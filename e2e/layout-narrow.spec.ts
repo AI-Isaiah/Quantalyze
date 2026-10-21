@@ -2209,7 +2209,10 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
  * anchor and the `x` / `y` attributes) against the fixture committed at
  * `e2e/fixtures/narrowcharts-desktop-1280.json`, on every run. The fixture lives
  * outside `.planning/` because ship branches drop it. Attributes are compared, not
- * rendered boxes: boxes depend on the machine's fonts, attributes do not.
+ * rendered boxes: boxes depend on the machine's fonts, attributes do not. That holds for the
+ * rolling charts too because `RollingXAxis` picks their x ticks in arithmetic; Recharts'
+ * own pick measured DM Sans in the DOM and so differed by host. It was checked by forcing
+ * the page font to a serif and to Courier New: the reading is unchanged.
  * To accept an intended desktop change, regenerate the fixture on the local-stack lane:
  *   NARROWCHARTS_DESKTOP_OUT=e2e/fixtures/narrowcharts-desktop-1280.json \
  *     npx playwright test e2e/layout-narrow.spec.ts -g "desktop reading" --workers=1
@@ -2612,10 +2615,9 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
     expect(overlaps, `V390 equity x labels overlap:\n${overlaps.join("\n")}`).toEqual([]);
   });
 
-  // WR-01: the rolling charts' end-date label must not land on the label before it. Whether the
-  // penultimate label reaches the end label depends on the data window (Recharts places it by a
-  // forward walk), and the default 400-day fixture happens to clear it even with the old end flip.
-  // 260 days measured RED against that flip at both widths, so this case seeds 260.
+  // WR-01: the rolling charts' end-date label must not land on the label before it. The tick list
+  // is arithmetic (`fitXTickValues`, swept over 60 to 400 days in src/lib/chart-ticks.test.ts);
+  // this case is the real-browser check of one window. 260 days was RED against the old end flip.
   for (const vp of [NARROW_VIEWPORTS[0], NARROW_VIEWPORTS[1]]) {
     test(`${vp.id} composer: rolling x labels do not overlap`, async ({ page }) => {
       test.setTimeout(150_000);

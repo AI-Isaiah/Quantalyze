@@ -123,6 +123,46 @@ export function estLabelWidth(label: string, fontSize: number): number {
   return label.length * fontSize * 0.6;
 }
 
+/** The clear gap, in the SVG's user units, between two drawn x tick labels. */
+export const X_TICK_GAP_PX = 8;
+
+/**
+ * Which x tick values a category axis draws, chosen in arithmetic so that no
+ * two drawn labels overlap and the server and the browser agree (Phase 170.1.3
+ * NARROWCHARTS, D-03b). Every k-th value counted back from the newest, so the
+ * newest keeps its label; `values` are evenly spaced across `[plotLeft,
+ * plotRight]` (a point scale) in an SVG `svgWidth` wide, and `labelW` is the
+ * width the label is drawn at (`estLabelWidth`).
+ *
+ * Why not leave the choice to Recharts: `interval="preserveStartEnd"` measures
+ * each label in a hidden span in the body font (DM Sans) while the chart draws
+ * it in Geist Mono, so the pick depends on the host's font rasteriser and the
+ * measured box is not the drawn one (another host can pick other labels, and
+ * about a third of data windows drew two labels over each other).
+ * Why not `thinXTicks` (EquityChart): it returns the list unchanged at 400 px
+ * and wider, and spaces by a fixed pitch rather than by the label width.
+ *
+ * The newest label is centred on `plotRight`, which is nearer the SVG edge than
+ * half its width, and `EdgeFitXTick` moves it in by that overshoot. The pitch
+ * includes the overshoot, so the moved label still clears the one before it.
+ */
+export function fitXTickValues<T>(
+  values: T[],
+  labelW: number,
+  plotLeft: number,
+  plotRight: number,
+  svgWidth: number,
+): T[] {
+  const overshoot = Math.max(0, labelW / 2 - (svgWidth - plotRight));
+  const pitch = labelW + X_TICK_GAP_PX + overshoot;
+  const maxTicks = Math.max(1, Math.floor((plotRight - plotLeft) / pitch));
+  if (values.length <= maxTicks) return values;
+  const k = Math.ceil(values.length / maxTicks);
+  const kept: T[] = [];
+  for (let i = values.length - 1; i >= 0; i -= k) kept.push(values[i]);
+  return kept.reverse();
+}
+
 /**
  * Where an axis tick label is anchored so that its box stays inside its own
  * SVG (Phase 170.1.3 D-02, UI-SPEC C-3). `x` is the tick position, `[minX,

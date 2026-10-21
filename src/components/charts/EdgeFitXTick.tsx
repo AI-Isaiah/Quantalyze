@@ -1,8 +1,9 @@
 "use client";
 
 import type { ComponentProps } from "react";
-import { Text, useChartWidth } from "recharts";
-import { estLabelWidth } from "@/lib/chart-ticks";
+import { Text, XAxis, useChartWidth, usePlotArea } from "recharts";
+import { estLabelWidth, fitXTickValues } from "@/lib/chart-ticks";
+import { CHART_BORDER, CHART_TICK_STYLE } from "./chart-tokens";
 
 type RechartsTextProps = ComponentProps<typeof Text>;
 
@@ -28,11 +29,10 @@ export interface EdgeFitXTickProps extends Omit<RechartsTextProps, "children"> {
  * so the label's estimated box (`estLabelWidth`, `src/lib/chart-ticks.ts`)
  * lies in `[0, chartWidth]`: a label that fits keeps its `x`, and one that
  * crosses an edge moves by its real overflow only. That is deliberate.
- * Recharts has already shifted the end label inward and hidden the earlier
- * labels whose centred boxes reach into the gap it reserved, so a centred
- * label that moves a few px stays inside that gap, where flipping the anchor
- * (a further half label width) would not. No label is hidden, truncated,
- * rotated or shrunk.
+ * `RollingXAxis` below picks the tick list with a pitch that already counts
+ * that overflow (`fitXTickValues`), so a centred label that moves a few px
+ * still clears its neighbour, where flipping the anchor (a further half label
+ * width) would not. No label is hidden, truncated, rotated or shrunk.
  *
  * Why the chart width comes from `useChartWidth()` and not from the DOM: the
  * width is Recharts' own layout state (the width of its `recharts-surface`
@@ -84,5 +84,40 @@ export function EdgeFitXTick(props: EdgeFitXTickProps) {
     <Text {...rest} x={drawX} fontSize={fontSize} textAnchor={textAnchor}>
       {label}
     </Text>
+  );
+}
+
+/**
+ * The date x axis of the three rolling charts (D-03b). The tick list is chosen
+ * in arithmetic by `fitXTickValues` and handed to Recharts as `ticks` with
+ * `interval={0}`, so Recharts never measures a label in the DOM: the labels
+ * drawn do not depend on the host's fonts, and the server and the browser agree.
+ * A component of its own because the plot area and the chart width exist only
+ * inside the chart. Before the plot area is known every date is passed through.
+ */
+export function RollingXAxis({ dates }: { dates: string[] }) {
+  const chartWidth = useChartWidth();
+  const plot = usePlotArea();
+  const label = (d: string) => d.slice(5);
+  const ticks =
+    chartWidth !== undefined && plot !== undefined
+      ? fitXTickValues(
+          dates,
+          estLabelWidth(label(dates[0]), CHART_TICK_STYLE.fontSize),
+          plot.x,
+          plot.x + plot.width,
+          chartWidth,
+        )
+      : dates;
+  return (
+    <XAxis
+      dataKey="date"
+      tick={<EdgeFitXTick {...CHART_TICK_STYLE} />}
+      tickLine={false}
+      axisLine={{ stroke: CHART_BORDER }}
+      tickFormatter={label}
+      ticks={ticks}
+      interval={0}
+    />
   );
 }

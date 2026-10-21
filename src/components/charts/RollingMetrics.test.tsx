@@ -65,6 +65,9 @@ vi.mock("recharts", () => {
   Tooltip.displayName = "RechartsMockTooltip";
   return {
     ResponsiveContainer: makePassthrough("ResponsiveContainer"),
+    // RollingXAxis reads the chart context; outside a real chart both hooks are undefined.
+    useChartWidth: () => undefined,
+    usePlotArea: () => undefined,
     LineChart: makePassthrough("LineChart"),
     Line: NullComponent,
     // 2026-10-21 (Phase 170.1.3 NARROWCHARTS plan 03, D-03b): record the `tick` prop (this mock

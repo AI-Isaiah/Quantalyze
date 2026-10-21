@@ -5,6 +5,7 @@ import {
   estLabelWidth,
   fitTickLabel,
   fitBaselineY,
+  fitXTickValues,
   niceStepValues,
   pow10,
   tickTolerance,
@@ -302,5 +303,61 @@ describe("fitBaselineY", () => {
     // Desktop arms: font 9 at baseline 10 (ceil 9.45 = 10) and font 10 at baseline 12 (ceil 10.5 = 11).
     expect(fitBaselineY(10, 9)).toBe(10);
     expect(fitBaselineY(12, 10)).toBe(12);
+  });
+});
+
+/**
+ * Phase 170.1.3 NARROWCHARTS (D-03b). The rolling charts' x labels are chosen in
+ * arithmetic, so no two drawn labels overlap and none crosses the svg edge for
+ * any series length. A single seeded window cannot show that: Recharts' own pick
+ * left about a third of the windows with two labels over each other (it measured
+ * DM Sans and drew Geist Mono).
+ */
+describe("fitXTickValues", () => {
+  const FONT = 12;
+  const LABEL_W = estLabelWidth("10-19", FONT); // 36, Geist Mono
+  const PLOT_LEFT = 65; // 5 margin + 60 y axis, as the rolling charts draw
+  const MARGIN_RIGHT = 5;
+  // The rolling charts' svg widths at V390, V640 and V1280, as the local-stack lane measured them.
+  const SVG_WIDTHS = [260, 510, 858];
+  const LENGTHS = Array.from({ length: 400 - 60 + 1 }, (_, i) => 60 + i);
+
+  /** The boxes drawn: a point scale across the plot, then EdgeFitXTick's clamp into [0, svgWidth]. */
+  function drawnBoxes(n: number, svgWidth: number) {
+    const idx = Array.from({ length: n }, (_, i) => i);
+    const plotRight = svgWidth - MARGIN_RIGHT;
+    const step = (plotRight - PLOT_LEFT) / (n - 1);
+    return fitXTickValues(idx, LABEL_W, PLOT_LEFT, plotRight, svgWidth).map((i) => {
+      const half = LABEL_W / 2;
+      const c = Math.max(half, Math.min(PLOT_LEFT + i * step, svgWidth - half));
+      return { i, left: c - half, right: c + half };
+    });
+  }
+
+  for (const svgWidth of SVG_WIDTHS) {
+    it(`draws no overlapping label and none past the svg edge, 60 to 400 days, svg ${svgWidth}`, () => {
+      const bad: string[] = [];
+      for (const n of LENGTHS) {
+        const boxes = drawnBoxes(n, svgWidth);
+        if (boxes[boxes.length - 1].i !== n - 1) bad.push(`n=${n}: newest label dropped`);
+        if (boxes.length < 2) bad.push(`n=${n}: fewer than two labels`);
+        boxes.forEach((b, k) => {
+          if (b.left < 0 || b.right > svgWidth) bad.push(`n=${n}: label ${b.i} crosses the svg edge`);
+          if (k > 0 && boxes[k - 1].right > b.left) {
+            bad.push(`n=${n}: labels ${boxes[k - 1].i} and ${b.i} overlap by ${(boxes[k - 1].right - b.left).toFixed(2)}`);
+          }
+        });
+      }
+      expect(bad).toEqual([]);
+    });
+  }
+
+  it("returns the input list when every label fits, and keeps the newest when thinned", () => {
+    const few = [0, 1, 2, 3];
+    expect(fitXTickValues(few, LABEL_W, PLOT_LEFT, 853, 858)).toBe(few);
+    const many = Array.from({ length: 400 }, (_, i) => i);
+    const kept = fitXTickValues(many, LABEL_W, PLOT_LEFT, 853, 858);
+    expect(kept.length).toBeLessThan(many.length);
+    expect(kept[kept.length - 1]).toBe(399);
   });
 });

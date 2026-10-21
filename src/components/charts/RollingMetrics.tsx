@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { Line, LineChart, ReferenceLine, ResponsiveContainer, XAxis, YAxis, Legend } from "recharts";
+import { Line, LineChart, ReferenceLine, ResponsiveContainer, YAxis, Legend } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
-import { EdgeFitXTick } from "./EdgeFitXTick";
+import { RollingXAxis } from "./EdgeFitXTick";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
@@ -144,14 +144,7 @@ export function RollingMetrics({
     <div>
       <ResponsiveContainer width="100%" height={250}>
         <LineChart accessibilityLayer={false} data={merged} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-          <XAxis
-            dataKey="date"
-            tick={<EdgeFitXTick {...CHART_TICK_STYLE} />}
-            tickLine={false}
-            axisLine={{ stroke: CHART_BORDER }}
-            tickFormatter={(d: string) => d.slice(5)}
-            interval="preserveStartEnd"
-          />
+          <RollingXAxis dates={merged.map((d) => String(d.date))} />
           <YAxis
             tick={CHART_TICK_STYLE}
             tickLine={false}

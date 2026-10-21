@@ -66,6 +66,9 @@ vi.mock("recharts", () => {
   NullComponent.displayName = "RechartsMockNull";
   return {
     ResponsiveContainer: makePassthrough("ResponsiveContainer"),
+    // RollingXAxis reads the chart context; outside a real chart both hooks are undefined.
+    useChartWidth: () => undefined,
+    usePlotArea: () => undefined,
     LineChart: makePassthrough("LineChart"),
     Line,
     XAxis,
