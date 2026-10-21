@@ -27,7 +27,10 @@ vi.mock("@/hooks/useBreakpoint", () => ({
 import { FactsheetProvider } from "./factsheet-context";
 import { BasisProvider } from "./basis-context";
 import { MasterBrush } from "./MasterBrush";
-import { QuantileBoxPlotPanel } from "./DistributionPanels";
+import { QuantileBoxPlotPanel, EndOfYearBarsPanel } from "./DistributionPanels";
+import { TimeSeriesChart } from "./TimeSeriesChart";
+import { CHART_CONFIGS } from "./chart-configs";
+import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 
 const lsStore = new Map<string, string>();
 beforeEach(() => {
@@ -163,5 +166,81 @@ describe("QuantileBoxPlotPanel P5/P95 reference labels anchor inward (D-02, D-03
     const { container } = mountQuantiles(payload);
     expect(refText(container, "P95 ").getAttribute("text-anchor")).toBe("middle");
     expect(refText(container, "P5 ").getAttribute("text-anchor")).toBe("middle");
+  });
+});
+
+describe("TimeSeriesChart y tick labels stay inside the svg (D-02, D-03a)", () => {
+  // The Overview's Rolling Sortino (30d) values are in the thousands: "+1000.00" is 8 chars.
+  function mountSortino(values: number[]) {
+    const daily = dailyRows(values.length, Date.UTC(2026, 0, 1));
+    const base = buildScenarioFactsheetPayload({ portfolioDaily: daily }) as unknown as FactsheetPayload;
+    const payload = { ...base, strategyRollingSortino: values } as FactsheetPayload;
+    const config = CHART_CONFIGS.find((c) => c.key === "rollingSortino")!;
+    return render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <TimeSeriesChart config={config} />
+      </FactsheetProvider>,
+    );
+  }
+
+  /** The y tick labels: end-anchored 10 px mono texts whose string is a signed 2-decimal number. */
+  function yTicks(container: HTMLElement): { label: string; x: string | null; anchor: string | null }[] {
+    return Array.from(container.querySelectorAll("svg text"))
+      .filter((t) => t.getAttribute("font-size") === "10" && /^[+-]?\d+\.\d\d$/.test(t.textContent ?? ""))
+      .map((t) => ({ label: t.textContent ?? "", x: t.getAttribute("x"), anchor: t.getAttribute("text-anchor") }));
+  }
+
+  it("an 8-character tick ends at x = 48 so its box starts at the svg's left edge; a short one stays at 44", () => {
+    const { container } = mountSortino(Array.from({ length: 12 }, (_, i) => 500 + i * 250));
+    const ticks = yTicks(container);
+    expect(ticks.map((t) => t.label)).toEqual(["0.00", "+1000.00", "+2000.00", "+3000.00"]);
+    // "+1000.00" at font 10 is 8 * 6 = 48 wide: ending at the gutter's x = 44 it would start at -4.
+    for (const t of ticks.slice(1)) {
+      expect(t.anchor).toBe("end");
+      expect(t.x).toBe("48");
+    }
+    // "0.00" is 24 wide and fits: it keeps the gutter x of PAD.left - 6.
+    expect(ticks[0].anchor).toBe("end");
+    expect(ticks[0].x).toBe("44");
+  });
+
+  it("ticks that fit everywhere stay at x = 44", () => {
+    const { container } = mountSortino(Array.from({ length: 12 }, (_, i) => 1 + i * 0.25));
+    const ticks = yTicks(container);
+    expect(ticks.length).toBeGreaterThan(1);
+    for (const t of ticks) expect(t.x).toBe("44");
+  });
+});
+
+describe("EndOfYearBarsPanel legend stays inside the svg (D-02, D-03c)", () => {
+  const legend = (container: HTMLElement) => {
+    const text = Array.from(container.querySelectorAll("svg text")).find((t) => t.textContent === "Edge Tick Labels");
+    if (!text) throw new Error("no strategy legend text in the EOY svg");
+    const swatch = Array.from(container.querySelectorAll("svg rect")).find((r) => r.getAttribute("x") === "60" && r.getAttribute("width") === "10");
+    if (!swatch) throw new Error("no strategy legend swatch in the EOY svg");
+    return { text, swatch };
+  };
+  const mountEoy = () =>
+    render(
+      <FactsheetProvider payload={apiPayload(dailyRows(800, SPAN_START))} persist={false}>
+        <EndOfYearBarsPanel fullHistoryWithheld={false} />
+      </FactsheetProvider>,
+    );
+
+  it("mobile: font 16 sits on baseline 17, so its box does not start above the svg; the swatch follows", () => {
+    vi.mocked(useBreakpoint).mockReturnValue("mobile");
+    const { text, swatch } = legend(mountEoy().container);
+    expect(text.getAttribute("font-size")).toBe("16");
+    expect(text.getAttribute("y")).toBe("17");
+    // The swatch keeps its desktop relation to the baseline: it ends on it (baseline - 6).
+    expect(swatch.getAttribute("y")).toBe("11");
+    expect(text.textContent).toBe("Edge Tick Labels");
+  });
+
+  it("desktop: font 10 stays on baseline 12 and the swatch on 6 (nothing was cut, nothing moves)", () => {
+    const { text, swatch } = legend(mountEoy().container);
+    expect(text.getAttribute("font-size")).toBe("10");
+    expect(text.getAttribute("y")).toBe("12");
+    expect(swatch.getAttribute("y")).toBe("6");
   });
 });

@@ -10,7 +10,7 @@ import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { pctSigned, ratio, signed } from "./format";
-import { fitTickLabel } from "@/lib/chart-ticks";
+import { fitBaselineY, fitTickLabel } from "@/lib/chart-ticks";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -107,6 +107,10 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
   const zeroX = PAD.left + plotW / 2;
   // CHART-02 legibility: mobile font-bumps; desktop arms = today's literals.
   const legendFont = isMobile ? 16 : 10;
+  // Phase 170.1.3 NARROWCHARTS (D-03c): the legend's baseline follows its font so the text box
+  // does not start above the svg (desktop font 10 keeps today's 12); the swatch keeps its
+  // desktop relation to the baseline (it ends on it).
+  const legendY = fitBaselineY(12, legendFont);
   const yearFont = isMobile ? 18 : 11;
   const stratValFont = isMobile ? 18 : 11;
   const benchValFont = isMobile ? 16 : 10;
@@ -133,14 +137,14 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
       >
         {/* Legend */}
         <g>
-          <rect x={PAD.left} y={6} width={10} height={6} fill="var(--color-accent)" />
-          <text x={PAD.left + 14} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
+          <rect x={PAD.left} y={legendY - 6} width={10} height={6} fill="var(--color-accent)" />
+          <text x={PAD.left + 14} y={legendY} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
             {view.strategyName}
           </text>
           {hasBench && (
             <>
-              <rect x={PAD.left + 180} y={6} width={10} height={6} fill="var(--color-text-muted)" />
-              <text x={PAD.left + 194} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
+              <rect x={PAD.left + 180} y={legendY - 6} width={10} height={6} fill="var(--color-text-muted)" />
+              <text x={PAD.left + 194} y={legendY} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
                 {vcmp.name}
               </text>
             </>

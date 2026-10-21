@@ -7,7 +7,7 @@ import { useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
-import { niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
+import { fitEndLabelX, niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
 import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 const VB_W = 880;
@@ -889,7 +889,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
                 strokeWidth={isBaseline ? 1.2 : 1}
               />
               <text
-                x={PAD.left - 6}
+                x={fitEndLabelX(PAD.left - 6, t.label, 10)}
                 y={Y(t.value) + 3}
                 textAnchor="end"
                 fontSize={10}

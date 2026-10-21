@@ -9,6 +9,7 @@ import {
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
+import { estLabelWidth } from "@/lib/chart-ticks";
 
 interface ReturnQuantilesProps {
   data: Record<string, number[]>;
@@ -69,7 +70,13 @@ export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
   const yFont = isMobile ? Y_FONT_MOBILE : Y_FONT_DESKTOP;
   const periodFont = isMobile ? PERIOD_FONT_MOBILE : PERIOD_FONT_DESKTOP;
   const yFracs = isMobile ? Y_FRACS_MOBILE : Y_FRACS_DESKTOP;
-  const padding = { top: 20, right: 40, bottom: 30, left: 60 };
+  const yLabels = yFracs.map((frac) => formatUnsignedPercent(min + frac * range, 1));
+  // Phase 170.1.3 NARROWCHARTS (D-02, D-03c): the y labels end 8 left of the plot, so the left
+  // gutter grows (4-unit ladder) when the widest label would start below the svg's left edge.
+  // The mobile arm's font 22 needs 76 for "-1.0%"; every desktop label fits in the literal 60.
+  const widestY = Math.max(...yLabels.map((l) => estLabelWidth(l, yFont)));
+  const padLeft = Math.max(60, Math.ceil((widestY + 8) / 4) * 4);
+  const padding = { top: 20, right: 40, bottom: 30, left: padLeft };
   const plotW = width - padding.left - padding.right;
   const plotH = height - padding.top - padding.bottom;
 
@@ -87,7 +94,7 @@ export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
       aria-label={`Return quantiles box plot across ${periods.length} period${periods.length === 1 ? "" : "s"} (${periods.join(", ")}).`}
     >
       {/* Y axis grid lines */}
-      {yFracs.map((frac) => {
+      {yFracs.map((frac, fi) => {
         const val = min + frac * range;
         const y = yScale(val);
         return (
@@ -101,7 +108,7 @@ export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
               fill={CHART_AXIS_TICK}
               fontFamily={CHART_FONT_MONO}
             >
-              {formatUnsignedPercent(val, 1)}
+              {yLabels[fi]}
             </text>
           </g>
         );
