@@ -129,10 +129,11 @@ export const X_TICK_GAP_PX = 8;
 /**
  * Which x tick values a category axis draws, chosen in arithmetic so that no
  * two drawn labels overlap and the server and the browser agree (Phase 170.1.3
- * NARROWCHARTS, D-03b). Every k-th value counted back from the newest, so the
- * newest keeps its label; `values` are evenly spaced across `[plotLeft,
- * plotRight]` (a point scale) in an SVG `svgWidth` wide, and `labelW` is the
- * width the label is drawn at (`estLabelWidth`).
+ * NARROWCHARTS, D-03b). Both the oldest and the newest value keep their label
+ * and the ones between are spread evenly (one label only when the plot is
+ * narrower than one pitch, and then it is the newest). `values` are evenly
+ * spaced across `[plotLeft, plotRight]` (a point scale) in an SVG `svgWidth`
+ * wide, and `labelW` is the width the label is drawn at (`estLabelWidth`).
  *
  * Why not leave the choice to Recharts: `interval="preserveStartEnd"` measures
  * each label in a hidden span in the body font (DM Sans) while the chart draws
@@ -157,10 +158,13 @@ export function fitXTickValues<T>(
   const pitch = labelW + X_TICK_GAP_PX + overshoot;
   const maxTicks = Math.max(1, Math.floor((plotRight - plotLeft) / pitch));
   if (values.length <= maxTicks) return values;
-  const k = Math.ceil(values.length / maxTicks);
-  const kept: T[] = [];
-  for (let i = values.length - 1; i >= 0; i -= k) kept.push(values[i]);
-  return kept.reverse();
+  // Keep both ends and space the rest evenly. A rounded index gap is at least floor(gap), so `count`
+  // is the largest number of labels whose floor(gap) still spans `pitch` of the plot.
+  const last = values.length - 1;
+  const step = Math.ceil((last * pitch) / (plotRight - plotLeft));
+  const count = 1 + Math.floor(last / step);
+  if (count < 2) return [values[last]];
+  return Array.from({ length: count }, (_, j) => values[Math.round((j * last) / (count - 1))]);
 }
 
 /**

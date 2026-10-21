@@ -334,11 +334,16 @@ describe("fitXTickValues", () => {
     });
   }
 
+  // Round 3 MD-01: the oldest label is kept as well as the newest, from 2 points up. The old sweep
+  // started at 60 and asserted the newest only, so a series start with no date went unseen.
+  const SHORT_LENGTHS = Array.from({ length: 59 - 2 + 1 }, (_, i) => 2 + i);
+
   for (const svgWidth of SVG_WIDTHS) {
-    it(`draws no overlapping label and none past the svg edge, 60 to 400 days, svg ${svgWidth}`, () => {
+    it(`keeps the oldest and newest label, with no overlap and none past the svg edge, 2 to 400 days, svg ${svgWidth}`, () => {
       const bad: string[] = [];
-      for (const n of LENGTHS) {
+      for (const n of [...SHORT_LENGTHS, ...LENGTHS]) {
         const boxes = drawnBoxes(n, svgWidth);
+        if (boxes[0].i !== 0) bad.push(`n=${n}: oldest label dropped`);
         if (boxes[boxes.length - 1].i !== n - 1) bad.push(`n=${n}: newest label dropped`);
         if (boxes.length < 2) bad.push(`n=${n}: fewer than two labels`);
         boxes.forEach((b, k) => {
@@ -352,12 +357,17 @@ describe("fitXTickValues", () => {
     });
   }
 
-  it("returns the input list when every label fits, and keeps the newest when thinned", () => {
+  it("returns an empty list for an empty series", () => {
+    expect(fitXTickValues([], LABEL_W, PLOT_LEFT, 853, 858)).toEqual([]);
+  });
+
+  it("returns the input list when every label fits, and keeps both ends when thinned", () => {
     const few = [0, 1, 2, 3];
     expect(fitXTickValues(few, LABEL_W, PLOT_LEFT, 853, 858)).toBe(few);
     const many = Array.from({ length: 400 }, (_, i) => i);
     const kept = fitXTickValues(many, LABEL_W, PLOT_LEFT, 853, 858);
     expect(kept.length).toBeLessThan(many.length);
+    expect(kept[0]).toBe(0);
     expect(kept[kept.length - 1]).toBe(399);
   });
 });
