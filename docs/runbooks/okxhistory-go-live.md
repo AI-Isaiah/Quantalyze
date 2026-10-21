@@ -666,14 +666,23 @@ No form runs here; the founder reads and decides, with the orchestrator's summar
      explain by assets held outside the dollar family, or any of the three values null.
    - `info.flow_seam` and `info.flow_totals_overlap`, both measured around the real flow seam
      (`live_from.flows`, midnight of the run date minus 90 days), not around the P&L reconcile window.
-     `flow_seam` gives, within a week either side, the archive transfers the roll uses
+     `flow_seam` gives, within seven days before the seam and up to seven days after it (never past
+     the last day the archive covers, see `window.to`), the archive transfers the roll uses
      (`archive_before_seam_used`), the ones it discards (`archive_from_seam_discarded`) and the live flows
      it uses (`live_from_seam_used`), and `diff` (discarded minus used). All zero is a quiet seam. No-go:
-     a nonzero `diff` (a movement missing from both sources, or counted by one that the other disagrees
-     with) or `archive_before_seam_used` and `live_from_seam_used` both nonzero (a movement possibly
-     counted twice). Every rebuilt day before the seam shifts by that amount in the NAV denominator.
-     `flow_totals_overlap` (`{archive, live}`) is the same two sources from a week before the seam to the
-     end of the archive; a disagreement there is an internal transfer the live endpoints do not list.
+     a `diff` the founder cannot match to one movement he knows of (a movement missing from both
+     sources, or counted by one that the other disagrees with). `archive_before_seam_used` and
+     `live_from_seam_used` both being nonzero is NOT a no-go on its own: any account with an ordinary
+     deposit in the week before the seam and another in the week after shows both. No numeric limit is
+     written anywhere; whether to set one is the founder's call at the Step 3 go/no-go. Every rebuilt day
+     before the seam shifts by an unexplained `diff` in the NAV denominator. When the archive ends before
+     the seam (`unmeasurable` is `archive_ends_before_the_seam`, `diff` null), there is nothing to
+     compare: that is a missing reading, not a zero, and it is returned to the founder rather than
+     approved.
+     `flow_totals_overlap` (`{archive, live}`) is the same two sources
+     from the seam to the end of the archive, the days both sources can carry (the live flows start at the
+     seam, so an archive transfer before it belongs to `flow_seam`, never here); a disagreement there is an
+     internal transfer the live endpoints do not list.
    - `info.live_from` (`{pnl, flows}`): the first day each live source owns. `pnl` must be the day after
      `reconcile.excluded_boundary_day`, and `flows` must equal `flow_seam.seam_day`. No-go: either
      disagrees, or `flows` is null.

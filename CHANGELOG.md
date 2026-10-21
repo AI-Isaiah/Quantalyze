@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.132.9.8] - 2026-10-21 — fix: OKXHISTORY PR-B — the archive host is allowed, and the four round-3 survivors are fixed
+
+### Added
+- `analytics-service/services/okx_archive_download.py`: `ARCHIVE_ALLOWED_HOSTS` now holds the one host the plan 12 preflight observed on both quarters, `okg-pri-hk.oss-cn-hongkong.aliyuncs.com`, by founder decision `approve-host-keep-table` (2026-10-20). Exact match over https only: no suffix, subdomain, prefix, trailing dot, parent domain, sibling label or http spelling is admitted, there is still no environment path to widen it, and the URL-shape check still refuses a non-https scheme first. An empty list still admits nothing. The classification table is unchanged (the founder kept it), so `SUBTYPE_BUCKETS` and `CLASSIFICATION_TABLE_VERSION` do not move and an unlisted subtype with a nonzero effect still stops `unknown_subtype_nonzero`.
+
+### Fixed
+- WR-01 (`okx_archive_classify.py`, `okx_archive_job.py`): the balance-chain floor (`MIN_CHAINED_PAIRS`) is scoped to the currencies that actually reached a summed figure. `ArchiveAggregate` gains `summed_ccys` and `verify_bal_chain(files, summed_ccys)` takes it as a required argument. A lone coin-margined option bill no longer stops the rebuild as `too_few_pairs`; a lone realized USD-family bill still does, and a break inside any chain still stops `bal_chain_break` (the break check runs on every currency).
+- WR-02 (`okx_archive_job.py`): the `flow_totals_overlap` totals both run over the same window, from the seam to the last archive day. A withdrawal counted by both sources now shows on both sides instead of reading as agreement, and an archive transfer before the seam no longer appears in the overlap.
+- WR-04 (`okx_archive_job.py`): the flow-seam "after" window ends at the last covered archive day, `min(seam + 6, last_covered)`. When the archive ends before the seam the reading is unmeasurable rather than zero: `archive_from_seam_discarded`, `live_from_seam_used` and `diff` are null and a new `flow_seam.unmeasurable` key reads `archive_ends_before_the_seam`. The key is added only on that path, so the ordinary result is byte-identical.
+
+### Changed
+- WR-03 (`docs/runbooks/okxhistory-go-live.md`, Step 3): the no-go on the flow-seam reading is a `diff` the founder cannot match to one movement he knows of. "Both nonzero" is named as true of any active account and removed as a no-go. The runbook also describes the totals window and the unmeasurable reading. No numeric limit is written in code or runbook (CONTEXT D-13); the founder sets any limit at the calibrate checkpoint.
+
+### Tests
+- `test_okx_archive_download.py`: the two PR-A tests that pinned an empty shipped list were rewritten, not deleted. T-DL-1 now empties the list itself and proves the fail-closed property (both the fixture URL and the approved host are refused with `host_not_allowed`, with zero transport and zero resolver calls); new tests pin the constant to the approved host, admit it over https with no monkeypatch, and refuse seven other spellings before any request. Neutering the constant to an empty set turns the pin and the admit test RED.
+- WR-01..WR-04 each have a test that was RED on the PR-A code (9 failed, 7 passed when the pre-fix classify, job and runbook were swapped back in): `test_a_lone_coin_margined_option_bill_does_not_stop_the_floor`, `TestBalChainFloorScope`, the re-pinned and new seam-overlap tests, `TestRunbookFlowSeamSignal` (four tests) and `TestFlowSeamAfterWindowIsClamped`.
+
+### Notes
+- Commit map: `9ad40fbc0` (allow-list and its tests), `61d723a23` (WR-01..WR-04, tests and runbook), `b916b5165` (TODOS `[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]` marked done). The branch's `origin/main` merge brought no net change to non-planning paths.
+- This is the code that must be live before the OKXHISTORY calibrate run reads the preflight. No migration, no TypeScript change.
+
 ## [0.132.9.7] - 2026-10-21 — records: close AUMBASIS 167.1.1.2
 
 ### Notes

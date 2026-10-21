@@ -29,6 +29,8 @@ import pytest
 from services import okx_archive_download as mod
 
 HOST = "archive.example.test"
+#: The one host the shipped allow-list admits (plan 13, founder decision 2026-10-20).
+APPROVED_HOST = "okg-pri-hk.oss-cn-hongkong.aliyuncs.com"
 PUBLIC_IP = "8.8.8.8"
 OTHER_PUBLIC_IP = "1.1.1.1"
 # The signed query string is the bearer token; the tests assert it never reaches a log.
@@ -99,7 +101,7 @@ def rig(monkeypatch: pytest.MonkeyPatch) -> _Rig:
 
 @pytest.fixture
 def unallowed_rig(monkeypatch: pytest.MonkeyPatch) -> _Rig:
-    """Same seams as ``rig`` but the SHIPPED allow-list (empty) is left untouched."""
+    """Same seams as ``rig`` but the SHIPPED allow-list is left untouched."""
     r = _Rig()
     monkeypatch.setattr(mod, "_resolve_host", r.resolver)
     monkeypatch.setattr(
@@ -165,12 +167,13 @@ class TestTracerDownload:
     def test_describe_href_never_echoes_an_unparsable_url(self) -> None:
         assert mod.describe_href("https://[bad/priv?sign=SECRETTOKEN123") == ("", "")
 
-    def test_shipped_allow_list_is_empty_and_has_no_env_path(self) -> None:
-        # The module-level constant, read through the module, not the fixture.
-        assert mod.ARCHIVE_ALLOWED_HOSTS == frozenset()
+    def test_shipped_allow_list_is_exactly_the_approved_host_and_has_no_env_path(self) -> None:
+        # The module-level constant, read through the module, not the fixture. It holds the
+        # one host the founder approved from the preflight observation and nothing else: a
+        # second entry, a wildcard or an env-fed extension is a new reviewed change.
+        assert mod.ARCHIVE_ALLOWED_HOSTS == frozenset({APPROVED_HOST})
         source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "ARCHIVE_ALLOWED_HOSTS: Final" in source
-        assert "= frozenset()" in source
         assert "os.environ" not in source and "getenv(" not in source
 
 
@@ -185,12 +188,55 @@ async def _refused(rig: _Rig, url: str, reason: str) -> None:
 
 
 class TestUrlRefusals:
-    async def test_host_not_allowed_with_the_shipped_empty_allow_list(
+    async def test_an_empty_allow_list_admits_nothing_not_even_the_shipped_host(
+        self, unallowed_rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T-DL-1 (rewritten in plan 13). The allow-list is the only SSRF gate before any
+        socket opens, so an EMPTY list must fail closed, never open: every URL, the shipped
+        approved host's included, is refused with ``host_not_allowed`` and the transport is
+        called zero times. Plan 03 pinned this against the shipped list being empty; plan 13
+        populates the shipped list, so the property is pinned by emptying it here."""
+        monkeypatch.setattr(mod, "ARCHIVE_ALLOWED_HOSTS", frozenset())
+        await _refused(unallowed_rig, URL, "host_not_allowed")
+        await _refused(
+            unallowed_rig,
+            f"https://{APPROVED_HOST}{SECRET_PATH}?{SECRET_QUERY}",
+            "host_not_allowed",
+        )
+        assert unallowed_rig.resolver_calls == [], "nothing is resolved either"
+
+    async def test_the_shipped_list_admits_the_approved_host_over_https(
         self, unallowed_rig: _Rig
     ) -> None:
-        assert mod.ARCHIVE_ALLOWED_HOSTS == frozenset()
-        await _refused(unallowed_rig, URL, "host_not_allowed")
-        assert unallowed_rig.resolver_calls == [], "nothing is resolved either"
+        """No monkeypatch of the list: the approved host downloads, and the vetted address
+        is the one dialled."""
+        csv_bytes, container, _ = await mod.download_archive_csv(
+            f"https://{APPROVED_HOST}{SECRET_PATH}?{SECRET_QUERY}"
+        )
+        assert csv_bytes == CSV and container == "gzip"
+        assert unallowed_rig.resolver_calls == [APPROVED_HOST]
+        assert len(unallowed_rig.requests) == 1
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            f"http://{APPROVED_HOST}{SECRET_PATH}?{SECRET_QUERY}",  # plain http: scheme
+            f"https://{APPROVED_HOST}.evil{SECRET_PATH}?{SECRET_QUERY}",  # suffix
+            f"https://x.{APPROVED_HOST}{SECRET_PATH}?{SECRET_QUERY}",  # subdomain
+            f"https://evil{APPROVED_HOST}{SECRET_PATH}?{SECRET_QUERY}",  # prefix glued on
+            f"https://{APPROVED_HOST}.{SECRET_PATH}?{SECRET_QUERY}",  # trailing dot
+            f"https://aliyuncs.com{SECRET_PATH}?{SECRET_QUERY}",  # parent domain
+            f"https://oss-cn-hongkong.aliyuncs.com{SECRET_PATH}?{SECRET_QUERY}",  # sibling label
+        ],
+    )
+    async def test_the_shipped_list_refuses_the_approved_host_spelled_any_other_way(
+        self, unallowed_rig: _Rig, url: str
+    ) -> None:
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(url)
+        assert caught.value.reason in {"scheme", "host_not_allowed"}
+        assert unallowed_rig.requests == [], "a refusal must happen before any request"
+        assert unallowed_rig.resolver_calls == []
 
     async def test_http_scheme_is_refused(self, rig: _Rig) -> None:
         await _refused(rig, f"http://{HOST}{SECRET_PATH}?{SECRET_QUERY}", "scheme")

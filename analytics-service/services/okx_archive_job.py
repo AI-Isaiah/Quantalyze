@@ -1333,7 +1333,7 @@ async def _census_of(
         # F1 / WR-01: only after the rows classify, prove the quarters are whole, per currency
         # across adjacent files. Interior and seam completeness is what lets a bill-less
         # covered day stand as a real zero.
-        chain = await asyncio.to_thread(verify_bal_chain, files)
+        chain = await asyncio.to_thread(verify_bal_chain, files, aggregate.summed_ccys)
     except ArchiveParseError as exc:
         stop = _parse_stop(exc)
         if exc.stop_class in _CENSUS_ON_STOP:
@@ -1930,14 +1930,18 @@ def _flow_readings(
     (run date minus 87 days), not at the flow seam (midnight minus 90 days), so a total over
     it never looks at the seam.
 
-    * ``flow_totals_overlap``: the archive and live flow totals from ``FLOW_SEAM_MARGIN_DAYS``
-      before the seam to the last covered archive day. A venue with no deposit retention cap
-      has no seam; its total stays over the reconcile window.
-    * ``flow_seam``: within ``FLOW_SEAM_MARGIN_DAYS`` either side of the seam, the archive
-      transfers the roll USES (before it), the archive transfers it DISCARDS (from it on), and
-      the live flows it uses (from it on). ``diff`` is discarded minus used: nonzero when the
-      sources disagree after the seam, which is what a straddle looks like. ``None`` with no
-      seam."""
+    * ``flow_totals_overlap``: the archive and live flow totals from the seam to the last covered
+      archive day (WR-02: the days BOTH sources can carry; the live flows start at the seam, so
+      an earlier start compared a stretch where only the archive can have data, and a movement
+      counted by both sources across the seam read as agreement). A venue with no deposit
+      retention cap has no seam; its total stays over the reconcile window.
+    * ``flow_seam``: within ``FLOW_SEAM_MARGIN_DAYS`` before the seam and up to as many days
+      after it, but never past the last covered archive day (WR-04), the archive transfers the
+      roll USES (before it), the archive transfers it DISCARDS (from it on), and the live flows
+      it uses (from it on). ``diff`` is discarded minus used: nonzero when the sources disagree
+      after the seam, which is what a straddle looks like. ``None`` with no seam. When the
+      archive ends before the seam there is nothing to compare: the three after-seam readings
+      and ``diff`` are ``None`` and ``unmeasurable`` says why, so it never reads as a zero."""
     seam = live.flow_window_first_day
     live_flows = [(f.utc_day_iso, Decimal(repr(float(f.usd_signed)))) for f in live.flows]
     if seam is None:
@@ -1951,29 +1955,39 @@ def _flow_readings(
     first = (seam_day - margin).isoformat()
     last_covered = max(aggregate.covered_days, default=first)
     archive_total = sum(
-        (v for d, v in aggregate.flows_by_day.items() if first <= d <= last_covered), Decimal(0)
+        (v for d, v in aggregate.flows_by_day.items() if seam <= d <= last_covered), Decimal(0)
     )
-    live_total = sum((v for d, v in live_flows if first <= d <= last_covered), Decimal(0))
-    after_last = (seam_day + margin - timedelta(days=1)).isoformat()
+    live_total = sum((v for d, v in live_flows if seam <= d <= last_covered), Decimal(0))
+    # WR-04: the live side counts days the archive cannot carry once the archive ends, so the
+    # after-window stops at the archive's last covered day.
+    after_last = min((seam_day + margin - timedelta(days=1)).isoformat(), last_covered)
     archive_before = sum(
         (v for d, v in aggregate.flows_by_day.items() if first <= d < seam), Decimal(0)
     )
-    archive_after = sum(
-        (v for d, v in aggregate.flows_by_day.items() if seam <= d <= after_last), Decimal(0)
-    )
-    live_after = sum((v for d, v in live_flows if seam <= d <= after_last), Decimal(0))
-    return (
-        {"archive": _dec(archive_total), "live": _dec(live_total)},
-        {
-            "seam_day": seam,
-            "margin_days": FLOW_SEAM_MARGIN_DAYS,
-            "window": {"from": first, "to": after_last},
-            "archive_before_seam_used": _dec(archive_before),
-            "archive_from_seam_discarded": _dec(archive_after),
-            "live_from_seam_used": _dec(live_after),
-            "diff": _dec(archive_after - live_after),
-        },
-    )
+    reading: dict[str, Any] = {
+        "seam_day": seam,
+        "margin_days": FLOW_SEAM_MARGIN_DAYS,
+        "window": {"from": first, "to": after_last},
+        "archive_before_seam_used": _dec(archive_before),
+    }
+    if after_last < seam:
+        reading.update(
+            archive_from_seam_discarded=None,
+            live_from_seam_used=None,
+            diff=None,
+            unmeasurable="archive_ends_before_the_seam",
+        )
+    else:
+        archive_after = sum(
+            (v for d, v in aggregate.flows_by_day.items() if seam <= d <= after_last), Decimal(0)
+        )
+        live_after = sum((v for d, v in live_flows if seam <= d <= after_last), Decimal(0))
+        reading.update(
+            archive_from_seam_discarded=_dec(archive_after),
+            live_from_seam_used=_dec(live_after),
+            diff=_dec(archive_after - live_after),
+        )
+    return {"archive": _dec(archive_total), "live": _dec(live_total)}, reading
 
 
 async def _stored_vs_core(
