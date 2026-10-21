@@ -33,10 +33,11 @@ exceptions raised here never carry it: ``httpx.HTTPStatusError.__str__`` embeds 
 request URL, so a transient 5xx is re-raised with a message that names only the status.
 Only ``describe_href`` (scheme and host) is ever reported.
 
-⛔ ``ARCHIVE_ALLOWED_HOSTS`` starts EMPTY. Until a host measured from a real archive
-response is reviewed into code, every download is refused with ``host_not_allowed``
-before the resolver or the transport is touched. Extend it in code, by review, never
-from env, job metadata or a parameter: an extensible allow-list is no allow-list.
+⛔ ``ARCHIVE_ALLOWED_HOSTS`` holds only hosts measured from a real archive response and
+reviewed into code. A host outside it is refused with ``host_not_allowed`` before the
+resolver or the transport is touched, and an EMPTY list admits nothing. Extend it in
+code, by review, never from env, job metadata or a parameter: an extensible allow-list
+is no allow-list.
 """
 
 from __future__ import annotations
@@ -55,10 +56,16 @@ import httpx
 
 logger = logging.getLogger("quantalyze.analytics.okx_archive_download")
 
-#: Exact-match hosts the archive link may name. EMPTY on purpose (fail-safe): the
-#: first entry comes from the preflight observation of a real archive response,
-#: reviewed into this file. Tests monkeypatch this constant.
-ARCHIVE_ALLOWED_HOSTS: Final[frozenset[str]] = frozenset()
+#: Exact-match hosts the archive link may name; https only, enforced by the URL-shape
+#: check, never by a default here. Every entry comes from an observation of a real archive
+#: response, reviewed into this file. Tests monkeypatch this constant.
+#: 2026-10-20 (plan 13, founder decision ``approve-host-keep-table``): the OKXHISTORY
+#: preflight (plan 12, run 2026-10-20) observed an https link on this one host for both
+#: archive quarters (2026 Q2 and 2026 Q3), an Alibaba Cloud OSS bucket in Hong Kong. The
+#: founder approved it by exact match: no suffix, no subdomain, no http.
+ARCHIVE_ALLOWED_HOSTS: Final[frozenset[str]] = frozenset(
+    {"okg-pri-hk.oss-cn-hongkong.aliyuncs.com"}
+)
 
 #: Caps. Plan 14 compares them with the real quarterly file sizes at calibration and
 #: keeps at least 10x headroom; they are declared CEILINGS, not expectations.

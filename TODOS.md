@@ -10041,6 +10041,15 @@ without its `code` tag.
   ⭐ **2026-10-15:** items (1)-(4) are now bound in plan 13's PLAN file as Task 2b (WR-01..WR-04), each with a
   RED-first test, so the binding no longer lives only here. The founder question is DECIDED: "Decide after
   calibrate" (CONTEXT D-13). Both diffs stay readings, and the founder sets any limit at plan 15's checkpoint.
+  ✅ **DONE 2026-10-20 (Phase 167.1.2.2.2.1 plan 13 Task 2b, branch commit `61d723a23`; the squash merge SHA is
+  recorded in the plan 13 SUMMARY).** Each of (1)-(4) has a test that was RED on the PR-A code:
+  (1) `test_a_lone_coin_margined_option_bill_does_not_stop_the_floor` stopped `cause=too_few_pairs`;
+  (2) `test_a_withdrawal_counted_by_both_sources_across_the_seam_shows_both_sides` read `archive: -200` where the
+  corrected window reads `0`, and `test_an_archive_transfer_before_the_seam_is_not_in_the_overlap_totals` read `300`;
+  (3) `TestRunbookFlowSeamSignal` (four tests) failed on the "both nonzero" no-go;
+  (4) `test_the_after_window_ends_at_the_last_covered_archive_day` read `window.to` `2026-10-03` against
+  `2026-09-30`, and `test_an_archive_that_ends_before_the_seam_is_unmeasurable_not_zero` read a `diff` from a window
+  the archive could not cover. No limit on either D-13 reading was added.
 
 ## Phase 164.9.3.1 (FANINGRAPH) — routed items (logged 2026-10-15)
 
