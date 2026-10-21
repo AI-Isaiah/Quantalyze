@@ -188,7 +188,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — 8 plans plus review and fix rounds (CSV validation hardening, Sentry redaction of x-service-key and x-tenant-claim), shipped as v0.132.6.0 (#1082); SC-5 390px/640px passed on the seeded local stack; verification passed; security SECURED (completed 2026-10-20)
 - [x] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — 9 plans plus two review fix rounds (failed title reads give a neutral title and report to Sentry; the page-title census covers every title shape), shipped as v0.132.9.0 (#1093); SC-4 read on production at 367 CSS px; verification passed; security SECURED (completed 2026-10-20)
 - [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
-- [ ] **Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole** (INSERTED 2026-10-20) — planned 2026-10-21, 2 plans (founder 2026-10-20; equity chart 400 px floor, clipped axis labels)
+- [ ] **Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole** (INSERTED 2026-10-20) — planned 2026-10-21, 4 plans (founder 2026-10-20; equity chart 400 px floor, clipped axis labels)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
@@ -6212,7 +6212,7 @@ Plans:
 2. At 390 px no axis tick label on the /allocations Overview or the scenario composer is clipped by its SVG: each measured label box lies inside its SVG box.
 3. Desktop rendering is unchanged, shown by a desktop-width measurement before and after.
 4. After deploy, a 390 px and a 640 px measurement in the logged-in browser are recorded in the phase VERIFICATION.
-**Plans:** 2 plans
+**Plans:** 4 plans
 
 Plans:
 **Wave 1**
@@ -6221,7 +6221,12 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 170.1.3-02-PLAN.md — The shared factsheet v2 emitters (MasterBrush, QuantileBoxPlotPanel, TimeSeriesChart) anchor edge labels inward (D-03a), the measured closed set is fixed, and the 1280 px AFTER reading equals BEFORE (SC-2, SC-3) [Wave 2]
+- [ ] 170.1.3-02-PLAN.md — The shared factsheet v2 emitters MasterBrush and QuantileBoxPlotPanel anchor the "2025" and "P95 …" labels inward (D-03a) (SC-2) [Wave 2]
+- [ ] 170.1.3-03-PLAN.md — The shared Recharts rolling charts (RollingMetrics, RollingVolatilityChart, RollingSortinoChart) draw the "10-20"/"10-19" end-date label whole through one custom XAxis tick renderer (D-03b) (SC-2) [Wave 2]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 170.1.3-04-PLAN.md — Any further measured clipped emitter is fixed, the whole NARROWCHARTS gate turns green on both surfaces, the 1280 px AFTER reading equals BEFORE, and the SC-4 post-deploy handoff is written (SC-2, SC-3, SC-4) [Wave 3]
 
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
@@ -6466,7 +6471,7 @@ kept verbatim.
 | 170.1 COPY | 8/8 | Complete — CSV never raises or stores a wrong date (grids 135→0, 489→0); Sentry header redaction; SC-5 passed; SECURED | 2026-10-20 · v0.132.6.0 · #1082 |
 | 170.1.1 TITLES | 9/9 | Complete — own tab title on every route under one template; sentence-case headings; /referral removed; SC-4 passed on production; SECURED | 2026-10-20 · v0.132.9.0 · #1093 |
 | 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
-| 170.1.3 NARROWCHARTS | 0/2 | Planned 2026-10-21 — booked 2026-10-20 (founder) | - |
+| 170.1.3 NARROWCHARTS | 0/4 | Planned 2026-10-21 — booked 2026-10-20 (founder) | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
