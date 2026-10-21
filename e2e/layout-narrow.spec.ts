@@ -2462,8 +2462,13 @@ function writeDesktopReading(outPath: string, surface: Surface, reading: Reading
   fs.renameSync(tmp, outPath);
 }
 
+// A missing attribute (null) differs from a number, and a non-finite value (NaN, from a malformed
+// attribute) on either side is a difference: `Math.abs(NaN - b) > slop` is false, so without the
+// finite check a corrupt reading would compare equal to everything.
 const differs = (a: number | null, b: number | null): boolean =>
-  a === null || b === null ? a !== b : Math.abs(a - b) > DESKTOP_SLOP_PX;
+  a === null || b === null
+    ? a !== b
+    : !Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a - b) > DESKTOP_SLOP_PX;
 
 /** Every difference between the committed reading and this run's, one line each. */
 function compareDesktopReading(baselinePath: string, surface: Surface, after: ReadingSvg[]): void {
