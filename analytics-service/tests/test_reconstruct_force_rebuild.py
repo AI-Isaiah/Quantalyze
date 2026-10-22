@@ -14,11 +14,11 @@ rule it guards:
    ``reconstruct_started`` audit metadata is byte-identical.
 3. The flag must not be settable by a user: the only authenticated-user RPC that enqueues
    this kind passes no ``p_metadata``.
-4. A forced rebuild runs on a SOLE-key allocator only (review CR-01). With any sibling
-   api_keys row, or a sibling lookup that cannot answer, it refuses (`multi_key`,
-   `sibling_lookup_failed`) before the crawl and writes nothing: the DO-NOTHING persist
-   would otherwise gap-fill the aggregate curve with this one key's value. Multi-key
-   accounts belong to Phase 167.2.1.1.2 ACCTREBUILD (CONTEXT D-05).
+4. A forced rebuild is an ACCOUNT rebuild (UPNLVENUES D-04, this phase's D-01/D-02, decision
+   AR-7), whatever the key count: it crawls every exchange account, sums them, and replaces
+   only its window, or refuses and writes nothing. Its pins live in
+   `tests/test_reconstruct_whole_account.py`; the refusals that need no second key (an
+   empty replay, a stored day the rebuild does not reproduce) stay here.
 5. The spelling is a contract with the post-deploy enqueue (plan 06): one literal, pinned.
 6. Plan 05, PD-H: a forced rebuild replaces a stored curve in ONE write, so it must refuse
    rather than re-bake a wallet-only anchor. When the curve cannot be anchored to today's
@@ -36,7 +36,8 @@ enqueue; the exchange is a stub and the database is the in-memory fake.
 from __future__ import annotations
 
 import copy
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -50,8 +51,6 @@ from services.job_worker import DispatchOutcome
 from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
-    API_KEY_ID_2,
-    _FakeTable,
     _install_fake_audit,
     _install_fake_preflight,
     _make_trade,
@@ -100,6 +99,17 @@ async def _bybit_exchange() -> AsyncMock:
     )
     exchange.fetch_positions = AsyncMock(return_value=list(BYBIT_LINEAR_POSITIONS))
     return exchange
+
+
+def _freeze_now_at(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
+    """``_freeze_now`` at an arbitrary tz-aware ``instant`` instead of END_DATE exactly."""
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Any:  # type: ignore[override]
+            return instant if tz else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
 
 
 def _forced_job(key_id: str = API_KEY_ID_1) -> dict[str, Any]:
@@ -318,23 +328,17 @@ async def _assert_forced_rebuild_refused(
     reason: str,
     *,
     crawled: bool = True,
-    sibling: bool = False,
-    fail_sibling_lookup: bool = False,
     seeded_days: int = SENTINEL_ROWS,
     extra_asofs: tuple[str, ...] = (),
     venue: str = "bybit",
-    second_sibling_check: er.SiblingCheckResult | None = None,
 ) -> None:
-    """A marked key (Bybit unless ``venue``) with ``seeded_days`` sentinel rows (sole-key unless ``sibling``), a
+    """A marked sole key (Bybit unless ``venue``) with ``seeded_days`` sentinel rows, a
     forced job, ``exchange``: the job ends FAILED/permanent naming ``reason``, and NOTHING
     changed: every sentinel row, the marker, no completion audit. ``crawled=False`` is for a
     refusal that must come BEFORE the venue crawl. Static text only: the planted signature
     is absent."""
     fake = _MarkerFake()
     _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange=venue)
-    if sibling:
-        _seed_key(fake, API_KEY_ID_2, marker=MARKER, exchange="okx")
-    fake.fail_sibling_lookup = fail_sibling_lookup
     _seed_sentinel_rows(fake, seeded_days)
     for asof in extra_asofs:
         fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
@@ -342,19 +346,6 @@ async def _assert_forced_rebuild_refused(
             "breakdown": {"ETH": SENTINEL_VALUE}, "source": "exchange_primary",
             "history_depth_months": 24, "reconstructed_at": "2026-04-01T00:00:00+00:00",
         }
-    if second_sibling_check is not None:
-        # The first (pre-crawl) lookup is the real one; every later lookup answers
-        # ``second_sibling_check``, as if a key appeared or the read failed mid-crawl.
-        _real_lookup = er._allocator_has_other_api_keys
-        _lookups: list[None] = []
-
-        async def _lookup(*args: Any, **kwargs: Any) -> er.SiblingCheckResult:
-            _lookups.append(None)
-            if len(_lookups) == 1:
-                return await _real_lookup(*args, **kwargs)
-            return second_sibling_check
-
-        monkeypatch.setattr(er, "_allocator_has_other_api_keys", _lookup)
     audit = _install_fake_audit(monkeypatch)
     _install_fake_preflight(monkeypatch, venue, fake, exchange)
     _freeze_now(monkeypatch)
@@ -556,68 +547,17 @@ async def test_forced_rebuild_refuses_when_the_anchor_would_be_skipped_for_a_par
 
 
 @pytest.mark.asyncio
-async def test_forced_rebuild_refuses_a_multi_key_allocator_and_adds_no_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review CR-01. A multi-key allocator's rows are one aggregate curve across keys. The
-    DO-NOTHING persist cannot change an existing day, but it INSERTS this one key's replay
-    value into any day the aggregate is missing. Nine of the ten days are seeded (one is
-    missing); the refusal must leave exactly nine rows, none new, and must come before the
-    crawl. RED on a handler that crawls and persists: the missing day gains a row carrying
-    this key's own value."""
-    exchange = await _bybit_exchange()
-    await _assert_forced_rebuild_refused(
-        monkeypatch, exchange, "multi_key", crawled=False, sibling=True, seeded_days=9,
-    )
-
-
-@pytest.mark.asyncio
-async def test_forced_rebuild_refuses_when_the_sibling_lookup_cannot_answer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review SFH-1. A failed sibling lookup used to read as "has siblings" and end DONE
-    after a full crawl. A forced job must instead refuse: the allocator may be sole-key,
-    and a silent DONE would leave the curve on the old anchor with a success audit."""
-    exchange = await _bybit_exchange()
-    await _assert_forced_rebuild_refused(
-        monkeypatch, exchange, "sibling_lookup_failed", crawled=False, fail_sibling_lookup=True,
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("second_check", "reason"),
-    [
-        (er.SiblingCheckResult(True, True, "fixture: second lookup failed"), "sibling_lookup_failed"),
-        (er.SiblingCheckResult(True, False, None), "multi_key"),
-    ],
-    ids=["second-lookup-fails", "key-added-during-the-crawl"],
-)
-async def test_forced_rebuild_refuses_when_the_persist_time_sibling_lookup_disagrees(
-    monkeypatch: pytest.MonkeyPatch, second_check: er.SiblingCheckResult, reason: str,
-) -> None:
-    """Round-2 SFH. The pre-crawl lookup passes (sole key); the persist half looks again.
-    If that second lookup fails, or a key now exists, the DO-NOTHING persist would either
-    end DONE with nothing replaced or gap-fill the aggregate curve with this key's values
-    (nine of ten days are seeded, so it would INSERT the missing day). The job must refuse
-    with the named reason and leave exactly the nine seeded rows. RED on a persist half
-    that does not read ``forced``."""
-    exchange = await _bybit_exchange()
-    await _assert_forced_rebuild_refused(
-        monkeypatch, exchange, reason, seeded_days=9, second_sibling_check=second_check,
-    )
-
-
-@pytest.mark.asyncio
 async def test_forced_rebuild_refuses_an_empty_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review SFH-1. A forced replay with no trades or transfers yields no rows. The empty
-    sole-key replace is already refused downstream, but that path ends DONE as
-    ``reconstruct_no_data`` and stamps the marker; a forced job must FAIL instead."""
+    """Review SFH-1, unified (AR-7). A forced replay with no trades or transfers yields no
+    rows for that exchange account. An account with no curve cannot be summed (reading it
+    as zero would store a total that is too low), and the empty replace path would end DONE
+    as ``reconstruct_no_data`` and stamp the marker, so a forced job FAILS with
+    ``account_key_no_rows`` instead and every stored row stays."""
     exchange = await _bybit_exchange()
     exchange.fetch_my_trades = AsyncMock(return_value=[])
-    await _assert_forced_rebuild_refused(monkeypatch, exchange, "replay_empty")
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, "account_key_no_rows")
 
 
 @pytest.mark.asyncio
@@ -629,40 +569,17 @@ async def test_forced_rebuild_refuses_an_empty_replay(
 async def test_forced_rebuild_refuses_when_stored_history_would_be_dropped(
     monkeypatch: pytest.MonkeyPatch, extra_days_back: int
 ) -> None:
-    """Review WR-01. The sole-key replace DELETEs every stored row and inserts only the
-    replay. The replay here covers the ten sentinel days (the first trade is nine days
-    back); one extra stored day is either 60 days older than the replay's first row or a day
-    after the replay's last. Each would be silently deleted, so the job must refuse and
-    leave all eleven rows. RED on a handler that goes straight to the replace."""
+    """Review WR-01, now D-02 of ACCTREBUILD. The window replace deletes the stored days
+    inside its window and inserts only the rebuilt rows. The replay here covers the ten
+    sentinel days (the first trade is nine days back); one extra stored day is either 60
+    days older than the replay's first row (still inside the 730-day window) or a day after
+    the replay's last. Each would be deleted unreproduced, so the refusal comes from the
+    window call's own transaction (``history_days_unreproduced``) and all eleven rows
+    stay. RED on a replace that deletes the window without comparing."""
     extra = (END_DATE - timedelta(days=extra_days_back)).date().isoformat()
     exchange = await _bybit_exchange()
     await _assert_forced_rebuild_refused(
-        monkeypatch, exchange, "history_outside_replay", extra_asofs=(extra,),
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_stored_history_guard_reads_past_the_response_row_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review WR-01 follow-up. PostgREST caps one response at its max rows (1000 on
-    Supabase), so a single SELECT of an allocator's snapshot days can come back truncated
-    and the subset check would pass on days it never saw. Here the cap is 5 rows and the
-    extra stored day (60 days older than the replay) is the eleventh row, so it is only
-    seen if the read pages. RED on a single unpaged SELECT: the guard passes and the
-    forced replace deletes that day."""
-    monkeypatch.setattr(_FakeTable, "max_rows", 5)
-    real_paginated_select = er.paginated_select
-    monkeypatch.setattr(
-        er,
-        "paginated_select",
-        lambda builder, order_by, **kw: real_paginated_select(
-            builder, order_by, page_size=5, **kw
-        ),
-    )
-    extra = (END_DATE - timedelta(days=60)).date().isoformat()
-    await _assert_forced_rebuild_refused(
-        monkeypatch, await _bybit_exchange(), "history_outside_replay", extra_asofs=(extra,),
+        monkeypatch, exchange, "history_days_unreproduced", extra_asofs=(extra,),
     )
 
 
@@ -721,26 +638,53 @@ def _trade_ts() -> int:
     return int((END_DATE - timedelta(days=9)).timestamp() * 1000)
 
 
-@pytest.mark.asyncio
-async def test_forced_rebuild_refuses_an_okx_curve_clamped_at_the_90_day_terminus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review WR-03, ``anchor_skipped_okx_terminus``. OKX keeps 90 days of fills, so a 730 day
-    window is clamped and the replay starts at zero cash; the anchor is skipped because
-    every absolute level is wrong. Unforced that ships the replay; forced it would replace
-    the stored curve with it. The anchor itself is readable (1250.5), so only this arm
-    can refuse. RED with the arm removed."""
-    monkeypatch.setattr(
-        "services.exchange.fetch_okx_total_equity_usd", AsyncMock(return_value=1250.5)
-    )
+async def _okx_exchange() -> AsyncMock:
+    """A Bybit-shaped exchange that answers as OKX, with one BTC buy nine days back."""
     exchange = await _bybit_exchange()
     exchange.id = "okx"
     exchange.fetch_my_trades = _first_call_trades(
         [_make_trade(_trade_ts(), "BTC/USDT", "buy", 50000.0, 1.0)]
     )
-    await _assert_forced_rebuild_refused(
-        monkeypatch, exchange, "anchor_skipped_okx_terminus", venue="okx",
+    return exchange
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_an_okx_curve_clamped_at_the_90_day_terminus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-03, ``anchor_skipped_okx_terminus``, as a DIRECT call of the crawl. OKX keeps
+    90 days of fills, so a window that starts before that is clamped and the replay starts at
+    zero cash; the anchor is skipped because every absolute level is wrong. Forced, the crawl
+    must refuse instead of returning the curve. The anchor itself is readable (1250.5), so
+    only this arm can refuse. RED with the arm removed.
+
+    Why 89 and why now is frozen after midnight (RESEARCH Q1). The terminus test is
+    ``since < now - 90 days``. A start 90 days back is therefore older than the terminus
+    once the UTC day has begun, and at exactly 00:00 it is not, which is why now is frozen
+    six hours after midnight: at 00:00 the 90-day call would not bite. A start 89 days back
+    is newer than the terminus at any time of day and returns rows. The handler never asks
+    OKX for 90 days; it asks for 89 (``_account_rebuild_window``), and this call pins that
+    arithmetic from the crawl's side.
+    """
+    monkeypatch.setattr(
+        "services.exchange.fetch_okx_total_equity_usd", AsyncMock(return_value=1250.5)
     )
+    _freeze_now_at(monkeypatch, END_DATE + timedelta(hours=6))
+    fake = _MarkerFake()
+    end = END_DATE.date()
+
+    with pytest.raises(er.ForcedRebuildRefusedError) as excinfo:
+        await er._fetch_and_price_window(
+            await _okx_exchange(), "okx", fake, end - timedelta(days=90), end,
+            require_anchor=True,
+        )
+    assert excinfo.value.reason == "anchor_skipped_okx_terminus"
+
+    rows, hit_terminus, _telemetry = await er._fetch_and_price_window(
+        await _okx_exchange(), "okx", fake, end - timedelta(days=89), end,
+        require_anchor=True,
+    )
+    assert rows and hit_terminus is False
 
 
 @pytest.mark.asyncio
@@ -788,10 +732,11 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
 
     Phase 167.2.1.1.2 D-02 / UPNLVENUES D-04: the four tokens of the sole-key path
     (``multi_key``, ``sibling_lookup_failed``, ``replay_empty``, ``history_outside_replay``)
-    left the set with the unified whole-account path. Until plan 06 removes their raise
-    sites from the handler this test pins the VOCABULARY only; the raise-site equality scan
-    (every token a ``raise ForcedRebuildRefusedError`` names is in the set, and every token
-    in the set is raised) arrives in plan 06, when the handler's sole-key raises leave.
+    left the set with the unified whole-account path (decision AR-7), and their raise sites
+    left the handler with them. The raise-site scan at the end pins that from the source:
+    the double-quoted lower_snake literals the module passes to ``ForcedRebuildRefusedError(``
+    or assigns to ``_refusal =`` EQUAL the 15 tokens, so no token is without a raise site
+    and no raise site names a token outside the set.
     """
     anchor = frozenset(
         {
@@ -833,6 +778,16 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
         exc = er.ForcedRebuildRefusedError(reason)
         assert exc.reason == reason
         assert str(exc) == f"{REFUSAL_PREFIX}{reason})"
+
+    # Raise-site equality (decision AR-7). The scan reads the source text: a raise that passed
+    # a variable would not be seen, which is why every raise names its token as a literal.
+    source = Path(er.__file__).read_text(encoding="utf-8")
+    raised = set(re.findall(r'ForcedRebuildRefusedError\(\s*"([a-z_]+)"\s*\)', source))
+    raised |= set(re.findall(r'_refusal = "([a-z_]+)"', source))
+    assert raised == set(er.FORCED_REBUILD_REFUSAL_REASONS), (
+        f"raise sites without a token: {sorted(raised - er.FORCED_REBUILD_REFUSAL_REASONS)}; "
+        f"tokens without a raise site: {sorted(er.FORCED_REBUILD_REFUSAL_REASONS - raised)}"
+    )
 
 
 @pytest.mark.asyncio
