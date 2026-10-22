@@ -5258,7 +5258,7 @@ Plans:
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-14, "Ship diagnostic, re-run (Recommended)"):** plan 14's first calibrate stopped on `quarter_range_mismatch` for 2026-Q2 and the stop dropped the observed dates. A diagnostic plan makes the stop carry them (dates and counts only), ships, and calibrate is re-run once; the mismatch fix itself is decided on those dates. Plan 15 waits for a passing calibrate.
 
-**Plans:** 16 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1)
+**Plans:** 17 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14)
 
 Plans:
 - [x] 167.1.2.2.2.1-01-PLAN.md — migration: kind `okx_archive_rebuild` (registry + both CHECKs, api_key-only) and the atomic `apply_okx_archive_rebuild` RPC (INVOKER, service_role), 15-arm gate, rollback
@@ -5277,6 +5277,7 @@ Plans:
 - [ ] 167.1.2.2.2.1-14-PLAN.md — founder step: calibrate on the real Q2/Q3 files; any day above one cent STOPS (D-10)
 - [ ] 167.1.2.2.2.1-15-PLAN.md — founder decision on apply timing; PROD apply with before/after; survival after the next tick; Wave 5 hand-off
 - [x] 167.1.2.2.2.1-16-PLAN.md — the durable job's stateless wait on OKX and the ingest (download, parse, per-quarter readings); a lost link never yields a partial result (SC-1)
+- [ ] 167.1.2.2.2.1-17-PLAN.md — the `quarter_range_mismatch` stop names the requested range, the observed min/max UTC days and the rows outside in `last_error`, dates and counts only (D-14)
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
