@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.0.1] - 2026-10-22 — OKXHISTORY: archive bill ids are read without their export quoting (Phase 167.1.2.2.2.1, plan 21, D-17)
+
+### Fixed
+- Calibrate run 4 on PROD (2026-10-22) named its stop: all 1606 bills of both real quarter files carried a `billId` that is not ASCII digits. The parser now strips surrounding whitespace, apostrophes and double quotes from each `billId` before any check. These are spreadsheet-guard export wrapping, and the digits inside are unchanged. An id that is empty after the strip stops `missing_bill_id`.
+
+### Added
+- An id that still fails after the strip stops `nondigit_bill_id` and names a value-free shape and length of the first such id (`first_nondigit_shape`, `first_nondigit_len`: digits read 9, letters A, other characters their Unicode category). The id itself is never recorded.
+
+### Tests
+- Tab-, apostrophe-, quote- and space-wrapped ids each calibrate exactly like the bare file. A scientific-notation id still stops and names its shape. Each guard has a recorded neuter.
+
+### Notes
+- Orchestrator decision D-17, within founder D-16. Reviewed by gsd-code-reviewer and silent-failure-hunter, with no MEDIUM+ findings. After deploy, calibrate is re-run once.
+
 ## [0.133.0.0] - 2026-10-22 — ACCTREBUILD: a multi-key account's allocation history is rebuilt as one account over a window, or refused by name (Phase 167.2.1.1.2)
 
 ### Added
