@@ -4401,6 +4401,15 @@ BEGIN
         AND NOT EXISTS (
           SELECT 1 FROM api_keys WHERE user_id = auth.uid()
         );
+
+    -- WR-01: the snapshots the recorded rebuild seam separated are gone with the
+    -- last key, so clear the seam record under the same key-presence test.
+    DELETE FROM allocator_equity_derived ck
+      WHERE ck.allocator_id = auth.uid()
+        AND ck.kind = 'snapshot_rebuild_boundary'
+        AND NOT EXISTS (
+          SELECT 1 FROM api_keys WHERE user_id = auth.uid()
+        );
   END IF;
 
   RETURN v_holdings_deleted;
@@ -9478,6 +9487,12 @@ BEGIN
   DELETE FROM public.allocator_equity_snapshots
     WHERE allocator_id = p_allocator_id;
 
+  -- 1b. WR-01: the whole history was replaced, so a recorded rebuild seam names a
+  --     jump that is no longer in the stored series. Clear it.
+  DELETE FROM public.allocator_equity_derived rb
+   WHERE rb.allocator_id = p_allocator_id
+     AND rb.kind = 'snapshot_rebuild_boundary';
+
   -- 2. Insert the freshly replayed rows. jsonb_to_recordset projects the
   --    array; reconstructed_at uses the column DEFAULT (now()). The CASE on
   --    source mirrors persist_equity_snapshots' WR-05 per-row depth rule.
@@ -9516,7 +9531,168 @@ $$;
 ALTER FUNCTION "public"."replace_allocator_equity_snapshots"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."replace_allocator_equity_snapshots"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer) IS 'Atomic sole-key equity-history replacement: per-allocator advisory-lock (H-1186) then DELETE all rows for p_allocator_id then INSERT p_rows in ONE transaction (E4/HIGH8). Serializes with delete_allocator_api_key on hashtext(''alloc:''||allocator). Per-row history_depth_months mirrors persist_equity_snapshots WR-05; persists pre_terminus_balance_unknown (CL9/NEW-C01-11, COALESCE to false). service_role only.';
+COMMENT ON FUNCTION "public"."replace_allocator_equity_snapshots"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer) IS 'Atomic sole-key equity-history replacement: per-allocator advisory-lock (H-1186) then DELETE all rows for p_allocator_id, DELETE the allocator''s snapshot_rebuild_boundary row from allocator_equity_derived (ACCTREBUILD review WR-01: the seam it named is gone with the wiped days), then INSERT p_rows in ONE transaction (E4/HIGH8). Serializes with delete_allocator_api_key on hashtext(''alloc:''||allocator). Per-row history_depth_months mirrors persist_equity_snapshots WR-05; persists pre_terminus_balance_unknown (CL9/NEW-C01-11, COALESCE to false). service_role only.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."replace_allocator_equity_snapshots_window"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer, "p_window_start" "date") RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_temp'
+    SET "lock_timeout" TO '3s'
+    AS $$
+DECLARE
+  v_inserted     integer;
+  v_seam         date;
+  v_unreproduced integer;
+  v_bad          integer;
+BEGIN
+  -- ===== 1. NULL-explicit guards. A comparison against a NULL argument is NULL,
+  --          plpgsql takes the ELSE branch on a NULL condition, and a guard
+  --          written as `x <> y` would silently pass; each test below is spelled
+  --          IS NULL or IS DISTINCT FROM so a NULL can never get through.
+  IF p_allocator_id IS NULL THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: allocator_required'
+      USING ERRCODE = '22023';
+  END IF;
+  IF p_window_start IS NULL THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: window_start_required'
+      USING ERRCODE = '22023';
+  END IF;
+  -- Nested on purpose: plpgsql does not promise short-circuit evaluation, and
+  -- jsonb_array_length raises on a non-array.
+  IF p_rows IS NULL THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: rows_not_a_nonempty_array'
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(p_rows) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: rows_not_a_nonempty_array'
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_array_length(p_rows) = 0 THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: rows_not_a_nonempty_array'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- An element with no asof, or a JSON null asof (an element that is not an
+  -- object has no asof either: `->` on a scalar is SQL NULL).
+  SELECT count(*) INTO v_bad
+    FROM jsonb_array_elements(p_rows) e
+   WHERE (e -> 'asof') IS NULL OR jsonb_typeof(e -> 'asof') = 'null';
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: row_asof_missing'
+      USING ERRCODE = '22023';
+  END IF;
+
+  SELECT count(*) INTO v_bad
+    FROM jsonb_to_recordset(p_rows) AS r(asof date)
+   WHERE r.asof < p_window_start;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: row_before_window'
+      USING ERRCODE = '22023';
+  END IF;
+
+  SELECT count(*) - count(DISTINCT r.asof) INTO v_bad
+    FROM jsonb_to_recordset(p_rows) AS r(asof date);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'replace_allocator_equity_snapshots_window: duplicate_asof'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 2. H-1186: serialize against delete_allocator_api_key and against
+  --          replace_allocator_equity_snapshots on the same per-allocator key, so
+  --          a concurrent last-key cascade cannot interleave with this replace.
+  PERFORM pg_advisory_xact_lock(hashtext('alloc:' || p_allocator_id::text));
+
+  -- ===== 3. D-02. The purge of the window and the check of what it purged are
+  --          ONE statement: the days compared are the days the DELETE returned,
+  --          not a read taken earlier. NOT EXISTS, never NOT IN, so a NULL can
+  --          never hide a day. A day the payload does not carry raises, and the
+  --          raise rolls the DELETE back with everything else.
+  WITH del AS (
+    DELETE FROM public.allocator_equity_snapshots s
+     WHERE s.allocator_id = p_allocator_id
+       AND s.asof >= p_window_start
+    RETURNING s.asof
+  )
+  SELECT count(*) INTO v_unreproduced
+    FROM del d
+   WHERE NOT EXISTS (
+           SELECT 1
+             FROM jsonb_to_recordset(p_rows) AS r(asof date)
+            WHERE r.asof = d.asof);
+  IF v_unreproduced > 0 THEN
+    RAISE EXCEPTION 'history_days_unreproduced' USING ERRCODE = 'P0001', DETAIL = v_unreproduced::text;
+  END IF;
+
+  -- ===== 4. Insert the rebuilt window. Re-based VERBATIM on the projection of
+  --          replace_allocator_equity_snapshots (20260602183000): the seven
+  --          columns, the WR-05 depth rule, and CL9's pre_terminus_balance_unknown
+  --          with COALESCE to false. Dropping the CL9 column would silently revert
+  --          NEW-C01-11 and re-expose the OKX-terminus garbage equity curve.
+  WITH ins AS (
+    INSERT INTO public.allocator_equity_snapshots (
+      allocator_id, asof, value_usd, breakdown, source, history_depth_months,
+      pre_terminus_balance_unknown
+    )
+    SELECT
+      p_allocator_id,
+      r.asof,
+      r.value_usd,
+      r.breakdown,
+      r.source,
+      CASE WHEN r.source = 'exchange_primary' THEN p_depth_months ELSE NULL END,
+      COALESCE(r.pre_terminus_balance_unknown, false)
+    FROM jsonb_to_recordset(p_rows) AS r(
+      asof                          DATE,
+      value_usd                     NUMERIC,
+      breakdown                     JSONB,
+      source                        TEXT,
+      pre_terminus_balance_unknown  BOOLEAN
+    )
+    ON CONFLICT (allocator_id, asof) DO NOTHING
+    RETURNING asof
+  )
+  SELECT count(*), min(asof) INTO v_inserted, v_seam FROM ins;
+
+  -- ===== 5. D-03. The seam. A row older than the window that is still there is
+  --          a kept day, and the first inserted day is where the rebuilt days
+  --          begin (the payload may start after p_window_start). A seam already
+  --          recorded is kept while it lies before this call's first inserted day
+  --          and a stored day still precedes it: the earlier call's rebuilt days
+  --          were kept, so the jump is still where that call put it.
+  IF EXISTS (SELECT 1
+               FROM public.allocator_equity_snapshots s
+              WHERE s.allocator_id = p_allocator_id
+                AND s.asof < p_window_start) THEN
+    INSERT INTO public.allocator_equity_derived (allocator_id, kind, payload)
+    VALUES (p_allocator_id, 'snapshot_rebuild_boundary',
+            jsonb_build_object('boundary_date', to_char(v_seam, 'YYYY-MM-DD')))
+    ON CONFLICT (allocator_id, kind)
+    DO UPDATE SET payload = CASE
+                    WHEN (allocator_equity_derived.payload ->> 'boundary_date')::date < v_seam
+                     AND EXISTS (SELECT 1
+                                   FROM public.allocator_equity_snapshots s
+                                  WHERE s.allocator_id = p_allocator_id
+                                    AND s.asof < (allocator_equity_derived.payload ->> 'boundary_date')::date)
+                    THEN allocator_equity_derived.payload
+                    ELSE EXCLUDED.payload
+                  END,
+                  computed_at = now();
+  ELSE
+    DELETE FROM public.allocator_equity_derived d
+     WHERE d.allocator_id = p_allocator_id
+       AND d.kind = 'snapshot_rebuild_boundary';
+  END IF;
+
+  RETURN v_inserted;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."replace_allocator_equity_snapshots_window"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer, "p_window_start" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."replace_allocator_equity_snapshots_window"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer, "p_window_start" "date") IS 'Phase 167.2.1.1.2 ACCTREBUILD. Replaces only the window of an allocator''s equity history, in ONE transaction under the per-allocator advisory lock (H-1186, key hashtext(''alloc:''||allocator), the same as replace_allocator_equity_snapshots): DELETE the allocator''s allocator_equity_snapshots rows with asof >= p_window_start, refuse if any DELETEd day is missing from p_rows (RAISE history_days_unreproduced, P0001, DETAIL a count; the raise rolls the DELETE back), INSERT p_rows (WR-05 depth rule, pre_terminus_balance_unknown persisted). Days older than the window are untouched. Records the seam as one allocator_equity_derived row, kind snapshot_rebuild_boundary, payload {boundary_date: YYYY-MM-DD} naming the first inserted day (an earlier recorded seam is kept while a stored day still precedes it), when an older day is kept, and deletes that row when none is. ERRCODE map: 22023 = malformed input (allocator_required, window_start_required, rows_not_a_nonempty_array, row_asof_missing, row_before_window, duplicate_asof); P0001 = history_days_unreproduced. Never 40001. SECURITY DEFINER; EXECUTE for service_role only.';
 
 
 
@@ -17861,6 +18037,11 @@ GRANT ALL ON FUNCTION "public"."reject_sentinel_writes"() TO "service_role";
 
 REVOKE ALL ON FUNCTION "public"."replace_allocator_equity_snapshots"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."replace_allocator_equity_snapshots"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."replace_allocator_equity_snapshots_window"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer, "p_window_start" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."replace_allocator_equity_snapshots_window"("p_allocator_id" "uuid", "p_rows" "jsonb", "p_depth_months" integer, "p_window_start" "date") TO "service_role";
 
 
 
