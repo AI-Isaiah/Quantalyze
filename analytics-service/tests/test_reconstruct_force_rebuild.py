@@ -54,6 +54,7 @@ from tests.test_equity_reconstruction import (
     _FakeTable,
     _install_fake_audit,
     _install_fake_preflight,
+    _make_trade,
 )
 from tests.test_reconstruct_marker_writer import (
     COMPLETION_ACTIONS,
@@ -321,14 +322,15 @@ async def _assert_forced_rebuild_refused(
     fail_sibling_lookup: bool = False,
     seeded_days: int = SENTINEL_ROWS,
     extra_asofs: tuple[str, ...] = (),
+    venue: str = "bybit",
 ) -> None:
-    """A marked Bybit key with ``seeded_days`` sentinel rows (sole-key unless ``sibling``), a
+    """A marked key (Bybit unless ``venue``) with ``seeded_days`` sentinel rows (sole-key unless ``sibling``), a
     forced job, ``exchange``: the job ends FAILED/permanent naming ``reason``, and NOTHING
     changed: every sentinel row, the marker, no completion audit. ``crawled=False`` is for a
     refusal that must come BEFORE the venue crawl. Static text only: the planted signature
     is absent."""
     fake = _MarkerFake()
-    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange=venue)
     if sibling:
         _seed_key(fake, API_KEY_ID_2, marker=MARKER, exchange="okx")
     fake.fail_sibling_lookup = fail_sibling_lookup
@@ -340,7 +342,7 @@ async def _assert_forced_rebuild_refused(
             "history_depth_months": 24, "reconstructed_at": "2026-04-01T00:00:00+00:00",
         }
     audit = _install_fake_audit(monkeypatch)
-    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _install_fake_preflight(monkeypatch, venue, fake, exchange)
     _freeze_now(monkeypatch)
 
     result = await run_reconstruct_allocator_history_job(_forced_job())
@@ -651,6 +653,80 @@ async def test_a_completed_forced_rebuild_says_so_in_its_completion_audit(
     (complete,) = _audit_metadata(audit, COMPLETE)
     assert complete.get("forced_rebuild") is True, complete
     assert complete.get("anchor_positions_unread") is False, complete
+
+
+def _first_call_trades(trades: list[dict[str, Any]]) -> AsyncMock:
+    """``fetch_my_trades`` answering ``trades`` once and an empty page afterwards."""
+    calls: list[int] = []
+
+    async def _fetch(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
+        calls.append(1)
+        return trades if len(calls) == 1 else []
+
+    return AsyncMock(side_effect=_fetch)
+
+
+def _trade_ts() -> int:
+    return int((END_DATE - timedelta(days=9)).timestamp() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_an_okx_curve_clamped_at_the_90_day_terminus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-03, ``anchor_skipped_okx_terminus``. OKX keeps 90 days of fills, so a 730 day
+    window is clamped and the replay starts at zero cash; the anchor is skipped because
+    every absolute level is wrong. Unforced that ships the replay; forced it would replace
+    the stored curve with it. The anchor itself is readable (1250.5), so only this arm
+    can refuse. RED with the arm removed."""
+    monkeypatch.setattr(
+        "services.exchange.fetch_okx_total_equity_usd", AsyncMock(return_value=1250.5)
+    )
+    exchange = await _bybit_exchange()
+    exchange.id = "okx"
+    exchange.fetch_my_trades = _first_call_trades(
+        [_make_trade(_trade_ts(), "BTC/USDT", "buy", 50000.0, 1.0)]
+    )
+    await _assert_forced_rebuild_refused(
+        monkeypatch, exchange, "anchor_skipped_okx_terminus", venue="okx",
+    )
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_a_replay_with_an_inverse_perp_fill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-03, ``anchor_skipped_unreliable_replay``. An inverse perp fill is skipped by
+    the replay (INVERSE_UNSUPPORTED) while the live anchor still counts its uPnL, so the
+    replay's absolute level cannot be trusted. Forced, the stored curve must stay. RED with
+    the arm removed: the forced job would replace the curve with an unanchored replay."""
+    exchange = await _bybit_exchange()
+    exchange.fetch_my_trades = _first_call_trades(
+        [
+            _make_trade(_trade_ts(), "BTC/USDT", "buy", 50000.0, 1.0),
+            _make_trade(_trade_ts(), "BTC/USD:BTC", "buy", 50000.0, 100.0),
+        ]
+    )
+    await _assert_forced_rebuild_refused(
+        monkeypatch, exchange, "anchor_skipped_unreliable_replay",
+    )
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_an_implausible_anchor_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-03, ``anchor_skipped_implausible``. The replay ends at 10000 (1 BTC bought at
+    40000, marked at 50000) and the venue reports 100250.5: an offset of about 90000, over
+    5x the last value, which the anchor refuses to spread. The balance and the positions
+    agree, so only this arm can refuse. RED with the arm removed."""
+    payload = bybit_wallet_balance("UNIFIED", [bybit_coin("USDT", "100000", "250.5")])
+    exchange = await _bybit_exchange()
+    exchange.fetch_balance = AsyncMock(return_value=await real_bybit_parse_balance(payload))
+    exchange.fetch_my_trades = _first_call_trades(
+        [_make_trade(_trade_ts(), "BTC/USDT", "buy", 40000.0, 1.0)]
+    )
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, "anchor_skipped_implausible")
 
 
 def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
