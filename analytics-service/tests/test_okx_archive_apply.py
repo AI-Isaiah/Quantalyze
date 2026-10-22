@@ -2610,6 +2610,94 @@ class TestUnchainableRowDiagnostic:
 
         assert text.endswith(" rows_by_quarter=2026-Q2:0,2026-Q3:2")
 
+    @pytest.mark.parametrize(
+        "poison",
+        [
+            "1.23E+17", "x800000013", "3428.45", _link("2026", "Q3"), "AA", "Ab-9", "9-Po-", "",
+            "-".join(["9", "A"] * 5), 9, True, ["A"],
+        ],
+        ids=[
+            "raw-scientific", "raw-id", "amount", "link", "two-letters", "not-a-category",
+            "trailing-dash", "empty", "ten-runs", "int", "bool", "list",
+        ],
+    )
+    def test_a_shape_outside_the_grammar_reads_unreadable(self, poison: object) -> None:
+        """D-17. The shape is stored in ``compute_jobs.last_error``, logged, shown in the admin
+        table and kept in the result block, so it must never carry text from a file (the
+        account-size and bearer-link leak class, T-167.1.2.2.2.1-52). It is echoed only when the
+        shape grammar matches it in full; anything else reads ``unreadable`` and the other tokens
+        stay intact."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, "first_nondigit_shape": poison}, ["2026-Q3"])
+
+        tokens = text.split(" ")
+        assert "first_nondigit_shape=unreadable" in tokens
+        others = [t for t in tokens if not t.startswith("first_nondigit_shape=")]
+        assert others == [t for t in self.VALID_TEXT.split(" ") if not t.startswith("first_nondigit_shape=")]
+        for secret in LINK_SECRETS:
+            assert secret not in text
+
+    @pytest.mark.parametrize("poison", [True, -1, "10", 1.5], ids=["bool", "negative", "string", "float"])
+    def test_a_length_that_is_not_a_count_reads_unreadable(self, poison: object) -> None:
+        """D-17. The length is a count like the others: a non-negative int that is not a bool.
+        Anything else reads ``unreadable`` instead of being echoed as text from the file."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, "first_nondigit_len": poison}, ["2026-Q3"])
+
+        assert "first_nondigit_len=unreadable" in text.split(" ")
+
+    def test_a_stop_with_no_non_digit_id_reads_none(self) -> None:
+        """D-17. A stop on blank-ccy bills alone has no non-digit id. ``none`` says so;
+        ``unreadable`` would claim a value existed and was withheld, and the founder would go
+        looking for an id that was never there."""
+        detail = {**self.VALID, "nondigit_bill_id": 0, "first_nondigit_shape": None, "first_nondigit_len": None}
+
+        text = okx_archive_job._unchainable_tokens(detail, ["2026-Q3"])
+
+        assert " first_nondigit_shape=none first_nondigit_len=none " in text
+
+    def test_every_hand_written_shape_is_inside_the_grammar(self) -> None:
+        """D-17. The parse table pins what the classifier makes; this pins that the job echoes
+        every one of those shapes. Together they prove a shape the classifier makes is never
+        withheld as ``unreadable`` by a grammar that drifted from it."""
+        from tests.test_okx_archive_parse import SHAPE_CASES
+
+        for _, shape in SHAPE_CASES:
+            text = okx_archive_job._unchainable_tokens({**self.VALID, "first_nondigit_shape": shape}, ["2026-Q3"])
+
+            assert f"first_nondigit_shape={shape}" in text.split(" "), shape
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("A-9{9}", "A-9{9}"), (None, None), ("1.23E+17", "unreadable"), (_link("2026", "Q3"), "unreadable")],
+        ids=["shape", "none", "raw-id", "link"],
+    )
+    def test_the_info_carries_a_shape_only_inside_the_grammar(self, value: object, expected: object) -> None:
+        """D-17. ``info.bal_chain`` is kept in the result block and read by the founder, so it
+        gets the same closed-grammar check as ``last_error``: a slip in the code that makes the
+        shape must read ``unreadable`` here too."""
+        info = okx_archive_job._bal_chain_info(
+            {"reason": "unchainable_row", "first_nondigit_shape": value, "first_nondigit_len": 8}
+        )
+
+        assert (info["first_nondigit_shape"], info["first_nondigit_len"]) == (expected, 8)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (8, 8), (0, 0), (None, None),
+            (True, "unreadable"), (-1, "unreadable"), ("10", "unreadable"), (1.5, "unreadable"),
+        ],
+        ids=["count", "zero", "none", "bool", "negative", "string", "float"],
+    )
+    def test_the_info_carries_a_length_only_when_it_is_a_count(self, value: object, expected: object) -> None:
+        """D-17. The length gets the same check in ``info.bal_chain`` as in ``last_error``
+        (T-167.1.2.2.2.1-58): a non-negative int that is not a bool, else ``unreadable``, so the
+        two readings of one stop cannot disagree about the same value."""
+        info = okx_archive_job._bal_chain_info(
+            {"reason": "unchainable_row", "first_nondigit_shape": "A-9{9}", "first_nondigit_len": value}
+        )
+
+        assert info["first_nondigit_len"] == expected
+
     @pytest.mark.asyncio
     async def test_zero_effect_blank_ccy_rows_are_skipped_counted_and_change_no_money_reading(
         self, monkeypatch: pytest.MonkeyPatch
