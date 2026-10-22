@@ -5262,6 +5262,8 @@ Plans:
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-16, "Diagnose + skip safe rows (Recommended)"):** calibrate run 3 stopped `unchainable_row`; the stop records the cause split, counts and dates, zero-effect blank-ccy rows are skipped from the bal chain and counted, a non-digit billId still stops; then calibrate is re-run.
 
+**⭐ DECIDED 2026-10-22 (orchestrator, CONTEXT D-17, within founder D-16 "Diagnose + skip safe rows (Recommended)"):** calibrate run 4 stopped `unchainable_row` with `nondigit_bill_id=1606` of 1606 rows, a systematic export format. The parser strips surrounding whitespace, tab, apostrophe and double-quote characters from `billId` before any check; a `billId` still not ASCII digits stops `nondigit_bill_id` as before and the stop names a value-free shape of the first offending id (digits `9`, letters `A`, other characters by category or a fixed escape name, plus the length), never the id itself; then calibrate is re-run once.
+
 **Plans:** 20 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14; plans 18-19 added for D-15; plan 20 added for D-16)
 
 Plans:
