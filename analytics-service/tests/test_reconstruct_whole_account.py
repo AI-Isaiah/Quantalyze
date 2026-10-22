@@ -73,9 +73,11 @@ from tests.test_reconstruct_marker_writer import (
     _freeze_now,
     _marker_of,
     _MarkerFake,
+    _RecordingTable,
 )
 from tests.test_upnl_venues import (
     BYBIT_LINEAR_POSITIONS,
+    BYBIT_UNIFIED_WALLET_BALANCE,
     bybit_coin,
     bybit_wallet_balance,
     real_bybit_parse_balance,
@@ -1016,3 +1018,242 @@ async def test_a_cooling_down_sibling_defers_the_whole_job(
     assert fake.api_key_updates() == []
     _assert_no_venue_call(exchange_1, "the job key's exchange")
     _assert_no_venue_call(exchange_2, "the sibling's exchange")
+
+
+# ------------------------------------------------------------ refusals: the key set and shape
+
+_THIRD_KEY_ID = "00000000-0000-0000-0000-000000000003"
+
+
+class _AccountKeyListTable(_RecordingTable):
+    """The api_keys table, failing the Nth read of the account's key LIST.
+
+    ``account_shared_with_api_key_id`` is selected only by ``_read_account_keys`` (the
+    handler reads that list twice: before the crawl and again before the write), so a select
+    naming it identifies that read and no other. The planted signature rides the exception
+    text so a refusal that echoed it would show."""
+
+    _is_key_list = False
+
+    def select(self, *args: Any, head: bool = False, **kwargs: Any) -> "_AccountKeyListTable":
+        columns = str(args[0]) if args else ""
+        self._is_key_list = self._name == "api_keys" and "account_shared_with_api_key_id" in columns
+        super().select(*args, head=head, **kwargs)
+        return self
+
+    def execute(self) -> Any:
+        if self._is_key_list and self._pending_op == "select":
+            fake = self._client
+            fake.key_list_reads += 1
+            if fake.fail_key_list_read == fake.key_list_reads:
+                raise RuntimeError("fixture: key list unreadable " + LEAKED_SIGNATURE)
+        return super().execute()
+
+
+class _AccountFake(_MarkerFake):
+    def __init__(self) -> None:
+        super().__init__()
+        self.key_list_reads = 0
+        # 1-based index of the key-list read that fails; 0 = none fails.
+        self.fail_key_list_read = 0
+
+    def table(self, name: str) -> Any:
+        return _AccountKeyListTable(name, self.store, self)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_read", "crawled"),
+    [(1, False), (2, True)],
+    ids=["before-the-crawl", "at-persist-time"],
+)
+async def test_an_unreadable_key_list_refuses_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, failing_read: int, crawled: bool
+) -> None:
+    """The rebuild cannot say which exchange accounts the book holds without its key list, so
+    an unreadable list refuses account_state_unreadable. Read before the crawl, it refuses
+    before any venue call; read again at persist time (to see whether the set moved), it
+    refuses with the crawl already done and still writes nothing."""
+    fake = _AccountFake()
+    fake.fail_key_list_read = failing_read
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    assert fake.key_list_reads == failing_read, "the key list was not read the expected number of times"
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_state_unreadable",
+        before=before,
+        exchanges_crawled=(exchange_1, exchange_2) if crawled else (),
+        exchanges_untouched=() if crawled else (exchange_1, exchange_2),
+    )
+
+
+def _mutate_on_first_trades_call(exchange: Any, mutate: Any) -> None:
+    """Run ``mutate`` as the exchange's first ``fetch_my_trades`` call begins (mid-crawl), then
+    answer exactly what the exchange would have answered."""
+    answers = exchange.fetch_my_trades.side_effect
+    first = True
+
+    async def _side_effect(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal first
+        if first:
+            first = False
+            mutate()
+        return next(answers)
+
+    exchange.fetch_my_trades = AsyncMock(side_effect=_side_effect)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("moved", ["added", "removed"])
+async def test_a_key_set_that_moved_during_the_crawl_refuses_the_account(
+    monkeypatch: pytest.MonkeyPatch, moved: str
+) -> None:
+    """A key added or removed while the crawl runs changes which exchange accounts the window
+    may claim to cover, so the persist-time re-read refuses account_keys_changed and writes
+    nothing. The moved row itself stays moved: the job never touches api_keys."""
+    fake = _AccountFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    def _add_third_key() -> None:
+        _seed_account_key(fake, _THIRD_KEY_ID, "bybit", venue_account_id="fixture-acct-3")
+
+    def _remove_second_key() -> None:
+        del fake.store[("api_keys", (API_KEY_ID_2,))]
+
+    _mutate_on_first_trades_call(
+        exchange_1, _add_third_key if moved == "added" else _remove_second_key
+    )
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    # ``before`` was taken before the job; the one row the test itself moved is the only
+    # difference the api_keys equality may see, and it is asserted separately.
+    if moved == "added":
+        assert ("api_keys", (_THIRD_KEY_ID,)) in fake.store
+        before["api_keys"].append(copy.deepcopy(fake.store[("api_keys", (_THIRD_KEY_ID,))]))
+    else:
+        assert ("api_keys", (API_KEY_ID_2,)) not in fake.store
+        before["api_keys"] = [r for r in before["api_keys"] if r["id"] != API_KEY_ID_2]
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(exchange_1, exchange_2), exchanges_untouched=(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_curves_with_no_shared_day_refuse_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two exchange accounts whose curves share no day sum to nothing; storing either curve
+    alone would claim a total that covers one account. The crawl is stubbed to hand each key
+    typed rows on disjoint days, so only the sum can refuse."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    def _days(first_back: int, last_back: int) -> list[dict[str, Any]]:
+        return [
+            _row(
+                (END_DATE - timedelta(days=back)).date().isoformat(),
+                100.0 + back,
+                {"BTC": 100.0 + back},
+            )
+            for back in range(first_back, last_back + 1)
+        ]
+
+    curves = {API_KEY_ID_1: _days(0, 4), API_KEY_ID_2: _days(5, 9)}
+
+    async def _stub_crawl(
+        _supabase: Any, key_row: Any, _exchange: Any, *_args: Any
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return curves[str(key_row["id"])], er._mt5_telemetry()
+
+    monkeypatch.setattr(er, "_crawl_account_key", _stub_crawl)
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_sum_empty",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_exchange", "second_sync_status", "reason"),
+    [
+        ("sfox", "ok", "account_key_venue_unsupported"),
+        ("bybit", "revoked", "account_key_not_working"),
+    ],
+    ids=["venue-the-rebuild-cannot-read", "only-key-revoked"],
+)
+async def test_an_exchange_account_the_rebuild_cannot_read_refuses_before_any_venue_call(
+    monkeypatch: pytest.MonkeyPatch, second_exchange: str, second_sync_status: str, reason: str
+) -> None:
+    """Summing the readable accounts and leaving this one out would store a total that claims
+    to cover the whole book, so selection refuses before ANY venue call and before the
+    sibling's session is even opened."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake, second_exchange)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = second_sync_status
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, reason,
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+    assert [c["api_key_id"] for c in calls] == [API_KEY_ID_1], "a sibling session was opened"
+
+
+@pytest.mark.asyncio
+async def test_a_deribit_exchange_account_is_counted_as_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both allocator writers store a Deribit exchange account as $0 (the reconstruct refuses
+    every Deribit key and the daily refresh skips the venue), so the rebuild neither crawls it
+    nor refuses on it: the job ends DONE with every in-window row equal to the Bybit account's
+    own coin equity (computed here from its payload), and the audit counts the Deribit account
+    as a zero contribution."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake, "deribit")
+    older_asof = (END_DATE - timedelta(days=800)).date().isoformat()
+    audit = _install_fake_audit(monkeypatch)
+    exchange_1 = await _bybit_exchange()
+    calls = _install_account_preflight(monkeypatch, fake, {API_KEY_ID_1: exchange_1})
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert [c["api_key_id"] for c in calls] == [API_KEY_ID_1], "a Deribit session was built"
+    expected = round(_usdt_equity(BYBIT_UNIFIED_WALLET_BALANCE), 2)
+    assert expected == 1250.5
+    in_window = [r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] != older_asof]
+    assert len(in_window) == SENTINEL_ROWS, in_window
+    for row in in_window:
+        assert row["value_usd"] == pytest.approx(expected, abs=0.01), (
+            f"day {row['asof']} holds {row['value_usd']}, not the Bybit account alone {expected}"
+        )
+        assert row["value_usd"] != SENTINEL_VALUE
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["account_key_count"] == 2
+    assert complete["account_exchange_accounts"] == 1
+    assert complete["account_zero_contribution_accounts"] == 1
