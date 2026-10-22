@@ -39,6 +39,7 @@ import ccxt.async_support as ccxt
 import httpx
 import pandas as pd
 import sentry_sdk
+from postgrest.exceptions import APIError
 
 from services.account_identity import VENUES_WITH_ACCOUNT_ID
 from services.allocator_positions import read_native_unpriced_days
@@ -1715,6 +1716,101 @@ async def replace_equity_snapshots(
     res = await db_execute(_rpc)
     # The RPC RETURNS integer (rows inserted); supabase-py surfaces a scalar
     # function result under res.data.
+    data = getattr(res, "data", None)
+    if isinstance(data, int):
+        return data
+    if isinstance(data, list) and data and isinstance(data[0], int):
+        return data[0]
+    return len(payload)
+
+
+# Phase 167.2.1.1.2 D-02 / AR-2: the SQL function raises the BARE token below (SQLSTATE
+# P0001, DETAIL a count) when a stored day inside the window is not in the payload. The
+# worker maps that one message to the named refusal and nothing else. The token is spelled
+# once here for the match and once as a literal at the raise site (a closed-set scan of the
+# raise sites reads literals, not names).
+_WINDOW_REPLACE_REFUSAL_TOKEN: Final[str] = "history_days_unreproduced"
+
+
+def _window_replace_refusal(exc: BaseException) -> str | None:
+    """The refusal token when ``exc`` is the window function's D-02 raise, else ``None``.
+
+    Matched by class (a PostgREST ``APIError``), SQLSTATE ``P0001`` and the WHOLE message,
+    never by ``details`` or ``str(exc)``: those carry the DETAIL and can carry row text.
+    Another P0001 message, the same message under another code, a timeout and a transport
+    fault are therefore not this refusal and propagate as what they are.
+    """
+    if (
+        isinstance(exc, APIError)
+        and exc.code == "P0001"
+        and exc.message == _WINDOW_REPLACE_REFUSAL_TOKEN
+    ):
+        return _WINDOW_REPLACE_REFUSAL_TOKEN
+    return None
+
+
+async def replace_equity_snapshots_window(
+    supabase: Any,
+    rows: list[dict[str, Any]],
+    allocator_id: str,
+    history_depth_months: int | None,
+    window_start: date,
+) -> int:
+    """ACCTREBUILD: replace ONLY the window ``[window_start, ...)`` of an allocator's
+    stored equity history, atomically, or refuse and write nothing.
+
+    Calls ``replace_allocator_equity_snapshots_window`` (AR-1: a new SECURITY DEFINER
+    function; ``replace_equity_snapshots`` above stays as it is and still replaces every
+    row). In one transaction under the per-allocator advisory lock it
+
+    - D-01: deletes only the rows with ``asof >= window_start`` and inserts ``rows``, so a
+      stored day older than the window keeps every column it had;
+    - D-02 / AR-2: refuses when a stored day inside the window is not in ``rows``. The
+      comparison is made on the rows the DELETE itself returned, in the same transaction,
+      so a day the daily refresh wrote after ``rows`` was built is refused, never deleted
+      unseen. The refusal surfaces here as ``ForcedRebuildRefusedError`` with reason
+      ``history_days_unreproduced``, and nothing was written;
+    - D-03: records the seam, ``allocator_equity_derived`` kind ``snapshot_rebuild_boundary``
+      with ``{"boundary_date": <window_start>}``, when an older day is kept, and removes it
+      when none is.
+
+    ``rows`` must be non-empty and every ``asof`` must lie on or after ``window_start``
+    (the SQL refuses both); an empty payload is refused here before any call. Only the
+    forced rebuild calls this, and no caller is wired in this module yet. Returns the
+    number of rows inserted.
+    """
+    if not rows:
+        raise ValueError("replace_equity_snapshots_window requires at least one row")
+    payload = [
+        {
+            "asof": r["asof"],
+            "value_usd": r["value_usd"],
+            "breakdown": r.get("breakdown"),
+            "source": r.get("source", "exchange_primary"),
+            "pre_terminus_balance_unknown": bool(
+                r.get("pre_terminus_balance_unknown", False)
+            ),
+        }
+        for r in rows
+    ]
+
+    def _rpc() -> Any:
+        return supabase.rpc(
+            "replace_allocator_equity_snapshots_window",
+            {
+                "p_allocator_id": allocator_id,
+                "p_rows": payload,
+                "p_depth_months": history_depth_months,
+                "p_window_start": window_start.isoformat(),
+            },
+        ).execute()
+
+    try:
+        res = await db_execute(_rpc)
+    except Exception as exc:
+        if _window_replace_refusal(exc) is not None:
+            raise ForcedRebuildRefusedError("history_days_unreproduced") from None
+        raise
     data = getattr(res, "data", None)
     if isinstance(data, int):
         return data
