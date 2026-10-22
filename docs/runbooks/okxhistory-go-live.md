@@ -619,14 +619,28 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
   with `info.bal_chain`, the one balance-chain proof.
 - `info.bal_chain`: on a clean calibrate, `ccys.<ccy>` with `pairs_checked`, `first_day` and `last_day`
   (the days the chain reaches), the `total_pairs` over all currencies and the `floor` (2 pairs; a currency
-  that carries money with fewer cannot prove completeness). The chain runs per currency across the
-  deduplicated bills of every ADJACENT requested quarter in billId order, so the Q2 to Q3 seam is inside
-  it. A clean calibrate proves the chain by the absence of the `archive_incomplete` stop and shows the
-  numbers above. The stop's own `info.bal_chain` adds `reason` (`bal_chain_break`, `too_few_pairs` or
-  `unchainable_row`; `last_error` ends `cause=<reason>`), per currency `breaks`, `seam_breaks` (breaks
-  on a pair that crosses two files) and `first_break_day`, `starved` (the currencies under the floor) and
-  `files[]` (each file's `ts_min_day` / `ts_max_day`).
-- `census`: `by_ccy` all USDT, `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
+  that carries money with fewer cannot prove completeness) and `blank_ccy_skipped` (D-16), the count of
+  bills with a blank `ccy` and no effect at all (`balChg`, `pnl` and `fee` all 0) left out of the chain.
+  Such a bill cannot move any currency's balance, so its neighbours still chain without it. On a clean
+  calibrate it equals `census.by_ccy` `(blank)`, and it is a reading, not a stop. The chain runs per
+  currency across the deduplicated bills of every ADJACENT requested quarter in billId order, so the Q2
+  to Q3 seam is inside it. A clean calibrate proves the chain by the absence of the `archive_incomplete`
+  stop and shows the numbers above. The stop's own `info.bal_chain` adds `reason` (`bal_chain_break`,
+  `too_few_pairs` or `unchainable_row`; `last_error` carries `cause=<reason>`), per currency `breaks`,
+  `seam_breaks` (breaks on a pair that crosses two files) and `first_break_day`, `starved` (the
+  currencies under the floor) and `files[]` (each file's `ts_min_day` / `ts_max_day`). An
+  `unchainable_row` stop (D-16) is a bill the chain cannot place. That is a blank `ccy` with an effect
+  (`blank_ccy`) or a `billId` that is not all digits (`nondigit_bill_id`, whatever its effect). One bill
+  can carry both causes, and `rows` counts each once. Its `info.bal_chain` adds `rows`, `blank_ccy`,
+  `nondigit_bill_id`, `first_day` / `last_day` (the UTC days of the first and last such bill) and
+  `blank_ccy_skipped`. Per file, in `files[]` in `quarters[]` order, it adds the same counts and days
+  beside `ts_min_day` / `ts_max_day`. Its `last_error` continues after `cause=unchainable_row` with
+  `rows=`, `blank_ccy=`, `nondigit_bill_id=`, `first_day=`, `last_day=` and
+  `rows_by_quarter=<YYYY-Qn>:<n>,...`, and `unreadable` marks a value the job would not echo. Counts and
+  dates only, never a billId or an amount. The readings go to the founder (D-16); do not re-enqueue to
+  get past the stop.
+- `census`: `by_ccy` all USDT, apart from a `(blank)` count that on a clean calibrate equals
+  `info.bal_chain.blank_ccy_skipped` (D-16), `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
   non-USD currency is the STOP `non_usd_ccy`, and it is the measurement that settles
   `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`. `census.edge_days` (`{whole, missing}`, dates only) names the
   quarter-edge UTC days, the days OKX's 00:00 UTC+8 cut splits between two files (03-31, 06-30, 09-30,
@@ -663,8 +677,8 @@ No form runs here; the founder reads and decides, with the orchestrator's summar
    - **What the chain proves:** the interior of every file and the Q2 to Q3 seam. Each currency's running
      balance chains bill to bill across both files, else the STOP `archive_incomplete`; a clean calibrate
      shows `pairs_checked` per currency. Every bill after a currency's first adds one pair, so
-     `total_pairs` equals the sum of `quarters[].row_count` less one per currency; a total far below that
-     is not a mystery to approve past.
+     `total_pairs` equals the sum of `quarters[].row_count`, less `info.bal_chain.blank_ccy_skipped`
+     (D-16) and less one per currency; a total far below that is not a mystery to approve past.
    - **What it cannot prove:** the HEAD of the earliest file (Q2) and the TAIL of the latest (Q3). A file
      missing its first or last bills still chains. `info.bal_chain.ccys.<ccy>.first_day` and `last_day`
      say how far the proven chain reaches for each currency.
