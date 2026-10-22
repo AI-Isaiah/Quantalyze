@@ -5260,6 +5260,8 @@ Plans:
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-15, "HK bounds, edge days whole-or-missing (Recommended)"):** the D-14 re-run showed the Q2 file starts 2026-03-31 (UTC): OKX cuts quarters on UTC+8. Files are accepted on UTC+8 bounds, daily totals stay on UTC days, and a quarter-edge UTC day counts only when both neighbouring files were read, otherwise it stays missing and named. Then calibrate is re-run.
 
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-16, "Diagnose + skip safe rows (Recommended)"):** calibrate run 3 stopped `unchainable_row`; the stop records the cause split, counts and dates, zero-effect blank-ccy rows are skipped from the bal chain and counted, a non-digit billId still stops; then calibrate is re-run.
+
 **Plans:** 19 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14; plans 18-19 added for D-15)
 
 Plans:
