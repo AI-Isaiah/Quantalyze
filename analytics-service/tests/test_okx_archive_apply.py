@@ -2456,6 +2456,16 @@ def _nondigit_row(day: str) -> Callable[[int], str]:
     return line
 
 
+def _blank_zero_row(day: str) -> Callable[[int], str]:
+    """A ``_Bills.raw`` line function: a SWAP subType-2 bill on ``day`` whose billId is the bare
+    counter and whose ccy is blank, with ``balChg``, ``bal``, ``pnl`` and ``fee`` all 0."""
+
+    def line(n: int) -> str:
+        return f"SWAP,{n},2,{_ms_at(day, 12)},0,0,0,0,,,,0,0,cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
+
+    return line
+
+
 class TestUnchainableRowDiagnostic:
     """D-16. Calibrate run 3 stopped ``archive_incomplete cause=unchainable_row`` and the stop
     dropped which bills and how many, so the founder read an empty reading."""
@@ -2592,6 +2602,64 @@ class TestUnchainableRowDiagnostic:
         )
 
         assert text.endswith(" rows_by_quarter=2026-Q2:0,2026-Q3:2")
+
+    @pytest.mark.asyncio
+    async def test_zero_effect_blank_ccy_rows_are_skipped_counted_and_change_no_money_reading(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16. The bills sit on days that already have bills, so ``longest_billless_run`` is
+        not under test here, and that reading still counts such a bill's day as billed. What
+        is: a zero-effect blank-ccy bill is left out of the chain only, counted in
+        ``blank_ccy_skipped`` and in the ``(blank)`` census, and moves no money reading."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_bills().bytes())
+        first = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert first.outcome == DispatchOutcome.DONE, first.error_message
+        before = copy.deepcopy(world.result())
+
+        bills = _standard_bills().raw(_blank_zero_row("2026-08-03")).raw(_blank_zero_row("2026-09-15"))
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+        second = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert second.outcome == DispatchOutcome.DONE, second.error_message
+        after = world.result()
+        assert after["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-07-10", "last_day": "2026-09-15"}},
+            "total_pairs": 10,
+            "blank_ccy_skipped": 2,
+            "floor": 2,
+        }
+        assert after["census"]["by_ccy"] == {"(blank)": 2, "USDT": 11}
+        for key in ("reconcile", "excluded", "d03", "strategies"):
+            assert after[key] == before[key], key
+        assert {k: v for k, v in after["info"].items() if k != "bal_chain"} == {
+            k: v for k, v in before["info"].items() if k != "bal_chain"
+        }
+        assert after["quarters"][0]["row_count"] == before["quarters"][0]["row_count"] + 2 == 13
+
+    @pytest.mark.asyncio
+    async def test_a_stop_counts_the_zero_effect_rows_apart_from_the_ones_that_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16. When the run stops anyway, the skipped bills are still reported, apart from the
+        one that stopped it, so the founder can add the two up against the ``(blank)`` count."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().raw(_blank_zero_row("2026-08-03")).raw(_nondigit_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
+            "rows_by_quarter=2026-Q3:1"
+        )
+        chain = world.result()["info"]["bal_chain"]
+        assert (chain["rows"], chain["blank_ccy"], chain["nondigit_bill_id"], chain["blank_ccy_skipped"]) == (
+            1, 0, 1, 1,
+        )
 
 
 class TestNonExternalPnlIsInTheLiveNumber:
