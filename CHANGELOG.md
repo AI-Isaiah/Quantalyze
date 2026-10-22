@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.132.10.12] - 2026-10-22 — ACCTREBUILD: a multi-key account's allocation history is rebuilt as one account over a window, or refused by name (Phase 167.2.1.1.2)
+## [0.133.0.0] - 2026-10-22 — ACCTREBUILD: a multi-key account's allocation history is rebuilt as one account over a window, or refused by name (Phase 167.2.1.1.2)
 
 ### Added
 - A forced rebuild of a Bybit-backed account with several keys rebuilds the whole account: every active key is read with its own venue reader, each exchange account is crawled and counted once whichever key names it, and the daily curve is the sum over the days every account shares (no zero fill). Deribit accounts count as $0. An unresolved account identity refuses before any venue call.
