@@ -72,9 +72,14 @@ CSV_HEADER = (
 # The archive file: built from per-day nets, so the oracle is the dict that built it
 # ---------------------------------------------------------------------------
 
-def _noon_ms(day: str) -> int:
+def _ms_at(day: str, hour: int) -> int:
+    """The epoch milliseconds of ``hour`` o'clock UTC on ``day``."""
     y, m, d = (int(p) for p in day.split("-"))
-    return int(datetime(y, m, d, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    return int(datetime(y, m, d, hour, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _noon_ms(day: str) -> int:
+    return _ms_at(day, 12)
 
 
 def _fmt(value: str | Decimal | float) -> str:
@@ -97,12 +102,13 @@ class _Bills:
 
     def _row(
         self, inst: str, sub: str, day: str, bal_chg: str, ccy: str, pnl: str, fee: str,
+        *, hour: int = 12,
     ) -> "_Bills":
         self._n += 1
         bal = self._bal.get(ccy, self._opening) + Decimal(bal_chg)
         self._bal[ccy] = bal
         self._lines.append(
-            f"{inst},{self._n},{sub},{_noon_ms(day)},{bal_chg},0,{_fmt(bal)},0,,,{ccy},{pnl},{fee},"
+            f"{inst},{self._n},{sub},{_ms_at(day, hour)},{bal_chg},0,{_fmt(bal)},0,,,{ccy},{pnl},{fee},"
             "cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
         )
         return self
@@ -118,10 +124,12 @@ class _Bills:
         """The balance after this file's last bill: the next quarter's opening."""
         return self._bal.get(ccy, self._opening)
 
-    def realized(self, day: str, net: str | float, *, inst: str = "SWAP", ccy: str = "USDT") -> "_Bills":
+    def realized(
+        self, day: str, net: str | float, *, inst: str = "SWAP", ccy: str = "USDT", hour: int = 12,
+    ) -> "_Bills":
         fee = Decimal("-0.25")
         pnl = Decimal(str(net)) - fee
-        return self._row(inst, "2", day, _fmt(net), ccy, _fmt(pnl), _fmt(fee))
+        return self._row(inst, "2", day, _fmt(net), ccy, _fmt(pnl), _fmt(fee), hour=hour)
 
     def funding(self, day: str, amount: str | float) -> "_Bills":
         sub = "174" if Decimal(str(amount)) >= 0 else "173"
@@ -2310,6 +2318,81 @@ class TestArchiveCompleteness:
         # is 07-01..09-30, so the longest quiet stretch is 08-09..09-14 = 23 + 14 = 37 days
         # (07-01..07-09 is 9, 07-21..07-31 is 11, 09-16..09-30 is 15).
         assert quarter["longest_billless_run"] == {"days": 37, "from": "2026-08-09", "to": "2026-09-14"}
+
+
+class TestQuarterEdgeDaysEndToEnd:
+    """D-15, end to end through ``dispatch()`` and the stateful RPC fake. OKX cuts a quarter
+    file at 00:00 UTC+8, i.e. 16:00 UTC the day before, so a quarter-edge UTC day (06-30) is
+    split between two files, and the last day of the newest quarter (09-30) is reached only
+    until 16:00 UTC. A day counts only when the files on both sides were read; the founder
+    approves a fingerprint on the days named here, so a partial day must be neither compared
+    nor written."""
+
+    GAP_EDGE = [{"from": "2026-06-25", "to": "2026-07-15", "recorded_at": "2026-10-10T00:00:00Z"}]
+
+    @staticmethod
+    def _files() -> tuple[bytes, bytes]:
+        """A Q2 file and a Q3 file cut at 00:00 UTC+8. Q2 opens at 03-31 20:00Z and holds the
+        first 10 hours of 06-30; Q3 holds the last 8 hours of 06-30 and the first 10 hours of 09-30."""
+        q2 = _Bills(first_id=700_000_000)
+        q2.realized("2026-03-31", "3", hour=20)
+        for day, net in (("2026-04-02", "10"), ("2026-05-10", "20"), ("2026-06-20", "5")):
+            q2.realized(day, net)
+        q2.realized("2026-06-30", "5", hour=10)
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000)
+        q3.realized("2026-06-30", "7", hour=20)
+        q3.realized("2026-09-30", "4", hour=10)
+        return q2.bytes(), q3.bytes()
+
+    @pytest.mark.asyncio
+    async def test_a_utc_plus_8_q2_q3_pair_writes_06_30_whole_and_never_compares_or_writes_a_missing_edge_day(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-15. OKX cuts at 00:00 UTC+8, so 06-30 is split between the two files and is whole
+        only with both; 09-30 reaches only until 16:00 UTC in Q3 and must never be compared
+        against the live day (D-10), which sees all 24 hours, or written. A run that compared
+        it would stop on a false reconcile_miss, and one that wrote a one-file day would
+        publish a partial return."""
+        q2, q3 = self._files()
+        db = _db_with((STRATEGY_ID, self.GAP_EDGE))
+        live = _standard_live()
+        live.realized["2026-09-30"] = 10.0
+        world = _install(monkeypatch, db, live, q2=q2, q3=q3)
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+        quarters = TestArchiveCompleteness.QUARTERS_Q2_Q3
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID], quarters=quarters))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result = world.result()
+        assert [(q["ts_min_day"], q["ts_max_day"]) for q in result["quarters"]] == [
+            ("2026-03-31", "2026-06-30"), ("2026-06-30", "2026-09-30"),
+        ]
+        assert result["census"]["edge_days"] == {
+            "whole": ["2026-06-30"], "missing": ["2026-03-31", "2026-09-30"],
+        }
+        reconcile = result["reconcile"]
+        assert reconcile["window"] == {"from": "2026-08-03", "to": "2026-09-29"}
+        for leg in ("realized", "funding"):
+            assert reconcile[leg]["ok"] is True
+        assert reconcile["realized"]["days_compared"] == 58
+        (strategy,) = result["strategies"]
+        assert strategy["insert_days"] == 21
+        assert strategy["insert_ranges"] == [{"from": "2026-06-25", "to": "2026-07-15"}]
+        assert strategy["gaps_after"] == []
+        _no_writes_but_progress(world, db)
+
+        fingerprint = result["fingerprint"]
+        _install(monkeypatch, db, live, q2=q2, q3=q3)
+        applied = await _run(
+            _meta("apply", [STRATEGY_ID], quarters=quarters, approved_fingerprint=fingerprint)
+        )
+
+        assert applied.outcome == DispatchOutcome.DONE, applied.error_message
+        (call,) = _apply_calls(db)
+        assert [r["date"] for r in call["p_rows"]] == _daterange("2026-06-25", "2026-07-15")
+        assert call["p_expected_gaps_after"] == []
+        assert "2026-06-30" in db.csv_days(STRATEGY_ID)
 
 
 class TestNonExternalPnlIsInTheLiveNumber:
