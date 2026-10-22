@@ -1303,20 +1303,72 @@ _ARCHIVE_INCOMPLETE_REASONS: Final[frozenset[str]] = frozenset(
 )
 
 
+#: The count and day keys of an ``unchainable_row`` detail, in the order they are echoed (D-16).
+_UNCHAINABLE_COUNT_KEYS: Final[tuple[str, ...]] = ("rows", "blank_ccy", "nondigit_bill_id")
+_UNCHAINABLE_DAY_KEYS: Final[tuple[str, ...]] = ("first_day", "last_day")
+
+
+def _count_token(value: object) -> str:
+    """``value`` as text when it is a non-negative int that is not a bool, else ``unreadable``."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return str(value)
+    return "unreadable"
+
+
+def _unchainable_tokens(detail: Mapping[str, Any], tags: list[str]) -> str:
+    """The ``key=value`` tokens an ``unchainable_row`` stop (D-16) adds after ``cause=``: the
+    count of bills the chain cannot place, the split by cause, the first and last UTC day of
+    those bills and the count per requested quarter (``tags`` come from the validated job input,
+    in the order of the files). Nothing from the file is echoed as text: a count must be a
+    non-negative int that is not a bool, a day must pass ``_iso_day``, and anything else (or a
+    missing key) reads ``unreadable`` and never raises. ``rows_by_quarter`` is ``unreadable`` as
+    a whole when ``files`` is not a list of mappings as long as ``tags``; a single entry's bad
+    count reads ``<tag>:unreadable``. This text is stored in ``last_error``, logged and shown in
+    the admin table."""
+    tokens = [f"{key}={_count_token(detail.get(key))}" for key in _UNCHAINABLE_COUNT_KEYS]
+    tokens += [f"{key}={_iso_day(detail.get(key)) or 'unreadable'}" for key in _UNCHAINABLE_DAY_KEYS]
+    files = detail.get("files")
+    if (
+        isinstance(files, list)
+        and len(files) == len(tags)
+        and all(isinstance(entry, Mapping) for entry in files)
+    ):
+        per_quarter = ",".join(
+            f"{tag}:{_count_token(entry.get('rows'))}" for tag, entry in zip(tags, files)
+        )
+    else:
+        per_quarter = "unreadable"
+    tokens.append(f"rows_by_quarter={per_quarter}")
+    return " ".join(tokens)
+
+
 def _bal_chain_info(detail: Mapping[str, Any]) -> dict[str, Any]:
     """The Result ``info.bal_chain`` of an ``archive_incomplete`` stop: the reason, per ccy the
     pairs checked, the first and last day the chain reaches and (on a break) the breaks, how
     many sit on a pair that crosses two files and the day of the first, the total, the starved
-    ccys and each file's ts range. Counts and dates only; a ccy label that is not a short
-    plain token is merged into ``(malformed)`` as everywhere else."""
+    ccys and each file's ts range. D-16: an ``unchainable_row`` detail adds the count of bills
+    the chain cannot place, the split by cause and their first and last UTC day, in total and
+    per file. Counts and dates only, computed by the job's own code; a ccy label that is not a
+    short plain token is merged into ``(malformed)`` as everywhere else."""
     out = _safe_bal_chain(detail)
     reason = detail.get("reason")
     out = {"reason": reason if reason in _ARCHIVE_INCOMPLETE_REASONS else _MALFORMED, **out}
+    for key in (*_UNCHAINABLE_COUNT_KEYS, *_UNCHAINABLE_DAY_KEYS):
+        if key in detail:
+            out[key] = detail[key]
     if "starved" in detail:
         out["starved"] = sorted(_malformed_or(ccy) for ccy in detail["starved"])
     if "files" in detail:
         out["files"] = [
-            {"ts_min_day": file["ts_min_day"], "ts_max_day": file["ts_max_day"]}
+            {
+                "ts_min_day": file["ts_min_day"],
+                "ts_max_day": file["ts_max_day"],
+                **{
+                    key: file[key]
+                    for key in (*_UNCHAINABLE_COUNT_KEYS, *_UNCHAINABLE_DAY_KEYS)
+                    if key in file
+                },
+            }
             for file in detail["files"]
         ]
     out["floor"] = MIN_CHAINED_PAIRS
@@ -1350,13 +1402,15 @@ _CENSUS_ON_STOP: Final[frozenset[str]] = frozenset({"non_usd_ccy", "unknown_subt
 
 
 async def _census_of(
-    files: list[ArchiveFile], live_types: Mapping[str, str]
+    files: list[ArchiveFile], live_types: Mapping[str, str], tags: list[str]
 ) -> tuple[dict[str, Any], ArchiveAggregate, dict[str, Any]]:
     """Classify every bill of the verified files and return the Result shape v1 ``census``
     (counts only, never an amount), the aggregate the evaluation reads and the ``bal_chain``
     reading of the one gated chain (``info.bal_chain`` of a passing run). ``edge_days`` names
     the quarter-edge UTC days (D-15) the files made whole and those that stayed missing: sorted
-    ISO dates computed from the requested quarters, never file text."""
+    ISO dates computed from the requested quarters, never file text. ``tags`` are the requested
+    quarters' tags in the order of ``files``; D-16: an ``unchainable_row`` stop appends its
+    counts and days to the stop text (``_unchainable_tokens``)."""
     try:
         aggregate = await asyncio.to_thread(aggregate_archive, files, live_types)
         # F1 / WR-01: only after the rows classify, prove the quarters are whole, per currency
@@ -1370,6 +1424,8 @@ async def _census_of(
         if exc.stop_class == "archive_incomplete":
             info = _bal_chain_info(exc.detail)
             stop.detail = f"{stop.detail} cause={info['reason']}"
+            if info["reason"] == "unchainable_row":
+                stop.detail = f"{stop.detail} {_unchainable_tokens(exc.detail, tags)}"
             stop.info = {"bal_chain": info}
         raise stop from None
     census = aggregate.census
@@ -1411,7 +1467,8 @@ async def _ingest_all(
     for entry, step in zip(quarters, steps):
         assert step.href is not None  # every quarter was ready, or the job deferred
         files.append(await _ingest_quarter(exchange, entry, step.href, budget))
-    result["census"], aggregate, bal_chain = await _census_of(files, live_types)
+    tags = [_quarter_tag(entry["year"], entry["quarter"]) for entry in quarters]
+    result["census"], aggregate, bal_chain = await _census_of(files, live_types, tags)
     return _Ingested(files=files, aggregate=aggregate, bal_chain=bal_chain)
 
 

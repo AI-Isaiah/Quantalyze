@@ -30,8 +30,9 @@ census extends the table. Do not encode a number from memory here.
 Stop classes raised here (all ``okx_archive_files.ArchiveParseError``):
 ``subtype_map_drift``, ``unknown_subtype_nonzero``, ``non_usd_ccy``,
 ``duplicate_bill_conflict``, and (``verify_bal_chain``) ``archive_incomplete`` with the reasons
-``bal_chain_break``, ``too_few_pairs`` and ``unchainable_row``. Details hold counts, months,
-dates and subtype labels only.
+``bal_chain_break``, ``too_few_pairs`` and ``unchainable_row`` (D-16: its detail splits the cause
+into ``blank_ccy`` and ``nondigit_bill_id`` and names the rows per file and their first and last
+UTC day). Details hold counts, months, dates and subtype labels only.
 """
 from __future__ import annotations
 
@@ -188,6 +189,12 @@ def verify_bal_chain(
       not floored, because no published figure rests on its completeness, but its breaks above
       still stop the job and it still appears in the reading. A break is reported before this.
 
+    ``unchainable_row`` (D-16) is raised before any chaining, for a bill the chain cannot place:
+    a blank ``ccy`` (``blank_ccy``) or a ``billId`` that is not all digits (``nondigit_bill_id``).
+    One bill can carry both causes; ``rows`` counts each stopping bill once. The detail carries
+    the totals, the first and last UTC day of those bills and, per file in the order passed,
+    the same counts and days beside the file's ts range. Counts and dates only.
+
     On success it returns the reading the job records in ``info.bal_chain``:
     ``{"ccys": {ccy: {pairs_checked, first_day, last_day}}, "total_pairs": n}``.
 
@@ -198,12 +205,46 @@ def verify_bal_chain(
     unprovable head or tail needs the founder's judgment. RESEARCH A7 (``bal`` chains exactly
     on a real file) was unmeasured when this became a gate: the first real calibrate is its
     measurement, and a false stop here is a fail-closed stop, never a published figure."""
-    unchainable = sum(
-        1 for file in files for row in file.rows if not row.ccy or not row.bill_id.isdigit()
-    )
+    # D-16: the bills the chain cannot place are counted per file, with the cause split and the
+    # first and last UTC day, so the stop names what stopped it. Counts and days only.
+    tally: list[dict[str, Any]] = []
+    for file in files:
+        stopping_days: list[str] = []
+        blank = nondigit = 0
+        for row in file.rows:
+            row_blank = not row.ccy
+            row_nondigit = not row.bill_id.isdigit()
+            if row_blank:
+                blank += 1
+            if row_nondigit:
+                nondigit += 1
+            if row_blank or row_nondigit:
+                stopping_days.append(row.day)
+        tally.append(
+            {
+                "ts_min_day": file.ts_min_day,
+                "ts_max_day": file.ts_max_day,
+                "rows": len(stopping_days),
+                "blank_ccy": blank,
+                "nondigit_bill_id": nondigit,
+                "first_day": min(stopping_days, default=None),
+                "last_day": max(stopping_days, default=None),
+            }
+        )
+    unchainable = sum(entry["rows"] for entry in tally)
     if unchainable:
+        days = [d for entry in tally for d in (entry["first_day"], entry["last_day"]) if d is not None]
         raise ArchiveParseError(
-            "archive_incomplete", {"reason": "unchainable_row", "rows": unchainable}
+            "archive_incomplete",
+            {
+                "reason": "unchainable_row",
+                "rows": unchainable,
+                "blank_ccy": sum(entry["blank_ccy"] for entry in tally),
+                "nondigit_bill_id": sum(entry["nondigit_bill_id"] for entry in tally),
+                "first_day": min(days),
+                "last_day": max(days),
+                "files": tally,
+            },
         )
     runs = _adjacent_runs(files)
     ccys: dict[str, dict[str, Any]] = {}
