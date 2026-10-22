@@ -1106,14 +1106,14 @@ async def test_a_rate_limited_own_key_is_stamped_once(
 
 
 @pytest.mark.asyncio
-async def test_an_mt5_account_that_fails_its_read_leaves_one_failure_audit(
+async def test_an_mt5_account_that_fails_its_read_leaves_one_failure_audit_on_the_job_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``_mt5_fetch_window`` settles its own failures: it writes a ``reconstruct_failed``
-    audit and returns the result. The account path must hand that result on unchanged and
-    write no second, contradicting audit (it used to refuse ``account_key_read_failed``,
-    permanent, over a transient history-unsettled). One job, one failure audit, and the
-    job's disposition is the MT5 arm's own (transient here, so the queue retries it)."""
+    """On the account path ``_mt5_fetch_window`` writes NO audit of its own (the handoff reads
+    the JOB's key, and the member's key would carry the only terminal event). The job writes
+    exactly one failure audit, on its own key, with the MT5 arm's kind and text: a transient
+    history-unsettled stays transient (the queue retries it) and is never made a permanent
+    refusal."""
     fake = _MarkerFake()
     _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
     _seed_account_key(fake, API_KEY_ID_2, "mt5", venue_account_id="fixture-mt5-2")
@@ -1123,14 +1123,12 @@ async def test_an_mt5_account_that_fails_its_read_leaves_one_failure_audit(
     mt5_exchange = _crawl_exchange()
     mt5_exchange.id = "mt5"
     message = er._MT5_BACKFILL_MESSAGES["history_unsettled"]
+    seen: list[dict[str, Any]] = []
 
     async def _unsettled(exchange: Any, **kwargs: Any) -> DispatchResult:
-        # What the real arm's ``_fail("history_unsettled", "transient")`` does.
-        er._emit_audit(
-            kwargs["allocator_id"], kwargs["api_key_id"],
-            "allocator.equity.reconstruct_failed",
-            {"error_kind": "transient", "sanitized_message": message, "venue": "mt5"},
-        )
+        # What the real arm's ``_fail("history_unsettled", "transient")`` returns; it emits
+        # its audit only when the caller leaves ``emit_audit`` on.
+        seen.append(kwargs)
         return DispatchResult(
             outcome=DispatchOutcome.FAILED, error_message=message, error_kind="transient"
         )
@@ -1141,10 +1139,47 @@ async def test_an_mt5_account_that_fails_its_read_leaves_one_failure_audit(
         monkeypatch, fake, exchange_1, mt5_exchange
     )
 
+    assert [k.get("emit_audit") for k in seen] == [False], seen
     _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
     assert result.error_message == message, result.error_message
-    (failed,) = _audit_metadata(audit, FAILED_ACTION)
-    assert failed["sanitized_message"] == message, failed
+    failed_calls = [c for c in audit.call_args_list if c.kwargs.get("action") == FAILED_ACTION]
+    assert [c.kwargs["entity_id"] for c in failed_calls] == [API_KEY_ID_1], failed_calls
+    assert failed_calls[0].kwargs["metadata"]["sanitized_message"] == message
+
+
+@pytest.mark.asyncio
+async def test_two_failing_mt5_accounts_leave_one_failure_audit_on_the_job_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two MT5 exchange accounts that BOTH fail (the REAL ``_mt5_fetch_window``, its
+    kill-switch arm) used to leave a failure audit per account, on each member's own key. The
+    account path now leaves exactly one, on the job's key, and a permanent MT5 failure keeps
+    the ``forced rebuild refused (`` prefix the post-deploy handoff classifies by."""
+    fake = _MarkerFake()
+    _seed_account_key(fake, API_KEY_ID_1, "mt5", venue_account_id="fixture-mt5-1")
+    _seed_account_key(fake, API_KEY_ID_2, "mt5", venue_account_id="fixture-mt5-2")
+    _seed_sentinel_rows(fake)
+    _seed_older_row(fake)
+    mt5_1 = _crawl_exchange()
+    mt5_1.id = "mt5"
+    mt5_2 = _crawl_exchange()
+    mt5_2.id = "mt5"
+    monkeypatch.setattr(er, "mt5_enabled_server", lambda: False)
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, mt5_1, mt5_2
+    )
+
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "permanent", result
+    assert (result.error_message or "").startswith(
+        f"{REFUSAL_PREFIX}account_key_read_failed)"
+    ), result.error_message
+    assert _book_state(fake) == before, "a failed MT5 account rebuild changed the stored state"
+    failed_calls = [c for c in audit.call_args_list if c.kwargs.get("action") == FAILED_ACTION]
+    assert [c.kwargs["entity_id"] for c in failed_calls] == [API_KEY_ID_1], failed_calls
+    assert failed_calls[0].kwargs["metadata"]["error_kind"] == "permanent"
+    assert failed_calls[0].kwargs["metadata"]["sanitized_message"].startswith(REFUSAL_PREFIX)
 
 
 @pytest.mark.asyncio

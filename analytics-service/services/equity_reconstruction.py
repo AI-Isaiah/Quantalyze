@@ -3957,6 +3957,7 @@ async def _mt5_fetch_window(
     api_key_id: str,
     start_date: date,
     end_date: date,
+    emit_audit: bool = True,
 ) -> DispatchResult | tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     """The MT5 half of the backfill fetch: read the deal ledger, reconstruct the
     per-day dollar levels, and return the ccxt path's own
@@ -4012,18 +4013,21 @@ async def _mt5_fetch_window(
         detail: str | None = None,
     ) -> DispatchResult:
         """Emit the SAME ``reconstruct_failed`` audit event every other arm of this
-        job emits, then return the fixed, classifier-safe verdict."""
-        _emit_audit(
-            allocator_id, api_key_id,
-            "allocator.equity.reconstruct_failed",
-            {
-                "error_kind": kind,
-                # The broker-supplied detail lives HERE, scrubbed — not in
-                # `error_message`. See `_MT5_BACKFILL_MESSAGES`.
-                "sanitized_message": (detail or _MT5_BACKFILL_MESSAGES[key])[:500],
-                "venue": "mt5",
-            },
-        )
+        job emits (unless the whole-account path passed ``emit_audit=False`` and writes
+        the one terminal audit on the job's own key), then return the fixed,
+        classifier-safe verdict."""
+        if emit_audit:
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {
+                    "error_kind": kind,
+                    # The broker-supplied detail lives HERE, scrubbed — not in
+                    # `error_message`. See `_MT5_BACKFILL_MESSAGES`.
+                    "sanitized_message": (detail or _MT5_BACKFILL_MESSAGES[key])[:500],
+                    "venue": "mt5",
+                },
+            )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=_MT5_BACKFILL_MESSAGES[key],
@@ -4496,9 +4500,9 @@ async def _crawl_account_key(
     """Crawl ONE exchange account through its chosen key: anchored rows and telemetry.
 
     The venue is the key row's own. MT5 reads its deal ledger (``_mt5_fetch_window``, no
-    anchor step); a failure there is returned as the ``DispatchResult`` it already settled,
-    with its own ``reconstruct_failed`` audit written, so the caller hands it on unchanged
-    and the job leaves that one audit. Every other venue calls ``_fetch_and_price_window``
+    anchor step); a failure there is returned as the ``DispatchResult`` it settled, with no
+    audit of its own (``emit_audit=False``): the handler writes the job's one terminal audit
+    on the job's own key. Every other venue calls ``_fetch_and_price_window``
     through the module global with ``require_anchor=True`` (five positional arguments), which
     raises ``ForcedRebuildRefusedError`` instead of returning an un-anchored curve. A rate
     limit is stamped on the key (so the circuit breaker parks it) and re-raised unchanged;
@@ -4514,6 +4518,7 @@ async def _crawl_account_key(
                 api_key_id=str(key_row["id"]),
                 start_date=start_date,
                 end_date=end_date,
+                emit_audit=False,
             )
             if isinstance(outcome, DispatchResult):
                 return outcome
@@ -4547,8 +4552,8 @@ async def _crawl_whole_account(
     ``account_key_read_failed``. The crawls then run concurrently over the one window_start
     (a stored row is a sum across exchange accounts, so every account must cover the same
     span). In key order the first refusal is re-raised as it is. An MT5 account's failure
-    comes back as the ``DispatchResult`` it already settled and audited, and is returned
-    unchanged. A failure ``classify_exception`` does not call permanent
+    comes back as the ``DispatchResult`` it settled, unaudited, and is returned unchanged
+    (the handler audits it on the job's key). A failure ``classify_exception`` does not call permanent
     (transient or unknown: a rate limit, a network error, a timeout, an exchange fault)
     becomes ``_AccountCrawlRetryableError`` after one class-only WARNING, so the job is
     retried and the sibling's text goes nowhere. Any other failure becomes
@@ -4763,10 +4768,25 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                     timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
                 )
                 if isinstance(_account_outcome, DispatchResult):
-                    # A sibling key's circuit-breaker cooldown deferred this job, or an
-                    # MT5 account's window fetch failed and already wrote its own
-                    # ``reconstruct_failed`` audit; either way the result is already
-                    # settled and nothing was persisted.
+                    # A sibling key's circuit-breaker cooldown deferred this job (no audit),
+                    # or an MT5 account's window fetch failed without writing an audit of
+                    # its own. Nothing was persisted. The job writes the ONE terminal audit,
+                    # on its own key: a permanent MT5 failure keeps the refusal prefix the
+                    # handoff reads, a transient one keeps the MT5 arm's own kind and text.
+                    if _account_outcome.outcome == DispatchOutcome.FAILED:
+                        if _account_outcome.error_kind == "permanent":
+                            return _forced_refusal_result(
+                                allocator_id, api_key_id, venue, "account_key_read_failed"
+                            )
+                        _emit_audit(
+                            allocator_id, api_key_id,
+                            "allocator.equity.reconstruct_failed",
+                            {
+                                "error_kind": _account_outcome.error_kind,
+                                "sanitized_message": (_account_outcome.error_message or "")[:500],
+                                "venue": "mt5",
+                            },
+                        )
                     return _account_outcome
                 account = _account_outcome
                 rows, hit_terminus, telemetry = account.rows, False, account.telemetry
