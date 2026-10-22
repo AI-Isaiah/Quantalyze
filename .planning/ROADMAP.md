@@ -5501,7 +5501,7 @@ Plans:
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-04, "Rebuild whole account (Recommended)"):** all 6 active Bybit keys sit on multi-key accounts, so a forced rebuild of a multi-key account rebuilds all its keys together and replaces that account's history atomically, or refuses and writes nothing.
 
-**Plans:** 6/6 plans executed
+**Plans:** 6/11 plans executed
 
 Plans:
 **Wave 1**
@@ -5521,6 +5521,26 @@ Plans:
 **Wave 4** *(blocked on Wave 3 completion)*
 
 - [x] 167.2.1.1-06-PLAN.md — Bookings, merged-tree gates, and the orchestrator-owned post-deploy handoff for the D-01 live read and the D-02 recompute (SC-1, SC-3) [Wave 4]
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 167.2.1.1-07-PLAN.md — D-04 helpers: one crawl key per exchange account, shared-days sum (no zero fill), telemetry merge, closed 16-token refusal set; Deribit counts as zero (SC-2, SC-3) [Wave 5]
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 167.2.1.1-08-PLAN.md — D-04 tracer: a forced rebuild of a multi-key account rebuilds every exchange account and replaces history in one atomic call, or refuses and writes nothing; plan 04's first-writer-wins pin retired (SC-2, SC-3) [Wave 6]
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 167.2.1.1-09-PLAN.md — Both forced paths refuse a replace that would delete stored days the rebuild does not reproduce; the sole-key forced path no longer falls through to first-writer-wins (SC-2, SC-3) [Wave 7]
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [ ] 167.2.1.1-10-PLAN.md — Mixed-venue (MT5 + Bybit) account rebuild, history depth, every active key's marker, duplicate-key and identity refusals (SC-2, SC-3) [Wave 8]
+
+**Wave 9** *(blocked on Wave 8 completion)*
+
+- [ ] 167.2.1.1-11-PLAN.md — TODOS (MULTIKEY-RECOMPUTE superseded by D-04, ACCOUNT-REBUILD-BLOCKERS booked), merged-tree gates, and the D-04 post-deploy handoff superseding plan 06 Part B (SC-3) [Wave 9]
 
 ### Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history (INSERTED)
 
