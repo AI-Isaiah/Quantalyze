@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.132.10.5] - 2026-10-22 — OKXHISTORY: the quarter-range stop names the dates it saw (Phase 167.1.2.2.2.1, plan 17, D-14)
+
+### Fixed
+- The OKX archive job's `quarter_range_mismatch` stop now writes the requested range (`range_start`, `range_end_exclusive`), the file's observed first and last UTC day and `rows_outside` into `last_error`, as dates and counts only. Before, `_parse_stop` kept only `parse=<label>` and dropped the parser's detail, so the first PROD calibrate (2026-10-22) stopped on 2026-Q2 without saying which dates fell outside. A day that is not a real calendar day and a count that is not a plain non-negative integer print `unreadable`; `empty_file` and every other stop keep their old text.
+- A `ts` too large for a date (for example a microsecond-unit file) no longer crashes the parser with an unnamed `OverflowError` before the stop is built: it stays a named, permanent `quarter_range_mismatch` stop with the observed days `unreadable`.
+
+### Changed
+- Runbook `okxhistory-go-live.md`, form `job-result`: selects `last_error` only when it is the job's own stop text (`okx_archive_rebuild: ...`) and flags any other text as `last_error_uncontracted`, which falls under the same never-paste rule as `member_progress`.
+
+### Tests
+- RED-first job and parser tests for the new tokens, value-safety tests for unreadable dates and counts, and a 16-digit `ts` at parser and job level.
+
+### Notes
+- Founder decision D-14 (2026-10-22, "Ship diagnostic, re-run"): after this deploys, calibrate is re-run once to read the real dates; the fix for the mismatch itself (a UTC+8 quarter cut or a shifted quarter label) is decided on those dates.
+
 ## [0.132.10.4] - 2026-10-22 — roadmap: book UPNLVENUES 167.2.1.1, NAVMTM 167.2.1.1.1 and MARKSOURCE 167.2.1.1.1.1
 
 ### Notes

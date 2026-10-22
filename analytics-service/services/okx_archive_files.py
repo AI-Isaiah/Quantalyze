@@ -256,14 +256,19 @@ def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
     ts_values = [r[3] for r in raw_rows]
     ts_min, ts_max = min(ts_values), max(ts_values)
     if ts_min < start_ms or ts_max >= end_ms:
+        try:
+            observed_min_day: str | None = _ms_to_day(ts_min)
+            observed_max_day: str | None = _ms_to_day(ts_max)
+        except OverflowError:  # a ts past the year 9999 (a microsecond-unit file) has no day
+            observed_min_day = observed_max_day = None
         raise ArchiveParseError(
             "quarter_range_mismatch",
             {
                 "requested": label,
                 "range_start": start.isoformat(),
                 "range_end_exclusive": end_excl.isoformat(),
-                "observed_min_day": _ms_to_day(ts_min),
-                "observed_max_day": _ms_to_day(ts_max),
+                "observed_min_day": observed_min_day,
+                "observed_max_day": observed_max_day,
                 "rows_outside": sum(1 for t in ts_values if t < start_ms or t >= end_ms),
             },
         )
