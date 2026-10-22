@@ -3275,8 +3275,9 @@ async def _fetch_current_equity(
                 # uPnL already included in fetch_balance['total'] on
                 # unified-margin venues — adding it again double-counts.
                 continue
+            upnl: Any = p.get("unrealizedPnl")
             try:
-                total += float(p.get("unrealizedPnl"))
+                total += float(upnl)
             except (TypeError, ValueError):
                 # Unforced: a position without a numeric uPnL is skipped. Forced
                 # (review WR-02): an OPEN one refuses; a flat one carries none.
