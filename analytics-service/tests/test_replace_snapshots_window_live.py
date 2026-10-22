@@ -8,7 +8,7 @@ this proves, and the offline module cannot:
      column it had (``reconstructed_at`` included) while the days inside the window take
      the payload's values.
   2. D-03: the seam is recorded. One ``allocator_equity_derived`` row of kind
-     ``snapshot_rebuild_boundary`` carries ``{"boundary_date": <window start>}`` when an
+     ``snapshot_rebuild_boundary`` carries ``{"boundary_date": <first rebuilt day>}`` when an
      older day is kept, and is gone when none is kept. This is also the proof that the
      definer write to the FORCE-RLS ``allocator_equity_derived`` table succeeds on the
      service-role call path (RESEARCH assumptions A1 and A2).
@@ -240,7 +240,7 @@ async def test_window_replace_keeps_older_days_and_records_the_boundary() -> Non
         # The window took the payload, and the per-row depth rule of the full replace.
         assert [r["value_usd"] for r in after[1:]] == [11.0, 12.0, 13.0]
         assert [r["history_depth_months"] for r in after[1:]] == [3, 3, 3]
-        # D-03: one boundary row, the window start, nothing invented.
+        # D-03: one boundary row, the first rebuilt day (here also the window start), nothing invented.
         derived = _derived(admin, user_id)
         assert [(d["kind"], d["payload"]) for d in derived] == [
             (BOUNDARY_KIND, {"boundary_date": "2026-03-01"})
