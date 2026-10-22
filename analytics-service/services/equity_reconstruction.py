@@ -4554,11 +4554,14 @@ async def _crawl_whole_account(
             if isinstance(outcome, ForcedRebuildRefusedError):
                 raise outcome
             if isinstance(outcome, BaseException):
+                # The exception CLASS only: the venue's text is never logged here, so
+                # nothing it carries (a scrub-resistant fragment included) reaches the log
+                # on the way to a refusal that names only the token (T-167.2.1.1.2-24).
                 logger.warning(
                     "reconstruct_allocator_history account crawl failed "
-                    "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
+                    "allocator=%s key=%s venue=%s exc_class=%s",
                     allocator_id, key.get("id"), _key_venue(key),
-                    type(outcome).__name__, scrub_freeform_string(str(outcome)),
+                    type(outcome).__name__,
                 )
                 raise ForcedRebuildRefusedError("account_key_read_failed") from None
             per_account_rows.append(outcome[0])

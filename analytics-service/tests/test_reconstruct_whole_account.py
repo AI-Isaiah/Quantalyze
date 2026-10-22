@@ -23,6 +23,10 @@ pin the rules that decide that, none of which touches a venue or a database:
 5. How the per-account telemetry merges (``_merge_account_telemetry``), because the
    handler's audit reads every key of one telemetry dict.
 
+Plan 07 adds the other half of D-04, "or refuses and writes nothing": the refusal pins at the
+end of this module (every way a sibling exchange account or the account's key set can fail,
+and a Deribit account counted as $0). They are also the tokens plan 09's handoff records.
+
 Expected values are typed literals. Every new name is reached through ``er.`` inside the
 test body so a missing implementation fails the test instead of the collection.
 """
@@ -34,11 +38,12 @@ from datetime import date, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import ccxt
 import pytest
 
 from services import equity_reconstruction as er
 from services.equity_reconstruction import run_reconstruct_allocator_history_job
-from services.job_worker import DispatchOutcome
+from services.job_worker import DispatchOutcome, DispatchResult
 from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
@@ -47,7 +52,9 @@ from tests.test_equity_reconstruction import (
 )
 from tests.test_reconstruct_force_rebuild import (
     COMPLETE,
+    LEAKED_SIGNATURE,
     MARKER,
+    REFUSAL_PREFIX,
     SENTINEL_ROWS,
     SENTINEL_VALUE,
     _audit_metadata,
@@ -59,7 +66,9 @@ from tests.test_reconstruct_force_rebuild import (
     _venue_coin_equity,
 )
 from tests.test_reconstruct_marker_writer import (
+    COMPLETION_ACTIONS,
     END_DATE,
+    FAILED_ACTION,
     _crawl_exchange,
     _freeze_now,
     _marker_of,
@@ -714,3 +723,296 @@ async def test_an_okx_holding_account_is_rebuilt_over_90_days_and_keeps_older_da
     assert complete["account_exchange_accounts"] == 2
     assert complete["okx_terminus_hit"] is False
     assert complete["account_rebuild"] is True
+
+
+# ------------------------------------------------------------------ refusals: the account
+#
+# UPNLVENUES D-04, the "or refuses and writes nothing" half. Every pin below runs a FORCED
+# job on key 1 of a two-account book and asserts through ONE helper that the job ended
+# FAILED/permanent naming the reason, and that nothing it could have written changed.
+
+_VENUE_METHODS = (
+    "fetch_my_trades",
+    "fetch_positions",
+    "fetch_balance",
+    "fetch_ohlcv",
+    "fetch_deposits",
+    "fetch_withdrawals",
+)
+_ACCOUNT_TABLES = ("allocator_equity_snapshots", "allocator_equity_derived", "api_keys")
+
+
+def _book_state(fake: Any) -> dict[str, list[dict[str, Any]]]:
+    """A deep copy of every row a refused rebuild must leave exactly as it found it."""
+    return {table: copy.deepcopy(fake.rows_for(table)) for table in _ACCOUNT_TABLES}
+
+
+def _seed_older_row(fake: Any) -> None:
+    """One stored day older than any rebuild window: a refusal must keep it too."""
+    older_asof = (END_DATE - timedelta(days=800)).date().isoformat()
+    fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, older_asof))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "asof": older_asof,
+        "value_usd": 777.0,
+        "breakdown": {"BTC": 777.0},
+        "source": "exchange_primary",
+        "history_depth_months": 24,
+        "reconstructed_at": "2025-01-01T00:00:00+00:00",
+    }
+
+
+def _seed_two_account_book(fake: Any, second_exchange: str = "bybit") -> None:
+    """Two exchange accounts ("fixture-acct-1" job key, "fixture-acct-2" sibling), the ten
+    sentinel rows and one older row."""
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
+    _seed_account_key(fake, API_KEY_ID_2, second_exchange, venue_account_id="fixture-acct-2")
+    _seed_sentinel_rows(fake)
+    _seed_older_row(fake)
+
+
+async def _sibling_bybit_exchange() -> AsyncMock:
+    """The sibling account's Bybit exchange (USDT coin equity 540)."""
+    return await _bybit_account_exchange(
+        bybit_wallet_balance("UNIFIED", [bybit_coin("USDT", "500", "40")]),
+        [{**BYBIT_LINEAR_POSITIONS[0], "unrealizedPnl": 40.0}],
+    )
+
+
+def _install_close_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Record every exchange ``aclose_exchange`` is handed, in order."""
+    closed: list[Any] = []
+
+    async def _aclose(exchange: Any) -> None:
+        closed.append(exchange)
+
+    monkeypatch.setattr(er, "aclose_exchange", _aclose)
+    return closed
+
+
+def _assert_no_venue_call(exchange: Any, label: str) -> None:
+    for method in _VENUE_METHODS:
+        assert getattr(exchange, method).await_count == 0, f"{label} saw {method} awaited"
+
+
+def _assert_account_rebuild_refused(
+    fake: Any,
+    result: DispatchResult,
+    audit: Any,
+    reason: str,
+    *,
+    before: dict[str, list[dict[str, Any]]],
+    exchanges_crawled: tuple[Any, ...],
+    exchanges_untouched: tuple[Any, ...],
+    caplog: pytest.LogCaptureFixture | None = None,
+) -> None:
+    """The shared assertion of every account refusal (UPNLVENUES D-04).
+
+    FAILED/permanent naming ``reason``; every snapshot row, derived row (the seam record
+    included) and api_keys row (the marker included) equal ``before``; no window call and no
+    replace call; exactly one reconstruct_failed audit with the same prefix and no completion
+    audit; the planted venue signature absent from the error and the audit, and, when
+    ``caplog`` is given, from every captured log record. ``caplog`` is passed only by the
+    failed-crawl pin: the shipped positions-read WARNING logs the scrubbed venue text and
+    ``scrub_freeform_string`` leaves a bare hex word in place, so a log check there would pin
+    behaviour this phase does not change.
+    """
+    prefix = f"{REFUSAL_PREFIX}{reason})"
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "permanent", result
+    assert (result.error_message or "").startswith(prefix), result.error_message
+    assert LEAKED_SIGNATURE not in (result.error_message or ""), result.error_message
+
+    after = _book_state(fake)
+    for table in _ACCOUNT_TABLES:
+        assert after[table] == before[table], f"a refused account rebuild changed {table}"
+    assert fake.api_key_updates() == [], fake.api_key_updates()
+    written = [
+        n
+        for (n, _p) in fake.rpc_calls
+        if n in ("replace_allocator_equity_snapshots_window", "replace_allocator_equity_snapshots")
+    ]
+    assert written == [], written
+
+    actions = [c.kwargs["action"] for c in audit.call_args_list]
+    assert not (set(actions) & COMPLETION_ACTIONS), actions
+    (failed,) = _audit_metadata(audit, FAILED_ACTION)
+    assert failed["error_kind"] == "permanent", failed
+    assert failed["sanitized_message"].startswith(prefix), failed
+    assert LEAKED_SIGNATURE not in failed["sanitized_message"], failed
+
+    if caplog is not None:
+        leaked = [r.getMessage() for r in caplog.records if LEAKED_SIGNATURE in r.getMessage()]
+        assert leaked == [], f"the venue text reached the log: {leaked}"
+    for index, exchange in enumerate(exchanges_crawled):
+        assert exchange.fetch_my_trades.await_count > 0, f"crawled exchange {index} saw no trades read"
+    for index, exchange in enumerate(exchanges_untouched):
+        _assert_no_venue_call(exchange, f"untouched exchange {index}")
+
+
+async def _run_forced_two_account_job(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: Any,
+    exchange_1: Any,
+    exchange_2: Any,
+    results: dict[str, Any] | None = None,
+) -> tuple[DispatchResult, Any, dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Install the audit, the per-key preflight and the clock, snapshot the book, run a forced
+    job on key 1. Returns the result, the audit mock, the book before, the preflight job log."""
+    audit = _install_fake_audit(monkeypatch)
+    calls = _install_account_preflight(
+        monkeypatch, fake, {API_KEY_ID_1: exchange_1, API_KEY_ID_2: exchange_2}, results
+    )
+    _freeze_now(monkeypatch)
+    before = _book_state(fake)
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+    return result, audit, before, calls
+
+
+@pytest.mark.asyncio
+async def test_a_sibling_whose_positions_cannot_be_read_refuses_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling exchange account whose open positions cannot be read has an unknowable
+    open-position uPnL, so its anchor is wrong; summing it would replace the stored curve
+    with a total that is short by exactly that uPnL. The whole account refuses."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_positions = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "positions_unreadable",
+        before=before, exchanges_crawled=(exchange_1, exchange_2), exchanges_untouched=(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_sibling_crawl_refuses_the_account_without_its_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sibling crawl that fails for any reason other than a named refusal still ends the
+    whole account refused (account_key_read_failed), and its venue text reaches neither the
+    job error, the audit, nor the log: the gather converter is the one place that converts it,
+    and it records the exception CLASS only. The sibling's session is closed exactly once."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    # A BARE word, not ``signature=<hex>``: ``scrub_freeform_string`` redacts the keyed form,
+    # so only a bare word proves the converter keeps venue text out of the log by construction.
+    exchange_2.fetch_my_trades = AsyncMock(
+        side_effect=ccxt.ExchangeError(f"fixture failure {LEAKED_SIGNATURE}")
+    )
+    closed = _install_close_recorder(monkeypatch)
+
+    with caplog.at_level("DEBUG"):
+        result, audit, before, _calls = await _run_forced_two_account_job(
+            monkeypatch, fake, exchange_1, exchange_2
+        )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_key_read_failed",
+        before=before, exchanges_crawled=(exchange_2,), exchanges_untouched=(), caplog=caplog,
+    )
+    assert closed.count(exchange_2) == 1, "the sibling's session was not closed exactly once"
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_sibling_is_stamped_and_refuses_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling the venue rate-limits is parked behind the circuit breaker (its own key, and
+    only its own, is stamped) and the whole account refuses rather than skipping it."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_my_trades = AsyncMock(side_effect=ccxt.RateLimitExceeded("fixture: slow down"))
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_key_read_failed",
+        before=before, exchanges_crawled=(exchange_2,), exchanges_untouched=(),
+    )
+    stamped = [p for (n, p) in fake.rpc_calls if n == "stamp_api_key_429"]
+    assert stamped == [{"p_api_key_id": API_KEY_ID_2}], stamped
+
+
+@pytest.mark.asyncio
+async def test_a_sibling_session_that_cannot_be_built_refuses_before_any_venue_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sessions are built before any crawl starts, so a sibling that cannot sign in refuses
+    the account while no exchange, the job key's included, has been asked anything."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    unbuildable = DispatchResult(
+        outcome=DispatchOutcome.FAILED, error_message="fixture: no session", error_kind="permanent"
+    )
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2, results={API_KEY_ID_2: unbuildable}
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_key_read_failed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_empty_sibling_replay_refuses_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling whose replay yields no day would drop out of the sum as an account with no
+    history, so the others' total would be stored as if it were the whole book."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_my_trades = AsyncMock(return_value=[])
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_key_no_rows",
+        before=before, exchanges_crawled=(exchange_2,), exchanges_untouched=(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cooling_down_sibling_defers_the_whole_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling parked behind its circuit breaker defers THIS job unchanged (the same result
+    object, no failed audit): an account is never rebuilt with one exchange account skipped."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    deferred = DispatchResult(outcome=DispatchOutcome.DEFERRED)
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2, results={API_KEY_ID_2: deferred}
+    )
+
+    assert result is deferred, result
+    assert _audit_metadata(audit, FAILED_ACTION) == []
+    assert _book_state(fake) == before, "a deferred account rebuild changed the stored state"
+    assert fake.api_key_updates() == []
+    _assert_no_venue_call(exchange_1, "the job key's exchange")
+    _assert_no_venue_call(exchange_2, "the sibling's exchange")
