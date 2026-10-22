@@ -19,10 +19,16 @@ rule it guards:
    written with the old anchor. TODOS [167.2.1.1-MULTIKEY-RECOMPUTE] (booked by plan 06)
    owns that gap and the handoff records such allocators as "recorded, not recomputed".
 5. The spelling is a contract with the post-deploy enqueue (plan 06): one literal, pinned.
+6. Plan 05, PD-H: a forced rebuild replaces a stored curve in ONE write, so it must refuse
+   rather than re-bake a wallet-only anchor. When the curve cannot be anchored to today's
+   venue equity including the open uPnL, the job FAILS (error_kind "permanent") with a named
+   reason and writes nothing: the seeded rows, the marker and the completion audits are
+   untouched. The unforced path keeps PD-B (an advisory anchor, wallet figure on a failed
+   positions read) and its exact call shape.
 
-Every FORCED test runs on an exchange whose anchor applies (ccxt's real parsed Bybit
-balance and a readable BYBIT_LINEAR_POSITIONS), so a later rule that a forced rebuild
-writes only an anchored curve leaves them green. No test touches a venue, a database or an
+Every FORCED test of plan 04 runs on an exchange whose anchor applies (ccxt's real parsed
+Bybit balance and a readable BYBIT_LINEAR_POSITIONS), so plan 05's rule that a forced
+rebuild writes only an anchored curve leaves them green. No test touches a venue, a database or an
 enqueue; the exchange is a stub and the database is the in-memory fake.
 """
 
@@ -33,6 +39,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import ccxt
 import pytest
 
 from services import equity_reconstruction as er
@@ -46,7 +53,9 @@ from tests.test_equity_reconstruction import (
     _install_fake_preflight,
 )
 from tests.test_reconstruct_marker_writer import (
+    COMPLETION_ACTIONS,
     END_DATE,
+    FAILED_ACTION,
     _crawl_exchange,
     _freeze_now,
     _job,
@@ -57,6 +66,8 @@ from tests.test_reconstruct_marker_writer import (
 from tests.test_upnl_venues import (
     BYBIT_LINEAR_POSITIONS,
     BYBIT_UNIFIED_WALLET_BALANCE,
+    bybit_coin,
+    bybit_wallet_balance,
     real_bybit_parse_balance,
 )
 
@@ -319,3 +330,247 @@ def test_the_user_callable_reconstruct_enqueue_passes_no_metadata() -> None:
         "request_allocator_holdings_sync now passes p_metadata to an enqueue: an "
         "authenticated user could set force_rebuild and rewrite a stored curve"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 05 (PD-H): a forced rebuild writes an anchored curve or nothing
+# ---------------------------------------------------------------------------
+
+SENTINEL_VALUE = 12345.0
+SENTINEL_ROWS = 10
+REFUSAL_PREFIX = "forced rebuild refused ("
+# Planted in the exception the venue raises; it must never reach the job error or the audit.
+LEAKED_SIGNATURE = "deadbeef"
+
+
+def _seed_sentinel_rows(fake: Any) -> None:
+    """Ten snapshot rows for the allocator, all at the sentinel value: a refused forced
+    rebuild must leave every one of them exactly as seeded."""
+    for days_back in range(SENTINEL_ROWS):
+        asof = (END_DATE - timedelta(days=days_back)).date().isoformat()
+        fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": SENTINEL_VALUE,
+            "breakdown": {"ETH": SENTINEL_VALUE},
+            "source": "exchange_primary",
+            "history_depth_months": 24,
+            "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
+
+
+async def _assert_forced_rebuild_refused(
+    monkeypatch: pytest.MonkeyPatch, exchange: Any, reason: str
+) -> None:
+    """A marked SOLE Bybit key with ten sentinel rows, a forced job, ``exchange``: the job
+    ends FAILED/permanent naming ``reason``, and NOTHING changed: every sentinel row, the
+    marker, no completion audit. Static text only: the planted signature is absent."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    _seed_sentinel_rows(fake)
+    audit = _install_fake_audit(monkeypatch)
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert exchange.fetch_my_trades.await_count > 0, "the forced job did not crawl"
+    prefix = f"{REFUSAL_PREFIX}{reason})"
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "permanent", result
+    assert (result.error_message or "").startswith(prefix), result.error_message
+    assert LEAKED_SIGNATURE not in (result.error_message or ""), result.error_message
+
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert len(rows) == SENTINEL_ROWS and all(
+        r.get("value_usd") == SENTINEL_VALUE for r in rows
+    ), (
+        "a refused forced rebuild changed the stored curve: "
+        f"{[(r['asof'], r['value_usd']) for r in rows]}"
+    )
+    assert _marker_of(fake, API_KEY_ID_1) == MARKER, "a refused forced rebuild moved the marker"
+    assert fake.api_key_updates() == [], fake.api_key_updates()
+
+    actions = [c.kwargs["action"] for c in audit.call_args_list]
+    assert not (set(actions) & COMPLETION_ACTIONS), actions
+    (started,) = _audit_metadata(audit, STARTED)
+    assert started.get("forced_rebuild") is True, started
+    (failed,) = _audit_metadata(audit, FAILED_ACTION)
+    assert failed["error_kind"] == "permanent", failed
+    assert failed["sanitized_message"].startswith(prefix), failed
+    assert LEAKED_SIGNATURE not in failed["sanitized_message"], failed
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_and_writes_nothing_when_the_positions_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tracer for PD-H. Bybit's ``total`` is the wallet balance WITHOUT the open uPnL;
+    the anchor adds the uPnL from ``fetch_positions``. When that read fails, an unforced
+    reconstruct may still anchor at the wallet figure (PD-B), but a forced one would
+    replace the stored curve in one write with exactly the wallet-only anchor this phase
+    removes. It must refuse instead. RED on a handler that finishes the forced job DONE
+    with the wallet-only anchor and replaces the rows."""
+    exchange = await _bybit_exchange()
+    exchange.fetch_positions = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, "positions_unreadable")
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_when_the_balance_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The balance read is the anchor itself. With it failing, ``_fetch_current_equity``
+    answers ``None`` and the curve would ship un-anchored (and, until now, invisibly: no
+    telemetry flag is set for an anchor that could not be read). A forced rebuild must
+    refuse that too. The positions are readable, so this is NOT ``positions_unreadable``."""
+    exchange = await _bybit_exchange()
+    exchange.fetch_balance = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, "anchor_unreadable")
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_when_the_anchor_would_be_skipped_for_a_partial_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing anchor skip: a held non-stable coin whose ticker call fails makes the
+    equity figure an undercount, so the crawl ships the replay un-anchored. Unforced that is
+    the documented fallback; forced it would replace the stored curve with an un-anchored
+    one. The payload is two coins through ccxt's REAL Bybit parser (USDT walletBalance 1000,
+    BTC walletBalance 0.1); the BTC ticker raises; the positions are readable."""
+    payload = bybit_wallet_balance(
+        "UNIFIED",
+        [bybit_coin("USDT", "1000", "0"), bybit_coin("BTC", "0.1", "0")],
+    )
+    exchange = await _bybit_exchange()
+    exchange.fetch_balance = AsyncMock(return_value=await real_bybit_parse_balance(payload))
+    exchange.fetch_ticker = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, "anchor_skipped_partial_ticker")
+
+
+def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
+    """The plan 06 post-deploy handoff matches the ``forced rebuild refused (`` prefix and
+    these six tokens to decide re-enqueue-once versus record-only (PD-I). A seventh reason,
+    or a renamed one, that the handoff does not know would be recorded as an unknown
+    failure; the set is therefore pinned, and so is the message each token produces."""
+    expected = frozenset(
+        {
+            "positions_unreadable",
+            "anchor_unreadable",
+            "anchor_skipped_okx_terminus",
+            "anchor_skipped_partial_ticker",
+            "anchor_skipped_unreliable_replay",
+            "anchor_skipped_implausible",
+        }
+    )
+    assert er.FORCED_REBUILD_REFUSAL_REASONS == expected, (
+        "FORCED_REBUILD_REFUSAL_REASONS changed: the plan 06 handoff matches the "
+        "'forced rebuild refused (' prefix and these tokens; change both together"
+    )
+    for reason in sorted(expected):
+        exc = er.ForcedRebuildRefusedError(reason)
+        assert exc.reason == reason
+        assert str(exc) == f"{REFUSAL_PREFIX}{reason})"
+
+
+@pytest.mark.asyncio
+async def test_unforced_reconstruct_with_a_failed_positions_read_still_anchors_at_the_wallet_figure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PD-B is unchanged at handler level. An UNFORCED reconstruct of an unmarked sole
+    Bybit key whose positions read raises still ends DONE, anchored at the wallet figure
+    (the payload's own walletBalance, 1000), with only a WARNING. The refusal is a forced-
+    path rule: an unanchored zero-cash replay is worse than a one-day uPnL shift for a
+    FIRST reconstruct, and TODOS [167.2.1.1-ANCHOR-POSITIONS-READ-FAILURE] records both
+    halves of that decision."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=None, exchange="bybit")
+    audit = _install_fake_audit(monkeypatch)
+    exchange = await _bybit_exchange()
+    exchange.fetch_positions = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        "an unforced reconstruct was refused on a failed positions read: PD-B "
+        "(TODOS [167.2.1.1-ANCHOR-POSITIONS-READ-FAILURE]) keeps the wallet-figure anchor "
+        f"for every unforced job: {result}"
+    )
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert rows, "the unforced reconstruct persisted no rows"
+    last = max(rows, key=lambda r: r["asof"])
+    account = BYBIT_UNIFIED_WALLET_BALANCE["result"]["list"][0]
+    (usdt,) = [c for c in account["coin"] if c["coin"] == "USDT"]
+    assert last["value_usd"] == pytest.approx(float(usdt["walletBalance"]), abs=0.01), last
+    assert FAILED_ACTION not in [c.kwargs["action"] for c in audit.call_args_list]
+    assert _marker_of(fake, API_KEY_ID_1) is not None
+
+
+@pytest.mark.asyncio
+async def test_unforced_reconstruct_calls_the_crawl_and_the_anchor_with_their_existing_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PD-J. The new keywords are passed ONLY on the forced branch. Fixed-signature fakes
+    (``fake_anchor(exchange, venue)``, ``fake_fetch_and_price(...)``) and AsyncMock patches
+    in other suites would raise TypeError on a keyword they do not declare, so an unforced
+    job must call the crawl with exactly five positional arguments and the anchor with
+    exactly (exchange, venue). Recording wrappers delegate to the real functions."""
+    crawl_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    anchor_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_crawl = er._fetch_and_price_window
+    real_anchor = er._fetch_current_equity
+
+    async def _crawl(*args: Any, **kwargs: Any) -> Any:
+        crawl_calls.append((args, kwargs))
+        return await real_crawl(*args, **kwargs)
+
+    async def _anchor(*args: Any, **kwargs: Any) -> Any:
+        anchor_calls.append((args, kwargs))
+        return await real_anchor(*args, **kwargs)
+
+    monkeypatch.setattr(er, "_fetch_and_price_window", _crawl)
+    monkeypatch.setattr(er, "_fetch_current_equity", _anchor)
+
+    # Unforced, unmarked key.
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=None, exchange="bybit")
+    _install_fake_audit(monkeypatch)
+    exchange = await _bybit_exchange()
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _freeze_now(monkeypatch)
+    result = await run_reconstruct_allocator_history_job(_job())
+    assert result.outcome == DispatchOutcome.DONE, result
+    ((crawl_args, crawl_kwargs),) = crawl_calls
+    assert len(crawl_args) == 5 and crawl_kwargs == {}, (crawl_args, crawl_kwargs)
+    ((anchor_args, anchor_kwargs),) = anchor_calls
+    assert anchor_args == (exchange, "bybit") and anchor_kwargs == {}, (
+        anchor_args, anchor_kwargs,
+    )
+
+    # Forced, marked key: the keywords appear, and only then.
+    crawl_calls.clear()
+    anchor_calls.clear()
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    _install_fake_audit(monkeypatch)
+    exchange = await _bybit_exchange()
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+    assert result.outcome == DispatchOutcome.DONE, result
+    ((crawl_args, crawl_kwargs),) = crawl_calls
+    assert len(crawl_args) == 5 and crawl_kwargs == {"require_anchor": True}, (
+        crawl_args, crawl_kwargs,
+    )
+    ((anchor_args, anchor_kwargs),) = anchor_calls
+    assert anchor_args == (exchange, "bybit")
+    assert anchor_kwargs == {"refuse_unread_positions": True}, anchor_kwargs

@@ -1791,6 +1791,39 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
     return metadata.get(RECONSTRUCT_FORCE_REBUILD_KEY) is True
 
 
+# Phase 167.2.1.1 PD-H: a FORCED rebuild replaces a SOLE-key allocator's stored curve in one
+# atomic write, so it writes a curve only when that curve is anchored to today's venue equity
+# INCLUDING the open-position uPnL. Any other outcome refuses: the job fails (error_kind
+# "permanent", PD-I: no automatic re-crawl) and nothing is written. This is the closed set of
+# reasons; the post-deploy handoff (plan 06) matches the "forced rebuild refused (" prefix
+# and these tokens, and a test pins the set. The unforced path is untouched (PD-B).
+FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "positions_unreadable",
+        "anchor_unreadable",
+        "anchor_skipped_okx_terminus",
+        "anchor_skipped_partial_ticker",
+        "anchor_skipped_unreliable_replay",
+        "anchor_skipped_implausible",
+    }
+)
+
+
+class ForcedRebuildRefusedError(RuntimeError):
+    """Phase 167.2.1.1 PD-H: raised ONLY on the forced path, when the rebuilt curve could not
+    be anchored to today's venue equity including open-position uPnL.
+
+    Caught by the dedicated arm in ``run_reconstruct_allocator_history_job`` before its
+    generic ``except Exception``. The message is the static ``forced rebuild refused
+    (<reason>)``: ``reason`` is one of ``FORCED_REBUILD_REFUSAL_REASONS`` and no venue
+    error text, amount or signature is ever attached.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"forced rebuild refused ({reason})")
+
+
 async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool:
     """Per-api_key idempotency check, answered from the MARKER ONLY (D-04).
 
@@ -2705,9 +2738,17 @@ async def _fetch_and_price_window(
     supabase: Any,
     start_date: date,
     end_date: date,
+    *,
+    require_anchor: bool = False,
 ) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     """Fetch trades + transfers + OHLCV in [start_date, end_date] and build
     the per-day equity rows. Returns ``(rows, hit_okx_terminus, telemetry)``.
+
+    ``require_anchor`` (forced path only, Phase 167.2.1.1 PD-H): raise
+    ``ForcedRebuildRefusedError`` instead of returning rows that are not anchored to
+    today's venue equity including open-position uPnL. False (the default, and the only
+    value an unforced reconstruct or the daily refresh ever passes) keeps the advisory
+    anchor.
 
     ``telemetry`` is a dict of observability signals collected during the
     replay so the caller can include them in ``reconstruct_complete``
@@ -2840,7 +2881,12 @@ async def _fetch_and_price_window(
     # are preserved; absolute levels are anchored to the exchange's
     # own number. Breakdown gets a "STARTING_BALANCE" entry so the
     # components still sum to value_usd.
-    anchor, anchor_partial_symbols = await _fetch_current_equity(exchange, venue)
+    if require_anchor:
+        anchor, anchor_partial_symbols = await _fetch_current_equity(
+            exchange, venue, refuse_unread_positions=True,
+        )
+    else:
+        anchor, anchor_partial_symbols = await _fetch_current_equity(exchange, venue)
     # M-1 / H-02: initialise anchor-skip DQ fields (populated inside the block
     # below when skipping fires; remain empty/False when anchor is not attempted).
     _anchor_skipped_partial_ticker: list[str] = []
@@ -2941,6 +2987,26 @@ async def _fetch_and_price_window(
                     )
                     r["breakdown"] = _cap_breakdown(bd)
 
+    # Phase 167.2.1.1 PD-H: on the forced path an un-anchored curve is never returned,
+    # because the caller would replace a stored curve with it in one write. Reasons are
+    # read from the variables the block above already set, in the block's own order
+    # (terminus, partial ticker, unreliable replay, implausible offset); an empty replay
+    # is not refused here (the persist half already writes nothing for it).
+    if require_anchor and rows:
+        _refusal: str | None = None
+        if anchor is None:
+            _refusal = "anchor_unreadable"
+        elif hit_terminus:
+            _refusal = "anchor_skipped_okx_terminus"
+        elif _anchor_skipped_partial_ticker:
+            _refusal = "anchor_skipped_partial_ticker"
+        elif _anchor_skipped_unreliable_replay:
+            _refusal = "anchor_skipped_unreliable_replay"
+        elif _anchor_skipped_implausible:
+            _refusal = "anchor_skipped_implausible"
+        if _refusal is not None:
+            raise ForcedRebuildRefusedError(_refusal)
+
     # NEW-C01-11: when hit_terminus, the replay starts from quantities={}
     # (zero cash) because the pre-terminus deposit that funds open perps
     # falls outside the 90-day fetch window.  Every intermediate row is
@@ -2991,9 +3057,15 @@ async def _fetch_and_price_window(
 
 
 async def _fetch_current_equity(
-    exchange: Any, venue: str
+    exchange: Any, venue: str, *, refuse_unread_positions: bool = False,
 ) -> tuple[float | None, set[str]]:
     """Return (equity_usd, partial_unpriced_symbols).
+
+    ``refuse_unread_positions`` (forced path only, Phase 167.2.1.1 PD-H): when True and the
+    venue ADDS open-position uPnL here (Bybit, Binance: not ``_UNIFIED_MARGIN_VENUES``), a
+    ``fetch_positions()`` that raises or returns a non-list raises
+    ``ForcedRebuildRefusedError("positions_unreadable")`` instead of anchoring at the
+    wallet figure. False keeps the advisory-anchor contract below, unchanged.
 
     ``equity_usd`` is today's total account equity in USD, or None if we
     can't determine it. ``partial_unpriced_symbols`` is the set of
@@ -3120,8 +3192,13 @@ async def _fetch_current_equity(
                 venue, type(_pos_exc).__name__,
                 scrub_freeform_string(str(_pos_exc)),
             )
+            if refuse_unread_positions and not _skip_upnl:
+                # PD-H: `from None` so no venue error text rides the refusal.
+                raise ForcedRebuildRefusedError("positions_unreadable") from None
             positions = []
         if not isinstance(positions, list):
+            if refuse_unread_positions and not _skip_upnl:
+                raise ForcedRebuildRefusedError("positions_unreadable")
             positions = []
         for p in positions:
             if not isinstance(p, dict):
@@ -3138,6 +3215,10 @@ async def _fetch_current_equity(
             except (TypeError, ValueError):
                 continue
         return total, partial_unpriced
+    except ForcedRebuildRefusedError:
+        # PD-H: a forced-path refusal must reach the handler, not be swallowed by the
+        # blanket arm below into `(None, ...)` and misreported as anchor_unreadable.
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("anchor: _fetch_current_equity failed venue=%s: %s", venue, exc)
         return None, partial_unpriced
@@ -3971,12 +4052,47 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 # FLIPRETRY-01 (defensive): the orchestrating window crawl is HARD-BOUNDED
                 # so a hang becomes a classified transient (the except asyncio.TimeoutError
                 # arm below), never an unbounded await that wedges the worker loop.
-                rows, hit_terminus, telemetry = await asyncio.wait_for(
-                    _fetch_and_price_window(
+                if forced:
+                    # PD-H / PD-J: the keyword is passed ONLY when forced, so the
+                    # unforced call keeps exactly its five positional arguments.
+                    _crawl = _fetch_and_price_window(
                         ctx.exchange, venue, ctx.supabase, start_date, end_date,
-                    ),
-                    timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                        require_anchor=True,
+                    )
+                else:
+                    _crawl = _fetch_and_price_window(
+                        ctx.exchange, venue, ctx.supabase, start_date, end_date,
+                    )
+                rows, hit_terminus, telemetry = await asyncio.wait_for(
+                    _crawl, timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
                 )
+        except ForcedRebuildRefusedError as exc:
+            # Phase 167.2.1.1 PD-H / PD-I: the forced curve could not be anchored to
+            # today's venue equity including open-position uPnL. Nothing has been
+            # persisted (the crawl is before the persist half and the marker writer), so
+            # fail loudly and leave the stored curve and the marker as they were. Static
+            # text only: the reason is from a closed set and no venue error text is kept.
+            logger.warning(
+                "reconstruct_allocator_history forced rebuild refused allocator=%s "
+                "key=%s venue=%s reason=%s",
+                allocator_id, api_key_id, venue, exc.reason,
+            )
+            sanitized = (
+                f"forced rebuild refused ({exc.reason}): the rebuilt curve could not be "
+                "anchored to today's venue equity including open-position uPnL, so "
+                "nothing was written and the stored curve is unchanged "
+                "(Phase 167.2.1.1 D-02)"
+            )
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {"error_kind": "permanent", "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind="permanent",
+            )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)
