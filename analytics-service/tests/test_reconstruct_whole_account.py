@@ -53,6 +53,8 @@ from tests.test_reconstruct_force_rebuild import (
     _audit_metadata,
     _bybit_exchange,
     _forced_job,
+    _freeze_now_at,
+    _okx_exchange,
     _seed_sentinel_rows,
     _venue_coin_equity,
 )
@@ -616,3 +618,99 @@ async def test_forced_rebuild_of_a_two_account_book_replaces_its_window_with_the
     assert complete["account_days_incomplete"] == 0
     assert complete["window_days"] == 730
     assert complete["forced_rebuild"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_okx_holding_account_is_rebuilt_over_90_days_and_keeps_older_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UPNLVENUES D-05 / D-01 end to end (SC-2), decisions AR-4 and AR-5. An allocator holds a
+    Bybit account and an OKX account. OKX keeps only 90 days of fills, and a stored row is the
+    SUM across exchange accounts, so one window serves every venue: 90 calendar days inclusive
+    of today, which is 89 days back. Every crawl, the Bybit one included, receives that one
+    start date (2026-01-16, END_DATE minus 89 days, a typed literal here); a Bybit crawl on 730
+    days would sum over a different span than the OKX one.
+
+    Why now is frozen six hours after midnight: the terminus test is ``since < now - 90 days``
+    and at exactly 00:00 a 90-day start would not bite, so a 90-day mistake would pass unseen.
+
+    AR-4 (founder-visible, the founder may revisit): the rows carry
+    ``pre_terminus_balance_unknown`` False, because the 89-day start never reaches the terminus
+    and the curve is anchored to the venue's ``totalEq``; and ``history_depth_months`` 3, the
+    most limiting venue. The row older than the window is untouched (D-01).
+
+    RED when every crawl is given the 730-day start (drill D-B), and RED when the window is
+    90 days back instead of 89 (drill D-C: the OKX crawl then clamps at the terminus and the
+    job refuses ``anchor_skipped_okx_terminus``)."""
+    okx_anchor = 800.0
+    monkeypatch.setattr(
+        "services.exchange.fetch_okx_total_equity_usd", AsyncMock(return_value=okx_anchor)
+    )
+    fake = _MarkerFake()
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
+    _seed_account_key(fake, API_KEY_ID_2, "okx", venue_account_id="fixture-okx-2")
+    _seed_sentinel_rows(fake)
+    older_asof = (END_DATE - timedelta(days=120)).date().isoformat()
+    older_key = ("allocator_equity_snapshots", (ALLOCATOR_ID, older_asof))
+    fake.store[older_key] = {
+        "allocator_id": ALLOCATOR_ID,
+        "asof": older_asof,
+        "value_usd": 777.0,
+        "breakdown": {"BTC": 777.0},
+        "source": "exchange_primary",
+        "history_depth_months": 24,
+        "pre_terminus_balance_unknown": False,
+        "reconstructed_at": "2025-01-01T00:00:00+00:00",
+    }
+    older_before = copy.deepcopy(fake.store[older_key])
+    audit = _install_fake_audit(monkeypatch)
+    _install_account_preflight(
+        monkeypatch,
+        fake,
+        {API_KEY_ID_1: await _bybit_exchange(), API_KEY_ID_2: await _okx_exchange()},
+    )
+    _freeze_now_at(monkeypatch, END_DATE + timedelta(hours=6))
+
+    real_crawl = er._fetch_and_price_window
+    crawls: list[tuple[str, date]] = []
+
+    async def _recording_crawl(
+        exchange: Any, venue: str, supabase: Any, start_date: date, end_date: date, **kwargs: Any
+    ) -> Any:
+        crawls.append((venue, start_date))
+        return await real_crawl(exchange, venue, supabase, start_date, end_date, **kwargs)
+
+    monkeypatch.setattr(er, "_fetch_and_price_window", _recording_crawl)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    window_start = date(2026, 1, 16)
+    assert sorted(crawls) == [("bybit", window_start), ("okx", window_start)], (
+        "every crawl of an OKX-holding account must receive the one 89-day start"
+    )
+    assert len(_window_rpc_calls(fake)) == 1, fake.rpc_calls
+
+    expected = round(_venue_coin_equity() + okx_anchor, 2)
+    assert expected == 2050.5
+    in_window = [
+        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] != older_asof
+    ]
+    assert len(in_window) == SENTINEL_ROWS, in_window
+    for row in in_window:
+        assert row["value_usd"] == pytest.approx(expected, abs=0.01), (
+            f"day {row['asof']} holds {row['value_usd']}, not Bybit plus OKX {expected}"
+        )
+        assert row["value_usd"] != SENTINEL_VALUE
+        assert row["history_depth_months"] == 3, row
+        assert row["pre_terminus_balance_unknown"] is False, row  # AR-4
+    assert fake.store[older_key] == older_before, "the day older than the window was rewritten"
+
+    boundary = fake.store[("allocator_equity_derived", (ALLOCATOR_ID, "snapshot_rebuild_boundary"))]
+    assert boundary["payload"] == {"boundary_date": "2026-01-16"}
+
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["window_days"] == 90
+    assert complete["account_exchange_accounts"] == 2
+    assert complete["okx_terminus_hit"] is False
+    assert complete["account_rebuild"] is True

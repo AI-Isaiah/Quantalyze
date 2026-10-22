@@ -36,6 +36,7 @@ enqueue; the exchange is a stub and the database is the in-memory fake.
 from __future__ import annotations
 
 import copy
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -731,10 +732,11 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
 
     Phase 167.2.1.1.2 D-02 / UPNLVENUES D-04: the four tokens of the sole-key path
     (``multi_key``, ``sibling_lookup_failed``, ``replay_empty``, ``history_outside_replay``)
-    left the set with the unified whole-account path. Until plan 06 removes their raise
-    sites from the handler this test pins the VOCABULARY only; the raise-site equality scan
-    (every token a ``raise ForcedRebuildRefusedError`` names is in the set, and every token
-    in the set is raised) arrives in plan 06, when the handler's sole-key raises leave.
+    left the set with the unified whole-account path (decision AR-7), and their raise sites
+    left the handler with them. The raise-site scan at the end pins that from the source:
+    the double-quoted lower_snake literals the module passes to ``ForcedRebuildRefusedError(``
+    or assigns to ``_refusal =`` EQUAL the 15 tokens, so no token is without a raise site
+    and no raise site names a token outside the set.
     """
     anchor = frozenset(
         {
@@ -776,6 +778,16 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
         exc = er.ForcedRebuildRefusedError(reason)
         assert exc.reason == reason
         assert str(exc) == f"{REFUSAL_PREFIX}{reason})"
+
+    # Raise-site equality (decision AR-7). The scan reads the source text: a raise that passed
+    # a variable would not be seen, which is why every raise names its token as a literal.
+    source = Path(er.__file__).read_text(encoding="utf-8")
+    raised = set(re.findall(r'ForcedRebuildRefusedError\(\s*"([a-z_]+)"\s*\)', source))
+    raised |= set(re.findall(r'_refusal = "([a-z_]+)"', source))
+    assert raised == set(er.FORCED_REBUILD_REFUSAL_REASONS), (
+        f"raise sites without a token: {sorted(raised - er.FORCED_REBUILD_REFUSAL_REASONS)}; "
+        f"tokens without a raise site: {sorted(er.FORCED_REBUILD_REFUSAL_REASONS - raised)}"
+    )
 
 
 @pytest.mark.asyncio
