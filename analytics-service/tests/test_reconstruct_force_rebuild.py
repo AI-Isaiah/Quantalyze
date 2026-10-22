@@ -781,17 +781,21 @@ async def test_forced_rebuild_refuses_an_implausible_anchor_offset(
 
 
 def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
-    """The plan 06 post-deploy handoff matches the ``forced rebuild refused (`` prefix and
-    these tokens to decide re-enqueue-once versus record-only (PD-I). An extra reason,
-    or a renamed one, that the handoff does not know would be recorded as an unknown
-    failure; the set is therefore pinned, and so is the message each token produces."""
-    expected = frozenset(
+    """The post-deploy handoff matches the ``forced rebuild refused (`` prefix and these 15
+    tokens to decide re-enqueue-once versus record-only (PD-I). An extra reason, or a
+    renamed one, that the handoff does not know would be recorded as an unknown failure;
+    the set is therefore pinned in both halves, and so is the message each token produces.
+
+    Phase 167.2.1.1.2 D-02 / UPNLVENUES D-04: the four tokens of the sole-key path
+    (``multi_key``, ``sibling_lookup_failed``, ``replay_empty``, ``history_outside_replay``)
+    left the set with the unified whole-account path. Until plan 06 removes their raise
+    sites from the handler this test pins the VOCABULARY only; the raise-site equality scan
+    (every token a ``raise ForcedRebuildRefusedError`` names is in the set, and every token
+    in the set is raised) arrives in plan 06, when the handler's sole-key raises leave.
+    """
+    anchor = frozenset(
         {
             "positions_unreadable",
-            "multi_key",
-            "sibling_lookup_failed",
-            "replay_empty",
-            "history_outside_replay",
             "anchor_unreadable",
             "anchor_skipped_okx_terminus",
             "anchor_skipped_partial_ticker",
@@ -799,11 +803,33 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
             "anchor_skipped_implausible",
         }
     )
-    assert er.FORCED_REBUILD_REFUSAL_REASONS == expected, (
-        "FORCED_REBUILD_REFUSAL_REASONS changed: the plan 06 handoff matches the "
-        "'forced rebuild refused (' prefix and these tokens; change both together"
+    account = frozenset(
+        {
+            "account_state_unreadable",
+            "account_identity_pending",
+            "account_key_venue_unsupported",
+            "account_key_not_working",
+            "account_key_read_failed",
+            "account_key_no_rows",
+            "account_sum_empty",
+            "account_keys_changed",
+            "history_days_unreproduced",
+        }
     )
-    for reason in sorted(expected):
+    assert er.FORCED_REBUILD_ANCHOR_REASONS == anchor, (
+        "FORCED_REBUILD_ANCHOR_REASONS changed: the post-deploy handoff matches these "
+        "tokens; change both together"
+    )
+    assert er.FORCED_REBUILD_ACCOUNT_REASONS == account, (
+        "FORCED_REBUILD_ACCOUNT_REASONS changed: the post-deploy handoff matches these "
+        "tokens; change both together"
+    )
+    assert anchor.isdisjoint(account)
+    assert len(anchor) + len(account) == 15
+    assert er.FORCED_REBUILD_REFUSAL_REASONS == anchor | account, (
+        "FORCED_REBUILD_REFUSAL_REASONS is no longer the union of its two halves"
+    )
+    for reason in sorted(anchor | account):
         exc = er.ForcedRebuildRefusedError(reason)
         assert exc.reason == reason
         assert str(exc) == f"{REFUSAL_PREFIX}{reason})"

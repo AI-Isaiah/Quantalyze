@@ -30,7 +30,7 @@ import logging
 import math
 import os
 from bisect import bisect_right
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
@@ -1903,25 +1903,44 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
     return metadata.get(RECONSTRUCT_FORCE_REBUILD_KEY) is True
 
 
-# Phase 167.2.1.1 PD-H: a FORCED rebuild replaces a SOLE-key allocator's stored curve in one
-# atomic write, so it writes a curve only when that curve is anchored to today's venue equity
-# INCLUDING the open-position uPnL. Any other outcome refuses: the job fails (error_kind
-# "permanent", PD-I: no automatic re-crawl) and nothing is written. This is the closed set of
-# reasons; the post-deploy handoff (plan 06) matches the "forced rebuild refused (" prefix
-# and these tokens, and a test pins the set. The unforced path is untouched (PD-B).
-FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
+# Phase 167.2.1.1 PD-H: a FORCED rebuild replaces a stored curve in one atomic write, so it
+# writes a curve only when that curve is anchored to today's venue equity INCLUDING the
+# open-position uPnL. Any other outcome refuses: the job fails (error_kind "permanent", PD-I:
+# no automatic re-crawl) and nothing is written. This is the closed set of reasons; the
+# post-deploy handoff matches the "forced rebuild refused (" prefix and these 15 tokens, and
+# a test pins both halves. The unforced path is untouched (PD-B).
+#
+# Phase 167.2.1.1.2 (UPNLVENUES D-04, D-02 of this phase): the rebuild is now WHOLE-ACCOUNT,
+# so the set has two halves. The anchor half is the per-crawl refusal of the 167.2.1.1 path;
+# the account half is what refusing to cover every exchange account of the allocator, or to
+# replace a stored day the new curve does not reproduce, is named. The four tokens of the
+# old sole-key path (multi_key, sibling_lookup_failed, replay_empty, history_outside_replay)
+# left the set with it; their raise sites in the handler leave in plan 06.
+FORCED_REBUILD_ANCHOR_REASONS: Final[frozenset[str]] = frozenset(
     {
         "positions_unreadable",
-        "multi_key",
-        "sibling_lookup_failed",
-        "replay_empty",
-        "history_outside_replay",
         "anchor_unreadable",
         "anchor_skipped_okx_terminus",
         "anchor_skipped_partial_ticker",
         "anchor_skipped_unreliable_replay",
         "anchor_skipped_implausible",
     }
+)
+FORCED_REBUILD_ACCOUNT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "account_state_unreadable",
+        "account_identity_pending",
+        "account_key_venue_unsupported",
+        "account_key_not_working",
+        "account_key_read_failed",
+        "account_key_no_rows",
+        "account_sum_empty",
+        "account_keys_changed",
+        "history_days_unreproduced",
+    }
+)
+FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = (
+    FORCED_REBUILD_ANCHOR_REASONS | FORCED_REBUILD_ACCOUNT_REASONS
 )
 
 
@@ -1938,6 +1957,238 @@ class ForcedRebuildRefusedError(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"forced rebuild refused ({reason})")
+
+
+# Phase 167.2.1.1.2 ACCTREBUILD plan 04: the pure rules of the whole-account rebuild. A stored
+# ``allocator_equity_snapshots`` row is ONE aggregate per (allocator_id, asof), the sum across
+# every exchange account the allocator holds, so a forced rebuild crawls each exchange account
+# once and replaces in one write (UPNLVENUES D-04), or refuses and writes nothing.
+#
+# The venues a rebuild can crawl. OKX is IN (UPNLVENUES D-05): it is rebuilt over a 90-day
+# window and never refused. sfox has no reconstruct crawl, so it is outside.
+_ACCOUNT_REBUILD_VENUES: Final[frozenset[str]] = frozenset({"bybit", "binance", "mt5", "okx"})
+# The reconstruct refuses every Deribit key and the daily refresh skips venue deribit, so both
+# allocator writers store a Deribit exchange account as $0. The rebuild counts it, crawls
+# nothing and refuses nothing.
+_ACCOUNT_ZERO_CONTRIBUTION_VENUES: Final[frozenset[str]] = frozenset({"deribit"})
+
+
+def _key_venue(key_row: Mapping[str, Any]) -> str:
+    """The key's exchange, lower-cased and stripped ("" when it is not a string)."""
+    exchange = key_row.get("exchange")
+    return exchange.strip().lower() if isinstance(exchange, str) else ""
+
+
+def _select_account_crawl_keys(
+    account_keys: Sequence[Mapping[str, Any]], job_api_key_id: str
+) -> tuple[list[Mapping[str, Any]], int]:
+    """Pick the ONE working key each exchange account is crawled through, or refuse.
+
+    ``account_keys`` is EVERY ``api_keys`` row of the user, whatever its status (D-07): the
+    grouping needs the departed and duplicate rows to see that two keys read one account.
+    The grouping and the two predicates are the ones both allocator writers use
+    (``account_groups``, ``working_holder_predicate``, ``identity_pending_venues`` with the
+    daily refresh's own venue set), so the rebuild cannot count an exchange account twice
+    or call a key working that the writers would not.
+
+    Per group, in the group order ``account_groups`` fixes:
+
+    * the members must all be on one venue, else ``account_key_venue_unsupported`` (one
+      exchange account is on one venue, so a marker across venues cannot be read by any
+      single crawl);
+    * a Deribit group is skipped and COUNTED (the second return value): both writers store
+      it as $0, whatever its key's state, so it is neither crawled nor a refusal;
+    * a venue outside ``_ACCOUNT_REBUILD_VENUES`` (sfox, anything unknown) refuses
+      ``account_key_venue_unsupported``: leaving it out would store a total that claims to
+      cover the allocator;
+    * a group with no working member refuses ``account_key_not_working``;
+    * otherwise the job's own key is chosen when it is a working member, else the working
+      member with the smallest id. A departed or duplicate member is thereby covered by a
+      working sibling instead of by nobody.
+
+    OKX is selected (UPNLVENUES D-05); the one window it forces is
+    ``_account_rebuild_window``'s concern. After the loop two unstamped working keys on one
+    stamping venue may be ONE exchange account, which crawling both would count twice, so
+    the daily refresh's own ``identity_pending_venues`` call refuses
+    ``account_identity_pending``.
+    """
+    selected: list[Mapping[str, Any]] = []
+    zero_contribution = 0
+    for group in account_groups(account_keys):
+        venues = {_key_venue(member) for member in group}
+        if len(venues) != 1:
+            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
+        venue = next(iter(venues))
+        if venue in _ACCOUNT_ZERO_CONTRIBUTION_VENUES:
+            zero_contribution += 1
+            continue
+        if venue not in _ACCOUNT_REBUILD_VENUES:
+            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
+        working = [member for member in group if working_holder_predicate(member)]
+        if not working:
+            raise ForcedRebuildRefusedError("account_key_not_working")
+        job_member = next(
+            (member for member in working if str(member.get("id")) == str(job_api_key_id)),
+            None,
+        )
+        selected.append(
+            job_member
+            if job_member is not None
+            else min(working, key=lambda member: str(member.get("id")))
+        )
+    if identity_pending_venues(account_keys, VENUES_WITH_ACCOUNT_ID - {"deribit"}) > 0:
+        raise ForcedRebuildRefusedError("account_identity_pending")
+    if not selected:
+        # Unreachable for a job whose own key is not Deribit (that key's group is then
+        # selected or refused above); kept so a Deribit-only book never reaches the crawl.
+        raise ForcedRebuildRefusedError("account_sum_empty")
+    return selected, zero_contribution
+
+
+def _account_rebuild_window(
+    selected_keys: Sequence[Mapping[str, Any]], end_date: date
+) -> tuple[date, int]:
+    """The ONE ``(start_date, window_days)`` every exchange account of the rebuild uses.
+
+    D-01 / UPNLVENUES D-05, decision AR-5: when ANY selected key is on OKX the window is 90
+    calendar days inclusive of today, so ``OKX_TRADE_TERMINUS_DAYS - 1`` (89) days back;
+    otherwise ``BACKFILL_CAP_DAYS`` (730) back. 89, not 90: ``_fetch_trades_with_pagination``
+    flags the terminus when ``since`` is older than ``now - 90 days``, and a start 90 days
+    before today's date is always older than that once the UTC day has begun, which would
+    make every OKX crawl refuse ``anchor_skipped_okx_terminus``. One window for the whole
+    account, because a stored row is the sum across exchange accounts and a sum over
+    different spans is not a total.
+    """
+    if any(_key_venue(key) == "okx" for key in selected_keys):
+        return end_date - timedelta(days=OKX_TRADE_TERMINUS_DAYS - 1), OKX_TRADE_TERMINUS_DAYS
+    return end_date - timedelta(days=BACKFILL_CAP_DAYS), BACKFILL_CAP_DAYS
+
+
+def _account_history_depth_months(venues: Iterable[str]) -> int | None:
+    """The history depth, in months, the rebuilt rows can honestly claim: the minimum of
+    ``history_depth_months_for_venue`` over the venues that have one, None when none has
+    (an MT5-only account, whose deal ledger has no retention depth)."""
+    depths = [
+        depth
+        for depth in (history_depth_months_for_venue(venue) for venue in venues)
+        if depth is not None
+    ]
+    return min(depths) if depths else None
+
+
+def _sum_breakdowns(breakdowns: Sequence[Any]) -> dict[str, Any] | None:
+    """Add the NUMERIC entries of the dict breakdowns, to 2 dp; None when none is a dict.
+
+    ``__truncated__`` survives as True when any part carries it. A structured entry such
+    as ``__pnl_missing__`` (a ``{count, symbols}`` record, never a number) is not added and
+    does not survive: it is a per-snapshot record of the daily refresh, which a
+    reconstructed row never carries, and adding two of them numerically would be wrong.
+    Re-capped through ``_cap_breakdown`` so the merged dict honours the stored-size cap.
+    """
+    dicts = [b for b in breakdowns if isinstance(b, dict)]
+    if not dicts:
+        return None
+    merged: dict[str, Any] = {}
+    truncated = False
+    for part in dicts:
+        for name, value in part.items():
+            if name == "__truncated__":
+                truncated = truncated or value is True
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                merged[name] = merged.get(name, 0.0) + value
+    result: dict[str, Any] = {name: round(value, 2) for name, value in merged.items()}
+    if truncated:
+        result["__truncated__"] = True
+    return _cap_breakdown(result)
+
+
+def _sum_account_rows(
+    per_account_rows: Sequence[Sequence[Mapping[str, Any]]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Add the per-exchange-account curves into the allocator's one curve, on shared days.
+
+    Returns ``(rows, days_incomplete)``. A row is emitted ONLY on a day EVERY exchange
+    account has a row (the intersection). A day one account lacks is UNKNOWN for that
+    account: reading it as 0 would store a total that is too low and looks real, and
+    reading it as the neighbouring day would invent a value. So it is left out and
+    counted (``days_incomplete`` = the union of days minus the intersection), and the
+    replace RPC then refuses (``history_days_unreproduced``, D-02) if a stored day would be
+    left unreproduced. Nothing is zero-filled.
+
+    On a shared day ``value_usd`` and every numeric breakdown entry are summed to 2 dp
+    (``_sum_breakdowns``); ``source`` is the parts' common source, else ``"mixed"``; and
+    ``pre_terminus_balance_unknown`` is True when any part says so. No offset entry is read
+    as a signal: it is the anchor offset, not a pre-window balance. Rows come back sorted
+    by ``asof``.
+    """
+    if not per_account_rows:
+        return [], 0
+    by_day: list[dict[str, Mapping[str, Any]]] = [
+        {str(row["asof"]): row for row in rows} for rows in per_account_rows
+    ]
+    union: set[str] = set()
+    shared: set[str] | None = None
+    for days in by_day:
+        union |= days.keys()
+        shared = set(days) if shared is None else shared & days.keys()
+    shared_days = shared or set()
+    summed: list[dict[str, Any]] = []
+    for day in sorted(shared_days):
+        parts = [days[day] for days in by_day]
+        sources = {str(part.get("source", "exchange_primary")) for part in parts}
+        summed.append(
+            {
+                "asof": day,
+                "value_usd": round(sum(float(part["value_usd"]) for part in parts), 2),
+                "breakdown": _sum_breakdowns([part.get("breakdown") for part in parts]),
+                "source": next(iter(sources)) if len(sources) == 1 else "mixed",
+                "pre_terminus_balance_unknown": any(
+                    bool(part.get("pre_terminus_balance_unknown", False)) for part in parts
+                ),
+            }
+        )
+    return summed, len(union) - len(shared_days)
+
+
+def _merge_account_telemetry(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Merge the per-exchange-account telemetry into the one dict the handler's audit reads.
+
+    The audit INDEXES the four lists (``skipped_symbols``, ``unknown_perp_symbols``,
+    ``inverse_perp_symbols``, ``ctval_drift_warnings``) and reads the anchor flags with
+    ``.get``, so every key is always present. MT5's telemetry omits the anchor keys on
+    purpose (``_mt5_telemetry``: it performs no anchor step), so every read here has a
+    default. Symbol lists are sorted unions, ``ctval_drift_warnings`` (dicts) are
+    concatenated in part order, flags are ORed and the skipped anchor offset is summed to
+    2 dp.
+    """
+
+    def _union(name: str) -> list[str]:
+        return sorted({str(item) for part in parts for item in part.get(name, [])})
+
+    return {
+        "skipped_symbols": _union("skipped_symbols"),
+        "unknown_perp_symbols": _union("unknown_perp_symbols"),
+        "inverse_perp_symbols": _union("inverse_perp_symbols"),
+        "ctval_drift_warnings": [
+            warning for part in parts for warning in part.get("ctval_drift_warnings", [])
+        ],
+        "pre_terminus_balance_unknown": any(
+            bool(part.get("pre_terminus_balance_unknown", False)) for part in parts
+        ),
+        "anchor_partial_ticker_symbols": _union("anchor_partial_ticker_symbols"),
+        "anchor_offset_implausible": any(
+            bool(part.get("anchor_offset_implausible", False)) for part in parts
+        ),
+        "anchor_replay_unreliable": any(
+            bool(part.get("anchor_replay_unreliable", False)) for part in parts
+        ),
+        "anchor_offset_skipped_usd": round(
+            sum(float(part.get("anchor_offset_skipped_usd", 0.0) or 0.0) for part in parts), 2
+        ),
+        "anchor_positions_unread": any(
+            bool(part.get("anchor_positions_unread", False)) for part in parts
+        ),
+    }
 
 
 async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool:
