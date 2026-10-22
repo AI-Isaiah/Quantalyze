@@ -4474,15 +4474,17 @@ async def _crawl_account_key(
     allocator_id: str,
     start_date: date,
     end_date: date,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | DispatchResult:
     """Crawl ONE exchange account through its chosen key: anchored rows and telemetry.
 
     The venue is the key row's own. MT5 reads its deal ledger (``_mt5_fetch_window``, no
-    anchor step); every other venue calls ``_fetch_and_price_window`` through the module
-    global with ``require_anchor=True`` (five positional arguments), which raises
-    ``ForcedRebuildRefusedError`` instead of returning an un-anchored curve. A rate limit
-    is stamped on the key (so the circuit breaker parks it) and re-raised unchanged; the
-    caller is the only place that converts a non-refusal failure. An empty curve refuses
+    anchor step); a failure there is returned as the ``DispatchResult`` it already settled,
+    with its own ``reconstruct_failed`` audit written, so the caller hands it on unchanged
+    and the job leaves that one audit. Every other venue calls ``_fetch_and_price_window``
+    through the module global with ``require_anchor=True`` (five positional arguments), which
+    raises ``ForcedRebuildRefusedError`` instead of returning an un-anchored curve. A rate
+    limit is stamped on the key (so the circuit breaker parks it) and re-raised unchanged;
+    the caller is the only place that converts a non-refusal failure. An empty curve refuses
     ``account_key_no_rows``: summing would otherwise treat the account as having no days.
     """
     venue = _key_venue(key_row)
@@ -4496,7 +4498,7 @@ async def _crawl_account_key(
                 end_date=end_date,
             )
             if isinstance(outcome, DispatchResult):
-                raise ForcedRebuildRefusedError("account_key_read_failed")
+                return outcome
             rows, _hit_terminus, telemetry = outcome
         else:
             rows, _hit_terminus, telemetry = await _fetch_and_price_window(
@@ -4526,9 +4528,10 @@ async def _crawl_whole_account(
     DEFERRED result is returned unchanged), and any other failure to open refuses
     ``account_key_read_failed``. The crawls then run concurrently over the one window_start
     (a stored row is a sum across exchange accounts, so every account must cover the same
-    span). In key order the first refusal is re-raised as it is and any other failure
-    becomes ``account_key_read_failed`` after one scrubbed WARNING: this loop is the only
-    converter. Every session this function opened is closed in ``finally``; the job's own
+    span). In key order the first refusal is re-raised as it is. An MT5 account's failure
+    comes back as the ``DispatchResult`` it already settled and audited, and is returned
+    unchanged. Any other failure becomes ``account_key_read_failed`` after one scrubbed
+    WARNING: this loop is the only converter. Every session this function opened is closed in ``finally``; the job's own
     session stays with the handler's ``finally``.
     """
     own_key_id = str(job["api_key_id"])
@@ -4577,6 +4580,8 @@ async def _crawl_whole_account(
         for key, outcome in zip(selected, results):
             if isinstance(outcome, ForcedRebuildRefusedError):
                 raise outcome
+            if isinstance(outcome, DispatchResult):
+                return outcome
             if isinstance(outcome, BaseException):
                 # The exception CLASS only: the venue's text is never logged here, so
                 # nothing it carries (a scrub-resistant fragment included) reaches the log
@@ -4722,8 +4727,10 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                     timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
                 )
                 if isinstance(_account_outcome, DispatchResult):
-                    # A sibling key's circuit-breaker cooldown deferred this job; the DB
-                    # row was already transitioned and nothing was persisted.
+                    # A sibling key's circuit-breaker cooldown deferred this job, or an
+                    # MT5 account's window fetch failed and already wrote its own
+                    # ``reconstruct_failed`` audit; either way the result is already
+                    # settled and nothing was persisted.
                     return _account_outcome
                 account = _account_outcome
                 rows, hit_terminus, telemetry = account.rows, False, account.telemetry

@@ -950,6 +950,73 @@ async def test_a_rate_limited_sibling_is_stamped_and_refuses_the_account(
     assert stamped == [{"p_api_key_id": API_KEY_ID_2}], stamped
 
 
+def _assert_account_rebuild_failed_transient(
+    fake: Any,
+    result: DispatchResult,
+    audit: Any,
+    *,
+    before: dict[str, list[dict[str, Any]]],
+) -> None:
+    """A transient fault in the account crawl ends the job FAILED/transient (so the queue
+    retries it), writes nothing, and leaves exactly ONE failure audit, which says transient."""
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "transient", result
+    assert _book_state(fake) == before, "a transient account failure changed the stored state"
+    assert fake.api_key_updates() == [], fake.api_key_updates()
+    written = [
+        n
+        for (n, _p) in fake.rpc_calls
+        if n in ("replace_allocator_equity_snapshots_window", "replace_allocator_equity_snapshots")
+    ]
+    assert written == [], written
+    actions = [c.kwargs["action"] for c in audit.call_args_list]
+    assert not (set(actions) & COMPLETION_ACTIONS), actions
+    (failed,) = _audit_metadata(audit, FAILED_ACTION)
+    assert failed["error_kind"] == "transient", failed
+
+
+@pytest.mark.asyncio
+async def test_an_mt5_account_that_fails_its_read_leaves_one_failure_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_mt5_fetch_window`` settles its own failures: it writes a ``reconstruct_failed``
+    audit and returns the result. The account path must hand that result on unchanged and
+    write no second, contradicting audit (it used to refuse ``account_key_read_failed``,
+    permanent, over a transient history-unsettled). One job, one failure audit, and the
+    job's disposition is the MT5 arm's own (transient here, so the queue retries it)."""
+    fake = _MarkerFake()
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
+    _seed_account_key(fake, API_KEY_ID_2, "mt5", venue_account_id="fixture-mt5-2")
+    _seed_sentinel_rows(fake)
+    _seed_older_row(fake)
+    exchange_1 = await _bybit_exchange()
+    mt5_exchange = _crawl_exchange()
+    mt5_exchange.id = "mt5"
+    message = er._MT5_BACKFILL_MESSAGES["history_unsettled"]
+
+    async def _unsettled(exchange: Any, **kwargs: Any) -> DispatchResult:
+        # What the real arm's ``_fail("history_unsettled", "transient")`` does.
+        er._emit_audit(
+            kwargs["allocator_id"], kwargs["api_key_id"],
+            "allocator.equity.reconstruct_failed",
+            {"error_kind": "transient", "sanitized_message": message, "venue": "mt5"},
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED, error_message=message, error_kind="transient"
+        )
+
+    monkeypatch.setattr(er, "_mt5_fetch_window", _unsettled)
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, mt5_exchange
+    )
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    assert result.error_message == message, result.error_message
+    (failed,) = _audit_metadata(audit, FAILED_ACTION)
+    assert failed["sanitized_message"] == message, failed
+
+
 @pytest.mark.asyncio
 async def test_a_sibling_session_that_cannot_be_built_refuses_before_any_venue_call(
     monkeypatch: pytest.MonkeyPatch,
