@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.132.10.8] - 2026-10-22 — OKXHISTORY: quarterly archive files are read on OKX's UTC+8 quarter cut, and quarter-edge days are whole or missing (Phase 167.1.2.2.2.1, plans 18-19, D-15)
+
+### Root cause
+- The D-14 diagnostic re-run on PROD (2026-10-22) read the 2026-Q2 file as starting 2026-03-31 (UTC) with one bill outside the calendar quarter: OKX cuts its archive quarters at 00:00 UTC+8, not 00:00 UTC. The parser asserted calendar-UTC bounds, so every real file stopped `quarter_range_mismatch`.
+
+### Fixed
+- `parse_archive_csv` accepts each quarter file on the 00:00 UTC+8 cut (both bounds move by one 8-hour constant). The stop text and its tokens are unchanged.
+- Daily totals are summed on whole UTC days only. A quarter-edge UTC day (03-31, 06-30, 09-30, 12-31) is whole only when both neighbouring files were read; otherwise it is never written and stays in its named gap. Every bill is still classified and chained, so an unknown bill type or a balance break on an edge day still stops the job.
+- The `bal` continuity check joins two quarters on their shared edge day, so the Q2/Q3 seam stays checked.
+- The D-10 one-cent reconcile window is built from whole covered days only (Q3 compares through 09-29).
+
+### Added
+- `census.edge_days` in the calibrate result lists the whole and the missing quarter-edge days.
+
+### Changed
+- Runbook `okxhistory-go-live.md`: the calibrate reading describes the UTC+8 cut and `census.edge_days`; the last run date that keeps 14 days of Q3 overlap is 2026-12-12.
+
+### Tests
+- RED-first tracers for the UTC+8 bounds and for a whole-day calibrate, edge-day tests that fail if a partial day is written, and a recorded neuter for every guard.
+
+### Notes
+- Founder decision D-15 (2026-10-22, "HK bounds, edge days whole-or-missing"). Q1 2026 is not requested: 03-31 stays missing and named. After deploy, calibrate is re-run once.
+
 ## [0.132.10.7] - 2026-10-22 — UPNLVENUES: Bybit account equity counts open-position profit on every path (Phase 167.2.1.1)
 
 ### Root cause
