@@ -5498,7 +5498,7 @@ Plans:
 1. A recorded real or ccxt-fixture Bybit V5 and Binance (spot and futures) balance response settles whether `total` includes uPnL.
 2. Every path (derive anchor, reconstruct anchor, holdings) reads it the same way, with a test that goes RED on the wrong reading.
 3. A PROD census says whether any connected key is Bybit or Binance, and any stored series built on the wrong reading is recomputed or recorded.
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans executed
 
 Plans:
 **Wave 1**
@@ -5517,7 +5517,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 167.2.1.1-06-PLAN.md — Bookings, merged-tree gates, and the orchestrator-owned post-deploy handoff for the D-01 live read and the D-02 recompute (SC-1, SC-3) [Wave 4]
+- [x] 167.2.1.1-06-PLAN.md — Bookings, merged-tree gates, and the orchestrator-owned post-deploy handoff for the D-01 live read and the D-02 recompute (SC-1, SC-3) [Wave 4]
 
 ### Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history (INSERTED)
 
