@@ -5492,6 +5492,8 @@ Plans:
 - (4) the docstring at `exchange.py` ~3081-3083 says 'account equity' while ~3111 says realized-basis.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 167.2.1
+**Decisions (founder 2026-10-22, AskUserQuestion):** D-01 "Code + one live read (Recommended)": settle from the pinned ccxt source and Bybit V5 docs, then confirm on the live Bybit keys with a read-only worker check that records no amounts. D-02 "Recompute affected (Recommended)": after the fix deploys, re-run derive and reconstruct for Bybit-backed strategies and allocators and record before/after. D-03 "Fix code, test only (Recommended)" for Binance. PROD census 2026-10-22: 6 active Bybit keys, 0 Binance.
+
 **Success Criteria** (what must be TRUE):
 1. A recorded real or ccxt-fixture Bybit V5 and Binance (spot and futures) balance response settles whether `total` includes uPnL.
 2. Every path (derive anchor, reconstruct anchor, holdings) reads it the same way, with a test that goes RED on the wrong reading.
