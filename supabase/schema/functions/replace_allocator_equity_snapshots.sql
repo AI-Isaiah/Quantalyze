@@ -2,26 +2,21 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260602183000_b5b_api_key_delete_atomicity.sql
--- ==========================================================================
--- 3. replace_allocator_equity_snapshots — same per-allocator advisory lock
---    (H-1186 worker half)
--- ==========================================================================
--- ⚠️ This function was LAST defined by migration 20260529160000 (CL9 /
--- NEW-C01-11), NOT 20260527102050 (E4). CL9 added the 7th column
--- `pre_terminus_balance_unknown` to the INSERT + jsonb_to_recordset. This
--- CREATE OR REPLACE re-applies the CL9 body VERBATIM (all 7 columns) and adds
--- ONLY the per-allocator advisory lock + function-scoped lock_timeout. Dropping
--- the CL9 column here would silently revert NEW-C01-11 and re-expose the
--- OKX-terminus garbage equity curve — the exact silent-data-loss class this
--- migration closes. The DO block below asserts the column persists.
---
--- The advisory lock keys on hashtext('alloc:' || p_allocator_id) — the SAME
--- key delete_allocator_api_key uses (auth.uid() == p_allocator_id for one
--- allocator) so the worker's sole-key replace serializes with a concurrent
--- last-key cascade. Signature, SECURITY DEFINER, search_path, WR-05 depth,
--- scoping, and grants are otherwise unchanged from CL9.
-CREATE OR REPLACE FUNCTION replace_allocator_equity_snapshots(
+-- source migration: 20261028120000_replace_allocator_equity_snapshots_window.sql
+-- ============================================================================
+-- Review WR-01: clear the seam record wherever ALL of an allocator's snapshots are
+-- wiped or fully replaced. Both functions below are re-based on their LATEST
+-- definition, migration 20260602183000_b5b_api_key_delete_atomicity.sql (checked
+-- 2026-10-22 across every migration: it is the newest file that defines either
+-- name), copied VERBATIM except for ONE added DELETE each. Signature, SECURITY
+-- DEFINER, search_path, lock_timeout, the advisory lock and the grants are
+-- unchanged: CREATE OR REPLACE keeps the existing ACL, so no GRANT is re-issued.
+-- ============================================================================
+
+-- 1. replace_allocator_equity_snapshots deletes EVERY snapshot row of the allocator,
+--    so the days the recorded seam separated are gone. Added: delete the boundary row
+--    in the same transaction, under the same lock.
+CREATE OR REPLACE FUNCTION public.replace_allocator_equity_snapshots(
   p_allocator_id UUID,
   p_rows         JSONB,    -- array of {asof, value_usd, breakdown, source, pre_terminus_balance_unknown}
   p_depth_months INTEGER   -- per WR-05: applied only to source='exchange_primary' rows
@@ -42,6 +37,12 @@ BEGIN
   -- 1. Purge — strictly scoped to this allocator.
   DELETE FROM public.allocator_equity_snapshots
     WHERE allocator_id = p_allocator_id;
+
+  -- 1b. WR-01: the whole history was replaced, so a recorded rebuild seam names a
+  --     jump that is no longer in the stored series. Clear it.
+  DELETE FROM public.allocator_equity_derived rb
+   WHERE rb.allocator_id = p_allocator_id
+     AND rb.kind = 'snapshot_rebuild_boundary';
 
   -- 2. Insert the freshly replayed rows. jsonb_to_recordset projects the
   --    array; reconstructed_at uses the column DEFAULT (now()). The CASE on

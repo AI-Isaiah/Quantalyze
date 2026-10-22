@@ -3560,6 +3560,121 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     );
     captureSpy.mockRestore();
   });
+
+  // Phase 167.2.1.1.2 plan 02 (D-03, AR-3). The rebuild function stores the date
+  // where the rebuilt window meets the older unchanged days as one
+  // allocator_equity_derived row (kind snapshot_rebuild_boundary). The dashboard
+  // payload is its one reader, so a chart or return can name the seam. Nothing
+  // renders it (RESEARCH OQ-1): the curve on screen is the derived equity_curve
+  // row, which does not carry the seam. Expected values are typed literals.
+  describe("snapshot rebuild boundary (Phase 167.2.1.1.2 D-03)", () => {
+    const boundaryRow = (
+      payload: Record<string, unknown> = { boundary_date: "2026-07-24" },
+      allocatorId = "user-1",
+    ) => ({
+      allocator_id: allocatorId,
+      kind: "snapshot_rebuild_boundary",
+      payload,
+    });
+
+    it("a stored boundary row reaches the payload as { boundaryDate }", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [v2Row(), boundaryRow()];
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.snapshotRebuildBoundary).toEqual({ boundaryDate: "2026-07-24" });
+    });
+
+    it("the fresh-allocator branch carries it too", async () => {
+      state.portfolios = [];
+      state.allocatorEquityDerived = [v2Row(), boundaryRow()];
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.snapshotRebuildBoundary).toEqual({ boundaryDate: "2026-07-24" });
+    });
+
+    it("no boundary row means null, and the equity curve read is unchanged", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [v2Row()];
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.snapshotRebuildBoundary).toBeNull();
+      // The same fixture read "ready" with three returns before this plan
+      // (see "plan 11: a version-2 row and one identified key read ready").
+      expect(result.equityHistoryState).toBe("ready");
+      expect(result.equityDailyReturns).toHaveLength(3);
+    });
+
+    it("a failed boundary read is non-fatal, logged and reported", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [v2Row(), boundaryRow()];
+      const failure = { message: "connection reset (test)" };
+      state.tableErrors["allocator_equity_derived"] = failure;
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const sentry = await import("./sentry-capture");
+      const captureSpy = vi
+        .spyOn(sentry, "captureToSentry")
+        .mockImplementation(async () => {});
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      // The call resolved (non-fatal) and the boundary names nothing.
+      expect(result.snapshotRebuildBoundary).toBeNull();
+      expect(captureSpy).toHaveBeenCalledWith(
+        failure,
+        expect.objectContaining({
+          tags: expect.objectContaining({
+            op: "getMyAllocationDashboard",
+            reason: "snapshot_rebuild_boundary_read_failed",
+          }),
+        }),
+      );
+      const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("snapshot_rebuild_boundary read failed");
+      expect(logged).not.toContain("legacy");
+      errSpy.mockRestore();
+      captureSpy.mockRestore();
+    });
+
+    it("another allocator's boundary row is never read", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [
+        v2Row(),
+        boundaryRow({ boundary_date: "2026-07-24" }, "user-2"),
+      ];
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.snapshotRebuildBoundary).toBeNull();
+    });
+
+    it("a malformed stored payload names no boundary and leaves the curve alone", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [v2Row(), boundaryRow({ boundary_date: "2026-02-30" })];
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.snapshotRebuildBoundary).toBeNull();
+      expect(result.equityHistoryState).toBe("ready");
+      expect(result.equityDailyReturns).toHaveLength(3);
+      warnSpy.mockRestore();
+    });
+  });
 });
 
 describe("115.1 equity display-repoint", () => {

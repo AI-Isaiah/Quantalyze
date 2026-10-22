@@ -1,18 +1,25 @@
 # Changelog
 
-## [0.132.10.12] - 2026-10-22 — OKXHISTORY: archive bill ids are read without their export quoting (Phase 167.1.2.2.2.1, plan 21, D-17)
-
-### Fixed
-- Calibrate run 4 on PROD (2026-10-22) named its stop: all 1606 bills of both real quarter files carried a `billId` that is not ASCII digits. The parser now strips surrounding whitespace, apostrophes and double quotes from each `billId` before any check. These are spreadsheet-guard export wrapping, and the digits inside are unchanged. An id that is empty after the strip stops `missing_bill_id`.
+## [0.133.0.0] - 2026-10-22 — ACCTREBUILD: a multi-key account's allocation history is rebuilt as one account over a window, or refused by name (Phase 167.2.1.1.2)
 
 ### Added
-- An id that still fails after the strip stops `nondigit_bill_id` and names a value-free shape and length of the first such id (`first_nondigit_shape`, `first_nondigit_len`: digits read 9, letters A, other characters their Unicode category). The id itself is never recorded.
+- A forced rebuild of a Bybit-backed account with several keys rebuilds the whole account: every active key is read with its own venue reader, each exchange account is crawled and counted once whichever key names it, and the daily curve is the sum over the days every account shares (no zero fill). Deribit accounts count as $0. An unresolved account identity refuses before any venue call.
+- Migration `20261028120000`: new SECURITY DEFINER `replace_allocator_equity_snapshots_window` (service_role only) replaces only the rebuilt window of `allocator_equity_snapshots` in one transaction and records the window's first day as a `snapshot_rebuild_boundary` row; the earliest seam is kept. Manual rollback in `supabase/migrations/down/`.
+- The window is 89 days when the account holds an OKX key, otherwise 730. Stored days older than the window keep their values (D-01); the seam may step and its date is stored (D-03).
+- The dashboard payload carries the stored boundary as `snapshotRebuildBoundary` (no UI yet).
+
+### Changed
+- `replace_allocator_equity_snapshots` and `delete_allocator_api_key` (rebased on their latest definitions) also delete the boundary row, so a boundary never outlives a wiped series.
+- Refusals are a closed set of 15 named tokens. A stored day inside the window that the rebuild does not reproduce refuses that account and writes nothing (D-02, checked inside the replace transaction).
+
+### Fixed
+- Review fixes: a sibling account's transient or retryable fault ends the job transient with its venue text and a stamp on the job's own key; a failed MT5 account read leaves one terminal failure audit on the job's own key and keeps its own disposition; the boundary names the real seam.
 
 ### Tests
-- Tab-, apostrophe-, quote- and space-wrapped ids each calibrate exactly like the bare file. A scientific-notation id still stops and names its shape. Each guard has a recorded neuter.
+- 11-arm SQL gate for the window replace, worker to PostgREST to function on the local lane, rollback proven on the lane, raise-site equality for the 15 tokens, boundary reader pins (malformed JSONB, failed read, cross-tenant). FILES_FLOOR, ARMS_FLOOR and COMPARED_FLOOR raised; the sql-tests sentinel census and lint pins count the new gate.
 
 ### Notes
-- Orchestrator decision D-17, within founder D-16. Reviewed by gsd-code-reviewer and silent-failure-hunter, with no MEDIUM+ findings. After deploy, calibrate is re-run once.
+- Founder decisions D-01..D-03 (2026-10-22) and UPNLVENUES D-04/D-05. Three review rounds; two diagnostic MEDIUMs from round 3 are booked as `[167.2.1.1.2-ACCOUNT-CRAWL-DIAGNOSTICS]` in TODOS. migration-reviewer and rls-policy-auditor clean; security audit secured. Post-deploy, each of the 5 multi-key accounts is rebuilt or refused, recorded as counts and reasons only. Closes `[167.2.1.1-MULTIKEY-RECOMPUTE]`.
 
 ## [0.132.10.11] - 2026-10-22 — OKXHISTORY: an unchainable archive bill is named, and a zero-effect blank-currency bill no longer stops the chain (Phase 167.1.2.2.2.1, plan 20, D-16)
 
