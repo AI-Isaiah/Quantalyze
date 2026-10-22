@@ -13167,7 +13167,7 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 
 ### 167.2.1.1-MULTIKEY-RECOMPUTE — a forced reconstruct cannot re-anchor an allocator that has any other api_keys row (booked 2026-10-22, 167.2.1.1 plan 04, DATA INTEGRITY, FOUNDER DECISION)
 
-**Reading.** A forced reconstruct re-anchors a SOLE-key allocator through the atomic replace. With any other `api_keys` row of the same user the persist is first-writer-wins DO NOTHING (T-07-V5b), so rows a Bybit key wrote with the old anchor stay. Pinned by `test_forced_rebuild_cannot_overwrite_a_multi_key_allocators_rows`. The D-02 recompute records each such allocator as "recorded, not recomputed" (SC-3).
+**Reading.** A forced reconstruct re-anchors a SOLE-key allocator through the atomic replace. With any other `api_keys` row of the same user it now refuses with `multi_key` before the crawl and writes nothing (an unanswered sibling lookup refuses too, as `sibling_lookup_failed`). It used to run the first-writer-wins DO NOTHING persist (T-07-V5b), which cannot change an existing day but would insert this one key's value into any day the aggregate curve is missing. Pinned by `test_forced_rebuild_refuses_a_multi_key_allocator_and_adds_no_row`. The D-02 recompute records each such allocator as owned by ACCTREBUILD 167.2.1.1.2 (SC-3).
 
 **Owner / Trigger:** founder decision after the D-02 census. Trigger: the census counts at least one Bybit key whose allocator has another key row. Closed when the founder has decided per allocator (accept as recorded, or a scoped product path) and the decision is recorded.
 
