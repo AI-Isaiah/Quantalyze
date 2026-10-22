@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.132.10.6] - 2026-10-22 — roadmap: book ACCTREBUILD 167.2.1.1.2
+
+### Notes
+- Booked Phase 167.2.1.1.2 ACCTREBUILD, split from 167.2.1.1 UPNLVENUES D-04. Founder decisions, 2026-10-22: "Rebuild whole account (Recommended)", then "Add an OKX 90-day path" and "Split Phases if Necessary". UPNLVENUES ships its code fix, so every new day counts open-position profit; this phase owns rebuilding the past allocation history.
+- Evidence (PROD census, counts only): all 6 active Bybit keys sit on 5 users who hold other keys, and 4 of the 5 also hold OKX keys, whose history reaches 90 days against a 730-day rebuild window. Allocator snapshots are one aggregate row per allocator and day with a first-writer-wins multi-key persist, so a sole-key rebuild recomputes none of them.
+- Success needs a whole-account rebuild that replaces an allocator's history in one atomic call or refuses and writes nothing, a 90-day rebuild for accounts holding OKX keys that leaves older days as they are, a post-deploy record per account (counts and reasons only), and stored days the rebuild would drop left to a founder decision. No product code changed.
+
 ## [0.132.10.5] - 2026-10-22 — OKXHISTORY: the quarter-range stop names the dates it saw (Phase 167.1.2.2.2.1, plan 17, D-14)
 
 ### Fixed

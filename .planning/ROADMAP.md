@@ -176,6 +176,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [ ] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; data-integrity)
+- [ ] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; split from UPNLVENUES D-04; data-integrity)
 - [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
 - [ ] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after NAVMTM)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -5501,6 +5502,26 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all (INSERTED)
+
+**Goal:** ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all; accounts that also hold OKX keys get a 90-day rebuild.
+**Booked 2026-10-22 by founder decision:** split from 167.2.1.1 UPNLVENUES D-04 ("Rebuild whole account (Recommended)"), then "Add an OKX 90-day path" and "Split Phases if Necessary". UPNLVENUES ships its code fix (every new day correct); this phase owns the past days. Data integrity.
+**Evidence** (PROD census 2026-10-22, marker first, counts only):
+- all 6 active Bybit keys sit on 5 users who hold other keys; 4 of the 5 also hold OKX keys, whose history reaches 90 days while the rebuild window is 730 days; 1 holds Bybit, Deribit and MT5;
+- allocator snapshots are one aggregate row per (allocator_id, asof) and the multi-key persist is first-writer-wins (threat T-07-V5b), so the sole-key forced rebuild from UPNLVENUES recomputes none of them;
+- UPNLVENUES plans 07-11 (written and plan-checked on branch feat/167.2.1.1-upnlvenues at 77f5602fd, never executed) are this phase's starting design: whole-account crawl, one atomic replace through the existing `replace_allocator_equity_snapshots`, refusals in a closed set, no migration.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 167.2.1.1 (UPNLVENUES)
+**Success Criteria** (what must be TRUE):
+1. A forced rebuild of a multi-key account crawls every exchange account and replaces that allocator's history in one atomic call, or refuses with a named reason and writes nothing; a test goes RED on first-writer-wins.
+2. An account holding OKX keys is rebuilt over the last 90 days only; older stored days are left as they are, and the 90-day boundary is stated.
+3. Post-deploy, each of the 5 accounts is rebuilt or refused, recorded as counts and reasons only.
+4. Stored days the rebuild would drop are a founder decision, never a silent delete.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history (INSERTED)
 
 **Goal:** NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history.
@@ -6511,6 +6532,7 @@ kept verbatim.
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 167.2.1.1 UPNLVENUES | 0/? | Queued — booked 2026-10-22 (founder) | - |
+| 167.2.1.1.2 ACCTREBUILD | 0/? | Queued — booked 2026-10-22 (founder), split from UPNLVENUES D-04 | - |
 | 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
 | 167.2.1.1.1.1 MARKSOURCE | 0/? | Queued — booked 2026-10-22 (founder), after NAVMTM | - |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |

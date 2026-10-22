@@ -638,6 +638,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2.1.1 inserted after Phase 167.2.1: UPNLVENUES: Bybit/Binance equity read one way on every path; open-position profit neither double-counted nor dropped (founder 2026-10-22, "Book it.")
 - Phase 167.2.1.1.1 inserted after Phase 167.2.1.1: NAVMTM: every ingest stores marked NAV incl. unrealized profit plus the unrealized amount; curves use stored marks from storage start (founder 2026-10-22, "remember NAV + unrealized profit")
 - Phase 167.2.1.1.1.1 inserted after Phase 167.2.1.1.1: MARKSOURCE: one stated mark rule on every path; the two allocator equity curves agree while positions are open; last-bar uPnL spike gone (founder 2026-10-22, "Or several phases")
+- Phase 167.2.1.1.2 inserted after Phase 167.2.1.1: ACCTREBUILD: a Bybit-backed account's past allocation history is rebuilt whole-account or refused; OKX-holding accounts get a 90-day rebuild (founder 2026-10-22, split from UPNLVENUES D-04, "Add an OKX 90-day path", "Split Phases if Necessary")
 
 ### Decisions
 
