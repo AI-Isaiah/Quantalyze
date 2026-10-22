@@ -173,6 +173,16 @@ class TestQuarterRangeAssertion:
         assert err.stop_class == "quarter_range_mismatch"
         assert err.detail["observed_max_day"] == "2026-10-01"
 
+    def test_a_ts_beyond_the_calendar_is_still_a_named_stop_with_no_observed_days(self):
+        """A 16-digit (microsecond-unit) ts is accepted by the digit check but lies past the year
+        9999, so its day cannot be computed. It must stay the named stop, not an OverflowError."""
+        header, rows = _read_fixture("q3_like.csv")
+        rows[-1][header.index("ts")] = "1751328000000000"
+        err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
+        assert err.stop_class == "quarter_range_mismatch"
+        assert err.detail["observed_min_day"] is None and err.detail["observed_max_day"] is None
+        assert err.detail["rows_outside"] == 1
+
     def test_quarter_first_and_last_millisecond_are_inside(self):
         # q3_like.csv carries a row at 00:00:00.000 on 07-01 and one at 23:59:59.999 on 09-30.
         parsed = parse_archive_csv((FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q3")
