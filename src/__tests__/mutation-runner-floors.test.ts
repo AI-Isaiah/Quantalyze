@@ -741,7 +741,9 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 723 -> 738, the okx archive rebuild gate's 15 arms. MEASURED by ONE full runner run (`arms: 738/738/0`, `biting: 738`).
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 771 -> 776, the sameday_empty gate's five arms. MEASURED: this pin read `expected 776 to be 771`, and ONE full runner run printed `arms: 776/776/0`.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): 776 -> 777, the sameday_empty gate's sixth arm (`sameday-empty-sibling-older`). MEASURED: this pin read `expected 777 to be 776`, and ONE full runner run printed `arms: 777/777/0`.
-    expect(totalAnchored).toBe(777);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788, the replace_allocator_equity_snapshots_window gate's eleven arms. MEASURED: this pin read `expected 788 to be 777`, and ONE full runner run printed `arms: 788/788/0`.
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792, +4 arms (12-15) of test_replace_allocator_equity_snapshots_window.sql. MEASURED: this pin read `expected 792 to be 788`, and ONE full runner run printed `arms: 792/792/0`.
+    expect(totalAnchored).toBe(792);
   });
 });
 
@@ -1802,7 +1804,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72/72 -> 73/73, copied from the one full lane run (`scope: FULL 73/73 annotated files`; test_okx_archive_rebuild.sql arrived).
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77/77 -> 78/78, copied from the one full lane run (`scope: FULL 78/78 annotated files`; test_commit_scenario_batch_fingerprint_sameday_empty.sql arrived).
-    "scope: FULL 78/78 annotated files",
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/78 -> 79/79, copied from the same full lane run (`scope: FULL 79/79 annotated files`).
+    "scope: FULL 79/79 annotated files",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12): the runner prints exactly one
     // `scope-reason:` line directly after `scope:` on every corpus run, and the
     // count-recheck step MEASURE_FAILs without it.
@@ -1816,7 +1819,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 72 -> 75 target files, copied from the same full lane run.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73 target files, copied from the same full lane run.
-    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 4 for this run's 78 target file(s); lanes within a file run in order)",
+    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 4 for this run's 79 target file(s); lanes within a file run in order)",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -1852,7 +1855,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72/99 -> 73/100, the arrival of test_okx_archive_rebuild.sql, copied from one full lane run.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77/104 -> 78/105, copied from the same full lane run, the arrival of the sameday_empty gate file.
-    "coverage: files 78/105",
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/105 -> 79/106, copied from the same full lane run (`coverage: files 79/106`), the arrival of test_replace_allocator_equity_snapshots_window.sql.
+    "coverage: files 79/106",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -2149,9 +2153,11 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 756 -> 771 in arms/biting/lane-invocations, the leg counts 76 -> 77, coverage 76/103 -> 77/104 and the mean line (1.9s over 771), copied from ONE full lane run of the merged tree (`arms: 771/771/0`); every derived pin (the 770 row sum, the 772 splices) moved with it. The ARMS_FLOOR and FILES_FLOOR ratchets read 771 / 77 against 756 / 76 first.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 771 -> 776 in arms/biting/lane-invocations, the leg counts 77 -> 78, the NEW per-file row (test_commit_scenario_batch_fingerprint_sameday_empty.sql, biting 5) and the mean line (3.6s over 776), copied from ONE full lane run.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): 776 -> 777 in arms/biting/lane-invocations, the sameday_empty per-file row 5 -> 6 and the mean line (1.8s over 777), copied from ONE full lane run.
-    "arms: 777/777/0   (executed/annotated/waived)",
-    "biting: 777   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 777   (arm lanes actually spawned — tallied inside runLane, independent of the 777 the verdict loop counted; plus 78 baseline / 78 restore leg(s))",
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788 in arms/biting/lane-invocations, the leg counts 78 -> 79, the NEW per-file row (test_replace_allocator_equity_snapshots_window.sql, biting 11) and the mean line (1.5s over 788), copied from ONE full lane run (`arms: 788/788/0`).
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792 in arms/biting/lane-invocations, the window-replace row 11 -> 15 sections, the mean line (1.6s over 792), copied from ONE full lane run.
+    "arms: 792/792/0   (executed/annotated/waived)",
+    "biting: 792   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 792   (arm lanes actually spawned — tallied inside runLane, independent of the 792 the verdict loop counted; plus 79 baseline / 79 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2270,6 +2276,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): the owed-key gate row 13/17 -> 14/20 (+3 arms: O13, O13l, O13r), copied from ONE full lane run on the committed tree (exit 0, `No defects`).
     "  file test_refresh_fanout_owed_key_reconstruct.sql: sections 14 / judged 20 / annotated 20 / waived 0 / biting 20",
     "  file test_refresh_fanout_zero_snapshot_bootstrap.sql: sections 26 / judged 31 / annotated 31 / waived 0 / biting 31",
+    // ⭐ ADDED 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): the window-replace gate, copied from the full run's own per-file line.
+    "  file test_replace_allocator_equity_snapshots_window.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15",
     "  file test_resync_retry_single_job.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_retention_orphaned_running.sql: sections 27 / judged 27 / annotated 27 / waived 0 / biting 27",
     "  file test_scenario_downgrade_sweep.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
@@ -2324,7 +2332,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): mean 2.4s -> 2.8s over 723 -> 740, from the same full run.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): mean 2.4s -> 2.5s over 738, from the same full run.
-    "per-arm lane time: mean 1.8s over 777 arm run(s)",
+    "per-arm lane time: mean 1.6s over 792 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2359,7 +2367,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01): 740 -> 743, +3 biting arms (FL4 and FL5 in test_fan_in_lock_order_race.sql, OD7 in test_bridge_outcomes_decision_delete_cascade.sql). MEASURED: the corpus-derived pins (`totalAnchored`, `armsSeen`, the ARMS_FLOOR ratchet) read `expected 743 to be 740` before they were edited; the synthetic-log values here move with them.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 723 -> 738 lanes spawned in the count-recheck.
-    expect(r.out).toContain("777 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788 lanes spawned in the count-recheck.
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792.
+    expect(r.out).toContain("792 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2585,7 +2595,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 73/72 -> 74/73, one more real per-file row (test_okx_archive_rebuild.sql); offset +1 kept.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 74/73 -> 79/78, one more real per-file row (test_commit_scenario_batch_fingerprint_sameday_empty.sql) beside the aggregate's +1; offset +1 kept.
-    expect(r.out).toContain("printed 79 per-file row(s) but reported 78 annotated file(s)");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 79/78 -> 80/79, one more real per-file row (test_replace_allocator_equity_snapshots_window.sql) beside the aggregate's +1; offset +1 kept.
+    expect(r.out).toContain("printed 80 per-file row(s) but reported 79 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2658,8 +2669,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 722/723 -> 737/738, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 770/771 -> 775/776, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): 775/776 -> 776/777, both halves together, so the gap stays exactly one (offset -1 kept).
-    expect(r.out).toContain("rows sum to 776 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 777");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 776/777 -> 787/788, both halves together, so the gap stays exactly one (offset -1 kept).
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 787/788 -> 791/792, both halves together (offset -1 kept).
+    expect(r.out).toContain("rows sum to 791 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 792");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2701,7 +2714,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the lane-invocations severing replaces the 643 tally.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 777 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777/778 -> 788/789 in the synthetic splices below (each is the measured aggregate or one past it).
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788/789 -> 792/793 in the same splices.
+    const severed = GREEN_LOG.replace(/^lane-invocations: 792 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
@@ -2710,7 +2725,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 615 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the severed-tally message now reads executed=643 lane-invocations=0 biting=643.
-    expect(r.out).toContain("executed=777 lane-invocations=0 biting=777");
+    expect(r.out).toContain("executed=792 lane-invocations=0 biting=792");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2753,10 +2768,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): NEEDLE 556 and DELIBERATE MISMATCH 557, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): NEEDLE 574 and DELIBERATE MISMATCH 575, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the extra lane-invocation is 644 against 643 executed.
-    const extra = GREEN_LOG.replace(/^lane-invocations: 777 /m, "lane-invocations: 778 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 792 /m, "lane-invocations: 793 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=777 lane-invocations=778 biting=777");
+    expect(r.out).toContain("executed=792 lane-invocations=793 biting=792");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2777,7 +2792,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the garbled lane-invocations replace the 643 tally.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 777 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 792 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2826,7 +2841,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the waived-arm replacement now rewrites arms 643/643/0.
-    const waived = GREEN_LOG.replace(/^arms: 777\/777\/0 /m, `arms: 777/777/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 792\/792\/0 /m, `arms: 792/792/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2899,15 +2914,15 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 556 and MISMATCH 557 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 574 and MISMATCH 575 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the zero-executed replacement now rewrites arms 0/643/0.
-    const zero = GREEN_LOG.replace(/^arms: 777\/777\/0 /m, "arms: 0/777/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 792\/792\/0 /m, "arms: 0/792/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 615 -> 630, moved INDIVIDUALLY with the 616 -> 631 splice (offset +1 kept).
-    const spliced = GREEN_LOG.replace(/^biting: 777 /m, "biting: 778 ");
+    const spliced = GREEN_LOG.replace(/^biting: 792 /m, "biting: 793 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (778) exceeds executed (777)");
+    expect(s.out).toContain("biting (793) exceeds executed (792)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -2943,7 +2958,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 2/72 -> 2/73, agreeing with the coverage line below.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 2/77 -> 2/78, agreeing with the coverage line below.
-    "scope: SUBSET 2/78 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 2/78 -> 2/79, agreeing with the coverage line below.
+    "scope: SUBSET 2/79 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12), directly after `scope:` as the runner prints it.
     "scope-reason: 2 of 5 changed file(s) are gate files",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6.1 D-01, SS-5), directly after `scope-reason:` as the
@@ -2966,7 +2982,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72/99 -> 73/100, copied from the same full lane run, the arrival of test_okx_archive_rebuild.sql.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77/104 -> 78/105, copied from the same full lane run, the arrival of the sameday_empty gate file.
-    "coverage: files 78/105",
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/105 -> 79/106, copied from the same full lane run (`coverage: files 79/106`), the arrival of test_replace_allocator_equity_snapshots_window.sql.
+    "coverage: files 79/106",
     "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
     "lane-blocked: 2 file(s) probe pg_extension for pg_cron and are NOT yet annotated — d.sql e.sql (the lane hosts pg_cron since Phase 164.4.1, so a non-empty class here is STALE — see the lane-probe line)",
     "lane-probe: pg_cron absent — lane-blocked class is current",
@@ -3026,7 +3043,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 71/71 -> 72/72, copied from the one full lane run of the committed merge (`scope: FULL 72/72 annotated files`; the anon grants gate joined the annotated set).
       // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72/72 -> 73/73, copied from the one full lane run (`scope: FULL 73/73 annotated files`; test_okx_archive_rebuild.sql arrived).
       // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77/77 -> 78/78, copied from the one full lane run.
-      expect(r.out).toContain("scope: FULL 78/78 annotated files");
+      expect(r.out).toContain("scope: FULL 79/79 annotated files");
       expect(r.out).toContain("both floors and the waiver ceiling hold");
       // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
       // The right-hand side is ARMS_FLOOR as the step re-reads it from run.mjs.
@@ -3058,7 +3075,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01): 740 -> 743, +3 biting arms (FL4 and FL5 in test_fan_in_lock_order_race.sql, OD7 in test_bridge_outcomes_decision_delete_cascade.sql). MEASURED: the corpus-derived pins (`totalAnchored`, `armsSeen`, the ARMS_FLOOR ratchet) read `expected 743 to be 740` before they were edited; the synthetic-log values here move with them.
       // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
       // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 723 -> 738, the floor and the measured biting count together.
-      expect(r.out).toContain("biting arms 777 >= 777");
+      // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788, the floor and the measured biting count together.
+      // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792, the floor and the measured biting count together.
+      expect(r.out).toContain("biting arms 792 >= 792");
     }
   });
 
@@ -3117,7 +3136,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the lying-subset replacement now rewrites 2/67 to 3/67.
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): the NEEDLE follows SUBSET_LOG's scope line 2/68 -> 2/69; the lie stays one file more (3/69).
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): the NEEDLE follows SUBSET_LOG scope line 2/72 -> 2/73; the lie stays one file more (3/73).
-    const lying = SUBSET_LOG.replace("scope: SUBSET 2/78 ", "scope: SUBSET 3/78 ");
+    const lying = SUBSET_LOG.replace("scope: SUBSET 2/79 ", "scope: SUBSET 3/79 ");
     expect(lying).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(lying, PR);
     expect(r.status, r.out).toBe(1);
@@ -3201,7 +3220,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 71/71 -> 72/72, copied from the one full lane run of the committed merge (`scope: FULL 72/72 annotated files`; the anon grants gate joined the annotated set).
       // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72/72 -> 73/73, the arrival of test_okx_archive_rebuild.sql, copied from the one full lane run.
       // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77/77 -> 78/78, copied from the one full lane run.
-      "scope: FULL 78/78 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
+      // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/78 -> 79/79, copied from the one full lane run.
+      "scope: FULL 79/79 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
     );
     expect(mislabelled).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(mislabelled, PR);
@@ -3226,7 +3246,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 70 -> 71, from SUBSET_LOG's coverage line, which moved to 71/98 with the owed-key gate.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 71 -> 72, from SUBSET_LOG's coverage line, which moved to 72/99 with the anon grants gate.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73, from SUBSET_LOG's coverage line, which carries the arrival of test_okx_archive_rebuild.sql.
-    expect(r.out).toContain("printed 2 per-file row(s) but reported 78 annotated file(s)");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78 -> 79, from SUBSET_LOG's coverage line, which carries the arrival of test_replace_allocator_equity_snapshots_window.sql.
+    expect(r.out).toContain("printed 2 per-file row(s) but reported 79 annotated file(s)");
   });
 
   // ── Phase 164.9.6 / D-12: every run says WHY it took its scope ─────────
@@ -3331,11 +3352,11 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): the NEEDLE follows GREEN_LOG's scope line 55/55 -> 56/56, or both replaces below become no-ops.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): the NEEDLE follows GREEN_LOG's scope line 56/56 -> 58/58, or both replaces below become no-ops.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the doubled scope line now doubles 67/67.
-    const twice = GREEN_LOG.replace("scope: FULL 78/78 annotated files", "scope: FULL 78/78 annotated files\nscope: FULL 78/78 annotated files");
+    const twice = GREEN_LOG.replace("scope: FULL 79/79 annotated files", "scope: FULL 79/79 annotated files\nscope: FULL 79/79 annotated files");
     const t = runCountRecheck(twice, PUSH_MAIN);
     expect(t.status, t.out).toBe(1);
     expect(t.out).toContain("printed 2 'scope:' lines");
-    const diag = GREEN_LOG.replace("scope: FULL 78/78 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
+    const diag = GREEN_LOG.replace("scope: FULL 79/79 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
     const d = runCountRecheck(diag, PUSH_MAIN);
     expect(d.status, d.out).toBe(1);
     expect(d.out).toContain("is neither the FULL nor the SUBSET form");

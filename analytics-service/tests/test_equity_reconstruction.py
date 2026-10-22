@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import ccxt.async_support as ccxt
 import pytest
+from postgrest.exceptions import APIError
 
 # RED state on first run — this module does not exist yet. Task 2 creates it.
 from services.equity_reconstruction import (  # noqa: E402
@@ -364,6 +365,99 @@ class FakeSupabaseClient:
                     return _FakeSelectResult(data=inserted)
 
             return _ReplaceShim()
+
+        # Phase 167.2.1.1.2 ACCTREBUILD: a Python MIRROR of
+        # replace_allocator_equity_snapshots_window (migration 20261028120000). It proves
+        # only the worker's MAPPING (the arguments it sends and how it reads the answer or
+        # the refusal); the SQL gate supabase/tests/test_replace_allocator_equity_snapshots_window.sql
+        # proves the semantics. Same order as the SQL: validate the payload, find the stored
+        # days inside the window the payload does not reproduce and REFUSE before touching
+        # the store, else delete exactly the window, insert first-writer-wins with the
+        # depth and CL9 rules above, and keep or drop the seam row.
+        if name == "replace_allocator_equity_snapshots_window":
+            alloc = params.get("p_allocator_id")
+            payload_rows = params.get("p_rows")
+            depth = params.get("p_depth_months")
+            window_start = params.get("p_window_start")
+            snapshot_table = "allocator_equity_snapshots"
+
+            class _WindowShim:
+                def execute(inner_self):
+                    if (
+                        not alloc
+                        or not window_start
+                        or not isinstance(payload_rows, list)
+                        or not payload_rows
+                        or any(not r.get("asof") for r in payload_rows)
+                        or any(str(r["asof"]) < str(window_start) for r in payload_rows)
+                        or len({r["asof"] for r in payload_rows}) != len(payload_rows)
+                    ):
+                        raise APIError(
+                            {
+                                "code": "22023",
+                                "message": "replace_allocator_equity_snapshots_window: malformed input",
+                                "details": None,
+                                "hint": None,
+                            }
+                        )
+                    payload_asofs = {str(r["asof"]) for r in payload_rows}
+                    in_window = [
+                        key
+                        for key, row in store.items()
+                        if key[0] == snapshot_table
+                        and row.get("allocator_id") == alloc
+                        and str(row.get("asof")) >= str(window_start)
+                    ]
+                    unreproduced = [
+                        key for key in in_window if str(store[key].get("asof")) not in payload_asofs
+                    ]
+                    if unreproduced:
+                        raise APIError(
+                            {
+                                "code": "P0001",
+                                "message": "history_days_unreproduced",
+                                "details": str(len(unreproduced)),
+                                "hint": None,
+                            }
+                        )
+                    for key in in_window:
+                        del store[key]
+                    inserted = 0
+                    for r in payload_rows:
+                        key = (snapshot_table, (alloc, r["asof"]))
+                        if key in store:
+                            continue
+                        src = r.get("source", "exchange_primary")
+                        store[key] = {
+                            "allocator_id": alloc,
+                            "asof": r["asof"],
+                            "value_usd": r.get("value_usd"),
+                            "breakdown": r.get("breakdown"),
+                            "source": src,
+                            "history_depth_months": depth if src == "exchange_primary" else None,
+                            "pre_terminus_balance_unknown": bool(
+                                r.get("pre_terminus_balance_unknown", False)
+                            ),
+                        }
+                        inserted += 1
+                    boundary_key = ("allocator_equity_derived", (alloc, "snapshot_rebuild_boundary"))
+                    older_kept = any(
+                        key[0] == snapshot_table
+                        and store[key].get("allocator_id") == alloc
+                        and str(store[key].get("asof")) < str(window_start)
+                        for key in store
+                    )
+                    if older_kept:
+                        store[boundary_key] = {
+                            "allocator_id": alloc,
+                            "kind": "snapshot_rebuild_boundary",
+                            "payload": {"boundary_date": str(window_start)},
+                        }
+                    else:
+                        store.pop(boundary_key, None)
+                    return _FakeSelectResult(data=inserted)
+
+            return _WindowShim()
 
         class _RPCShim:
             def execute(inner_self):

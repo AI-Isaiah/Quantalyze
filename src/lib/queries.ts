@@ -90,6 +90,11 @@ import { safeFraction } from "./units";
 import { drainById } from "./drain-by-id";
 import { withPublishedOnly } from "./visibility";
 import {
+  parseSnapshotRebuildBoundary,
+  SNAPSHOT_REBUILD_BOUNDARY_KIND,
+  type SnapshotRebuildBoundary,
+} from "./snapshot-rebuild-boundary";
+import {
   PERCENTILE_METRICS,
   scoreAgainstPopulation,
   type CommaSpaceJoined,
@@ -3366,6 +3371,18 @@ export interface MyAllocationDashboardPayload {
    */
   unpricedNativeAccounts?: UnpricedNativeAccount[];
   /**
+   * Phase 167.2.1.1.2 plan 02 (D-03, AR-3). The date where a rebuilt window of
+   * `allocator_equity_snapshots` meets the older unchanged days, read from the
+   * owner's `allocator_equity_derived` row of kind `snapshot_rebuild_boundary`.
+   * The curve may jump by the open-position profit at that date; the jump is
+   * left in place and this field lets a chart or return name it. `null` means
+   * no row, or a malformed or unreadable one (logged, never a value). No UI
+   * reads it today (RESEARCH OQ-1): the curve on screen is the derived
+   * `equity_curve`, which does not carry the seam. Optional so legacy fixtures
+   * compile; the producer always sets it.
+   */
+  snapshotRebuildBoundary?: SnapshotRebuildBoundary | null;
+  /**
    * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
    * written, on `asof`, by a poll that could not read their open positions
    * (`fetchLatestHoldingsPerKey`'s `partialReads`). Bound to the poll that
@@ -5208,6 +5225,11 @@ export const getMyAllocationDashboard = cache(
       // curve to fall back to; a failed read renders the history as
       // rebuilding with reason `history_read_failed` (review C2 SFH-06).
       phase115DerivedRow,
+      // Phase 167.2.1.1.2 D-03 — the stored rebuild boundary (kind
+      // 'snapshot_rebuild_boundary'). Same USER client + owner RLS + explicit
+      // `.eq` posture as the line above. NON-FATAL, never assertOk'd: a failed
+      // read yields null and leaves every other dashboard field as it was.
+      snapshotRebuildBoundary,
       // Phase 151 / 151-02 (AUM-04) — the owner's OWN strategies and the
       // composite `strategy_keys` links, the two halves of the manager-role
       // discriminator (`deriveStrategyLinkedKeyIds`). Fetched in THIS batch
@@ -5404,6 +5426,37 @@ export const getMyAllocationDashboard = cache(
           }
         }
         return row;
+      })(),
+      // Phase 167.2.1.1.2 D-03 — the rebuild boundary the snapshot rebuild
+      // stored (AR-3). USER client + owner RLS + explicit `.eq("allocator_id",
+      // userId)`, in this batch so it costs no extra wave. NON-FATAL: a read
+      // failure is logged, reported to Sentry and yields null. The payload is
+      // worker/SQL-written JSONB, so it is parsed defensively.
+      (async (): Promise<SnapshotRebuildBoundary | null> => {
+        const res = await supabase
+          .from("allocator_equity_derived")
+          .select("payload")
+          .eq("allocator_id", userId)
+          .eq("kind", SNAPSHOT_REBUILD_BOUNDARY_KIND)
+          .maybeSingle();
+        if (res.error) {
+          console.error(
+            "[queries.getMyAllocationDashboard] allocator_equity_derived snapshot_rebuild_boundary read failed (naming no boundary):",
+            res.error,
+          );
+          scheduleDerivedRowCapture(
+            captureToSentry(res.error, {
+              tags: {
+                op: "getMyAllocationDashboard",
+                reason: "snapshot_rebuild_boundary_read_failed",
+              },
+              level: "warning",
+            }),
+          );
+          return null;
+        }
+        const row = (res.data ?? null) as { payload: unknown } | null;
+        return row === null ? null : parseSnapshotRebuildBoundary(row.payload);
       })(),
       // Phase 151 / AUM-04 — the owner's own strategies. `.eq("user_id",
       // userId)` (NOT allocator_id): on this table the owner column is
@@ -6044,6 +6097,7 @@ export const getMyAllocationDashboard = cache(
         mandateIsSet,
         ...phase07,
         btcBenchmarkPrices,
+        snapshotRebuildBoundary,
       };
     }
 
@@ -6541,6 +6595,7 @@ export const getMyAllocationDashboard = cache(
       mandateIsSet,
       ...phase07,
       btcBenchmarkPrices,
+      snapshotRebuildBoundary,
     };
   },
 );

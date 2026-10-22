@@ -392,6 +392,25 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-10-22: the Phase 167.2.1.1.2 ACCTREBUILD row below is the ONE row
+  // this list holds. It carries its own clearing condition (a regeneration
+  // taken after the apply) and is DELETED by the re-dump, never earlier.
+  {
+    name: "replace_allocator_equity_snapshots_window",
+    side: "snapshot-only",
+    capturedAt: "2026-10-22",
+    clearedBy:
+      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
+      "20261028120000_replace_allocator_equity_snapshots_window.sql has " +
+      "applied to PROD",
+    reason:
+      "Phase 167.2.1.1.2 ACCTREBUILD plan 01 ships " +
+      "public.replace_allocator_equity_snapshots_window() in a forward " +
+      "migration. supabase/schema/baseline.sql is a dated PROD dump that " +
+      "predates it, so the migration chain defines the function and the " +
+      "baseline does not. The function lands in PROD's catalogue at merge, " +
+      "via apply-test then the automatic PROD apply.",
+  },
   // ⭐ 2026-10-15: the Phase 164.9.3.1 FANINGRAPH row (`_fan_in_lock_rows`,
   // `snapshot-only`, captured 2026-10-15) was DELETED on the re-dump taken
   // after 20261024120000 applied to PROD (#1061), its own clearing condition.
