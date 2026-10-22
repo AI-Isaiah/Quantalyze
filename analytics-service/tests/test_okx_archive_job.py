@@ -29,6 +29,7 @@ import pytest
 import main_worker
 from services import job_worker, okx_archive_download, okx_archive_job
 from services.job_worker import DispatchOutcome, TIMEOUT_PER_KIND, dispatch
+from services.okx_archive_files import ArchiveParseError
 from services.okx_archive_download import LinkExpired
 
 KEY_ID = "11111111-1111-4111-8111-111111111111"
@@ -1698,6 +1699,87 @@ class TestQuarterRangeMismatchDiagnostic:
         for forbidden in ("600000014", "3428.45", "-3.30", *LINK_SECRETS):
             assert forbidden not in everything, f"leaked: {forbidden!r}"
         _assert_no_other_writes(world)
+
+    @pytest.mark.parametrize(
+        ("key", "poison"),
+        [
+            *[
+                (key, poison)
+                for key in ("range_start", "range_end_exclusive", "observed_min_day", "observed_max_day")
+                for poison in (
+                    _link("2026", "Q3"), "3428.45", "20260701", "2026-02-30", "2026-07-01\n",
+                    "\u0662\u0660\u0662\u0666-\u0660\u0667-\u0660\u0661", 20260701, None,
+                )
+            ],
+            *[("rows_outside", poison) for poison in (True, -1, "14", 1.5, None)],
+        ],
+        ids=lambda v: repr(v)[:24],
+    )
+    def test_a_value_that_is_not_a_calendar_day_or_a_count_reads_unreadable(
+        self, key: str, poison: object
+    ) -> None:
+        """The stop text is stored in `compute_jobs.last_error`, logged and shown in the admin
+        table, so it must never carry text that came from a file (the account-size and
+        bearer-link leak class, T-167.1.2.2.2.1-42). A date is echoed only when it is a real
+        ASCII calendar day and the count only when it is a non-negative int that is not a
+        bool; anything else reads `unreadable`, and the other four tokens stay intact."""
+        valid: dict[str, Any] = {
+            "range_start": "2026-07-01", "range_end_exclusive": "2026-10-01",
+            "observed_min_day": "2026-06-30", "observed_max_day": "2026-09-30", "rows_outside": 1,
+        }
+        stop = okx_archive_job._parse_stop(
+            ArchiveParseError("quarter_range_mismatch", {"requested": "2026 Q3", **valid, key: poison}), "2026-Q3"
+        )
+
+        expected_tokens = " ".join(
+            f"{k}={'unreadable' if k == key else v}" for k, v in valid.items()
+        )
+        assert stop.stop_class == "quarter_range_mismatch"
+        assert stop.detail == f"quarter=2026-Q3 parse=quarter_range_mismatch {expected_tokens}"
+        for secret in LINK_SECRETS:
+            assert secret not in stop.detail
+        if isinstance(poison, str) and poison:
+            assert poison not in stop.detail
+
+    def test_a_detail_without_its_keys_reads_unreadable_and_does_not_raise(self) -> None:
+        """A parser detail that drifts (a renamed or dropped key) must degrade to `unreadable`
+        and still stop the job with its class. A KeyError here would surface mid-calibration
+        as a crash instead of the permanent, named stop the founder reads."""
+        stop = okx_archive_job._parse_stop(ArchiveParseError("quarter_range_mismatch"), "2026-Q3")
+
+        assert stop.stop_class == "quarter_range_mismatch"
+        assert stop.detail == (
+            "quarter=2026-Q3 parse=quarter_range_mismatch range_start=unreadable "
+            "range_end_exclusive=unreadable observed_min_day=unreadable "
+            "observed_max_day=unreadable rows_outside=unreadable"
+        )
+
+    def test_an_empty_file_keeps_its_text_without_observed_tokens(self) -> None:
+        """`empty_file` maps to the same class but has no row, so it has no observed day. Its
+        text must stay as it was, so `parse=empty_file` is what tells it apart from a real
+        range mismatch when the founder reads `last_error`."""
+        stop = okx_archive_job._parse_stop(ArchiveParseError("empty_file", {"requested": "2026 Q3"}), "2026-Q3")
+
+        assert stop.stop_class == "quarter_range_mismatch"
+        assert stop.detail == "quarter=2026-Q3 parse=empty_file"
+
+    @pytest.mark.parametrize(
+        "label",
+        sorted(set(okx_archive_job._PARSE_STOP_CLASS) - {"quarter_range_mismatch"}),
+    )
+    def test_no_other_parse_label_echoes_its_detail(self, label: str) -> None:
+        """The tokens are keyed on the parser LABEL, not on which keys a detail happens to
+        carry. A label whose detail holds the same five keys, or any file-shaped text, must
+        still read exactly `quarter=<tag> parse=<label>`: widening the echo to other stops
+        would put file text into `last_error`."""
+        detail = {
+            "requested": "2026 Q3", "range_start": "2026-07-01", "range_end_exclusive": "2026-10-01",
+            "observed_min_day": "2026-06-30", "observed_max_day": "2026-09-30", "rows_outside": 1,
+            "link": _link("2026", "Q3"),
+        }
+        stop = okx_archive_job._parse_stop(ArchiveParseError(label, detail), "2026-Q3")
+
+        assert stop.detail == f"quarter=2026-Q3 parse={label}"
 
 
 # ---------------------------------------------------------------------------
