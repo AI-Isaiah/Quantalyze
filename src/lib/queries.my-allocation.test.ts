@@ -3612,6 +3612,68 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
       expect(result.equityHistoryState).toBe("ready");
       expect(result.equityDailyReturns).toHaveLength(3);
     });
+
+    it("a failed boundary read is non-fatal, logged and reported", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [v2Row(), boundaryRow()];
+      const failure = { message: "connection reset (test)" };
+      state.tableErrors["allocator_equity_derived"] = failure;
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const sentry = await import("./sentry-capture");
+      const captureSpy = vi
+        .spyOn(sentry, "captureToSentry")
+        .mockImplementation(async () => {});
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      // The call resolved (non-fatal) and the boundary names nothing.
+      expect(result.snapshotRebuildBoundary).toBeNull();
+      expect(captureSpy).toHaveBeenCalledWith(
+        failure,
+        expect.objectContaining({
+          tags: expect.objectContaining({
+            op: "getMyAllocationDashboard",
+            reason: "snapshot_rebuild_boundary_read_failed",
+          }),
+        }),
+      );
+      const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("snapshot_rebuild_boundary read failed");
+      expect(logged).not.toContain("legacy");
+      errSpy.mockRestore();
+      captureSpy.mockRestore();
+    });
+
+    it("another allocator's boundary row is never read", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [
+        v2Row(),
+        boundaryRow({ boundary_date: "2026-07-24" }, "user-2"),
+      ];
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.snapshotRebuildBoundary).toBeNull();
+    });
+
+    it("a malformed stored payload names no boundary and leaves the curve alone", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [v2Row(), boundaryRow({ boundary_date: "2026-02-30" })];
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.snapshotRebuildBoundary).toBeNull();
+      expect(result.equityHistoryState).toBe("ready");
+      expect(result.equityDailyReturns).toHaveLength(3);
+      warnSpy.mockRestore();
+    });
   });
 });
 
