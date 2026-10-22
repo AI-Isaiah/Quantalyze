@@ -909,6 +909,21 @@ class TestBlankCcyZeroEffectSkip:
             detail["blank_ccy_skipped"],
         ) == ("unchainable_row", 1, 0, 1, 0)
 
+    @pytest.mark.parametrize("ccy", ["", "USDT"])
+    def test_a_bill_id_with_a_non_ascii_digit_stops_as_non_digit_instead_of_crashing(self, ccy):
+        """D-16 round 1. ``"2005\u00b2".isdigit()`` is true but ``int()`` rejects it, so a
+        zero-effect blank-ccy bill (or a USDT one) with such a billId used to reach the sort and
+        raise a bare ``ValueError`` carrying the billId. It is a bill the chain cannot order and
+        stops by name, like any other non-digit billId."""
+        header, rows = _interleaved_q3(_blank("2005\u00b2", "2026-07-03 10:00:00", ccy=ccy))
+        err = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset())
+        detail = err.detail
+        assert err.stop_class == "archive_incomplete"
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["blank_ccy_skipped"],
+        ) == ("unchainable_row", 1, 0, 1, 0)
+
     def test_a_skipped_row_cannot_hide_a_missing_bill(self):
         """D-16. The skipped bill sits where USDT bill 2010 was. The chain still breaks at the
         next USDT bill, so the missing bill is found whether or not the blank line is skipped."""

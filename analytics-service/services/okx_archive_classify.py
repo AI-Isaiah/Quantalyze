@@ -142,7 +142,8 @@ class ArchiveAggregate:
 
 
 def _bill_order_key(row: ArchiveRow) -> tuple[bool, int, str]:
-    return (not row.bill_id.isdigit(), int(row.bill_id) if row.bill_id.isdigit() else 0, row.bill_id)
+    digits = row.bill_id.isascii() and row.bill_id.isdigit()
+    return (not digits, int(row.bill_id) if digits else 0, row.bill_id)
 
 
 def _adjacent_runs(files: Sequence[ArchiveFile]) -> list[list[int]]:
@@ -225,7 +226,7 @@ def verify_bal_chain(
         blank = nondigit = 0
         for row in file.rows:
             row_blank = not row.ccy
-            row_nondigit = not row.bill_id.isdigit()
+            row_nondigit = not (row.bill_id.isascii() and row.bill_id.isdigit())
             # D-16: zero balance effect is the negation of ``aggregate_archive``'s ``nonzero``.
             zero_effect = row.bal_chg == 0 and row.pnl == 0 and row.fee == 0
             if row_nondigit or (row_blank and not zero_effect):

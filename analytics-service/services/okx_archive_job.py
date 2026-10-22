@@ -1985,7 +1985,11 @@ def _balance_vs_nav(files: list[ArchiveFile], live: _LiveReference) -> dict[str,
         for row in file.rows:
             if row.day > prev or row.ccy not in ARCHIVE_USD_FAMILY:
                 continue
-            order = (row.ts_ms, int(row.bill_id) if row.bill_id.isdigit() else 0, row.bill_id)
+            order = (
+                row.ts_ms,
+                int(row.bill_id) if row.bill_id.isascii() and row.bill_id.isdigit() else 0,
+                row.bill_id,
+            )
             kept = latest.get(row.ccy)
             if kept is None or order > kept[0]:
                 latest[row.ccy] = (order, row.bal)
