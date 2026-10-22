@@ -1580,6 +1580,17 @@ PARSE_CASES: list[tuple[str, Callable[[], bytes], str, str]] = [
 ]
 
 
+#: What the job appends after `parse=<label>` for the labels that carry evidence (D-14). Independent
+#: literals from the fixtures: the whole q2 fixture, served for a Q3 request, holds 14 rows, all outside
+#: the quarter, from 2026-04-01 to 2026-06-30. A label absent here appends nothing.
+PARSE_DETAIL_SUFFIX: dict[str, str] = {
+    "quarter_range_mismatch": (
+        " range_start=2026-07-01 range_end_exclusive=2026-10-01"
+        " observed_min_day=2026-04-01 observed_max_day=2026-06-30 rows_outside=14"
+    ),
+}
+
+
 #: The two classification stops whose result block carries the file's census (counts only):
 #: the founder reads the per-currency / per-subType picture there to decide what to do.
 #: Independent literals: each is `Q3_CENSUS` with the one row the case edits moved by hand
@@ -1615,6 +1626,7 @@ class TestIngestStops:
         outcome = await dispatch(_calibrate())
 
         result = _assert_stopped(world, outcome, stop_class, detail=f"quarter=2026-Q3 parse={label}"
+                                 f"{PARSE_DETAIL_SUFFIX.get(label, '')}"
                                  if label not in ("non_usd_ccy", "unknown_subtype_nonzero")
                                  else f"parse={label}")
         quarter = result["quarters"][0]

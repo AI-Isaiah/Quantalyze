@@ -1137,7 +1137,9 @@ async def _defer_job(
 #: Parse and classification stops mapped into the closed ``STOP_CLASSES``. The first four
 #: and the three classification stops keep their names; the parser's remaining stops have
 #: no class of their own in the contract, so they map to the nearest one by WHAT FAILED, and
-#: the original label always rides in ``last_error`` (``parse=<label>``).
+#: the original label always rides in ``last_error`` (``parse=<label>``). The range-mismatch
+#: label also carries the requested range, the observed UTC days and the rows outside (D-14),
+#: with ``unreadable`` for any value the job will not echo.
 _PARSE_STOP_CLASS: Final[Mapping[str, str]] = {
     "header_drift": "header_drift",
     "quarter_range_mismatch": "quarter_range_mismatch",
@@ -1160,8 +1162,32 @@ _PARSE_STOP_CLASS: Final[Mapping[str, str]] = {
 }
 
 
+#: The parser's own detail keys for a range mismatch, in the order they are echoed (D-14).
+_RANGE_DAY_KEYS: Final[tuple[str, ...]] = (
+    "range_start", "range_end_exclusive", "observed_min_day", "observed_max_day",
+)
+
+
+def _quarter_range_tokens(detail: Mapping[str, Any]) -> str:
+    """The five ``key=value`` tokens of a ``quarter_range_mismatch`` stop: the requested range
+    (half-open, as the parser compared it), the file's earliest and latest UTC day, and the
+    count of rows outside. Nothing from the file is echoed as text: a day must pass
+    ``_iso_day``, the count must be a non-negative int that is not a bool, and anything else
+    (or a missing key) reads ``unreadable``. This text is stored in ``last_error``, logged and
+    shown in the admin table."""
+    tokens = [f"{key}={_iso_day(detail.get(key)) or 'unreadable'}" for key in _RANGE_DAY_KEYS]
+    outside = detail.get("rows_outside")
+    ok = isinstance(outside, int) and not isinstance(outside, bool) and outside >= 0
+    tokens.append(f"rows_outside={outside if ok else 'unreadable'}")
+    return " ".join(tokens)
+
+
 def _parse_stop(exc: ArchiveParseError, tag: str | None = None) -> _Stop:
     detail = f"parse={exc.stop_class}" if tag is None else f"quarter={tag} parse={exc.stop_class}"
+    # Keyed on the parser LABEL, not the mapped class: ``empty_file`` also maps to
+    # ``quarter_range_mismatch`` but has no observed day, so its text stays as it was.
+    if exc.stop_class == "quarter_range_mismatch":
+        detail = f"{detail} {_quarter_range_tokens(exc.detail)}"
     return _Stop(_PARSE_STOP_CLASS[exc.stop_class], detail)
 
 
