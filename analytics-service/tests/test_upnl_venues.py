@@ -265,3 +265,175 @@ async def test_reconstruct_bybit_anchor_is_wallet_plus_position_upnl() -> None:
         f"anchor must add the position uPnL to reach the coin equity {expected}; got {anchor}."
     )
     assert partial == set()
+
+
+# ---------------------------------------------------------------------------
+# Derive anchor: realized basis, structural 0.0 wedge
+# ---------------------------------------------------------------------------
+
+
+async def test_derive_bybit_anchor_is_wallet_balance_with_a_structural_zero_wedge() -> None:
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    coin = _coin_row(BYBIT_UNIFIED_WALLET_BALANCE, "USDT")
+    wallet = float(coin["walletBalance"])
+    parsed = await real_bybit_parse_balance(BYBIT_UNIFIED_WALLET_BALANCE)
+
+    equity, balance_error, wedge, unreadable = await fetch_account_equity_and_upnl_usd(
+        _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit"
+    )
+
+    assert (equity, balance_error, wedge, unreadable) == (wallet, False, 0.0, False), (
+        f"ccxt {ccxt.__version__}: the Bybit derive anchor is the realized-basis "
+        f"walletBalance {wallet} with a structurally 0.0 wedge by design until "
+        "Phase 167.2.1.1.1 NAVMTM. A non-zero wedge here is the double count."
+    )
+    assert equity is not None and equity - wedge == wallet, (
+        "nav_twr's terminal_nav = anchor - wedge must stay realized-basis"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Holdings poll: spot row = walletBalance, derivative row carries the uPnL
+# ---------------------------------------------------------------------------
+
+
+async def test_holdings_bybit_spot_row_is_wallet_balance_and_derivative_row_carries_upnl() -> None:
+    from services.allocator_positions import fetch_allocator_holdings
+
+    coin = _coin_row(BYBIT_UNIFIED_WALLET_BALANCE, "USDT")
+    wallet = float(coin["walletBalance"])
+    equity = float(coin["equity"])
+    parsed = await real_bybit_parse_balance(BYBIT_UNIFIED_WALLET_BALANCE)
+
+    # No monkeypatch of fetch_positions: the derivative rows go through the REAL
+    # positions seam (the ccxt dicts carry markPrice, entryPrice and unrealizedPnl).
+    rows, warning = await fetch_allocator_holdings(
+        "bybit", _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS)
+    )
+
+    assert warning is None
+    spot_rows = [r for r in rows if r["holding_type"] == "spot"]
+    deriv_rows = [r for r in rows if r["holding_type"] == "derivative"]
+    assert len(spot_rows) == 1 and len(deriv_rows) == 1, f"rows: {rows!r}"
+    spot, deriv = spot_rows[0], deriv_rows[0]
+    assert spot["symbol"] == "USDT"
+    assert spot["quantity"] == pytest.approx(wallet), (
+        f"ccxt {ccxt.__version__}: the Bybit USDT spot row must carry the coin "
+        f"walletBalance {wallet}, not the equity {equity}"
+    )
+    assert spot["value_usd"] == pytest.approx(wallet)
+    assert deriv["unrealized_pnl_usd"] == pytest.approx(250.5)  # (60000 - 57495) x 0.1
+    assert spot["value_usd"] + deriv["unrealized_pnl_usd"] == pytest.approx(equity, abs=1e-9), (
+        "AUM = spot value + derivative uPnL must equal the coin equity"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SC-2 as ONE invariant: every path reads `total` the same way
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_path_bybit_reconstruct_equals_derive_plus_upnl_equals_holdings() -> None:
+    from services.allocator_positions import fetch_allocator_holdings
+    from services.equity_reconstruction import _fetch_current_equity
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    coin = _coin_row(BYBIT_UNIFIED_WALLET_BALANCE, "USDT")
+    # E: the oracle, read from the payload. U: the fixture positions' own uPnL.
+    expected_equity = float(coin["equity"])
+    position_upnl = sum(float(p["unrealizedPnl"]) for p in BYBIT_LINEAR_POSITIONS)
+
+    parsed = await real_bybit_parse_balance(BYBIT_UNIFIED_WALLET_BALANCE)
+    # A separate fake per path, each built from deep copies, so no path can
+    # mutate another's input.
+    reconstruct, _ = await _fetch_current_equity(_fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit")
+    derive, _err, wedge, _unreadable = await fetch_account_equity_and_upnl_usd(
+        _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit"
+    )
+    rows, warning = await fetch_allocator_holdings("bybit", _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS))
+    assert warning is None
+    holdings = sum(r["value_usd"] for r in rows if r["holding_type"] == "spot") + sum(
+        r["unrealized_pnl_usd"] for r in rows if r["holding_type"] == "derivative"
+    )
+
+    assert reconstruct is not None and derive is not None
+    detail = (
+        f"reconstruct R={reconstruct}, derive D={derive}, open uPnL U={position_upnl}, "
+        f"holdings H={holdings}, coin equity E={expected_equity}, wedge={wedge}; "
+        f"ccxt {ccxt.__version__}"
+    )
+    assert wedge == 0.0, f"the derive wedge must stay structurally 0.0: {detail}"
+    assert reconstruct == pytest.approx(derive + position_upnl, abs=1e-9), (
+        f"SC-2: every path reads `total` the same way, as the wallet figure; the "
+        f"mark-to-market reconstruct and the realized derive differ by exactly the "
+        f"open uPnL: {detail}"
+    )
+    assert reconstruct == pytest.approx(holdings, abs=1e-9), f"SC-2: reconstruct != holdings AUM: {detail}"
+    assert reconstruct == pytest.approx(expected_equity, abs=1e-9), (
+        f"SC-2: reconstruct != the payload's coin equity: {detail}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Coin coverage (booked gap, not a uPnL question)
+# ---------------------------------------------------------------------------
+
+
+async def test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin() -> None:
+    from services.equity_reconstruction import _fetch_current_equity
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    payload = bybit_wallet_balance(
+        "UNIFIED",
+        [bybit_coin("USDT", "1000", "250.5"), bybit_coin("USDC", "200", "0")],
+    )
+    parsed = await real_bybit_parse_balance(payload)
+
+    derive, _err, _wedge, _unreadable = await fetch_account_equity_and_upnl_usd(
+        _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit"
+    )
+    reconstruct, _ = await _fetch_current_equity(_fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit")
+
+    note = (
+        f"ccxt {ccxt.__version__}: pins the booked gap, TODOS [167.2.1.1-DERIVE-USDT-ONLY-ANCHOR]; "
+        "update this test and the entry together if the derive starts reading other coins"
+    )
+    assert derive == 1000.0, f"derive reads the USDT coin only (1000), got {derive}; {note}"
+    # 1000 USDT + 200 USDC (a stablecoin, priced at 1) + 250.5 open uPnL
+    assert reconstruct == pytest.approx(1450.5, abs=1e-9), (
+        f"reconstruct sums every stable coin plus the position uPnL, got {reconstruct}; {note}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Positions read failure (decision PD-B, default path)
+# ---------------------------------------------------------------------------
+
+
+async def test_reconstruct_bybit_positions_read_failure_anchors_at_wallet_and_logs_the_drop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from services.equity_reconstruction import _fetch_current_equity
+
+    parsed = await real_bybit_parse_balance(BYBIT_UNIFIED_WALLET_BALANCE)
+    failing = ccxt.NetworkError(
+        "bybit GET https://api.bybit.com/v5/position/list?category=linear&signature=deadbeef"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        anchor, partial = await _fetch_current_equity(_fake_bybit(parsed, failing), "bybit")
+
+    note = (
+        "default (unforced) path: the anchor ships at the wallet figure by decision, "
+        "owned by TODOS [167.2.1.1-ANCHOR-POSITIONS-READ-FAILURE]"
+    )
+    assert (anchor, partial) == (1000.0, set()), f"{note}; got {(anchor, partial)}"
+    drops = [r for r in caplog.records if "fetch_positions failed" in r.getMessage()]
+    assert len(drops) == 1, f"exactly one WARNING must record the dropped uPnL; {note}"
+    message = drops[0].getMessage()
+    assert drops[0].levelno == logging.WARNING
+    assert "venue=bybit" in message and "exc_class=NetworkError" in message, message
+    assert "deadbeef" not in caplog.text, (
+        "the request signature must not reach the log (ccxt error text can carry one)"
+    )
