@@ -221,10 +221,14 @@ def verify_bal_chain(
     # first and last UTC day, so the stop names what stopped it. Counts and days only.
     tally: list[dict[str, Any]] = []
     skipped = 0
+    seen: set[str] = set()
     for file in files:
         stopping_days: list[str] = []
         blank = nondigit = 0
         for row in file.rows:
+            if row.bill_id in seen:  # a bill in two files counts once, first file wins
+                continue
+            seen.add(row.bill_id)
             row_blank = not row.ccy
             row_nondigit = not (row.bill_id.isascii() and row.bill_id.isdigit())
             # D-16: zero balance effect is the negation of ``aggregate_archive``'s ``nonzero``.

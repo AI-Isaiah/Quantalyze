@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import dataclasses
 import io
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -933,6 +934,21 @@ class TestBlankCcyZeroEffectSkip:
         assert err.detail["reason"] == "bal_chain_break"
         assert err.detail["ccys"]["USDT"]["first_break_day"] == "2026-08-10"
         assert err.detail["blank_ccy_skipped"] == 1
+
+
+    def test_a_bill_present_in_two_adjacent_files_is_counted_once(self):
+        """D-16 round 1. The census and the chain's ``unique`` dict count a billId once, first
+        file wins, so the skip tally must too: the runbook reads ``blank_ccy_skipped`` against
+        the ``(blank)`` census count. The same zero-effect blank-ccy bill sits in the Q2 file and
+        in the Q3 file here."""
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        blank = _blank("150", "2026-05-01 10:00:00")
+        q2 = _parsed(h2, [*r2, _new_row(h2, **blank)], "Q2")
+        q3 = _parsed(h3, r3, "Q3")
+        q3 = dataclasses.replace(q3, rows=(*q3.rows, *(row for row in q2.rows if row.bill_id == "150")))
+        reading = _chain([q2, q3])
+        assert reading["blank_ccy_skipped"] == 1
+        assert reading["blank_ccy_skipped"] == aggregate_archive([q2, q3], None).census["by_ccy"]["(blank)"]
 
 
 # D-15: OKX cuts a quarter file at 00:00 UTC+8 (16:00 UTC the day before), so a real Q2 file
