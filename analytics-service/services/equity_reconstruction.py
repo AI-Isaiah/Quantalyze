@@ -1516,6 +1516,21 @@ async def _allocator_has_other_api_keys(
     return SiblingCheckResult(has_siblings=int(count) > 0)
 
 
+async def _allocator_snapshot_asofs(supabase: Any, allocator_id: str) -> set[str]:
+    """Every ``asof`` stored for this allocator, oldest first. A failed read bubbles."""
+    def _sel() -> Any:
+        return (
+            supabase.table("allocator_equity_snapshots")
+            .select("asof")
+            .eq("allocator_id", allocator_id)
+            .order("asof")
+            .execute()
+        )
+
+    res = await db_execute(_sel)
+    return {str(r["asof"]) for r in (getattr(res, "data", None) or [])}
+
+
 async def _purge_allocator_equity_snapshots(
     supabase: Any, allocator_id: str,
 ) -> int:
@@ -1803,6 +1818,7 @@ FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
         "multi_key",
         "sibling_lookup_failed",
         "replay_empty",
+        "history_outside_replay",
         "anchor_unreadable",
         "anchor_skipped_okx_terminus",
         "anchor_skipped_partial_ticker",
@@ -4081,10 +4097,19 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 rows, hit_terminus, telemetry = await asyncio.wait_for(
                     _crawl, timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
                 )
-            if forced and not rows:
-                # Review SFH-1: an empty forced replay writes nothing and must not end
-                # DONE (the empty-replace guard would otherwise mark the key complete).
-                raise ForcedRebuildRefusedError("replay_empty")
+            if forced:
+                if not rows:
+                    # Review SFH-1: an empty forced replay writes nothing and must not
+                    # end DONE (the empty-replace guard would otherwise mark the key
+                    # complete).
+                    raise ForcedRebuildRefusedError("replay_empty")
+                # Review WR-01: the sole-key replace DELETEs every stored row, so refuse
+                # when a stored day (older than the replay, or one it does not emit)
+                # would be lost. Dropping stored history is a founder decision.
+                if not await _allocator_snapshot_asofs(
+                    ctx.supabase, allocator_id,
+                ) <= {r["asof"] for r in rows}:
+                    raise ForcedRebuildRefusedError("history_outside_replay")
         except ForcedRebuildRefusedError as exc:
             # Phase 167.2.1.1 PD-H / PD-I: the forced rebuild was refused (a multi-key
             # allocator, or a curve that could not be anchored to today's venue equity

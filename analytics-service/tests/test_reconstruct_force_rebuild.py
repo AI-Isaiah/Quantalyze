@@ -318,6 +318,7 @@ async def _assert_forced_rebuild_refused(
     sibling: bool = False,
     fail_sibling_lookup: bool = False,
     seeded_days: int = SENTINEL_ROWS,
+    extra_asofs: tuple[str, ...] = (),
 ) -> None:
     """A marked Bybit key with ``seeded_days`` sentinel rows (sole-key unless ``sibling``), a
     forced job, ``exchange``: the job ends FAILED/permanent naming ``reason``, and NOTHING
@@ -330,6 +331,12 @@ async def _assert_forced_rebuild_refused(
         _seed_key(fake, API_KEY_ID_2, marker=MARKER, exchange="okx")
     fake.fail_sibling_lookup = fail_sibling_lookup
     _seed_sentinel_rows(fake, seeded_days)
+    for asof in extra_asofs:
+        fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof, "value_usd": SENTINEL_VALUE,
+            "breakdown": {"ETH": SENTINEL_VALUE}, "source": "exchange_primary",
+            "history_depth_months": 24, "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
     audit = _install_fake_audit(monkeypatch)
     _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
     _freeze_now(monkeypatch)
@@ -346,7 +353,7 @@ async def _assert_forced_rebuild_refused(
     assert LEAKED_SIGNATURE not in (result.error_message or ""), result.error_message
 
     rows = fake.rows_for("allocator_equity_snapshots")
-    assert len(rows) == seeded_days and all(
+    assert len(rows) == seeded_days + len(extra_asofs) and all(
         r.get("value_usd") == SENTINEL_VALUE for r in rows
     ), (
         "a refused forced rebuild changed the stored curve: "
@@ -460,6 +467,47 @@ async def test_forced_rebuild_refuses_an_empty_replay(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_days_back",
+    [60, -3],
+    ids=["older-than-the-replays-first-row", "day-the-replay-does-not-emit"],
+)
+async def test_forced_rebuild_refuses_when_stored_history_would_be_dropped(
+    monkeypatch: pytest.MonkeyPatch, extra_days_back: int
+) -> None:
+    """Review WR-01. The sole-key replace DELETEs every stored row and inserts only the
+    replay. The replay here covers the ten sentinel days (the first trade is nine days
+    back); one extra stored day is either 60 days older than the replay's first row or a day
+    after the replay's last. Each would be silently deleted, so the job must refuse and
+    leave all eleven rows. RED on a handler that goes straight to the replace."""
+    extra = (END_DATE - timedelta(days=extra_days_back)).date().isoformat()
+    exchange = await _bybit_exchange()
+    await _assert_forced_rebuild_refused(
+        monkeypatch, exchange, "history_outside_replay", extra_asofs=(extra,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_replaces_stored_rows_the_replay_reproduces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-01, the other side: when every stored day is one the replay emits, the
+    sole-key forced rebuild still replaces the curve (no sentinel survives)."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    _seed_sentinel_rows(fake)
+    _install_fake_audit(monkeypatch)
+    _install_fake_preflight(monkeypatch, "bybit", fake, await _bybit_exchange())
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert len(rows) == SENTINEL_ROWS and all(r["value_usd"] != SENTINEL_VALUE for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_a_completed_forced_rebuild_says_so_in_its_completion_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -489,6 +537,7 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
             "multi_key",
             "sibling_lookup_failed",
             "replay_empty",
+            "history_outside_replay",
             "anchor_unreadable",
             "anchor_skipped_okx_terminus",
             "anchor_skipped_partial_ticker",
