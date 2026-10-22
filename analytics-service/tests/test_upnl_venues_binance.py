@@ -45,7 +45,7 @@ import pytest
 
 from services.allocator_positions import fetch_allocator_holdings
 from services.equity_reconstruction import _fetch_current_equity
-from services.exchange import fetch_account_equity_and_upnl_usd
+from services.exchange import create_exchange, fetch_account_equity_and_upnl_usd
 
 # -- ccxt-documented payloads (response-shape comments inside ``binance.fetch_balance``).
 # Values are chosen so the uPnL-inclusive and uPnL-exclusive readings differ.
@@ -276,3 +276,48 @@ async def test_cross_path_binance_reconstruct_equals_derive_plus_upnl_equals_hol
     assert reconstruct == pytest.approx(holdings, abs=1e-9), msg
     assert reconstruct == pytest.approx(oracle, abs=1e-9), msg
     assert wedge == 0.0, msg
+
+
+# -- trip-wire: the paths are consistent ONLY while Binance is read as spot ----------
+
+
+async def test_binance_tripwire_repo_reads_the_spot_wallet_only() -> None:
+    # (a) create_exchange keeps ccxt's default type 'spot' (no network: construction only).
+    client = create_exchange("binance", "k", "s")
+    try:
+        default_type = client.options["defaultType"]
+    finally:
+        await client.close()  # type: ignore[no-untyped-call]
+    guidance = (
+        "If Binance is ever read with a futures type, its fetch_balance() total "
+        "already includes uPnL and the reconstruct additive path double counts. "
+        "Change the _UNIFIED_MARGIN_VENUES skip set and the derive wedge together "
+        "and close TODOS [167.2.1.1-BINANCE-FUTURES-WALLET-UNREAD]."
+    )
+    assert default_type == "spot", (
+        f"ccxt {ccxt.__version__}: binance defaultType is {default_type!r}, not 'spot'. "
+        + guidance
+    )
+
+    # (b) both anchors call fetch_balance() with NO arguments (no type override).
+    balance = await real_binance_parse_balance(BINANCE_SPOT_ACCOUNT, "spot")
+    derive_exchange = _fake_exchange(balance, [])
+    await fetch_account_equity_and_upnl_usd(derive_exchange, "binance")
+    reconstruct_exchange = _fake_exchange(balance, BINANCE_LINEAR_POSITIONS)
+    await _fetch_current_equity(reconstruct_exchange, "binance")
+    for path, ex in (("derive", derive_exchange), ("reconstruct", reconstruct_exchange)):
+        assert ex.fetch_balance.await_args_list == [((), {})], (
+            f"{path} anchor must await fetch_balance() with no arguments, got "
+            f"{ex.fetch_balance.await_args_list}. " + guidance
+        )
+
+    # (c) a futures-type total exceeds the spot-style wallet by exactly unrealizedProfit,
+    # which is why a futures-type read would double count under the additive path.
+    usdm = await real_binance_parse_balance(BINANCE_USDM_ACCOUNT, "linear")
+    asset = BINANCE_USDM_ACCOUNT["assets"][0]
+    assert usdm["total"]["USDT"] - float(asset["walletBalance"]) == pytest.approx(
+        float(asset["unrealizedProfit"]), abs=1e-9
+    ), (
+        f"ccxt {ccxt.__version__}: USD-M total must exceed the wallet figure by "
+        f"unrealizedProfit. " + guidance
+    )
