@@ -5260,7 +5260,7 @@ Plans:
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-15, "HK bounds, edge days whole-or-missing (Recommended)"):** the D-14 re-run showed the Q2 file starts 2026-03-31 (UTC): OKX cuts quarters on UTC+8. Files are accepted on UTC+8 bounds, daily totals stay on UTC days, and a quarter-edge UTC day counts only when both neighbouring files were read, otherwise it stays missing and named. Then calibrate is re-run.
 
-**Plans:** 17 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14)
+**Plans:** 19 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14; plans 18-19 added for D-15)
 
 Plans:
 - [x] 167.1.2.2.2.1-01-PLAN.md — migration: kind `okx_archive_rebuild` (registry + both CHECKs, api_key-only) and the atomic `apply_okx_archive_rebuild` RPC (INVOKER, service_role), 15-arm gate, rollback
@@ -5280,6 +5280,8 @@ Plans:
 - [ ] 167.1.2.2.2.1-15-PLAN.md — founder decision on apply timing; PROD apply with before/after; survival after the next tick; Wave 5 hand-off
 - [x] 167.1.2.2.2.1-16-PLAN.md — the durable job's stateless wait on OKX and the ingest (download, parse, per-quarter readings); a lost link never yields a partial result (SC-1)
 - [x] 167.1.2.2.2.1-17-PLAN.md — the `quarter_range_mismatch` stop names the requested range, the observed min/max UTC days and the rows outside in `last_error`, dates and counts only (D-14)
+- [ ] 167.1.2.2.2.1-18-PLAN.md — D-15 pure layer: quarter files accepted on the 00:00 UTC+8 cut, whole-UTC-day covered sets, a quarter-edge day summed only when both neighbouring files were read, the Q2/Q3 seam chained on the shared edge day
+- [ ] 167.1.2.2.2.1-19-PLAN.md — D-15 job layer: the D-10 window over covered whole UTC days, `census.edge_days`, an edge day one file reaches never written and kept in its gap; runbook calibrate reading and the Q3 overlap's last run date 2026-12-12
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
