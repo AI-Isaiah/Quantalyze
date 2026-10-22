@@ -433,14 +433,6 @@ async def _bybit_exchange_with(
         ),
         pytest.param(
             lambda: _bybit_exchange_with(
-                positions=[
-                    {**_position(0.1, 250.5), "info": {"nextPageCursor": "0%3A1657711949945"}}
-                ]
-            ),
-            id="next-page-cursor",
-        ),
-        pytest.param(
-            lambda: _bybit_exchange_with(
                 positions=[_position(0.1, 250.5)] + [_position(0, None)] * 199
             ),
             id="full-page-of-200-rows",
@@ -459,13 +451,34 @@ async def test_forced_rebuild_refuses_when_the_open_upnl_cannot_be_fully_read(
     monkeypatch: pytest.MonkeyPatch, build: Any
 ) -> None:
     """Review WR-02 / SFH-2. A readable position list can still drop uPnL silently: an open
-    position with no numeric uPnL, a truncated read (a ``nextPageCursor`` or a full page of
-    200), or positions that do not add up to Bybit's own ``totalPerpUPL`` (which also
+    position with no numeric uPnL, a truncated read (a full page of
+    200 rows), or positions that do not add up to Bybit's own ``totalPerpUPL`` (which also
     covers USDC and inverse positions, never requested by the default read). Each would
     replace the stored curve with an anchor missing some open uPnL, so each refuses. (The two
     open-position cases keep a good position beside the bad one and a matching
     ``totalPerpUPL``, so only the per-position rule can refuse them.)"""
     await _assert_forced_rebuild_refused(monkeypatch, await build(), "positions_unreadable")
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_accepts_a_199_row_positions_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read is sent with limit=200, so 199 rows proves it is complete: no cursor rule is
+    needed (Bybit can send a non-empty ``nextPageCursor`` beside a single position), and the
+    job must not refuse. RED on a bound below 199."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    _install_fake_audit(monkeypatch)
+    exchange = await _bybit_exchange_with(
+        positions=[_position(0.1, 250.5)] + [_position(0, None)] * 198,
+    )
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
 
 
 @pytest.mark.asyncio

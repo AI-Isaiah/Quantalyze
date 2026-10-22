@@ -3082,10 +3082,9 @@ async def _fetch_and_price_window(
 
 # Phase 167.2.1.1 review WR-02 / SFH-2: bounds for the forced path's completeness check of
 # ``fetch_positions()``. ccxt 4.5.88 ``bybit.fetch_positions`` sends ``limit=200`` when the
-# caller gives none and does not page by default; with more rows it puts the response's
-# ``nextPageCursor`` on ``info`` of the FIRST returned position
-# (``add_pagination_cursor_to_result``). So a cursor, or a full page, means the read may be
-# truncated. Bybit also reports the account's ``totalPerpUPL`` (a decimal string at
+# caller gives none and does not page by default, so fewer than ``limit`` rows proves the
+# read is complete and a full page (200 or more) means it may be truncated. (Bybit's
+# ``nextPageCursor`` is not used: it can be non-empty beside a single position.) Bybit also reports the account's ``totalPerpUPL`` (a decimal string at
 # ``balance["info"]["result"]["list"][0]``, 8 dp, so rounding is negligible). The two figures
 # come from two sequential REST calls, so marks move between them: the tolerance is the
 # larger of 1 USD and 0.5% of the wallet figure (the equity before open uPnL), the scale
@@ -3115,8 +3114,8 @@ async def _fetch_current_equity(
 
     ``refuse_unread_positions`` (forced path only, Phase 167.2.1.1 PD-H): when True and the
     venue ADDS open-position uPnL here (Bybit, Binance: not ``_UNIFIED_MARGIN_VENUES``), a
-    ``fetch_positions()`` that raises, returns a non-list, may be truncated (a
-    ``nextPageCursor`` or ``_POSITIONS_PAGE_LIMIT`` rows), carries an open position
+    ``fetch_positions()`` that raises, returns a non-list, may be truncated
+    (``_POSITIONS_PAGE_LIMIT`` or more rows), carries an open position
     without a numeric uPnL, or (Bybit) sums to something other than the balance's
     ``totalPerpUPL`` raises ``ForcedRebuildRefusedError("positions_unreadable")``
     instead of anchoring without part of the uPnL. False keeps the advisory-anchor
@@ -3257,14 +3256,10 @@ async def _fetch_current_equity(
                 raise ForcedRebuildRefusedError("positions_unreadable")
             partial_unpriced.positions_unread = not _skip_upnl
             positions = []
-        if refuse_unread_positions and not _skip_upnl and (
-            len(positions) >= _POSITIONS_PAGE_LIMIT
-            or any(
-                isinstance(p, dict)
-                and isinstance(p.get("info"), dict)
-                and p["info"].get("nextPageCursor")
-                for p in positions
-            )
+        if (
+            refuse_unread_positions
+            and not _skip_upnl
+            and len(positions) >= _POSITIONS_PAGE_LIMIT
         ):
             raise ForcedRebuildRefusedError("positions_unreadable")
         _wallet_total = total
