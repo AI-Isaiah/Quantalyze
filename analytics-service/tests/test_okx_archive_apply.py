@@ -2507,6 +2507,92 @@ class TestUnchainableRowDiagnostic:
         assert db.apply_calls == 0
         _no_writes_but_progress(world, db)
 
+    VALID: dict[str, Any] = {
+        "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
+        "first_day": "2026-07-20", "last_day": "2026-09-01", "files": [{"rows": 2}],
+    }
+    VALID_TEXT = (
+        "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
+        "rows_by_quarter=2026-Q3:2"
+    )
+
+    @pytest.mark.parametrize(
+        ("key", "poison"),
+        [
+            *[
+                (key, poison)
+                for key in ("rows", "blank_ccy", "nondigit_bill_id")
+                for poison in (True, -1, "2", 1.5, None)
+            ],
+            *[
+                (key, poison)
+                for key in ("first_day", "last_day")
+                for poison in (
+                    _link("2026", "Q3"), "3428.45", "20260720", "2026-02-30", 20260720, None,
+                )
+            ],
+        ],
+        ids=lambda v: repr(v)[:24],
+    )
+    def test_a_value_that_is_not_a_count_or_a_calendar_day_reads_unreadable(
+        self, key: str, poison: object
+    ) -> None:
+        """D-16. This text is stored in ``compute_jobs.last_error``, logged and shown in the
+        admin table, so it must never carry text that came from a file (the account-size and
+        bearer-link leak class, T-167.1.2.2.2.1-52). A count is echoed only when it is a
+        non-negative int that is not a bool, a day only when it is a real ASCII calendar day;
+        anything else reads ``unreadable`` and the other tokens stay intact."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, key: poison}, ["2026-Q3"])
+
+        tokens = text.split(" ")
+        assert f"{key}=unreadable" in tokens
+        others = [t for t in tokens if not t.startswith(f"{key}=")]
+        assert others == [t for t in self.VALID_TEXT.split(" ") if not t.startswith(f"{key}=")]
+        for secret in LINK_SECRETS:
+            assert secret not in text
+
+    @pytest.mark.parametrize(
+        ("files", "expected"),
+        [
+            (None, "rows_by_quarter=unreadable"),
+            ("2", "rows_by_quarter=unreadable"),
+            ([], "rows_by_quarter=unreadable"),
+            ([{"rows": 2}, {"rows": 0}], "rows_by_quarter=unreadable"),
+            (["2"], "rows_by_quarter=unreadable"),
+            ([{"rows": True}], "rows_by_quarter=2026-Q3:unreadable"),
+            ([{"rows": "2"}], "rows_by_quarter=2026-Q3:unreadable"),
+            ([{}], "rows_by_quarter=2026-Q3:unreadable"),
+        ],
+        ids=lambda v: repr(v)[:30],
+    )
+    def test_a_per_file_list_that_does_not_fit_the_quarters_reads_unreadable(
+        self, files: object, expected: str
+    ) -> None:
+        """D-16. The per-quarter counts are paired with the requested quarters by position, so a
+        per-file list of the wrong length or shape cannot be paired and must read ``unreadable``
+        instead of being guessed or crashing the stop; a single bad count degrades alone."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, "files": files}, ["2026-Q3"])
+
+        assert text.split(" ")[-1] == expected
+
+    def test_a_detail_without_its_keys_reads_unreadable_and_does_not_raise(self) -> None:
+        """D-16. A stop detail that drifts (a renamed or dropped key) must degrade to
+        ``unreadable`` and still stop the job with its class. A KeyError here would surface
+        mid-calibration as a crash instead of the permanent, named stop the founder reads."""
+        assert okx_archive_job._unchainable_tokens({}, ["2026-Q3"]) == (
+            "rows=unreadable blank_ccy=unreadable nondigit_bill_id=unreadable "
+            "first_day=unreadable last_day=unreadable rows_by_quarter=unreadable"
+        )
+
+    def test_two_quarters_are_named_in_input_order(self) -> None:
+        """D-16. ``files`` is in ``quarters[]`` order, so the tags must be paired with it in the
+        same order: a swapped pair would tell the founder to look in the wrong quarter's file."""
+        text = okx_archive_job._unchainable_tokens(
+            {**self.VALID, "files": [{"rows": 0}, {"rows": 2}]}, ["2026-Q2", "2026-Q3"]
+        )
+
+        assert text.endswith(" rows_by_quarter=2026-Q2:0,2026-Q3:2")
+
 
 class TestNonExternalPnlIsInTheLiveNumber:
     """WR-01. A liquidation transfer or forced repayment is not external capital (D-08), but a

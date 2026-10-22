@@ -727,6 +727,25 @@ class TestBalChainCompleteness:
         assert err.stop_class == "archive_incomplete"
         assert err.detail["reason"] == "unchainable_row"
 
+    def test_a_bill_with_both_causes_is_one_stopping_row_counted_under_each_cause(self):
+        """D-16. The cause counts may overlap, but ``rows`` is how many bills stopped the run,
+        so a bill with both causes must count once there or the founder over-reads the damage.
+        The bill has an effect (``balChg`` and ``pnl`` nonzero), so this holds unchanged once
+        the blank-ccy count is narrowed to bills with an effect."""
+
+        def both(header, rows):
+            rows[3][header.index("ccy")] = ""
+            rows[3][header.index("billId")] = "abc-3"
+
+        err = _stop(verify_bal_chain, [self._file(edit=both)], frozenset())
+        assert err.stop_class == "archive_incomplete"
+        detail = err.detail
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["first_day"], detail["last_day"],
+        ) == ("unchainable_row", 1, 1, 1, "2026-07-02", "2026-07-02")
+        assert [f["rows"] for f in detail["files"]] == [1]
+
 
 def _ledger(quarter, bills, *, opening, first_id, ccy="USDT"):
     """One chaining quarter file built from ``(when, balChg)`` pairs: ``bal`` is the running
