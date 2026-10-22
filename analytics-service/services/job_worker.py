@@ -6471,6 +6471,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # FLOW-04 (v1.8): the venue-gated companion open-uPnL wedge rides the
             # SAME response (OKX upl; Bybit/Binance structural 0.0 — realized-basis
             # walletBalance, so a downstream subtract can never double-count, 77-02).
+            # ccxt 4.5.88: ``bybit.parse_balance`` / ``binance.parse_balance_custom``
+            # (spot) set ``total`` to the wallet figure, no uPnL; the reconstruct
+            # anchor is the separate mark-to-market basis (Phase 167.2.1.1).
             # FLIPRETRY-01: the equity anchor + full-history trades + funding are
             # LIVE crawls (fetch_all_trades on the bybit-19k account was a named
             # v1.11 wedge) — bound EACH by asyncio.wait_for so a slow/hanging read
@@ -8899,6 +8902,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
         # Current total equity anchor + the venue-gated companion open-uPnL wedge
         # (OKX totalEq; Bybit/Binance realized-basis walletBalance → structural 0.0).
+        # ccxt 4.5.88 ``bybit.parse_balance`` / ``binance.parse_balance_custom`` (spot):
+        # ``total`` is the wallet figure, no uPnL; the reconstruct anchor is the
+        # separate mark-to-market basis (Phase 167.2.1.1).
         equity, balance_error, open_unrealized_usd, upnl_unreadable = (
             await fetch_account_equity_and_upnl_usd(ctx.exchange, venue)
         )

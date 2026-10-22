@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.132.10.7] - 2026-10-22 — UPNLVENUES: Bybit account equity counts open-position profit on every path (Phase 167.2.1.1)
+
+### Root cause
+- The pinned ccxt (4.5.88) sets Bybit V5 `total` to the coin `walletBalance`, which excludes open-position uPnL. The allocator history reconstruct treated Bybit like OKX (equity-inclusive) and skipped the position-uPnL add, so a Bybit-backed allocator's rebuilt curve was anchored at the wallet figure and dropped open-position profit. The strategy derive (realized-basis wallet anchor, 0.0 wedge) and the holdings poll were already right.
+
+### Fixed
+- The reconstruct anchor adds open-position uPnL for Bybit (`_UNIFIED_MARGIN_VENUES` is now OKX only), so reconstruct = derive + open uPnL = holdings on one balance payload.
+- A failed positions read on a normal reconstruct now records `anchor_positions_unread: true` in telemetry and the completion audit instead of only a log line.
+
+### Added
+- A `force_rebuild` compute-job metadata flag (JSON `true` only, settable by service role only) re-runs the history reconstruct for a key already marked done. A forced rebuild replaces a sole-key allocator's curve in one atomic call, or refuses with one of ten closed-set reasons and writes nothing: the account has other keys (`multi_key`, checked before the crawl and again before saving), the key lookup fails, the replay is empty, stored days the replay does not reproduce would be dropped (paged read), the anchor was skipped (OKX terminus, unreliable replay, implausible offset), or the open uPnL cannot be fully read (200+ position rows, an open position without uPnL, or a Bybit `totalPerpUPL` mismatch).
+- `analytics-service/scripts/bybit_upnl_probe.py`: a read-only probe (two GET reads, one SELECT) that reports per key, labelled k1..kN, whether equity minus wallet equals the open uPnL, as booleans, counts and 3-significant-figure ratios only.
+
+### Tests
+- Bybit and Binance (spot, USD-M, portfolio margin) balances parsed through ccxt's real parsers, a cross-path invariant per venue, a trip-wire on any futures-type Binance read, the flipped `test_c01_05` Bybit case, and one forced-path test per refusal reason, each shown RED with its branch neutered.
+
+### Notes
+- Binance: the derive (spot wallet, 0.0 wedge) and the reconstruct (mark-to-market, adds uPnL once) measure different bases on purpose; no double count. Code and tests only, no Binance keys exist.
+- Multi-key accounts (all 6 active Bybit keys sit on 5 users who hold other keys) are refused here and rebuilt by Phase 167.2.1.1.2 ACCTREBUILD (founder D-04/D-05). The check-then-replace race on the stored-days guard is accepted and owned by ACCTREBUILD.
+- TODOS: five `167.2.1.1-*` entries booked (anchor positions-read failure, USDT-only derive anchor, USDT-linear-only positions read, Binance futures wallet unread, multi-key recompute routed to ACCTREBUILD).
+- Post-deploy: the D-01 live Bybit read and the D-02 forced recompute of sole-key allocators.
+
 ## [0.132.10.6] - 2026-10-22 — roadmap: book ACCTREBUILD 167.2.1.1.2
 
 ### Notes

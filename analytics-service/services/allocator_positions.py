@@ -388,12 +388,13 @@ def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, flo
 
     Bybit Unified Trading Account (UTA) quirk: when an allocator has
     funds locked as derivative collateral, the raw V5 response sets
-    `availableToWithdraw: ""` (empty string) on each coin. CCXT's
-    `parseBalance` for Bybit can map that empty string to 0 in the
-    parsed `total` / `free` dicts — so a user with a $200k USDT margin
-    backing their Bybit perp positions sees a zero spot balance after
-    CCXT parsing, which silently drops their Bybit collateral from the
-    Holdings panel even though the unified account is fully funded.
+    `availableToWithdraw: ""` (empty string) on each coin. In the
+    pinned ccxt 4.5.88 `bybit.parse_balance`, `total` is set from this same
+    `walletBalance`, and an empty `availableToWithdraw` changes `free`, not
+    `total`. The merge in `_fetch_spot_rows` therefore stays as a defensive
+    fallback that reads the same figure ccxt does, so a collateral-backed
+    unified account cannot drop out of the Holdings panel if ccxt's parsing
+    ever changes.
 
     The raw V5 payload at
     `info["result"]["list"][N]["coin"][*]["walletBalance"]` is the
@@ -618,9 +619,11 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, 
     totals = balance.get("total") or {}
 
     # Bybit Unified Trading Account fallback (2026-05-20): for UTA users
-    # whose funds are locked as derivative collateral, CCXT's parsed
-    # `total` dict can be empty/zero because the V5 payload sets
-    # `availableToWithdraw: ""`. Read the raw `walletBalance` per coin
+    # whose funds are locked as derivative collateral, the V5 payload sets
+    # `availableToWithdraw: ""`. (Phase 167.2.1.1: in the pinned ccxt 4.5.88
+    # `bybit.parse_balance` that changes `free`, not `total`, which comes from
+    # the same `walletBalance`; the merge below is a defensive fallback.)
+    # Read the raw `walletBalance` per coin
     # from `info` and merge it OVER CCXT's parsed totals so the actual
     # collateral surfaces as a spot holding. Without this, an allocator
     # with $200k USDT backing their Bybit perp positions sees zero

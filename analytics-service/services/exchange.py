@@ -3075,13 +3075,17 @@ async def fetch_okx_total_equity_usd(exchange: ccxt.Exchange) -> float | None:
 async def fetch_account_equity_usd(
     exchange: ccxt.Exchange, venue: str,
 ) -> tuple[float | None, bool]:
-    """Total account equity in USD (NAV incl. unrealized PnL) for the
-    initial-capital anchor, dispatched by venue.
+    """Account-equity anchor in USD for the initial-capital anchor, dispatched
+    by venue. OKX includes open-position unrealized PnL (raw ``totalEq``);
+    Bybit and Binance return the realized-basis USDT wallet figure.
 
     OKX is read via the raw ``totalEq`` endpoint (``fetch_okx_total_equity_usd``)
     because ccxt's unified ``fetch_balance()`` crashes on OKX in ccxt 4.5.x.
-    Other venues use ``fetch_usdt_balance_with_status`` — for unified-margin
-    USDT accounts the USDT total equals account equity (uPnL settles in USDT).
+    Other venues use ``fetch_usdt_balance_with_status``. Bybit's ccxt ``total``
+    is the coin ``walletBalance`` (ccxt 4.5.88 ``bybit.parse_balance``) and
+    Binance's default spot ``total`` is free + locked (ccxt 4.5.88
+    ``binance.parse_balance_custom``, spot), so neither includes open-position
+    unrealized PnL.
 
     Returns ``(equity, balance_error)`` mirroring
     ``fetch_usdt_balance_with_status``: balance_error=True means the read
@@ -3109,11 +3113,16 @@ async def fetch_account_equity_and_upnl_usd(
       absent/garbled — the caller raises ``unrealized_pnl_unreadable`` so a
       partial/schema-drifted response is LOUD, not a silent 0 that embeds MTM.
     * **Bybit / Binance** — the anchor is realized-basis ``walletBalance``
-      (ccxt 4.5.59 ``bybit.parse_balance`` / binance spot): the wedge is
+      (ccxt 4.5.88 ``bybit.parse_balance``: ``total`` is the coin ``walletBalance``;
+      ``binance.parse_balance_custom``, spot: ``total`` is free + locked): the wedge is
       STRUCTURALLY 0.0 by construction, so a downstream subtract can never
       double-count (Q2 / Pitfall 2). Returning a non-zero wedge here is the
       double-count bug — it is hard-coded 0.0, NOT a read field, so it is never
       "unreadable" (there is no field to read → ``upnl_unreadable`` is False).
+      The reconstruct anchor (``equity_reconstruction._fetch_current_equity``) is
+      the mark-to-market basis and adds position uPnL for these venues: a
+      different basis from this realized-basis anchor, and not a double count
+      (Phase 167.2.1.1).
 
     ``fetch_account_equity_usd`` (the 2-tuple) is left intact for allocator /
     other callers.

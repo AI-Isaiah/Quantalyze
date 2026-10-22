@@ -167,6 +167,15 @@ class _FakeTable:
     def order(self, *_args, **_kwargs):
         return self
 
+    # PostgREST `.range(start, end)` (inclusive) and its per-response row ceiling.
+    # `max_rows` is None unless a test sets it, so no other test sees a cap.
+    max_rows: int | None = None
+    _range: tuple[int, int] | None = None
+
+    def range(self, start: int, end: int):
+        self._range = (start, end)
+        return self
+
     def limit(self, *_args, **_kwargs):
         return self
 
@@ -275,8 +284,13 @@ class _FakeTable:
                     continue
                 matched.append(dict(row))
 
+            total_matched = len(matched)
+            if self._range is not None:
+                matched = matched[self._range[0]:self._range[1] + 1]
+            if _FakeTable.max_rows is not None:
+                matched = matched[:_FakeTable.max_rows]
             if self._select_count_mode == "exact":
-                return _FakeSelectResult(data=matched, count=len(matched))
+                return _FakeSelectResult(data=matched, count=total_matched)
             return _FakeSelectResult(data=matched)
 
         return _FakeSelectResult()
