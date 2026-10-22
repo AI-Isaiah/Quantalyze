@@ -5498,14 +5498,14 @@ Plans:
 1. A recorded real or ccxt-fixture Bybit V5 and Binance (spot and futures) balance response settles whether `total` includes uPnL.
 2. Every path (derive anchor, reconstruct anchor, holdings) reads it the same way, with a test that goes RED on the wrong reading.
 3. A PROD census says whether any connected key is Bybit or Binance, and any stored series built on the wrong reading is recomputed or recorded.
-**Plans:** 6 plans
+**Plans:** 3/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 167.2.1.1-01-PLAN.md — Bybit: pinned ccxt 4.5.88 `parse_balance` settles `total` = coin walletBalance; reconstruct anchor adds position uPnL (`_UNIFIED_MARGIN_VENUES` okx only); derive/holdings pinned; cross-path invariant (SC-1, SC-2) [Wave 1]
-- [ ] 167.2.1.1-02-PLAN.md — Binance: real `parse_balance_custom` tests for spot, USD-M and PAPI, cross-path invariant, futures-wallet trip-wire, docstring fixes (D-03; SC-1, SC-2) [Wave 1]
-- [ ] 167.2.1.1-03-PLAN.md — D-01 read-only Bybit uPnL probe, built and unit-tested only (booleans, ratios, counts; no amounts or ids) (SC-1, SC-3) [Wave 1]
+- [x] 167.2.1.1-01-PLAN.md — Bybit: pinned ccxt 4.5.88 `parse_balance` settles `total` = coin walletBalance; reconstruct anchor adds position uPnL (`_UNIFIED_MARGIN_VENUES` okx only); derive/holdings pinned; cross-path invariant (SC-1, SC-2) [Wave 1]
+- [x] 167.2.1.1-02-PLAN.md — Binance: real `parse_balance_custom` tests for spot, USD-M and PAPI, cross-path invariant, futures-wallet trip-wire, docstring fixes (D-03; SC-1, SC-2) [Wave 1]
+- [x] 167.2.1.1-03-PLAN.md — D-01 read-only Bybit uPnL probe, built and unit-tested only (booleans, ratios, counts; no amounts or ids) (SC-1, SC-3) [Wave 1]
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
