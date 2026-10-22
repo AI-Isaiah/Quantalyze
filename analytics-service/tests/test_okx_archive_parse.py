@@ -364,6 +364,121 @@ class TestDuplicateBills:
         assert twice.realized_by_day["2026-07-01"] == Decimal("5.90")
 
 
+#: The billId cell of the q3 fixture's fourth bill (700000004) as an export wrap leaves it. The
+#: cell is what ``csv.reader`` returns, so a double-quoted id holds the quotes in its text.
+WRAPPED_BILL_ID_CELLS = {
+    "tab": "\t700000004",
+    "apostrophe": "'700000004",
+    "double-quote": '"700000004"',
+    "space-padded": " 700000004 ",
+    "mixed": " '\t\"700000004\"\t' ",
+}
+
+
+class TestBillIdWrapStrip:
+    """D-17. Calibrate run 4 counted every bill of both real files as a non-digit billId, because
+    the export wraps each id in whitespace, apostrophes or double quotes. The strip runs before
+    every check (empty, de-duplication, conflict, the chain's digit test), and it never touches
+    the inside of an id: a strip that reached inside could merge two ids into one and invent a
+    bill, and an id that stayed empty would give every such row one shared identity."""
+
+    @staticmethod
+    def _parse(edit):
+        header, rows = _read_fixture("q3_like.csv")
+        edited = edit(header, rows)
+        return parse_archive_csv(_emit(header, rows if edited is None else edited), year=2026, quarter="Q3")
+
+    @pytest.mark.parametrize("cell", list(WRAPPED_BILL_ID_CELLS.values()), ids=list(WRAPPED_BILL_ID_CELLS))
+    def test_a_wrapped_bill_id_parses_to_its_digits_and_the_file_chains_as_before(self, cell):
+        """A wrap left in place turns a complete file into a stop (run 4): the id must read as
+        its digits, the whole file as the bare file, and the chain as the bare chain."""
+        bare = self._parse(lambda header, rows: None)
+
+        def wrap(header, rows):
+            rows[3][header.index("billId")] = cell
+
+        parsed = self._parse(wrap)
+
+        assert parsed.rows[3].bill_id == "700000004"
+        assert parsed.rows == bare.rows
+        assert _chain([parsed]) == _chain([bare])
+
+    def test_every_bill_id_of_a_file_wrapped_is_stripped_and_the_file_chains_as_before(self):
+        """Run 4's real shape: EVERY id of the file is wrapped, not one."""
+        bare = self._parse(lambda header, rows: None)
+
+        def wrap_all(header, rows):
+            for row in rows:
+                row[header.index("billId")] = "\t" + row[header.index("billId")]
+
+        parsed = self._parse(wrap_all)
+
+        assert [r.bill_id for r in parsed.rows] == [r.bill_id for r in bare.rows]
+        assert _chain([parsed]) == _chain([bare])
+
+    @pytest.mark.parametrize(
+        "cell",
+        ["\t", "''", '""', " ", " '\t\" "],
+        ids=["tab", "apostrophes", "double-quotes", "space", "mixed"],
+    )
+    def test_an_id_of_wrap_characters_only_is_a_missing_bill_id(self, cell):
+        """An id with nothing left after the strip has no identity to de-duplicate on. Letting it
+        through would make one shared billId of every such row, so it stops at its line."""
+
+        def blank_it(header, rows):
+            rows[5][header.index("billId")] = cell
+
+        err = _stop(self._parse, blank_it)
+
+        assert err.stop_class == "missing_bill_id"
+        assert err.detail == {"line": 7}
+
+    @pytest.mark.parametrize("sep", [" ", "\t", "'", '"'], ids=["space", "tab", "apostrophe", "double-quote"])
+    def test_the_inside_of_a_bill_id_is_never_touched(self, sep):
+        """Joining ``7000 00004`` into ``700000004`` would invent an id that may be another bill's.
+        Only the edges are wrap; an inner character stays and the id stops as non-digit."""
+        cell = f"7000{sep}00004"
+
+        def inner(header, rows):
+            rows[3][header.index("billId")] = cell
+
+        parsed = self._parse(inner)
+
+        assert parsed.rows[3].bill_id == cell
+        detail = _stop(verify_bal_chain, [parsed], frozenset()).detail
+        assert (detail["reason"], detail["nondigit_bill_id"]) == ("unchainable_row", 1)
+
+    def test_the_same_bill_wrapped_two_ways_in_one_file_is_one_bill(self):
+        """The export may wrap one bill differently on its two lines. It is still one bill, an
+        identical duplicate that is dropped and counted, not a conflict and not two bills."""
+
+        def two_ways(header, rows):
+            twin = list(rows[1])
+            rows[1][header.index("billId")] = "'700000002"
+            twin[header.index("billId")] = "\t700000002"
+            return [*rows, twin]
+
+        parsed = self._parse(two_ways)
+
+        assert (parsed.row_count, parsed.duplicate_rows_dropped) == (22, 1)
+        assert parsed.rows[1].bill_id == "700000002"
+
+    def test_a_wrapped_bill_id_with_different_content_is_still_a_conflict(self):
+        """Stripping must not launder a conflict: the same bill with another amount, however it
+        is wrapped, is two different facts about one id and stops."""
+
+        def conflicting(header, rows):
+            twin = list(rows[1])
+            twin[header.index("billId")] = "'700000002"
+            twin[header.index("pnl")] = "-4.21"
+            return [*rows, twin]
+
+        err = _stop(self._parse, conflicting)
+
+        assert err.stop_class == "duplicate_bill_conflict"
+        assert "-4.21" not in _detail_text(err)
+
+
 # ----------------------------------------------------------------- classification D-08
 class TestUnknownSubtypeClassification:
     """T-CLASS-1: a subType the table does not list can never be silently bucketed.

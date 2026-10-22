@@ -2716,6 +2716,123 @@ class TestUnchainableRowDiagnostic:
         assert result["census"]["by_ccy"]["(blank)"] == 2
 
 
+#: How the export wraps a billId, as the CSV field TEXT of an id. A double-quoted id is a CSV
+#: field of three quotes each side, so the cell the csv reader returns holds one quote each side.
+BILL_ID_WRAPS: dict[str, Callable[[str], str]] = {
+    "tab-prefixed": lambda bill_id: "\t" + bill_id,
+    "apostrophe-prefixed": lambda bill_id: "'" + bill_id,
+    "double-quoted": lambda bill_id: '"""' + bill_id + '"""',
+    "space-padded": lambda bill_id: " " + bill_id + " ",
+}
+
+
+def _wrap_bill_ids(data: bytes, wrap: Callable[[str], str]) -> bytes:
+    """``data`` with the billId (second field) of every data line rewritten by ``wrap``. The
+    header line is left alone. A plain split on commas is exact: a ``_Bills`` line carries no
+    quoted field."""
+    header, *lines = data.decode().split("\n")
+    out = [header]
+    for line in lines:
+        if not line:
+            out.append(line)
+            continue
+        fields = line.split(",")
+        fields[1] = wrap(fields[1])
+        out.append(",".join(fields))
+    return "\n".join(out).encode()
+
+
+def _content_readings(result: dict[str, Any]) -> dict[str, Any]:
+    """Everything of a calibrate result that is a reading of the file's CONTENT, leaving out the
+    transport readings (``decompressed_bytes`` grows with the wrap)."""
+    return {
+        **{
+            key: result[key]
+            for key in ("fingerprint", "census", "reconcile", "excluded", "d03", "strategies", "info")
+        },
+        "quarters": [
+            {
+                key: quarter[key]
+                for key in (
+                    "year", "quarter", "has_type_column", "ts_min_day", "ts_max_day", "row_count",
+                    "longest_billless_run",
+                )
+            }
+            for quarter in result["quarters"]
+        ],
+    }
+
+
+class TestBillIdExportWrap:
+    """D-17. Calibrate run 4 counted every bill of both real files in ``nondigit_bill_id``
+    because the export wraps each id, so a complete file could never pass the completeness proof.
+    The wrap is export formatting, not content: a wrapped file must read exactly as the bare one,
+    fingerprint included, or the founder would approve a preview that differs from what the
+    ledger would then hold."""
+
+    @pytest.mark.parametrize("wrap", list(BILL_ID_WRAPS))
+    @pytest.mark.asyncio
+    async def test_a_wrapped_bill_id_chains_and_reads_exactly_as_the_bare_id(
+        self, monkeypatch: pytest.MonkeyPatch, wrap: str
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_bills().bytes())
+        first = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert first.outcome == DispatchOutcome.DONE, first.error_message
+        bare = copy.deepcopy(world.result())
+
+        wrapped = _wrap_bill_ids(_standard_bills().bytes(), BILL_ID_WRAPS[wrap])
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=wrapped)
+        second = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert second.outcome == DispatchOutcome.DONE, second.error_message
+        result = world.result()
+        assert result["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-07-10", "last_day": "2026-09-15"}},
+            "total_pairs": 10,
+            "blank_ccy_skipped": 0,
+            "floor": 2,
+        }
+        assert HEX64.fullmatch(result["fingerprint"])
+        assert _content_readings(result) == _content_readings(bare)
+
+    @pytest.mark.asyncio
+    async def test_a_q2_and_q3_pair_with_every_bill_id_wrapped_reads_as_the_bare_pair(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real calibrate is this shape: a Q2 and a Q3 file, both with wrapped ids."""
+        q2 = TestArchiveCompleteness()._q2()
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000)
+        quarters = TestArchiveCompleteness.QUARTERS_Q2_Q3
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+        first = await _run(_meta("calibrate", [STRATEGY_ID], quarters=quarters))
+        assert first.outcome == DispatchOutcome.DONE, first.error_message
+        bare = copy.deepcopy(world.result())
+
+        wrap = BILL_ID_WRAPS["apostrophe-prefixed"]
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(
+            monkeypatch, db, _standard_live(),
+            q2=_wrap_bill_ids(q2.bytes(), wrap), q3=_wrap_bill_ids(q3.bytes(), wrap),
+        )
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+        second = await _run(_meta("calibrate", [STRATEGY_ID], quarters=quarters))
+
+        assert second.outcome == DispatchOutcome.DONE, second.error_message
+        result = world.result()
+        # 4 Q2 bills + 11 Q3 bills = 15 bills in one chain = 14 pairs, 04-02 .. 09-15.
+        assert result["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 14, "first_day": "2026-04-02", "last_day": "2026-09-15"}},
+            "total_pairs": 14,
+            "blank_ccy_skipped": 0,
+            "floor": 2,
+        }
+        assert _content_readings(result) == _content_readings(bare)
+
+
 class TestNonExternalPnlIsInTheLiveNumber:
     """WR-01. A liquidation transfer or forced repayment is not external capital (D-08), but a
     ``pnl`` and ``fee`` on it are inside the live aggregator's day total. The archive leg must
