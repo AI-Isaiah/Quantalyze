@@ -1655,6 +1655,39 @@ class TestIngestStops:
             assert secret not in repr(reading) + repr(step)
 
 
+class TestQuarterRangeMismatchDiagnostic:
+    @pytest.mark.asyncio
+    async def test_a_straddling_file_names_the_requested_range_the_observed_utc_days_and_the_rows_outside(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """D-14. The first real calibrate stopped on `quarter_range_mismatch` and the stop
+        dropped the dates the parser had already computed. The founder needs the requested
+        range, the file's earliest and latest UTC day and the count of rows outside to choose
+        between a UTC+8 quarter cut and a shifted quarter label; a stop that drops them sends
+        the one re-run in blind. Here a Q3 file carries one Q2 row stamped one millisecond
+        before the quarter began, the boundary-straddle shape D-14 describes."""
+        world = _happy(monkeypatch)
+        q2_last_row = (FIXTURES / "q2_like.csv").read_text().splitlines()[-1]
+        world.csv_override = ("\n".join([*_q3_lines(), q2_last_row]) + "\n").encode()
+        outcome = await dispatch(_calibrate())
+
+        result = _assert_stopped(
+            world, outcome, "quarter_range_mismatch",
+            detail=(
+                "quarter=2026-Q3 parse=quarter_range_mismatch range_start=2026-07-01 "
+                "range_end_exclusive=2026-10-01 observed_min_day=2026-06-30 "
+                "observed_max_day=2026-09-30 rows_outside=1"
+            ),
+        )
+        quarter = result["quarters"][0]
+        assert quarter["ts_min_day"] is None and quarter["ts_max_day"] is None
+        assert result["census"] is None
+        everything = json.dumps(result) + (outcome.error_message or "") + caplog.text
+        for forbidden in ("600000014", "3428.45", "-3.30", *LINK_SECRETS):
+            assert forbidden not in everything, f"leaked: {forbidden!r}"
+        _assert_no_other_writes(world)
+
+
 # ---------------------------------------------------------------------------
 # Result shape v1
 # ---------------------------------------------------------------------------
