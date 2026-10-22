@@ -5256,6 +5256,8 @@ Plans:
 4. A day neither source covers stays missing and is named on the factsheet (TRADESYNC D-02).
 5. Each affected strategy's history is rebuilt on PROD with before/after readings (marker first, counts only); its recompute joins the Wave 5 consolidated recompute.
 
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-14, "Ship diagnostic, re-run (Recommended)"):** plan 14's first calibrate stopped on `quarter_range_mismatch` for 2026-Q2 and the stop dropped the observed dates. A diagnostic plan makes the stop carry them (dates and counts only), ships, and calibrate is re-run once; the mismatch fix itself is decided on those dates. Plan 15 waits for a passing calibrate.
+
 **Plans:** 16 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1)
 
 Plans:
