@@ -9,13 +9,16 @@ radius" and "What this runbook does not cover" before the pre-flight.
 
 **Two dates and one rule to read first.**
 
-- **The Q3 overlap closes about 2026-12-14.** The reconciliation compares the archive file with
+- **The Q3 overlap closes about 2026-12-12.** The reconciliation compares the archive file with
   the live-derived days both cover. The job takes the live reach as the run date minus
   `LIVE_REACH_ASSUMED_DAYS` (88), opens the window the day after that boundary, and needs at least
   `MIN_COMPARED_DAYS` (14) compared days with `MIN_ACTIVE_DAYS` (5) active ones (review round 1, CR-01
-  and F3). Q3 2026 ends 2026-09-30, so a Q3 window of 14 days is last possible about 2026-12-14; after
-  that `calibrate` stops `reconcile_miss cause=insufficient_overlap` and the D-10 measurement cannot be
-  repeated. Do the calibration before then, or re-decide with the founder.
+  and F3). OKX cuts quarters at 00:00 UTC+8 (D-15), so the Q3 file ends at 16:00 UTC on 2026-09-30, and
+  2026-09-30 is a quarter-edge day only the Q4 file (the current quarter, which OKX excludes) could make
+  whole. The last compared Q3 day is therefore 2026-09-29, and a Q3 window of 14 days is last possible on
+  a run dated 2026-12-12 UTC: that date minus 88 days is 2026-09-15, so the first full live day is 09-16,
+  and 09-16..09-29 is 14 days. After that `calibrate` stops `reconcile_miss cause=insufficient_overlap`
+  and the D-10 measurement cannot be repeated. Do the calibration before then, or re-decide with the founder.
 - **Deploy order.** The analytics worker carrying `run_okx_archive_rebuild_job` must be live, and the
   `compute_jobs` kind migration (`supabase/migrations/20261026120000_okx_archive_rebuild.sql`) must
   have applied, BEFORE any enqueue form is run. An old worker fails an unknown kind straight to
@@ -110,8 +113,8 @@ Counts as measured 2026-10-15 (re-measure with `ordinals` and `worklist`):
    next tick whether or not anything else runs. When the founder wants to see the changed headline
    before it is public, `apply` is held until just before the consolidated recompute (Step 3).
 5. **Accepted residual risks.** The first real archive response is unmeasured (container, host, header
-   columns, quarter boundaries, currencies): `calibrate` is the measurement and it STOPS on any
-   surprise. `reconstructed_ranges` can over-claim a day that a later live derive overwrote (Step 5).
+   columns, quarter boundaries (the cut was measured on 2026-10-22 as 00:00 UTC+8, D-15), currencies):
+   `calibrate` is the measurement and it STOPS on any surprise. `reconstructed_ranges` can over-claim a day that a later live derive overwrote (Step 5).
 
 ## Environment and rendering the SQL
 
@@ -601,13 +604,17 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
 **Calibrate reading, from `member_progress`** (read in `TS_SP`, counts and dates only into any note):
 
 - `quarters[]`: `state` `finished` for both, `container`, `has_type_column`, `ts_min_day` / `ts_max_day`
-  matching the quarter (a mismatch is the STOP `quarter_range_mismatch`). For a refused file the block's
+  with every `ts` inside the quarter as OKX cuts it, from 00:00 UTC+8 on its first day to 00:00 UTC+8 on
+  the day after its last (16:00 UTC the day before each, D-15). So Q2's `ts_min_day` can read 03-31, and
+  both Q2's `ts_max_day` and Q3's `ts_min_day` can read 06-30. A row outside is the STOP
+  `quarter_range_mismatch`. For a refused file the block's
   `ts_min_day` / `ts_max_day` stay null; read the stop's `last_error` instead (the `last_error` column of
-  `job-result`). It names `range_start` and `range_end_exclusive` (the requested quarter as a half-open UTC
-  calendar range), `observed_min_day` and `observed_max_day` (the file's earliest and latest `ts` as UTC
-  days) and `rows_outside` (the count of rows outside the range); `unreadable` marks a value the job would
-  not echo. An `empty_file` stop (`parse=empty_file`) carries none of these. The dates go to the founder,
-  whose call the mismatch fix is (D-14); do not re-enqueue to get past it.
+  `job-result`). It names `range_start` and `range_end_exclusive` (the requested quarter's first day and
+  the day after its last; the parser cuts each at 00:00 UTC+8, that is 16:00 UTC the day before, D-15),
+  `observed_min_day` and `observed_max_day` (the file's earliest and latest `ts` as UTC days) and
+  `rows_outside` (the count of rows outside the range); `unreadable` marks a value the job would not echo.
+  An `empty_file` stop (`parse=empty_file`) carries none of these. Under the UTC+8 cut a mismatch is a new
+  finding; the dates go to the founder (D-14, D-15); do not re-enqueue to get past it.
   Also in the result, per quarter: `quarters[].longest_billless_run` (`{days, from, to}`). Step 3 reads it
   with `info.bal_chain`, the one balance-chain proof.
 - `info.bal_chain`: on a clean calibrate, `ccys.<ccy>` with `pairs_checked`, `first_day` and `last_day`
@@ -621,10 +628,18 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
   `files[]` (each file's `ts_min_day` / `ts_max_day`).
 - `census`: `by_ccy` all USDT, `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
   non-USD currency is the STOP `non_usd_ccy`, and it is the measurement that settles
-  `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`.
+  `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`. `census.edge_days` (`{whole, missing}`, dates only) names the
+  quarter-edge UTC days, the days OKX's 00:00 UTC+8 cut splits between two files (03-31, 06-30, 09-30,
+  12-31). A day in `whole` had both neighbouring files read and counts like any other day. A day in
+  `missing` has no daily total: it is never compared, never written and never 0.0, and if it lies inside a
+  stored gap it stays in `gaps_after` (named, TRADESYNC D-02). For the Q2 and Q3 run the expected reading
+  is `whole` [2026-06-30] and `missing` [2026-03-31, 2026-09-30]. Neither missing day lies in the two named
+  gaps: 03-31 sits in the carried-forward `legacy_ranges` and 09-30 on live-derived days (D-01, D-12), so Q1
+  is not requested. A classification stop's census (`non_usd_ccy`, `unknown_subtype_nonzero`) carries the
+  four count keys only.
 - `reconcile`: for `realized` and `funding`, `ok` true, `days_over_cent` 0, `max_abs_diff` and
   `window_total_diff` within one cent, `misses` empty, and `reconcile.window` naming the overlap days
-  actually compared.
+  actually compared; it ends at the last whole covered UTC day, 2026-09-29 for Q3 without Q4 (D-15).
 - `d03`: `hits` empty (D-03). A hit is the STOP `d03_zero_day_has_archive_pnl`; nothing is rewritten and
   the fix, if any, is a separate founder decision.
 - `strategies[]`: `insert_days`, `insert_ranges`, `gaps_before` and `gaps_after` per target, in input order.
@@ -655,8 +670,9 @@ No form runs here; the founder reads and decides, with the orchestrator's summar
      say how far the proven chain reaches for each currency.
    - **When that needs the founder's judgment:** only for a gap day inside the unprovable head or tail,
      that is, an entry of `strategies[].gaps_before` earlier than the P&L currency's `first_day` or later
-     than its `last_day`. `ts_min_day` / `ts_max_day` sitting short of the quarter's first / last day is
-     NOT a no-go by itself (an account with no bill on 04-01 or 09-30 is complete and quiet). The
+     than its `last_day`. `ts_min_day` later than the day before the quarter's first day, or `ts_max_day`
+     earlier than the quarter's last day, is NOT a no-go by itself (an account with no bill in the first or
+     last hours of the quarter, as OKX cuts it at 00:00 UTC+8, is complete and quiet). The
      bill-less run is read the same way: a long run is a no-go only if the account's real activity cannot
      explain it AND it overlaps the unprovable head or tail; an interior long run is already covered by
      the chain, because a missing bill would have broken it.
