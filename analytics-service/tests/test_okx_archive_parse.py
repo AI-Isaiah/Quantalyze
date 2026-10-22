@@ -16,12 +16,14 @@ import ast
 import csv
 import dataclasses
 import io
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from services import okx_archive_classify
 from services.okx_archive_classify import (
     ARCHIVE_USD_FAMILY,
     LIVE_REALIZED_INST_TYPES,
@@ -362,6 +364,121 @@ class TestDuplicateBills:
         # the very same file twice is not a conflict, and is not double counted
         twice = aggregate_archive([first, first], None)
         assert twice.realized_by_day["2026-07-01"] == Decimal("5.90")
+
+
+#: The billId cell of the q3 fixture's fourth bill (700000004) as an export wrap leaves it. The
+#: cell is what ``csv.reader`` returns, so a double-quoted id holds the quotes in its text.
+WRAPPED_BILL_ID_CELLS = {
+    "tab": "\t700000004",
+    "apostrophe": "'700000004",
+    "double-quote": '"700000004"',
+    "space-padded": " 700000004 ",
+    "mixed": " '\t\"700000004\"\t' ",
+}
+
+
+class TestBillIdWrapStrip:
+    """D-17. Calibrate run 4 counted every bill of both real files as a non-digit billId, because
+    the export wraps each id in whitespace, apostrophes or double quotes. The strip runs before
+    every check (empty, de-duplication, conflict, the chain's digit test), and it never touches
+    the inside of an id: a strip that reached inside could merge two ids into one and invent a
+    bill, and an id that stayed empty would give every such row one shared identity."""
+
+    @staticmethod
+    def _parse(edit):
+        header, rows = _read_fixture("q3_like.csv")
+        edited = edit(header, rows)
+        return parse_archive_csv(_emit(header, rows if edited is None else edited), year=2026, quarter="Q3")
+
+    @pytest.mark.parametrize("cell", list(WRAPPED_BILL_ID_CELLS.values()), ids=list(WRAPPED_BILL_ID_CELLS))
+    def test_a_wrapped_bill_id_parses_to_its_digits_and_the_file_chains_as_before(self, cell):
+        """A wrap left in place turns a complete file into a stop (run 4): the id must read as
+        its digits, the whole file as the bare file, and the chain as the bare chain."""
+        bare = self._parse(lambda header, rows: None)
+
+        def wrap(header, rows):
+            rows[3][header.index("billId")] = cell
+
+        parsed = self._parse(wrap)
+
+        assert parsed.rows[3].bill_id == "700000004"
+        assert parsed.rows == bare.rows
+        assert _chain([parsed]) == _chain([bare])
+
+    def test_every_bill_id_of_a_file_wrapped_is_stripped_and_the_file_chains_as_before(self):
+        """Run 4's real shape: EVERY id of the file is wrapped, not one."""
+        bare = self._parse(lambda header, rows: None)
+
+        def wrap_all(header, rows):
+            for row in rows:
+                row[header.index("billId")] = "\t" + row[header.index("billId")]
+
+        parsed = self._parse(wrap_all)
+
+        assert [r.bill_id for r in parsed.rows] == [r.bill_id for r in bare.rows]
+        assert _chain([parsed]) == _chain([bare])
+
+    @pytest.mark.parametrize(
+        "cell",
+        ["\t", "''", '""', " ", " '\t\" "],
+        ids=["tab", "apostrophes", "double-quotes", "space", "mixed"],
+    )
+    def test_an_id_of_wrap_characters_only_is_a_missing_bill_id(self, cell):
+        """An id with nothing left after the strip has no identity to de-duplicate on. Letting it
+        through would make one shared billId of every such row, so it stops at its line."""
+
+        def blank_it(header, rows):
+            rows[5][header.index("billId")] = cell
+
+        err = _stop(self._parse, blank_it)
+
+        assert err.stop_class == "missing_bill_id"
+        assert err.detail == {"line": 7}
+
+    @pytest.mark.parametrize("sep", [" ", "\t", "'", '"'], ids=["space", "tab", "apostrophe", "double-quote"])
+    def test_the_inside_of_a_bill_id_is_never_touched(self, sep):
+        """Joining ``7000 00004`` into ``700000004`` would invent an id that may be another bill's.
+        Only the edges are wrap; an inner character stays and the id stops as non-digit."""
+        cell = f"7000{sep}00004"
+
+        def inner(header, rows):
+            rows[3][header.index("billId")] = cell
+
+        parsed = self._parse(inner)
+
+        assert parsed.rows[3].bill_id == cell
+        detail = _stop(verify_bal_chain, [parsed], frozenset()).detail
+        assert (detail["reason"], detail["nondigit_bill_id"]) == ("unchainable_row", 1)
+
+    def test_the_same_bill_wrapped_two_ways_in_one_file_is_one_bill(self):
+        """The export may wrap one bill differently on its two lines. It is still one bill, an
+        identical duplicate that is dropped and counted, not a conflict and not two bills."""
+
+        def two_ways(header, rows):
+            twin = list(rows[1])
+            rows[1][header.index("billId")] = "'700000002"
+            twin[header.index("billId")] = "\t700000002"
+            return [*rows, twin]
+
+        parsed = self._parse(two_ways)
+
+        assert (parsed.row_count, parsed.duplicate_rows_dropped) == (22, 1)
+        assert parsed.rows[1].bill_id == "700000002"
+
+    def test_a_wrapped_bill_id_with_different_content_is_still_a_conflict(self):
+        """Stripping must not launder a conflict: the same bill with another amount, however it
+        is wrapped, is two different facts about one id and stops."""
+
+        def conflicting(header, rows):
+            twin = list(rows[1])
+            twin[header.index("billId")] = "'700000002"
+            twin[header.index("pnl")] = "-4.21"
+            return [*rows, twin]
+
+        err = _stop(self._parse, conflicting)
+
+        assert err.stop_class == "duplicate_bill_conflict"
+        assert "-4.21" not in _detail_text(err)
 
 
 # ----------------------------------------------------------------- classification D-08
@@ -984,6 +1101,99 @@ class TestUnchainableTallyAcrossTwoFiles:
             ("2026-05-01", "2026-05-01"), ("2026-08-20", "2026-08-20"),
         ]
 
+
+
+#: ``(bill_id, shape)``, written by hand from the grammar: an ASCII digit is ``9``, an ASCII letter
+#: ``A``, tab/space/double quote/apostrophe ``TAB``/``SP``/``DQ``/``SQ``, any other character its
+#: Unicode category, a run of n equal symbols ``<symbol>{n}``, runs joined by ``-``, at most eight
+#: spelled out and then ``-MORE``.
+SHAPE_CASES = [
+    ("1.23E+17", "9-Po-9{2}-A-Sm-9{2}"),
+    ("x800000013", "A-9{9}"),
+    ("abc-3", "A{3}-Pd-9"),
+    ("2005\u00b2", "9{4}-No"),
+    ("7000 00004", "9{4}-SP-9{5}"),
+    ("7000\t00004", "9{4}-TAB-9{5}"),
+    ("7000'00004", "9{4}-SQ-9{5}"),
+    ('7000"00004', "9{4}-DQ-9{5}"),
+    ("=700000004", "Sm-9{9}"),
+    ("7000\u00a000004", "9{4}-Zs-9{5}"),
+    ("\u0661\u0662\u0663", "Nd{3}"),
+    ("\u00e91", "Ll-9"),
+    ("1a1a1a1a", "9-A-9-A-9-A-9-A"),
+    ("1a1a1a1a1", "9-A-9-A-9-A-9-A-MORE"),
+]
+SHAPE_IDS = [
+    "scientific", "letter-prefix", "dash", "superscript", "inner-space", "inner-tab",
+    "inner-apostrophe", "inner-double-quote", "formula", "nbsp", "arabic-indic", "accented",
+    "eight-runs", "nine-runs",
+]
+
+
+class TestNondigitBillIdShape:
+    """D-17. A billId still not ASCII digits after the strip stops as before, and the stop names
+    the first such id's shape and length, so the next reading says what the export did without
+    echoing the id. The shape is a closed alphabet: it must never carry a character of the id."""
+
+    @pytest.mark.parametrize(("bill_id", "shape"), SHAPE_CASES, ids=SHAPE_IDS)
+    def test_the_shape_maps_each_character_to_its_class_and_never_echoes_it(self, bill_id, shape):
+        """A shape that echoed a digit or a letter would carry file text into ``last_error``, the
+        log and the admin table (the account-size leak class). Each character becomes a class."""
+        made = okx_archive_classify._bill_id_shape(bill_id)
+
+        assert made == shape
+        assert re.fullmatch(r"[0-9A-Za-z{}-]+", made)
+        assert not re.search("[0-8]", re.sub(r"\{[0-9]+\}", "", made))
+
+    def test_the_stop_names_the_first_non_digit_id_in_row_order(self):
+        """``first`` means the first in row order. String or billId order would pick ``1.5E+3``
+        and send the founder to the wrong row."""
+        header, rows = _interleaved_q3(
+            _blank("2005", "2026-07-03 10:00:00", balChg="0.01"),
+            _blank("x2015", "2026-07-20 10:00:00"),
+            _blank("1.5E+3", "2026-08-20 10:00:00"),
+        )
+        detail = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset()).detail
+
+        assert (
+            detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["first_nondigit_shape"], detail["first_nondigit_len"],
+        ) == (3, 1, 2, "A-9{4}", 5)
+
+    def test_the_first_non_digit_id_is_taken_in_the_order_the_files_are_passed(self):
+        """``quarters[]`` order, then row order: the same two files passed the other way round
+        name the other id, so the reading points at the file the founder asked about first."""
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        q2 = _parsed(h2, [*r2, _new_row(h2, **_blank("x150", "2026-05-01 10:00:00"))], "Q2")
+        q3 = _parsed(h3, [*r3, _new_row(h3, **_blank("1.23E+17", "2026-08-20 10:00:00"))], "Q3")
+
+        forward = _stop(verify_bal_chain, [q2, q3], frozenset()).detail
+        backward = _stop(verify_bal_chain, [q3, q2], frozenset()).detail
+
+        assert (forward["first_nondigit_shape"], forward["first_nondigit_len"]) == ("A-9{3}", 4)
+        assert (backward["first_nondigit_shape"], backward["first_nondigit_len"]) == (
+            "9-Po-9{2}-A-Sm-9{2}", 8,
+        )
+
+    def test_the_shape_is_taken_after_the_strip(self):
+        """The wrap is export formatting. A shape that spelled it (``TAB``, ``SQ``, ``SP`` at its
+        edges) would describe the wrap, not the id that still fails."""
+        header, rows = _interleaved_q3(_blank("\t'1.23E+17' ", "2026-07-03 10:00:00"))
+        detail = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset()).detail
+
+        assert (detail["first_nondigit_shape"], detail["first_nondigit_len"]) == (
+            "9-Po-9{2}-A-Sm-9{2}", 8,
+        )
+
+    def test_a_stop_with_no_non_digit_id_names_no_shape(self):
+        """A stop on a blank-ccy bill alone has no non-digit id to describe: ``None``, never a
+        made-up shape."""
+        header, rows = _interleaved_q3(_blank("2005", "2026-07-03 10:00:00", balChg="0.01"))
+        detail = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset()).detail
+
+        assert (
+            detail["nondigit_bill_id"], detail["first_nondigit_shape"], detail["first_nondigit_len"],
+        ) == (0, None, None)
 
 # D-15: OKX cuts a quarter file at 00:00 UTC+8 (16:00 UTC the day before), so a real Q2 file
 # opens on 2026-03-31 and a real Q3 file on 2026-06-30. Each pair is (when UTC, balChg).

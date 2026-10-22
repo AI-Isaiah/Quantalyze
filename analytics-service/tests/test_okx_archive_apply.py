@@ -2496,7 +2496,7 @@ class TestUnchainableRowDiagnostic:
         assert outcome.error_message == (
             "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
             "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
-            "rows_by_quarter=2026-Q3:2"
+            "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q3:2"
         )
         result = world.result()
         assert result["stop_class"] == "archive_incomplete"
@@ -2505,6 +2505,7 @@ class TestUnchainableRowDiagnostic:
                 "reason": "unchainable_row", "ccys": {}, "total_pairs": None,
                 "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
                 "first_day": "2026-07-20", "last_day": "2026-09-01",
+                "first_nondigit_shape": "A-9{9}", "first_nondigit_len": 10,
                 "files": [{
                     "ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15", "rows": 2,
                     "blank_ccy": 1, "nondigit_bill_id": 1,
@@ -2523,11 +2524,12 @@ class TestUnchainableRowDiagnostic:
 
     VALID: dict[str, Any] = {
         "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
-        "first_day": "2026-07-20", "last_day": "2026-09-01", "files": [{"rows": 2}],
+        "first_day": "2026-07-20", "last_day": "2026-09-01",
+        "first_nondigit_shape": "A-9{9}", "first_nondigit_len": 10, "files": [{"rows": 2}],
     }
     VALID_TEXT = (
         "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
-        "rows_by_quarter=2026-Q3:2"
+        "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q3:2"
     )
 
     @pytest.mark.parametrize(
@@ -2595,7 +2597,8 @@ class TestUnchainableRowDiagnostic:
         mid-calibration as a crash instead of the permanent, named stop the founder reads."""
         assert okx_archive_job._unchainable_tokens({}, ["2026-Q3"]) == (
             "rows=unreadable blank_ccy=unreadable nondigit_bill_id=unreadable "
-            "first_day=unreadable last_day=unreadable rows_by_quarter=unreadable"
+            "first_day=unreadable last_day=unreadable first_nondigit_shape=unreadable "
+            "first_nondigit_len=unreadable rows_by_quarter=unreadable"
         )
 
     def test_two_quarters_are_named_in_input_order(self) -> None:
@@ -2606,6 +2609,94 @@ class TestUnchainableRowDiagnostic:
         )
 
         assert text.endswith(" rows_by_quarter=2026-Q2:0,2026-Q3:2")
+
+    @pytest.mark.parametrize(
+        "poison",
+        [
+            "1.23E+17", "x800000013", "3428.45", _link("2026", "Q3"), "AA", "Ab-9", "9-Po-", "",
+            "-".join(["9", "A"] * 5), 9, True, ["A"],
+        ],
+        ids=[
+            "raw-scientific", "raw-id", "amount", "link", "two-letters", "not-a-category",
+            "trailing-dash", "empty", "ten-runs", "int", "bool", "list",
+        ],
+    )
+    def test_a_shape_outside_the_grammar_reads_unreadable(self, poison: object) -> None:
+        """D-17. The shape is stored in ``compute_jobs.last_error``, logged, shown in the admin
+        table and kept in the result block, so it must never carry text from a file (the
+        account-size and bearer-link leak class, T-167.1.2.2.2.1-52). It is echoed only when the
+        shape grammar matches it in full; anything else reads ``unreadable`` and the other tokens
+        stay intact."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, "first_nondigit_shape": poison}, ["2026-Q3"])
+
+        tokens = text.split(" ")
+        assert "first_nondigit_shape=unreadable" in tokens
+        others = [t for t in tokens if not t.startswith("first_nondigit_shape=")]
+        assert others == [t for t in self.VALID_TEXT.split(" ") if not t.startswith("first_nondigit_shape=")]
+        for secret in LINK_SECRETS:
+            assert secret not in text
+
+    @pytest.mark.parametrize("poison", [True, -1, "10", 1.5], ids=["bool", "negative", "string", "float"])
+    def test_a_length_that_is_not_a_count_reads_unreadable(self, poison: object) -> None:
+        """D-17. The length is a count like the others: a non-negative int that is not a bool.
+        Anything else reads ``unreadable`` instead of being echoed as text from the file."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, "first_nondigit_len": poison}, ["2026-Q3"])
+
+        assert "first_nondigit_len=unreadable" in text.split(" ")
+
+    def test_a_stop_with_no_non_digit_id_reads_none(self) -> None:
+        """D-17. A stop on blank-ccy bills alone has no non-digit id. ``none`` says so;
+        ``unreadable`` would claim a value existed and was withheld, and the founder would go
+        looking for an id that was never there."""
+        detail = {**self.VALID, "nondigit_bill_id": 0, "first_nondigit_shape": None, "first_nondigit_len": None}
+
+        text = okx_archive_job._unchainable_tokens(detail, ["2026-Q3"])
+
+        assert " first_nondigit_shape=none first_nondigit_len=none " in text
+
+    def test_every_hand_written_shape_is_inside_the_grammar(self) -> None:
+        """D-17. The parse table pins what the classifier makes; this pins that the job echoes
+        every one of those shapes. Together they prove a shape the classifier makes is never
+        withheld as ``unreadable`` by a grammar that drifted from it."""
+        from tests.test_okx_archive_parse import SHAPE_CASES
+
+        for _, shape in SHAPE_CASES:
+            text = okx_archive_job._unchainable_tokens({**self.VALID, "first_nondigit_shape": shape}, ["2026-Q3"])
+
+            assert f"first_nondigit_shape={shape}" in text.split(" "), shape
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("A-9{9}", "A-9{9}"), (None, None), ("1.23E+17", "unreadable"), (_link("2026", "Q3"), "unreadable")],
+        ids=["shape", "none", "raw-id", "link"],
+    )
+    def test_the_info_carries_a_shape_only_inside_the_grammar(self, value: object, expected: object) -> None:
+        """D-17. ``info.bal_chain`` is kept in the result block and read by the founder, so it
+        gets the same closed-grammar check as ``last_error``: a slip in the code that makes the
+        shape must read ``unreadable`` here too."""
+        info = okx_archive_job._bal_chain_info(
+            {"reason": "unchainable_row", "first_nondigit_shape": value, "first_nondigit_len": 8}
+        )
+
+        assert (info["first_nondigit_shape"], info["first_nondigit_len"]) == (expected, 8)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (8, 8), (0, 0), (None, None),
+            (True, "unreadable"), (-1, "unreadable"), ("10", "unreadable"), (1.5, "unreadable"),
+        ],
+        ids=["count", "zero", "none", "bool", "negative", "string", "float"],
+    )
+    def test_the_info_carries_a_length_only_when_it_is_a_count(self, value: object, expected: object) -> None:
+        """D-17. The length gets the same check in ``info.bal_chain`` as in ``last_error``
+        (T-167.1.2.2.2.1-58): a non-negative int that is not a bool, else ``unreadable``, so the
+        two readings of one stop cannot disagree about the same value."""
+        info = okx_archive_job._bal_chain_info(
+            {"reason": "unchainable_row", "first_nondigit_shape": "A-9{9}", "first_nondigit_len": value}
+        )
+
+        assert info["first_nondigit_len"] == expected
 
     @pytest.mark.asyncio
     async def test_zero_effect_blank_ccy_rows_are_skipped_counted_and_change_no_money_reading(
@@ -2658,7 +2749,7 @@ class TestUnchainableRowDiagnostic:
         assert outcome.error_message == (
             "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
             "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
-            "rows_by_quarter=2026-Q3:1"
+            "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q3:1"
         )
         chain = world.result()["info"]["bal_chain"]
         assert (chain["rows"], chain["blank_ccy"], chain["nondigit_bill_id"], chain["blank_ccy_skipped"]) == (
@@ -2685,7 +2776,7 @@ class TestUnchainableRowDiagnostic:
         assert outcome.error_message == (
             "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
             "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
-            "rows_by_quarter=2026-Q2:0,2026-Q3:1"
+            "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q2:0,2026-Q3:1"
         )
         assert world.result()["info"]["bal_chain"]["blank_ccy_skipped"] == 0
 
@@ -2714,6 +2805,186 @@ class TestUnchainableRowDiagnostic:
             "floor": 2,
         }
         assert result["census"]["by_ccy"]["(blank)"] == 2
+
+
+#: How the export wraps a billId, as the CSV field TEXT of an id. A double-quoted id is a CSV
+#: field of three quotes each side, so the cell the csv reader returns holds one quote each side.
+BILL_ID_WRAPS: dict[str, Callable[[str], str]] = {
+    "tab-prefixed": lambda bill_id: "\t" + bill_id,
+    "apostrophe-prefixed": lambda bill_id: "'" + bill_id,
+    "double-quoted": lambda bill_id: '"""' + bill_id + '"""',
+    "space-padded": lambda bill_id: " " + bill_id + " ",
+}
+
+
+def _wrap_bill_ids(data: bytes, wrap: Callable[[str], str]) -> bytes:
+    """``data`` with the billId (second field) of every data line rewritten by ``wrap``. The
+    header line is left alone. A plain split on commas is exact: a ``_Bills`` line carries no
+    quoted field."""
+    header, *lines = data.decode().split("\n")
+    out = [header]
+    for line in lines:
+        if not line:
+            out.append(line)
+            continue
+        fields = line.split(",")
+        fields[1] = wrap(fields[1])
+        out.append(",".join(fields))
+    return "\n".join(out).encode()
+
+
+def _content_readings(result: dict[str, Any]) -> dict[str, Any]:
+    """Everything of a calibrate result that is a reading of the file's CONTENT, leaving out the
+    transport readings (``decompressed_bytes`` grows with the wrap)."""
+    return {
+        **{
+            key: result[key]
+            for key in ("fingerprint", "census", "reconcile", "excluded", "d03", "strategies", "info")
+        },
+        "quarters": [
+            {
+                key: quarter[key]
+                for key in (
+                    "year", "quarter", "has_type_column", "ts_min_day", "ts_max_day", "row_count",
+                    "longest_billless_run",
+                )
+            }
+            for quarter in result["quarters"]
+        ],
+    }
+
+
+class TestBillIdExportWrap:
+    """D-17. Calibrate run 4 counted every bill of both real files in ``nondigit_bill_id``
+    because the export wraps each id, so a complete file could never pass the completeness proof.
+    The wrap is export formatting, not content: a wrapped file must read exactly as the bare one,
+    fingerprint included, or the founder would approve a preview that differs from what the
+    ledger would then hold."""
+
+    @pytest.mark.parametrize("wrap", list(BILL_ID_WRAPS))
+    @pytest.mark.asyncio
+    async def test_a_wrapped_bill_id_chains_and_reads_exactly_as_the_bare_id(
+        self, monkeypatch: pytest.MonkeyPatch, wrap: str
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_bills().bytes())
+        first = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert first.outcome == DispatchOutcome.DONE, first.error_message
+        bare = copy.deepcopy(world.result())
+
+        wrapped = _wrap_bill_ids(_standard_bills().bytes(), BILL_ID_WRAPS[wrap])
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=wrapped)
+        second = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert second.outcome == DispatchOutcome.DONE, second.error_message
+        result = world.result()
+        assert result["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-07-10", "last_day": "2026-09-15"}},
+            "total_pairs": 10,
+            "blank_ccy_skipped": 0,
+            "floor": 2,
+        }
+        assert HEX64.fullmatch(result["fingerprint"])
+        assert _content_readings(result) == _content_readings(bare)
+
+    @pytest.mark.asyncio
+    async def test_a_q2_and_q3_pair_with_every_bill_id_wrapped_reads_as_the_bare_pair(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real calibrate is this shape: a Q2 and a Q3 file, both with wrapped ids."""
+        q2 = TestArchiveCompleteness()._q2()
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000)
+        quarters = TestArchiveCompleteness.QUARTERS_Q2_Q3
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+        first = await _run(_meta("calibrate", [STRATEGY_ID], quarters=quarters))
+        assert first.outcome == DispatchOutcome.DONE, first.error_message
+        bare = copy.deepcopy(world.result())
+
+        wrap = BILL_ID_WRAPS["apostrophe-prefixed"]
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(
+            monkeypatch, db, _standard_live(),
+            q2=_wrap_bill_ids(q2.bytes(), wrap), q3=_wrap_bill_ids(q3.bytes(), wrap),
+        )
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+        second = await _run(_meta("calibrate", [STRATEGY_ID], quarters=quarters))
+
+        assert second.outcome == DispatchOutcome.DONE, second.error_message
+        result = world.result()
+        # 4 Q2 bills + 11 Q3 bills = 15 bills in one chain = 14 pairs, 04-02 .. 09-15.
+        assert result["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 14, "first_day": "2026-04-02", "last_day": "2026-09-15"}},
+            "total_pairs": 14,
+            "blank_ccy_skipped": 0,
+            "floor": 2,
+        }
+        assert _content_readings(result) == _content_readings(bare)
+
+
+def _sci_row(day: str) -> Callable[[int], str]:
+    """A ``_Bills.raw`` line function: a USDT SWAP subType-2 bill on ``day`` with ``balChg``,
+    ``pnl`` and ``fee`` 0 and ``bal`` 5000, whose billId is ``1.23E+17``. Scientific notation is
+    the form a spreadsheet gives a long id."""
+
+    def line(n: int) -> str:
+        return (
+            f"SWAP,1.23E+17,2,{_ms_at(day, 12)},0,0,5000,0,,,USDT,0,0,"
+            "cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
+        )
+
+    return line
+
+
+class TestNondigitShapeEndToEnd:
+    """D-17. A billId the strip cannot turn into ASCII digits still stops the run. Without the
+    shape the next stop would again say only that every id failed, not how, and the founder would
+    have nothing to decide on. The shape names the id's form and length and never the id."""
+
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.asyncio
+    async def test_a_scientific_notation_bill_id_stops_and_names_its_shape(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: str
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().raw(_sci_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+        extra = {"approved_fingerprint": "d" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
+            "first_nondigit_shape=9-Po-9{2}-A-Sm-9{2} first_nondigit_len=8 "
+            "rows_by_quarter=2026-Q3:1"
+        )
+        result = world.result()
+        assert result["info"] == {
+            "bal_chain": {
+                "reason": "unchainable_row", "ccys": {}, "total_pairs": None,
+                "rows": 1, "blank_ccy": 0, "nondigit_bill_id": 1,
+                "first_day": "2026-09-01", "last_day": "2026-09-01",
+                "first_nondigit_shape": "9-Po-9{2}-A-Sm-9{2}", "first_nondigit_len": 8,
+                "files": [{
+                    "ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15", "rows": 1,
+                    "blank_ccy": 0, "nondigit_bill_id": 1,
+                    "first_day": "2026-09-01", "last_day": "2026-09-01",
+                }],
+                "blank_ccy_skipped": 0,
+                "floor": 2,
+            }
+        }
+        everything = (outcome.error_message or "") + json.dumps(result) + caplog.text
+        for forbidden in ("1.23E+17", "1.23", "E+17", *LINK_SECRETS):
+            assert forbidden not in everything, f"leaked: {forbidden!r}"
+        assert result["fingerprint"] is None
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
 
 
 class TestNonExternalPnlIsInTheLiveNumber:
