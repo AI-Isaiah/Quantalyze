@@ -650,6 +650,7 @@ async def test_a_completed_forced_rebuild_says_so_in_its_completion_audit(
     assert result.outcome == DispatchOutcome.DONE, result
     (complete,) = _audit_metadata(audit, COMPLETE)
     assert complete.get("forced_rebuild") is True, complete
+    assert complete.get("anchor_positions_unread") is False, complete
 
 
 def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
@@ -716,6 +717,10 @@ async def test_unforced_reconstruct_with_a_failed_positions_read_still_anchors_a
     assert last["value_usd"] == pytest.approx(float(usdt["walletBalance"]), abs=0.01), last
     assert FAILED_ACTION not in [c.kwargs["action"] for c in audit.call_args_list]
     assert _marker_of(fake, API_KEY_ID_1) is not None
+    # Review SFH-3: the wallet-figure anchor is no longer invisible. The completion audit
+    # says the open uPnL was left out. RED on a handler that records nothing.
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete.get("anchor_positions_unread") is True, complete
 
 
 @pytest.mark.asyncio

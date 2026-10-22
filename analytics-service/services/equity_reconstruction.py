@@ -3072,6 +3072,10 @@ async def _fetch_and_price_window(
         # the whole curve.
         "anchor_replay_unreliable": _anchor_skipped_unreliable_replay,
         "anchor_offset_skipped_usd": _anchor_offset_skipped,
+        # Review SFH-3: the anchor shipped without the open uPnL (positions read failed).
+        "anchor_positions_unread": bool(
+            getattr(anchor_partial_symbols, "positions_unread", False)
+        ),
     }
     return rows, hit_terminus, telemetry
 
@@ -3088,6 +3092,18 @@ async def _fetch_and_price_window(
 # the drift follows (it follows notional, not the uPnL). It is wide enough for seconds of
 # price movement and far below a missing USDC or inverse position on a book worth anchoring.
 _POSITIONS_PAGE_LIMIT: Final[int] = 200
+
+
+class _AnchorPartialSet(set[str]):
+    """The unpriced-asset set ``_fetch_current_equity`` returns, carrying one more fact.
+
+    ``positions_unread`` (review SFH-3) is True when an UNFORCED anchor on a venue that adds
+    open uPnL (Bybit, Binance) shipped at the wallet figure because ``fetch_positions()``
+    failed. It rides the existing return so the function's signature, and every caller and
+    fake that unpacks two values, is unchanged (PD-J).
+    """
+
+    positions_unread: bool = False
 _BYBIT_UPNL_TOLERANCE_USD: Final[float] = 1.0
 _BYBIT_UPNL_TOLERANCE_REL: Final[float] = 0.005
 
@@ -3124,7 +3140,7 @@ async def _fetch_current_equity(
     so the reconstruction still ships an unanchored series rather than
     failing the whole job.
     """
-    partial_unpriced: set[str] = set()
+    partial_unpriced = _AnchorPartialSet()
     # OKX: ccxt's unified fetch_balance() crashes (load_markets keysort,
     # str < None TypeError in ccxt 4.5.x) so the anchor here silently returned
     # None for every OKX account, shipping an UN-anchored reconstructed curve.
@@ -3234,10 +3250,12 @@ async def _fetch_current_equity(
             if refuse_unread_positions and not _skip_upnl:
                 # PD-H: `from None` so no venue error text rides the refusal.
                 raise ForcedRebuildRefusedError("positions_unreadable") from None
+            partial_unpriced.positions_unread = not _skip_upnl
             positions = []
         if not isinstance(positions, list):
             if refuse_unread_positions and not _skip_upnl:
                 raise ForcedRebuildRefusedError("positions_unreadable")
+            partial_unpriced.positions_unread = not _skip_upnl
             positions = []
         if refuse_unread_positions and not _skip_upnl and (
             len(positions) >= _POSITIONS_PAGE_LIMIT
@@ -4452,6 +4470,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
         # the offset magnitude we declined to spread is auditable here.
         "anchor_replay_unreliable": telemetry.get("anchor_replay_unreliable", False),
         "anchor_offset_skipped_usd": telemetry.get("anchor_offset_skipped_usd", 0.0),
+        "anchor_positions_unread": telemetry.get("anchor_positions_unread", False),
         # Review SFH-1: a forced rebuild's completion says so, like its started audit.
         **({"forced_rebuild": True} if forced else {}),
     }
