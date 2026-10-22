@@ -1166,7 +1166,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file (test_okx_archive_rebuild.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 100 file(s); 0…' to match /scanned 99 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 100 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): MEASURED on the merged tree, `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 104 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).` (main's 103 plus test_okx_archive_rebuild.sql).
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 104 -> 105, the same-day-empty fingerprint gate file (test_commit_scenario_batch_fingerprint_sameday_empty.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 105 file(s); …' to match /scanned 104 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 105 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
-    expect(res.out).toMatch(/scanned 105 file/);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 105 -> 106, the window-replace gate file (test_replace_allocator_equity_snapshots_window.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 106 file(s)…' to match /scanned 105 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 106 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 106 file/);
     expect(res.status, res.out).toBe(0);
   });
 

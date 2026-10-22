@@ -1291,7 +1291,14 @@
 // `test_commit_scenario_batch_fingerprint_unpriced.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2` (unchanged count, retargeted
 // to the new migration). The stale-low direction was observed first: `RATCHET STALE: 78 of 105 gate files are now annotated but FILES_FLOOR is
 // still 77.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 78;
+// RAISED 78 -> 79 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD plan 05): +1 file, test_replace_allocator_equity_snapshots_window.sql
+// (migration 20261028120000, eleven arms), so 79 of 106 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file edited during
+// it, exit 0: `scope: FULL 79/79 annotated files`, `lane-concurrency: 4`, `coverage: files 79/106`, `arms: 788/788/0`, `biting: 788`,
+// `lane-invocations: 788 ... plus 79 baseline / 79 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron
+// AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.5s over 788 arm run(s)`, `No defects. Every annotated arm bit its own arm first.`
+// Per-file line: `test_replace_allocator_equity_snapshots_window.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11`. The
+// stale-low direction was observed first: `RATCHET STALE: 79 of 106 gate files are now annotated but FILES_FLOOR is still 78.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 79;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3257,7 +3264,12 @@ export const FILES_FLOOR = 78;
 // `unreachable: 27`, `lane-blocked: 0`, `No defects`, exit 0; per-file `test_commit_scenario_batch_fingerprint_sameday_empty.sql: sections 6 / judged 6 /
 // annotated 6 / waived 0 / biting 6`. The stale-low direction was observed first: `The corpus declares 777 twin(s) of which 0 are waivers, so a green run
 // bites 777. ARMS_FLOOR is 776.` FILES_FLOOR stays 78 (no file joined). WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 777;
+// RAISED 777 -> 788 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD plan 05): +11 biting arms, the eleven arms of the NEW gate
+// test_replace_allocator_equity_snapshots_window.sql (migration 20261028120000). MEASURED by the same single run recorded under FILES_FLOOR:
+// `arms: 788/788/0`, `biting: 788`, `lane-invocations: 788`; per-file `test_replace_allocator_equity_snapshots_window.sql: sections 11 / judged 11 /
+// annotated 11 / waived 0 / biting 11`. The stale-low direction was observed first: `The corpus declares 788 twin(s) of which 0 are waivers, so a
+// green run bites 788. ARMS_FLOOR is 777.` WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 788;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
