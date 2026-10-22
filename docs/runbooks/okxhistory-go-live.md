@@ -630,15 +630,26 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
   `seam_breaks` (breaks on a pair that crosses two files) and `first_break_day`, `starved` (the
   currencies under the floor) and `files[]` (each file's `ts_min_day` / `ts_max_day`). An
   `unchainable_row` stop (D-16) is a bill the chain cannot place. That is a blank `ccy` with an effect
-  (`blank_ccy`) or a `billId` that is not all digits (`nondigit_bill_id`, whatever its effect). One bill
-  can carry both causes, and `rows` counts each once. Its `info.bal_chain` adds `rows`, `blank_ccy`,
-  `nondigit_bill_id`, `first_day` / `last_day` (the UTC days of the first and last such bill) and
-  `blank_ccy_skipped`. Per file, in `files[]` in `quarters[]` order, it adds the same counts and days
-  beside `ts_min_day` / `ts_max_day`. Its `last_error` continues after `cause=unchainable_row` with
-  `rows=`, `blank_ccy=`, `nondigit_bill_id=`, `first_day=`, `last_day=` and
-  `rows_by_quarter=<YYYY-Qn>:<n>,...`, and `unreadable` marks a value the job would not echo. Counts and
-  dates only, never a billId or an amount. The readings go to the founder (D-16); do not re-enqueue to
-  get past the stop.
+  (`blank_ccy`) or a `billId` that is not all ASCII digits (`nondigit_bill_id`, whatever its effect). The
+  parser first strips the whitespace (tab and space included), apostrophes and double quotes around each
+  `billId` (D-17), so an export that wraps every id still chains. The inside of an id is never touched,
+  and an id made of those characters alone stops `duplicate_bill_conflict` with `parse=missing_bill_id`.
+  One bill can carry both causes, and `rows` counts each once. Its `info.bal_chain` adds `rows`,
+  `blank_ccy`, `nondigit_bill_id`, `first_day` / `last_day` (the UTC days of the first and last such
+  bill), `first_nondigit_shape` / `first_nondigit_len` and `blank_ccy_skipped`. Per file, in `files[]` in
+  `quarters[]` order, it adds the same counts and days beside `ts_min_day` / `ts_max_day`. Its
+  `last_error` continues after `cause=unchainable_row` with `rows=`, `blank_ccy=`, `nondigit_bill_id=`,
+  `first_day=`, `last_day=`, `first_nondigit_shape=`, `first_nondigit_len=` and
+  `rows_by_quarter=<YYYY-Qn>:<n>,...`, and `unreadable` marks a value the job would not echo.
+  `first_nondigit_shape` (D-17) is the shape of the first id that stopped as non-digit, in `quarters[]`
+  order and then row order, after the strip. An ASCII digit reads `9`, an ASCII letter `A`, a tab `TAB`, a
+  space `SP`, a double quote `DQ`, an apostrophe `SQ`, and any other character its two-letter Unicode
+  category (`Po` for a full stop, `Sm` for `+` or `=`, `Pd` for `-`, `Zs` for a no-break space). A run
+  reads `<symbol>{<n>}`, runs are joined by `-`, and an id with more than eight runs ends `-MORE`, so
+  `9-Po-9{2}-A-Sm-9{2}` is a number in scientific notation. `first_nondigit_len` is that id's length in
+  characters. Both read `none` when no bill stopped for its id. Counts, dates and the shape only, never a
+  billId or an amount. The readings go to the founder (D-16, D-17); do not re-enqueue to get past the
+  stop.
 - `census`: `by_ccy` all USDT, apart from a `(blank)` count that on a clean calibrate equals
   `info.bal_chain.blank_ccy_skipped` (D-16), `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
   non-USD currency is the STOP `non_usd_ccy`, and it is the measurement that settles

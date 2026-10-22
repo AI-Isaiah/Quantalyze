@@ -32,10 +32,13 @@ Stop classes raised here (all ``okx_archive_files.ArchiveParseError``):
 ``duplicate_bill_conflict``, and (``verify_bal_chain``) ``archive_incomplete`` with the reasons
 ``bal_chain_break``, ``too_few_pairs`` and ``unchainable_row`` (D-16: its detail splits the cause
 into ``blank_ccy`` and ``nondigit_bill_id`` and names the rows per file and their first and last
-UTC day). Details hold counts, months, dates and subtype labels only.
+UTC day; D-17: it also names the value-free shape and the length of the first non-digit billId).
+Details hold counts, months, dates, subtype labels and that closed-grammar shape only.
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
@@ -141,6 +144,51 @@ class ArchiveAggregate:
     summed_ccys: frozenset[str]
 
 
+# D-17: the value-free shape of a billId that is still not all ASCII digits after the strip. An
+# ASCII digit is ``9``, an ASCII letter ``A``, tab/space/double quote/apostrophe a fixed name, and any
+# other character its two-letter Unicode category, so a shape holds no character of the id.
+_SHAPE_NAMES: Final[Mapping[str, str]] = MappingProxyType({"\t": "TAB", " ": "SP", '"': "DQ", "'": "SQ"})
+_SHAPE_MAX_RUNS: Final[int] = 8
+# One run: a symbol, then ``{n}`` when it repeats (n >= 2, at most 6 digits: Python's default csv
+# field limit of 131072 characters already stops a longer cell as ``malformed_csv``).
+_SHAPE_RUN: Final[str] = (
+    r"(?:9|A|TAB|SP|DQ|SQ|L[ultmo]|M[nce]|N[dlo]|P[cdseifo]|S[mcko]|Z[slp]|C[cfsno])"
+    r"(?:\{(?:[2-9]|[1-9][0-9]{1,5})\})?"
+)
+#: The whole grammar of a shape, defined beside the code that makes shapes and imported by the job,
+#: which echoes a shape only when this matches it in full: one run, up to seven more preceded by
+#: ``-``, then an optional ``-MORE``.
+NONDIGIT_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
+    rf"{_SHAPE_RUN}(?:-{_SHAPE_RUN}){{0,{_SHAPE_MAX_RUNS - 1}}}(?:-MORE)?"
+)
+
+
+def _bill_id_shape(bill_id: str) -> str:
+    """D-17: the value-free shape of ``bill_id``, matched in full by ``NONDIGIT_SHAPE_RE``.
+
+    Each character becomes a symbol (``9`` for an ASCII digit, ``A`` for an ASCII letter, ``TAB``,
+    ``SP``, ``DQ`` or ``SQ`` for those four, else its Unicode general category such as ``Po`` or
+    ``Sm``), equal neighbours merge into a run (``9{4}`` for four digits in a row), runs are joined
+    by ``-``, and an id with more than ``_SHAPE_MAX_RUNS`` runs ends ``-MORE``. A shape never holds
+    a character of the id: its only digits are the symbol ``9`` and run counts."""
+    runs: list[list[Any]] = []
+    for ch in bill_id:
+        if "0" <= ch <= "9":
+            symbol = "9"
+        elif ch.isascii() and ch.isalpha():
+            symbol = "A"
+        else:
+            symbol = _SHAPE_NAMES.get(ch) or unicodedata.category(ch)
+        if runs and runs[-1][0] == symbol:
+            runs[-1][1] += 1
+        else:
+            runs.append([symbol, 1])
+    parts = [symbol if count == 1 else f"{symbol}{{{count}}}" for symbol, count in runs[:_SHAPE_MAX_RUNS]]
+    if len(runs) > _SHAPE_MAX_RUNS:
+        parts.append("MORE")
+    return "-".join(parts)
+
+
 def _bill_order_key(row: ArchiveRow) -> tuple[bool, int, str]:
     digits = row.bill_id.isascii() and row.bill_id.isdigit()
     return (not digits, int(row.bill_id) if digits else 0, row.bill_id)
@@ -193,7 +241,9 @@ def verify_bal_chain(
     ``unchainable_row`` (D-16) is raised before any chaining, for a bill the chain cannot place:
     a blank ``ccy`` with an effect (``blank_ccy``) or a ``billId`` that is not all digits
     (``nondigit_bill_id``, whatever its ``ccy`` or effect). One bill can carry both causes;
-    ``rows`` counts each stopping bill once.
+    ``rows`` counts each stopping bill once. D-17: its detail also carries ``first_nondigit_shape``
+    and ``first_nondigit_len``, the value-free shape (``_bill_id_shape``) and the length of the FIRST
+    non-digit billId in the order the files are passed and then row order (None when there is none).
 
     D-16 skip: a bill with a blank ``ccy``, an all-digit ``billId`` and ZERO BALANCE EFFECT
     (``balChg``, ``pnl`` and ``fee`` all exactly 0, the negation of ``aggregate_archive``'s
@@ -221,6 +271,8 @@ def verify_bal_chain(
     # first and last UTC day, so the stop names what stopped it. Counts and days only.
     tally: list[dict[str, Any]] = []
     skipped = 0
+    first_shape: str | None = None
+    first_len: int | None = None
     seen: set[str] = set()
     for file in files:
         stopping_days: list[str] = []
@@ -241,6 +293,9 @@ def verify_bal_chain(
                 blank += 1
             if row_nondigit:
                 nondigit += 1
+                if first_shape is None:
+                    first_shape = _bill_id_shape(row.bill_id)
+                    first_len = len(row.bill_id)
         tally.append(
             {
                 "ts_min_day": file.ts_min_day,
@@ -264,6 +319,8 @@ def verify_bal_chain(
                 "nondigit_bill_id": sum(entry["nondigit_bill_id"] for entry in tally),
                 "first_day": min(days),
                 "last_day": max(days),
+                "first_nondigit_shape": first_shape,
+                "first_nondigit_len": first_len,
                 "files": tally,
                 "blank_ccy_skipped": skipped,
             },
