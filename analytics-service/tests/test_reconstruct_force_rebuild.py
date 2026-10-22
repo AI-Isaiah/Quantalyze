@@ -35,6 +35,7 @@ enqueue; the exchange is a stub and the database is the in-memory fake.
 
 from __future__ import annotations
 
+import copy
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -389,6 +390,104 @@ async def test_forced_rebuild_refuses_and_writes_nothing_when_the_positions_read
     await _assert_forced_rebuild_refused(monkeypatch, exchange, "positions_unreadable")
 
 
+def _position(contracts: float, upnl: Any) -> dict[str, Any]:
+    return {**BYBIT_LINEAR_POSITIONS[0], "contracts": contracts, "unrealizedPnl": upnl}
+
+
+async def _bybit_exchange_with(
+    *, positions: list[dict[str, Any]], total_perp_upl: str | None = "250.5"
+) -> AsyncMock:
+    """A Bybit exchange whose balance is ccxt's REAL parse of the fixture payload with its
+    ``totalPerpUPL`` set to ``total_perp_upl`` (None removes it), and whose positions are
+    exactly ``positions``."""
+    payload = copy.deepcopy(BYBIT_UNIFIED_WALLET_BALANCE)
+    account = payload["result"]["list"][0]
+    if total_perp_upl is None:
+        del account["totalPerpUPL"]
+    else:
+        account["totalPerpUPL"] = total_perp_upl
+    exchange = await _bybit_exchange()
+    exchange.fetch_balance = AsyncMock(return_value=await real_bybit_parse_balance(payload))
+    exchange.fetch_positions = AsyncMock(return_value=positions)
+    return exchange
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(
+            lambda: _bybit_exchange_with(
+                positions=[_position(0.1, 250.5), _position(0.2, None)]
+            ),
+            id="open-position-without-upnl",
+        ),
+        pytest.param(
+            lambda: _bybit_exchange_with(
+                positions=[_position(0.1, 250.5), _position(0.2, "n/a")]
+            ),
+            id="open-position-with-non-numeric-upnl",
+        ),
+        pytest.param(
+            lambda: _bybit_exchange_with(
+                positions=[
+                    {**_position(0.1, 250.5), "info": {"nextPageCursor": "0%3A1657711949945"}}
+                ]
+            ),
+            id="next-page-cursor",
+        ),
+        pytest.param(
+            lambda: _bybit_exchange_with(
+                positions=[_position(0.1, 250.5)] + [_position(0, None)] * 199
+            ),
+            id="full-page-of-200-rows",
+        ),
+        pytest.param(
+            lambda: _bybit_exchange_with(positions=[_position(0.1, 250.5)], total_perp_upl="1000"),
+            id="positions-disagree-with-totalPerpUPL",
+        ),
+        pytest.param(
+            lambda: _bybit_exchange_with(positions=[_position(0.1, 250.5)], total_perp_upl=None),
+            id="totalPerpUPL-absent",
+        ),
+    ],
+)
+async def test_forced_rebuild_refuses_when_the_open_upnl_cannot_be_fully_read(
+    monkeypatch: pytest.MonkeyPatch, build: Any
+) -> None:
+    """Review WR-02 / SFH-2. A readable position list can still drop uPnL silently: an open
+    position with no numeric uPnL, a truncated read (a ``nextPageCursor`` or a full page of
+    200), or positions that do not add up to Bybit's own ``totalPerpUPL`` (which also
+    covers USDC and inverse positions, never requested by the default read). Each would
+    replace the stored curve with an anchor missing some open uPnL, so each refuses. (The two
+    open-position cases keep a good position beside the bad one and a matching
+    ``totalPerpUPL``, so only the per-position rule can refuse them.)"""
+    await _assert_forced_rebuild_refused(monkeypatch, await build(), "positions_unreadable")
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_accepts_flat_positions_and_a_small_totalperpupl_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-02, the other side. A flat position carries no uPnL and is not an open one,
+    and the two REST calls are seconds apart, so a 2.5 USD drift between the summed
+    positions and ``totalPerpUPL`` (tolerance: the larger of 1 USD and 0.5% of the 1000
+    wallet figure, i.e. 5) must not refuse. RED on a check with no tolerance or none for
+    flat positions."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    _install_fake_audit(monkeypatch)
+    exchange = await _bybit_exchange_with(
+        positions=[_position(0.1, 250.5), _position(0, None)], total_perp_upl="253",
+    )
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+
+
 @pytest.mark.asyncio
 async def test_forced_rebuild_refuses_when_the_balance_read_fails(
     monkeypatch: pytest.MonkeyPatch,
@@ -411,11 +510,12 @@ async def test_forced_rebuild_refuses_when_the_anchor_would_be_skipped_for_a_par
     """An existing anchor skip: a held non-stable coin whose ticker call fails makes the
     equity figure an undercount, so the crawl ships the replay un-anchored. Unforced that is
     the documented fallback; forced it would replace the stored curve with an un-anchored
-    one. The payload is two coins through ccxt's REAL Bybit parser (USDT walletBalance 1000,
-    BTC walletBalance 0.1); the BTC ticker raises; the positions are readable."""
+    one. The payload is two coins through ccxt's REAL Bybit parser (USDT walletBalance 1000
+    with the fixture's 250.5 open uPnL, BTC walletBalance 0.1); the BTC ticker raises; the
+    positions are readable and agree with the payload's totalPerpUPL."""
     payload = bybit_wallet_balance(
         "UNIFIED",
-        [bybit_coin("USDT", "1000", "0"), bybit_coin("BTC", "0.1", "0")],
+        [bybit_coin("USDT", "1000", "250.5"), bybit_coin("BTC", "0.1", "0")],
     )
     exchange = await _bybit_exchange()
     exchange.fetch_balance = AsyncMock(return_value=await real_bybit_parse_balance(payload))

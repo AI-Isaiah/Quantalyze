@@ -3075,6 +3075,22 @@ async def _fetch_and_price_window(
     return rows, hit_terminus, telemetry
 
 
+# Phase 167.2.1.1 review WR-02 / SFH-2: bounds for the forced path's completeness check of
+# ``fetch_positions()``. ccxt 4.5.88 ``bybit.fetch_positions`` sends ``limit=200`` when the
+# caller gives none and does not page by default; with more rows it puts the response's
+# ``nextPageCursor`` on ``info`` of the FIRST returned position
+# (``add_pagination_cursor_to_result``). So a cursor, or a full page, means the read may be
+# truncated. Bybit also reports the account's ``totalPerpUPL`` (a decimal string at
+# ``balance["info"]["result"]["list"][0]``, 8 dp, so rounding is negligible). The two figures
+# come from two sequential REST calls, so marks move between them: the tolerance is the
+# larger of 1 USD and 0.5% of the wallet figure (the equity before open uPnL), the scale
+# the drift follows (it follows notional, not the uPnL). It is wide enough for seconds of
+# price movement and far below a missing USDC or inverse position on a book worth anchoring.
+_POSITIONS_PAGE_LIMIT: Final[int] = 200
+_BYBIT_UPNL_TOLERANCE_USD: Final[float] = 1.0
+_BYBIT_UPNL_TOLERANCE_REL: Final[float] = 0.005
+
+
 async def _fetch_current_equity(
     exchange: Any, venue: str, *, refuse_unread_positions: bool = False,
 ) -> tuple[float | None, set[str]]:
@@ -3082,9 +3098,12 @@ async def _fetch_current_equity(
 
     ``refuse_unread_positions`` (forced path only, Phase 167.2.1.1 PD-H): when True and the
     venue ADDS open-position uPnL here (Bybit, Binance: not ``_UNIFIED_MARGIN_VENUES``), a
-    ``fetch_positions()`` that raises or returns a non-list raises
-    ``ForcedRebuildRefusedError("positions_unreadable")`` instead of anchoring at the
-    wallet figure. False keeps the advisory-anchor contract below, unchanged.
+    ``fetch_positions()`` that raises, returns a non-list, may be truncated (a
+    ``nextPageCursor`` or ``_POSITIONS_PAGE_LIMIT`` rows), carries an open position
+    without a numeric uPnL, or (Bybit) sums to something other than the balance's
+    ``totalPerpUPL`` raises ``ForcedRebuildRefusedError("positions_unreadable")``
+    instead of anchoring without part of the uPnL. False keeps the advisory-anchor
+    contract below, unchanged.
 
     ``equity_usd`` is today's total account equity in USD, or None if we
     can't determine it. ``partial_unpriced_symbols`` is the set of
@@ -3219,6 +3238,17 @@ async def _fetch_current_equity(
             if refuse_unread_positions and not _skip_upnl:
                 raise ForcedRebuildRefusedError("positions_unreadable")
             positions = []
+        if refuse_unread_positions and not _skip_upnl and (
+            len(positions) >= _POSITIONS_PAGE_LIMIT
+            or any(
+                isinstance(p, dict)
+                and isinstance(p.get("info"), dict)
+                and p["info"].get("nextPageCursor")
+                for p in positions
+            )
+        ):
+            raise ForcedRebuildRefusedError("positions_unreadable")
+        _wallet_total = total
         for p in positions:
             if not isinstance(p, dict):
                 continue
@@ -3226,13 +3256,28 @@ async def _fetch_current_equity(
                 # uPnL already included in fetch_balance['total'] on
                 # unified-margin venues — adding it again double-counts.
                 continue
-            upnl = p.get("unrealizedPnl")
-            if upnl is None:
-                continue
             try:
-                total += float(upnl)
+                total += float(p.get("unrealizedPnl"))
             except (TypeError, ValueError):
+                # Unforced: a position without a numeric uPnL is skipped. Forced
+                # (review WR-02): an OPEN one refuses; a flat one carries none.
+                if refuse_unread_positions:
+                    try:
+                        _is_open = float(p.get("contracts") or 0) != 0
+                    except (TypeError, ValueError):
+                        _is_open = True
+                    if _is_open:
+                        raise ForcedRebuildRefusedError("positions_unreadable") from None
                 continue
+        if refuse_unread_positions and venue.lower() == "bybit":
+            try:
+                _reported_upnl = float(balance["info"]["result"]["list"][0]["totalPerpUPL"])
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise ForcedRebuildRefusedError("positions_unreadable") from None
+            if abs((total - _wallet_total) - _reported_upnl) > max(
+                _BYBIT_UPNL_TOLERANCE_USD, _BYBIT_UPNL_TOLERANCE_REL * abs(_wallet_total),
+            ):
+                raise ForcedRebuildRefusedError("positions_unreadable")
         return total, partial_unpriced
     except ForcedRebuildRefusedError:
         # PD-H: a forced-path refusal must reach the handler, not be swallowed by the
