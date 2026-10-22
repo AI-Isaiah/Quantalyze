@@ -899,10 +899,11 @@ async def test_a_sibling_whose_positions_cannot_be_read_refuses_the_account(
 async def test_a_failed_sibling_crawl_refuses_the_account_without_its_text(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A sibling crawl that fails for any reason other than a named refusal still ends the
-    whole account refused (account_key_read_failed), and its venue text reaches neither the
-    job error, the audit, nor the log: the gather converter is the one place that converts it,
-    and it records the exception CLASS only. The sibling's session is closed exactly once."""
+    """A sibling crawl that fails PERMANENTLY (an authentication fault, here) and is not a
+    named refusal still ends the whole account refused (account_key_read_failed), and its
+    venue text reaches neither the job error, the audit, nor the log: the gather converter is
+    the one place that converts it, and it records the exception CLASS only. The sibling's
+    session is closed exactly once."""
     fake = _MarkerFake()
     _seed_two_account_book(fake)
     exchange_1 = await _bybit_exchange()
@@ -910,7 +911,7 @@ async def test_a_failed_sibling_crawl_refuses_the_account_without_its_text(
     # A BARE word, not ``signature=<hex>``: ``scrub_freeform_string`` redacts the keyed form,
     # so only a bare word proves the converter keeps venue text out of the log by construction.
     exchange_2.fetch_my_trades = AsyncMock(
-        side_effect=ccxt.ExchangeError(f"fixture failure {LEAKED_SIGNATURE}")
+        side_effect=ccxt.AuthenticationError(f"fixture failure {LEAKED_SIGNATURE}")
     )
     closed = _install_close_recorder(monkeypatch)
 
@@ -932,11 +933,13 @@ def _assert_account_rebuild_failed_transient(
     audit: Any,
     *,
     before: dict[str, list[dict[str, Any]]],
+    kind: str = "transient",
 ) -> None:
-    """A transient fault in the account crawl ends the job FAILED/transient (so the queue
-    retries it), writes nothing, and leaves exactly ONE failure audit, which says transient."""
+    """A non-permanent fault in the account crawl ends the job FAILED with ``kind``
+    (transient, or unknown for a fault the classifier cannot place; the queue retries both),
+    writes nothing, and leaves exactly ONE failure audit, which says the same kind."""
     assert result.outcome == DispatchOutcome.FAILED, result
-    assert result.error_kind == "transient", result
+    assert result.error_kind == kind, result
     assert _book_state(fake) == before, "a transient account failure changed the stored state"
     assert fake.api_key_updates() == [], fake.api_key_updates()
     written = [
@@ -948,27 +951,31 @@ def _assert_account_rebuild_failed_transient(
     actions = [c.kwargs["action"] for c in audit.call_args_list]
     assert not (set(actions) & COMPLETION_ACTIONS), actions
     (failed,) = _audit_metadata(audit, FAILED_ACTION)
-    assert failed["error_kind"] == "transient", failed
+    assert failed["error_kind"] == kind, failed
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "fault",
+    ("fault", "kind"),
     [
-        ccxt.RateLimitExceeded("fixture: slow down"),
-        ccxt.NetworkError("fixture: connection reset"),
-        ccxt.RequestTimeout("fixture: timed out"),
-        ccxt.ExchangeNotAvailable("fixture: 503"),
+        (ccxt.RateLimitExceeded("fixture: slow down"), "transient"),
+        (ccxt.NetworkError("fixture: connection reset"), "transient"),
+        (ccxt.RequestTimeout("fixture: timed out"), "transient"),
+        (ccxt.ExchangeNotAvailable("fixture: 503"), "transient"),
+        # The classifier calls a bare exchange fault ``unknown`` and "retried by default":
+        # a venue body-level server fault (a Bybit retCode 10016) arrives as this class.
+        (ccxt.ExchangeError("fixture: internal server error"), "unknown"),
     ],
-    ids=["rate_limit", "network", "timeout", "exchange_5xx"],
+    ids=["rate_limit", "network", "timeout", "exchange_5xx", "exchange_error_unknown"],
 )
 async def test_a_transient_fault_on_one_account_ends_the_job_transient_and_writes_nothing(
-    monkeypatch: pytest.MonkeyPatch, fault: Exception
+    monkeypatch: pytest.MonkeyPatch, fault: Exception, kind: str
 ) -> None:
-    """A rate limit, a network error, a timeout or an exchange 5xx on ONE of the account's
-    exchange accounts is a fault a retry clears. The crawl must not turn it into the
-    permanent ``account_key_read_failed`` refusal (a refusal is never retried): the job ends
-    FAILED/transient, nothing is written, and one failure audit says transient."""
+    """A rate limit, a network error, a timeout, an exchange 5xx or an unclassifiable exchange
+    fault on ONE of the account's exchange accounts is a fault a retry may clear. The crawl
+    must not turn it into the permanent ``account_key_read_failed`` refusal (a refusal is
+    never retried): the job ends FAILED with the classified kind, nothing is written, and
+    one failure audit says the same kind."""
     fake = _MarkerFake()
     _seed_two_account_book(fake)
     exchange_1 = await _bybit_exchange()
@@ -979,17 +986,89 @@ async def test_a_transient_fault_on_one_account_ends_the_job_transient_and_write
         monkeypatch, fake, exchange_1, exchange_2
     )
 
-    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before, kind=kind)
     assert not (result.error_message or "").startswith(REFUSAL_PREFIX), result.error_message
+
+
+_SIGNED_URL_FAULT = (
+    "fixture: GET https://venue.invalid/v5/x?apiKey=PUBKEY123&signature=deadbeefcafe "
+    "connection reset"
+)
+
+
+def _assert_signed_url_leaked_nowhere(
+    result: DispatchResult, audit: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    for text in ("PUBKEY123", "deadbeefcafe", "venue.invalid"):
+        assert text not in (result.error_message or ""), result.error_message
+        assert not [c for c in audit.call_args_list if text in repr(c)], audit.call_args_list
+        leaked = [r.getMessage() for r in caplog.records if text in r.getMessage()]
+        assert leaked == [], f"the venue text reached the log: {leaked}"
+
+
+@pytest.mark.asyncio
+async def test_a_sibling_crawl_transient_leaks_its_signed_url_nowhere(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-167.2.1.1.2-24: a sibling's ``NetworkError`` carries the request URL, signature
+    included. A retried job must not copy that text into ``compute_jobs.error_message``, the
+    audit or any log record: the phase-owned transient names the exception CLASS only."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_my_trades = AsyncMock(side_effect=ccxt.NetworkError(_SIGNED_URL_FAULT))
+
+    with caplog.at_level("DEBUG"):
+        result, audit, before, _calls = await _run_forced_two_account_job(
+            monkeypatch, fake, exchange_1, exchange_2
+        )
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    _assert_signed_url_leaked_nowhere(result, audit, caplog)
+
+
+@pytest.mark.asyncio
+async def test_a_sibling_session_transient_leaks_its_signed_url_nowhere(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same, for a sibling session that cannot be opened: the preflight itself raises."""
+    from services import job_worker as jw
+
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+
+    async def _preflight(job: dict[str, Any], caller_name: str) -> Any:
+        if job["api_key_id"] == API_KEY_ID_2:
+            raise ccxt.NetworkError(_SIGNED_URL_FAULT)
+        return jw._ExchangeContext(
+            supabase=fake, strategy_row=None,
+            key_row=dict(fake.store[("api_keys", (job["api_key_id"],))]),
+            exchange=exchange_1,
+        )
+
+    audit = _install_fake_audit(monkeypatch)
+    monkeypatch.setattr(er, "_allocator_key_preflight", _preflight)
+    monkeypatch.setattr(er, "get_supabase", lambda: fake, raising=False)
+    _freeze_now(monkeypatch)
+    before = _book_state(fake)
+
+    with caplog.at_level("DEBUG"):
+        result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    _assert_signed_url_leaked_nowhere(result, audit, caplog)
 
 
 @pytest.mark.asyncio
 async def test_a_rate_limited_sibling_is_stamped_and_ends_the_job_transient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A sibling the venue rate-limits is parked behind the circuit breaker (its own key is
-    stamped, so the retry waits out the cooldown) and the whole account is not rebuilt:
-    nothing is written and the job is retried rather than refused for good."""
+    """A sibling the venue rate-limits is parked behind the circuit breaker (its own key, and
+    only its own, is stamped, so the retry waits out the cooldown) and the whole account is
+    not rebuilt: nothing is written and the job is retried rather than refused for good. The
+    job's own healthy key is NOT stamped: that would park every other job on it."""
     fake = _MarkerFake()
     _seed_two_account_book(fake)
     exchange_1 = await _bybit_exchange()
@@ -1001,8 +1080,29 @@ async def test_a_rate_limited_sibling_is_stamped_and_ends_the_job_transient(
     )
 
     _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
-    stamped = [p["p_api_key_id"] for (n, p) in fake.rpc_calls if n == "stamp_api_key_429"]
-    assert API_KEY_ID_2 in stamped, stamped
+    stamped = [p for (n, p) in fake.rpc_calls if n == "stamp_api_key_429"]
+    assert stamped == [{"p_api_key_id": API_KEY_ID_2}], stamped
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_own_key_is_stamped_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mirror: when the JOB'S OWN key is rate-limited, that key is stamped exactly once
+    and the sibling's key is not."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_1.fetch_my_trades = AsyncMock(side_effect=ccxt.RateLimitExceeded("fixture: slow down"))
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    stamped = [p for (n, p) in fake.rpc_calls if n == "stamp_api_key_429"]
+    assert stamped == [{"p_api_key_id": API_KEY_ID_1}], stamped
 
 
 @pytest.mark.asyncio

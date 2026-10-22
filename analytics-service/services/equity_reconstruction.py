@@ -73,6 +73,7 @@ from services.job_worker import (
     AllocatorEquityAction,
     DispatchOutcome,
     DispatchResult,
+    ErrorKind,
     _ExchangeContext,
     _allocator_key_preflight,
     _emit_audit,
@@ -1967,6 +1968,23 @@ class ForcedRebuildRefusedError(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"forced rebuild refused ({reason})")
+
+
+class _AccountCrawlRetryableError(RuntimeError):
+    """A sibling exchange account's crawl or session failed with a fault that is not
+    ``permanent`` (transient or unknown), so a retry may clear it.
+
+    Phase-owned, with static text naming only the exception CLASS: the sibling's own
+    exception (which can carry the request URL and its signature) is never re-raised, so it
+    reaches neither ``compute_jobs.error_message`` nor the audit (T-167.2.1.1.2-24).
+    """
+
+    def __init__(self, error_kind: ErrorKind, exc_class: str) -> None:
+        self.error_kind = error_kind
+        super().__init__(
+            f"whole-account rebuild crawl hit a retryable venue fault ({exc_class}); "
+            "nothing was written"
+        )
 
 
 # Phase 167.2.1.1.2 ACCTREBUILD plan 04: the pure rules of the whole-account rebuild. A stored
@@ -4530,11 +4548,13 @@ async def _crawl_whole_account(
     (a stored row is a sum across exchange accounts, so every account must cover the same
     span). In key order the first refusal is re-raised as it is. An MT5 account's failure
     comes back as the ``DispatchResult`` it already settled and audited, and is returned
-    unchanged. A failure ``classify_exception`` calls transient (a rate limit, a network
-    error, a timeout, an exchange 5xx) is re-raised unchanged, so the handler's own arms
-    retry the job. Any other failure becomes ``account_key_read_failed`` after one scrubbed
-    WARNING: this loop is the only converter. Every session this function opened is closed in ``finally``; the job's own
-    session stays with the handler's ``finally``.
+    unchanged. A failure ``classify_exception`` does not call permanent
+    (transient or unknown: a rate limit, a network error, a timeout, an exchange fault)
+    becomes ``_AccountCrawlRetryableError`` after one class-only WARNING, so the job is
+    retried and the sibling's text goes nowhere. Any other failure becomes
+    ``account_key_read_failed`` after one WARNING: this loop is the only converter. Every
+    session this function opened is closed in ``finally``; the job's own session stays with
+    the handler's ``finally``.
     """
     own_key_id = str(job["api_key_id"])
     selected, zero_contribution = _select_account_crawl_keys(account_keys, own_key_id)
@@ -4553,8 +4573,14 @@ async def _crawl_whole_account(
                     {**job, "api_key_id": key_id}, "run_reconstruct_allocator_history_job",
                 )
             except Exception as exc:  # noqa: BLE001
-                if classify_exception(exc)[0] == "transient":
-                    raise
+                sibling_kind = classify_exception(exc)[0]
+                if sibling_kind != "permanent":
+                    logger.warning(
+                        "reconstruct_allocator_history sibling key could not be opened "
+                        "allocator=%s key=%s venue=%s exc_class=%s",
+                        allocator_id, key_id, _key_venue(key), type(exc).__name__,
+                    )
+                    raise _AccountCrawlRetryableError(sibling_kind, type(exc).__name__) from None
                 logger.warning(
                     "reconstruct_allocator_history sibling key could not be opened "
                     "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
@@ -4587,8 +4613,6 @@ async def _crawl_whole_account(
             if isinstance(outcome, DispatchResult):
                 return outcome
             if isinstance(outcome, BaseException):
-                if isinstance(outcome, Exception) and classify_exception(outcome)[0] == "transient":
-                    raise outcome
                 # The exception CLASS only: the venue's text is never logged here, so
                 # nothing it carries (a scrub-resistant fragment included) reaches the log
                 # on the way to a refusal that names only the token (T-167.2.1.1.2-24).
@@ -4598,6 +4622,12 @@ async def _crawl_whole_account(
                     allocator_id, key.get("id"), _key_venue(key),
                     type(outcome).__name__,
                 )
+                if isinstance(outcome, Exception):
+                    crawl_kind = classify_exception(outcome)[0]
+                    if crawl_kind != "permanent":
+                        raise _AccountCrawlRetryableError(
+                            crawl_kind, type(outcome).__name__
+                        ) from None
                 raise ForcedRebuildRefusedError("account_key_read_failed") from None
             per_account_rows.append(outcome[0])
             per_account_telemetry.append(outcome[1])
@@ -4787,6 +4817,21 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             # is before the persist half and the marker writer), so fail loudly and leave
             # the stored curve and the marker as they were.
             return _forced_refusal_result(allocator_id, api_key_id, venue, exc.reason)
+        except _AccountCrawlRetryableError as exc:
+            # A sibling exchange account's retryable fault: the crawl already stamped a
+            # sibling rate limit on the sibling's own key, so nothing is stamped on THIS
+            # job's key. Static text only, the kind the sibling's fault was classified as.
+            sanitized = str(exc)
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {"error_kind": exc.error_kind, "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind=exc.error_kind,
+            )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)
