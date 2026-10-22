@@ -1766,6 +1766,31 @@ async def _mark_api_key_history_reconstructed(supabase: Any, api_key_id: str) ->
         raise RuntimeError("api_keys marker update matched no row")
 
 
+# Phase 167.2.1.1 D-02: the key in ``compute_jobs.metadata`` that lets a service-role or
+# owner-role enqueue rebuild an ALREADY-RECONSTRUCTED key (one whose
+# ``api_keys.history_reconstructed_at`` is set), which D-02 needs because the stored Bybit
+# curve was anchored on the wrong reading. It is a CONTRACT with the post-deploy enqueue,
+# which spells the same literal with no compiler between the two, so a test pins it. Only
+# ``run_reconstruct_allocator_history_job`` reads it; the daily fan-out's OWED predicate
+# (and its SQL twin) does not, so the flag never makes a key owed.
+RECONSTRUCT_FORCE_REBUILD_KEY: Final[str] = "force_rebuild"
+
+
+def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
+    """True only when the job's metadata is a dict carrying JSON ``true`` under
+    ``RECONSTRUCT_FORCE_REBUILD_KEY``.
+
+    Strict on purpose: a missing or non-dict ``metadata``, and any other value (the
+    string ``"true"``, ``1``, ``False``, a list), read as "no flag", so the default
+    behaviour (the marker short-circuit) is unchanged. Same defensive read as the
+    ``source`` marker in ``services/job_worker.py``.
+    """
+    metadata = job.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return metadata.get(RECONSTRUCT_FORCE_REBUILD_KEY) is True
+
+
 async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool:
     """Per-api_key idempotency check, answered from the MARKER ONLY (D-04).
 
@@ -3874,7 +3899,20 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     # (already_reconstructed_for_api_key) from the success evidence it counts
     # (plan 01 arm B7), so this echo cannot mark an unmarked key on any later
     # backfill re-run.
-    if await _api_key_already_reconstructed(ctx.supabase, api_key_id):
+    #
+    # Phase 167.2.1.1 D-02: a job whose metadata carries ``force_rebuild: true``
+    # BYPASSES this check, so a service-role or owner-role enqueue can re-run the
+    # reconstruct for a marked key (the product's own job path, not a hand SQL write
+    # to the marker). The default is unchanged. The persist half below is untouched,
+    # so an allocator with any other api_keys row still keeps first-writer-wins
+    # (T-07-V5b): a forced rebuild does not overwrite rows an old anchor wrote there.
+    forced = _job_requests_force_rebuild(job)
+    if forced:
+        logger.info(
+            "reconstruct: forced rebuild requested for api_key=%s; bypassing the "
+            "history_reconstructed_at short-circuit", api_key_id,
+        )
+    if not forced and await _api_key_already_reconstructed(ctx.supabase, api_key_id):
         _emit_audit(
             allocator_id, api_key_id,
             "allocator.equity.reconstruct_complete",
@@ -3889,7 +3927,11 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     _emit_audit(
         allocator_id, api_key_id,
         "allocator.equity.reconstruct_started",
-        {"venue": venue, "backfill_cap_days": BACKFILL_CAP_DAYS},
+        {
+            "venue": venue,
+            "backfill_cap_days": BACKFILL_CAP_DAYS,
+            **({"forced_rebuild": True} if forced else {}),
+        },
     )
 
     end_date = datetime.now(timezone.utc).date()
