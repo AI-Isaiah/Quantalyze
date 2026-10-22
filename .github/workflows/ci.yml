@@ -4932,6 +4932,7 @@ jobs:
           #   test_okx_archive_rebuild.sql                   15
           #   test_ops_staleness_check.sql                   14
           #   test_prod_prober_cadence.sql                    7
+          #   test_replace_allocator_equity_snapshots_window.sql 15
           #   test_retention_crons_safe.sql                   4
           # Re-measured 2026-08-27 (164-06): test_strategy_shares_rls.sql goes
           # 101 -> 106 for the five N1 arms (the bounded-increment rule, its
@@ -5117,6 +5118,19 @@ jobs:
           #   block moved the floors from the same base (17/299) as the blocks above it. The merged table
           #   carries every row, so SENTINEL_FLOOR is 22 and ARMS_FLOOR 347, read off the merged table and
           #   re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never by adding the moves.
+          # Re-measured 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05), ONE file joined:
+          #   test_replace_allocator_equity_snapshots_window.sql declares `ALL 11 ARMS EXECUTED`
+          #   (arms 1-11), so SENTINEL_FLOOR moves 22 -> 23 and ARMS_FLOOR 347 -> 358 (+11). It posts
+          #   nothing and runs on the ordinary sql-tests lane; its arms also bite on the pg-lane under
+          #   sql-mutation (mutation runner, same date: FILES_FLOOR 78 -> 79 and ARMS_FLOOR 777 -> 788,
+          #   the same +11 arms, one full run). The row sits in the contiguous table above, in
+          #   file-name order, and ci-anti-skip-gate.contract.test.ts read 23 sentinel-bearing files
+          #   against the table's 22 (`expected [ ...(23) ] to deeply equal [ ...(22) ]`) before this edit.
+          # Re-measured 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01), the same file
+          #   grew four arms (12-15: the boundary row cleared by the whole-history replace and by the
+          #   last-key cascade, the seam named at the first rebuilt day, the earliest seam kept), so it
+          #   now declares `ALL 15 ARMS EXECUTED` (arms 1-15) and ARMS_FLOOR moves 358 -> 362 (+4);
+          #   SENTINEL_FLOOR stays 23. The mutation runner's ARMS_FLOOR moved 788 -> 792, the same +4.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5124,8 +5138,8 @@ jobs:
           #   test_sync_status_computed_at_runner_only.sql     10
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=22  # files declaring a sentinel
-          ARMS_FLOOR=347     # 13 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 23
+          SENTINEL_FLOOR=23  # files declaring a sentinel
+          ARMS_FLOOR=362     # 13 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 15 + 14 + 7 + 15 + 4 + 103 + 20 + 16 + 10 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

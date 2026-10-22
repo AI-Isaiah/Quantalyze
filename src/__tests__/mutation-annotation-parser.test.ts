@@ -1093,7 +1093,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 756 -> 771, MEASURED: this pin read `expected 771 to be 756` on the merged tree (main's corpus plus test_okx_archive_rebuild.sql's 15 arms).
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): `armsSeen` 771 -> 776, +5 arms of the NEW gate test_commit_scenario_batch_fingerprint_sameday_empty.sql (migration 20261027120000: sameday-empty-dropped, sameday-nonempty-kept, later-warnings-poll-kept, warnings-empty-kept, older-empty-day-kept). MEASURED: this file's run read `expected 776 to be 771`, and ONE full lane run printed `arms: 776/776/0`.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): `armsSeen` 776 -> 777, +1 arm (`sameday-empty-sibling-older`) in test_commit_scenario_batch_fingerprint_sameday_empty.sql. MEASURED: this file's run read `expected 777 to be 776`, and ONE full lane run printed `arms: 777/777/0`.
-    expect(armsSeen).toBe(777);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): `armsSeen` 777 -> 788, +11 arms of the NEW gate test_replace_allocator_equity_snapshots_window.sql. MEASURED: this file's run read `expected 788 to be 777`, and ONE full lane run printed `arms: 788/788/0`.
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): `armsSeen` 788 -> 792, +4 arms (12-15) of test_replace_allocator_equity_snapshots_window.sql. MEASURED: this pin read `expected 792 to be 788`.
+    expect(armsSeen).toBe(792);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1122,7 +1124,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 875 -> 887, MEASURED: re-read on the merged tree by this pin, never by adding the two branches' moves.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): `stepsSeen` 887 -> 892, +5 file steps: the sameday_empty gate's five twins carry one `edit` step each on migration 20261027120000, and the unpriced gate's three `edit` steps were retargeted to that migration, not added (its step count is unchanged). MEASURED: this file's run read `expected 892 to be 887`.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): `stepsSeen` 892 -> 893, +1 file step: the new arm's twin carries one `edit` step on migration 20261027120000. MEASURED: this file's run read `expected 893 to be 892`.
-    expect(stepsSeen).toBe(893);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): `stepsSeen` 893 -> 901, +8 file steps from the NEW gate test_replace_allocator_equity_snapshots_window.sql (its 11 arms carry 8 non-`sql` steps, MEASURED not derived). MEASURED: the 3c needle pin read `expected 901 to be 893`, the same count.
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): `stepsSeen` 901 -> 905, +4 file steps (one `edit` step per new arm 12-15). MEASURED: the 3c needle pin read `expected 905 to be 901`.
+    expect(stepsSeen).toBe(905);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2067,7 +2071,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 875 -> 887, MEASURED: this pin read `expected 887 to be 875` on the merged tree.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 887 -> 892, the find/anchor literals of the sameday_empty gate's five twins. MEASURED: this pin read `expected 892 to be 887`.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): 892 -> 893, the find literal of the new arm's twin. MEASURED: this pin read `expected 893 to be 892`.
-    expect(needles.length).toBe(893);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 893 -> 901, the same +8 steps as `stepsSeen` above. MEASURED: this pin read `expected 901 to be 893`.
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 901 -> 905, the same +4 steps as `stepsSeen`. MEASURED: this pin read `expected 905 to be 901`.
+    expect(needles.length).toBe(905);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2668,7 +2674,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
     // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 103 -> 104, MEASURED: this pin read `expected 104 to be 103` on the merged tree.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 104 -> 105, the sameday_empty gate file (test_commit_scenario_batch_fingerprint_sameday_empty.sql). MEASURED: this file's run read `expected 105 to be 104`, and the full lane run printed `coverage: files 78/105`.
-    expect(corpus.filesTotal).toBe(105);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 105 -> 106, the window-replace gate file (test_replace_allocator_equity_snapshots_window.sql). MEASURED: this file's run read `expected 106 to be 105`, and the full lane run printed `coverage: files 79/106`.
+    expect(corpus.filesTotal).toBe(106);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2751,7 +2758,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73, moving WITH `filesTotal`; the by-name list below gained test_okx_archive_rebuild.sql.
     // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 76 -> 77, the okx archive rebuild gate joins main's 76 annotated files; MEASURED on the merged tree by this pin.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77 -> 78, moving WITH `filesTotal`; the by-name list below gained test_commit_scenario_batch_fingerprint_sameday_empty.sql. MEASURED: this file's run read `expected 78 to be 77`, and the full lane run printed `scope: FULL 78/78 annotated files`.
-    expect(corpus.filesAnnotated).toBe(78);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78 -> 79, moving WITH `filesTotal`; the by-name list below gained test_replace_allocator_equity_snapshots_window.sql.
+    expect(corpus.filesAnnotated).toBe(79);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2845,6 +2853,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // ⭐ ADDED 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): the owed-key fan-out gate (12 arms) for migration 20261021120000.
       "test_refresh_fanout_owed_key_reconstruct.sql",
       "test_refresh_fanout_zero_snapshot_bootstrap.sql",
+      // ⭐ ADDED 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): the window-replace gate (11 arms).
+      "test_replace_allocator_equity_snapshots_window.sql",
       "test_resync_retry_single_job.sql",
       "test_retention_orphaned_running.sql",
       "test_scenario_downgrade_sweep.sql",
@@ -3308,7 +3318,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file (test_okx_archive_rebuild.sql). MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
     // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 103 -> 104, MEASURED: this pin read `expected 104 to be 103` on the merged tree.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 104 -> 105, the sameday_empty gate file (test_commit_scenario_batch_fingerprint_sameday_empty.sql). MEASURED: this file's run read `expected 105 to be 104`, and the full lane run printed `coverage: files 78/105`.
-    expect(corpus.filesTotal).toBe(105);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 105 -> 106, the window-replace gate file (test_replace_allocator_equity_snapshots_window.sql). MEASURED: this file's run read `expected 106 to be 105`, and the full lane run printed `coverage: files 79/106`.
+    expect(corpus.filesTotal).toBe(106);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3347,7 +3358,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73, moving WITH `filesAnnotated`.
     // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 76 -> 77, MEASURED on the merged tree by this pin.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77 -> 78, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(78) ] to have a length of 77 but got 78`.
-    expect(corpus.annotatedFiles).toHaveLength(78);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78 -> 79, moving WITH `filesAnnotated`.
+    expect(corpus.annotatedFiles).toHaveLength(79);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

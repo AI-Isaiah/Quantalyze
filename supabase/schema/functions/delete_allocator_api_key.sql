@@ -2,16 +2,11 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260602183000_b5b_api_key_delete_atomicity.sql
--- ==========================================================================
--- 1. delete_allocator_api_key — advisory lock + single-statement last-key
---    cascade + function-scoped lock_timeout (M-1020 + M-1021 + H-1186 RPC half)
--- ==========================================================================
--- Rewrites migration 077 (20260422182451). Behaviour preserved EXACTLY except:
---   (a) per-allocator advisory xact lock at entry (H-1186),
---   (b) Step-4 count-then-delete collapsed to one NOT EXISTS statement (M-1020),
---   (c) lock_timeout pinned as a function attribute (M-1021).
--- The v_remaining_keys local is removed — its only use was the racy count.
+-- source migration: 20261028120000_replace_allocator_equity_snapshots_window.sql
+-- 2. delete_allocator_api_key: the last-key cascade wipes every snapshot row. Added:
+--    the boundary row goes with them, under the SAME key-presence test (a second
+--    statement; a key added between the two leaves a boundary row that the new key's
+--    sole-key replace clears, so it cannot outlive a rebuild).
 CREATE OR REPLACE FUNCTION public.delete_allocator_api_key(
   p_api_key_id uuid,
   p_cascade_holdings boolean DEFAULT false
@@ -72,6 +67,15 @@ BEGIN
   IF p_cascade_holdings THEN
     DELETE FROM allocator_equity_snapshots
       WHERE allocator_id = auth.uid()
+        AND NOT EXISTS (
+          SELECT 1 FROM api_keys WHERE user_id = auth.uid()
+        );
+
+    -- WR-01: the snapshots the recorded rebuild seam separated are gone with the
+    -- last key, so clear the seam record under the same key-presence test.
+    DELETE FROM allocator_equity_derived ck
+      WHERE ck.allocator_id = auth.uid()
+        AND ck.kind = 'snapshot_rebuild_boundary'
         AND NOT EXISTS (
           SELECT 1 FROM api_keys WHERE user_id = auth.uid()
         );

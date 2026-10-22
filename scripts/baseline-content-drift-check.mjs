@@ -240,8 +240,18 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * `node scripts/baseline-content-drift-check.mjs` on the merged tree: `functions compared 132 —
  * MATCH 128, DRIFT 3, SNAPSHOT_MISSING 1`; the one SNAPSHOT_MISSING is `apply_okx_archive_rebuild/4`
  * (main's `_fan_in_lock_rows/2` cleared with its re-dump), so the floor moves 131 -> 132.
+ *
+ * MOVED 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD plan 05), 132 -> 133: one ADDITION, not a removal.
+ * `public.replace_allocator_equity_snapshots_window(uuid, jsonb, integer, date)` enters the chain via
+ * forward migration 20261028120000_replace_allocator_equity_snapshots_window.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 133 — MATCH 129,
+ * DRIFT 3, SNAPSHOT_MISSING 1`. The one SNAPSHOT_MISSING finding is
+ * `replace_allocator_equity_snapshots_window/4`, whose migration is not on PROD yet (recorded as a
+ * dated `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the
+ * re-dump taken after the apply); the finding is EXPECTED until that re-dump. Raising this floor
+ * records the function joining the corpus; it does NOT suppress that finding.
  */
-export const COMPARED_FLOOR = 132;
+export const COMPARED_FLOOR = 133;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

@@ -30,7 +30,7 @@ import logging
 import math
 import os
 from bisect import bisect_right
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
@@ -39,6 +39,7 @@ import ccxt.async_support as ccxt
 import httpx
 import pandas as pd
 import sentry_sdk
+from postgrest.exceptions import APIError
 
 from services.account_identity import VENUES_WITH_ACCOUNT_ID
 from services.allocator_positions import read_native_unpriced_days
@@ -67,11 +68,13 @@ from services.closed_sets import (
 )
 from services.dateday import epoch_ms_to_iso_day, sort_events_stable
 from services.dispersion import dispersion_is_residue
-from services.db import db_execute, get_supabase, paginated_select
+from services.db import db_execute, get_supabase
 from services.job_worker import (
     AllocatorEquityAction,
     DispatchOutcome,
     DispatchResult,
+    ErrorKind,
+    _ExchangeContext,
     _allocator_key_preflight,
     _emit_audit,
     _stamp_429,
@@ -1516,22 +1519,6 @@ async def _allocator_has_other_api_keys(
     return SiblingCheckResult(has_siblings=int(count) > 0)
 
 
-async def _allocator_snapshot_asofs(supabase: Any, allocator_id: str) -> set[str]:
-    """Every ``asof`` stored for this allocator. A failed read bubbles.
-
-    Paged: PostgREST caps one response at its max rows, and a truncated set would let the
-    caller's subset check pass on days it never saw."""
-    def _sel() -> list[dict[str, Any]]:
-        return paginated_select(
-            supabase.table("allocator_equity_snapshots")
-            .select("asof")
-            .eq("allocator_id", allocator_id),
-            order_by=(("asof", False),),
-        )
-
-    return {str(r["asof"]) for r in await db_execute(_sel)}
-
-
 async def _purge_allocator_equity_snapshots(
     supabase: Any, allocator_id: str,
 ) -> int:
@@ -1723,6 +1710,101 @@ async def replace_equity_snapshots(
     return len(payload)
 
 
+# Phase 167.2.1.1.2 D-02 / AR-2: the SQL function raises the BARE token below (SQLSTATE
+# P0001, DETAIL a count) when a stored day inside the window is not in the payload. The
+# worker maps that one message to the named refusal and nothing else. The token is spelled
+# once here for the match and once as a literal at the raise site (a closed-set scan of the
+# raise sites reads literals, not names).
+_WINDOW_REPLACE_REFUSAL_TOKEN: Final[str] = "history_days_unreproduced"
+
+
+def _window_replace_refusal(exc: BaseException) -> str | None:
+    """The refusal token when ``exc`` is the window function's D-02 raise, else ``None``.
+
+    Matched by class (a PostgREST ``APIError``), SQLSTATE ``P0001`` and the WHOLE message,
+    never by ``details`` or ``str(exc)``: those carry the DETAIL and can carry row text.
+    Another P0001 message, the same message under another code, a timeout and a transport
+    fault are therefore not this refusal and propagate as what they are.
+    """
+    if (
+        isinstance(exc, APIError)
+        and exc.code == "P0001"
+        and exc.message == _WINDOW_REPLACE_REFUSAL_TOKEN
+    ):
+        return _WINDOW_REPLACE_REFUSAL_TOKEN
+    return None
+
+
+async def replace_equity_snapshots_window(
+    supabase: Any,
+    rows: list[dict[str, Any]],
+    allocator_id: str,
+    history_depth_months: int | None,
+    window_start: date,
+) -> int:
+    """ACCTREBUILD: replace ONLY the window ``[window_start, ...)`` of an allocator's
+    stored equity history, atomically, or refuse and write nothing.
+
+    Calls ``replace_allocator_equity_snapshots_window`` (AR-1: a new SECURITY DEFINER
+    function; ``replace_equity_snapshots`` above stays as it is and still replaces every
+    row). In one transaction under the per-allocator advisory lock it
+
+    - D-01: deletes only the rows with ``asof >= window_start`` and inserts ``rows``, so a
+      stored day older than the window keeps every column it had;
+    - D-02 / AR-2: refuses when a stored day inside the window is not in ``rows``. The
+      comparison is made on the rows the DELETE itself returned, in the same transaction,
+      so a day the daily refresh wrote after ``rows`` was built is refused, never deleted
+      unseen. The refusal surfaces here as ``ForcedRebuildRefusedError`` with reason
+      ``history_days_unreproduced``, and nothing was written;
+    - D-03: records the seam, ``allocator_equity_derived`` kind ``snapshot_rebuild_boundary``
+      with ``{"boundary_date": <window_start>}``, when an older day is kept, and removes it
+      when none is.
+
+    ``rows`` must be non-empty and every ``asof`` must lie on or after ``window_start``
+    (the SQL refuses both); an empty payload is refused here before any call. Only the
+    forced rebuild calls this (``run_reconstruct_allocator_history_job``, after the account
+    crawl). Returns the number of rows inserted.
+    """
+    if not rows:
+        raise ValueError("replace_equity_snapshots_window requires at least one row")
+    payload = [
+        {
+            "asof": r["asof"],
+            "value_usd": r["value_usd"],
+            "breakdown": r.get("breakdown"),
+            "source": r.get("source", "exchange_primary"),
+            "pre_terminus_balance_unknown": bool(
+                r.get("pre_terminus_balance_unknown", False)
+            ),
+        }
+        for r in rows
+    ]
+
+    def _rpc() -> Any:
+        return supabase.rpc(
+            "replace_allocator_equity_snapshots_window",
+            {
+                "p_allocator_id": allocator_id,
+                "p_rows": payload,
+                "p_depth_months": history_depth_months,
+                "p_window_start": window_start.isoformat(),
+            },
+        ).execute()
+
+    try:
+        res = await db_execute(_rpc)
+    except Exception as exc:
+        if _window_replace_refusal(exc) is not None:
+            raise ForcedRebuildRefusedError("history_days_unreproduced") from None
+        raise
+    data = getattr(res, "data", None)
+    if isinstance(data, int):
+        return data
+    if isinstance(data, list) and data and isinstance(data[0], int):
+        return data[0]
+    return len(payload)
+
+
 # ---------------------------------------------------------------------------
 # Read helpers
 # ---------------------------------------------------------------------------
@@ -1782,6 +1864,30 @@ async def _mark_api_key_history_reconstructed(supabase: Any, api_key_id: str) ->
         raise RuntimeError("api_keys marker update matched no row")
 
 
+def _account_marker_key_ids(account_keys: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ids a forced ACCOUNT rebuild stamps ``history_reconstructed_at`` on, sorted.
+
+    UPNLVENUES D-04 / PD-O. A rebuilt book is ONE aggregate per day, so a key of the account
+    that still looks owed would be re-crawled by the daily fan-out, and its unforced
+    reconstruct on a multi-key allocator persists first-writer-wins: it would fill any day
+    the rebuilt book lacks with that key's value alone. Every ACTIVE key of the account is
+    therefore marked, the job's own and the siblings', including a key that was rebuilt
+    through another member of its exchange account (its account's history is the rebuilt one).
+
+    Left as they were: an INACTIVE key (no reconstruct can run for it, the preflight fails it
+    permanently, so nothing can re-fill the book through it) and a Deribit key (its history is
+    counted as $0 and never rebuilt, so a marker would claim a rebuild that did not happen).
+    ``account_keys`` is the persist-time key re-read, the set the window replace was checked
+    against.
+    """
+    return sorted(
+        str(row["id"])
+        for row in account_keys
+        if row.get("is_active") is True
+        and _key_venue(row) not in _ACCOUNT_ZERO_CONTRIBUTION_VENUES
+    )
+
+
 # Phase 167.2.1.1 D-02: the key in ``compute_jobs.metadata`` that lets a service-role or
 # owner-role enqueue rebuild an ALREADY-RECONSTRUCTED key (one whose
 # ``api_keys.history_reconstructed_at`` is set), which D-02 needs because the stored Bybit
@@ -1807,25 +1913,45 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
     return metadata.get(RECONSTRUCT_FORCE_REBUILD_KEY) is True
 
 
-# Phase 167.2.1.1 PD-H: a FORCED rebuild replaces a SOLE-key allocator's stored curve in one
-# atomic write, so it writes a curve only when that curve is anchored to today's venue equity
-# INCLUDING the open-position uPnL. Any other outcome refuses: the job fails (error_kind
-# "permanent", PD-I: no automatic re-crawl) and nothing is written. This is the closed set of
-# reasons; the post-deploy handoff (plan 06) matches the "forced rebuild refused (" prefix
-# and these tokens, and a test pins the set. The unforced path is untouched (PD-B).
-FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
+# Phase 167.2.1.1 PD-H: a FORCED rebuild replaces a stored curve in one atomic write, so it
+# writes a curve only when that curve is anchored to today's venue equity INCLUDING the
+# open-position uPnL. Any other outcome refuses: the job fails (error_kind "permanent", PD-I:
+# no automatic re-crawl) and nothing is written. This is the closed set of reasons; the
+# post-deploy handoff matches the "forced rebuild refused (" prefix and these 15 tokens, and
+# a test pins both halves. The unforced path is untouched (PD-B).
+#
+# Phase 167.2.1.1.2 (UPNLVENUES D-04, D-02 of this phase): the rebuild is now WHOLE-ACCOUNT,
+# so the set has two halves. The anchor half is the per-crawl refusal of the 167.2.1.1 path;
+# the account half is what refusing to cover every exchange account of the allocator, or to
+# replace a stored day the new curve does not reproduce, is named. The four tokens of the
+# old sole-key path (multi_key, sibling_lookup_failed, replay_empty, history_outside_replay)
+# left the set with it, and their raise sites left the handler with the unified forced path
+# (decision AR-7): a test pins that every token raised in this module is in the set.
+FORCED_REBUILD_ANCHOR_REASONS: Final[frozenset[str]] = frozenset(
     {
         "positions_unreadable",
-        "multi_key",
-        "sibling_lookup_failed",
-        "replay_empty",
-        "history_outside_replay",
         "anchor_unreadable",
         "anchor_skipped_okx_terminus",
         "anchor_skipped_partial_ticker",
         "anchor_skipped_unreliable_replay",
         "anchor_skipped_implausible",
     }
+)
+FORCED_REBUILD_ACCOUNT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "account_state_unreadable",
+        "account_identity_pending",
+        "account_key_venue_unsupported",
+        "account_key_not_working",
+        "account_key_read_failed",
+        "account_key_no_rows",
+        "account_sum_empty",
+        "account_keys_changed",
+        "history_days_unreproduced",
+    }
+)
+FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = (
+    FORCED_REBUILD_ANCHOR_REASONS | FORCED_REBUILD_ACCOUNT_REASONS
 )
 
 
@@ -1842,6 +1968,255 @@ class ForcedRebuildRefusedError(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"forced rebuild refused ({reason})")
+
+
+class _AccountCrawlRetryableError(RuntimeError):
+    """A sibling exchange account's crawl or session failed with a fault that is not
+    ``permanent`` (transient or unknown), so a retry may clear it.
+
+    Phase-owned, with static text naming only the exception CLASS: the sibling's own
+    exception (which can carry the request URL and its signature) is never re-raised, so it
+    reaches neither ``compute_jobs.error_message`` nor the audit (T-167.2.1.1.2-24).
+    """
+
+    def __init__(self, error_kind: ErrorKind, exc_class: str) -> None:
+        self.error_kind = error_kind
+        super().__init__(
+            f"whole-account rebuild crawl hit a retryable venue fault ({exc_class}); "
+            "nothing was written"
+        )
+
+
+# Phase 167.2.1.1.2 ACCTREBUILD plan 04: the pure rules of the whole-account rebuild. A stored
+# ``allocator_equity_snapshots`` row is ONE aggregate per (allocator_id, asof), the sum across
+# every exchange account the allocator holds, so a forced rebuild crawls each exchange account
+# once and replaces in one write (UPNLVENUES D-04), or refuses and writes nothing.
+#
+# The venues a rebuild can crawl. OKX is IN (UPNLVENUES D-05): it is rebuilt over a 90-day
+# window and never refused. sfox has no reconstruct crawl, so it is outside.
+_ACCOUNT_REBUILD_VENUES: Final[frozenset[str]] = frozenset({"bybit", "binance", "mt5", "okx"})
+# The reconstruct refuses every Deribit key and the daily refresh skips venue deribit, so both
+# allocator writers store a Deribit exchange account as $0. The rebuild counts it, crawls
+# nothing and refuses nothing.
+_ACCOUNT_ZERO_CONTRIBUTION_VENUES: Final[frozenset[str]] = frozenset({"deribit"})
+
+
+def _key_venue(key_row: Mapping[str, Any]) -> str:
+    """The key's exchange, lower-cased and stripped ("" when it is not a string)."""
+    exchange = key_row.get("exchange")
+    return exchange.strip().lower() if isinstance(exchange, str) else ""
+
+
+def _select_account_crawl_keys(
+    account_keys: Sequence[Mapping[str, Any]], job_api_key_id: str
+) -> tuple[list[Mapping[str, Any]], int]:
+    """Pick the ONE working key each exchange account is crawled through, or refuse.
+
+    ``account_keys`` is EVERY ``api_keys`` row of the user, whatever its status (D-07): the
+    grouping needs the departed and duplicate rows to see that two keys read one account.
+    The grouping and the two predicates are the ones both allocator writers use
+    (``account_groups``, ``working_holder_predicate``, ``identity_pending_venues`` with the
+    daily refresh's own venue set), so the rebuild cannot count an exchange account twice
+    or call a key working that the writers would not.
+
+    Per group, in the group order ``account_groups`` fixes:
+
+    * the members must all be on one venue, else ``account_key_venue_unsupported`` (one
+      exchange account is on one venue, so a marker across venues cannot be read by any
+      single crawl);
+    * a Deribit group is skipped and COUNTED (the second return value): both writers store
+      it as $0, whatever its key's state, so it is neither crawled nor a refusal;
+    * a venue outside ``_ACCOUNT_REBUILD_VENUES`` (sfox, anything unknown) refuses
+      ``account_key_venue_unsupported``: leaving it out would store a total that claims to
+      cover the allocator;
+    * a group with no working member refuses ``account_key_not_working``;
+    * otherwise the job's own key is chosen when it is a working member, else the working
+      member with the smallest id. A departed or duplicate member is thereby covered by a
+      working sibling instead of by nobody.
+
+    OKX is selected (UPNLVENUES D-05); the one window it forces is
+    ``_account_rebuild_window``'s concern. After the loop two unstamped working keys on one
+    stamping venue may be ONE exchange account, which crawling both would count twice, so
+    the daily refresh's own ``identity_pending_venues`` call refuses
+    ``account_identity_pending``.
+    """
+    selected: list[Mapping[str, Any]] = []
+    zero_contribution = 0
+    for group in account_groups(account_keys):
+        venues = {_key_venue(member) for member in group}
+        if len(venues) != 1:
+            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
+        venue = next(iter(venues))
+        if venue in _ACCOUNT_ZERO_CONTRIBUTION_VENUES:
+            zero_contribution += 1
+            continue
+        if venue not in _ACCOUNT_REBUILD_VENUES:
+            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
+        working = [member for member in group if working_holder_predicate(member)]
+        if not working:
+            raise ForcedRebuildRefusedError("account_key_not_working")
+        job_member = next(
+            (member for member in working if str(member.get("id")) == str(job_api_key_id)),
+            None,
+        )
+        selected.append(
+            job_member
+            if job_member is not None
+            else min(working, key=lambda member: str(member.get("id")))
+        )
+    if identity_pending_venues(account_keys, VENUES_WITH_ACCOUNT_ID - {"deribit"}) > 0:
+        raise ForcedRebuildRefusedError("account_identity_pending")
+    if not selected:
+        # Unreachable for a job whose own key is not Deribit (that key's group is then
+        # selected or refused above); kept so a Deribit-only book never reaches the crawl.
+        raise ForcedRebuildRefusedError("account_sum_empty")
+    return selected, zero_contribution
+
+
+def _account_rebuild_window(
+    selected_keys: Sequence[Mapping[str, Any]], end_date: date
+) -> tuple[date, int]:
+    """The ONE ``(start_date, window_days)`` every exchange account of the rebuild uses.
+
+    D-01 / UPNLVENUES D-05, decision AR-5: when ANY selected key is on OKX the window is 90
+    calendar days inclusive of today, so ``OKX_TRADE_TERMINUS_DAYS - 1`` (89) days back;
+    otherwise ``BACKFILL_CAP_DAYS`` (730) back. 89, not 90: ``_fetch_trades_with_pagination``
+    flags the terminus when ``since`` is older than ``now - 90 days``, and a start 90 days
+    before today's date is always older than that once the UTC day has begun, which would
+    make every OKX crawl refuse ``anchor_skipped_okx_terminus``. One window for the whole
+    account, because a stored row is the sum across exchange accounts and a sum over
+    different spans is not a total.
+    """
+    if any(_key_venue(key) == "okx" for key in selected_keys):
+        return end_date - timedelta(days=OKX_TRADE_TERMINUS_DAYS - 1), OKX_TRADE_TERMINUS_DAYS
+    return end_date - timedelta(days=BACKFILL_CAP_DAYS), BACKFILL_CAP_DAYS
+
+
+def _account_history_depth_months(venues: Iterable[str]) -> int | None:
+    """The history depth, in months, the rebuilt rows can honestly claim: the minimum of
+    ``history_depth_months_for_venue`` over the venues that have one, None when none has
+    (an MT5-only account, whose deal ledger has no retention depth)."""
+    depths = [
+        depth
+        for depth in (history_depth_months_for_venue(venue) for venue in venues)
+        if depth is not None
+    ]
+    return min(depths) if depths else None
+
+
+def _sum_breakdowns(breakdowns: Sequence[Any]) -> dict[str, Any] | None:
+    """Add the NUMERIC entries of the dict breakdowns, to 2 dp; None when none is a dict.
+
+    ``__truncated__`` survives as True when any part carries it. A structured entry such
+    as ``__pnl_missing__`` (a ``{count, symbols}`` record, never a number) is not added and
+    does not survive: it is a per-snapshot record of the daily refresh, which a
+    reconstructed row never carries, and adding two of them numerically would be wrong.
+    Re-capped through ``_cap_breakdown`` so the merged dict honours the stored-size cap.
+    """
+    dicts = [b for b in breakdowns if isinstance(b, dict)]
+    if not dicts:
+        return None
+    merged: dict[str, Any] = {}
+    truncated = False
+    for part in dicts:
+        for name, value in part.items():
+            if name == "__truncated__":
+                truncated = truncated or value is True
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                merged[name] = merged.get(name, 0.0) + value
+    result: dict[str, Any] = {name: round(value, 2) for name, value in merged.items()}
+    if truncated:
+        result["__truncated__"] = True
+    return _cap_breakdown(result)
+
+
+def _sum_account_rows(
+    per_account_rows: Sequence[Sequence[Mapping[str, Any]]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Add the per-exchange-account curves into the allocator's one curve, on shared days.
+
+    Returns ``(rows, days_incomplete)``. A row is emitted ONLY on a day EVERY exchange
+    account has a row (the intersection). A day one account lacks is UNKNOWN for that
+    account: reading it as 0 would store a total that is too low and looks real, and
+    reading it as the neighbouring day would invent a value. So it is left out and
+    counted (``days_incomplete`` = the union of days minus the intersection), and the
+    replace RPC then refuses (``history_days_unreproduced``, D-02) if a stored day would be
+    left unreproduced. Nothing is zero-filled.
+
+    On a shared day ``value_usd`` and every numeric breakdown entry are summed to 2 dp
+    (``_sum_breakdowns``); ``source`` is the parts' common source, else ``"mixed"``; and
+    ``pre_terminus_balance_unknown`` is True when any part says so. No offset entry is read
+    as a signal: it is the anchor offset, not a pre-window balance. Rows come back sorted
+    by ``asof``.
+    """
+    if not per_account_rows:
+        return [], 0
+    by_day: list[dict[str, Mapping[str, Any]]] = [
+        {str(row["asof"]): row for row in rows} for rows in per_account_rows
+    ]
+    union: set[str] = set()
+    shared: set[str] | None = None
+    for days in by_day:
+        union |= days.keys()
+        shared = set(days) if shared is None else shared & days.keys()
+    shared_days = shared or set()
+    summed: list[dict[str, Any]] = []
+    for day in sorted(shared_days):
+        parts = [days[day] for days in by_day]
+        sources = {str(part.get("source", "exchange_primary")) for part in parts}
+        summed.append(
+            {
+                "asof": day,
+                "value_usd": round(sum(float(part["value_usd"]) for part in parts), 2),
+                "breakdown": _sum_breakdowns([part.get("breakdown") for part in parts]),
+                "source": next(iter(sources)) if len(sources) == 1 else "mixed",
+                "pre_terminus_balance_unknown": any(
+                    bool(part.get("pre_terminus_balance_unknown", False)) for part in parts
+                ),
+            }
+        )
+    return summed, len(union) - len(shared_days)
+
+
+def _merge_account_telemetry(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Merge the per-exchange-account telemetry into the one dict the handler's audit reads.
+
+    The audit INDEXES the four lists (``skipped_symbols``, ``unknown_perp_symbols``,
+    ``inverse_perp_symbols``, ``ctval_drift_warnings``) and reads the anchor flags with
+    ``.get``, so every key is always present. MT5's telemetry omits the anchor keys on
+    purpose (``_mt5_telemetry``: it performs no anchor step), so every read here has a
+    default. Symbol lists are sorted unions, ``ctval_drift_warnings`` (dicts) are
+    concatenated in part order, flags are ORed and the skipped anchor offset is summed to
+    2 dp.
+    """
+
+    def _union(name: str) -> list[str]:
+        return sorted({str(item) for part in parts for item in part.get(name, [])})
+
+    return {
+        "skipped_symbols": _union("skipped_symbols"),
+        "unknown_perp_symbols": _union("unknown_perp_symbols"),
+        "inverse_perp_symbols": _union("inverse_perp_symbols"),
+        "ctval_drift_warnings": [
+            warning for part in parts for warning in part.get("ctval_drift_warnings", [])
+        ],
+        "pre_terminus_balance_unknown": any(
+            bool(part.get("pre_terminus_balance_unknown", False)) for part in parts
+        ),
+        "anchor_partial_ticker_symbols": _union("anchor_partial_ticker_symbols"),
+        "anchor_offset_implausible": any(
+            bool(part.get("anchor_offset_implausible", False)) for part in parts
+        ),
+        "anchor_replay_unreliable": any(
+            bool(part.get("anchor_replay_unreliable", False)) for part in parts
+        ),
+        "anchor_offset_skipped_usd": round(
+            sum(float(part.get("anchor_offset_skipped_usd", 0.0) or 0.0) for part in parts), 2
+        ),
+        "anchor_positions_unread": any(
+            bool(part.get("anchor_positions_unread", False)) for part in parts
+        ),
+    }
 
 
 async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool:
@@ -3582,6 +3957,7 @@ async def _mt5_fetch_window(
     api_key_id: str,
     start_date: date,
     end_date: date,
+    emit_audit: bool = True,
 ) -> DispatchResult | tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     """The MT5 half of the backfill fetch: read the deal ledger, reconstruct the
     per-day dollar levels, and return the ccxt path's own
@@ -3637,18 +4013,21 @@ async def _mt5_fetch_window(
         detail: str | None = None,
     ) -> DispatchResult:
         """Emit the SAME ``reconstruct_failed`` audit event every other arm of this
-        job emits, then return the fixed, classifier-safe verdict."""
-        _emit_audit(
-            allocator_id, api_key_id,
-            "allocator.equity.reconstruct_failed",
-            {
-                "error_kind": kind,
-                # The broker-supplied detail lives HERE, scrubbed — not in
-                # `error_message`. See `_MT5_BACKFILL_MESSAGES`.
-                "sanitized_message": (detail or _MT5_BACKFILL_MESSAGES[key])[:500],
-                "venue": "mt5",
-            },
-        )
+        job emits (unless the whole-account path passed ``emit_audit=False`` and writes
+        the one terminal audit on the job's own key), then return the fixed,
+        classifier-safe verdict."""
+        if emit_audit:
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {
+                    "error_kind": kind,
+                    # The broker-supplied detail lives HERE, scrubbed — not in
+                    # `error_message`. See `_MT5_BACKFILL_MESSAGES`.
+                    "sanitized_message": (detail or _MT5_BACKFILL_MESSAGES[key])[:500],
+                    "venue": "mt5",
+                },
+            )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=_MT5_BACKFILL_MESSAGES[key],
@@ -4014,6 +4393,272 @@ async def _mt5_fetch_window(
     )
 
 
+def _forced_refusal_result(
+    allocator_id: str, api_key_id: str, venue: str, reason: str
+) -> DispatchResult:
+    """The ONE place a refused forced rebuild is recorded (Phase 167.2.1.1 PD-H / PD-I,
+    unified for ACCTREBUILD): a WARNING naming allocator, key, venue and reason; one
+    ``allocator.equity.reconstruct_failed`` audit; and a FAILED/permanent result, because
+    a refusal is never retried automatically.
+
+    Nothing has been persisted when this runs (it is called before the persist half, or
+    from inside the window call whose transaction rolled back), so the stored curve and the
+    marker are as they were. Static text only: ``reason`` is one of
+    ``FORCED_REBUILD_REFUSAL_REASONS`` and no venue error text, id or amount is attached.
+    """
+    logger.warning(
+        "reconstruct_allocator_history forced rebuild refused allocator=%s "
+        "key=%s venue=%s reason=%s",
+        allocator_id, api_key_id, venue, reason,
+    )
+    sanitized = (
+        f"forced rebuild refused ({reason}): the forced rebuild could not be "
+        "written safely, so nothing was written and the stored curve is "
+        "unchanged (Phase 167.2.1.1 D-02)"
+    )
+    _emit_audit(
+        allocator_id, api_key_id,
+        "allocator.equity.reconstruct_failed",
+        {"error_kind": "permanent", "sanitized_message": sanitized},
+    )
+    return DispatchResult(
+        outcome=DispatchOutcome.FAILED,
+        error_message=sanitized,
+        error_kind="permanent",
+    )
+
+
+@dataclass(frozen=True)
+class _AccountCrawl:
+    """What the whole-account crawl hands the handler's persist half."""
+
+    rows: list[dict[str, Any]]
+    telemetry: dict[str, Any]
+    # Lower-cased venue of every crawled exchange account (the depth rule reads it).
+    selected_venues: tuple[str, ...]
+    # Every api_keys id the user held when the crawl began; the persist half re-reads and
+    # refuses ``account_keys_changed`` when the set moved.
+    account_key_ids: frozenset[str]
+    window_start: date
+    window_days: int
+    exchange_accounts: int
+    zero_contribution_accounts: int
+    days_incomplete: int
+
+
+_ACCOUNT_KEY_COLUMNS: Final[str] = (
+    "id, exchange, is_active, sync_status, disconnected_at, venue_account_id, "
+    "account_share_kind, account_shared_with_api_key_id"
+)
+
+
+async def _read_account_keys(
+    supabase: Any, allocator_id: str, job_api_key_id: str
+) -> list[dict[str, Any]]:
+    """EVERY ``api_keys`` row of the user, sorted by id, with the columns the account rules
+    read (``_select_account_crawl_keys`` needs the departed and duplicate rows too).
+
+    A read that raises, answers no list, or does not contain the job's own key refuses
+    ``account_state_unreadable``: the rebuild cannot say which exchange accounts the book
+    holds, so it writes nothing. The log line carries the exception class and scrubbed
+    text, never ``logger.exception`` (H-3).
+    """
+
+    def _sel() -> Any:
+        return (
+            supabase.table("api_keys")
+            .select(_ACCOUNT_KEY_COLUMNS)
+            .eq("user_id", allocator_id)
+            .execute()
+        )
+
+    try:
+        res = await db_execute(_sel)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "reconstruct_allocator_history account key read failed "
+            "allocator=%s key=%s exc_class=%s scrubbed=%s",
+            allocator_id, job_api_key_id, type(exc).__name__, scrub_freeform_string(str(exc)),
+        )
+        raise ForcedRebuildRefusedError("account_state_unreadable") from None
+    data = getattr(res, "data", None)
+    if not isinstance(data, list) or not any(
+        str(row.get("id")) == str(job_api_key_id) for row in data
+    ):
+        raise ForcedRebuildRefusedError("account_state_unreadable")
+    return sorted((dict(row) for row in data), key=lambda row: str(row.get("id")))
+
+
+async def _crawl_account_key(
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    exchange: Any,
+    allocator_id: str,
+    start_date: date,
+    end_date: date,
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | DispatchResult:
+    """Crawl ONE exchange account through its chosen key: anchored rows and telemetry.
+
+    The venue is the key row's own. MT5 reads its deal ledger (``_mt5_fetch_window``, no
+    anchor step); a failure there is returned as the ``DispatchResult`` it settled, with no
+    audit of its own (``emit_audit=False``): the handler writes the job's one terminal audit
+    on the job's own key. Every other venue calls ``_fetch_and_price_window``
+    through the module global with ``require_anchor=True`` (five positional arguments), which
+    raises ``ForcedRebuildRefusedError`` instead of returning an un-anchored curve. A rate
+    limit is stamped on the key (so the circuit breaker parks it) and re-raised unchanged;
+    the caller is the only place that converts a non-refusal failure. An empty curve refuses
+    ``account_key_no_rows``: summing would otherwise treat the account as having no days.
+    """
+    venue = _key_venue(key_row)
+    try:
+        if venue == "mt5":
+            outcome = await _mt5_fetch_window(
+                exchange,
+                allocator_id=allocator_id,
+                api_key_id=str(key_row["id"]),
+                start_date=start_date,
+                end_date=end_date,
+                emit_audit=False,
+            )
+            if isinstance(outcome, DispatchResult):
+                return outcome
+            rows, _hit_terminus, telemetry = outcome
+        else:
+            rows, _hit_terminus, telemetry = await _fetch_and_price_window(
+                exchange, venue, supabase, start_date, end_date, require_anchor=True,
+            )
+    except ccxt.RateLimitExceeded as exc:
+        await _stamp_429(supabase, dict(key_row), exc)
+        raise
+    if not rows:
+        raise ForcedRebuildRefusedError("account_key_no_rows")
+    return rows, telemetry
+
+
+async def _crawl_whole_account(
+    ctx: _ExchangeContext,
+    job: Mapping[str, Any],
+    allocator_id: str,
+    account_keys: Sequence[Mapping[str, Any]],
+    end_date: date,
+) -> DispatchResult | _AccountCrawl:
+    """UPNLVENUES D-04: crawl EVERY exchange account of the allocator once, with the anchor,
+    on ONE window, and add the curves on the days they share.
+
+    Selection, the window and the sum are plan 04's pure rules. Sessions are built first, in
+    key order: the job's own key uses ``ctx.exchange``; any other key opens through
+    ``_allocator_key_preflight`` so a sibling's circuit-breaker cooldown defers THIS job (its
+    DEFERRED result is returned unchanged), and any other failure to open refuses
+    ``account_key_read_failed``. The crawls then run concurrently over the one window_start
+    (a stored row is a sum across exchange accounts, so every account must cover the same
+    span). In key order the first refusal is re-raised as it is. An MT5 account's failure
+    comes back as the ``DispatchResult`` it settled, unaudited, and is returned unchanged
+    (the handler audits it on the job's key). A failure ``classify_exception`` does not call permanent
+    (transient or unknown: a rate limit, a network error, a timeout, an exchange fault)
+    becomes ``_AccountCrawlRetryableError`` after one class-only WARNING, so the job is
+    retried and the sibling's text goes nowhere. Any other failure becomes
+    ``account_key_read_failed`` after one WARNING: this loop is the only converter. Every
+    session this function opened is closed in ``finally``; the job's own session stays with
+    the handler's ``finally``.
+    """
+    own_key_id = str(job["api_key_id"])
+    selected, zero_contribution = _select_account_crawl_keys(account_keys, own_key_id)
+    window_start, window_days = _account_rebuild_window(selected, end_date)
+
+    opened: list[Any] = []
+    try:
+        sessions: dict[str, Any] = {}
+        for key in selected:
+            key_id = str(key["id"])
+            if key_id == own_key_id:
+                sessions[key_id] = ctx.exchange
+                continue
+            try:
+                sibling = await _allocator_key_preflight(
+                    {**job, "api_key_id": key_id}, "run_reconstruct_allocator_history_job",
+                )
+            except Exception as exc:  # noqa: BLE001
+                sibling_kind = classify_exception(exc)[0]
+                if sibling_kind != "permanent":
+                    logger.warning(
+                        "reconstruct_allocator_history sibling key could not be opened "
+                        "allocator=%s key=%s venue=%s exc_class=%s",
+                        allocator_id, key_id, _key_venue(key), type(exc).__name__,
+                    )
+                    raise _AccountCrawlRetryableError(sibling_kind, type(exc).__name__) from None
+                logger.warning(
+                    "reconstruct_allocator_history sibling key could not be opened "
+                    "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
+                    allocator_id, key_id, _key_venue(key),
+                    type(exc).__name__, scrub_freeform_string(str(exc)),
+                )
+                raise ForcedRebuildRefusedError("account_key_read_failed") from None
+            if isinstance(sibling, DispatchResult):
+                if sibling.outcome == DispatchOutcome.DEFERRED:
+                    return sibling
+                raise ForcedRebuildRefusedError("account_key_read_failed")
+            opened.append(sibling.exchange)
+            sessions[key_id] = sibling.exchange
+
+        results = await asyncio.gather(
+            *(
+                _crawl_account_key(
+                    ctx.supabase, key, sessions[str(key["id"])], allocator_id,
+                    window_start, end_date,
+                )
+                for key in selected
+            ),
+            return_exceptions=True,
+        )
+        per_account_rows: list[list[dict[str, Any]]] = []
+        per_account_telemetry: list[dict[str, Any]] = []
+        for key, outcome in zip(selected, results):
+            if isinstance(outcome, ForcedRebuildRefusedError):
+                raise outcome
+            if isinstance(outcome, DispatchResult):
+                return outcome
+            if isinstance(outcome, BaseException):
+                # The exception CLASS only: the venue's text is never logged here, so
+                # nothing it carries (a scrub-resistant fragment included) reaches the log
+                # on the way to a refusal that names only the token (T-167.2.1.1.2-24).
+                logger.warning(
+                    "reconstruct_allocator_history account crawl failed "
+                    "allocator=%s key=%s venue=%s exc_class=%s",
+                    allocator_id, key.get("id"), _key_venue(key),
+                    type(outcome).__name__,
+                )
+                if isinstance(outcome, Exception):
+                    crawl_kind = classify_exception(outcome)[0]
+                    if crawl_kind != "permanent":
+                        raise _AccountCrawlRetryableError(
+                            crawl_kind, type(outcome).__name__
+                        ) from None
+                raise ForcedRebuildRefusedError("account_key_read_failed") from None
+            per_account_rows.append(outcome[0])
+            per_account_telemetry.append(outcome[1])
+    finally:
+        for exchange in opened:
+            try:
+                await aclose_exchange(exchange)
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass
+
+    summed, days_incomplete = _sum_account_rows(per_account_rows)
+    if not summed:
+        raise ForcedRebuildRefusedError("account_sum_empty")
+    return _AccountCrawl(
+        rows=summed,
+        telemetry=_merge_account_telemetry(per_account_telemetry),
+        selected_venues=tuple(_key_venue(key) for key in selected),
+        account_key_ids=frozenset(str(key.get("id")) for key in account_keys),
+        window_start=window_start,
+        window_days=window_days,
+        exchange_accounts=len(selected),
+        zero_contribution_accounts=zero_contribution,
+        days_incomplete=days_incomplete,
+    )
+
+
 async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> DispatchResult:
     """Full backfill on first key connect. One-time per (allocator, api_key).
 
@@ -4063,11 +4708,16 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     # Phase 167.2.1.1 D-02: a job whose metadata carries ``force_rebuild: true``
     # BYPASSES this check, so a service-role or owner-role enqueue can re-run the
     # reconstruct for a marked key (the product's own job path, not a hand SQL write
-    # to the marker). The default is unchanged. A forced rebuild runs only on a SOLE-key
-    # allocator: with any other api_keys row (or an unanswered sibling lookup) it refuses
-    # and writes nothing, because the DO-NOTHING persist would gap-fill the aggregate
-    # curve with this one key's value (review CR-01). Multi-key accounts belong to
-    # Phase 167.2.1.1.2 ACCTREBUILD (D-05).
+    # to the marker). The default is unchanged.
+    #
+    # Phase 167.2.1.1.2 ACCTREBUILD (UPNLVENUES D-04 / D-05, this phase's D-01..D-03,
+    # decision AR-7): EVERY forced job is an ACCOUNT rebuild, whatever its key count. It
+    # crawls every exchange account of the allocator with the anchor on one window (90 days
+    # when the account holds OKX, else 730), sums them on the shared days, and replaces only
+    # that window in one transaction that itself refuses a stored day the rebuild does not
+    # reproduce; days older than the window are kept and the seam date is recorded. A stored
+    # row is one aggregate per (allocator, day), so the DO-NOTHING persist could only
+    # gap-fill it with one key's value (review CR-01) and is never used when forced.
     forced = _job_requests_force_rebuild(job)
     if forced:
         logger.info(
@@ -4098,20 +4748,49 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=BACKFILL_CAP_DAYS)
+    # Set only by a forced job's account crawl; the persist half reads it to choose the
+    # window replace over the unforced sole-key replace / multi-key DO NOTHING.
+    account: _AccountCrawl | None = None
+    # The persist-time key re-read of a forced account rebuild: the set the marker loop
+    # below stamps from, so the ladder needs no third read.
+    rebuilt_account_keys: list[dict[str, Any]] = []
 
     try:
         try:
             if forced:
-                # Phase 167.2.1.1 review CR-01 / SFH-1: refuse BEFORE the crawl. An
-                # unanswered lookup refuses too (never a fail-safe DONE).
-                _forced_siblings = await _allocator_has_other_api_keys(
-                    ctx.supabase, allocator_id, api_key_id,
+                # ACCTREBUILD AR-7: one forced path. FLIPRETRY-01 applies to it too: the
+                # whole account crawl is awaited under the one per-crawl bound, so a hang
+                # becomes the classified transient below. The key set is read FIRST, so an
+                # unreadable one refuses before any venue call.
+                _account_keys = await _read_account_keys(ctx.supabase, allocator_id, api_key_id)
+                _account_outcome = await asyncio.wait_for(
+                    _crawl_whole_account(ctx, job, allocator_id, _account_keys, end_date),
+                    timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
                 )
-                if _forced_siblings.lookup_failed:
-                    raise ForcedRebuildRefusedError("sibling_lookup_failed")
-                if _forced_siblings.has_siblings:
-                    raise ForcedRebuildRefusedError("multi_key")
-            if venue == "mt5":
+                if isinstance(_account_outcome, DispatchResult):
+                    # A sibling key's circuit-breaker cooldown deferred this job (no audit),
+                    # or an MT5 account's window fetch failed without writing an audit of
+                    # its own. Nothing was persisted. The job writes the ONE terminal audit,
+                    # on its own key: a permanent MT5 failure keeps the refusal prefix the
+                    # handoff reads, a transient one keeps the MT5 arm's own kind and text.
+                    if _account_outcome.outcome == DispatchOutcome.FAILED:
+                        if _account_outcome.error_kind == "permanent":
+                            return _forced_refusal_result(
+                                allocator_id, api_key_id, venue, "account_key_read_failed"
+                            )
+                        _emit_audit(
+                            allocator_id, api_key_id,
+                            "allocator.equity.reconstruct_failed",
+                            {
+                                "error_kind": _account_outcome.error_kind,
+                                "sanitized_message": (_account_outcome.error_message or "")[:500],
+                                "venue": "mt5",
+                            },
+                        )
+                    return _account_outcome
+                account = _account_outcome
+                rows, hit_terminus, telemetry = account.rows, False, account.telemetry
+            elif venue == "mt5":
                 # ⭐ 164.5.4 / D-01 — THE VENUE BRANCH. Placed like the `deribit`
                 # arm above (an explicit venue check ahead of the generic crawl)
                 # so `_fetch_and_price_window` — and with it every
@@ -4143,63 +4822,35 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 # FLIPRETRY-01 (defensive): the orchestrating window crawl is HARD-BOUNDED
                 # so a hang becomes a classified transient (the except asyncio.TimeoutError
                 # arm below), never an unbounded await that wedges the worker loop.
-                if forced:
-                    # PD-H / PD-J: the keyword is passed ONLY when forced, so the
-                    # unforced call keeps exactly its five positional arguments.
-                    _crawl = _fetch_and_price_window(
-                        ctx.exchange, venue, ctx.supabase, start_date, end_date,
-                        require_anchor=True,
-                    )
-                else:
-                    _crawl = _fetch_and_price_window(
-                        ctx.exchange, venue, ctx.supabase, start_date, end_date,
-                    )
+                _crawl = _fetch_and_price_window(
+                    ctx.exchange, venue, ctx.supabase, start_date, end_date,
+                )
                 rows, hit_terminus, telemetry = await asyncio.wait_for(
                     _crawl, timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
                 )
-            if forced:
-                if not rows:
-                    # Review SFH-1: an empty forced replay writes nothing and must not
-                    # end DONE (the empty-replace guard would otherwise mark the key
-                    # complete).
-                    raise ForcedRebuildRefusedError("replay_empty")
-                # Review WR-01: the sole-key replace DELETEs every stored row, so refuse
-                # when a stored day (older than the replay, or one it does not emit)
-                # would be lost. Dropping stored history is a founder decision.
-                # ACCEPTED RACE: this read is outside the replace RPC's transaction, so
-                # a row written between the two (the daily refresh's row for this
-                # sole-key allocator) is deleted unseen. No RPC change or migration in
-                # this phase; ACCTREBUILD 167.2.1.1.2 owns the in-transaction version.
-                if not await _allocator_snapshot_asofs(
-                    ctx.supabase, allocator_id,
-                ) <= {r["asof"] for r in rows}:
-                    raise ForcedRebuildRefusedError("history_outside_replay")
+            # D-02 / AR-2: a stored day the rebuilt rows lack is refused INSIDE the window
+            # call's transaction (history_days_unreproduced), never from a read made here.
         except ForcedRebuildRefusedError as exc:
-            # Phase 167.2.1.1 PD-H / PD-I: the forced rebuild was refused (a multi-key
-            # allocator, or a curve that could not be anchored to today's venue equity
-            # including open-position uPnL). Nothing has been persisted (this is before
-            # the persist half and the marker writer), so fail loudly and leave the
-            # stored curve and the marker as they were. Static text only: the reason is
-            # from a closed set and no venue error text is kept.
-            logger.warning(
-                "reconstruct_allocator_history forced rebuild refused allocator=%s "
-                "key=%s venue=%s reason=%s",
-                allocator_id, api_key_id, venue, exc.reason,
-            )
-            sanitized = (
-                f"forced rebuild refused ({exc.reason}): the forced rebuild could not be "
-                "written safely, so nothing was written and the stored curve is "
-                "unchanged (Phase 167.2.1.1 D-02)"
-            )
+            # Phase 167.2.1.1 PD-H / PD-I: the forced rebuild was refused (the account
+            # could not be read or covered, or a curve could not be anchored to today's
+            # venue equity including open-position uPnL). Nothing has been persisted (this
+            # is before the persist half and the marker writer), so fail loudly and leave
+            # the stored curve and the marker as they were.
+            return _forced_refusal_result(allocator_id, api_key_id, venue, exc.reason)
+        except _AccountCrawlRetryableError as exc:
+            # A sibling exchange account's retryable fault: the crawl already stamped a
+            # sibling rate limit on the sibling's own key, so nothing is stamped on THIS
+            # job's key. Static text only, the kind the sibling's fault was classified as.
+            sanitized = str(exc)
             _emit_audit(
                 allocator_id, api_key_id,
                 "allocator.equity.reconstruct_failed",
-                {"error_kind": "permanent", "sanitized_message": sanitized},
+                {"error_kind": exc.error_kind, "sanitized_message": sanitized},
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
                 error_message=sanitized,
-                error_kind="permanent",
+                error_kind=exc.error_kind,
             )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
@@ -4277,6 +4928,10 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     depth_months = history_depth_months_for_venue(venue)
     if hit_terminus:
         depth_months = 3
+    if account is not None:
+        # A forced account rebuild: the most limiting venue of the account, with no terminus
+        # override (the one 89-day window never reaches the OKX terminus).
+        depth_months = _account_history_depth_months(account.selected_venues)
 
     # /investigate 2026-04-22: sole-key stale-snapshot replacement.
     # When this api_key is the allocator's only key, any existing snapshots
@@ -4318,71 +4973,69 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     purge_snapshot_lookup_failed = False
     try:
         purged = 0
-        sibling_check = await _allocator_has_other_api_keys(
-            ctx.supabase, allocator_id, api_key_id,
-        )
-        if forced and sibling_check.has_siblings:
-            # Phase 167.2.1.1 round-2 SFH: the pre-crawl check above passed, so this
-            # second lookup disagrees (a key added during the crawl, or a lookup that
-            # failed this time). The DO-NOTHING persist below would end DONE with
-            # nothing replaced, or gap-fill the aggregate curve with this key's values.
-            # Refuse with the same closed-set reason and write nothing.
-            _reason = "sibling_lookup_failed" if sibling_check.lookup_failed else "multi_key"
-            logger.warning(
-                "reconstruct_allocator_history forced rebuild refused allocator=%s "
-                "key=%s venue=%s reason=%s",
-                allocator_id, api_key_id, venue, _reason,
-            )
-            sanitized = (
-                f"forced rebuild refused ({_reason}): the forced rebuild could not be "
-                "written safely, so nothing was written and the stored curve is "
-                "unchanged (Phase 167.2.1.1 D-02)"
-            )
-            _emit_audit(
-                allocator_id, api_key_id,
-                "allocator.equity.reconstruct_failed",
-                {"error_kind": "permanent", "sanitized_message": sanitized},
-            )
-            return DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_message=sanitized,
-                error_kind="permanent",
-            )
-        # C-0328 / M-1028: surface sibling-lookup failures into the audit
-        # trail. The boolean fail-safe (return True ⇒ skip purge) preserves
-        # data integrity but is invisible to operators — without an event
-        # the user's stale curve persists indefinitely with no signal that
-        # the recovery path latched on a DB error.
-        if sibling_check.lookup_failed:
-            _emit_audit(
-                allocator_id, api_key_id,
-                "allocator.equity.sibling_lookup_failed",
-                {
-                    "error_message": sibling_check.error_message,
-                    "venue": venue,
-                    "behavior": "fail_safe_skip_purge",
-                },
-            )
-        if not sibling_check.has_siblings:
-            # E4 (HIGH8): sole-key path — atomic DELETE + INSERT in one RPC.
-            # The purge now happens INSIDE the RPC transaction, so it is no
-            # longer a separately-measurable round-trip. The RPC returns the
-            # rows it inserted, which IS the new history depth; report that as
-            # ``days_written`` (the replacement happened atomically) and mirror
-            # it into ``stale_snapshots_purged`` for audit-trail
-            # continuity. ``atomic_replace=True`` lets operators distinguish
-            # the atomic path from the legacy purge+persist shape.
-            count = await replace_equity_snapshots(
-                ctx.supabase, rows, allocator_id, depth_months,
+        if account is not None:
+            # ACCTREBUILD AR-7: the forced path. Re-read the key set: a key added or
+            # removed since the crawl began changes what the window may claim to cover.
+            # (A key added between this read and the window call is not seen: such a key
+            # has no reconstructed history; T-167.2.1.1.2-21, accepted.)
+            _current_keys = await _read_account_keys(ctx.supabase, allocator_id, api_key_id)
+            if frozenset(str(row.get("id")) for row in _current_keys) != account.account_key_ids:
+                raise ForcedRebuildRefusedError("account_keys_changed")
+            rebuilt_account_keys = _current_keys
+            # D-01 / D-02 / D-03 in ONE transaction: replace only the window, refuse a
+            # stored in-window day the rows lack, record the seam date. Never the
+            # first-writer-wins persist, which would leave every stored day untouched.
+            count = await replace_equity_snapshots_window(
+                ctx.supabase, rows, allocator_id, depth_months, account.window_start,
             )
             purged = count
             used_atomic_replace = True
+            # So the ladder below classifies a 0-row insert from a non-empty payload as
+            # reconstruct_unexpected_noop, as the sole-key replace does.
+            sibling_check = SiblingCheckResult(has_siblings=False)
         else:
-            # Multi-key path: keep first-writer-wins ON CONFLICT DO NOTHING
-            # aggregation (T-07-V5b). No purge.
-            count = await persist_equity_snapshots(
-                ctx.supabase, rows, allocator_id, depth_months,
+            sibling_check = await _allocator_has_other_api_keys(
+                ctx.supabase, allocator_id, api_key_id,
             )
+            # C-0328 / M-1028: surface sibling-lookup failures into the audit
+            # trail. The boolean fail-safe (return True ⇒ skip purge) preserves
+            # data integrity but is invisible to operators — without an event
+            # the user's stale curve persists indefinitely with no signal that
+            # the recovery path latched on a DB error.
+            if sibling_check.lookup_failed:
+                _emit_audit(
+                    allocator_id, api_key_id,
+                    "allocator.equity.sibling_lookup_failed",
+                    {
+                        "error_message": sibling_check.error_message,
+                        "venue": venue,
+                        "behavior": "fail_safe_skip_purge",
+                    },
+                )
+            if not sibling_check.has_siblings:
+                # E4 (HIGH8): sole-key path — atomic DELETE + INSERT in one RPC.
+                # The purge now happens INSIDE the RPC transaction, so it is no
+                # longer a separately-measurable round-trip. The RPC returns the
+                # rows it inserted, which IS the new history depth; report that as
+                # ``days_written`` (the replacement happened atomically) and mirror
+                # it into ``stale_snapshots_purged`` for audit-trail
+                # continuity. ``atomic_replace=True`` lets operators distinguish
+                # the atomic path from the legacy purge+persist shape.
+                count = await replace_equity_snapshots(
+                    ctx.supabase, rows, allocator_id, depth_months,
+                )
+                purged = count
+                used_atomic_replace = True
+            else:
+                # Multi-key path: keep first-writer-wins ON CONFLICT DO NOTHING
+                # aggregation (T-07-V5b). No purge.
+                count = await persist_equity_snapshots(
+                    ctx.supabase, rows, allocator_id, depth_months,
+                )
+    except ForcedRebuildRefusedError as exc:
+        # A refusal from the key re-read or from inside the window call's transaction
+        # (history_days_unreproduced). The transaction rolled back, so nothing was written.
+        return _forced_refusal_result(allocator_id, api_key_id, venue, exc.reason)
     except EmptyReplaceRefusedError as exc:
         # The RPC did not run. Fall through to the existing taxonomy:
         # count == 0 and not rows yields reconstruct_no_data. Outcome
@@ -4496,6 +5149,19 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
         "anchor_positions_unread": telemetry.get("anchor_positions_unread", False),
         # Review SFH-1: a forced rebuild's completion says so, like its started audit.
         **({"forced_rebuild": True} if forced else {}),
+        # ACCTREBUILD: counts and booleans only, never an id or an amount.
+        **(
+            {
+                "account_rebuild": True,
+                "account_key_count": len(account.account_key_ids),
+                "account_exchange_accounts": account.exchange_accounts,
+                "account_zero_contribution_accounts": account.zero_contribution_accounts,
+                "account_days_incomplete": account.days_incomplete,
+                "window_days": account.window_days,
+            }
+            if account is not None
+            else {}
+        ),
     }
     if purge_refused:
         # Item 7 (b): booleans only, and only when the refusal fired.
@@ -4513,13 +5179,28 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     # an exit reached through a failed sibling lookup or a failed snapshot
     # lookup (transient failures, the same rule PR 1's backfill applies); the
     # job still ends DONE and the key stays owed under the cap.
+    #
+    # UPNLVENUES D-04 / PD-O: a forced ACCOUNT rebuild stamps every ACTIVE non-Deribit key of
+    # the account, not only the job's. The rebuilt book is one aggregate per day; a sibling
+    # left unmarked is owed to the daily fan-out, whose unforced reconstruct would
+    # first-writer-wins-fill any day the rebuilt book lacks with that one key's value. An
+    # inactive key (no reconstruct can run for it) and a Deribit key (counted as $0, never
+    # rebuilt, so a marker would claim a rebuild that did not happen) are left as they were.
+    # A failed stamp takes the arm below: the retry re-runs the whole forced rebuild, which the
+    # window replace makes idempotent.
     if _reconstruct_outcome_completes_the_key(
         audit_kind,
         sibling_lookup_failed=sibling_check.lookup_failed,
         snapshot_lookup_failed=purge_snapshot_lookup_failed,
     ):
         try:
-            await _mark_api_key_history_reconstructed(ctx.supabase, api_key_id)
+            if account is not None:
+                # UPNLVENUES D-04 / PD-O: every active non-Deribit key of the rebuilt
+                # account, in id order (the job's own is among them).
+                for marked_key_id in _account_marker_key_ids(rebuilt_account_keys):
+                    await _mark_api_key_history_reconstructed(ctx.supabase, marked_key_id)
+            else:
+                await _mark_api_key_history_reconstructed(ctx.supabase, api_key_id)
         except Exception as exc:  # noqa: BLE001
             # A swallowed failure would leave a success audit for a key that is
             # still owed (SC-1). Fail the job instead: the rows are persisted
