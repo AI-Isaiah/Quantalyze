@@ -15,7 +15,7 @@ from __future__ import annotations
 import ast
 import csv
 import io
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -38,6 +38,7 @@ from services.okx_archive_files import (
     parse_archive_csv,
     quarter_bounds,
 )
+from services.okx_archive_reconcile import reconcile_leg
 
 FIXTURES = Path(__file__).parent / "fixtures" / "okx_archive"
 EXCHANGE_SOURCE = Path(__file__).resolve().parents[1] / "services" / "exchange.py"
@@ -816,6 +817,84 @@ class TestBalChainCrossesTheQuarterSeam:
             {"ts_min_day": "2026-04-02", "ts_max_day": "2026-05-10"},
             {"ts_min_day": "2026-07-02", "ts_max_day": "2026-09-01"},
         ]
+
+
+# D-15: OKX cuts a quarter file at 00:00 UTC+8 (16:00 UTC the day before), so a real Q2 file
+# opens on 2026-03-31 and a real Q3 file on 2026-06-30. Each pair is (when UTC, balChg).
+Q2_EDGE_BILLS = [("2026-03-31 20:00:00", "3"), ("2026-04-02 10:00:00", "10"),
+                 ("2026-05-10 10:00:00", "20"), ("2026-06-20 10:00:00", "5"),
+                 ("2026-06-30 10:00:00", "5")]
+Q3_EDGE_BILLS = [("2026-06-30 20:00:00", "7"), ("2026-07-02 10:00:00", "3"),
+                 ("2026-07-15 10:00:00", "4"), ("2026-08-10 10:00:00", "6"),
+                 ("2026-09-01 10:00:00", "8"), ("2026-09-30 10:00:00", "4")]
+
+
+def _edge_pair():
+    """A Q2 and a Q3 file of ONE account cut at 00:00 UTC+8; Q3 opens on Q2's closing 1043."""
+    h2, r2, closing = _ledger("Q2", Q2_EDGE_BILLS, opening="1000", first_id=100)
+    h3, r3, _ = _ledger("Q3", Q3_EDGE_BILLS, opening=str(closing), first_id=200)
+    return _parsed(h2, r2, "Q2"), _parsed(h3, r3, "Q3")
+
+
+class TestQuarterCutAtUtcPlus8:
+    """D-15. OKX cuts quarters at 00:00 UTC+8, not at 00:00 UTC. The real Q2 file therefore
+    starts at 16:00 UTC on 03-31 and a parser on calendar-UTC bounds refuses a correct file.
+    One that accepted it but kept summing by file would publish a partial 03-31, 06-30 or
+    09-30 as if it were a whole day, so a quarter-edge UTC day counts only when both
+    neighbouring files were read."""
+
+    def test_a_q2_q3_pair_cut_at_utc_plus_8_parses_aggregates_whole_utc_days_and_chains_across_the_seam(self):
+        q2, q3 = _edge_pair()
+        # Imported here, after the parse, so the symbol need not exist for the file to collect.
+        from services.okx_archive_files import quarter_edge_days
+
+        assert (q2.ts_min_day, q2.ts_max_day, q2.row_count) == ("2026-03-31", "2026-06-30", 5)
+        assert len(q2.covered_days) == 90
+        assert (q2.head_edge_day, q2.tail_edge_day) == ("2026-03-31", "2026-06-30")
+        assert q2.head_edge_day not in q2.covered_days and q2.tail_edge_day not in q2.covered_days
+        assert (q3.ts_min_day, q3.ts_max_day, q3.row_count) == ("2026-06-30", "2026-09-30", 6)
+        assert len(q3.covered_days) == 91
+        assert (q3.head_edge_day, q3.tail_edge_day) == ("2026-06-30", "2026-09-30")
+        assert q3.head_edge_day not in q3.covered_days and q3.tail_edge_day not in q3.covered_days
+
+        assert quarter_edge_days([q2, q3]) == (
+            frozenset({"2026-06-30"}),
+            frozenset({"2026-03-31", "2026-09-30"}),
+        )
+
+        aggregate = aggregate_archive([q2, q3], None)
+        assert aggregate.realized_by_day == {
+            "2026-04-02": Decimal("10"),
+            "2026-05-10": Decimal("20"),
+            "2026-06-20": Decimal("5"),
+            "2026-06-30": Decimal("12"),  # 5 from Q2's last hours + 7 from Q3's first hours
+            "2026-07-02": Decimal("3"),
+            "2026-07-15": Decimal("4"),
+            "2026-08-10": Decimal("6"),
+            "2026-09-01": Decimal("8"),
+        }
+        first = date(2026, 4, 1)
+        assert aggregate.covered_days == frozenset(
+            (first + timedelta(days=i)).isoformat() for i in range(182)  # 04-01 .. 09-29
+        )
+        assert max(aggregate.covered_days) == "2026-09-29"
+        assert aggregate.edge_days_whole == frozenset({"2026-06-30"})
+        assert aggregate.edge_days_missing == frozenset({"2026-03-31", "2026-09-30"})
+
+        # 11 bills in one USDT chain, the seam pair and both edge-day bills included.
+        assert verify_bal_chain([q2, q3], aggregate.summed_ccys) == {
+            "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-03-31", "last_day": "2026-09-30"}},
+            "total_pairs": 10,
+        }
+
+        reading = reconcile_leg(
+            "realized",
+            aggregate.realized_by_day,
+            {"2026-08-10": Decimal("6"), "2026-09-01": Decimal("8")},
+            ("2026-08-03", "2026-09-29"),
+        )
+        assert reading.ok is True
+        assert reading.days_compared == 58
 
 
 class TestBalChainFloor:
