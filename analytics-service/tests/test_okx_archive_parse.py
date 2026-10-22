@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import dataclasses
 import io
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -678,6 +679,7 @@ class TestBalChainCompleteness:
         assert reading == {
             "ccys": {"USDT": {"pairs_checked": 13, "first_day": "2026-04-01", "last_day": "2026-06-30"}},
             "total_pairs": 13,
+            "blank_ccy_skipped": 0,
         }
 
     def test_the_q3_fixture_chains_with_the_floor_met_by_each_of_its_ccys(self):
@@ -727,6 +729,25 @@ class TestBalChainCompleteness:
         assert err.stop_class == "archive_incomplete"
         assert err.detail["reason"] == "unchainable_row"
 
+    def test_a_bill_with_both_causes_is_one_stopping_row_counted_under_each_cause(self):
+        """D-16. The cause counts may overlap, but ``rows`` is how many bills stopped the run,
+        so a bill with both causes must count once there or the founder over-reads the damage.
+        The bill has an effect (``balChg`` and ``pnl`` nonzero), so this holds unchanged once
+        the blank-ccy count is narrowed to bills with an effect."""
+
+        def both(header, rows):
+            rows[3][header.index("ccy")] = ""
+            rows[3][header.index("billId")] = "abc-3"
+
+        err = _stop(verify_bal_chain, [self._file(edit=both)], frozenset())
+        assert err.stop_class == "archive_incomplete"
+        detail = err.detail
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["first_day"], detail["last_day"],
+        ) == ("unchainable_row", 1, 1, 1, "2026-07-02", "2026-07-02")
+        assert [f["rows"] for f in detail["files"]] == [1]
+
 
 def _ledger(quarter, bills, *, opening, first_id, ccy="USDT"):
     """One chaining quarter file built from ``(when, balChg)`` pairs: ``bal`` is the running
@@ -775,6 +796,7 @@ class TestBalChainCrossesTheQuarterSeam:
         assert reading == {
             "ccys": {"USDT": {"pairs_checked": 7, "first_day": "2026-04-02", "last_day": "2026-09-01"}},
             "total_pairs": 7,
+            "blank_ccy_skipped": 0,
         }
 
     def test_a_q2_file_missing_its_last_rows_stops_at_the_seam(self):
@@ -823,6 +845,143 @@ class TestBalChainCrossesTheQuarterSeam:
         assert err.detail["files"] == [
             {"ts_min_day": "2026-04-02", "ts_max_day": "2026-05-10"},
             {"ts_min_day": "2026-07-02", "ts_max_day": "2026-09-01"},
+        ]
+
+
+def _blank(bill_id: str, when: str, **overrides: str) -> dict[str, str]:
+    """The cells of a blank-ccy SWAP subType-2 bill: ``balChg``, ``bal``, ``pnl`` and ``fee``
+    are all 0 unless overridden."""
+    return {
+        "instType": "SWAP", "billId": bill_id, "subType": "2", "ts": _ms(when), "ccy": "",
+        "balChg": "0", "bal": "0", "pnl": "0", "fee": "0", **overrides,
+    }
+
+
+def _interleaved_q3(*extra: dict[str, str]):
+    """The four-bill Q3 ledger with its billIds renumbered 2000, 2010, 2020 and 2030, plus one
+    row per ``extra`` cells dict, so an extra billId between them sits between two USDT bills
+    in billId order."""
+    header, rows, _ = _ledger("Q3", Q3_BILLS, opening="1000", first_id=200)
+    for row, bill_id in zip(rows, ("2000", "2010", "2020", "2030")):
+        row[header.index("billId")] = bill_id
+    return header, [*rows, *(_new_row(header, **cells) for cells in extra)]
+
+
+class TestBlankCcyZeroEffectSkip:
+    """D-16. A bill with a blank ``ccy`` fits no currency's chain. When its ``balChg``, ``pnl``
+    and ``fee`` are all 0 it cannot have moved any balance, so it is left out of the chain and
+    counted; any other bill the chain cannot place still stops. A skip that took a bill with
+    money on it, or one the chain cannot order, would let a file missing that money pass the
+    completeness proof and publish missing days as 0.0."""
+
+    def test_a_zero_effect_blank_ccy_row_is_skipped_counted_and_its_neighbours_still_chain(self):
+        """D-16. ``bal`` is the balance AFTER a bill (state, not effect), so the second blank
+        row carries a nonzero ``bal`` and is still zero effect."""
+        header, rows = _interleaved_q3(
+            _blank("2005", "2026-07-03 10:00:00"), _blank("2015", "2026-07-20 10:00:00", bal="999"),
+        )
+        assert _chain([_parsed(header, rows, "Q3")]) == {
+            "ccys": {"USDT": {"pairs_checked": 3, "first_day": "2026-07-02", "last_day": "2026-09-01"}},
+            "total_pairs": 3,
+            "blank_ccy_skipped": 2,
+        }
+
+    @pytest.mark.parametrize("field", ["balChg", "pnl", "fee"])
+    def test_a_blank_ccy_row_with_any_effect_still_stops_as_blank_ccy(self, field):
+        """D-16. Each of the three effect columns alone keeps the bill in the stop: a blank-ccy
+        bill with money on it moved a balance the chain cannot attribute."""
+        header, rows = _interleaved_q3(_blank("2005", "2026-07-03 10:00:00", **{field: "0.01"}))
+        err = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset())
+        assert err.stop_class == "archive_incomplete"
+        detail = err.detail
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["blank_ccy_skipped"], detail["first_day"], detail["last_day"],
+        ) == ("unchainable_row", 1, 1, 0, 0, "2026-07-03", "2026-07-03")
+
+    def test_a_zero_effect_blank_ccy_row_with_a_non_digit_bill_id_still_stops(self):
+        """D-16. A bill the chain cannot order is never skipped, whatever its effect: its
+        position between its neighbours is unknown."""
+        header, rows = _interleaved_q3(_blank("x2005", "2026-07-03 10:00:00"))
+        err = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset())
+        detail = err.detail
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["blank_ccy_skipped"],
+        ) == ("unchainable_row", 1, 0, 1, 0)
+
+    @pytest.mark.parametrize("ccy", ["", "USDT"])
+    def test_a_bill_id_with_a_non_ascii_digit_stops_as_non_digit_instead_of_crashing(self, ccy):
+        """D-16 round 1. ``"2005\u00b2".isdigit()`` is true but ``int()`` rejects it, so a
+        zero-effect blank-ccy bill (or a USDT one) with such a billId used to reach the sort and
+        raise a bare ``ValueError`` carrying the billId. It is a bill the chain cannot order and
+        stops by name, like any other non-digit billId."""
+        header, rows = _interleaved_q3(_blank("2005\u00b2", "2026-07-03 10:00:00", ccy=ccy))
+        err = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset())
+        detail = err.detail
+        assert err.stop_class == "archive_incomplete"
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["blank_ccy_skipped"],
+        ) == ("unchainable_row", 1, 0, 1, 0)
+
+    def test_a_skipped_row_cannot_hide_a_missing_bill(self):
+        """D-16. The skipped bill sits where USDT bill 2010 was. The chain still breaks at the
+        next USDT bill, so the missing bill is found whether or not the blank line is skipped."""
+        header, rows = _interleaved_q3(_blank("2015", "2026-07-20 10:00:00"))
+        rows = [r for r in rows if r[header.index("billId")] != "2010"]
+        err = _stop(_chain, [_parsed(header, rows, "Q3")])
+        assert err.detail["reason"] == "bal_chain_break"
+        assert err.detail["ccys"]["USDT"]["first_break_day"] == "2026-08-10"
+        assert err.detail["blank_ccy_skipped"] == 1
+
+
+    def test_a_bill_present_in_two_adjacent_files_is_counted_once(self):
+        """D-16 round 1. The census and the chain's ``unique`` dict count a billId once, first
+        file wins, so the skip tally must too: the runbook reads ``blank_ccy_skipped`` against
+        the ``(blank)`` census count. The same zero-effect blank-ccy bill sits in the Q2 file and
+        in the Q3 file here."""
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        blank = _blank("150", "2026-05-01 10:00:00")
+        q2 = _parsed(h2, [*r2, _new_row(h2, **blank)], "Q2")
+        q3 = _parsed(h3, r3, "Q3")
+        q3 = dataclasses.replace(q3, rows=(*q3.rows, *(row for row in q2.rows if row.bill_id == "150")))
+        reading = _chain([q2, q3])
+        assert reading["blank_ccy_skipped"] == 1
+        assert reading["blank_ccy_skipped"] == aggregate_archive([q2, q3], None).census["by_ccy"]["(blank)"]
+
+
+class TestUnchainableTallyAcrossTwoFiles:
+    """D-16 round 1. The calibrate D-16 orders is a Q2 + Q3 re-run, so the tally and the stop
+    totals are read across two files: each file's count, every file's days and the skips of
+    BOTH files must reach the founder."""
+
+    def test_a_zero_effect_blank_ccy_bill_in_each_file_is_skipped_in_each(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        q2 = _parsed(h2, [*r2, _new_row(h2, **_blank("150", "2026-05-01 10:00:00"))], "Q2")
+        q3 = _parsed(h3, [*r3, _new_row(h3, **_blank("250", "2026-08-20 10:00:00"))], "Q3")
+        reading = _chain([q2, q3])
+        assert reading["blank_ccy_skipped"] == 2 == aggregate_archive([q2, q3], None).census["by_ccy"]["(blank)"]
+        assert reading["total_pairs"] == 7
+
+    def test_the_stop_totals_and_days_span_both_files(self):
+        """Q2 holds a non-digit billId, Q3 a blank ccy with money: the totals add the two, the
+        first and last day come from different files, and each file keeps its own count."""
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        q2 = _parsed(h2, [*r2, _new_row(h2, **_blank("x150", "2026-05-01 10:00:00"))], "Q2")
+        q3 = _parsed(h3, [*r3, _new_row(h3, **_blank("250", "2026-08-20 10:00:00", balChg="0.01"))], "Q3")
+        err = _stop(verify_bal_chain, [q2, q3], frozenset())
+        detail = err.detail
+        assert err.stop_class == "archive_incomplete"
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["first_day"], detail["last_day"],
+        ) == ("unchainable_row", 2, 1, 1, "2026-05-01", "2026-08-20")
+        assert [(f["rows"], f["blank_ccy"], f["nondigit_bill_id"]) for f in detail["files"]] == [
+            (1, 0, 1), (1, 1, 0),
+        ]
+        assert [(f["first_day"], f["last_day"]) for f in detail["files"]] == [
+            ("2026-05-01", "2026-05-01"), ("2026-08-20", "2026-08-20"),
         ]
 
 
@@ -892,6 +1051,7 @@ class TestQuarterCutAtUtcPlus8:
         assert verify_bal_chain([q2, q3], aggregate.summed_ccys) == {
             "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-03-31", "last_day": "2026-09-30"}},
             "total_pairs": 10,
+            "blank_ccy_skipped": 0,
         }
 
         reading = reconcile_leg(
