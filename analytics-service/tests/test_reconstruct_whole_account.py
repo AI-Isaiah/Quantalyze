@@ -1257,3 +1257,165 @@ async def test_a_deribit_exchange_account_is_counted_as_zero(
     assert complete["account_key_count"] == 2
     assert complete["account_exchange_accounts"] == 1
     assert complete["account_zero_contribution_accounts"] == 1
+
+
+# ------------------------------------------------------------ mixed venues and the marker rule
+#
+# UPNLVENUES D-04 across venues, and PD-O (the marker rule). A rebuilt account's book is ONE
+# aggregate per day, so a later UNFORCED reconstruct of a sibling that still looks owed would
+# first-writer-wins-fill any day the rebuilt book lacks with that key's value alone. Every
+# ACTIVE key of the rebuilt account is therefore stamped with the job's own; an inactive key
+# (no reconstruct can run for it) and a Deribit key (its history is counted as $0, not
+# rebuilt, so a marker would claim a rebuild that never happened) are left as they were.
+
+MT5_LEVEL = 300.0
+
+
+def _install_recording_mt5_fetch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace ``_mt5_fetch_window`` with a recording fake that answers ten typed deal-ledger
+    days (END_DATE minus 9..0) at MT5_LEVEL, no breakdown, and MT5's own telemetry."""
+    calls: list[dict[str, Any]] = []
+
+    async def _fake(exchange: Any, **kwargs: Any) -> Any:
+        calls.append({"exchange": exchange, **kwargs})
+        rows = [
+            _row((END_DATE - timedelta(days=back)).date().isoformat(), MT5_LEVEL, None)
+            for back in range(9, -1, -1)
+        ]
+        return rows, False, er._mt5_telemetry()
+
+    monkeypatch.setattr(er, "_mt5_fetch_window", _fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_mt5_and_bybit_account_is_rebuilt_with_each_venues_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UPNLVENUES D-04 across venues, PD-O, SC-3. An allocator holds an MT5 key (key 1, the
+    job's, marked) and a Bybit key (key 2, marker NULL). A FORCED rebuild reads the MT5
+    exchange account from its deal ledger (no anchor step, no ccxt trade read) and the Bybit
+    one through the anchored crawl; every stored row is the per-day sum (300.0 plus the Bybit
+    payload's own USDT coin equity, computed here) and carries depth 24, the Bybit-limited
+    depth (MT5 has none). Both keys end marked: key 2 would otherwise stay owed and a later
+    unforced reconstruct of it would fill the rebuilt book with its own value alone.
+
+    RED at PLAN_BASE: only the job key was stamped, so key 2's marker stayed NULL (drill J)."""
+    fake = _MarkerFake()
+    _seed_account_key(fake, API_KEY_ID_1, "mt5", venue_account_id="fixture-mt5-1")
+    _seed_account_key(fake, API_KEY_ID_2, "bybit", venue_account_id="fixture-acct-2", marker=None)
+    _seed_sentinel_rows(fake)
+    audit = _install_fake_audit(monkeypatch)
+    mt5_exchange = _crawl_exchange()
+    mt5_exchange.id = "mt5"
+    payload_2 = bybit_wallet_balance("UNIFIED", [bybit_coin("USDT", "500", "40")])
+    bybit_exchange = await _bybit_account_exchange(
+        payload_2, [{**BYBIT_LINEAR_POSITIONS[0], "unrealizedPnl": 40.0}]
+    )
+    _install_account_preflight(
+        monkeypatch, fake, {API_KEY_ID_1: mt5_exchange, API_KEY_ID_2: bybit_exchange}
+    )
+    mt5_calls = _install_recording_mt5_fetch(monkeypatch)
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert [c["api_key_id"] for c in mt5_calls] == [API_KEY_ID_1], mt5_calls
+    assert mt5_calls[0]["exchange"] is mt5_exchange
+    assert bybit_exchange.fetch_positions.await_count > 0, "the Bybit account was not anchored"
+    assert bybit_exchange.fetch_my_trades.await_count > 0, "the Bybit account was not crawled"
+    _assert_no_venue_call(mt5_exchange, "the MT5 key's exchange")
+
+    expected = round(MT5_LEVEL + _usdt_equity(payload_2), 2)
+    assert expected == 840.0
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert len(rows) == SENTINEL_ROWS, rows
+    for row in rows:
+        assert row["value_usd"] == pytest.approx(expected, abs=0.01), (
+            f"day {row['asof']} holds {row['value_usd']}, not MT5 plus Bybit {expected}"
+        )
+        assert row["history_depth_months"] == 24, row
+
+    assert _marker_of(fake, API_KEY_ID_1) != MARKER, "the job's own key was not re-stamped"
+    assert _marker_of(fake, API_KEY_ID_2) is not None, (
+        "a sibling of the rebuilt account was left owed: a later unforced reconstruct of it "
+        "would fill the rebuilt book with that key's value alone"
+    )
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["account_rebuild"] is True
+    assert complete["account_key_count"] == 2
+    assert complete["window_days"] == 730
+
+
+def _seed_keys_outside_the_rebuild(fake: Any, case: str) -> None:
+    """Key 1 (the job's, Bybit, marked) and key 3 (Bybit, NULL marker) are rebuilt; key 2
+    is the key the rebuild must leave as it found it."""
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
+    _seed_account_key(fake, _THIRD_KEY_ID, "bybit", venue_account_id="fixture-acct-3", marker=None)
+    if case == "inactive_duplicate":
+        _seed_account_key(
+            fake, API_KEY_ID_2, "bybit", venue_account_id=None, marker=None, is_active=False,
+            share_kind="duplicate", shared_with=API_KEY_ID_1,
+        )
+    else:
+        _seed_account_key(
+            fake, API_KEY_ID_2, "deribit", venue_account_id="fixture-acct-2", marker=None
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["inactive_duplicate", "deribit"])
+async def test_keys_outside_the_rebuild_keep_their_marker(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """PD-O: an inactive key (no reconstruct can run for it, the preflight fails it
+    permanently) and a Deribit key (its history is counted as $0, never rebuilt, so a marker
+    would claim a rebuild that never happened) keep a NULL marker, while the active sibling
+    of the rebuilt account (key 3) is stamped."""
+    fake = _MarkerFake()
+    _seed_keys_outside_the_rebuild(fake, case)
+    _seed_sentinel_rows(fake)
+    _install_fake_audit(monkeypatch)
+    _install_account_preflight(
+        monkeypatch,
+        fake,
+        {API_KEY_ID_1: await _bybit_exchange(), _THIRD_KEY_ID: await _sibling_bybit_exchange()},
+    )
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert _marker_of(fake, API_KEY_ID_1) != MARKER, "the job's own key was not re-stamped"
+    assert _marker_of(fake, _THIRD_KEY_ID) is not None, "an active sibling was left owed"
+    assert _marker_of(fake, API_KEY_ID_2) is None, f"a {case} key was stamped"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_marker_stamp_on_a_rebuilt_account_fails_the_job_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker that cannot be written must not end the job DONE: the account's keys would be
+    left owed under a success audit. FAILED/transient is safe to retry because the forced
+    rebuild is idempotent under the window replace, so the replaced rows stay."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.fail_update_tables.add("api_keys")
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, _before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "transient", result
+    actions = [c.kwargs["action"] for c in audit.call_args_list]
+    assert not (set(actions) & COMPLETION_ACTIONS), actions
+    older_asof = (END_DATE - timedelta(days=800)).date().isoformat()
+    in_window = [r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] != older_asof]
+    assert len(in_window) == SENTINEL_ROWS, in_window
+    assert all(r["value_usd"] != SENTINEL_VALUE for r in in_window), (
+        "the replaced rows were rolled back; the retry relies on them being idempotent, not gone"
+    )
