@@ -13182,6 +13182,12 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 
 ## Phase 167.2.1.1.2 (ACCTREBUILD) — routed items (logged 2026-10-22)
 
+### 167.2.1.1.2-ACCOUNT-CRAWL-DIAGNOSTICS — a failed forced account crawl does not name the failing member or a code fault (booked 2026-10-22, 167.2.1.1.2 review round 3, DIAGNOSTIC)
+
+**Reading.** Review round 3 (REVIEW-3 WR-01 and the silent-failure re-hunt) left two MEDIUM diagnostic gaps in `analytics-service/services/equity_reconstruction.py`, neither user-facing nor data integrity, so they were booked rather than fixed (founder rule: a non-user-facing MEDIUM gets booked). (1) A permanent MT5 member failure on the account path is replaced by the generic `account_key_read_failed` refusal; five MT5 arms (`kill_switch`, `auth`, `account_snapshot`, `non_finite`, `negative_nav`) log nothing of their own, so no record names the member key or cause, and the user-fixable `auth` arm reads like the kill switch. (2) Any `unknown`-class crawl fault (including a code bug such as `KeyError`) is labelled a "retryable venue fault" with the class name only, so a deterministic bug burns every retry and blames the venue.
+
+**Owner / Trigger:** next phase that touches the forced account crawl, or the first post-deploy ACCTREBUILD refusal whose cause cannot be read. Minimal fix: one WARNING in the gather loop naming the member key, venue, kind and the arm's static message; and wording or a scrubbed traceback that separates `unknown` from venue faults.
+
 ### 167.2.1.1.2-ACCOUNT-REBUILD-BLOCKERS — a forced account rebuild refuses an account it cannot rebuild in full, and writes nothing (booked 2026-10-22, 167.2.1.1.2 plans 04-08, UPNLVENUES D-04, D-02, DATA INTEGRITY, FOUNDER DECISION)
 
 **Reading.** These refusals are structural: a re-run cannot clear them. Each one writes nothing and leaves the stored curve unchanged (founder D-02, "Refuse that account (Recommended)"; the founder decides per account afterwards).
