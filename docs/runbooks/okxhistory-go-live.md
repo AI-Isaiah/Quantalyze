@@ -485,10 +485,14 @@ Expected readback: `this_run_jobs 1`. The idempotency key makes a repeat of the 
 returns the same job; use a new `RUN` for a new preflight. Then read the job (below) until it is `done`.
 
 **Read the result.** `job-result` lists the five newest jobs of the kind: status, attempts,
-`next_attempt_at`, the class prefix of `last_error`, `last_error` whole (by the job contract it carries
-dates, counts and closed-vocabulary classes only), `stop_class` from the result, and the whole
-`member_progress` object as text. The CSV goes to `TS_SP` and is read there; **its `member_progress`
-column carries amounts and is never pasted into a tracked file or a chat.**
+`next_attempt_at`, the class prefix of `last_error`, `last_error` whole only when it is the job's own stop
+text (`okx_archive_rebuild: ...`, which by the job contract carries dates, counts and closed-vocabulary
+classes only), `last_error_uncontracted`, `stop_class` from the result, and the whole `member_progress`
+object as text. The CSV goes to `TS_SP` and is read there; **its `member_progress` column carries amounts
+and is never pasted into a tracked file or a chat.** `last_error_uncontracted` true means the text came
+from the dispatcher or the key preflight, not from the job; the `last_error` column is empty for that row
+and the text is not selected. It gets the same never-paste rule as `member_progress`: return to the
+founder.
 
 <!-- form: job-result -->
 ```sql
@@ -499,7 +503,8 @@ j AS (
 SELECT m.marker_is_prod, j.idempotency_key, j.metadata ->> 'mode' AS mode, j.status, j.attempts, j.max_attempts,
        j.next_attempt_at,
        substring(j.last_error from '^okx_archive_rebuild: ([a-z0-9_]+)') AS error_class,
-       j.last_error,
+       CASE WHEN j.last_error ~ '^okx_archive_rebuild: ' THEN j.last_error END AS last_error,
+       (j.last_error IS NOT NULL AND j.last_error !~ '^okx_archive_rebuild: ') AS last_error_uncontracted,
        j.error_kind,
        j.metadata ->> 'member_progress_at' AS progress_at,
        j.metadata -> 'member_progress' ->> 'stop_class' AS stop_class,
