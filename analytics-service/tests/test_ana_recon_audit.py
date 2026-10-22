@@ -913,7 +913,8 @@ def test_c01_10_value_usd_survives_breakdown_truncation():
 
 
 # ---------------------------------------------------------------------------
-# NEW-C01-05 — unified-margin venues skip uPnL double-count
+# NEW-C01-05 — OKX skips the uPnL add (totalEq is marked to market); Bybit and
+# Binance add it (their ccxt `total` is the wallet figure)
 # ---------------------------------------------------------------------------
 
 
@@ -942,8 +943,13 @@ def test_c01_05_okx_upnl_not_double_counted():
     assert not partial
 
 
-def test_c01_05_bybit_upnl_not_double_counted():
-    """NEW-C01-05: same as OKX — Bybit V5 is also unified-margin."""
+def test_c01_05_bybit_upnl_is_added_to_the_wallet_balance_anchor():
+    """NEW-C01-05's Bybit reading was reversed by Phase 167.2.1.1: Bybit's
+    ccxt ``total`` is the coin walletBalance, which excludes open uPnL, so the
+    reconstruct anchor ADDS the position uPnL (as for Binance). Real-parser
+    coverage lives in tests/test_upnl_venues.py; this is the cheap bare-dict
+    regression.
+    """
     exchange = MagicMock()
     exchange.fetch_balance = AsyncMock(return_value={
         "total": {"USDT": 30000.0}
@@ -956,8 +962,10 @@ def test_c01_05_bybit_upnl_not_double_counted():
     equity, partial = asyncio.run(
         _run_fetch_current_equity(exchange, venue="bybit")
     )
-    assert equity == 30000.0, (
-        f"NEW-C01-05: Bybit equity should be 30000 (total only), got {equity}"
+    assert equity == 32000.0, (
+        "Bybit's ccxt `total` is the coin walletBalance (ccxt bybit.parse_balance) "
+        "and excludes uPnL, so the reconstruct anchor adds position uPnL as for "
+        f"Binance (30000 + 2000 = 32000), got {equity}"
     )
 
 
