@@ -678,6 +678,7 @@ class TestBalChainCompleteness:
         assert reading == {
             "ccys": {"USDT": {"pairs_checked": 13, "first_day": "2026-04-01", "last_day": "2026-06-30"}},
             "total_pairs": 13,
+            "blank_ccy_skipped": 0,
         }
 
     def test_the_q3_fixture_chains_with_the_floor_met_by_each_of_its_ccys(self):
@@ -794,6 +795,7 @@ class TestBalChainCrossesTheQuarterSeam:
         assert reading == {
             "ccys": {"USDT": {"pairs_checked": 7, "first_day": "2026-04-02", "last_day": "2026-09-01"}},
             "total_pairs": 7,
+            "blank_ccy_skipped": 0,
         }
 
     def test_a_q2_file_missing_its_last_rows_stops_at_the_seam(self):
@@ -984,6 +986,7 @@ class TestQuarterCutAtUtcPlus8:
         assert verify_bal_chain([q2, q3], aggregate.summed_ccys) == {
             "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-03-31", "last_day": "2026-09-30"}},
             "total_pairs": 10,
+            "blank_ccy_skipped": 0,
         }
 
         reading = reconcile_leg(

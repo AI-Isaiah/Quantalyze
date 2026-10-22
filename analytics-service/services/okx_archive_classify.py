@@ -190,13 +190,24 @@ def verify_bal_chain(
       still stop the job and it still appears in the reading. A break is reported before this.
 
     ``unchainable_row`` (D-16) is raised before any chaining, for a bill the chain cannot place:
-    a blank ``ccy`` (``blank_ccy``) or a ``billId`` that is not all digits (``nondigit_bill_id``).
-    One bill can carry both causes; ``rows`` counts each stopping bill once. The detail carries
+    a blank ``ccy`` with an effect (``blank_ccy``) or a ``billId`` that is not all digits
+    (``nondigit_bill_id``, whatever its ``ccy`` or effect). One bill can carry both causes;
+    ``rows`` counts each stopping bill once.
+
+    D-16 skip: a bill with a blank ``ccy``, an all-digit ``billId`` and ZERO BALANCE EFFECT
+    (``balChg``, ``pnl`` and ``fee`` all exactly 0, the negation of ``aggregate_archive``'s
+    ``nonzero``; ``bal`` is state, not effect, and ``posBalChg`` / ``posBal`` are never read)
+    is left out of the chain only and counted in ``blank_ccy_skipped``. It fits no currency's
+    chain, and since it changed no balance its neighbours still satisfy ``bal == previous bal +
+    balChg`` without it, so skipping it can neither hide a break nor make one. The skip comes
+    after the de-duplication and conflict check. ``aggregate_archive`` still classifies and
+    counts the bill. The detail carries
     the totals, the first and last UTC day of those bills and, per file in the order passed,
     the same counts and days beside the file's ts range. Counts and dates only.
 
     On success it returns the reading the job records in ``info.bal_chain``:
-    ``{"ccys": {ccy: {pairs_checked, first_day, last_day}}, "total_pairs": n}``.
+    ``{"ccys": {ccy: {pairs_checked, first_day, last_day}}, "total_pairs": n,
+    "blank_ccy_skipped": n}``; every stop detail carries ``blank_ccy_skipped`` too.
 
     What the chain proves is INTERIOR completeness plus the seam between adjacent quarters.
     It cannot prove the HEAD of the earliest file or the TAIL of the latest: a file missing
@@ -208,18 +219,23 @@ def verify_bal_chain(
     # D-16: the bills the chain cannot place are counted per file, with the cause split and the
     # first and last UTC day, so the stop names what stopped it. Counts and days only.
     tally: list[dict[str, Any]] = []
+    skipped = 0
     for file in files:
         stopping_days: list[str] = []
         blank = nondigit = 0
         for row in file.rows:
             row_blank = not row.ccy
             row_nondigit = not row.bill_id.isdigit()
-            if row_blank:
+            # D-16: zero balance effect is the negation of ``aggregate_archive``'s ``nonzero``.
+            zero_effect = row.bal_chg == 0 and row.pnl == 0 and row.fee == 0
+            if row_nondigit or (row_blank and not zero_effect):
+                stopping_days.append(row.day)
+            elif row_blank:
+                skipped += 1
+            if row_blank and not zero_effect:
                 blank += 1
             if row_nondigit:
                 nondigit += 1
-            if row_blank or row_nondigit:
-                stopping_days.append(row.day)
         tally.append(
             {
                 "ts_min_day": file.ts_min_day,
@@ -244,6 +260,7 @@ def verify_bal_chain(
                 "first_day": min(days),
                 "last_day": max(days),
                 "files": tally,
+                "blank_ccy_skipped": skipped,
             },
         )
     runs = _adjacent_runs(files)
@@ -259,6 +276,11 @@ def verify_bal_chain(
                     raise ArchiveParseError("duplicate_bill_conflict", {"across_files": len(files)})
         previous: dict[str, tuple[ArchiveRow, int]] = {}
         for row, index in sorted(unique.values(), key=lambda pair: _bill_order_key(pair[0])):
+            if not row.ccy:
+                # D-16: only a zero-effect, all-digit blank-ccy bill gets here (any other raised
+                # above). It fits no currency's chain and moved no balance, so its neighbours
+                # chain without it; no ``""`` entry is made and ``previous`` is not set from it.
+                continue
             entry = ccys.setdefault(
                 row.ccy,
                 {"pairs_checked": 0, "first_day": row.day, "last_day": row.day,
@@ -295,6 +317,7 @@ def verify_bal_chain(
                 "files": [
                     {"ts_min_day": file.ts_min_day, "ts_max_day": file.ts_max_day} for file in files
                 ],
+                "blank_ccy_skipped": skipped,
             },
         )
     return {
@@ -307,6 +330,7 @@ def verify_bal_chain(
             for ccy, entry in ccys.items()
         },
         "total_pairs": total_pairs,
+        "blank_ccy_skipped": skipped,
     }
 
 

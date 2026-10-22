@@ -2163,6 +2163,7 @@ class TestArchiveCompleteness:
                 "total_pairs": 9,
                 "starved": [],
                 "files": [{"ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15"}],
+                "blank_ccy_skipped": 0,
                 "floor": 2,
             }
         }
@@ -2188,6 +2189,7 @@ class TestArchiveCompleteness:
         assert world.result()["info"]["bal_chain"] == {
             "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-07-10", "last_day": "2026-09-15"}},
             "total_pairs": 10,
+            "blank_ccy_skipped": 0,
             "floor": 2,
         }
 
@@ -2306,6 +2308,7 @@ class TestArchiveCompleteness:
         assert world.result()["info"]["bal_chain"] == {
             "ccys": {"USDT": {"pairs_checked": 14, "first_day": "2026-04-02", "last_day": "2026-09-15"}},
             "total_pairs": 14,
+            "blank_ccy_skipped": 0,
             "floor": 2,
         }
 
@@ -2507,6 +2510,7 @@ class TestUnchainableRowDiagnostic:
                     "blank_ccy": 1, "nondigit_bill_id": 1,
                     "first_day": "2026-07-20", "last_day": "2026-09-01",
                 }],
+                "blank_ccy_skipped": 0,
                 "floor": 2,
             }
         }

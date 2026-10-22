@@ -1353,7 +1353,7 @@ def _bal_chain_info(detail: Mapping[str, Any]) -> dict[str, Any]:
     out = _safe_bal_chain(detail)
     reason = detail.get("reason")
     out = {"reason": reason if reason in _ARCHIVE_INCOMPLETE_REASONS else _MALFORMED, **out}
-    for key in (*_UNCHAINABLE_COUNT_KEYS, *_UNCHAINABLE_DAY_KEYS):
+    for key in (*_UNCHAINABLE_COUNT_KEYS, *_UNCHAINABLE_DAY_KEYS, "blank_ccy_skipped"):
         if key in detail:
             out[key] = detail[key]
     if "starved" in detail:
@@ -1441,7 +1441,7 @@ async def _census_of(
             },
         },
         aggregate,
-        {**_safe_bal_chain(chain), "floor": MIN_CHAINED_PAIRS},
+        {**_safe_bal_chain(chain), "blank_ccy_skipped": chain["blank_ccy_skipped"], "floor": MIN_CHAINED_PAIRS},
     )
 
 
