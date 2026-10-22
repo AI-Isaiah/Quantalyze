@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.132.10.11] - 2026-10-22 — OKXHISTORY: an unchainable archive bill is named, and a zero-effect blank-currency bill no longer stops the chain (Phase 167.1.2.2.2.1, plan 20, D-16)
+
+### Fixed
+- Calibrate run 3 on PROD (2026-10-22) stopped `archive_incomplete cause=unchainable_row` and dropped which bills and how many. The stop now names the cause split (`blank_ccy`, `nondigit_bill_id`), the rows per quarter and the first and last UTC day, as counts and dates only.
+- A blank-currency bill whose `balChg`, `pnl` and `fee` are all 0 cannot move any balance, so it is skipped from the `bal` continuity chain and counted in `info.bal_chain.blank_ccy_skipped`. It is still counted in the census. A non-digit `billId` still stops.
+- A `billId` counts as numeric only when it is ASCII digits, so a non-ASCII digit (for example `²`) stops cleanly instead of crashing `int()`. A bill present in two files is counted once.
+
+### Changed
+- Runbook `okxhistory-go-live.md`: the calibrate reading covers `blank_ccy_skipped` and the new stop tokens.
+
+### Tests
+- RED-first tracer and value-safety tests, two-file and two-quarter tests of the tally, and a recorded neuter for every guard.
+
+### Notes
+- Founder decision D-16 (2026-10-22, "Diagnose + skip safe rows"). Reviewed by gsd-code-reviewer and silent-failure-hunter. One fix round fixed the three MEDIUM findings. After deploy, calibrate is re-run once.
+
 ## [0.132.10.10] - 2026-10-22 — security: vite 8.3.5 clears the high-severity npm audit advisory
 
 ### Security

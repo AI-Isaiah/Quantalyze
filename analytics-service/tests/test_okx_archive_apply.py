@@ -39,11 +39,13 @@ from services import job_worker, okx_archive_job
 from services.job_worker import DispatchOutcome, dispatch
 from tests.test_okx_archive_job import (
     KEY_ID,
+    LINK_SECRETS,
     OTHER_KEY_ID,
     STRATEGY_2_ID,
     STRATEGY_ID,
     _install as _install_base,
     _job,
+    _link,
     _World,
 )
 
@@ -2161,6 +2163,7 @@ class TestArchiveCompleteness:
                 "total_pairs": 9,
                 "starved": [],
                 "files": [{"ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15"}],
+                "blank_ccy_skipped": 0,
                 "floor": 2,
             }
         }
@@ -2186,6 +2189,7 @@ class TestArchiveCompleteness:
         assert world.result()["info"]["bal_chain"] == {
             "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-07-10", "last_day": "2026-09-15"}},
             "total_pairs": 10,
+            "blank_ccy_skipped": 0,
             "floor": 2,
         }
 
@@ -2304,6 +2308,7 @@ class TestArchiveCompleteness:
         assert world.result()["info"]["bal_chain"] == {
             "ccys": {"USDT": {"pairs_checked": 14, "first_day": "2026-04-02", "last_day": "2026-09-15"}},
             "total_pairs": 14,
+            "blank_ccy_skipped": 0,
             "floor": 2,
         }
 
@@ -2439,6 +2444,276 @@ class TestQuarterEdgeDaysEndToEnd:
         assert [(r["from"], r["to"]) for r in provenance["reconstructed_ranges"]] == [
             ("2026-07-01", "2026-07-15")
         ]
+
+
+def _nondigit_row(day: str) -> Callable[[int], str]:
+    """A ``_Bills.raw`` line function: a SWAP subType-2 bill on ``day`` whose billId is the
+    counter prefixed with ``x``, so it is not all digits. USDT, no effect at all, bal 5000."""
+
+    def line(n: int) -> str:
+        return (
+            f"SWAP,x{n},2,{_ms_at(day, 12)},0,0,5000,0,,,USDT,0,0,"
+            "cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
+        )
+
+    return line
+
+
+def _blank_zero_row(day: str) -> Callable[[int], str]:
+    """A ``_Bills.raw`` line function: a SWAP subType-2 bill on ``day`` whose billId is the bare
+    counter and whose ccy is blank, with ``balChg``, ``bal``, ``pnl`` and ``fee`` all 0."""
+
+    def line(n: int) -> str:
+        return f"SWAP,{n},2,{_ms_at(day, 12)},0,0,0,0,,,,0,0,cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
+
+    return line
+
+
+class TestUnchainableRowDiagnostic:
+    """D-16. Calibrate run 3 stopped ``archive_incomplete cause=unchainable_row`` and the stop
+    dropped which bills and how many, so the founder read an empty reading."""
+
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.asyncio
+    async def test_an_unchainable_stop_names_the_cause_split_the_rows_per_quarter_and_the_days(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: str
+    ) -> None:
+        """D-16. Calibrate run 3 stopped here, and the stop dropped which bills and how many,
+        so the founder could not tell a harmless blank line from a missing ccy on money or an
+        id the chain cannot order. The OPTION row reaches the chain because OPTION is outside
+        the live instTypes (``excluded_non_usd_rows``), while in a SWAP row a blank ccy with
+        money stops ``non_usd_ccy`` first."""
+        caplog.set_level(logging.DEBUG)
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().realized("2026-07-20", "1.5", inst="OPTION", ccy="")
+        bills.raw(_nondigit_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+        extra = {"approved_fingerprint": "d" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
+            "rows_by_quarter=2026-Q3:2"
+        )
+        result = world.result()
+        assert result["stop_class"] == "archive_incomplete"
+        assert result["info"] == {
+            "bal_chain": {
+                "reason": "unchainable_row", "ccys": {}, "total_pairs": None,
+                "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
+                "first_day": "2026-07-20", "last_day": "2026-09-01",
+                "files": [{
+                    "ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15", "rows": 2,
+                    "blank_ccy": 1, "nondigit_bill_id": 1,
+                    "first_day": "2026-07-20", "last_day": "2026-09-01",
+                }],
+                "blank_ccy_skipped": 0,
+                "floor": 2,
+            }
+        }
+        everything = (outcome.error_message or "") + json.dumps(result) + caplog.text
+        for forbidden in ("800000012", "x800000013", "5001.5", "1.75", *LINK_SECRETS):
+            assert forbidden not in everything, f"leaked: {forbidden!r}"
+        assert result["fingerprint"] is None
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+    VALID: dict[str, Any] = {
+        "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
+        "first_day": "2026-07-20", "last_day": "2026-09-01", "files": [{"rows": 2}],
+    }
+    VALID_TEXT = (
+        "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
+        "rows_by_quarter=2026-Q3:2"
+    )
+
+    @pytest.mark.parametrize(
+        ("key", "poison"),
+        [
+            *[
+                (key, poison)
+                for key in ("rows", "blank_ccy", "nondigit_bill_id")
+                for poison in (True, -1, "2", 1.5, None)
+            ],
+            *[
+                (key, poison)
+                for key in ("first_day", "last_day")
+                for poison in (
+                    _link("2026", "Q3"), "3428.45", "20260720", "2026-02-30", 20260720, None,
+                )
+            ],
+        ],
+        ids=lambda v: repr(v)[:24],
+    )
+    def test_a_value_that_is_not_a_count_or_a_calendar_day_reads_unreadable(
+        self, key: str, poison: object
+    ) -> None:
+        """D-16. This text is stored in ``compute_jobs.last_error``, logged and shown in the
+        admin table, so it must never carry text that came from a file (the account-size and
+        bearer-link leak class, T-167.1.2.2.2.1-52). A count is echoed only when it is a
+        non-negative int that is not a bool, a day only when it is a real ASCII calendar day;
+        anything else reads ``unreadable`` and the other tokens stay intact."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, key: poison}, ["2026-Q3"])
+
+        tokens = text.split(" ")
+        assert f"{key}=unreadable" in tokens
+        others = [t for t in tokens if not t.startswith(f"{key}=")]
+        assert others == [t for t in self.VALID_TEXT.split(" ") if not t.startswith(f"{key}=")]
+        for secret in LINK_SECRETS:
+            assert secret not in text
+
+    @pytest.mark.parametrize(
+        ("files", "expected"),
+        [
+            (None, "rows_by_quarter=unreadable"),
+            ("2", "rows_by_quarter=unreadable"),
+            ([], "rows_by_quarter=unreadable"),
+            ([{"rows": 2}, {"rows": 0}], "rows_by_quarter=unreadable"),
+            (["2"], "rows_by_quarter=unreadable"),
+            ([{"rows": True}], "rows_by_quarter=2026-Q3:unreadable"),
+            ([{"rows": "2"}], "rows_by_quarter=2026-Q3:unreadable"),
+            ([{}], "rows_by_quarter=2026-Q3:unreadable"),
+        ],
+        ids=lambda v: repr(v)[:30],
+    )
+    def test_a_per_file_list_that_does_not_fit_the_quarters_reads_unreadable(
+        self, files: object, expected: str
+    ) -> None:
+        """D-16. The per-quarter counts are paired with the requested quarters by position, so a
+        per-file list of the wrong length or shape cannot be paired and must read ``unreadable``
+        instead of being guessed or crashing the stop; a single bad count degrades alone."""
+        text = okx_archive_job._unchainable_tokens({**self.VALID, "files": files}, ["2026-Q3"])
+
+        assert text.split(" ")[-1] == expected
+
+    def test_a_detail_without_its_keys_reads_unreadable_and_does_not_raise(self) -> None:
+        """D-16. A stop detail that drifts (a renamed or dropped key) must degrade to
+        ``unreadable`` and still stop the job with its class. A KeyError here would surface
+        mid-calibration as a crash instead of the permanent, named stop the founder reads."""
+        assert okx_archive_job._unchainable_tokens({}, ["2026-Q3"]) == (
+            "rows=unreadable blank_ccy=unreadable nondigit_bill_id=unreadable "
+            "first_day=unreadable last_day=unreadable rows_by_quarter=unreadable"
+        )
+
+    def test_two_quarters_are_named_in_input_order(self) -> None:
+        """D-16. ``files`` is in ``quarters[]`` order, so the tags must be paired with it in the
+        same order: a swapped pair would tell the founder to look in the wrong quarter's file."""
+        text = okx_archive_job._unchainable_tokens(
+            {**self.VALID, "files": [{"rows": 0}, {"rows": 2}]}, ["2026-Q2", "2026-Q3"]
+        )
+
+        assert text.endswith(" rows_by_quarter=2026-Q2:0,2026-Q3:2")
+
+    @pytest.mark.asyncio
+    async def test_zero_effect_blank_ccy_rows_are_skipped_counted_and_change_no_money_reading(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16. The bills sit on days that already have bills, so ``longest_billless_run`` is
+        not under test here, and that reading still counts such a bill's day as billed. What
+        is: a zero-effect blank-ccy bill is left out of the chain only, counted in
+        ``blank_ccy_skipped`` and in the ``(blank)`` census, and moves no money reading."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_bills().bytes())
+        first = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert first.outcome == DispatchOutcome.DONE, first.error_message
+        before = copy.deepcopy(world.result())
+
+        bills = _standard_bills().raw(_blank_zero_row("2026-08-03")).raw(_blank_zero_row("2026-09-15"))
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+        second = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert second.outcome == DispatchOutcome.DONE, second.error_message
+        after = world.result()
+        assert after["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-07-10", "last_day": "2026-09-15"}},
+            "total_pairs": 10,
+            "blank_ccy_skipped": 2,
+            "floor": 2,
+        }
+        assert after["census"]["by_ccy"] == {"(blank)": 2, "USDT": 11}
+        for key in ("reconcile", "excluded", "d03", "strategies"):
+            assert after[key] == before[key], key
+        assert {k: v for k, v in after["info"].items() if k != "bal_chain"} == {
+            k: v for k, v in before["info"].items() if k != "bal_chain"
+        }
+        assert after["quarters"][0]["row_count"] == before["quarters"][0]["row_count"] + 2 == 13
+
+    @pytest.mark.asyncio
+    async def test_a_stop_counts_the_zero_effect_rows_apart_from_the_ones_that_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16. When the run stops anyway, the skipped bills are still reported, apart from the
+        one that stopped it, so the founder can add the two up against the ``(blank)`` count."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().raw(_blank_zero_row("2026-08-03")).raw(_nondigit_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
+            "rows_by_quarter=2026-Q3:1"
+        )
+        chain = world.result()["info"]["bal_chain"]
+        assert (chain["rows"], chain["blank_ccy"], chain["nondigit_bill_id"], chain["blank_ccy_skipped"]) == (
+            1, 0, 1, 1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_two_quarter_stop_names_the_quarter_that_holds_the_bill(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16 round 1. The Q2 + Q3 calibrate is the real shape: the one stopping bill is in
+        Q3, and ``rows_by_quarter`` must say Q3 holds it and Q2 holds none, in input order."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        q2 = TestArchiveCompleteness()._q2()
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000).raw(_nondigit_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+
+        outcome = await _run(
+            _meta("calibrate", [STRATEGY_ID], quarters=TestArchiveCompleteness.QUARTERS_Q2_Q3)
+        )
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
+            "rows_by_quarter=2026-Q2:0,2026-Q3:1"
+        )
+        assert world.result()["info"]["bal_chain"]["blank_ccy_skipped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_two_quarter_calibrate_counts_the_skips_of_both_quarters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16 round 1. One zero-effect blank-ccy bill in each quarter: ``blank_ccy_skipped``
+        must add both, so it equals the ``(blank)`` census count the runbook compares it to."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        q2 = TestArchiveCompleteness()._q2().raw(_blank_zero_row("2026-05-10"))
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000).raw(_blank_zero_row("2026-09-15"))
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+
+        outcome = await _run(
+            _meta("calibrate", [STRATEGY_ID], quarters=TestArchiveCompleteness.QUARTERS_Q2_Q3)
+        )
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result = world.result()
+        assert result["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 14, "first_day": "2026-04-02", "last_day": "2026-09-15"}},
+            "total_pairs": 14,
+            "blank_ccy_skipped": 2,
+            "floor": 2,
+        }
+        assert result["census"]["by_ccy"]["(blank)"] == 2
 
 
 class TestNonExternalPnlIsInTheLiveNumber:
