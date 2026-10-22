@@ -22,8 +22,9 @@ Stop classes raised here (``ArchiveParseError.stop_class``):
 * ``empty_file``             - header only, so no row can authenticate the quarter
 * ``quarter_range_mismatch`` - a ``ts`` lies outside the requested quarter's
                                half-open range, cut at 00:00 UTC+8 (D-15)
-* ``missing_bill_id``        - a row without a ``billId`` (dedup and conflict
-                               detection are impossible)
+* ``missing_bill_id``        - a row without a ``billId`` once the D-17 strip has removed
+                               the whitespace, apostrophes and double quotes around it
+                               (dedup and conflict detection are impossible)
 * ``duplicate_bill_conflict``- one ``billId`` carried with different content
 * ``unparseable_amount``     - a money field that is not a finite plain decimal
 
@@ -112,6 +113,11 @@ _PLAIN_DECIMAL_RE: Final[re.Pattern[str]] = re.compile(r"-?[0-9]+(\.[0-9]+)?([eE
 # Header names come from an untrusted file; cap what an error detail may echo.
 _DETAIL_NAME_MAXLEN: Final[int] = 40
 _DETAIL_NAME_MAXCOUNT: Final[int] = 40
+
+
+# D-17: calibrate run 4 counted every bill of both real files as a non-digit billId because the
+# export wraps each id. The characters stripped from the edges of a billId besides whitespace.
+_BILL_ID_WRAP_QUOTES: Final[str] = "'\""
 
 
 class ArchiveParseError(Exception):
@@ -248,8 +254,22 @@ def _parse_amount(text: str, *, field: str, line: int) -> Decimal:
     raise ArchiveParseError("unparseable_amount", {"field": field, "line": line})
 
 
+def _strip_bill_id(raw: str) -> str:
+    """D-17: ``raw`` without the whitespace, apostrophes and double quotes around it, in any mix
+    and number; the inside of the id is never touched."""
+    value = raw
+    while True:
+        stripped = value.strip().strip(_BILL_ID_WRAP_QUOTES)
+        if stripped == value:
+            return value
+        value = stripped
+
+
 def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
-    """Parse one decompressed archive CSV for the requested quarter, or stop loud."""
+    """Parse one decompressed archive CSV for the requested quarter, or stop loud.
+
+    D-17: each row's ``billId`` is stripped of its wrapping before any check, so every later
+    check (missing, de-duplication, conflict, the chain's digit test) reads the stripped id."""
     start, end_excl = quarter_bounds(year, quarter)
     label = f"{year} {quarter}"
     start_ms = _day_number(start) * _MS_PER_DAY - _QUARTER_CUT_UTC_OFFSET_MS
@@ -274,10 +294,11 @@ def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
                     "malformed_row", {"line": line, "expected_cells": len(header), "got_cells": len(cells)}
                 )
             row = dict(zip(header, cells))
+            row["billId"] = _strip_bill_id(row["billId"])
             ts_text = row["ts"]
             if not (ts_text.isascii() and ts_text.isdigit()) or len(ts_text) > 16:
                 raise ArchiveParseError("unparseable_ts", {"line": line})
-            raw_rows.append((line, row, tuple(cells), int(ts_text)))
+            raw_rows.append((line, row, tuple(row.values()), int(ts_text)))
     except csv.Error:
         raise ArchiveParseError("malformed_csv", {"byte_length": len(data)}) from None
 
