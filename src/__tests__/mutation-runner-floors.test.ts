@@ -742,7 +742,8 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 771 -> 776, the sameday_empty gate's five arms. MEASURED: this pin read `expected 776 to be 771`, and ONE full runner run printed `arms: 776/776/0`.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): 776 -> 777, the sameday_empty gate's sixth arm (`sameday-empty-sibling-older`). MEASURED: this pin read `expected 777 to be 776`, and ONE full runner run printed `arms: 777/777/0`.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788, the replace_allocator_equity_snapshots_window gate's eleven arms. MEASURED: this pin read `expected 788 to be 777`, and ONE full runner run printed `arms: 788/788/0`.
-    expect(totalAnchored).toBe(788);
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792, +4 arms (12-15) of test_replace_allocator_equity_snapshots_window.sql. MEASURED: this pin read `expected 792 to be 788`, and ONE full runner run printed `arms: 792/792/0`.
+    expect(totalAnchored).toBe(792);
   });
 });
 
@@ -2153,9 +2154,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 771 -> 776 in arms/biting/lane-invocations, the leg counts 77 -> 78, the NEW per-file row (test_commit_scenario_batch_fingerprint_sameday_empty.sql, biting 5) and the mean line (3.6s over 776), copied from ONE full lane run.
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): 776 -> 777 in arms/biting/lane-invocations, the sameday_empty per-file row 5 -> 6 and the mean line (1.8s over 777), copied from ONE full lane run.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788 in arms/biting/lane-invocations, the leg counts 78 -> 79, the NEW per-file row (test_replace_allocator_equity_snapshots_window.sql, biting 11) and the mean line (1.5s over 788), copied from ONE full lane run (`arms: 788/788/0`).
-    "arms: 788/788/0   (executed/annotated/waived)",
-    "biting: 788   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 788   (arm lanes actually spawned — tallied inside runLane, independent of the 788 the verdict loop counted; plus 79 baseline / 79 restore leg(s))",
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792 in arms/biting/lane-invocations, the window-replace row 11 -> 15 sections, the mean line (1.6s over 792), copied from ONE full lane run.
+    "arms: 792/792/0   (executed/annotated/waived)",
+    "biting: 792   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 792   (arm lanes actually spawned — tallied inside runLane, independent of the 792 the verdict loop counted; plus 79 baseline / 79 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2275,7 +2277,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_refresh_fanout_owed_key_reconstruct.sql: sections 14 / judged 20 / annotated 20 / waived 0 / biting 20",
     "  file test_refresh_fanout_zero_snapshot_bootstrap.sql: sections 26 / judged 31 / annotated 31 / waived 0 / biting 31",
     // ⭐ ADDED 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): the window-replace gate, copied from the full run's own per-file line.
-    "  file test_replace_allocator_equity_snapshots_window.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
+    "  file test_replace_allocator_equity_snapshots_window.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15",
     "  file test_resync_retry_single_job.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_retention_orphaned_running.sql: sections 27 / judged 27 / annotated 27 / waived 0 / biting 27",
     "  file test_scenario_downgrade_sweep.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
@@ -2330,7 +2332,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): mean 2.4s -> 2.8s over 723 -> 740, from the same full run.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): mean 2.4s -> 2.5s over 738, from the same full run.
-    "per-arm lane time: mean 1.5s over 788 arm run(s)",
+    "per-arm lane time: mean 1.6s over 792 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2366,7 +2368,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 723 -> 738 lanes spawned in the count-recheck.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788 lanes spawned in the count-recheck.
-    expect(r.out).toContain("788 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792.
+    expect(r.out).toContain("792 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2667,8 +2670,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 770/771 -> 775/776, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): 775/776 -> 776/777, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 776/777 -> 787/788, both halves together, so the gap stays exactly one (offset -1 kept).
-    expect(r.out).toContain("rows sum to 787 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 788");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 787/788 -> 791/792, both halves together (offset -1 kept).
+    expect(r.out).toContain("rows sum to 791 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 792");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2711,7 +2715,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the lane-invocations severing replaces the 643 tally.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777/778 -> 788/789 in the synthetic splices below (each is the measured aggregate or one past it).
-    const severed = GREEN_LOG.replace(/^lane-invocations: 788 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788/789 -> 792/793 in the same splices.
+    const severed = GREEN_LOG.replace(/^lane-invocations: 792 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
@@ -2720,7 +2725,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 615 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the severed-tally message now reads executed=643 lane-invocations=0 biting=643.
-    expect(r.out).toContain("executed=788 lane-invocations=0 biting=788");
+    expect(r.out).toContain("executed=792 lane-invocations=0 biting=792");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2763,10 +2768,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): NEEDLE 556 and DELIBERATE MISMATCH 557, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): NEEDLE 574 and DELIBERATE MISMATCH 575, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the extra lane-invocation is 644 against 643 executed.
-    const extra = GREEN_LOG.replace(/^lane-invocations: 788 /m, "lane-invocations: 789 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 792 /m, "lane-invocations: 793 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=788 lane-invocations=789 biting=788");
+    expect(r.out).toContain("executed=792 lane-invocations=793 biting=792");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2787,7 +2792,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the garbled lane-invocations replace the 643 tally.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 788 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 792 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2836,7 +2841,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the waived-arm replacement now rewrites arms 643/643/0.
-    const waived = GREEN_LOG.replace(/^arms: 788\/788\/0 /m, `arms: 788/788/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 792\/792\/0 /m, `arms: 792/792/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2909,15 +2914,15 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 556 and MISMATCH 557 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 574 and MISMATCH 575 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the zero-executed replacement now rewrites arms 0/643/0.
-    const zero = GREEN_LOG.replace(/^arms: 788\/788\/0 /m, "arms: 0/788/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 792\/792\/0 /m, "arms: 0/792/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 615 -> 630, moved INDIVIDUALLY with the 616 -> 631 splice (offset +1 kept).
-    const spliced = GREEN_LOG.replace(/^biting: 788 /m, "biting: 789 ");
+    const spliced = GREEN_LOG.replace(/^biting: 792 /m, "biting: 793 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (789) exceeds executed (788)");
+    expect(s.out).toContain("biting (793) exceeds executed (792)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -3071,7 +3076,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
       // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 723 -> 738, the floor and the measured biting count together.
       // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 777 -> 788, the floor and the measured biting count together.
-      expect(r.out).toContain("biting arms 788 >= 788");
+      // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792, the floor and the measured biting count together.
+      expect(r.out).toContain("biting arms 792 >= 792");
     }
   });
 

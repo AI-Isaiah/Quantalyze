@@ -19,6 +19,7 @@ SET lock_timeout = '3s'
 AS $fn$
 DECLARE
   v_inserted     integer;
+  v_seam         date;
   v_unreproduced integer;
   v_bad          integer;
 BEGIN
@@ -126,21 +127,34 @@ BEGIN
       pre_terminus_balance_unknown  BOOLEAN
     )
     ON CONFLICT (allocator_id, asof) DO NOTHING
-    RETURNING 1
+    RETURNING asof
   )
-  SELECT count(*) INTO v_inserted FROM ins;
+  SELECT count(*), min(asof) INTO v_inserted, v_seam FROM ins;
 
   -- ===== 5. D-03. The seam. A row older than the window that is still there is
-  --          a kept day, and the window start is where the rebuilt days begin.
+  --          a kept day, and the first inserted day is where the rebuilt days
+  --          begin (the payload may start after p_window_start). A seam already
+  --          recorded is kept while it lies before this call's first inserted day
+  --          and a stored day still precedes it: the earlier call's rebuilt days
+  --          were kept, so the jump is still where that call put it.
   IF EXISTS (SELECT 1
                FROM public.allocator_equity_snapshots s
               WHERE s.allocator_id = p_allocator_id
                 AND s.asof < p_window_start) THEN
     INSERT INTO public.allocator_equity_derived (allocator_id, kind, payload)
     VALUES (p_allocator_id, 'snapshot_rebuild_boundary',
-            jsonb_build_object('boundary_date', to_char(p_window_start, 'YYYY-MM-DD')))
+            jsonb_build_object('boundary_date', to_char(v_seam, 'YYYY-MM-DD')))
     ON CONFLICT (allocator_id, kind)
-    DO UPDATE SET payload = EXCLUDED.payload, computed_at = now();
+    DO UPDATE SET payload = CASE
+                    WHEN (allocator_equity_derived.payload ->> 'boundary_date')::date < v_seam
+                     AND EXISTS (SELECT 1
+                                   FROM public.allocator_equity_snapshots s
+                                  WHERE s.allocator_id = p_allocator_id
+                                    AND s.asof < (allocator_equity_derived.payload ->> 'boundary_date')::date)
+                    THEN allocator_equity_derived.payload
+                    ELSE EXCLUDED.payload
+                  END,
+                  computed_at = now();
   ELSE
     DELETE FROM public.allocator_equity_derived d
      WHERE d.allocator_id = p_allocator_id

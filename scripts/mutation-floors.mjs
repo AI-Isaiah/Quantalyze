@@ -3269,7 +3269,15 @@ export const FILES_FLOOR = 79;
 // `arms: 788/788/0`, `biting: 788`, `lane-invocations: 788`; per-file `test_replace_allocator_equity_snapshots_window.sql: sections 11 / judged 11 /
 // annotated 11 / waived 0 / biting 11`. The stale-low direction was observed first: `The corpus declares 788 twin(s) of which 0 are waivers, so a
 // green run bites 788. ARMS_FLOOR is 777.` WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 788;
+// RAISED 788 -> 792 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): +4 biting arms, arms 12-15 of
+// test_replace_allocator_equity_snapshots_window.sql (migration 20261028120000: the boundary row cleared by the whole-history replace and by the
+// last-key cascade, the seam named at the first rebuilt day, the earliest seam kept). MEASURED by ONE full `node scripts/mutation-runner/run.mjs`:
+// `scope: FULL 79/79 annotated files`, `coverage: files 79/106`, `arms: 792/792/0`, `biting: 792`, `lane-invocations: 792 ... plus 79 baseline / 79
+// restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 1.6s over 792 arm run(s)`;
+// per-file `test_replace_allocator_equity_snapshots_window.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. The stale-low direction
+// was observed first: `The corpus declares 792 twin(s) of which 0 are waivers, so a green run bites 792. ARMS_FLOOR is 788.` FILES_FLOOR stays 79 (no
+// file joined). WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 792;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

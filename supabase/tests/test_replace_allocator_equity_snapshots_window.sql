@@ -14,7 +14,10 @@
 --   D-01  rows with asof >= p_window_start are replaced; older rows are untouched.
 --   D-02  a stored in-window day missing from the payload raises P0001
 --         history_days_unreproduced and leaves everything as it was (SC-4).
---   D-03  the snapshot_rebuild_boundary row is written iff an older row is kept.
+--   D-03  the snapshot_rebuild_boundary row is written iff an older row is kept,
+--         names the first rebuilt day (the real seam), keeps the earliest seam
+--         while older kept rows still precede it, and is cleared wherever all of an
+--         allocator's snapshots are wiped or fully replaced.
 --   AR-1  the definer write to the FORCE-RLS allocator_equity_derived succeeds on
 --         the service-role call path.
 --
@@ -30,8 +33,8 @@
 --      the late-refresh ordering: a row that arrives after the payload was built
 --      is refused, never deleted unseen.
 --   5  the boundary row is written iff an older row is kept, holds exactly
---      {"boundary_date": p_window_start}, is updated by a later call and is
---      deleted when no older row is kept (D-03).
+--      {"boundary_date": "2026-03-10"} for a payload that starts on the window
+--      start, and is deleted when no older row is kept (D-03).
 --   6  the call works on the service-role path and the arm records which rule
 --      admitted the definer write to the FORCE-RLS table (AR-1, RESEARCH A2).
 --   7  the owner reads the boundary row and no one else does (D-03 reader rule).
@@ -41,13 +44,21 @@
 --   10 the CL9 pre_terminus_balance_unknown flag persists true / false / omitted
 --      as false.
 --   11 the WR-05 depth rule: history_depth_months only on exchange_primary rows.
+--   12 replace_allocator_equity_snapshots (the whole-history replace) clears the
+--      allocator's boundary row and no one else's (review WR-01).
+--   13 the last-key cascade of delete_allocator_api_key clears the boundary row, and
+--      a cascade that keeps the snapshots keeps it (review WR-01).
+--   14 the boundary date is the first rebuilt day, min(asof) of the inserted rows,
+--      not the window start (review WR-01).
+--   15 a later window call keeps the earliest seam while older kept rows still
+--      precede it, and moves it when none does (review WR-01).
 --
 -- ANTI-GREEN-SKIP CONTRACT. Absence of the function is an EXCEPTION, never a
 -- skip. Merging supabase/migrations/** applies to PRODUCTION with no human stop,
 -- so nothing in the merge path would make a missing object appear. Do not add a
 -- presence skip.
 --
--- SENTINEL. The final `ALL 11 ARMS EXECUTED (1,...,11)` notice at the foot of
+-- SENTINEL. The final `ALL 15 ARMS EXECUTED (1,...,15)` notice at the foot of
 -- this file, before ROLLBACK, joins ci.yml's `sql-tests` sentinel census. That
 -- census is moved by plan 05 of this phase, not here.
 --
@@ -82,7 +93,7 @@
 -- applies clean and the gate, not the apply, is what speaks. The grant and policy
 -- twins are post-apply `sql` steps, because an edit of the GRANT or the policy
 -- would abort an apply that asserts them and score no identity.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql"]}
 
 BEGIN;
 
@@ -131,6 +142,22 @@ LANGUAGE sql AS $f$
     FROM unnest(p_days) AS d
 $f$;
 
+-- Seeds one api_keys row (and the profile it hangs off) for an allocator and
+-- returns the key id, for the delete_allocator_api_key arm.
+CREATE FUNCTION pg_temp.wnd_key(p_alloc uuid) RETURNS uuid
+LANGUAGE plpgsql AS $f$
+DECLARE
+  v_key uuid := gen_random_uuid();
+BEGIN
+  INSERT INTO public.profiles (id, display_name, role)
+  VALUES (p_alloc, 'wnd', 'allocator')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted)
+  VALUES (v_key, p_alloc, 'binance', 'wnd', 'x');
+  RETURN v_key;
+END
+$f$;
+
 -- Whole-row images of one allocator's snapshot rows and derived rows, so a
 -- before/after compare covers EVERY column (reconstructed_at and
 -- history_depth_months included).
@@ -163,6 +190,18 @@ DECLARE
   v_m      uuid;
   v_n1     uuid;
   v_n2     uuid;
+  v_o1     uuid;
+  v_o2     uuid;
+  v_p1     uuid;
+  v_p2     uuid;
+  v_p3     uuid;
+  v_pk1    uuid;
+  v_pk2    uuid;
+  v_pk3    uuid;
+  v_pk4    uuid;
+  v_q      uuid;
+  v_r      uuid;
+  v_s      uuid;
   v_state  text;
   v_msg    text;
   v_ret    integer;
@@ -379,8 +418,9 @@ BEGIN
 
   -- ===== ARM 5 - the seam record (D-03) =====================================
   -- G keeps an older row: the boundary row must hold exactly
-  -- {"boundary_date": "2026-03-10"}; a later call with a later window start must
-  -- update it; M keeps no older row and holds a stale boundary row, which must be
+  -- {"boundary_date": "2026-03-10"} (the payload starts on the window start, so
+  -- the first rebuilt day and the window start are the same day here; arm 14 pulls
+  -- them apart and arm 15 owns what a later call does to the row); M keeps no older row and holds a stale boundary row, which must be
   -- gone afterwards while M's other derived rows stay.
   -- RED-UNDER: make the boundary condition in 20261028120000 `IF false AND
   --            EXISTS (...)`. The seam is then never recorded (the ELSE deletes
@@ -412,24 +452,6 @@ BEGIN
      IS DISTINCT FROM '{"boundary_date": "2026-03-10"}'::jsonb THEN
     RAISE EXCEPTION 'TEST FAILED (5): the boundary payload is %, expected exactly {"boundary_date": "2026-03-10"}',
       (SELECT payload::text FROM public.allocator_equity_derived WHERE allocator_id = v_g AND kind = 'snapshot_rebuild_boundary');
-  END IF;
-  -- A later call moves the boundary. The first call's in-window rows (03-10, 03-11)
-  -- are now older than the new window start 2026-03-12.
-  v_state := NULL; v_msg := NULL;
-  BEGIN
-    v_ret := public.replace_allocator_equity_snapshots_window(
-      v_g, pg_temp.wnd_payload(ARRAY[DATE '2026-03-12', DATE '2026-03-13'], 6), 3, DATE '2026-03-12');
-  EXCEPTION WHEN OTHERS THEN
-    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
-  END;
-  IF v_state IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (5): the second call raised % (%)', v_state, v_msg;
-  END IF;
-  IF (SELECT payload FROM public.allocator_equity_derived
-       WHERE allocator_id = v_g AND kind = 'snapshot_rebuild_boundary')
-     IS DISTINCT FROM '{"boundary_date": "2026-03-12"}'::jsonb THEN
-    RAISE EXCEPTION 'TEST FAILED (5): a later call left the boundary payload at %, expected {"boundary_date": "2026-03-12"}',
-      COALESCE((SELECT payload::text FROM public.allocator_equity_derived WHERE allocator_id = v_g AND kind = 'snapshot_rebuild_boundary'), 'NULL');
   END IF;
   -- No older row kept: a stale boundary row is deleted, other kinds survive.
   v_m := pg_temp.wnd_user();
@@ -642,7 +664,7 @@ BEGIN
   --            row then persists false, so a worker that correctly flags an
   --            OKX-terminus replay has its flag silently discarded and the garbage
   --            absolute levels flow back into the equity curve (NEW-C01-11).
-  -- RED-UNDER-M: {"arm":"10","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"COALESCE(r.pre_terminus_balance_unknown, false)","replace":"false","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"10","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"COALESCE(r.pre_terminus_balance_unknown, false)\n    FROM jsonb_to_recordset(p_rows) AS r(","replace":"false\n    FROM jsonb_to_recordset(p_rows) AS r(","occurrences":1}]}
   v_n1 := pg_temp.wnd_user();
   v_state := NULL; v_msg := NULL;
   BEGIN
@@ -679,7 +701,7 @@ BEGIN
   --            plain `p_depth_months`. A fallback-priced row then claims the
   --            venue's retention depth, and the dashboard's warm-up copy names a
   --            depth the row never had.
-  -- RED-UNDER-M: {"arm":"11","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"CASE WHEN r.source = 'exchange_primary' THEN p_depth_months ELSE NULL END","replace":"p_depth_months","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"11","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"CASE WHEN r.source = 'exchange_primary' THEN p_depth_months ELSE NULL END,\n      COALESCE(r.pre_terminus_balance_unknown, false)\n    FROM jsonb_to_recordset(p_rows) AS r(","replace":"p_depth_months,\n      COALESCE(r.pre_terminus_balance_unknown, false)\n    FROM jsonb_to_recordset(p_rows) AS r(","occurrences":1}]}
   v_n2 := pg_temp.wnd_user();
   v_state := NULL; v_msg := NULL;
   BEGIN
@@ -722,7 +744,261 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (11): % rows stored a history_depth_months after a call with p_depth_months NULL, expected 0', v_n;
   END IF;
 
-  RAISE NOTICE 'ALL 11 ARMS EXECUTED (1,2,3,4,5,6,7,8,9,10,11): the window replace leaves another allocator alone (1), replaces the window-start day too (2), keeps older rows byte-identical (3), refuses an unreproduced stored day including one that arrived after the payload was built and changes nothing (4, 4-LATE), records the seam exactly once and removes it when no older day is kept (5), works as service_role and records the owner attributes that admitted the FORCE-RLS write (6), shows the boundary row to its owner only (7), refuses eight malformed inputs with their tokens (8), is executable by service_role alone as a SECURITY DEFINER with a pinned search_path, lock_timeout and lock key (9), persists the CL9 flag (10) and applies the depth only to exchange_primary rows (11).';
+  -- ===== ARM 12 - a whole-history replace clears the seam record (WR-01) ====
+  -- replace_allocator_equity_snapshots deletes EVERY snapshot row of the allocator,
+  -- the older kept days the recorded seam separated included, so a boundary row that
+  -- survives it names a jump that is no longer in the stored series. O1 holds an
+  -- older row, a boundary row and an equity_curve row; O2 holds a boundary row. After
+  -- the call as service_role (the worker's caller) O1's boundary row is gone, its
+  -- equity_curve row stays, its snapshots are exactly the payload's, and O2's rows are
+  -- identical.
+  -- RED-UNDER: remove the boundary DELETE from replace_allocator_equity_snapshots in
+  --            20261028120000 (make its `rb.kind` test `AND false`). The sole-key
+  --            reconstruct then replaces the whole history and leaves a boundary
+  --            date describing days that were wiped, which reaches the dashboard
+  --            payload as a seam that is not in the series.
+  -- RED-UNDER-M: {"arm":"12","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"AND rb.kind = 'snapshot_rebuild_boundary'","replace":"AND false","occurrences":1}]}
+  v_o1 := pg_temp.wnd_user();
+  v_o2 := pg_temp.wnd_user();
+  PERFORM pg_temp.wnd_snap(v_o1, DATE '2026-03-01', 3);
+  PERFORM pg_temp.wnd_snap(v_o1, DATE '2026-03-10', 4);
+  PERFORM pg_temp.wnd_snap(v_o2, DATE '2026-03-01', 3);
+  INSERT INTO public.allocator_equity_derived (allocator_id, kind, payload, computed_at)
+  VALUES (v_o1, 'snapshot_rebuild_boundary', '{"boundary_date": "2026-03-10"}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00'),
+         (v_o1, 'equity_curve', '{"curve": []}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00'),
+         (v_o2, 'snapshot_rebuild_boundary', '{"boundary_date": "2026-03-10"}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00');
+  v_der0 := pg_temp.wnd_derived(v_o2);
+  v_state := NULL; v_msg := NULL; v_ret := NULL;
+  PERFORM set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
+  SET LOCAL ROLE service_role;
+  BEGIN
+    v_ret := public.replace_allocator_equity_snapshots(
+      v_o1, pg_temp.wnd_payload(ARRAY[DATE '2026-03-10', DATE '2026-03-11'], 5), 3);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', '', true);
+  IF v_state IS NOT NULL OR v_ret IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (12-SETUP): the whole-history replace raised % (%) or returned % instead of 2', COALESCE(v_state, 'none'), COALESCE(v_msg, 'none'), COALESCE(v_ret::text, 'NULL');
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_snapshots WHERE allocator_id = v_o1;
+  IF v_n <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (12): % snapshot rows are stored after the whole-history replace, expected exactly the 2 sent', v_n;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_derived
+   WHERE allocator_id = v_o1 AND kind = 'snapshot_rebuild_boundary';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (12): the boundary row survived a replace that wiped every older day (% rows)', v_n;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_derived
+   WHERE allocator_id = v_o1 AND kind = 'equity_curve';
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (12): the boundary delete took another derived kind with it (% equity_curve rows left, expected 1)', v_n;
+  END IF;
+  IF pg_temp.wnd_derived(v_o2) IS DISTINCT FROM v_der0 THEN
+    RAISE EXCEPTION 'TEST FAILED (12): another allocator''s derived rows changed';
+  END IF;
+
+  -- ===== ARM 13 - the last-key cascade clears the seam record (WR-01) =======
+  -- delete_allocator_api_key(key, true) wipes the snapshots only when no key is left.
+  -- P1 holds one key: the cascade wipes the snapshots and must clear the boundary row
+  -- (equity_curve stays). P2 holds two keys and deletes one: the snapshots stay, so the
+  -- boundary row must stay. P3 holds one key and deletes it WITHOUT the cascade: the
+  -- snapshots stay, so the boundary row must stay. Every call is made as the signed-in
+  -- owner (authenticated), the real caller of this function.
+  -- RED-UNDER: remove the boundary DELETE from the last-key cascade of
+  --            delete_allocator_api_key in 20261028120000 (make its `ck.kind` test
+  --            `AND false`). A user who hard-deletes every key keeps a boundary date
+  --            for a series that no longer exists; the next key's sole-key rebuild
+  --            starts from it.
+  -- RED-UNDER-M: {"arm":"13","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"AND ck.kind = 'snapshot_rebuild_boundary'","replace":"AND false","occurrences":1}]}
+  v_p1 := pg_temp.wnd_user();
+  v_p2 := pg_temp.wnd_user();
+  v_p3 := pg_temp.wnd_user();
+  v_pk1 := pg_temp.wnd_key(v_p1);
+  v_pk2 := pg_temp.wnd_key(v_p2);
+  v_pk3 := pg_temp.wnd_key(v_p2);
+  v_pk4 := pg_temp.wnd_key(v_p3);
+  PERFORM pg_temp.wnd_snap(v_p1, DATE '2026-03-01', 3);
+  PERFORM pg_temp.wnd_snap(v_p1, DATE '2026-03-10', 4);
+  PERFORM pg_temp.wnd_snap(v_p2, DATE '2026-03-01', 3);
+  PERFORM pg_temp.wnd_snap(v_p2, DATE '2026-03-10', 4);
+  PERFORM pg_temp.wnd_snap(v_p3, DATE '2026-03-01', 3);
+  PERFORM pg_temp.wnd_snap(v_p3, DATE '2026-03-10', 4);
+  INSERT INTO public.allocator_equity_derived (allocator_id, kind, payload, computed_at)
+  VALUES (v_p1, 'snapshot_rebuild_boundary', '{"boundary_date": "2026-03-10"}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00'),
+         (v_p1, 'equity_curve', '{"curve": []}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00'),
+         (v_p2, 'snapshot_rebuild_boundary', '{"boundary_date": "2026-03-10"}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00'),
+         (v_p3, 'snapshot_rebuild_boundary', '{"boundary_date": "2026-03-10"}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00');
+  v_state := NULL; v_msg := NULL;
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_p1::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    PERFORM public.delete_allocator_api_key(v_pk1, true);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', '', true);
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (13-SETUP): the last-key hard delete raised % (%)', v_state, v_msg;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_snapshots WHERE allocator_id = v_p1;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (13-SETUP): the last-key cascade left % snapshot rows, so the arm cannot judge the boundary row', v_n;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_derived
+   WHERE allocator_id = v_p1 AND kind = 'snapshot_rebuild_boundary';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (13): the boundary row survived the last-key cascade that wiped every snapshot (% rows)', v_n;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_derived
+   WHERE allocator_id = v_p1 AND kind = 'equity_curve';
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (13): the boundary delete took another derived kind with it (% equity_curve rows left, expected 1)', v_n;
+  END IF;
+  -- P2: another key remains, the cascade wipes nothing.
+  v_state := NULL; v_msg := NULL;
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_p2::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    PERFORM public.delete_allocator_api_key(v_pk2, true);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', '', true);
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (13-SETUP): the multi-key delete raised % (%)', v_state, v_msg;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_snapshots WHERE allocator_id = v_p2;
+  IF v_n <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (13): a cascade delete of one of two keys changed the snapshot rows (% left, expected 2)', v_n;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_derived
+   WHERE allocator_id = v_p2 AND kind = 'snapshot_rebuild_boundary';
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (13): the boundary row of an allocator whose snapshots were kept was cleared (% rows, expected 1)', v_n;
+  END IF;
+  -- P3: the last key goes without the cascade, the snapshots stay.
+  v_state := NULL; v_msg := NULL;
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_p3::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    PERFORM public.delete_allocator_api_key(v_pk4, false);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', '', true);
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (13-SETUP): the delete without cascade raised % (%)', v_state, v_msg;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_snapshots WHERE allocator_id = v_p3;
+  IF v_n <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (13): a delete without the cascade changed the snapshot rows (% left, expected 2)', v_n;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.allocator_equity_derived
+   WHERE allocator_id = v_p3 AND kind = 'snapshot_rebuild_boundary';
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (13): the boundary row was cleared by a delete that kept the snapshots (% rows, expected 1)', v_n;
+  END IF;
+
+  -- ===== ARM 14 - the seam is the first rebuilt day (WR-01) =================
+  -- Q holds an older row and is rebuilt over a window starting 2026-03-10, but the
+  -- payload's first day is 2026-03-12 (the venue's history began later). The jump sits
+  -- between the kept 2026-03-01 and the first rebuilt day 2026-03-12, so the boundary
+  -- row must hold exactly {"boundary_date": "2026-03-12"}, not the window start.
+  -- RED-UNDER: write `p_window_start` instead of the first inserted day into the
+  --            boundary payload in 20261028120000. The row then names a date that is
+  --            earlier than the first rebuilt day, a seam position that is not where
+  --            the stored values jump.
+  -- RED-UNDER-M: {"arm":"14","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"to_char(v_seam, 'YYYY-MM-DD')","replace":"to_char(p_window_start, 'YYYY-MM-DD')","occurrences":1}]}
+  v_q := pg_temp.wnd_user();
+  PERFORM pg_temp.wnd_snap(v_q, DATE '2026-03-01', 3);
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.replace_allocator_equity_snapshots_window(
+      v_q, pg_temp.wnd_payload(ARRAY[DATE '2026-03-12', DATE '2026-03-13'], 5), 3, v_ws);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (14): the call raised % (%) instead of recording the boundary', v_state, v_msg;
+  END IF;
+  IF (SELECT payload FROM public.allocator_equity_derived
+       WHERE allocator_id = v_q AND kind = 'snapshot_rebuild_boundary')
+     IS DISTINCT FROM '{"boundary_date": "2026-03-12"}'::jsonb THEN
+    RAISE EXCEPTION 'TEST FAILED (14): the boundary payload is %, expected the first rebuilt day {"boundary_date": "2026-03-12"}',
+      COALESCE((SELECT payload::text FROM public.allocator_equity_derived WHERE allocator_id = v_q AND kind = 'snapshot_rebuild_boundary'), 'NULL');
+  END IF;
+
+  -- ===== ARM 15 - a later window call keeps the earliest seam (WR-01) =======
+  -- R is rebuilt twice. The first call (window 2026-03-10) records the seam
+  -- 2026-03-10 over the kept 2026-03-01. The second call, a later UTC day's window
+  -- starting 2026-03-12, replaces only days after that; the seam between the kept
+  -- 2026-03-01 and the first rebuilt day is still 2026-03-10, and 2026-03-01 still
+  -- precedes it, so the row must still say 2026-03-10. S holds a stale boundary row
+  -- dated before every stored day, so no kept row precedes it and the new seam
+  -- (2026-03-10) replaces it.
+  -- RED-UNDER: make the keep-the-earlier-seam test in 20261028120000 `WHEN false AND`.
+  --            Every later window call then moves the seam forward over days that
+  --            were already rebuilt, where the stored values need not jump at all,
+  --            and the real seam is named nowhere.
+  -- RED-UNDER-M: {"arm":"15","apply":[{"kind":"edit","file":"supabase/migrations/20261028120000_replace_allocator_equity_snapshots_window.sql","find":"WHEN (allocator_equity_derived.payload ->> 'boundary_date')::date < v_seam","replace":"WHEN false AND (allocator_equity_derived.payload ->> 'boundary_date')::date < v_seam","occurrences":1}]}
+  v_r := pg_temp.wnd_user();
+  PERFORM pg_temp.wnd_snap(v_r, DATE '2026-03-01', 3);
+  PERFORM pg_temp.wnd_snap(v_r, DATE '2026-03-10', 4);
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.replace_allocator_equity_snapshots_window(
+      v_r, pg_temp.wnd_payload(ARRAY[DATE '2026-03-10', DATE '2026-03-11'], 5), 3, v_ws);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (15-SETUP): the first call raised % (%)', v_state, v_msg;
+  END IF;
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.replace_allocator_equity_snapshots_window(
+      v_r, pg_temp.wnd_payload(ARRAY[DATE '2026-03-12', DATE '2026-03-13'], 6), 3, DATE '2026-03-12');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (15): the second call raised % (%)', v_state, v_msg;
+  END IF;
+  IF (SELECT payload FROM public.allocator_equity_derived
+       WHERE allocator_id = v_r AND kind = 'snapshot_rebuild_boundary')
+     IS DISTINCT FROM '{"boundary_date": "2026-03-10"}'::jsonb THEN
+    RAISE EXCEPTION 'TEST FAILED (15): a later window call left the boundary payload at %, expected the earlier seam {"boundary_date": "2026-03-10"}',
+      COALESCE((SELECT payload::text FROM public.allocator_equity_derived WHERE allocator_id = v_r AND kind = 'snapshot_rebuild_boundary'), 'NULL');
+  END IF;
+  -- A stale row with no kept day before it is replaced by the new seam.
+  v_s := pg_temp.wnd_user();
+  PERFORM pg_temp.wnd_snap(v_s, DATE '2026-03-08', 3);
+  INSERT INTO public.allocator_equity_derived (allocator_id, kind, payload, computed_at)
+  VALUES (v_s, 'snapshot_rebuild_boundary', '{"boundary_date": "2026-03-05"}'::jsonb, TIMESTAMPTZ '2026-02-02 00:00:00+00');
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    v_ret := public.replace_allocator_equity_snapshots_window(
+      v_s, pg_temp.wnd_payload(ARRAY[DATE '2026-03-10', DATE '2026-03-11'], 5), 3, v_ws);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (15): the call over a stale boundary row raised % (%)', v_state, v_msg;
+  END IF;
+  IF (SELECT payload FROM public.allocator_equity_derived
+       WHERE allocator_id = v_s AND kind = 'snapshot_rebuild_boundary')
+     IS DISTINCT FROM '{"boundary_date": "2026-03-10"}'::jsonb THEN
+    RAISE EXCEPTION 'TEST FAILED (15): a stale boundary row with no kept day before it was not replaced, payload %, expected {"boundary_date": "2026-03-10"}',
+      COALESCE((SELECT payload::text FROM public.allocator_equity_derived WHERE allocator_id = v_s AND kind = 'snapshot_rebuild_boundary'), 'NULL');
+  END IF;
+
+  RAISE NOTICE 'ALL 15 ARMS EXECUTED (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15): the window replace leaves another allocator alone (1), replaces the window-start day too (2), keeps older rows byte-identical (3), refuses an unreproduced stored day including one that arrived after the payload was built and changes nothing (4, 4-LATE), records the seam exactly once and removes it when no older day is kept (5), works as service_role and records the owner attributes that admitted the FORCE-RLS write (6), shows the boundary row to its owner only (7), refuses eight malformed inputs with their tokens (8), is executable by service_role alone as a SECURITY DEFINER with a pinned search_path, lock_timeout and lock key (9), persists the CL9 flag (10), applies the depth only to exchange_primary rows (11), has the whole-history replace clear the boundary row (12), has the last-key cascade clear it (13), names the first rebuilt day as the seam (14) and keeps the earliest seam over later window calls (15).';
 END $$;
 
 ROLLBACK;
