@@ -51,6 +51,7 @@ from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
     API_KEY_ID_2,
+    _FakeTable,
     _install_fake_audit,
     _install_fake_preflight,
 )
@@ -584,6 +585,31 @@ async def test_forced_rebuild_refuses_when_stored_history_would_be_dropped(
     exchange = await _bybit_exchange()
     await _assert_forced_rebuild_refused(
         monkeypatch, exchange, "history_outside_replay", extra_asofs=(extra,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_stored_history_guard_reads_past_the_response_row_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-01 follow-up. PostgREST caps one response at its max rows (1000 on
+    Supabase), so a single SELECT of an allocator's snapshot days can come back truncated
+    and the subset check would pass on days it never saw. Here the cap is 5 rows and the
+    extra stored day (60 days older than the replay) is the eleventh row, so it is only
+    seen if the read pages. RED on a single unpaged SELECT: the guard passes and the
+    forced replace deletes that day."""
+    monkeypatch.setattr(_FakeTable, "max_rows", 5)
+    real_paginated_select = er.paginated_select
+    monkeypatch.setattr(
+        er,
+        "paginated_select",
+        lambda builder, order_by, **kw: real_paginated_select(
+            builder, order_by, page_size=5, **kw
+        ),
+    )
+    extra = (END_DATE - timedelta(days=60)).date().isoformat()
+    await _assert_forced_rebuild_refused(
+        monkeypatch, await _bybit_exchange(), "history_outside_replay", extra_asofs=(extra,),
     )
 
 

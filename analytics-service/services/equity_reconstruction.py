@@ -67,7 +67,7 @@ from services.closed_sets import (
 )
 from services.dateday import epoch_ms_to_iso_day, sort_events_stable
 from services.dispersion import dispersion_is_residue
-from services.db import db_execute, get_supabase
+from services.db import db_execute, get_supabase, paginated_select
 from services.job_worker import (
     AllocatorEquityAction,
     DispatchOutcome,
@@ -1517,18 +1517,19 @@ async def _allocator_has_other_api_keys(
 
 
 async def _allocator_snapshot_asofs(supabase: Any, allocator_id: str) -> set[str]:
-    """Every ``asof`` stored for this allocator, oldest first. A failed read bubbles."""
-    def _sel() -> Any:
-        return (
+    """Every ``asof`` stored for this allocator. A failed read bubbles.
+
+    Paged: PostgREST caps one response at its max rows, and a truncated set would let the
+    caller's subset check pass on days it never saw."""
+    def _sel() -> list[dict[str, Any]]:
+        return paginated_select(
             supabase.table("allocator_equity_snapshots")
             .select("asof")
-            .eq("allocator_id", allocator_id)
-            .order("asof")
-            .execute()
+            .eq("allocator_id", allocator_id),
+            order_by=(("asof", False),),
         )
 
-    res = await db_execute(_sel)
-    return {str(r["asof"]) for r in (getattr(res, "data", None) or [])}
+    return {str(r["asof"]) for r in await db_execute(_sel)}
 
 
 async def _purge_allocator_equity_snapshots(
@@ -4151,6 +4152,10 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 # Review WR-01: the sole-key replace DELETEs every stored row, so refuse
                 # when a stored day (older than the replay, or one it does not emit)
                 # would be lost. Dropping stored history is a founder decision.
+                # ACCEPTED RACE: this read is outside the replace RPC's transaction, so
+                # a row written between the two (the daily refresh's row for this
+                # sole-key allocator) is deleted unseen. No RPC change or migration in
+                # this phase; ACCTREBUILD 167.2.1.1.2 owns the in-transaction version.
                 if not await _allocator_snapshot_asofs(
                     ctx.supabase, allocator_id,
                 ) <= {r["asof"] for r in rows}:
