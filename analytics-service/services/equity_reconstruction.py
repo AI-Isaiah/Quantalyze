@@ -1800,6 +1800,9 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
 FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
     {
         "positions_unreadable",
+        "multi_key",
+        "sibling_lookup_failed",
+        "replay_empty",
         "anchor_unreadable",
         "anchor_skipped_okx_terminus",
         "anchor_skipped_partial_ticker",
@@ -3984,9 +3987,11 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     # Phase 167.2.1.1 D-02: a job whose metadata carries ``force_rebuild: true``
     # BYPASSES this check, so a service-role or owner-role enqueue can re-run the
     # reconstruct for a marked key (the product's own job path, not a hand SQL write
-    # to the marker). The default is unchanged. The persist half below is untouched,
-    # so an allocator with any other api_keys row still keeps first-writer-wins
-    # (T-07-V5b): a forced rebuild does not overwrite rows an old anchor wrote there.
+    # to the marker). The default is unchanged. A forced rebuild runs only on a SOLE-key
+    # allocator: with any other api_keys row (or an unanswered sibling lookup) it refuses
+    # and writes nothing, because the DO-NOTHING persist would gap-fill the aggregate
+    # curve with this one key's value (review CR-01). Multi-key accounts belong to
+    # Phase 167.2.1.1.2 ACCTREBUILD (D-05).
     forced = _job_requests_force_rebuild(job)
     if forced:
         logger.info(
@@ -4020,6 +4025,16 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 
     try:
         try:
+            if forced:
+                # Phase 167.2.1.1 review CR-01 / SFH-1: refuse BEFORE the crawl. An
+                # unanswered lookup refuses too (never a fail-safe DONE).
+                _forced_siblings = await _allocator_has_other_api_keys(
+                    ctx.supabase, allocator_id, api_key_id,
+                )
+                if _forced_siblings.lookup_failed:
+                    raise ForcedRebuildRefusedError("sibling_lookup_failed")
+                if _forced_siblings.has_siblings:
+                    raise ForcedRebuildRefusedError("multi_key")
             if venue == "mt5":
                 # ⭐ 164.5.4 / D-01 — THE VENUE BRANCH. Placed like the `deribit`
                 # arm above (an explicit venue check ahead of the generic crawl)
@@ -4066,22 +4081,26 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 rows, hit_terminus, telemetry = await asyncio.wait_for(
                     _crawl, timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
                 )
+            if forced and not rows:
+                # Review SFH-1: an empty forced replay writes nothing and must not end
+                # DONE (the empty-replace guard would otherwise mark the key complete).
+                raise ForcedRebuildRefusedError("replay_empty")
         except ForcedRebuildRefusedError as exc:
-            # Phase 167.2.1.1 PD-H / PD-I: the forced curve could not be anchored to
-            # today's venue equity including open-position uPnL. Nothing has been
-            # persisted (the crawl is before the persist half and the marker writer), so
-            # fail loudly and leave the stored curve and the marker as they were. Static
-            # text only: the reason is from a closed set and no venue error text is kept.
+            # Phase 167.2.1.1 PD-H / PD-I: the forced rebuild was refused (a multi-key
+            # allocator, or a curve that could not be anchored to today's venue equity
+            # including open-position uPnL). Nothing has been persisted (this is before
+            # the persist half and the marker writer), so fail loudly and leave the
+            # stored curve and the marker as they were. Static text only: the reason is
+            # from a closed set and no venue error text is kept.
             logger.warning(
                 "reconstruct_allocator_history forced rebuild refused allocator=%s "
                 "key=%s venue=%s reason=%s",
                 allocator_id, api_key_id, venue, exc.reason,
             )
             sanitized = (
-                f"forced rebuild refused ({exc.reason}): the rebuilt curve could not be "
-                "anchored to today's venue equity including open-position uPnL, so "
-                "nothing was written and the stored curve is unchanged "
-                "(Phase 167.2.1.1 D-02)"
+                f"forced rebuild refused ({exc.reason}): the forced rebuild could not be "
+                "written safely, so nothing was written and the stored curve is "
+                "unchanged (Phase 167.2.1.1 D-02)"
             )
             _emit_audit(
                 allocator_id, api_key_id,
@@ -4358,6 +4377,8 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
         # the offset magnitude we declined to spread is auditable here.
         "anchor_replay_unreliable": telemetry.get("anchor_replay_unreliable", False),
         "anchor_offset_skipped_usd": telemetry.get("anchor_offset_skipped_usd", 0.0),
+        # Review SFH-1: a forced rebuild's completion says so, like its started audit.
+        **({"forced_rebuild": True} if forced else {}),
     }
     if purge_refused:
         # Item 7 (b): booleans only, and only when the refusal fired.

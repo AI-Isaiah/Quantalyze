@@ -14,10 +14,11 @@ rule it guards:
    ``reconstruct_started`` audit metadata is byte-identical.
 3. The flag must not be settable by a user: the only authenticated-user RPC that enqueues
    this kind passes no ``p_metadata``.
-4. The multi-key limit is recorded, not hidden: with any sibling api_keys row the persist
-   half still takes first-writer-wins DO NOTHING, so a forced job cannot overwrite rows
-   written with the old anchor. TODOS [167.2.1.1-MULTIKEY-RECOMPUTE] (booked by plan 06)
-   owns that gap and the handoff records such allocators as "recorded, not recomputed".
+4. A forced rebuild runs on a SOLE-key allocator only (review CR-01). With any sibling
+   api_keys row, or a sibling lookup that cannot answer, it refuses (`multi_key`,
+   `sibling_lookup_failed`) before the crawl and writes nothing: the DO-NOTHING persist
+   would otherwise gap-fill the aggregate curve with this one key's value. Multi-key
+   accounts belong to Phase 167.2.1.1.2 ACCTREBUILD (CONTEXT D-05).
 5. The spelling is a contract with the post-deploy enqueue (plan 06): one literal, pinned.
 6. Plan 05, PD-H: a forced rebuild replaces a stored curve in ONE write, so it must refuse
    rather than re-bake a wallet-only anchor. When the curve cannot be anchored to today's
@@ -245,57 +246,6 @@ async def test_unforced_reconstruct_started_audit_metadata_is_unchanged(
 
 
 # ---------------------------------------------------------------------------
-# The recorded limit: a multi-key allocator
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_forced_rebuild_cannot_overwrite_a_multi_key_allocators_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The recorded limit (T-07-V5b). With ANY other api_keys row for the same user the
-    persist half is first-writer-wins DO NOTHING, so a forced rebuild crawls but cannot
-    replace the rows an old anchor wrote: ten sentinel rows survive and the completion
-    audit reports no atomic replace and no purge. This is NOT a fix: it is the pinned
-    reason plan 06 books TODOS [167.2.1.1-MULTIKEY-RECOMPUTE] and the post-deploy handoff
-    records such allocators as "recorded, not recomputed" (SC-3)."""
-    fake = _MarkerFake()
-    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
-    _seed_key(fake, API_KEY_ID_2, marker=MARKER, exchange="okx")
-    for days_back in range(10):
-        asof = (END_DATE - timedelta(days=days_back)).date().isoformat()
-        fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
-            "allocator_id": ALLOCATOR_ID,
-            "asof": asof,
-            "value_usd": 12345.0,
-            "breakdown": {"ETH": 12345.0},
-            "source": "exchange_primary",
-            "history_depth_months": 24,
-            "reconstructed_at": "2026-04-01T00:00:00+00:00",
-        }
-    audit = _install_fake_audit(monkeypatch)
-    exchange = await _bybit_exchange()
-    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
-    _freeze_now(monkeypatch)
-
-    result = await run_reconstruct_allocator_history_job(_forced_job())
-
-    assert result.outcome == DispatchOutcome.DONE, result
-    assert exchange.fetch_my_trades.await_count > 0, "the forced job did not crawl"
-    survivors = [
-        r for r in fake.rows_for("allocator_equity_snapshots") if r.get("value_usd") == 12345.0
-    ]
-    assert len(survivors) == 10, (
-        "a forced rebuild overwrote a multi-key allocator's rows (first-writer-wins "
-        f"DO NOTHING is the contract); {len(survivors)} of 10 sentinel rows survive. "
-        "TODOS [167.2.1.1-MULTIKEY-RECOMPUTE] owns the recompute of these allocators."
-    )
-    (complete,) = _audit_metadata(audit, COMPLETE)
-    assert complete.get("atomic_replace") is False, complete
-    assert complete.get("stale_snapshots_purged") == 0, complete
-
-
-# ---------------------------------------------------------------------------
 # Contracts: the spelling, and who can set the flag
 # ---------------------------------------------------------------------------
 
@@ -343,10 +293,10 @@ REFUSAL_PREFIX = "forced rebuild refused ("
 LEAKED_SIGNATURE = "deadbeef"
 
 
-def _seed_sentinel_rows(fake: Any) -> None:
-    """Ten snapshot rows for the allocator, all at the sentinel value: a refused forced
-    rebuild must leave every one of them exactly as seeded."""
-    for days_back in range(SENTINEL_ROWS):
+def _seed_sentinel_rows(fake: Any, days: int = SENTINEL_ROWS) -> None:
+    """``days`` snapshot rows for the allocator, all at the sentinel value: a refused
+    forced rebuild must leave every one of them exactly as seeded."""
+    for days_back in range(days):
         asof = (END_DATE - timedelta(days=days_back)).date().isoformat()
         fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
             "allocator_id": ALLOCATOR_ID,
@@ -360,21 +310,35 @@ def _seed_sentinel_rows(fake: Any) -> None:
 
 
 async def _assert_forced_rebuild_refused(
-    monkeypatch: pytest.MonkeyPatch, exchange: Any, reason: str
+    monkeypatch: pytest.MonkeyPatch,
+    exchange: Any,
+    reason: str,
+    *,
+    crawled: bool = True,
+    sibling: bool = False,
+    fail_sibling_lookup: bool = False,
+    seeded_days: int = SENTINEL_ROWS,
 ) -> None:
-    """A marked SOLE Bybit key with ten sentinel rows, a forced job, ``exchange``: the job
-    ends FAILED/permanent naming ``reason``, and NOTHING changed: every sentinel row, the
-    marker, no completion audit. Static text only: the planted signature is absent."""
+    """A marked Bybit key with ``seeded_days`` sentinel rows (sole-key unless ``sibling``), a
+    forced job, ``exchange``: the job ends FAILED/permanent naming ``reason``, and NOTHING
+    changed: every sentinel row, the marker, no completion audit. ``crawled=False`` is for a
+    refusal that must come BEFORE the venue crawl. Static text only: the planted signature
+    is absent."""
     fake = _MarkerFake()
     _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
-    _seed_sentinel_rows(fake)
+    if sibling:
+        _seed_key(fake, API_KEY_ID_2, marker=MARKER, exchange="okx")
+    fake.fail_sibling_lookup = fail_sibling_lookup
+    _seed_sentinel_rows(fake, seeded_days)
     audit = _install_fake_audit(monkeypatch)
     _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
     _freeze_now(monkeypatch)
 
     result = await run_reconstruct_allocator_history_job(_forced_job())
 
-    assert exchange.fetch_my_trades.await_count > 0, "the forced job did not crawl"
+    assert (exchange.fetch_my_trades.await_count > 0) is crawled, (
+        f"crawled={crawled} but fetch_my_trades awaited {exchange.fetch_my_trades.await_count}x"
+    )
     prefix = f"{REFUSAL_PREFIX}{reason})"
     assert result.outcome == DispatchOutcome.FAILED, result
     assert result.error_kind == "permanent", result
@@ -382,7 +346,7 @@ async def _assert_forced_rebuild_refused(
     assert LEAKED_SIGNATURE not in (result.error_message or ""), result.error_message
 
     rows = fake.rows_for("allocator_equity_snapshots")
-    assert len(rows) == SENTINEL_ROWS and all(
+    assert len(rows) == seeded_days and all(
         r.get("value_usd") == SENTINEL_VALUE for r in rows
     ), (
         "a refused forced rebuild changed the stored curve: "
@@ -454,14 +418,77 @@ async def test_forced_rebuild_refuses_when_the_anchor_would_be_skipped_for_a_par
     await _assert_forced_rebuild_refused(monkeypatch, exchange, "anchor_skipped_partial_ticker")
 
 
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_a_multi_key_allocator_and_adds_no_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review CR-01. A multi-key allocator's rows are one aggregate curve across keys. The
+    DO-NOTHING persist cannot change an existing day, but it INSERTS this one key's replay
+    value into any day the aggregate is missing. Nine of the ten days are seeded (one is
+    missing); the refusal must leave exactly nine rows, none new, and must come before the
+    crawl. RED on a handler that crawls and persists: the missing day gains a row carrying
+    this key's own value."""
+    exchange = await _bybit_exchange()
+    await _assert_forced_rebuild_refused(
+        monkeypatch, exchange, "multi_key", crawled=False, sibling=True, seeded_days=9,
+    )
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_when_the_sibling_lookup_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review SFH-1. A failed sibling lookup used to read as "has siblings" and end DONE
+    after a full crawl. A forced job must instead refuse: the allocator may be sole-key,
+    and a silent DONE would leave the curve on the old anchor with a success audit."""
+    exchange = await _bybit_exchange()
+    await _assert_forced_rebuild_refused(
+        monkeypatch, exchange, "sibling_lookup_failed", crawled=False, fail_sibling_lookup=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_an_empty_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review SFH-1. A forced replay with no trades or transfers yields no rows. The empty
+    sole-key replace is already refused downstream, but that path ends DONE as
+    ``reconstruct_no_data`` and stamps the marker; a forced job must FAIL instead."""
+    exchange = await _bybit_exchange()
+    exchange.fetch_my_trades = AsyncMock(return_value=[])
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, "replay_empty")
+
+
+@pytest.mark.asyncio
+async def test_a_completed_forced_rebuild_says_so_in_its_completion_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review SFH-1. ``forced_rebuild: true`` rides the completion audit as well as the
+    started audit, so the two events of one job can be joined."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    audit = _install_fake_audit(monkeypatch)
+    _install_fake_preflight(monkeypatch, "bybit", fake, await _bybit_exchange())
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete.get("forced_rebuild") is True, complete
+
+
 def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
     """The plan 06 post-deploy handoff matches the ``forced rebuild refused (`` prefix and
-    these six tokens to decide re-enqueue-once versus record-only (PD-I). A seventh reason,
+    these tokens to decide re-enqueue-once versus record-only (PD-I). An extra reason,
     or a renamed one, that the handoff does not know would be recorded as an unknown
     failure; the set is therefore pinned, and so is the message each token produces."""
     expected = frozenset(
         {
             "positions_unreadable",
+            "multi_key",
+            "sibling_lookup_failed",
+            "replay_empty",
             "anchor_unreadable",
             "anchor_skipped_okx_terminus",
             "anchor_skipped_partial_ticker",
