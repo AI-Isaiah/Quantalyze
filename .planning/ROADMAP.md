@@ -5498,6 +5498,9 @@ Plans:
 1. A recorded real or ccxt-fixture Bybit V5 and Binance (spot and futures) balance response settles whether `total` includes uPnL.
 2. Every path (derive anchor, reconstruct anchor, holdings) reads it the same way, with a test that goes RED on the wrong reading.
 3. A PROD census says whether any connected key is Bybit or Binance, and any stored series built on the wrong reading is recomputed or recorded.
+
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-04, "Rebuild whole account (Recommended)"):** all 6 active Bybit keys sit on multi-key accounts, so a forced rebuild of a multi-key account rebuilds all its keys together and replaces that account's history atomically, or refuses and writes nothing.
+
 **Plans:** 6/6 plans executed
 
 Plans:
