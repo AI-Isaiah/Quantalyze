@@ -4321,6 +4321,33 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
         sibling_check = await _allocator_has_other_api_keys(
             ctx.supabase, allocator_id, api_key_id,
         )
+        if forced and sibling_check.has_siblings:
+            # Phase 167.2.1.1 round-2 SFH: the pre-crawl check above passed, so this
+            # second lookup disagrees (a key added during the crawl, or a lookup that
+            # failed this time). The DO-NOTHING persist below would end DONE with
+            # nothing replaced, or gap-fill the aggregate curve with this key's values.
+            # Refuse with the same closed-set reason and write nothing.
+            _reason = "sibling_lookup_failed" if sibling_check.lookup_failed else "multi_key"
+            logger.warning(
+                "reconstruct_allocator_history forced rebuild refused allocator=%s "
+                "key=%s venue=%s reason=%s",
+                allocator_id, api_key_id, venue, _reason,
+            )
+            sanitized = (
+                f"forced rebuild refused ({_reason}): the forced rebuild could not be "
+                "written safely, so nothing was written and the stored curve is "
+                "unchanged (Phase 167.2.1.1 D-02)"
+            )
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {"error_kind": "permanent", "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind="permanent",
+            )
         # C-0328 / M-1028: surface sibling-lookup failures into the audit
         # trail. The boolean fail-safe (return True ⇒ skip purge) preserves
         # data integrity but is invisible to operators — without an event

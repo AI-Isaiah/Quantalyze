@@ -323,6 +323,7 @@ async def _assert_forced_rebuild_refused(
     seeded_days: int = SENTINEL_ROWS,
     extra_asofs: tuple[str, ...] = (),
     venue: str = "bybit",
+    second_sibling_check: er.SiblingCheckResult | None = None,
 ) -> None:
     """A marked key (Bybit unless ``venue``) with ``seeded_days`` sentinel rows (sole-key unless ``sibling``), a
     forced job, ``exchange``: the job ends FAILED/permanent naming ``reason``, and NOTHING
@@ -341,6 +342,19 @@ async def _assert_forced_rebuild_refused(
             "breakdown": {"ETH": SENTINEL_VALUE}, "source": "exchange_primary",
             "history_depth_months": 24, "reconstructed_at": "2026-04-01T00:00:00+00:00",
         }
+    if second_sibling_check is not None:
+        # The first (pre-crawl) lookup is the real one; every later lookup answers
+        # ``second_sibling_check``, as if a key appeared or the read failed mid-crawl.
+        _real_lookup = er._allocator_has_other_api_keys
+        _lookups: list[None] = []
+
+        async def _lookup(*args: Any, **kwargs: Any) -> er.SiblingCheckResult:
+            _lookups.append(None)
+            if len(_lookups) == 1:
+                return await _real_lookup(*args, **kwargs)
+            return second_sibling_check
+
+        monkeypatch.setattr(er, "_allocator_has_other_api_keys", _lookup)
     audit = _install_fake_audit(monkeypatch)
     _install_fake_preflight(monkeypatch, venue, fake, exchange)
     _freeze_now(monkeypatch)
@@ -567,6 +581,30 @@ async def test_forced_rebuild_refuses_when_the_sibling_lookup_cannot_answer(
     exchange = await _bybit_exchange()
     await _assert_forced_rebuild_refused(
         monkeypatch, exchange, "sibling_lookup_failed", crawled=False, fail_sibling_lookup=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_check", "reason"),
+    [
+        (er.SiblingCheckResult(True, True, "fixture: second lookup failed"), "sibling_lookup_failed"),
+        (er.SiblingCheckResult(True, False, None), "multi_key"),
+    ],
+    ids=["second-lookup-fails", "key-added-during-the-crawl"],
+)
+async def test_forced_rebuild_refuses_when_the_persist_time_sibling_lookup_disagrees(
+    monkeypatch: pytest.MonkeyPatch, second_check: er.SiblingCheckResult, reason: str,
+) -> None:
+    """Round-2 SFH. The pre-crawl lookup passes (sole key); the persist half looks again.
+    If that second lookup fails, or a key now exists, the DO-NOTHING persist would either
+    end DONE with nothing replaced or gap-fill the aggregate curve with this key's values
+    (nine of ten days are seeded, so it would INSERT the missing day). The job must refuse
+    with the named reason and leave exactly the nine seeded rows. RED on a persist half
+    that does not read ``forced``."""
+    exchange = await _bybit_exchange()
+    await _assert_forced_rebuild_refused(
+        monkeypatch, exchange, reason, seeded_days=9, second_sibling_check=second_check,
     )
 
 
