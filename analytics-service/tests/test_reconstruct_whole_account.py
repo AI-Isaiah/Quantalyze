@@ -926,30 +926,6 @@ async def test_a_failed_sibling_crawl_refuses_the_account_without_its_text(
     assert closed.count(exchange_2) == 1, "the sibling's session was not closed exactly once"
 
 
-@pytest.mark.asyncio
-async def test_a_rate_limited_sibling_is_stamped_and_refuses_the_account(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A sibling the venue rate-limits is parked behind the circuit breaker (its own key, and
-    only its own, is stamped) and the whole account refuses rather than skipping it."""
-    fake = _MarkerFake()
-    _seed_two_account_book(fake)
-    exchange_1 = await _bybit_exchange()
-    exchange_2 = await _sibling_bybit_exchange()
-    exchange_2.fetch_my_trades = AsyncMock(side_effect=ccxt.RateLimitExceeded("fixture: slow down"))
-
-    result, audit, before, _calls = await _run_forced_two_account_job(
-        monkeypatch, fake, exchange_1, exchange_2
-    )
-
-    _assert_account_rebuild_refused(
-        fake, result, audit, "account_key_read_failed",
-        before=before, exchanges_crawled=(exchange_2,), exchanges_untouched=(),
-    )
-    stamped = [p for (n, p) in fake.rpc_calls if n == "stamp_api_key_429"]
-    assert stamped == [{"p_api_key_id": API_KEY_ID_2}], stamped
-
-
 def _assert_account_rebuild_failed_transient(
     fake: Any,
     result: DispatchResult,
@@ -973,6 +949,60 @@ def _assert_account_rebuild_failed_transient(
     assert not (set(actions) & COMPLETION_ACTIONS), actions
     (failed,) = _audit_metadata(audit, FAILED_ACTION)
     assert failed["error_kind"] == "transient", failed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        ccxt.RateLimitExceeded("fixture: slow down"),
+        ccxt.NetworkError("fixture: connection reset"),
+        ccxt.RequestTimeout("fixture: timed out"),
+        ccxt.ExchangeNotAvailable("fixture: 503"),
+    ],
+    ids=["rate_limit", "network", "timeout", "exchange_5xx"],
+)
+async def test_a_transient_fault_on_one_account_ends_the_job_transient_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, fault: Exception
+) -> None:
+    """A rate limit, a network error, a timeout or an exchange 5xx on ONE of the account's
+    exchange accounts is a fault a retry clears. The crawl must not turn it into the
+    permanent ``account_key_read_failed`` refusal (a refusal is never retried): the job ends
+    FAILED/transient, nothing is written, and one failure audit says transient."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_my_trades = AsyncMock(side_effect=fault)
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    assert not (result.error_message or "").startswith(REFUSAL_PREFIX), result.error_message
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_sibling_is_stamped_and_ends_the_job_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling the venue rate-limits is parked behind the circuit breaker (its own key is
+    stamped, so the retry waits out the cooldown) and the whole account is not rebuilt:
+    nothing is written and the job is retried rather than refused for good."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_my_trades = AsyncMock(side_effect=ccxt.RateLimitExceeded("fixture: slow down"))
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    stamped = [p["p_api_key_id"] for (n, p) in fake.rpc_calls if n == "stamp_api_key_429"]
+    assert API_KEY_ID_2 in stamped, stamped
 
 
 @pytest.mark.asyncio

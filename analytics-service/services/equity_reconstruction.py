@@ -4530,7 +4530,9 @@ async def _crawl_whole_account(
     (a stored row is a sum across exchange accounts, so every account must cover the same
     span). In key order the first refusal is re-raised as it is. An MT5 account's failure
     comes back as the ``DispatchResult`` it already settled and audited, and is returned
-    unchanged. Any other failure becomes ``account_key_read_failed`` after one scrubbed
+    unchanged. A failure ``classify_exception`` calls transient (a rate limit, a network
+    error, a timeout, an exchange 5xx) is re-raised unchanged, so the handler's own arms
+    retry the job. Any other failure becomes ``account_key_read_failed`` after one scrubbed
     WARNING: this loop is the only converter. Every session this function opened is closed in ``finally``; the job's own
     session stays with the handler's ``finally``.
     """
@@ -4551,6 +4553,8 @@ async def _crawl_whole_account(
                     {**job, "api_key_id": key_id}, "run_reconstruct_allocator_history_job",
                 )
             except Exception as exc:  # noqa: BLE001
+                if classify_exception(exc)[0] == "transient":
+                    raise
                 logger.warning(
                     "reconstruct_allocator_history sibling key could not be opened "
                     "allocator=%s key=%s venue=%s exc_class=%s scrubbed=%s",
@@ -4583,6 +4587,8 @@ async def _crawl_whole_account(
             if isinstance(outcome, DispatchResult):
                 return outcome
             if isinstance(outcome, BaseException):
+                if isinstance(outcome, Exception) and classify_exception(outcome)[0] == "transient":
+                    raise outcome
                 # The exception CLASS only: the venue's text is never logged here, so
                 # nothing it carries (a scrub-resistant fragment included) reaches the log
                 # on the way to a refusal that names only the token (T-167.2.1.1.2-24).
