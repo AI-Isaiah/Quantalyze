@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.0.1] - 2026-10-22 — OKXHISTORY: archive bill ids are read without their export quoting (Phase 167.1.2.2.2.1, plan 21, D-17)
+## [0.133.0.2] - 2026-10-22 — OKXHISTORY: archive bill ids are read without their export quoting (Phase 167.1.2.2.2.1, plan 21, D-17)
 
 ### Fixed
 - Calibrate run 4 on PROD (2026-10-22) named its stop: all 1606 bills of both real quarter files carried a `billId` that is not ASCII digits. The parser now strips surrounding whitespace, apostrophes and double quotes from each `billId` before any check. These are spreadsheet-guard export wrapping, and the digits inside are unchanged. An id that is empty after the strip stops `missing_bill_id`.
@@ -13,6 +13,20 @@
 
 ### Notes
 - Orchestrator decision D-17, within founder D-16. Reviewed by gsd-code-reviewer and silent-failure-hunter, with no MEDIUM+ findings. After deploy, calibrate is re-run once.
+
+## [0.133.0.1] - 2026-10-22 — BASELINE: automated re-dump after the PROD apply of 131c3b04
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `39857947783`, after the PROD apply of merge `131c3b04`: sha256 `4fffa63f…` → `086028e7…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 132 → 133, distinct function names 130 → 131, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261028120000_replace_allocator_equity_snapshots_window.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-22` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.0.0 → 0.133.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=307 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 133 — MATCH 130, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+- `scripts/dump-sql-functions.ts`: the ACCTREBUILD `NAME_SET_RATCHET` row for `replace_allocator_equity_snapshots_window` is deleted, its own clearing condition (a re-dump taken after `20261028120000` applied to PROD). `snapshot-drift` reads `ratchet-stale` until it goes.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `39857947783` succeeded, and this entry was composed by the `redump-pr` job. Run `39857947783` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
 
 ## [0.133.0.0] - 2026-10-22 — ACCTREBUILD: a multi-key account's allocation history is rebuilt as one account over a window, or refused by name (Phase 167.2.1.1.2)
 
