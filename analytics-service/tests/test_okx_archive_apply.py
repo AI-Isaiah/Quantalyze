@@ -2496,7 +2496,7 @@ class TestUnchainableRowDiagnostic:
         assert outcome.error_message == (
             "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
             "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
-            "rows_by_quarter=2026-Q3:2"
+            "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q3:2"
         )
         result = world.result()
         assert result["stop_class"] == "archive_incomplete"
@@ -2505,6 +2505,7 @@ class TestUnchainableRowDiagnostic:
                 "reason": "unchainable_row", "ccys": {}, "total_pairs": None,
                 "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
                 "first_day": "2026-07-20", "last_day": "2026-09-01",
+                "first_nondigit_shape": "A-9{9}", "first_nondigit_len": 10,
                 "files": [{
                     "ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15", "rows": 2,
                     "blank_ccy": 1, "nondigit_bill_id": 1,
@@ -2523,11 +2524,12 @@ class TestUnchainableRowDiagnostic:
 
     VALID: dict[str, Any] = {
         "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
-        "first_day": "2026-07-20", "last_day": "2026-09-01", "files": [{"rows": 2}],
+        "first_day": "2026-07-20", "last_day": "2026-09-01",
+        "first_nondigit_shape": "A-9{9}", "first_nondigit_len": 10, "files": [{"rows": 2}],
     }
     VALID_TEXT = (
         "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
-        "rows_by_quarter=2026-Q3:2"
+        "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q3:2"
     )
 
     @pytest.mark.parametrize(
@@ -2595,7 +2597,8 @@ class TestUnchainableRowDiagnostic:
         mid-calibration as a crash instead of the permanent, named stop the founder reads."""
         assert okx_archive_job._unchainable_tokens({}, ["2026-Q3"]) == (
             "rows=unreadable blank_ccy=unreadable nondigit_bill_id=unreadable "
-            "first_day=unreadable last_day=unreadable rows_by_quarter=unreadable"
+            "first_day=unreadable last_day=unreadable first_nondigit_shape=unreadable "
+            "first_nondigit_len=unreadable rows_by_quarter=unreadable"
         )
 
     def test_two_quarters_are_named_in_input_order(self) -> None:
@@ -2658,7 +2661,7 @@ class TestUnchainableRowDiagnostic:
         assert outcome.error_message == (
             "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
             "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
-            "rows_by_quarter=2026-Q3:1"
+            "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q3:1"
         )
         chain = world.result()["info"]["bal_chain"]
         assert (chain["rows"], chain["blank_ccy"], chain["nondigit_bill_id"], chain["blank_ccy_skipped"]) == (
@@ -2685,7 +2688,7 @@ class TestUnchainableRowDiagnostic:
         assert outcome.error_message == (
             "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
             "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
-            "rows_by_quarter=2026-Q2:0,2026-Q3:1"
+            "first_nondigit_shape=A-9{9} first_nondigit_len=10 rows_by_quarter=2026-Q2:0,2026-Q3:1"
         )
         assert world.result()["info"]["bal_chain"]["blank_ccy_skipped"] == 0
 
