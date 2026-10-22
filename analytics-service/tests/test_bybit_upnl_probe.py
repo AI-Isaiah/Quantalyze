@@ -39,6 +39,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import ccxt
 import pytest
 
 from scripts import bybit_upnl_probe as bp
@@ -389,8 +390,6 @@ def test_margin_borrow_makes_the_coin_identity_false_and_is_recorded_as_the_reas
 
 
 async def test_contract_account_is_read_after_a_unified_bad_request() -> None:
-    import ccxt
-
     contract = _wallet_resp(
         [_coin("USDT", wallet=_WALLET, equity=_EQUITY, upnl=_UPNL)],
         account_type="CONTRACT",
@@ -512,8 +511,6 @@ def test_an_untrustworthy_position_list_is_absent_not_a_match() -> None:
 
 
 async def test_a_failed_position_read_is_recorded_and_the_key_is_still_measured() -> None:
-    import ccxt
-
     client = _StubBybit(
         _open_wallet(),
         positions_effect=ccxt.ExchangeError("boom 4321.5 signature=abc"),
@@ -652,3 +649,304 @@ def test_floats_are_rounded_to_three_significant_figures() -> None:
     assert bp.sig3(0.0) == 0.0
     assert bp.sig3(float("inf")) == "non-finite"
     assert bp.sig3(float("nan")) == "non-finite"
+
+
+# ---------------------------------------------------------------------------
+# Read-only wrapper and source-level safety.
+# ---------------------------------------------------------------------------
+
+
+async def test_proxy_serves_each_read_once_per_distinct_request_and_refuses_a_repeat() -> None:
+    stub = _StubBybit(_open_wallet(), _positions_resp([_UPNL]))
+    proxy = bp.ReadOnlyBybitProxy(stub)
+
+    first = await proxy.private_get_v5_account_wallet_balance({"accountType": "UNIFIED"})
+    assert first["result"]["list"][0]["accountType"] == "UNIFIED"
+    with pytest.raises(RuntimeError):
+        await proxy.private_get_v5_account_wallet_balance({"accountType": "UNIFIED"})
+    # A different account type is a distinct request: allowed once.
+    await proxy.private_get_v5_account_wallet_balance({"accountType": "CONTRACT"})
+    with pytest.raises(RuntimeError):
+        await proxy.private_get_v5_account_wallet_balance({"accountType": "CONTRACT"})
+    assert len(stub.wallet_calls) == 2  # the refused repeats never reached the venue
+
+    params = {"category": "linear", "settleCoin": "USDT"}
+    await proxy.private_get_v5_position_list(params)
+    with pytest.raises(RuntimeError):
+        await proxy.private_get_v5_position_list(params)
+    assert len(stub.position_calls) == 1
+
+
+async def test_a_failed_read_is_not_retried_through_the_proxy() -> None:
+    stub = _StubBybit(positions_effect=ccxt.RateLimitExceeded("slow down"))
+    proxy = bp.ReadOnlyBybitProxy(stub)
+    params = {"category": "linear", "settleCoin": "USDT"}
+    with pytest.raises(ccxt.RateLimitExceeded):
+        await proxy.private_get_v5_position_list(params)
+    with pytest.raises(RuntimeError):  # the retry is refused, not re-sent
+        await proxy.private_get_v5_position_list(params)
+    assert len(stub.position_calls) == 1
+
+
+async def test_proxy_exposes_reads_only() -> None:
+    stub = _StubBybit(_open_wallet(), _positions_resp([]))
+    proxy = bp.ReadOnlyBybitProxy(stub)
+    assert callable(proxy.private_get_v5_account_wallet_balance)
+    assert callable(proxy.private_get_v5_position_list)
+    with pytest.raises(AttributeError):
+        proxy.private_post_v5_order_create  # a write endpoint
+    with pytest.raises(AttributeError):
+        proxy.fetch_balance  # would add load_markets and account-info calls
+    with pytest.raises(AttributeError):
+        proxy.fetch_positions
+    with pytest.raises(AttributeError):
+        proxy.close  # lifecycle is the caller's, never reachable through the proxy
+    with pytest.raises(AttributeError):
+        proxy.private_get_v5_user_query_api  # a real GET endpoint, but not one of the two allowed
+    assert stub.close_calls == 0
+
+
+def test_the_probe_cannot_write_and_never_calls_the_breaker_preflight() -> None:
+    assert "_allocator_key_preflight(" not in _PROBE_SRC
+    for write in (".insert(", ".update(", ".upsert(", ".delete(", ".rpc(", "enqueue"):
+        assert write not in _PROBE_SRC, write
+
+
+def test_the_probe_reads_api_keys_with_exactly_one_select() -> None:
+    assert _PROBE_SRC.count(".select(") == 1
+    assert _PROBE_SRC.count("supabase.table(") == 1
+    assert 'supabase.table("api_keys")' in _PROBE_SRC
+
+
+# ---------------------------------------------------------------------------
+# Refusal before any decrypt.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        ({"exchange": "bybit", "is_active": True}, None),
+        ({"exchange": "okx", "is_active": True}, "not-bybit"),
+        ({"exchange": "bybit", "is_active": False}, "inactive"),
+        ({"exchange": "bybit"}, "inactive"),
+        ({}, "missing"),
+        (None, "missing"),
+    ],
+)
+def test_a_row_that_is_not_an_active_bybit_key_is_refused(
+    row: dict[str, Any] | None, reason: str | None
+) -> None:
+    assert bp.refusal_reason(row) == reason
+
+
+async def test_no_active_bybit_key_refuses_before_any_decrypt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    services = _Services([], [])
+    services.install(monkeypatch)
+    assert await bp.run() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("refused:")
+    assert services.decrypt_calls == []
+    assert services.built_for == []
+
+
+async def test_a_selected_row_that_is_not_an_active_bybit_key_refuses_before_any_decrypt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = _bybit_rows(_KEY_ID_ONE) + [{"id": _KEY_ID_TWO, "exchange": "okx", "is_active": True}]
+    services = _Services(rows, [_StubBybit(_open_wallet(), _positions_resp([]))])
+    services.install(monkeypatch)
+    assert await bp.run() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""  # not even k1 was measured: refusal comes first
+    assert "refused:" in captured.err and "not-bybit" in captured.err
+    assert _KEY_ID_TWO not in captured.err
+    assert services.decrypt_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Fail loud: one failed key does not hide the others.
+# ---------------------------------------------------------------------------
+
+
+async def test_one_failed_key_is_recorded_by_class_the_others_are_measured_and_the_run_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hostile = ccxt.AuthenticationError(
+        f"bybit GET /v5/account/wallet-balance 4321.5 {_KEY_ID_TWO} signature=abc"
+    )
+    c1 = _StubBybit(_open_wallet(), _positions_resp([_UPNL]))
+    c2 = _StubBybit(wallet_effects=[hostile])
+    c3 = _StubBybit(_flat_wallet(), _positions_resp([]))
+    services = _Services(_bybit_rows(_KEY_ID_ONE, _KEY_ID_TWO, _KEY_ID_THREE), [c1, c2, c3])
+    services.install(monkeypatch)
+
+    code = await bp.run()
+
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line.strip()]
+    assert code == 1
+    assert len(lines) == 4  # k1, k2, k3 and the summary: every key printed
+    k1, k2, k3, summary = (json.loads(line) for line in lines)
+    assert (k1["read_ok"], k2["read_ok"], k3["read_ok"]) == (True, False, True)
+    assert k2["failure_class"] == "AuthenticationError"
+    assert k2["positions_read_ok"] is False
+    for name in (
+        "account_type",
+        "ccxt_total_equals_wallet",
+        "coin_equity_minus_wallet_equals_upnl",
+        "account_equity_minus_wallet_equals_perp_upl",
+        "upnl_ratio",
+        "upnl_nonzero",
+        "borrow_present",
+        "non_usdt_coins_present",
+        "non_usdt_upnl_present",
+        "positions_upnl_matches_totalperpupl",
+    ):
+        assert k2[name] == "field-absent", name
+    assert k3["upnl_nonzero"] is False  # the key after the failure was still measured
+    assert summary["keys"] == 3 and summary["keys_read"] == 2
+    assert len(c2.wallet_calls) == 1  # no pointless CONTRACT retry after an auth refusal
+    assert services.closed == [c1, c2, c3]  # the failed key's client is closed too
+    for leak in ("4321.5", _KEY_ID_TWO, "signature", "wallet-balance"):
+        assert leak not in captured.out, leak
+        assert leak not in captured.err, leak
+
+
+async def test_a_failed_position_read_makes_the_run_exit_one_after_printing_everything(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = _StubBybit(_open_wallet(), positions_effect=ccxt.NetworkError("down"))
+    services = _Services(_bybit_rows(_KEY_ID_ONE), [client])
+    services.install(monkeypatch)
+    assert await bp.run() == 1
+    k1, summary = (json.loads(line) for line in _stdout_lines(capsys))
+    assert k1["read_ok"] is True and k1["positions_read_ok"] is False
+    assert summary["keys_read"] == 1
+
+
+async def test_a_wallet_read_past_the_timeout_is_recorded_as_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(bp, "READ_TIMEOUT_S", 0.05)
+    hung = _StubBybit(hang=True)
+    services = _Services(_bybit_rows(_KEY_ID_ONE), [hung])
+    services.install(monkeypatch)
+    assert await bp.run() == 1
+    k1, summary = (json.loads(line) for line in _stdout_lines(capsys))
+    assert k1["read_ok"] is False and k1["failure_class"] == "Timeout"
+    assert summary["keys_read"] == 0
+    assert services.closed == [hung]
+
+
+async def test_a_decrypt_failure_is_recorded_for_that_key_and_the_next_is_measured(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    c2 = _StubBybit(_open_wallet(), _positions_resp([_UPNL]))
+    services = _Services(_bybit_rows(_KEY_ID_ONE, _KEY_ID_TWO), [c2])
+    services.install(monkeypatch)
+    real_decrypt = services.decrypt_calls
+
+    def _decrypt(row: dict[str, Any], _kek: bytes) -> tuple[str, str, None]:
+        real_decrypt.append(row["id"])
+        if row["id"] == _KEY_ID_ONE:
+            raise ValueError(f"malformed credential row {_KEY_ID_ONE}")
+        return ("fake-k", "fake-s", None)
+
+    monkeypatch.setattr("services.encryption.decrypt_credentials", _decrypt)
+    assert await bp.run() == 1
+    captured = capsys.readouterr()
+    k1, k2, summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+    assert k1["read_ok"] is False and k1["failure_class"] == "other"
+    assert k2["read_ok"] is True
+    assert summary["keys"] == 2 and summary["keys_read"] == 1
+    assert _KEY_ID_ONE not in captured.out + captured.err
+
+
+class _HostileAuthError(ccxt.AuthenticationError):
+    def __str__(self) -> str:
+        raise AssertionError("classify_failure must never read the message")
+
+
+@pytest.mark.parametrize(
+    ("exc_name", "expected"),
+    [
+        ("PermissionDenied", "PermissionDenied"),  # a subclass of AuthenticationError
+        ("AuthenticationError", "AuthenticationError"),
+        ("RateLimitExceeded", "RateLimitExceeded"),  # a NetworkError subclass
+        ("RequestTimeout", "RequestTimeout"),  # a NetworkError subclass
+        ("NetworkError", "NetworkError"),
+        ("BadRequest", "BadRequest"),  # an ExchangeError subclass
+        ("ExchangeError", "ExchangeError"),
+    ],
+)
+def test_failures_are_classified_most_specific_first_without_reading_the_message(
+    exc_name: str, expected: str
+) -> None:
+    assert bp.classify_failure(getattr(ccxt, exc_name)("4321.5 fake-key-id signature=abc")) == expected
+
+
+def test_classification_never_reads_the_message_and_falls_back_to_other() -> None:
+    assert bp.classify_failure(_HostileAuthError("x")) == "AuthenticationError"
+    assert bp.classify_failure(TimeoutError("x")) == "Timeout"
+    assert bp.classify_failure(asyncio.TimeoutError()) == "Timeout"
+    assert bp.classify_failure(ValueError("x")) == "other"
+    assert bp.classify_failure(KeyError("x")) == "other"
+    assert {bp.classify_failure(e) for e in (ValueError(), KeyError())} <= set(bp.FAILURE_CLASSES)
+
+
+# ---------------------------------------------------------------------------
+# Exit codes and main.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _logging_restored() -> Any:
+    """main() switches logging off for the whole process; give it back."""
+    import logging
+
+    yield
+    logging.disable(logging.NOTSET)
+
+
+def test_the_exit_codes_are_the_documented_ones() -> None:
+    assert (bp.EXIT_OK, bp.EXIT_FAILED, bp.EXIT_REFUSED) == (0, 1, 2)
+    assert asyncio.iscoroutinefunction(bp.run)
+
+
+def test_main_takes_no_options_and_rejects_any_argument() -> None:
+    with pytest.raises(SystemExit) as exc:
+        bp.main(["--anything"])
+    assert exc.value.code != 0
+    with pytest.raises(SystemExit) as exc:
+        bp.main(["k1"])
+    assert exc.value.code != 0
+
+
+def test_main_returns_run_s_exit_code(
+    monkeypatch: pytest.MonkeyPatch, _logging_restored: Any
+) -> None:
+    async def _refused() -> int:
+        return bp.EXIT_REFUSED
+
+    monkeypatch.setattr(bp, "run", _refused)
+    assert bp.main([]) == 2
+
+
+def test_main_prints_the_exception_type_only_on_a_run_level_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _logging_restored: Any,
+) -> None:
+    async def _boom() -> int:
+        raise RuntimeError(f"db password 4321.5 {_KEY_ID_ONE}")
+
+    monkeypatch.setattr(bp, "run", _boom)
+    assert bp.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "failed: RuntimeError"
+    assert "4321.5" not in captured.err and _KEY_ID_ONE not in captured.err
+    assert captured.out == ""
