@@ -156,6 +156,14 @@ STACK_CONFIG="${STACK_DIR}/supabase/config.toml"
 # probe_function_denial_survives runs the crash's exact shape before anything loads,
 # so a pin moved to a crashing image fails loud at boot, with the cause named.
 LANE_PG_VERSION="17.6.1.113"
+
+# The lane pulls its images from ECR Public, the CLI's own default, and not from the
+# ghcr.io that supabase/setup-cli exports. MEASURED 2026-10-22: ghcr.io answered
+# `toomanyrequests ... allowed: 44000/minute` for supabase/postgres to CI (signed in)
+# and to an anonymous developer box alike, on about half of a handful of requests,
+# while public.ecr.aws served the same 17.6.1.113 manifest every time. The limit is on
+# the image, shared by everyone pulling it, so no login of ours can lift it.
+export SUPABASE_INTERNAL_IMAGE_REGISTRY="public.ecr.aws"
 # The currency gate's handover files (replay set, carried set, filtered
 # reference-data allowlist). Inside the gitignored lane workdir, and emptied
 # before every gate run, so a gate that refuses leaves NO file for a later

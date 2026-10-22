@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.132.10.12] - 2026-10-22 — CI: the local-stack lane pulls its images from ECR Public, not ghcr.io
+
+### Root cause
+- From 2026-10-22 ~16:50Z every local-stack lane job (`sql-tests`, `python`, `e2e-seeded`, `frontend-local-stack`, `frontend-live-db-lane`) died at boot with `toomanyrequests ... allowed: 44000/minute` from ghcr.io, on four retries of #1115 and the first run of #1116. The jobs were signed in. The same 429 came back on about half of a handful of anonymous requests for `supabase/postgres` from a developer box on another network, so the limit is ghcr's on Supabase's images, shared by everyone pulling them, and not our request volume. `public.ecr.aws` served the same `17.6.1.113` manifest on every request.
+
+### Fixed
+- `scripts/local-stack/run.sh` exports `SUPABASE_INTERNAL_IMAGE_REGISTRY=public.ecr.aws`, the Supabase CLI's own default, overriding the `ghcr.io` that `supabase/setup-cli` exports. The Postgres pin and its boot assertion are unchanged; the assertion already accepts any registry prefix.
+
+### Notes
+- The ghcr.io login steps in `ci.yml` stay and are now unused by the lane; their comments still describe the ghcr pull.
+
 ## [0.132.10.11] - 2026-10-22 — OKXHISTORY: an unchainable archive bill is named, and a zero-effect blank-currency bill no longer stops the chain (Phase 167.1.2.2.2.1, plan 20, D-16)
 
 ### Fixed
