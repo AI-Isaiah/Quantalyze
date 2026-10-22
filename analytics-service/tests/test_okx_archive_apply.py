@@ -2399,6 +2399,47 @@ class TestQuarterEdgeDaysEndToEnd:
         assert call["p_expected_gaps_after"] == []
         assert "2026-06-30" in db.csv_days(STRATEGY_ID)
 
+    @pytest.mark.asyncio
+    async def test_an_edge_day_only_one_file_reaches_is_never_written_and_stays_in_the_gap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-15 and TRADESYNC D-02. The Q3 file holds only the 8 hours of 06-30 after OKX's cut.
+        Writing a return from them would publish a partial day as a whole one and silently drop
+        the day from the gap the factsheet names. It must stay missing and named: out of
+        ``p_rows``, out of ``csv_daily_returns`` and ``reconstructed_ranges``, and inside the
+        stored ``unrecovered_gaps``. The file carries no 09-30 bill on purpose, so a wrongly
+        covered 09-30 cannot stop the run first and hide this test's own assertions."""
+        bills = _standard_bills()
+        bills.realized("2026-06-30", "7", hour=20)
+        db = _db_with((STRATEGY_ID, self.GAP_EDGE))
+        live = _standard_live()
+        world = _install(monkeypatch, db, live, q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result = world.result()
+        assert result["census"]["edge_days"] == {"whole": [], "missing": ["2026-06-30", "2026-09-30"]}
+        (strategy,) = result["strategies"]
+        assert strategy["insert_days"] == 15
+        assert strategy["insert_ranges"] == [{"from": "2026-07-01", "to": "2026-07-15"}]
+        assert strategy["gaps_after"] == [{"from": "2026-06-25", "to": "2026-06-30"}]
+
+        fingerprint = result["fingerprint"]
+        _install(monkeypatch, db, live, q3=bills.bytes())
+        applied = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert applied.outcome == DispatchOutcome.DONE, applied.error_message
+        (call,) = _apply_calls(db)
+        assert [r["date"] for r in call["p_rows"]] == _daterange("2026-07-01", "2026-07-15")
+        assert call["p_expected_gaps_after"] == [{"from": "2026-06-25", "to": "2026-06-30"}]
+        assert "2026-06-30" not in db.csv_days(STRATEGY_ID)
+        provenance = db.provenance(STRATEGY_ID)
+        assert _norm(provenance["unrecovered_gaps"]) == [{"from": "2026-06-25", "to": "2026-06-30"}]
+        assert [(r["from"], r["to"]) for r in provenance["reconstructed_ranges"]] == [
+            ("2026-07-01", "2026-07-15")
+        ]
+
 
 class TestNonExternalPnlIsInTheLiveNumber:
     """WR-01. A liquidation transfer or forced repayment is not external capital (D-08), but a
