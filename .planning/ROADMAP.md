@@ -175,7 +175,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2.2.2.1: OKXHISTORY — an OKX strategy's days older than the 3-month bills window are rebuilt from OKX's quarterly bills archive** (INSERTED 2026-10-09) — not yet planned (founder, split from TRADESYNC D-01)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
-- [ ] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; data-integrity)
+- [x] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — complete 2026-10-22 (v0.132.10.7 #1110; founder 2026-10-22; data-integrity)
 - [ ] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; split from UPNLVENUES D-04; data-integrity)
 - [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
 - [ ] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after NAVMTM)
@@ -4563,6 +4563,7 @@ Plans:
 - **(B) ReadTimeout** ("The read operation timed out"), six groups, 37 events: QUANTALYZE-2C (18, `main_worker` `_claim_priority`), 2E (8, `services.job_worker` `_sel`), 2B (7, `main_worker` `_reset`), and 2F, 2G, 2D (4, `/api/match/cron-recompute`). The worker reads go through `db_read_with_retry` (`analytics-service/services/db.py`), which retries only gateway-timeout-shaped exceptions, so an httpx ReadTimeout propagates on the first attempt.
 - **(C) QUANTALYZE-2A and QUANTALYZE-A**, 2 + 2 events. `mark_compute_job_done` and `mark_compute_job_failed` find the job back at `pending` instead of `running` (P0002): a job's claim was reset or reclaimed while its runner was still finishing. That job-state race can lose a finished result.
 - **Out of scope, owned elsewhere:** QUANTALYZE-18 (SERVICE_KEY mismatch, booked); the `account_duplicate` refusals (QUANTALYZE-23 and 2H, expected since 167.1.2.1.1 WRITERRESIDUALS); benchmark refresh "no BTC series" (1M, 1N, 1P); the Bybit unmatched-IP funding fetch (21).
+
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 166.5
 
@@ -4953,11 +4954,13 @@ Measured at `3175e5dd` by the 167.1.1.1 researcher:
 - `src/app/api/allocator/scenario/commit/route.ts` `serverAumUsd` sizes `size_at_decision_usd` from the `value_usd` (notional) sum. Its own comment says the downstream daily-delta cron divides realized P&L by that figure, so a book with derivatives reads understated returns. In the same file, `serverEquityAumUsd` already uses `unrealized_pnl_usd`.
 - The derivative writers (`analytics-service/services/allocator_positions.py`, `positions.py`) store `float(unrealized_pnl or 0)`, so a venue that reports no P&L writes 0.0, which looks like a real zero. On PROD, 0 of 294 current derivative rows are NULL, so missing values are invisible today.
 - Readers disagree on a missing P&L: the dashboard `holdingEquityContribution` counts it as 0, and `refresh_allocator_equity_daily` skips it with an audit event.
+
 **Success Criteria** (what must be TRUE):
 1. Scenario commit sizing counts each derivative at its unrealized P&L, using the same `holdingEquityContribution` definition as the dashboard, never `value_usd`. A test goes RED on the notional sum.
 2. A venue that reports no unrealized P&L is written as NULL, never 0.0, on every derivative writer path. A test goes RED on the `or 0` coercion.
 3. Every reader of `unrealized_pnl_usd` handles NULL by name: it is withheld and disclosed, never summed as 0. That covers the dashboard, the composer, the commit route, the equity curve and the 167.1.1.1 matcher.
 4. Before and after on PROD, read-only and marker first: the number of NULL derivative P&L rows, and the commit sizing of the books holding derivatives. Past `size_at_decision_usd` rows are read, never rewritten, unless the founder decides otherwise.
+
 **Plans:** 6/6 plans complete
 
 Plans:
@@ -5491,16 +5494,40 @@ Plans:
 - (2) Binance: the derive sets uPnL 0 (`exchange.py` ~3133) but the reconstruct anchor adds position uPnL on top (`equity_reconstruction.py` ~3093-3101);
 - (3) `allocator_positions.py` ~399-401 also calls Bybit walletBalance pre-uPnL;
 - (4) the docstring at `exchange.py` ~3081-3083 says 'account equity' while ~3111 says realized-basis.
+
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 167.2.1
+**Decisions (founder 2026-10-22, AskUserQuestion):** D-01 "Code + one live read (Recommended)": settle from the pinned ccxt source and Bybit V5 docs, then confirm on the live Bybit keys with a read-only worker check that records no amounts. D-02 "Recompute affected (Recommended)": after the fix deploys, re-run derive and reconstruct for Bybit-backed strategies and allocators and record before/after. D-03 "Fix code, test only (Recommended)" for Binance. PROD census 2026-10-22: 6 active Bybit keys, 0 Binance.
+
 **Success Criteria** (what must be TRUE):
 1. A recorded real or ccxt-fixture Bybit V5 and Binance (spot and futures) balance response settles whether `total` includes uPnL.
 2. Every path (derive anchor, reconstruct anchor, holdings) reads it the same way, with a test that goes RED on the wrong reading.
 3. A PROD census says whether any connected key is Bybit or Binance, and any stored series built on the wrong reading is recomputed or recorded.
-**Plans:** 0 plans
+
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-05, "Add an OKX 90-day path" + "Split Phases if Necessary"):** D-04's whole-account rebuild moved to Phase 167.2.1.1.2 ACCTREBUILD, with an OKX 90-day path added; plans 07-11 moved there as design input. This phase ships plans 01-06.
+
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-04, "Rebuild whole account (Recommended)"):** all 6 active Bybit keys sit on multi-key accounts, so a forced rebuild of a multi-key account rebuilds all its keys together and replaces that account's history atomically, or refuses and writes nothing.
+
+**Plans:** 6/6 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+
+- [x] 167.2.1.1-01-PLAN.md — Bybit: pinned ccxt 4.5.88 `parse_balance` settles `total` = coin walletBalance; reconstruct anchor adds position uPnL (`_UNIFIED_MARGIN_VENUES` okx only); derive/holdings pinned; cross-path invariant (SC-1, SC-2) [Wave 1]
+- [x] 167.2.1.1-02-PLAN.md — Binance: real `parse_balance_custom` tests for spot, USD-M and PAPI, cross-path invariant, futures-wallet trip-wire, docstring fixes (D-03; SC-1, SC-2) [Wave 1]
+- [x] 167.2.1.1-03-PLAN.md — D-01 read-only Bybit uPnL probe, built and unit-tested only (booleans, ratios, counts; no amounts or ids) (SC-1, SC-3) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 167.2.1.1-04-PLAN.md — D-02 `force_rebuild` job-metadata flag for the reconstruct, default path unchanged (SC-2, SC-3) [Wave 2]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 167.2.1.1-05-PLAN.md — A forced rebuild refuses rather than re-bake a wallet-only anchor (SC-2, SC-3) [Wave 3]
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 167.2.1.1-06-PLAN.md — Bookings, merged-tree gates, and the orchestrator-owned post-deploy handoff for the D-01 live read and the D-02 recompute (SC-1, SC-3) [Wave 4]
 
 ### Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all (INSERTED)
 
@@ -5510,6 +5537,7 @@ Plans:
 - all 6 active Bybit keys sit on 5 users who hold other keys; 4 of the 5 also hold OKX keys, whose history reaches 90 days while the rebuild window is 730 days; 1 holds Bybit, Deribit and MT5;
 - allocator snapshots are one aggregate row per (allocator_id, asof) and the multi-key persist is first-writer-wins (threat T-07-V5b), so the sole-key forced rebuild from UPNLVENUES recomputes none of them;
 - UPNLVENUES plans 07-11 (written and plan-checked on branch feat/167.2.1.1-upnlvenues at 77f5602fd, never executed) are this phase's starting design: whole-account crawl, one atomic replace through the existing `replace_allocator_equity_snapshots`, refusals in a closed set, no migration.
+
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 167.2.1.1 (UPNLVENUES)
 **Success Criteria** (what must be TRUE):
@@ -5517,6 +5545,7 @@ Plans:
 2. An account holding OKX keys is rebuilt over the last 90 days only; older stored days are left as they are, and the 90-day boundary is stated.
 3. Post-deploy, each of the 5 accounts is rebuilt or refused, recorded as counts and reasons only.
 4. Stored days the rebuild would drop are a founder decision, never a silent delete.
+
 **Plans:** 0 plans
 
 Plans:
@@ -5530,6 +5559,7 @@ Plans:
 - `nav_twr.py` ~1306-1324 subtracts open uPnL from the anchor and rolls history backward realized-basis, because historical marks are not retrievable on read-only keys, so the factsheet history never carries open-position profit;
 - `allocator_equity_derive.py` ~1343-1360 puts the live total only on the last day, a step;
 - the legacy snapshot reconstruct marks perps daily at the close.
+
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 167.2.1.1 (UPNLVENUES)
 **Success Criteria** (what must be TRUE):
@@ -5537,6 +5567,7 @@ Plans:
 2. The strategy return series and the allocator equity curve use the stored marked NAV for every day it exists, and realized-basis only for days before storage began, with the boundary visible and no fabricated past marks.
 3. A test proves a day with stored marks reproduces the marked NAV.
 4. A PROD reading after a week shows stored marks accumulating per key.
+
 **Plans:** 0 plans
 
 Plans:
@@ -5553,12 +5584,14 @@ Plans:
 - Deribit inverse positions use the index price (`positions.py` ~180-192);
 - `allocator_equity_snapshots` (marked daily) and `allocator_equity_derived` (realized-basis plus a last-day step) differ whenever positions are open;
 - `EquityCurveBuilder` books all open uPnL as a one-day spike on the last bar (`equity_reconstruction.py` ~4993-5004).
+
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 167.2.1.1.1 (NAVMTM)
 **Success Criteria** (what must be TRUE):
 1. One documented mark rule (venue mark for derivatives, a stated close for spot history) applied by every path, with a test per path.
 2. The two curves agree within a stated tolerance on a book with open positions, or the legacy curve is retired with every reader moved.
 3. The last-bar spike is gone.
+
 **Plans:** 0 plans
 
 Plans:
@@ -6289,6 +6322,7 @@ Plans:
 **Evidence**, measured 2026-10-20 by the Phase 167.1.2.1.2 HISTORYREADER post-deploy check on a seeded local stack (375x812 and 390x844, DPR 3):
 - **(1) The equity chart has a 400 px floor.** `src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx` floors its measured width with `Math.max(400, …)`, so the SVG is always at least 400 px wide. Its card clips it at 319 px (375) and 334 px (390), which hides the right-hand axis labels ("0%" to "-3.5%", "Oct"). The page itself does not scroll sideways. A book with open positions shows the same.
 - **(2) Axis tick labels are cut 3-4 px by their own `<svg>`**: "2025" reads "025", "P95 +0.1%", "10-20". This is item (2) of TODOS `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`, which this phase takes over. Items (1), (3) and (4) of that entry stay where they are.
+
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 170.1
 **Success Criteria** (what must be TRUE):
@@ -6296,6 +6330,7 @@ Plans:
 2. At 390 px no axis tick label on the /allocations Overview or the scenario composer is clipped by its SVG: each measured label box lies inside its SVG box.
 3. Desktop rendering is unchanged, shown by a desktop-width measurement before and after.
 4. After deploy, a 390 px and a 640 px measurement in the logged-in browser are recorded in the phase VERIFICATION.
+
 **Plans:** 0 plans
 
 Plans:
@@ -6531,7 +6566,7 @@ kept verbatim.
 | 167.1.2.2.2.1 OKXHISTORY | 0/? | Queued — booked 2026-10-09 (founder, split from TRADESYNC D-01) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
-| 167.2.1.1 UPNLVENUES | 0/? | Queued — booked 2026-10-22 (founder) | - |
+| 167.2.1.1 UPNLVENUES | 6/6 | Complete — v0.132.10.7 #1110; D-01 live read confirmed on 1 of 1 informative key; the 5 multi-key allocators are owned by ACCTREBUILD | 2026-10-22 |
 | 167.2.1.1.2 ACCTREBUILD | 0/? | Queued — booked 2026-10-22 (founder), split from UPNLVENUES D-04 | - |
 | 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
 | 167.2.1.1.1.1 MARKSOURCE | 0/? | Queued — booked 2026-10-22 (founder), after NAVMTM | - |

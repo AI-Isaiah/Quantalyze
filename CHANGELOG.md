@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.132.10.9] - 2026-10-22 — records: close UPNLVENUES 167.2.1.1
+
+### Notes
+- Phase 167.2.1.1 UPNLVENUES closed with verification passed. Shipped in v0.132.10.7 (#1110). Its planning artifacts (plans 01-06, research, two review rounds, security SECURED 25/25, verification) land on main, with the ACCTREBUILD design inputs that D-05 moved to Phase 167.2.1.1.2.
+- Post-deploy D-01 live read (read-only probe on the worker, booleans and ratios only): 6 active Bybit keys. 5 are revoked at the venue and refused authentication, which is their existing state. The one readable key had open uPnL, and on it ccxt `total` equals the wallet balance and equity minus wallet equals the open uPnL, which is the reading the anchor fix assumes.
+- D-02 record: all 6 active Bybit keys sit on 5 multi-key users, so no sole-key forced rebuild applied. All 5 allocators are recorded as owned by ACCTREBUILD 167.2.1.1.2. The derive re-run was not enqueued, because this phase changed no derive behaviour. No PROD row was written.
+- ROADMAP and STATE: the phase is ticked complete and the current position is updated by hand.
+
 ## [0.132.10.8] - 2026-10-22 — OKXHISTORY: quarterly archive files are read on OKX's UTC+8 quarter cut, and quarter-edge days are whole or missing (Phase 167.1.2.2.2.1, plans 18-19, D-15)
 
 ### Root cause
