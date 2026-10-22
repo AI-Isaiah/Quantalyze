@@ -5258,6 +5258,8 @@ Plans:
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-14, "Ship diagnostic, re-run (Recommended)"):** plan 14's first calibrate stopped on `quarter_range_mismatch` for 2026-Q2 and the stop dropped the observed dates. A diagnostic plan makes the stop carry them (dates and counts only), ships, and calibrate is re-run once; the mismatch fix itself is decided on those dates. Plan 15 waits for a passing calibrate.
 
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-15, "HK bounds, edge days whole-or-missing (Recommended)"):** the D-14 re-run showed the Q2 file starts 2026-03-31 (UTC): OKX cuts quarters on UTC+8. Files are accepted on UTC+8 bounds, daily totals stay on UTC days, and a quarter-edge UTC day counts only when both neighbouring files were read, otherwise it stays missing and named. Then calibrate is re-run.
+
 **Plans:** 17 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14)
 
 Plans:
