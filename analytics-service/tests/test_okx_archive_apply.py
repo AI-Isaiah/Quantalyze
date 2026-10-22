@@ -39,11 +39,13 @@ from services import job_worker, okx_archive_job
 from services.job_worker import DispatchOutcome, dispatch
 from tests.test_okx_archive_job import (
     KEY_ID,
+    LINK_SECRETS,
     OTHER_KEY_ID,
     STRATEGY_2_ID,
     STRATEGY_ID,
     _install as _install_base,
     _job,
+    _link,
     _World,
 )
 
@@ -2439,6 +2441,71 @@ class TestQuarterEdgeDaysEndToEnd:
         assert [(r["from"], r["to"]) for r in provenance["reconstructed_ranges"]] == [
             ("2026-07-01", "2026-07-15")
         ]
+
+
+def _nondigit_row(day: str) -> Callable[[int], str]:
+    """A ``_Bills.raw`` line function: a SWAP subType-2 bill on ``day`` whose billId is the
+    counter prefixed with ``x``, so it is not all digits. USDT, no effect at all, bal 5000."""
+
+    def line(n: int) -> str:
+        return (
+            f"SWAP,x{n},2,{_ms_at(day, 12)},0,0,5000,0,,,USDT,0,0,"
+            "cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
+        )
+
+    return line
+
+
+class TestUnchainableRowDiagnostic:
+    """D-16. Calibrate run 3 stopped ``archive_incomplete cause=unchainable_row`` and the stop
+    dropped which bills and how many, so the founder read an empty reading."""
+
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.asyncio
+    async def test_an_unchainable_stop_names_the_cause_split_the_rows_per_quarter_and_the_days(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: str
+    ) -> None:
+        """D-16. Calibrate run 3 stopped here, and the stop dropped which bills and how many,
+        so the founder could not tell a harmless blank line from a missing ccy on money or an
+        id the chain cannot order. The OPTION row reaches the chain because OPTION is outside
+        the live instTypes (``excluded_non_usd_rows``), while in a SWAP row a blank ccy with
+        money stops ``non_usd_ccy`` first."""
+        caplog.set_level(logging.DEBUG)
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().realized("2026-07-20", "1.5", inst="OPTION", ccy="")
+        bills.raw(_nondigit_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+        extra = {"approved_fingerprint": "d" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=2 blank_ccy=1 nondigit_bill_id=1 first_day=2026-07-20 last_day=2026-09-01 "
+            "rows_by_quarter=2026-Q3:2"
+        )
+        result = world.result()
+        assert result["stop_class"] == "archive_incomplete"
+        assert result["info"] == {
+            "bal_chain": {
+                "reason": "unchainable_row", "ccys": {}, "total_pairs": None,
+                "rows": 2, "blank_ccy": 1, "nondigit_bill_id": 1,
+                "first_day": "2026-07-20", "last_day": "2026-09-01",
+                "files": [{
+                    "ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15", "rows": 2,
+                    "blank_ccy": 1, "nondigit_bill_id": 1,
+                    "first_day": "2026-07-20", "last_day": "2026-09-01",
+                }],
+                "floor": 2,
+            }
+        }
+        everything = (outcome.error_message or "") + json.dumps(result) + caplog.text
+        for forbidden in ("800000012", "x800000013", "5001.5", "1.75", *LINK_SECRETS):
+            assert forbidden not in everything, f"leaked: {forbidden!r}"
+        assert result["fingerprint"] is None
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
 
 
 class TestNonExternalPnlIsInTheLiveNumber:
