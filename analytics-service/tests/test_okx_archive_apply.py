@@ -2833,6 +2833,69 @@ class TestBillIdExportWrap:
         assert _content_readings(result) == _content_readings(bare)
 
 
+def _sci_row(day: str) -> Callable[[int], str]:
+    """A ``_Bills.raw`` line function: a USDT SWAP subType-2 bill on ``day`` with ``balChg``,
+    ``pnl`` and ``fee`` 0 and ``bal`` 5000, whose billId is ``1.23E+17``. Scientific notation is
+    the form a spreadsheet gives a long id."""
+
+    def line(n: int) -> str:
+        return (
+            f"SWAP,1.23E+17,2,{_ms_at(day, 12)},0,0,5000,0,,,USDT,0,0,"
+            "cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
+        )
+
+    return line
+
+
+class TestNondigitShapeEndToEnd:
+    """D-17. A billId the strip cannot turn into ASCII digits still stops the run. Without the
+    shape the next stop would again say only that every id failed, not how, and the founder would
+    have nothing to decide on. The shape names the id's form and length and never the id."""
+
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.asyncio
+    async def test_a_scientific_notation_bill_id_stops_and_names_its_shape(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: str
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().raw(_sci_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+        extra = {"approved_fingerprint": "d" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
+            "first_nondigit_shape=9-Po-9{2}-A-Sm-9{2} first_nondigit_len=8 "
+            "rows_by_quarter=2026-Q3:1"
+        )
+        result = world.result()
+        assert result["info"] == {
+            "bal_chain": {
+                "reason": "unchainable_row", "ccys": {}, "total_pairs": None,
+                "rows": 1, "blank_ccy": 0, "nondigit_bill_id": 1,
+                "first_day": "2026-09-01", "last_day": "2026-09-01",
+                "first_nondigit_shape": "9-Po-9{2}-A-Sm-9{2}", "first_nondigit_len": 8,
+                "files": [{
+                    "ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15", "rows": 1,
+                    "blank_ccy": 0, "nondigit_bill_id": 1,
+                    "first_day": "2026-09-01", "last_day": "2026-09-01",
+                }],
+                "blank_ccy_skipped": 0,
+                "floor": 2,
+            }
+        }
+        everything = (outcome.error_message or "") + json.dumps(result) + caplog.text
+        for forbidden in ("1.23E+17", "1.23", "E+17", *LINK_SECRETS):
+            assert forbidden not in everything, f"leaked: {forbidden!r}"
+        assert result["fingerprint"] is None
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+
 class TestNonExternalPnlIsInTheLiveNumber:
     """WR-01. A liquidation transfer or forced repayment is not external capital (D-08), but a
     ``pnl`` and ``fee`` on it are inside the live aggregator's day total. The archive leg must

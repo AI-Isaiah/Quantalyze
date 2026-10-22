@@ -16,12 +16,14 @@ import ast
 import csv
 import dataclasses
 import io
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from services import okx_archive_classify
 from services.okx_archive_classify import (
     ARCHIVE_USD_FAMILY,
     LIVE_REALIZED_INST_TYPES,
@@ -1099,6 +1101,99 @@ class TestUnchainableTallyAcrossTwoFiles:
             ("2026-05-01", "2026-05-01"), ("2026-08-20", "2026-08-20"),
         ]
 
+
+
+#: ``(bill_id, shape)``, written by hand from the grammar: an ASCII digit is ``9``, an ASCII letter
+#: ``A``, tab/space/double quote/apostrophe ``TAB``/``SP``/``DQ``/``SQ``, any other character its
+#: Unicode category, a run of n equal symbols ``<symbol>{n}``, runs joined by ``-``, at most eight
+#: spelled out and then ``-MORE``.
+SHAPE_CASES = [
+    ("1.23E+17", "9-Po-9{2}-A-Sm-9{2}"),
+    ("x800000013", "A-9{9}"),
+    ("abc-3", "A{3}-Pd-9"),
+    ("2005\u00b2", "9{4}-No"),
+    ("7000 00004", "9{4}-SP-9{5}"),
+    ("7000\t00004", "9{4}-TAB-9{5}"),
+    ("7000'00004", "9{4}-SQ-9{5}"),
+    ('7000"00004', "9{4}-DQ-9{5}"),
+    ("=700000004", "Sm-9{9}"),
+    ("7000\u00a000004", "9{4}-Zs-9{5}"),
+    ("\u0661\u0662\u0663", "Nd{3}"),
+    ("\u00e91", "Ll-9"),
+    ("1a1a1a1a", "9-A-9-A-9-A-9-A"),
+    ("1a1a1a1a1", "9-A-9-A-9-A-9-A-MORE"),
+]
+SHAPE_IDS = [
+    "scientific", "letter-prefix", "dash", "superscript", "inner-space", "inner-tab",
+    "inner-apostrophe", "inner-double-quote", "formula", "nbsp", "arabic-indic", "accented",
+    "eight-runs", "nine-runs",
+]
+
+
+class TestNondigitBillIdShape:
+    """D-17. A billId still not ASCII digits after the strip stops as before, and the stop names
+    the first such id's shape and length, so the next reading says what the export did without
+    echoing the id. The shape is a closed alphabet: it must never carry a character of the id."""
+
+    @pytest.mark.parametrize(("bill_id", "shape"), SHAPE_CASES, ids=SHAPE_IDS)
+    def test_the_shape_maps_each_character_to_its_class_and_never_echoes_it(self, bill_id, shape):
+        """A shape that echoed a digit or a letter would carry file text into ``last_error``, the
+        log and the admin table (the account-size leak class). Each character becomes a class."""
+        made = okx_archive_classify._bill_id_shape(bill_id)
+
+        assert made == shape
+        assert re.fullmatch(r"[0-9A-Za-z{}-]+", made)
+        assert not re.search("[0-8]", re.sub(r"\{[0-9]+\}", "", made))
+
+    def test_the_stop_names_the_first_non_digit_id_in_row_order(self):
+        """``first`` means the first in row order. String or billId order would pick ``1.5E+3``
+        and send the founder to the wrong row."""
+        header, rows = _interleaved_q3(
+            _blank("2005", "2026-07-03 10:00:00", balChg="0.01"),
+            _blank("x2015", "2026-07-20 10:00:00"),
+            _blank("1.5E+3", "2026-08-20 10:00:00"),
+        )
+        detail = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset()).detail
+
+        assert (
+            detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["first_nondigit_shape"], detail["first_nondigit_len"],
+        ) == (3, 1, 2, "A-9{4}", 5)
+
+    def test_the_first_non_digit_id_is_taken_in_the_order_the_files_are_passed(self):
+        """``quarters[]`` order, then row order: the same two files passed the other way round
+        name the other id, so the reading points at the file the founder asked about first."""
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        q2 = _parsed(h2, [*r2, _new_row(h2, **_blank("x150", "2026-05-01 10:00:00"))], "Q2")
+        q3 = _parsed(h3, [*r3, _new_row(h3, **_blank("1.23E+17", "2026-08-20 10:00:00"))], "Q3")
+
+        forward = _stop(verify_bal_chain, [q2, q3], frozenset()).detail
+        backward = _stop(verify_bal_chain, [q3, q2], frozenset()).detail
+
+        assert (forward["first_nondigit_shape"], forward["first_nondigit_len"]) == ("A-9{3}", 4)
+        assert (backward["first_nondigit_shape"], backward["first_nondigit_len"]) == (
+            "9-Po-9{2}-A-Sm-9{2}", 8,
+        )
+
+    def test_the_shape_is_taken_after_the_strip(self):
+        """The wrap is export formatting. A shape that spelled it (``TAB``, ``SQ``, ``SP`` at its
+        edges) would describe the wrap, not the id that still fails."""
+        header, rows = _interleaved_q3(_blank("\t'1.23E+17' ", "2026-07-03 10:00:00"))
+        detail = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset()).detail
+
+        assert (detail["first_nondigit_shape"], detail["first_nondigit_len"]) == (
+            "9-Po-9{2}-A-Sm-9{2}", 8,
+        )
+
+    def test_a_stop_with_no_non_digit_id_names_no_shape(self):
+        """A stop on a blank-ccy bill alone has no non-digit id to describe: ``None``, never a
+        made-up shape."""
+        header, rows = _interleaved_q3(_blank("2005", "2026-07-03 10:00:00", balChg="0.01"))
+        detail = _stop(verify_bal_chain, [_parsed(header, rows, "Q3")], frozenset()).detail
+
+        assert (
+            detail["nondigit_bill_id"], detail["first_nondigit_shape"], detail["first_nondigit_len"],
+        ) == (0, None, None)
 
 # D-15: OKX cuts a quarter file at 00:00 UTC+8 (16:00 UTC the day before), so a real Q2 file
 # opens on 2026-03-31 and a real Q3 file on 2026-06-30. Each pair is (when UTC, balChg).
