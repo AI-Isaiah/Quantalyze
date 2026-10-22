@@ -29,6 +29,7 @@ import pytest
 import main_worker
 from services import job_worker, okx_archive_download, okx_archive_job
 from services.job_worker import DispatchOutcome, TIMEOUT_PER_KIND, dispatch
+from services.okx_archive_files import ArchiveParseError
 from services.okx_archive_download import LinkExpired
 
 KEY_ID = "11111111-1111-4111-8111-111111111111"
@@ -1580,6 +1581,17 @@ PARSE_CASES: list[tuple[str, Callable[[], bytes], str, str]] = [
 ]
 
 
+#: What the job appends after `parse=<label>` for the labels that carry evidence (D-14). Independent
+#: literals from the fixtures: the whole q2 fixture, served for a Q3 request, holds 14 rows, all outside
+#: the quarter, from 2026-04-01 to 2026-06-30. A label absent here appends nothing.
+PARSE_DETAIL_SUFFIX: dict[str, str] = {
+    "quarter_range_mismatch": (
+        " range_start=2026-07-01 range_end_exclusive=2026-10-01"
+        " observed_min_day=2026-04-01 observed_max_day=2026-06-30 rows_outside=14"
+    ),
+}
+
+
 #: The two classification stops whose result block carries the file's census (counts only):
 #: the founder reads the per-currency / per-subType picture there to decide what to do.
 #: Independent literals: each is `Q3_CENSUS` with the one row the case edits moved by hand
@@ -1615,6 +1627,7 @@ class TestIngestStops:
         outcome = await dispatch(_calibrate())
 
         result = _assert_stopped(world, outcome, stop_class, detail=f"quarter=2026-Q3 parse={label}"
+                                 f"{PARSE_DETAIL_SUFFIX.get(label, '')}"
                                  if label not in ("non_usd_ccy", "unknown_subtype_nonzero")
                                  else f"parse={label}")
         quarter = result["quarters"][0]
@@ -1653,6 +1666,120 @@ class TestIngestStops:
         step = okx_archive_job._QuarterStep(href=LINK_FULL)
         for secret in LINK_SECRETS:
             assert secret not in repr(reading) + repr(step)
+
+
+class TestQuarterRangeMismatchDiagnostic:
+    @pytest.mark.asyncio
+    async def test_a_straddling_file_names_the_requested_range_the_observed_utc_days_and_the_rows_outside(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """D-14. The first real calibrate stopped on `quarter_range_mismatch` and the stop
+        dropped the dates the parser had already computed. The founder needs the requested
+        range, the file's earliest and latest UTC day and the count of rows outside to choose
+        between a UTC+8 quarter cut and a shifted quarter label; a stop that drops them sends
+        the one re-run in blind. Here a Q3 file carries one Q2 row stamped one millisecond
+        before the quarter began, the boundary-straddle shape D-14 describes."""
+        world = _happy(monkeypatch)
+        q2_last_row = (FIXTURES / "q2_like.csv").read_text().splitlines()[-1]
+        world.csv_override = ("\n".join([*_q3_lines(), q2_last_row]) + "\n").encode()
+        outcome = await dispatch(_calibrate())
+
+        result = _assert_stopped(
+            world, outcome, "quarter_range_mismatch",
+            detail=(
+                "quarter=2026-Q3 parse=quarter_range_mismatch range_start=2026-07-01 "
+                "range_end_exclusive=2026-10-01 observed_min_day=2026-06-30 "
+                "observed_max_day=2026-09-30 rows_outside=1"
+            ),
+        )
+        quarter = result["quarters"][0]
+        assert quarter["ts_min_day"] is None and quarter["ts_max_day"] is None
+        assert result["census"] is None
+        everything = json.dumps(result) + (outcome.error_message or "") + caplog.text
+        for forbidden in ("600000014", "3428.45", "-3.30", *LINK_SECRETS):
+            assert forbidden not in everything, f"leaked: {forbidden!r}"
+        _assert_no_other_writes(world)
+
+    @pytest.mark.parametrize(
+        ("key", "poison"),
+        [
+            *[
+                (key, poison)
+                for key in ("range_start", "range_end_exclusive", "observed_min_day", "observed_max_day")
+                for poison in (
+                    _link("2026", "Q3"), "3428.45", "20260701", "2026-02-30", "2026-07-01\n",
+                    "\u0662\u0660\u0662\u0666-\u0660\u0667-\u0660\u0661", 20260701, None,
+                )
+            ],
+            *[("rows_outside", poison) for poison in (True, -1, "14", 1.5, None)],
+        ],
+        ids=lambda v: repr(v)[:24],
+    )
+    def test_a_value_that_is_not_a_calendar_day_or_a_count_reads_unreadable(
+        self, key: str, poison: object
+    ) -> None:
+        """The stop text is stored in `compute_jobs.last_error`, logged and shown in the admin
+        table, so it must never carry text that came from a file (the account-size and
+        bearer-link leak class, T-167.1.2.2.2.1-42). A date is echoed only when it is a real
+        ASCII calendar day and the count only when it is a non-negative int that is not a
+        bool; anything else reads `unreadable`, and the other four tokens stay intact."""
+        valid: dict[str, Any] = {
+            "range_start": "2026-07-01", "range_end_exclusive": "2026-10-01",
+            "observed_min_day": "2026-06-30", "observed_max_day": "2026-09-30", "rows_outside": 1,
+        }
+        stop = okx_archive_job._parse_stop(
+            ArchiveParseError("quarter_range_mismatch", {"requested": "2026 Q3", **valid, key: poison}), "2026-Q3"
+        )
+
+        expected_tokens = " ".join(
+            f"{k}={'unreadable' if k == key else v}" for k, v in valid.items()
+        )
+        assert stop.stop_class == "quarter_range_mismatch"
+        assert stop.detail == f"quarter=2026-Q3 parse=quarter_range_mismatch {expected_tokens}"
+        for secret in LINK_SECRETS:
+            assert secret not in stop.detail
+        if isinstance(poison, str) and poison:
+            assert poison not in stop.detail
+
+    def test_a_detail_without_its_keys_reads_unreadable_and_does_not_raise(self) -> None:
+        """A parser detail that drifts (a renamed or dropped key) must degrade to `unreadable`
+        and still stop the job with its class. A KeyError here would surface mid-calibration
+        as a crash instead of the permanent, named stop the founder reads."""
+        stop = okx_archive_job._parse_stop(ArchiveParseError("quarter_range_mismatch"), "2026-Q3")
+
+        assert stop.stop_class == "quarter_range_mismatch"
+        assert stop.detail == (
+            "quarter=2026-Q3 parse=quarter_range_mismatch range_start=unreadable "
+            "range_end_exclusive=unreadable observed_min_day=unreadable "
+            "observed_max_day=unreadable rows_outside=unreadable"
+        )
+
+    def test_an_empty_file_keeps_its_text_without_observed_tokens(self) -> None:
+        """`empty_file` maps to the same class but has no row, so it has no observed day. Its
+        text must stay as it was, so `parse=empty_file` is what tells it apart from a real
+        range mismatch when the founder reads `last_error`."""
+        stop = okx_archive_job._parse_stop(ArchiveParseError("empty_file", {"requested": "2026 Q3"}), "2026-Q3")
+
+        assert stop.stop_class == "quarter_range_mismatch"
+        assert stop.detail == "quarter=2026-Q3 parse=empty_file"
+
+    @pytest.mark.parametrize(
+        "label",
+        sorted(set(okx_archive_job._PARSE_STOP_CLASS) - {"quarter_range_mismatch"}),
+    )
+    def test_no_other_parse_label_echoes_its_detail(self, label: str) -> None:
+        """The tokens are keyed on the parser LABEL, not on which keys a detail happens to
+        carry. A label whose detail holds the same five keys, or any file-shaped text, must
+        still read exactly `quarter=<tag> parse=<label>`: widening the echo to other stops
+        would put file text into `last_error`."""
+        detail = {
+            "requested": "2026 Q3", "range_start": "2026-07-01", "range_end_exclusive": "2026-10-01",
+            "observed_min_day": "2026-06-30", "observed_max_day": "2026-09-30", "rows_outside": 1,
+            "link": _link("2026", "Q3"),
+        }
+        stop = okx_archive_job._parse_stop(ArchiveParseError(label, detail), "2026-Q3")
+
+        assert stop.detail == f"quarter=2026-Q3 parse={label}"
 
 
 # ---------------------------------------------------------------------------

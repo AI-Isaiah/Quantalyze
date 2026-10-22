@@ -485,7 +485,8 @@ Expected readback: `this_run_jobs 1`. The idempotency key makes a repeat of the 
 returns the same job; use a new `RUN` for a new preflight. Then read the job (below) until it is `done`.
 
 **Read the result.** `job-result` lists the five newest jobs of the kind: status, attempts,
-`next_attempt_at`, the class prefix of `last_error`, `stop_class` from the result, and the whole
+`next_attempt_at`, the class prefix of `last_error`, `last_error` whole (by the job contract it carries
+dates, counts and closed-vocabulary classes only), `stop_class` from the result, and the whole
 `member_progress` object as text. The CSV goes to `TS_SP` and is read there; **its `member_progress`
 column carries amounts and is never pasted into a tracked file or a chat.**
 
@@ -498,6 +499,7 @@ j AS (
 SELECT m.marker_is_prod, j.idempotency_key, j.metadata ->> 'mode' AS mode, j.status, j.attempts, j.max_attempts,
        j.next_attempt_at,
        substring(j.last_error from '^okx_archive_rebuild: ([a-z0-9_]+)') AS error_class,
+       j.last_error,
        j.error_kind,
        j.metadata ->> 'member_progress_at' AS progress_at,
        j.metadata -> 'member_progress' ->> 'stop_class' AS stop_class,
@@ -594,7 +596,13 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
 **Calibrate reading, from `member_progress`** (read in `TS_SP`, counts and dates only into any note):
 
 - `quarters[]`: `state` `finished` for both, `container`, `has_type_column`, `ts_min_day` / `ts_max_day`
-  matching the quarter (a mismatch is the STOP `quarter_range_mismatch`).
+  matching the quarter (a mismatch is the STOP `quarter_range_mismatch`). For a refused file the block's
+  `ts_min_day` / `ts_max_day` stay null; read the stop's `last_error` instead (the `last_error` column of
+  `job-result`). It names `range_start` and `range_end_exclusive` (the requested quarter as a half-open UTC
+  calendar range), `observed_min_day` and `observed_max_day` (the file's earliest and latest `ts` as UTC
+  days) and `rows_outside` (the count of rows outside the range); `unreadable` marks a value the job would
+  not echo. An `empty_file` stop (`parse=empty_file`) carries none of these. The dates go to the founder,
+  whose call the mismatch fix is (D-14); do not re-enqueue to get past it.
   Also in the result, per quarter: `quarters[].longest_billless_run` (`{days, from, to}`). Step 3 reads it
   with `info.bal_chain`, the one balance-chain proof.
 - `info.bal_chain`: on a clean calibrate, `ccys.<ccy>` with `pairs_checked`, `first_day` and `last_day`
