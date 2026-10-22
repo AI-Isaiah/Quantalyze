@@ -29,12 +29,46 @@ test body so a missing implementation fails the test instead of the collection.
 
 from __future__ import annotations
 
-from datetime import date
+import copy
+from datetime import date, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from services import equity_reconstruction as er
+from services.equity_reconstruction import run_reconstruct_allocator_history_job
+from services.job_worker import DispatchOutcome
+from tests.test_equity_reconstruction import (
+    ALLOCATOR_ID,
+    API_KEY_ID_1,
+    API_KEY_ID_2,
+    _install_fake_audit,
+)
+from tests.test_reconstruct_force_rebuild import (
+    COMPLETE,
+    MARKER,
+    SENTINEL_ROWS,
+    SENTINEL_VALUE,
+    _audit_metadata,
+    _bybit_exchange,
+    _forced_job,
+    _seed_sentinel_rows,
+    _venue_coin_equity,
+)
+from tests.test_reconstruct_marker_writer import (
+    END_DATE,
+    _crawl_exchange,
+    _freeze_now,
+    _marker_of,
+    _MarkerFake,
+)
+from tests.test_upnl_venues import (
+    BYBIT_LINEAR_POSITIONS,
+    bybit_coin,
+    bybit_wallet_balance,
+    real_bybit_parse_balance,
+)
 
 
 def _key(key_id: str, exchange: str, **overrides: Any) -> dict[str, Any]:
@@ -412,3 +446,173 @@ def test_merge_account_telemetry_of_mt5_alone_is_the_honest_default() -> None:
     assert merged["anchor_positions_unread"] is False
     assert merged["anchor_offset_skipped_usd"] == 0.0
     assert merged["anchor_partial_ticker_symbols"] == []
+
+
+# --------------------------------------------------------------------------- handler
+
+
+def _seed_account_key(
+    fake: Any,
+    key_id: str,
+    exchange: str,
+    *,
+    venue_account_id: str | None,
+    marker: str | None = MARKER,
+    is_active: bool = True,
+    sync_status: str | None = "ok",
+    disconnected_at: str | None = None,
+    share_kind: str | None = None,
+    shared_with: str | None = None,
+) -> None:
+    """One api_keys row of ALLOCATOR_ID with every column the account rules read."""
+    fake.store[("api_keys", (key_id,))] = {
+        "id": key_id,
+        "user_id": ALLOCATOR_ID,
+        "exchange": exchange,
+        "is_active": is_active,
+        "sync_status": sync_status,
+        "disconnected_at": disconnected_at,
+        "venue_account_id": venue_account_id,
+        "account_share_kind": share_kind,
+        "account_shared_with_api_key_id": shared_with,
+        "history_reconstructed_at": marker,
+        "history_reconstruct_attempts": 1,
+    }
+
+
+def _install_account_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: Any,
+    exchanges: dict[str, Any],
+    results: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """A per-key ``_allocator_key_preflight``: ``_install_fake_preflight`` answers the SAME
+    exchange and venue for every key id, which cannot model a two-account book.
+
+    A key id found in ``results`` answers that value (a DispatchResult, say), else a ready
+    ``_ExchangeContext`` over the key's seeded row and ``exchanges[key_id]``. Returns the
+    list every call appends its job dict to, so a test can see which keys were opened."""
+    from services import db as db_module
+    from services import job_worker as jw
+
+    calls: list[dict[str, Any]] = []
+
+    async def _preflight(job: dict[str, Any], caller_name: str) -> Any:
+        calls.append(dict(job))
+        key_id = job["api_key_id"]
+        if results is not None and key_id in results:
+            return results[key_id]
+        return jw._ExchangeContext(
+            supabase=fake,
+            strategy_row=None,
+            key_row=dict(fake.store[("api_keys", (key_id,))]),
+            exchange=exchanges[key_id],
+        )
+
+    monkeypatch.setattr(jw, "_allocator_key_preflight", _preflight)
+    monkeypatch.setattr(er, "_allocator_key_preflight", _preflight, raising=False)
+    monkeypatch.setattr(db_module, "get_supabase", lambda: fake)
+    monkeypatch.setattr(er, "get_supabase", lambda: fake, raising=False)
+    return calls
+
+
+async def _bybit_account_exchange(
+    payload: dict[str, Any], positions: list[dict[str, Any]]
+) -> AsyncMock:
+    """The marker-writer crawl exchange as Bybit whose balance is ccxt's REAL parse of
+    ``payload`` and whose open positions are ``positions``."""
+    exchange = _crawl_exchange()
+    exchange.id = "bybit"
+    exchange.fetch_balance = AsyncMock(return_value=await real_bybit_parse_balance(payload))
+    exchange.fetch_positions = AsyncMock(return_value=list(positions))
+    return exchange
+
+
+def _usdt_equity(payload: dict[str, Any]) -> float:
+    """The payload's own USDT coin ``equity``: the oracle, never produced by the code under test."""
+    (coin,) = [c for c in payload["result"]["list"][0]["coin"] if c["coin"] == "USDT"]
+    return float(coin["equity"])
+
+
+def _window_rpc_calls(fake: Any) -> list[dict[str, Any]]:
+    return [p for (n, p) in fake.rpc_calls if n == "replace_allocator_equity_snapshots_window"]
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_of_a_two_account_book_replaces_its_window_with_the_summed_anchored_curves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UPNLVENUES D-04 end to end, the tracer of the worker half. An allocator holds two
+    distinct Bybit exchange accounts (USDT coin equity 1250.5 and 540). A FORCED rebuild
+    crawls both with the anchor, adds them on the shared days, and replaces ONLY its window
+    in ONE window call: every in-window row is the sum of the two payloads' own coin
+    ``equity`` fields (1790.5), the day older than the window keeps every column it had
+    (D-01), and the seam date is recorded (D-03).
+
+    RED on first-writer-wins: a forced persist through the DO-NOTHING path leaves the ten
+    sentinel rows untouched (drill D-A). RED at the base commit: the job refused
+    ``multi_key`` before any crawl."""
+    fake = _MarkerFake()
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
+    _seed_account_key(fake, API_KEY_ID_2, "bybit", venue_account_id="fixture-acct-2")
+    _seed_sentinel_rows(fake)
+    older_asof = (END_DATE - timedelta(days=800)).date().isoformat()
+    older_key = ("allocator_equity_snapshots", (ALLOCATOR_ID, older_asof))
+    fake.store[older_key] = {
+        "allocator_id": ALLOCATOR_ID,
+        "asof": older_asof,
+        "value_usd": 777.0,
+        "breakdown": {"BTC": 777.0},
+        "source": "exchange_primary",
+        "history_depth_months": 24,
+        "reconstructed_at": "2025-01-01T00:00:00+00:00",
+    }
+    older_before = copy.deepcopy(fake.store[older_key])
+    audit = _install_fake_audit(monkeypatch)
+    exchange_1 = await _bybit_exchange()
+    payload_2 = bybit_wallet_balance("UNIFIED", [bybit_coin("USDT", "500", "40")])
+    exchange_2 = await _bybit_account_exchange(
+        payload_2, [{**BYBIT_LINEAR_POSITIONS[0], "unrealizedPnl": 40.0}]
+    )
+    _install_account_preflight(
+        monkeypatch, fake, {API_KEY_ID_1: exchange_1, API_KEY_ID_2: exchange_2}
+    )
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    for exchange in (exchange_1, exchange_2):
+        assert exchange.fetch_my_trades.await_count > 0, "an exchange account was not crawled"
+        assert exchange.fetch_positions.await_count > 0, "an exchange account was not anchored"
+    assert len(_window_rpc_calls(fake)) == 1, fake.rpc_calls
+    assert [n for (n, _p) in fake.rpc_calls if n == "replace_allocator_equity_snapshots"] == []
+
+    expected = round(_venue_coin_equity() + _usdt_equity(payload_2), 2)
+    assert expected == 1790.5
+    in_window = [
+        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] != older_asof
+    ]
+    assert len(in_window) == SENTINEL_ROWS, in_window
+    for row in in_window:
+        assert row["value_usd"] == pytest.approx(expected, abs=0.01), (
+            f"day {row['asof']} holds {row['value_usd']}, not the sum {expected} of both accounts"
+        )
+        assert row["value_usd"] != SENTINEL_VALUE
+    assert fake.store[older_key] == older_before, "the day older than the window was rewritten"
+
+    boundary = fake.store[("allocator_equity_derived", (ALLOCATOR_ID, "snapshot_rebuild_boundary"))]
+    assert boundary["payload"] == {
+        "boundary_date": (END_DATE - timedelta(days=730)).date().isoformat()
+    }
+
+    assert _marker_of(fake, API_KEY_ID_1) != MARKER, "the job's own key was not marked complete"
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["atomic_replace"] is True
+    assert complete["account_rebuild"] is True
+    assert complete["account_key_count"] == 2
+    assert complete["account_exchange_accounts"] == 2
+    assert complete["account_zero_contribution_accounts"] == 0
+    assert complete["account_days_incomplete"] == 0
+    assert complete["window_days"] == 730
+    assert complete["forced_rebuild"] is True
