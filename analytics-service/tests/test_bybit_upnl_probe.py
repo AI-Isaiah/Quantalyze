@@ -329,3 +329,326 @@ async def test_run_end_to_end_prints_two_key_records_and_a_summary(
     for leak in (_WALLET, _EQUITY, _UPNL, _KEY_ID_ONE, _KEY_ID_TWO):
         assert leak not in joined, leak
     assert not re.search(r"\d{2}:\d{2}:\d{2}", joined)
+
+
+# ---------------------------------------------------------------------------
+# Record semantics: confirmation, flat key, borrow, CONTRACT, missing fields.
+# ---------------------------------------------------------------------------
+
+_RUN_DATE = "2026-10-22"
+
+
+def _measure(
+    wallet: dict[str, Any],
+    positions: dict[str, Any] | None = None,
+    ccxt_total: Any = 1000.0,
+) -> dict[str, Any]:
+    return bp.measure_key("k1", _RUN_DATE, wallet, positions, ccxt_total)
+
+
+def _parser() -> Any:
+    """ccxt's REAL Bybit parser, credential-free, as the probe builds it."""
+    import ccxt.async_support as ccxt_async
+
+    return ccxt_async.bybit({})
+
+
+def test_real_ccxt_parse_balance_total_is_the_wallet_balance_not_the_equity() -> None:
+    """The finding plan 01 rests on, pinned on the installed parser: with a
+    nonzero uPnL the parsed ``total`` is walletBalance (1000), not equity (1250.5)."""
+    parsed = _parser().parse_balance(_open_wallet())
+    assert parsed["USDT"]["total"] == 1000.0
+    assert parsed["USDT"]["total"] != 1250.5
+
+
+def test_a_flat_key_is_recorded_as_non_informative() -> None:
+    rec = _measure(_flat_wallet(), _positions_resp([]), ccxt_total=500.0)
+    assert rec["upnl_nonzero"] is False
+    assert rec["upnl_ratio"] == "field-absent"
+    # The identity holds trivially at zero uPnL, which is exactly why a flat key
+    # must not be counted as confirmation.
+    assert rec["coin_equity_minus_wallet_equals_upnl"] is True
+    summary = bp.summarize([rec], _RUN_DATE)
+    assert summary["keys_informative"] == 0
+    assert summary["keys_identity_holds"] == 0
+
+
+def test_margin_borrow_makes_the_coin_identity_false_and_is_recorded_as_the_reason() -> None:
+    wallet = _wallet_resp(
+        [_coin("USDT", wallet=_WALLET, equity="1150.5", upnl=_UPNL, spot_borrow="100")],
+        total_equity="1150.5",
+        total_wallet=_WALLET,
+        total_perp_upl=_UPNL,
+    )
+    rec = _measure(wallet, _positions_resp([_UPNL]))
+    # equity - wallet = 150.5, not the 250.5 of uPnL: the borrow explains the gap.
+    assert rec["coin_equity_minus_wallet_equals_upnl"] is False
+    assert rec["borrow_present"] is True
+    assert rec["upnl_ratio"] == 0.601  # 150.5 / 250.5 = 0.60080 -> 0.601
+    assert rec["upnl_nonzero"] is True
+
+
+async def test_contract_account_is_read_after_a_unified_bad_request() -> None:
+    import ccxt
+
+    contract = _wallet_resp(
+        [_coin("USDT", wallet=_WALLET, equity=_EQUITY, upnl=_UPNL)],
+        account_type="CONTRACT",
+    )
+    client = _StubBybit(
+        wallet_effects=[ccxt.BadRequest("accountType only supports UNIFIED"), contract],
+        positions=_positions_resp([_UPNL]),
+    )
+    rec = await bp.measure_key_live(client, "k1", _RUN_DATE, _parser())
+    assert client.wallet_calls == [{"accountType": "UNIFIED"}, {"accountType": "CONTRACT"}]
+    assert rec["account_type"] == "CONTRACT"
+    assert rec["coin_equity_minus_wallet_equals_upnl"] is True  # from the CONTRACT response
+    assert rec["ccxt_total_equals_wallet"] is True
+    # A CONTRACT response carries no account totals: absent, not false.
+    assert rec["account_equity_minus_wallet_equals_perp_upl"] == "field-absent"
+    assert rec["positions_upnl_matches_totalperpupl"] == "field-absent"
+
+
+async def test_an_empty_unified_list_falls_back_to_contract_once() -> None:
+    empty = {"retCode": 0, "result": {"list": []}}
+    contract = _wallet_resp([_coin("USDT", wallet="10", equity="10", upnl="0")], account_type="CONTRACT")
+    client = _StubBybit(wallet_effects=[empty, contract], positions=_positions_resp([]))
+    rec = await bp.measure_key_live(client, "k1", _RUN_DATE, _parser())
+    assert len(client.wallet_calls) == 2
+    assert rec["account_type"] == "CONTRACT"
+
+
+async def test_two_empty_wallet_reads_are_an_empty_response_failure() -> None:
+    empty = {"retCode": 0, "result": {"list": []}}
+    client = _StubBybit(wallet_effects=[empty, empty], positions=_positions_resp([]))
+    with pytest.raises(bp.EmptyResponseError):
+        await bp.measure_key_live(client, "k1", _RUN_DATE, _parser())
+    assert len(client.wallet_calls) == 2  # UNIFIED then CONTRACT, never a third
+    assert bp.classify_failure(bp.EmptyResponseError("x")) == "EmptyResponse"
+
+
+def test_a_missing_venue_field_reads_field_absent_never_zero_or_false() -> None:
+    # No coin ``equity``: the coin identity and the ratio cannot be computed.
+    no_equity = _wallet_resp(
+        [_coin("USDT", wallet=_WALLET, equity=None, upnl=_UPNL)],
+        total_equity=_EQUITY,
+        total_wallet=_WALLET,
+        total_perp_upl=_UPNL,
+    )
+    rec = _measure(no_equity, _positions_resp([_UPNL]))
+    assert rec["coin_equity_minus_wallet_equals_upnl"] == "field-absent"
+    assert rec["upnl_ratio"] == "field-absent"
+    assert rec["upnl_nonzero"] is True  # the uPnL itself is present
+
+    # No ``totalPerpUPL``: the account identity and the positions match cannot be computed.
+    no_perp = _wallet_resp(
+        [_coin("USDT", wallet=_WALLET, equity=_EQUITY, upnl=_UPNL)],
+        total_equity=_EQUITY,
+        total_wallet=_WALLET,
+        total_perp_upl=None,
+    )
+    rec = _measure(no_perp, _positions_resp([_UPNL]))
+    assert rec["account_equity_minus_wallet_equals_perp_upl"] == "field-absent"
+    assert rec["positions_upnl_matches_totalperpupl"] == "field-absent"
+    assert rec["coin_equity_minus_wallet_equals_upnl"] is True  # untouched by the gap
+
+    # No USDT coin row at all and no coin borrow fields: every coin-level reading is absent.
+    no_usdt = _wallet_resp([_coin("BTC", wallet="1", equity="1", upnl="0", spot_borrow=None, borrow_amount=None)])
+    rec = _measure(no_usdt)
+    for name in (
+        "coin_equity_minus_wallet_equals_upnl",
+        "upnl_nonzero",
+        "upnl_ratio",
+        "borrow_present",
+        "ccxt_total_equals_wallet",
+        "account_equity_minus_wallet_equals_perp_upl",
+    ):
+        assert rec[name] == "field-absent", name
+
+    # An empty-string venue number is absent too, not zero.
+    blank = _wallet_resp([_coin("USDT", wallet=_WALLET, equity="", upnl=_UPNL)])
+    assert _measure(blank)["coin_equity_minus_wallet_equals_upnl"] == "field-absent"
+
+
+def test_a_response_with_no_account_type_reads_field_absent() -> None:
+    wallet = _wallet_resp([_coin("USDT", wallet="1", equity="1", upnl="0")], account_type=None)
+    assert _measure(wallet)["account_type"] == "field-absent"
+    other = _wallet_resp([_coin("USDT", wallet="1", equity="1", upnl="0")], account_type="FUND")
+    assert _measure(other)["account_type"] == "other"
+
+
+def test_non_usdt_coins_and_their_upnl_are_recorded_separately() -> None:
+    base = [_coin("USDT", wallet=_WALLET, equity=_EQUITY, upnl=_UPNL)]
+    held_only = _wallet_resp(base + [_coin("USDC", wallet="200", equity="200", upnl="0")])
+    rec = _measure(held_only)
+    assert rec["non_usdt_coins_present"] is True
+    assert rec["non_usdt_upnl_present"] is False
+
+    with_upnl = _wallet_resp(base + [_coin("USDC", wallet="200", equity="205", upnl="5")])
+    rec = _measure(with_upnl)
+    assert rec["non_usdt_coins_present"] is True
+    assert rec["non_usdt_upnl_present"] is True
+
+    only_usdt = _wallet_resp(base)
+    rec = _measure(only_usdt)
+    assert rec["non_usdt_coins_present"] is False
+    assert rec["non_usdt_upnl_present"] is False
+
+
+def test_positions_that_do_not_sum_to_total_perp_upl_are_a_recorded_mismatch() -> None:
+    rec = _measure(_open_wallet(), _positions_resp(["150", "50"]))  # 200 against 250.5
+    assert rec["positions_upnl_matches_totalperpupl"] is False
+    rec = _measure(_open_wallet(), _positions_resp(["100.25", "150.25"]))  # 250.5 against 250.5
+    assert rec["positions_upnl_matches_totalperpupl"] is True
+
+
+def test_an_untrustworthy_position_list_is_absent_not_a_match() -> None:
+    # A further page the single read did not take: the sum is a partial sum.
+    truncated = _positions_resp([_UPNL], next_cursor="page-2")
+    assert _measure(_open_wallet(), truncated)["positions_upnl_matches_totalperpupl"] == "field-absent"
+    # A row without a number.
+    blank_row = _positions_resp([""])
+    assert _measure(_open_wallet(), blank_row)["positions_upnl_matches_totalperpupl"] == "field-absent"
+
+
+async def test_a_failed_position_read_is_recorded_and_the_key_is_still_measured() -> None:
+    import ccxt
+
+    client = _StubBybit(
+        _open_wallet(),
+        positions_effect=ccxt.ExchangeError("boom 4321.5 signature=abc"),
+    )
+    rec = await bp.measure_key_live(client, "k1", _RUN_DATE, _parser())
+    assert rec["read_ok"] is True
+    assert rec["positions_read_ok"] is False
+    assert rec["failure_class"] == "none"  # the wallet read did not fail
+    assert rec["positions_upnl_matches_totalperpupl"] == "field-absent"
+    assert rec["coin_equity_minus_wallet_equals_upnl"] is True
+
+
+async def test_ccxt_total_comparison_uses_the_real_parser_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = _parser()
+    client = _StubBybit(_open_wallet(), _positions_resp([_UPNL]))
+    rec = await bp.measure_key_live(client, "k1", _RUN_DATE, parser)
+    assert rec["ccxt_total_equals_wallet"] is True  # the real parse: total == 1000 == wallet
+
+    # If a ccxt release ever folded uPnL into ``total``, the record would say so.
+    monkeypatch.setattr(parser, "parse_balance", lambda _resp: {"USDT": {"total": 1250.5}})
+    client = _StubBybit(_open_wallet(), _positions_resp([_UPNL]))
+    rec = await bp.measure_key_live(client, "k1", _RUN_DATE, parser)
+    assert rec["ccxt_total_equals_wallet"] is False
+
+    # A parser that cannot parse leaves the comparison absent, never false.
+    def _boom(_resp: Any) -> Any:
+        raise ValueError("unparseable")
+
+    monkeypatch.setattr(parser, "parse_balance", _boom)
+    client = _StubBybit(_open_wallet(), _positions_resp([_UPNL]))
+    rec = await bp.measure_key_live(client, "k1", _RUN_DATE, parser)
+    assert rec["ccxt_total_equals_wallet"] == "field-absent"
+
+
+def test_venue_decimals_equal_within_one_unit_of_eight_decimals_and_no_further() -> None:
+    off_by_one_unit = _wallet_resp(
+        [_coin("USDT", wallet="1000.00000000", equity="1250.50000001", upnl="250.5")],
+    )
+    assert _measure(off_by_one_unit)["coin_equity_minus_wallet_equals_upnl"] is True
+    off_by_a_cent = _wallet_resp(
+        [_coin("USDT", wallet="1000", equity="1250.51", upnl="250.5")],
+    )
+    assert _measure(off_by_a_cent)["coin_equity_minus_wallet_equals_upnl"] is False
+
+
+# ---------------------------------------------------------------------------
+# Redaction and the emitter.
+# ---------------------------------------------------------------------------
+
+_SECRET_WALLET = "9137.4521"
+_SECRET_UPNL = "61.2389"
+_SECRET_EQUITY = "9198.691"
+
+
+def _distinctive_record() -> dict[str, Any]:
+    wallet = _wallet_resp(
+        [_coin("USDT", wallet=_SECRET_WALLET, equity=_SECRET_EQUITY, upnl=_SECRET_UPNL)],
+        total_equity=_SECRET_EQUITY,
+        total_wallet=_SECRET_WALLET,
+        total_perp_upl=_SECRET_UPNL,
+    )
+    return bp.measure_key("k1", _RUN_DATE, wallet, _positions_resp([_SECRET_UPNL]), 9137.4521)
+
+
+def test_output_carries_no_amount_and_exactly_the_declared_keys() -> None:
+    rec = _distinctive_record()
+    line = bp.emit_record(rec)
+    parsed = json.loads(line)
+    assert set(parsed) == set(bp.KEY_RECORD_KEYS)
+    for amount in (9137.4521, 61.2389, 9198.691):
+        for text in {repr(amount), str(amount), f"{abs(amount):g}"}:
+            assert text not in line, f"amount {text} reached the output"
+    lowered = line.lower()
+    for banned in ("secret", "token", "api_key", "account_id", "strategy", "uuid", "email"):
+        assert banned not in lowered
+    assert not re.search(r"\d{2}:\d{2}:\d{2}", line)  # no clock time finer than a day
+    assert parsed["run_date"] == _RUN_DATE
+
+    summary = json.loads(bp.emit_record(bp.summarize([rec], _RUN_DATE)))
+    assert set(summary) == set(bp.SUMMARY_RECORD_KEYS)
+
+
+def test_emitter_refuses_a_key_or_a_value_outside_the_whitelist() -> None:
+    rec = _distinctive_record()
+    bp.emit_record(rec)  # control: the honest record prints
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, equity=9198.691))  # an extra key: a leaked amount
+
+    missing = dict(rec)
+    del missing["borrow_present"]
+    with pytest.raises(ValueError):
+        bp.emit_record(missing)
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, upnl_ratio=0.60080))  # not rounded to 3 s.f.
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, borrow_present="true"))  # a string where a boolean is declared
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, failure_class="AuthenticationError: 4321.5"))  # off the allow-list
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, key="key-1"))
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, key="k123"))
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, run_date="2026-10-22T10:30:15Z"))  # finer than the run date
+
+    summary = bp.summarize([rec], _RUN_DATE)
+    bp.emit_record(summary)  # control
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(summary, keys=True))  # True where a count is declared
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(summary, keys=1.0))
+
+    with pytest.raises(ValueError):
+        bp.emit_record(dict(rec, record="other"))
+
+    # The refusal names the path, never the offending value.
+    with pytest.raises(ValueError) as exc:
+        bp.emit_record(dict(rec, failure_class="boom 4321.5"))
+    assert "4321.5" not in str(exc.value)
+    assert "failure_class" in str(exc.value)
+
+
+def test_floats_are_rounded_to_three_significant_figures() -> None:
+    assert bp.sig3(0.123456) == 0.123
+    assert bp.sig3(1234.5) == 1230.0
+    assert bp.sig3(0.0) == 0.0
+    assert bp.sig3(float("inf")) == "non-finite"
+    assert bp.sig3(float("nan")) == "non-finite"
