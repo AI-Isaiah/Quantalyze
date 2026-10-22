@@ -5277,7 +5277,7 @@ Plans:
 - [ ] 167.1.2.2.2.1-14-PLAN.md — founder step: calibrate on the real Q2/Q3 files; any day above one cent STOPS (D-10)
 - [ ] 167.1.2.2.2.1-15-PLAN.md — founder decision on apply timing; PROD apply with before/after; survival after the next tick; Wave 5 hand-off
 - [x] 167.1.2.2.2.1-16-PLAN.md — the durable job's stateless wait on OKX and the ingest (download, parse, per-quarter readings); a lost link never yields a partial result (SC-1)
-- [ ] 167.1.2.2.2.1-17-PLAN.md — the `quarter_range_mismatch` stop names the requested range, the observed min/max UTC days and the rows outside in `last_error`, dates and counts only (D-14)
+- [x] 167.1.2.2.2.1-17-PLAN.md — the `quarter_range_mismatch` stop names the requested range, the observed min/max UTC days and the rows outside in `last_error`, dates and counts only (D-14)
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
