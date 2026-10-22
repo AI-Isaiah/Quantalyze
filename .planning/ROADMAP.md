@@ -5517,6 +5517,8 @@ Plans:
 2. An account holding OKX keys is rebuilt over the last 90 days only; older stored days are left as they are, and the 90-day boundary is stated.
 3. Post-deploy, each of the 5 accounts is rebuilt or refused, recorded as counts and reasons only.
 4. Stored days the rebuild would drop are a founder decision, never a silent delete.
+
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-01..D-03):** older stored days outside the rebuild window keep their values and the boundary date is recorded ("Keep them as they are"); a stored day inside the window the rebuild cannot reproduce refuses that account, counts only ("Refuse that account"); the step at the seam stays and its date is stored ("Allow the step, mark the date").
 **Plans:** 0 plans
 
 Plans:
