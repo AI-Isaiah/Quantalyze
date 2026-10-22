@@ -1419,3 +1419,137 @@ async def test_a_failed_marker_stamp_on_a_rebuilt_account_fails_the_job_transien
     assert all(r["value_usd"] != SENTINEL_VALUE for r in in_window), (
         "the replaced rows were rolled back; the retry relies on them being idempotent, not gone"
     )
+
+
+# ------------------------------------------------------ one exchange account, crawled once
+#
+# T-167.2.1.1.2-28: a duplicate key reads the SAME exchange account as the key it duplicates,
+# so crawling both would add that account to the stored aggregate twice.
+
+
+def _seed_duplicate_key_book(fake: Any) -> None:
+    """Key 1 and key 2 read ONE Bybit exchange account (key 2 is a marked duplicate of key 1);
+    key 3 is a second account. Keys 2 and 3 are unmarked, key 1 carries the old marker."""
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
+    _seed_account_key(
+        fake, API_KEY_ID_2, "bybit", venue_account_id=None, marker=None,
+        share_kind="duplicate", shared_with=API_KEY_ID_1,
+    )
+    _seed_account_key(fake, _THIRD_KEY_ID, "bybit", venue_account_id="fixture-acct-3", marker=None)
+    _seed_sentinel_rows(fake)
+
+
+async def _run_duplicate_key_job(
+    monkeypatch: pytest.MonkeyPatch, job_key_id: str
+) -> tuple[Any, Any, Any, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """A forced job on ``job_key_id`` over the duplicate-key book. Key 2 is given its OWN
+    exchange reading the same payload as key 1, so a crawl through it would double count.
+    Returns (result, fake, audit, preflight job log, exchanges by key id, payload of key 3)."""
+    fake = _MarkerFake()
+    _seed_duplicate_key_book(fake)
+    audit = _install_fake_audit(monkeypatch)
+    payload_3 = bybit_wallet_balance("UNIFIED", [bybit_coin("USDT", "500", "40")])
+    exchanges = {
+        API_KEY_ID_1: await _bybit_exchange(),
+        API_KEY_ID_2: await _bybit_exchange(),
+        _THIRD_KEY_ID: await _bybit_account_exchange(
+            payload_3, [{**BYBIT_LINEAR_POSITIONS[0], "unrealizedPnl": 40.0}]
+        ),
+    }
+    calls = _install_account_preflight(monkeypatch, fake, exchanges)
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job(job_key_id))
+    return result, fake, audit, calls, exchanges, payload_3
+
+
+def _assert_duplicate_key_book_summed_once(
+    fake: Any, audit: Any, payload_3: dict[str, Any]
+) -> None:
+    expected = round(_usdt_equity(BYBIT_UNIFIED_WALLET_BALANCE) + _usdt_equity(payload_3), 2)
+    assert expected == 1790.5
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert len(rows) == SENTINEL_ROWS, rows
+    for row in rows:
+        assert row["value_usd"] == pytest.approx(expected, abs=0.01), (
+            f"day {row['asof']} holds {row['value_usd']}, not the two accounts once each {expected}"
+        )
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["account_key_count"] == 3
+    assert complete["account_exchange_accounts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_two_keys_on_one_exchange_account_are_crawled_and_counted_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-167.2.1.1.2-28. Keys 1 and 2 read ONE exchange account, so a forced job on key 1
+    crawls it through key 1 alone: no session is opened for key 2, its exchange is never
+    asked anything, and every stored row is the two exchange accounts' own coin equity added
+    once each (computed here from the payloads). All three keys end marked, key 2 included:
+    it belongs to a rebuilt exchange account.
+
+    RED when the crawl takes every key instead of the selection (drill I: key 2's exchange
+    reads the same payload, so the rows come out 1250.5 too high) and RED when only the job's
+    key is stamped (drill J)."""
+    result, fake, audit, calls, exchanges, payload_3 = await _run_duplicate_key_job(
+        monkeypatch, API_KEY_ID_1
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert API_KEY_ID_2 not in [c["api_key_id"] for c in calls], "a session was opened for the duplicate"
+    _assert_no_venue_call(exchanges[API_KEY_ID_2], "the duplicate key's exchange")
+    assert exchanges[API_KEY_ID_1].fetch_my_trades.await_count > 0
+    assert exchanges[_THIRD_KEY_ID].fetch_my_trades.await_count > 0
+    _assert_duplicate_key_book_summed_once(fake, audit, payload_3)
+    assert _marker_of(fake, API_KEY_ID_1) != MARKER, "the job's own key was not re-stamped"
+    assert _marker_of(fake, API_KEY_ID_2) is not None, "the duplicate of a rebuilt account was left owed"
+    assert _marker_of(fake, _THIRD_KEY_ID) is not None, "an active sibling was left owed"
+
+
+@pytest.mark.asyncio
+async def test_a_forced_job_on_the_duplicate_key_crawls_its_exchange_account_through_that_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same book, the job named on key 2: the job's own working key is the one its exchange
+    account is crawled through (it is ``ctx.exchange``), key 1's exchange is never touched,
+    and the rows are the same two accounts counted once each."""
+    result, fake, audit, calls, exchanges, payload_3 = await _run_duplicate_key_job(
+        monkeypatch, API_KEY_ID_2
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert API_KEY_ID_1 not in [c["api_key_id"] for c in calls[1:]], calls
+    assert exchanges[API_KEY_ID_2].fetch_my_trades.await_count > 0, "the job's key was not crawled"
+    _assert_no_venue_call(exchanges[API_KEY_ID_1], "the duplicated key's exchange")
+    _assert_duplicate_key_book_summed_once(fake, audit, payload_3)
+    assert _marker_of(fake, API_KEY_ID_2) is not None
+    assert _marker_of(fake, API_KEY_ID_1) != MARKER
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_identity_refuses_before_any_venue_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two working Bybit keys with no stamped venue account and no share marker may be ONE
+    exchange account, which crawling both would count twice. The rebuild refuses
+    account_identity_pending before any venue call, opens no session for the sibling, and
+    leaves every row and marker as it was."""
+    fake = _MarkerFake()
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id=None)
+    _seed_account_key(fake, API_KEY_ID_2, "bybit", venue_account_id=None, marker=None)
+    _seed_sentinel_rows(fake)
+    _seed_older_row(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_identity_pending",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+    assert [c["api_key_id"] for c in calls] == [API_KEY_ID_1], "a sibling session was opened"
+    assert _marker_of(fake, API_KEY_ID_2) is None
