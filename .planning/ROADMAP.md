@@ -5519,13 +5519,13 @@ Plans:
 4. Stored days the rebuild would drop are a founder decision, never a silent delete.
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-01..D-03):** older stored days outside the rebuild window keep their values and the boundary date is recorded ("Keep them as they are"); a stored day inside the window the rebuild cannot reproduce refuses that account, counts only ("Refuse that account"); the step at the seam stays and its date is stored ("Allow the step, mark the date").
-**Plans:** 2/9 plans executed (planned 2026-10-22 in 6 waves; one migration, `replace_allocator_equity_snapshots_window`, reviewed by migration-reviewer and rls-policy-auditor before merge)
+**Plans:** 4/9 plans executed (planned 2026-10-22 in 6 waves; one migration, `replace_allocator_equity_snapshots_window`, reviewed by migration-reviewer and rls-policy-auditor before merge)
 
 Plans:
 - [x] 167.2.1.1.2-01-PLAN.md — migration: window-scoped SECURITY DEFINER replace, stored-days check inside the transaction, boundary row, worker wrapper and refusal mapping (wave 1)
 - [x] 167.2.1.1.2-02-PLAN.md — dashboard reads the `snapshot_rebuild_boundary` row through a defensive parser; no UI note (wave 1)
-- [ ] 167.2.1.1.2-03-PLAN.md — SQL gate for the window replace with mutation twins on both lanes (wave 2)
-- [ ] 167.2.1.1.2-04-PLAN.md — pure account rules: refusal set, key selection, 90/730-day window, shared-days sum (wave 2)
+- [x] 167.2.1.1.2-03-PLAN.md — SQL gate for the window replace with mutation twins on both lanes (wave 2)
+- [x] 167.2.1.1.2-04-PLAN.md — pure account rules: refusal set, key selection, 90/730-day window, shared-days sum (wave 2)
 - [ ] 167.2.1.1.2-05-PLAN.md — census and ratchet pins for the new function and gate (wave 3)
 - [ ] 167.2.1.1.2-06-PLAN.md — handler tracer: every forced job rebuilds the whole account through the window call; OKX over 90 days (wave 3)
 - [ ] 167.2.1.1.2-07-PLAN.md — refusal pins: every sibling failure refuses and writes nothing (wave 4)
