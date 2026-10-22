@@ -1700,6 +1700,31 @@ class TestQuarterRangeMismatchDiagnostic:
             assert forbidden not in everything, f"leaked: {forbidden!r}"
         _assert_no_other_writes(world)
 
+    @pytest.mark.asyncio
+    async def test_a_ts_past_the_calendar_still_stops_named_with_the_days_unreadable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 16-digit (microsecond-unit) ts is the likeliest shape of a wrong-range file and its day
+        cannot be computed. The parser used to raise OverflowError, which reached the dispatcher as
+        an unnamed `unknown` failure with no result block; the stop must be the named, permanent one
+        with the observed days marked `unreadable`."""
+        world = _happy(monkeypatch)
+        lines = _q3_lines()
+        cells = lines[-1].split(",")
+        cells[3] = "1751328000000000"
+        world.csv_override = ("\n".join([*lines[:-1], ",".join(cells)]) + "\n").encode()
+        outcome = await dispatch(_calibrate())
+
+        _assert_stopped(
+            world, outcome, "quarter_range_mismatch",
+            detail=(
+                "quarter=2026-Q3 parse=quarter_range_mismatch range_start=2026-07-01 "
+                "range_end_exclusive=2026-10-01 observed_min_day=unreadable "
+                "observed_max_day=unreadable rows_outside=1"
+            ),
+        )
+        _assert_no_other_writes(world)
+
     @pytest.mark.parametrize(
         ("key", "poison"),
         [
