@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.132.10.10] - 2026-10-22 — security: vite 8.3.5 clears the high-severity npm audit advisory
+
+### Security
+- The nightly `npm audit --omit=dev --audit-level=high` gate went red on 2026-10-22: vite 8.0.0-8.1.5 carries high-severity advisories (GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22, and the launch-editor ones it bundles). Vite reaches the production tree only through `@sentry/nextjs` → `@sentry/cloudflare`, whose range (`^6.1.0 || ^7.0.0 || ^8.0.0`) admits the fixed release. The lockfile now resolves vite 8.3.5. No `package.json` dependency changed.
+
+### Notes
+- Only the vite, rolldown and `@oxc-project/types` lock entries changed; every other entry is byte-equal to main. A first attempt let npm 11 prune `puppeteer-core`'s optional peer entries, which CI's `npm ci` still requires, so those entries are kept as they were.
+
 ## [0.132.10.9] - 2026-10-22 — records: close UPNLVENUES 167.2.1.1
 
 ### Notes
