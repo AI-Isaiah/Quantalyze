@@ -1170,8 +1170,9 @@ _RANGE_DAY_KEYS: Final[tuple[str, ...]] = (
 
 def _quarter_range_tokens(detail: Mapping[str, Any]) -> str:
     """The five ``key=value`` tokens of a ``quarter_range_mismatch`` stop: the requested range
-    (half-open, as the parser compared it), the file's earliest and latest UTC day, and the
-    count of rows outside. Nothing from the file is echoed as text: a day must pass
+    (half-open, as the parser compared it; ``range_start`` / ``range_end_exclusive`` are the
+    quarter's calendar dates, which the parser cuts at 00:00 UTC+8, D-15), the file's earliest
+    and latest UTC day, and the count of rows outside. Nothing from the file is echoed as text: a day must pass
     ``_iso_day``, the count must be a non-negative int that is not a bool, and anything else
     (or a missing key) reads ``unreadable``. This text is stored in ``last_error``, logged and
     shown in the admin table."""
@@ -1353,7 +1354,9 @@ async def _census_of(
 ) -> tuple[dict[str, Any], ArchiveAggregate, dict[str, Any]]:
     """Classify every bill of the verified files and return the Result shape v1 ``census``
     (counts only, never an amount), the aggregate the evaluation reads and the ``bal_chain``
-    reading of the one gated chain (``info.bal_chain`` of a passing run)."""
+    reading of the one gated chain (``info.bal_chain`` of a passing run). ``edge_days`` names
+    the quarter-edge UTC days (D-15) the files made whole and those that stayed missing: sorted
+    ISO dates computed from the requested quarters, never file text."""
     try:
         aggregate = await asyncio.to_thread(aggregate_archive, files, live_types)
         # F1 / WR-01: only after the rows classify, prove the quarters are whole, per currency
@@ -1376,6 +1379,10 @@ async def _census_of(
             "by_inst_type": _safe_counts(census["by_inst_type"]),
             "by_sub_type": _safe_counts(census["by_sub_type"]),
             "unknown_zero_effect": aggregate.unknown_zero_effect,
+            "edge_days": {
+                "whole": sorted(aggregate.edge_days_whole),
+                "missing": sorted(aggregate.edge_days_missing),
+            },
         },
         aggregate,
         {**_safe_bal_chain(chain), "floor": MIN_CHAINED_PAIRS},
@@ -1644,12 +1651,18 @@ async def _live_reference(
 # ----- reconciliation (D-09, D-10, D-11) --------------------------------------------------
 
 def _windows(
-    quarters: list[tuple[int, str]], first_full_day: date, today: date
+    covered_days: frozenset[str], first_full_day: date, today: date
 ) -> list[tuple[str, str]]:
-    """The inclusive overlap windows of the requested quarters, adjacent ones merged."""
+    """The inclusive overlap windows over the archive's covered days, adjacent ones merged.
+
+    ``covered_days`` are the whole UTC days the archive has a daily total for (D-15): each
+    island of consecutive covered days is clipped to the live reach exactly as a calendar
+    quarter used to be. A quarter-edge day only one file reaches is not covered, so it is
+    never compared against a whole live day (D-10)."""
     runs: list[tuple[str, str]] = []
-    for year, label in quarters:
-        start, end_excl = quarter_bounds(year, label)
+    for island in days_to_ranges(covered_days):
+        start = date.fromisoformat(island["from"])
+        end_excl = date.fromisoformat(island["to"]) + timedelta(days=1)
         window = overlap_window(start, end_excl, first_full_day, today)
         if window is not None:
             runs.append(window)
@@ -1685,11 +1698,11 @@ def _reconcile(
     result: dict[str, Any],
     aggregate: ArchiveAggregate,
     live: _LiveReference,
-    quarters: list[tuple[int, str]],
 ) -> list[tuple[str, str]]:
     """D-09 / D-10: the realized leg and the funding leg per day and on the window total over
     the overlap window, with ``TOLERANCE_USD`` only (``reconcile_leg`` carries it, with no
-    parameter). The excluded classes and flow totals are reported, never gated. The window
+    parameter). The window is built from ``aggregate.covered_days``, the whole UTC days the
+    archive covers (D-15), so it ends on the last whole day (2026-09-29 for Q3 without Q4). The excluded classes and flow totals are reported, never gated. The window
     opens the day after the reach boundary day, which comes from the fetch window (CR-01): a
     day the crawl missed inside it is then an archive-only day and a miss, not an unexamined
     one. A miss, or no window at all, is the permanent ``reconcile_miss`` (D-11). Returns the
@@ -1707,7 +1720,7 @@ def _reconcile(
             for month, by_class in sorted(aggregate.excluded_by_month.items())
         }
     }
-    windows = _windows(quarters, date.fromisoformat(live.first_full_day), _utc_today())
+    windows = _windows(aggregate.covered_days, date.fromisoformat(live.first_full_day), _utc_today())
     if not windows:
         # Calibration cannot be taken: the live reach no longer touches the verified quarters
         # (RESEARCH Pitfall 9). The runbook names the date.
@@ -2151,10 +2164,9 @@ async def _evaluate(
     raised BEFORE any write, and apply's first RPC comes after this returns, so a reconcile
     miss (or any other evaluation stop) can never follow a committed target (D-11)."""
     aggregate = ingested.aggregate
-    quarters = list(inp.quarters)
 
     live = await _live_reference(exchange, supabase, api_key_id, budget)
-    windows = _reconcile(result, aggregate, live, quarters)
+    windows = _reconcile(result, aggregate, live)
 
     if inp.mode == "calibrate":
         # D-03 is a calibrate check; apply refuses the key at input.
