@@ -5280,7 +5280,7 @@ Plans:
 - [ ] 167.1.2.2.2.1-15-PLAN.md — founder decision on apply timing; PROD apply with before/after; survival after the next tick; Wave 5 hand-off
 - [x] 167.1.2.2.2.1-16-PLAN.md — the durable job's stateless wait on OKX and the ingest (download, parse, per-quarter readings); a lost link never yields a partial result (SC-1)
 - [x] 167.1.2.2.2.1-17-PLAN.md — the `quarter_range_mismatch` stop names the requested range, the observed min/max UTC days and the rows outside in `last_error`, dates and counts only (D-14)
-- [ ] 167.1.2.2.2.1-18-PLAN.md — D-15 pure layer: quarter files accepted on the 00:00 UTC+8 cut, whole-UTC-day covered sets, a quarter-edge day summed only when both neighbouring files were read, the Q2/Q3 seam chained on the shared edge day
+- [x] 167.1.2.2.2.1-18-PLAN.md — D-15 pure layer: quarter files accepted on the 00:00 UTC+8 cut, whole-UTC-day covered sets, a quarter-edge day summed only when both neighbouring files were read, the Q2/Q3 seam chained on the shared edge day
 - [ ] 167.1.2.2.2.1-19-PLAN.md — D-15 job layer: the D-10 window over covered whole UTC days, `census.edge_days`, an edge day one file reaches never written and kept in its gap; runbook calibrate reading and the Q3 overlap's last run date 2026-12-12
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
