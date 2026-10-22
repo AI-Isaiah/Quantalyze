@@ -5519,7 +5519,7 @@ Plans:
 4. Stored days the rebuild would drop are a founder decision, never a silent delete.
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-01..D-03):** older stored days outside the rebuild window keep their values and the boundary date is recorded ("Keep them as they are"); a stored day inside the window the rebuild cannot reproduce refuses that account, counts only ("Refuse that account"); the step at the seam stays and its date is stored ("Allow the step, mark the date").
-**Plans:** 6/9 plans executed (planned 2026-10-22 in 6 waves; one migration, `replace_allocator_equity_snapshots_window`, reviewed by migration-reviewer and rls-policy-auditor before merge)
+**Plans:** 7/9 plans executed (planned 2026-10-22 in 6 waves; one migration, `replace_allocator_equity_snapshots_window`, reviewed by migration-reviewer and rls-policy-auditor before merge)
 
 Plans:
 - [x] 167.2.1.1.2-01-PLAN.md — migration: window-scoped SECURITY DEFINER replace, stored-days check inside the transaction, boundary row, worker wrapper and refusal mapping (wave 1)
@@ -5528,7 +5528,7 @@ Plans:
 - [x] 167.2.1.1.2-04-PLAN.md — pure account rules: refusal set, key selection, 90/730-day window, shared-days sum (wave 2)
 - [x] 167.2.1.1.2-05-PLAN.md — census and ratchet pins for the new function and gate (wave 3)
 - [x] 167.2.1.1.2-06-PLAN.md — handler tracer: every forced job rebuilds the whole account through the window call; OKX over 90 days (wave 3)
-- [ ] 167.2.1.1.2-07-PLAN.md — refusal pins: every sibling failure refuses and writes nothing (wave 4)
+- [x] 167.2.1.1.2-07-PLAN.md — refusal pins: every sibling failure refuses and writes nothing (wave 4)
 - [ ] 167.2.1.1.2-08-PLAN.md — mixed-venue tracer, marker loop, counted-once pins (wave 5)
 - [ ] 167.2.1.1.2-09-PLAN.md — TODOS close, merged-tree gates, orchestrator-owned ship and post-deploy handoff (wave 6)
 
