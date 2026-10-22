@@ -1863,6 +1863,30 @@ async def _mark_api_key_history_reconstructed(supabase: Any, api_key_id: str) ->
         raise RuntimeError("api_keys marker update matched no row")
 
 
+def _account_marker_key_ids(account_keys: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ids a forced ACCOUNT rebuild stamps ``history_reconstructed_at`` on, sorted.
+
+    UPNLVENUES D-04 / PD-O. A rebuilt book is ONE aggregate per day, so a key of the account
+    that still looks owed would be re-crawled by the daily fan-out, and its unforced
+    reconstruct on a multi-key allocator persists first-writer-wins: it would fill any day
+    the rebuilt book lacks with that key's value alone. Every ACTIVE key of the account is
+    therefore marked, the job's own and the siblings', including a key that was rebuilt
+    through another member of its exchange account (its account's history is the rebuilt one).
+
+    Left as they were: an INACTIVE key (no reconstruct can run for it, the preflight fails it
+    permanently, so nothing can re-fill the book through it) and a Deribit key (its history is
+    counted as $0 and never rebuilt, so a marker would claim a rebuild that did not happen).
+    ``account_keys`` is the persist-time key re-read, the set the window replace was checked
+    against.
+    """
+    return sorted(
+        str(row["id"])
+        for row in account_keys
+        if row.get("is_active") is True
+        and _key_venue(row) not in _ACCOUNT_ZERO_CONTRIBUTION_VENUES
+    )
+
+
 # Phase 167.2.1.1 D-02: the key in ``compute_jobs.metadata`` that lets a service-role or
 # owner-role enqueue rebuild an ALREADY-RECONSTRUCTED key (one whose
 # ``api_keys.history_reconstructed_at`` is set), which D-02 needs because the stored Bybit
@@ -4681,6 +4705,9 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     # Set only by a forced job's account crawl; the persist half reads it to choose the
     # window replace over the unforced sole-key replace / multi-key DO NOTHING.
     account: _AccountCrawl | None = None
+    # The persist-time key re-read of a forced account rebuild: the set the marker loop
+    # below stamps from, so the ladder needs no third read.
+    rebuilt_account_keys: list[dict[str, Any]] = []
 
     try:
         try:
@@ -4876,6 +4903,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             _current_keys = await _read_account_keys(ctx.supabase, allocator_id, api_key_id)
             if frozenset(str(row.get("id")) for row in _current_keys) != account.account_key_ids:
                 raise ForcedRebuildRefusedError("account_keys_changed")
+            rebuilt_account_keys = _current_keys
             # D-01 / D-02 / D-03 in ONE transaction: replace only the window, refuse a
             # stored in-window day the rows lack, record the seam date. Never the
             # first-writer-wins persist, which would leave every stored day untouched.
@@ -5073,13 +5101,28 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     # an exit reached through a failed sibling lookup or a failed snapshot
     # lookup (transient failures, the same rule PR 1's backfill applies); the
     # job still ends DONE and the key stays owed under the cap.
+    #
+    # UPNLVENUES D-04 / PD-O: a forced ACCOUNT rebuild stamps every ACTIVE non-Deribit key of
+    # the account, not only the job's. The rebuilt book is one aggregate per day; a sibling
+    # left unmarked is owed to the daily fan-out, whose unforced reconstruct would
+    # first-writer-wins-fill any day the rebuilt book lacks with that one key's value. An
+    # inactive key (no reconstruct can run for it) and a Deribit key (counted as $0, never
+    # rebuilt, so a marker would claim a rebuild that did not happen) are left as they were.
+    # A failed stamp takes the arm below: the retry re-runs the whole forced rebuild, which the
+    # window replace makes idempotent.
     if _reconstruct_outcome_completes_the_key(
         audit_kind,
         sibling_lookup_failed=sibling_check.lookup_failed,
         snapshot_lookup_failed=purge_snapshot_lookup_failed,
     ):
         try:
-            await _mark_api_key_history_reconstructed(ctx.supabase, api_key_id)
+            if account is not None:
+                # UPNLVENUES D-04 / PD-O: every active non-Deribit key of the rebuilt
+                # account, in id order (the job's own is among them).
+                for marked_key_id in _account_marker_key_ids(rebuilt_account_keys):
+                    await _mark_api_key_history_reconstructed(ctx.supabase, marked_key_id)
+            else:
+                await _mark_api_key_history_reconstructed(ctx.supabase, api_key_id)
         except Exception as exc:  # noqa: BLE001
             # A swallowed failure would leave a success audit for a key that is
             # still owed (SC-1). Fail the job instead: the rows are persisted
