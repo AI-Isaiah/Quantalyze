@@ -8,6 +8,7 @@
 - Migrations the dump newly carries, from the marker diff: `20261028120000_replace_allocator_equity_snapshots_window.sql`.
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-22` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.0.0 → 0.133.0.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=307 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 133 — MATCH 130, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+- `scripts/dump-sql-functions.ts`: the ACCTREBUILD `NAME_SET_RATCHET` row for `replace_allocator_equity_snapshots_window` is deleted, its own clearing condition (a re-dump taken after `20261028120000` applied to PROD). `snapshot-drift` reads `ratchet-stale` until it goes.
 
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `39857947783` succeeded, and this entry was composed by the `redump-pr` job. Run `39857947783` is the provenance anchor.
