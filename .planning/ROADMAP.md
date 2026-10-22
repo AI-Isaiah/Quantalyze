@@ -5262,7 +5262,7 @@ Plans:
 
 **⭐ DECIDED 2026-10-22 (founder, CONTEXT D-16, "Diagnose + skip safe rows (Recommended)"):** calibrate run 3 stopped `unchainable_row`; the stop records the cause split, counts and dates, zero-effect blank-ccy rows are skipped from the bal chain and counted, a non-digit billId still stops; then calibrate is re-run.
 
-**Plans:** 19 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14; plans 18-19 added for D-15)
+**Plans:** 20 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14; plans 18-19 added for D-15; plan 20 added for D-16)
 
 Plans:
 - [x] 167.1.2.2.2.1-01-PLAN.md — migration: kind `okx_archive_rebuild` (registry + both CHECKs, api_key-only) and the atomic `apply_okx_archive_rebuild` RPC (INVOKER, service_role), 15-arm gate, rollback
@@ -5284,6 +5284,7 @@ Plans:
 - [x] 167.1.2.2.2.1-17-PLAN.md — the `quarter_range_mismatch` stop names the requested range, the observed min/max UTC days and the rows outside in `last_error`, dates and counts only (D-14)
 - [x] 167.1.2.2.2.1-18-PLAN.md — D-15 pure layer: quarter files accepted on the 00:00 UTC+8 cut, whole-UTC-day covered sets, a quarter-edge day summed only when both neighbouring files were read, the Q2/Q3 seam chained on the shared edge day
 - [x] 167.1.2.2.2.1-19-PLAN.md — D-15 job layer: the D-10 window over covered whole UTC days, `census.edge_days`, an edge day one file reaches never written and kept in its gap; runbook calibrate reading and the Q3 overlap's last run date 2026-12-12
+- [ ] 167.1.2.2.2.1-20-PLAN.md — D-16: the `unchainable_row` stop names the cause split (`blank_ccy`, `nondigit_bill_id`), rows per file and the first/last UTC day in `info.bal_chain` and `last_error` (counts and dates only); a zero-effect blank-ccy bill is skipped from the bal chain and counted; a non-digit billId still stops; runbook calibrate reading
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
