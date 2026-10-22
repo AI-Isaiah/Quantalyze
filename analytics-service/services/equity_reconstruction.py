@@ -2993,8 +2993,8 @@ async def _fetch_current_equity(
     # str < None TypeError in ccxt 4.5.x) so the anchor here silently returned
     # None for every OKX account, shipping an UN-anchored reconstructed curve.
     # Read OKX's own marked-to-USD account equity via the raw endpoint instead;
-    # totalEq already includes open-position unrealized PnL, so the unified
-    # uPnL gate below (which skips it for OKX/Bybit) is already satisfied.
+    # totalEq already includes open-position unrealized PnL, so the OKX-only
+    # uPnL gate below (``_UNIFIED_MARGIN_VENUES``) is already satisfied.
     if venue.lower() == "okx":
         from services.exchange import fetch_okx_total_equity_usd
 
@@ -3057,32 +3057,43 @@ async def _fetch_current_equity(
                 partial_unpriced.add(asset_upper)
             total += q * px
 
-        # NEW-C01-05: unified-margin venues (OKX, Bybit V5) report
-        # fetch_balance['total'] as equity-inclusive — it already marks
-        # open perp positions to market. Adding unrealizedPnl from
-        # fetch_positions on top would double-count the uPnL and shift
-        # the ENTIRE reconstructed curve upward via the anchor offset.
-        # Gate: skip the position-loop for known unified-margin venues.
-        # Non-unified venues (Binance isolated, etc.) keep the additive
-        # uPnL path because their collateral sits separately in the spot
-        # wallet and is NOT included in fetch_balance['total'].
-        _UNIFIED_MARGIN_VENUES = frozenset({"okx", "bybit"})
+        # NEW-C01-05, reversed for Bybit by Phase 167.2.1.1 (the earlier text
+        # claimed Bybit V5 reports fetch_balance['total'] equity-inclusive; it
+        # does not). OKX's anchor is the raw ``totalEq`` read above, which
+        # already marks open positions to market, so its position loop is
+        # skipped (this point is only reached for OKX when that raw read
+        # failed). Bybit's ccxt ``total`` is the coin ``walletBalance``
+        # (ccxt 4.5.88 ``bybit.parse_balance``, unchanged since 4.5.59) and
+        # Binance's default spot ``total`` is free + locked: neither includes
+        # open-position uPnL, so both ADD the ``fetch_positions()`` uPnL here.
+        # The reconstruct curve is the mark-to-market basis (the replay marks
+        # open perps daily and the daily refresh adds derivative uPnL), while
+        # the derive anchor in services/exchange.py
+        # (``fetch_account_equity_and_upnl_usd``) is the realized basis with a
+        # structural 0.0 wedge. They differ by exactly the open uPnL; do not
+        # "unify" them.
+        _UNIFIED_MARGIN_VENUES = frozenset({"okx"})
         _skip_upnl = venue.lower() in _UNIFIED_MARGIN_VENUES
 
         try:
             positions = await exchange.fetch_positions()
         except Exception as _pos_exc:  # noqa: BLE001
             # silent-failure/F-03: bare except silently dropped the error,
-            # leaving positions=[] with no log entry. For non-unified-margin
-            # venues (Binance), uPnL is additive — missing it understates the
-            # anchor, which shifts the entire reconstructed equity curve.
-            # Log the failure so operators can diagnose auth/network errors
-            # that cause silent anchor undercounts.
+            # leaving positions=[] with no log entry. The venues that ADD
+            # uPnL here (Bybit, Binance) lose it from the anchor on a failed
+            # read, so the anchor understates equity by the open uPnL and
+            # shifts the entire reconstructed curve. The anchor still ships at
+            # the wallet figure BY DECISION (an unanchored zero-cash replay is
+            # worse than a one-day uPnL shift): see TODOS
+            # [167.2.1.1-ANCHOR-POSITIONS-READ-FAILURE]. ccxt error text can
+            # carry a request signature, so log the class and the scrubbed
+            # message, never the raw text.
             logger.warning(
-                "_fetch_current_equity: fetch_positions failed venue=%s — "
-                "uPnL excluded from anchor (may understate equity for "
-                "non-unified-margin venues): %s",
-                venue, _pos_exc,
+                "_fetch_current_equity: fetch_positions failed venue=%s "
+                "exc_class=%s scrubbed=%s - open-position uPnL left out of "
+                "the anchor",
+                venue, type(_pos_exc).__name__,
+                scrub_freeform_string(str(_pos_exc)),
             )
             positions = []
         if not isinstance(positions, list):
