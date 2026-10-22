@@ -224,3 +224,191 @@ def test_account_depth_is_the_most_limiting_known_venue() -> None:
     assert er._account_history_depth_months(["bybit", "mt5"]) == 24
     assert er._account_history_depth_months(["mt5"]) is None
     assert er._account_history_depth_months([]) is None
+
+# --------------------------------------------------------------------------- the sum
+
+
+def _row(
+    asof: str,
+    value: float,
+    breakdown: dict[str, Any] | None,
+    source: str = "exchange_primary",
+    unknown: bool = False,
+) -> dict[str, Any]:
+    return {
+        "asof": asof,
+        "value_usd": value,
+        "breakdown": breakdown,
+        "source": source,
+        "pre_terminus_balance_unknown": unknown,
+    }
+
+
+def test_sum_adds_each_shared_days_rows_and_merges_their_breakdowns() -> None:
+    """A stored row is the account total, so each shared day is the sum of the accounts'
+    values and of their breakdown entries."""
+    a = [
+        _row("2026-04-13", 100.10, {"BTC": 60.05, "ETH": 40.05, "STARTING_BALANCE": 10.0}),
+        _row("2026-04-14", 110.20, {"BTC": 70.10, "ETH": 40.10, "STARTING_BALANCE": 10.0}),
+        _row("2026-04-15", 120.30, {"BTC": 80.15, "ETH": 40.15, "STARTING_BALANCE": 10.0}),
+    ]
+    b = [
+        _row("2026-04-13", 50.01, {"BTC": 20.01, "SOL": 30.0, "STARTING_BALANCE": 5.0}),
+        _row("2026-04-14", 51.02, {"BTC": 21.02, "SOL": 30.0, "STARTING_BALANCE": 5.0}),
+        _row("2026-04-15", 52.03, {"BTC": 22.03, "SOL": 30.0, "STARTING_BALANCE": 5.0}),
+    ]
+    rows, incomplete = er._sum_account_rows([a, b])
+    assert incomplete == 0
+    assert [r["asof"] for r in rows] == ["2026-04-13", "2026-04-14", "2026-04-15"]
+    assert [r["value_usd"] for r in rows] == [150.11, 161.22, 172.33]
+    assert rows[0]["breakdown"] == {
+        "BTC": 80.06,
+        "ETH": 40.05,
+        "SOL": 30.0,
+        "STARTING_BALANCE": 15.0,
+    }
+    assert rows[2]["breakdown"] == {
+        "BTC": 102.18,
+        "ETH": 40.15,
+        "SOL": 30.0,
+        "STARTING_BALANCE": 15.0,
+    }
+    assert {r["source"] for r in rows} == {"exchange_primary"}
+    assert {r["pre_terminus_balance_unknown"] for r in rows} == {False}
+
+
+def test_sum_marks_a_mixed_source_and_ors_the_terminus_flag() -> None:
+    a = [_row("2026-04-14", 10.0, {"BTC": 10.0}, source="exchange_primary", unknown=False)]
+    b = [_row("2026-04-14", 5.0, {"BTC": 5.0}, source="coingecko", unknown=True)]
+    rows, incomplete = er._sum_account_rows([a, b])
+    assert incomplete == 0
+    assert len(rows) == 1
+    assert rows[0]["source"] == "mixed"
+    assert rows[0]["pre_terminus_balance_unknown"] is True
+    assert rows[0]["value_usd"] == 15.0
+
+
+def test_a_missing_breakdown_stays_out_of_the_merge() -> None:
+    """An MT5-shaped row has no breakdown; it adds its value and no entries."""
+    mt5 = [_row("2026-04-14", 40.0, None)]
+    bybit = [_row("2026-04-14", 60.0, {"BTC": 60.0})]
+    rows, _ = er._sum_account_rows([mt5, bybit])
+    assert rows[0]["value_usd"] == 100.0
+    assert rows[0]["breakdown"] == {"BTC": 60.0}
+    none_rows, _ = er._sum_account_rows([mt5, [_row("2026-04-14", 1.0, None)]])
+    assert none_rows[0]["value_usd"] == 41.0
+    assert none_rows[0]["breakdown"] is None
+
+
+def test_a_day_any_exchange_account_lacks_is_left_out_and_counted() -> None:
+    """A day one exchange account has no row is UNKNOWN for that account. Zero-filling it
+    would store a total that is too low and look real; so the day is left out and counted,
+    and D-02 refuses the replace if a stored day would be left unreproduced."""
+    days = [f"2026-04-{d:02d}" for d in range(1, 11)]
+    a = [_row(day, 100.0, {"BTC": 100.0}) for day in days]
+    # B starts two days later (04-03), has an interior gap (04-06) and ends a day early
+    # (no 04-10): it holds 04-03, 04-04, 04-05, 04-07, 04-08, 04-09.
+    b_days = ["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-07", "2026-04-08", "2026-04-09"]
+    b = [_row(day, 10.0, {"ETH": 10.0}) for day in b_days]
+    rows, incomplete = er._sum_account_rows([a, b])
+    assert [r["asof"] for r in rows] == b_days
+    assert incomplete == 4
+    assert {r["value_usd"] for r in rows} == {110.0}
+    for day in ("2026-04-01", "2026-04-02", "2026-04-06", "2026-04-10"):
+        assert day not in [r["asof"] for r in rows]
+
+
+def test_curves_that_share_no_day_sum_to_no_row() -> None:
+    a = [_row("2026-04-01", 1.0, None), _row("2026-04-02", 1.0, None)]
+    b = [_row("2026-04-03", 2.0, None)]
+    rows, incomplete = er._sum_account_rows([a, b])
+    assert rows == []
+    assert incomplete == 3
+
+
+def test_the_truncated_flag_survives_and_a_structured_entry_is_never_summed() -> None:
+    """``__truncated__`` is a flag, so it survives as True. ``__pnl_missing__`` is a dict
+    record, never a number: it is left out of the numeric sum and raises nothing."""
+    a = [
+        _row(
+            "2026-04-14",
+            10.0,
+            {"BTC": 10.0, "__truncated__": True, "__pnl_missing__": {"count": 1, "symbols": ["X"]}},
+        )
+    ]
+    b = [_row("2026-04-14", 5.0, {"BTC": 5.0})]
+    rows, incomplete = er._sum_account_rows([a, b])
+    assert incomplete == 0
+    breakdown = rows[0]["breakdown"]
+    assert breakdown["__truncated__"] is True
+    assert breakdown["BTC"] == 15.0
+    assert "__pnl_missing__" not in breakdown
+
+
+def test_a_single_account_comes_back_with_the_same_days() -> None:
+    a = [
+        _row("2026-04-13", 100.0, {"BTC": 100.0}),
+        _row("2026-04-15", 120.0, {"BTC": 120.0}),
+    ]
+    rows, incomplete = er._sum_account_rows([a])
+    assert incomplete == 0
+    assert [(r["asof"], r["value_usd"]) for r in rows] == [
+        ("2026-04-13", 100.0),
+        ("2026-04-15", 120.0),
+    ]
+
+
+# --------------------------------------------------------------------------- telemetry
+
+
+def test_merge_account_telemetry_unions_lists_ors_flags_and_reads_mt5_defaults() -> None:
+    """The handler's audit INDEXES the four lists and reads the anchor flags with
+    ``.get``; the merged dict must satisfy both, and MT5's telemetry omits the anchor
+    keys on purpose, so they are read with defaults."""
+    ccxt_part: dict[str, Any] = {
+        "skipped_symbols": ["B", "A"],
+        "unknown_perp_symbols": ["U1"],
+        "inverse_perp_symbols": [],
+        "ctval_drift_warnings": [{"symbol": "S1"}],
+        "pre_terminus_balance_unknown": False,
+        "anchor_partial_ticker_symbols": ["P2"],
+        "anchor_offset_implausible": False,
+        "anchor_replay_unreliable": True,
+        "anchor_offset_skipped_usd": 10.01,
+        "anchor_positions_unread": False,
+    }
+    other_ccxt: dict[str, Any] = {
+        "skipped_symbols": ["A", "C"],
+        "unknown_perp_symbols": [],
+        "inverse_perp_symbols": ["I1"],
+        "ctval_drift_warnings": [{"symbol": "S2"}],
+        "pre_terminus_balance_unknown": True,
+        "anchor_partial_ticker_symbols": ["P1", "P2"],
+        "anchor_offset_implausible": True,
+        "anchor_replay_unreliable": False,
+        "anchor_offset_skipped_usd": 5.5,
+        "anchor_positions_unread": True,
+    }
+    merged = er._merge_account_telemetry([ccxt_part, other_ccxt, er._mt5_telemetry()])
+    assert merged["skipped_symbols"] == ["A", "B", "C"]
+    assert merged["unknown_perp_symbols"] == ["U1"]
+    assert merged["inverse_perp_symbols"] == ["I1"]
+    assert merged["ctval_drift_warnings"] == [{"symbol": "S1"}, {"symbol": "S2"}]
+    assert merged["anchor_partial_ticker_symbols"] == ["P1", "P2"]
+    assert merged["pre_terminus_balance_unknown"] is True
+    assert merged["anchor_offset_implausible"] is True
+    assert merged["anchor_replay_unreliable"] is True
+    assert merged["anchor_positions_unread"] is True
+    assert merged["anchor_offset_skipped_usd"] == 15.51
+
+
+def test_merge_account_telemetry_of_mt5_alone_is_the_honest_default() -> None:
+    merged = er._merge_account_telemetry([er._mt5_telemetry()])
+    for name in ("skipped_symbols", "unknown_perp_symbols", "inverse_perp_symbols", "ctval_drift_warnings"):
+        assert merged[name] == []
+    assert merged["pre_terminus_balance_unknown"] is False
+    assert merged["anchor_offset_implausible"] is False
+    assert merged["anchor_replay_unreliable"] is False
+    assert merged["anchor_positions_unread"] is False
+    assert merged["anchor_offset_skipped_usd"] == 0.0
+    assert merged["anchor_partial_ticker_symbols"] == []

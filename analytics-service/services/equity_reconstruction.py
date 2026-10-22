@@ -2076,6 +2076,121 @@ def _account_history_depth_months(venues: Iterable[str]) -> int | None:
     return min(depths) if depths else None
 
 
+def _sum_breakdowns(breakdowns: Sequence[Any]) -> dict[str, Any] | None:
+    """Add the NUMERIC entries of the dict breakdowns, to 2 dp; None when none is a dict.
+
+    ``__truncated__`` survives as True when any part carries it. A structured entry such
+    as ``__pnl_missing__`` (a ``{count, symbols}`` record, never a number) is not added and
+    does not survive: it is a per-snapshot record of the daily refresh, which a
+    reconstructed row never carries, and adding two of them numerically would be wrong.
+    Re-capped through ``_cap_breakdown`` so the merged dict honours the stored-size cap.
+    """
+    dicts = [b for b in breakdowns if isinstance(b, dict)]
+    if not dicts:
+        return None
+    merged: dict[str, Any] = {}
+    truncated = False
+    for part in dicts:
+        for name, value in part.items():
+            if name == "__truncated__":
+                truncated = truncated or value is True
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                merged[name] = merged.get(name, 0.0) + value
+    result: dict[str, Any] = {name: round(value, 2) for name, value in merged.items()}
+    if truncated:
+        result["__truncated__"] = True
+    return _cap_breakdown(result)
+
+
+def _sum_account_rows(
+    per_account_rows: Sequence[Sequence[Mapping[str, Any]]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Add the per-exchange-account curves into the allocator's one curve, on shared days.
+
+    Returns ``(rows, days_incomplete)``. A row is emitted ONLY on a day EVERY exchange
+    account has a row (the intersection). A day one account lacks is UNKNOWN for that
+    account: reading it as 0 would store a total that is too low and looks real, and
+    reading it as the neighbouring day would invent a value. So it is left out and
+    counted (``days_incomplete`` = the union of days minus the intersection), and the
+    replace RPC then refuses (``history_days_unreproduced``, D-02) if a stored day would be
+    left unreproduced. Nothing is zero-filled.
+
+    On a shared day ``value_usd`` and every numeric breakdown entry are summed to 2 dp
+    (``_sum_breakdowns``); ``source`` is the parts' common source, else ``"mixed"``; and
+    ``pre_terminus_balance_unknown`` is True when any part says so. No offset entry is read
+    as a signal: it is the anchor offset, not a pre-window balance. Rows come back sorted
+    by ``asof``.
+    """
+    if not per_account_rows:
+        return [], 0
+    by_day: list[dict[str, Mapping[str, Any]]] = [
+        {str(row["asof"]): row for row in rows} for rows in per_account_rows
+    ]
+    union: set[str] = set()
+    shared: set[str] | None = None
+    for days in by_day:
+        union |= days.keys()
+        shared = set(days) if shared is None else shared & days.keys()
+    shared_days = shared or set()
+    summed: list[dict[str, Any]] = []
+    for day in sorted(shared_days):
+        parts = [days[day] for days in by_day]
+        sources = {str(part.get("source", "exchange_primary")) for part in parts}
+        summed.append(
+            {
+                "asof": day,
+                "value_usd": round(sum(float(part["value_usd"]) for part in parts), 2),
+                "breakdown": _sum_breakdowns([part.get("breakdown") for part in parts]),
+                "source": next(iter(sources)) if len(sources) == 1 else "mixed",
+                "pre_terminus_balance_unknown": any(
+                    bool(part.get("pre_terminus_balance_unknown", False)) for part in parts
+                ),
+            }
+        )
+    return summed, len(union) - len(shared_days)
+
+
+def _merge_account_telemetry(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Merge the per-exchange-account telemetry into the one dict the handler's audit reads.
+
+    The audit INDEXES the four lists (``skipped_symbols``, ``unknown_perp_symbols``,
+    ``inverse_perp_symbols``, ``ctval_drift_warnings``) and reads the anchor flags with
+    ``.get``, so every key is always present. MT5's telemetry omits the anchor keys on
+    purpose (``_mt5_telemetry``: it performs no anchor step), so every read here has a
+    default. Symbol lists are sorted unions, ``ctval_drift_warnings`` (dicts) are
+    concatenated in part order, flags are ORed and the skipped anchor offset is summed to
+    2 dp.
+    """
+
+    def _union(name: str) -> list[str]:
+        return sorted({str(item) for part in parts for item in part.get(name, [])})
+
+    return {
+        "skipped_symbols": _union("skipped_symbols"),
+        "unknown_perp_symbols": _union("unknown_perp_symbols"),
+        "inverse_perp_symbols": _union("inverse_perp_symbols"),
+        "ctval_drift_warnings": [
+            warning for part in parts for warning in part.get("ctval_drift_warnings", [])
+        ],
+        "pre_terminus_balance_unknown": any(
+            bool(part.get("pre_terminus_balance_unknown", False)) for part in parts
+        ),
+        "anchor_partial_ticker_symbols": _union("anchor_partial_ticker_symbols"),
+        "anchor_offset_implausible": any(
+            bool(part.get("anchor_offset_implausible", False)) for part in parts
+        ),
+        "anchor_replay_unreliable": any(
+            bool(part.get("anchor_replay_unreliable", False)) for part in parts
+        ),
+        "anchor_offset_skipped_usd": round(
+            sum(float(part.get("anchor_offset_skipped_usd", 0.0) or 0.0) for part in parts), 2
+        ),
+        "anchor_positions_unread": any(
+            bool(part.get("anchor_positions_unread", False)) for part in parts
+        ),
+    }
+
+
 async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool:
     """Per-api_key idempotency check, answered from the MARKER ONLY (D-04).
 
