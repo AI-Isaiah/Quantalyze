@@ -19,10 +19,16 @@ rule it guards:
    written with the old anchor. TODOS [167.2.1.1-MULTIKEY-RECOMPUTE] (booked by plan 06)
    owns that gap and the handoff records such allocators as "recorded, not recomputed".
 5. The spelling is a contract with the post-deploy enqueue (plan 06): one literal, pinned.
+6. Plan 05, PD-H: a forced rebuild replaces a stored curve in ONE write, so it must refuse
+   rather than re-bake a wallet-only anchor. When the curve cannot be anchored to today's
+   venue equity including the open uPnL, the job FAILS (error_kind "permanent") with a named
+   reason and writes nothing: the seeded rows, the marker and the completion audits are
+   untouched. The unforced path keeps PD-B (an advisory anchor, wallet figure on a failed
+   positions read) and its exact call shape.
 
-Every FORCED test runs on an exchange whose anchor applies (ccxt's real parsed Bybit
-balance and a readable BYBIT_LINEAR_POSITIONS), so a later rule that a forced rebuild
-writes only an anchored curve leaves them green. No test touches a venue, a database or an
+Every FORCED test of plan 04 runs on an exchange whose anchor applies (ccxt's real parsed
+Bybit balance and a readable BYBIT_LINEAR_POSITIONS), so plan 05's rule that a forced
+rebuild writes only an anchored curve leaves them green. No test touches a venue, a database or an
 enqueue; the exchange is a stub and the database is the in-memory fake.
 """
 
@@ -33,6 +39,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import ccxt
 import pytest
 
 from services import equity_reconstruction as er
@@ -46,7 +53,9 @@ from tests.test_equity_reconstruction import (
     _install_fake_preflight,
 )
 from tests.test_reconstruct_marker_writer import (
+    COMPLETION_ACTIONS,
     END_DATE,
+    FAILED_ACTION,
     _crawl_exchange,
     _freeze_now,
     _job,
@@ -319,3 +328,89 @@ def test_the_user_callable_reconstruct_enqueue_passes_no_metadata() -> None:
         "request_allocator_holdings_sync now passes p_metadata to an enqueue: an "
         "authenticated user could set force_rebuild and rewrite a stored curve"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 05 (PD-H): a forced rebuild writes an anchored curve or nothing
+# ---------------------------------------------------------------------------
+
+SENTINEL_VALUE = 12345.0
+SENTINEL_ROWS = 10
+REFUSAL_PREFIX = "forced rebuild refused ("
+# Planted in the exception the venue raises; it must never reach the job error or the audit.
+LEAKED_SIGNATURE = "deadbeef"
+
+
+def _seed_sentinel_rows(fake: Any) -> None:
+    """Ten snapshot rows for the allocator, all at the sentinel value: a refused forced
+    rebuild must leave every one of them exactly as seeded."""
+    for days_back in range(SENTINEL_ROWS):
+        asof = (END_DATE - timedelta(days=days_back)).date().isoformat()
+        fake.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": SENTINEL_VALUE,
+            "breakdown": {"ETH": SENTINEL_VALUE},
+            "source": "exchange_primary",
+            "history_depth_months": 24,
+            "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
+
+
+async def _assert_forced_rebuild_refused(
+    monkeypatch: pytest.MonkeyPatch, exchange: Any, reason: str
+) -> None:
+    """A marked SOLE Bybit key with ten sentinel rows, a forced job, ``exchange``: the job
+    ends FAILED/permanent naming ``reason``, and NOTHING changed: every sentinel row, the
+    marker, no completion audit. Static text only: the planted signature is absent."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=MARKER, exchange="bybit")
+    _seed_sentinel_rows(fake)
+    audit = _install_fake_audit(monkeypatch)
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _freeze_now(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_forced_job())
+
+    assert exchange.fetch_my_trades.await_count > 0, "the forced job did not crawl"
+    prefix = f"{REFUSAL_PREFIX}{reason})"
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "permanent", result
+    assert (result.error_message or "").startswith(prefix), result.error_message
+    assert LEAKED_SIGNATURE not in (result.error_message or ""), result.error_message
+
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert len(rows) == SENTINEL_ROWS and all(
+        r.get("value_usd") == SENTINEL_VALUE for r in rows
+    ), (
+        "a refused forced rebuild changed the stored curve: "
+        f"{[(r['asof'], r['value_usd']) for r in rows]}"
+    )
+    assert _marker_of(fake, API_KEY_ID_1) == MARKER, "a refused forced rebuild moved the marker"
+    assert fake.api_key_updates() == [], fake.api_key_updates()
+
+    actions = [c.kwargs["action"] for c in audit.call_args_list]
+    assert not (set(actions) & COMPLETION_ACTIONS), actions
+    (started,) = _audit_metadata(audit, STARTED)
+    assert started.get("forced_rebuild") is True, started
+    (failed,) = _audit_metadata(audit, FAILED_ACTION)
+    assert failed["error_kind"] == "permanent", failed
+    assert failed["sanitized_message"].startswith(prefix), failed
+    assert LEAKED_SIGNATURE not in failed["sanitized_message"], failed
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_and_writes_nothing_when_the_positions_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tracer for PD-H. Bybit's ``total`` is the wallet balance WITHOUT the open uPnL;
+    the anchor adds the uPnL from ``fetch_positions``. When that read fails, an unforced
+    reconstruct may still anchor at the wallet figure (PD-B), but a forced one would
+    replace the stored curve in one write with exactly the wallet-only anchor this phase
+    removes. It must refuse instead. RED on a handler that finishes the forced job DONE
+    with the wallet-only anchor and replaces the rows."""
+    exchange = await _bybit_exchange()
+    exchange.fetch_positions = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, "positions_unreadable")
