@@ -13170,3 +13170,5 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **Reading.** A forced reconstruct re-anchors a SOLE-key allocator through the atomic replace. With any other `api_keys` row of the same user the persist is first-writer-wins DO NOTHING (T-07-V5b), so rows a Bybit key wrote with the old anchor stay. Pinned by `test_forced_rebuild_cannot_overwrite_a_multi_key_allocators_rows`. The D-02 recompute records each such allocator as "recorded, not recomputed" (SC-3).
 
 **Owner / Trigger:** founder decision after the D-02 census. Trigger: the census counts at least one Bybit key whose allocator has another key row. Closed when the founder has decided per allocator (accept as recorded, or a scoped product path) and the decision is recorded.
+
+**Routed 2026-10-22 (founder, UPNLVENUES D-04/D-05).** The census triggered it: all 6 active Bybit keys sit on 5 multi-key users. The founder chose a whole-account rebuild plus a 90-day path for accounts holding OKX keys, and split it into Phase 167.2.1.1.2 ACCTREBUILD, which owns this entry and closes it.
