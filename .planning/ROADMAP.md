@@ -5498,7 +5498,7 @@ Plans:
 1. A recorded real or ccxt-fixture Bybit V5 and Binance (spot and futures) balance response settles whether `total` includes uPnL.
 2. Every path (derive anchor, reconstruct anchor, holdings) reads it the same way, with a test that goes RED on the wrong reading.
 3. A PROD census says whether any connected key is Bybit or Binance, and any stored series built on the wrong reading is recomputed or recorded.
-**Plans:** 3/6 plans executed
+**Plans:** 4/6 plans executed
 
 Plans:
 **Wave 1**
@@ -5509,7 +5509,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 167.2.1.1-04-PLAN.md — D-02 `force_rebuild` job-metadata flag for the reconstruct, default path unchanged (SC-2, SC-3) [Wave 2]
+- [x] 167.2.1.1-04-PLAN.md — D-02 `force_rebuild` job-metadata flag for the reconstruct, default path unchanged (SC-2, SC-3) [Wave 2]
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
