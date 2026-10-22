@@ -119,7 +119,9 @@ def _detail_text(err: ArchiveParseError) -> str:
 
 # ---------------------------------------------------------------------- the quarter
 class TestQuarterBounds:
-    """The plain calendar reading is the one asserted against every file."""
+    """The plain calendar reading is the one asserted against every file.
+
+    These are calendar dates; the file's instants are cut at 00:00 UTC+8 on them (D-15)."""
 
     @pytest.mark.parametrize(
         ("quarter", "start", "end"),
@@ -144,6 +146,7 @@ class TestQuarterRangeAssertion:
 
     OKX's own doc example labels 2024 Q2 as a July-September range; if the assertion
     were missing, a mislabelled file would write another quarter's P&L onto the wrong days.
+    The quarter's calendar dates are cut at 00:00 UTC+8, i.e. 16:00 UTC the day before (D-15).
     """
 
     def test_quarter_q3_file_parsed_as_q2_is_a_named_stop_with_requested_and_observed_dates(self):
@@ -159,20 +162,21 @@ class TestQuarterRangeAssertion:
         assert err.detail["requested"] == "2026 Q3"
 
     def test_quarter_row_one_millisecond_before_the_start_is_a_stop(self):
+        """D-15: Q3 starts at 2026-06-30T16:00:00.000Z (07-01 00:00 UTC+8); one ms earlier is Q2's."""
         header, rows = _read_fixture("q3_like.csv")
-        before = int(_ms("2026-07-01 00:00:00")) - 1
-        rows[0][header.index("ts")] = str(before)
+        rows[0][header.index("ts")] = "1782835199999"
         err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
         assert err.stop_class == "quarter_range_mismatch"
         assert err.detail["observed_min_day"] == "2026-06-30"
         assert err.detail["rows_outside"] == 1
 
     def test_quarter_row_at_the_exclusive_end_is_a_stop(self):
+        """D-15: Q3 ends, exclusive, at 2026-09-30T16:00:00.000Z (10-01 00:00 UTC+8)."""
         header, rows = _read_fixture("q3_like.csv")
-        rows[-1][header.index("ts")] = _ms("2026-10-01 00:00:00")
+        rows[-1][header.index("ts")] = "1790784000000"
         err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
         assert err.stop_class == "quarter_range_mismatch"
-        assert err.detail["observed_max_day"] == "2026-10-01"
+        assert err.detail["observed_max_day"] == "2026-09-30"
 
     def test_a_ts_beyond_the_calendar_is_still_a_named_stop_with_no_observed_days(self):
         """A 16-digit (microsecond-unit) ts is accepted by the digit check but lies past the year
@@ -185,14 +189,17 @@ class TestQuarterRangeAssertion:
         assert err.detail["rows_outside"] == 1
 
     def test_quarter_first_and_last_millisecond_are_inside(self):
-        # q3_like.csv carries a row at 00:00:00.000 on 07-01 and one at 23:59:59.999 on 09-30.
+        # q3_like.csv carries rows at 07-01T00:00:00.000Z and 09-30T15:59:59.999Z (D-15: the last
+        # millisecond before the UTC+8 cut).
         parsed = parse_archive_csv((FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q3")
         assert (parsed.ts_min_day, parsed.ts_max_day) == ("2026-07-01", "2026-09-30")
 
-    def test_quarter_q2_fixture_verifies_ninety_one_days(self):
+    def test_quarter_q2_fixture_covers_ninety_whole_utc_days(self):
+        """D-15: Q2 alone covers 04-01..06-29 as whole UTC days; 03-31 and 06-30 are its edges."""
         parsed = parse_archive_csv((FIXTURES / "q2_like.csv").read_bytes(), year=2026, quarter="Q2")
-        assert (parsed.row_count, len(parsed.covered_days)) == (14, 91)
+        assert (parsed.row_count, len(parsed.covered_days)) == (14, 90)
         assert (parsed.ts_min_day, parsed.ts_max_day) == ("2026-04-01", "2026-06-30")
+        assert (parsed.head_edge_day, parsed.tail_edge_day) == ("2026-03-31", "2026-06-30")
 
     def test_quarter_detail_carries_dates_and_counts_only(self):
         err = _stop(parse_archive_csv, (FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q2")
@@ -1019,4 +1026,4 @@ class TestLongestBilllessRun:
         rows = [r for r in rows if int(r[header.index("ts")]) < 1_784_600_000_000]  # up to 07-20
         parsed = parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")
         run = longest_billless_run(parsed)
-        assert run["to"] == "2026-09-30" and run["days"] >= 60
+        assert run["to"] == "2026-09-29" and run["days"] >= 60  # D-15: 09-30 is the tail edge
