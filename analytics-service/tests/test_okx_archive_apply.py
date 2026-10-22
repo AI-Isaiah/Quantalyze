@@ -72,9 +72,14 @@ CSV_HEADER = (
 # The archive file: built from per-day nets, so the oracle is the dict that built it
 # ---------------------------------------------------------------------------
 
-def _noon_ms(day: str) -> int:
+def _ms_at(day: str, hour: int) -> int:
+    """The epoch milliseconds of ``hour`` o'clock UTC on ``day``."""
     y, m, d = (int(p) for p in day.split("-"))
-    return int(datetime(y, m, d, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    return int(datetime(y, m, d, hour, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _noon_ms(day: str) -> int:
+    return _ms_at(day, 12)
 
 
 def _fmt(value: str | Decimal | float) -> str:
@@ -97,12 +102,13 @@ class _Bills:
 
     def _row(
         self, inst: str, sub: str, day: str, bal_chg: str, ccy: str, pnl: str, fee: str,
+        *, hour: int = 12,
     ) -> "_Bills":
         self._n += 1
         bal = self._bal.get(ccy, self._opening) + Decimal(bal_chg)
         self._bal[ccy] = bal
         self._lines.append(
-            f"{inst},{self._n},{sub},{_noon_ms(day)},{bal_chg},0,{_fmt(bal)},0,,,{ccy},{pnl},{fee},"
+            f"{inst},{self._n},{sub},{_ms_at(day, hour)},{bal_chg},0,{_fmt(bal)},0,,,{ccy},{pnl},{fee},"
             "cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
         )
         return self
@@ -118,10 +124,12 @@ class _Bills:
         """The balance after this file's last bill: the next quarter's opening."""
         return self._bal.get(ccy, self._opening)
 
-    def realized(self, day: str, net: str | float, *, inst: str = "SWAP", ccy: str = "USDT") -> "_Bills":
+    def realized(
+        self, day: str, net: str | float, *, inst: str = "SWAP", ccy: str = "USDT", hour: int = 12,
+    ) -> "_Bills":
         fee = Decimal("-0.25")
         pnl = Decimal(str(net)) - fee
-        return self._row(inst, "2", day, _fmt(net), ccy, _fmt(pnl), _fmt(fee))
+        return self._row(inst, "2", day, _fmt(net), ccy, _fmt(pnl), _fmt(fee), hour=hour)
 
     def funding(self, day: str, amount: str | float) -> "_Bills":
         sub = "174" if Decimal(str(amount)) >= 0 else "173"
@@ -522,7 +530,8 @@ def _apply_calls(db: _Db) -> list[dict[str, Any]]:
 #
 # Live: 08-02 +100 (the reach BOUNDARY day, partial: the crawl caught only part of it),
 # 08-03 -50, 09-15 +20 and funding +1.5 that day. Equity 10000, no open uPnL, no flows.
-# Archive (Q3, all 92 days covered):
+# Archive (Q3 alone: the 91 whole UTC days 07-01..09-29; 06-30 and 09-30 are quarter-edge days with
+# no daily total without Q2 and Q4, D-15):
 #   gap period: 07-10 +10, 07-20 funding -2, 08-01 +200 (the rest are real quiet zeros)
 #   08-02 +97.5: the WHOLE day. It differs from the live partial 100 on purpose. The boundary
 #   day is not compared, and (CR-01) the archive owns it: the NAV roll must use 97.5, not 100.
@@ -624,13 +633,14 @@ class TestTracerCalibrate:
         result = world.result()
         assert result["stop_class"] is None and result["mode"] == "calibrate"
         reconcile = result["reconcile"]
-        # Q3 ended 09-30; today (the seam) is 10-15; the live realized reach starts 08-02, a
-        # partial day, so the first full day is 08-03: 29 August days + 30 September days.
-        assert reconcile["window"] == {"from": "2026-08-03", "to": "2026-09-30"}
+        # Q3 alone covers 07-01..09-29 whole (09-30 is a quarter-edge day only Q4 could make
+        # whole, D-15); the live realized reach starts 08-02, a partial day, so the first full
+        # day is 08-03: 29 August days + 29 September days.
+        assert reconcile["window"] == {"from": "2026-08-03", "to": "2026-09-29"}
         assert reconcile["excluded_boundary_day"] == "2026-08-02"
         for leg in ("realized", "funding"):
             assert reconcile[leg]["ok"] is True
-            assert reconcile[leg]["days_compared"] == 59
+            assert reconcile[leg]["days_compared"] == 58
             assert reconcile[leg]["days_over_cent"] == 0
             assert reconcile[leg]["first_offending"] == [] and reconcile[leg]["misses"] == []
         assert reconcile["realized"]["window_total_diff"] == "0"
@@ -698,7 +708,7 @@ class TestAbortOnReconcileMiss:
 
         assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
         assert outcome.error_message == (
-            "okx_archive_rebuild: reconcile_miss window=2026-08-03..2026-09-30 "
+            "okx_archive_rebuild: reconcile_miss window=2026-08-03..2026-09-29 "
             "realized_days_over_cent=1 funding_days_over_cent=0 offending=2026-09-15..2026-09-15"
         )
         for amount in ("20.011", "0.011"):
@@ -802,7 +812,7 @@ class TestReachBoundaryComesFromTheFetchWindow:
 
         assert outcome.error_message is not None
         assert outcome.error_message.startswith(
-            "okx_archive_rebuild: reconcile_miss window=2026-08-03..2026-09-30"
+            "okx_archive_rebuild: reconcile_miss window=2026-08-03..2026-09-29"
         )
         assert "offending=2026-08-10..2026-08-10" in outcome.error_message
         result = world.result()
@@ -1261,7 +1271,7 @@ class TestInsufficientOverlap:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """2026-12-15 minus 88 days is 09-18, so the first full day is 09-19 and the Q3 window
-        is 09-19..09-30: twelve days, and the live reach ended its activity on 09-15. Both
+        is 09-19..09-29: eleven days, and the live reach ended its activity on 09-15. Both
         sides are empty there, so they agree to the cent, and the old code reported DONE."""
         db = _db_with((STRATEGY_ID, GAP_A))
         world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
@@ -1272,7 +1282,7 @@ class TestInsufficientOverlap:
         assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
         assert outcome.error_message == (
             "okx_archive_rebuild: reconcile_miss cause=insufficient_overlap "
-            "window=2026-09-19..2026-09-30 days=12 active=0 need_days=14 need_active=5"
+            "window=2026-09-19..2026-09-29 days=11 active=0 need_days=14 need_active=5"
         )
         result = world.result()
         assert result["stop_class"] == "reconcile_miss"
@@ -1285,7 +1295,7 @@ class TestInsufficientOverlap:
     async def test_a_long_window_with_too_few_active_days_is_insufficient_overlap(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Fifteen days (09-16..09-30) and still nothing on either side: long enough, empty."""
+        """Fourteen days (09-16..09-29), the floor exactly, and still nothing on either side: long enough, empty."""
         db = _db_with((STRATEGY_ID, GAP_A))
         world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
         self._at(monkeypatch, datetime(2026, 12, 12, 12, 0, tzinfo=timezone.utc))
@@ -1294,7 +1304,7 @@ class TestInsufficientOverlap:
 
         assert outcome.error_message == (
             "okx_archive_rebuild: reconcile_miss cause=insufficient_overlap "
-            "window=2026-09-16..2026-09-30 days=15 active=0 need_days=14 need_active=5"
+            "window=2026-09-16..2026-09-29 days=14 active=0 need_days=14 need_active=5"
         )
         assert db.apply_calls == 0
 
@@ -1308,7 +1318,7 @@ class TestInsufficientOverlap:
         outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
 
         assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
-        # 59 days (08-03..09-30). Realized is active on 08-03, 08-05..08-08 and 09-15; funding
+        # 58 days (08-03..09-29). Realized is active on 08-03, 08-05..08-08 and 09-15; funding
         # on 09-15 only. A day counts when either side carries >= half a cent.
         assert world.result()["reconcile"]["realized"]["active_days"] == 6
         assert world.result()["reconcile"]["funding"]["active_days"] == 1
@@ -1450,27 +1460,30 @@ class TestClaimBudget:
 
 class TestWindows:
     """The overlap windows are where the archive is authenticated, so their arithmetic is
-    pinned with independent calendar literals."""
+    pinned with independent calendar literals. They are built over the archive's covered days,
+    the whole UTC days plan 18's aggregate has a daily total for (D-15)."""
 
     def test_adjacent_quarter_windows_merge_into_one_comparison(self) -> None:
-        """Live reach starting 06-28 touches the tail of Q2 and all of Q3 until 09-30: one
-        contiguous run, so the window-total bound is applied to the run, not to a seam."""
+        """Covered days 04-01..09-29 (Q2 and Q3 with the 06-30 edge joined; 09-30 is missing)
+        and a live reach starting 06-28: one contiguous run, so the window-total bound is
+        applied to the run, not to a seam."""
         windows = okx_archive_job._windows(
-            [(2026, "Q2"), (2026, "Q3")], date(2026, 6, 29), date(2026, 10, 15)
+            frozenset(_daterange("2026-04-01", "2026-09-29")), date(2026, 6, 29), date(2026, 10, 15)
         )
-        assert windows == [("2026-06-29", "2026-09-30")]
+        assert windows == [("2026-06-29", "2026-09-29")]
 
     def test_non_adjacent_quarters_stay_separate_windows(self) -> None:
-        windows = okx_archive_job._windows(
-            [(2026, "Q1"), (2026, "Q3")], date(2026, 2, 1), date(2026, 10, 15)
-        )
-        assert windows == [("2026-02-01", "2026-03-31"), ("2026-07-01", "2026-09-30")]
+        covered = frozenset(_daterange("2026-01-01", "2026-03-30") + _daterange("2026-07-01", "2026-09-29"))
+        windows = okx_archive_job._windows(covered, date(2026, 2, 1), date(2026, 10, 15))
+        assert windows == [("2026-02-01", "2026-03-30"), ("2026-07-01", "2026-09-29")]
 
     def test_a_quarter_the_live_reach_never_touches_has_no_window(self) -> None:
-        assert okx_archive_job._windows([(2026, "Q2")], date(2026, 7, 2), date(2026, 10, 15)) == []
+        covered = frozenset(_daterange("2026-04-01", "2026-06-29"))
+        assert okx_archive_job._windows(covered, date(2026, 7, 2), date(2026, 10, 15)) == []
 
     def test_today_is_excluded_because_its_live_day_is_still_open(self) -> None:
-        assert okx_archive_job._windows([(2026, "Q3")], date(2026, 8, 3), date(2026, 9, 10)) == [
+        covered = frozenset(_daterange("2026-07-01", "2026-09-29"))
+        assert okx_archive_job._windows(covered, date(2026, 8, 3), date(2026, 9, 10)) == [
             ("2026-08-03", "2026-09-09")
         ]
 
@@ -2308,8 +2321,124 @@ class TestArchiveCompleteness:
         assert (quarter["ts_min_day"], quarter["ts_max_day"]) == ("2026-07-10", "2026-09-15")
         # Bills fall on 07-10, 07-20, 08-01, 08-02, 08-03, 08-05..08-08 and 09-15. The quarter
         # is 07-01..09-30, so the longest quiet stretch is 08-09..09-14 = 23 + 14 = 37 days
-        # (07-01..07-09 is 9, 07-21..07-31 is 11, 09-16..09-30 is 15).
+        # (07-01..07-09 is 9, 07-21..07-31 is 11, 09-16..09-29 is 14).
         assert quarter["longest_billless_run"] == {"days": 37, "from": "2026-08-09", "to": "2026-09-14"}
+
+
+class TestQuarterEdgeDaysEndToEnd:
+    """D-15, end to end through ``dispatch()`` and the stateful RPC fake. OKX cuts a quarter
+    file at 00:00 UTC+8, i.e. 16:00 UTC the day before, so a quarter-edge UTC day (06-30) is
+    split between two files, and the last day of the newest quarter (09-30) is reached only
+    until 16:00 UTC. A day counts only when the files on both sides were read; the founder
+    approves a fingerprint on the days named here, so a partial day must be neither compared
+    nor written."""
+
+    GAP_EDGE = [{"from": "2026-06-25", "to": "2026-07-15", "recorded_at": "2026-10-10T00:00:00Z"}]
+
+    @staticmethod
+    def _files() -> tuple[bytes, bytes]:
+        """A Q2 file and a Q3 file cut at 00:00 UTC+8. Q2 opens at 03-31 20:00Z and holds the
+        first 10 hours of 06-30; Q3 holds the last 8 hours of 06-30 and the first 10 hours of 09-30."""
+        q2 = _Bills(first_id=700_000_000)
+        q2.realized("2026-03-31", "3", hour=20)
+        for day, net in (("2026-04-02", "10"), ("2026-05-10", "20"), ("2026-06-20", "5")):
+            q2.realized(day, net)
+        q2.realized("2026-06-30", "5", hour=10)
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000)
+        q3.realized("2026-06-30", "7", hour=20)
+        q3.realized("2026-09-30", "4", hour=10)
+        return q2.bytes(), q3.bytes()
+
+    @pytest.mark.asyncio
+    async def test_a_utc_plus_8_q2_q3_pair_writes_06_30_whole_and_never_compares_or_writes_a_missing_edge_day(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-15. OKX cuts at 00:00 UTC+8, so 06-30 is split between the two files and is whole
+        only with both; 09-30 reaches only until 16:00 UTC in Q3 and must never be compared
+        against the live day (D-10), which sees all 24 hours, or written. A run that compared
+        it would stop on a false reconcile_miss, and one that wrote a one-file day would
+        publish a partial return."""
+        q2, q3 = self._files()
+        db = _db_with((STRATEGY_ID, self.GAP_EDGE))
+        live = _standard_live()
+        live.realized["2026-09-30"] = 10.0
+        world = _install(monkeypatch, db, live, q2=q2, q3=q3)
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+        quarters = TestArchiveCompleteness.QUARTERS_Q2_Q3
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID], quarters=quarters))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result = world.result()
+        assert [(q["ts_min_day"], q["ts_max_day"]) for q in result["quarters"]] == [
+            ("2026-03-31", "2026-06-30"), ("2026-06-30", "2026-09-30"),
+        ]
+        assert result["census"]["edge_days"] == {
+            "whole": ["2026-06-30"], "missing": ["2026-03-31", "2026-09-30"],
+        }
+        reconcile = result["reconcile"]
+        assert reconcile["window"] == {"from": "2026-08-03", "to": "2026-09-29"}
+        for leg in ("realized", "funding"):
+            assert reconcile[leg]["ok"] is True
+        assert reconcile["realized"]["days_compared"] == 58
+        (strategy,) = result["strategies"]
+        assert strategy["insert_days"] == 21
+        assert strategy["insert_ranges"] == [{"from": "2026-06-25", "to": "2026-07-15"}]
+        assert strategy["gaps_after"] == []
+        _no_writes_but_progress(world, db)
+
+        fingerprint = result["fingerprint"]
+        _install(monkeypatch, db, live, q2=q2, q3=q3)
+        applied = await _run(
+            _meta("apply", [STRATEGY_ID], quarters=quarters, approved_fingerprint=fingerprint)
+        )
+
+        assert applied.outcome == DispatchOutcome.DONE, applied.error_message
+        (call,) = _apply_calls(db)
+        assert [r["date"] for r in call["p_rows"]] == _daterange("2026-06-25", "2026-07-15")
+        assert call["p_expected_gaps_after"] == []
+        assert "2026-06-30" in db.csv_days(STRATEGY_ID)
+
+    @pytest.mark.asyncio
+    async def test_an_edge_day_only_one_file_reaches_is_never_written_and_stays_in_the_gap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-15 and TRADESYNC D-02. The Q3 file holds only the 8 hours of 06-30 after OKX's cut.
+        Writing a return from them would publish a partial day as a whole one and silently drop
+        the day from the gap the factsheet names. It must stay missing and named: out of
+        ``p_rows``, out of ``csv_daily_returns`` and ``reconstructed_ranges``, and inside the
+        stored ``unrecovered_gaps``. The file carries no 09-30 bill on purpose, so a wrongly
+        covered 09-30 cannot stop the run first and hide this test's own assertions."""
+        bills = _standard_bills()
+        bills.realized("2026-06-30", "7", hour=20)
+        db = _db_with((STRATEGY_ID, self.GAP_EDGE))
+        live = _standard_live()
+        world = _install(monkeypatch, db, live, q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result = world.result()
+        assert result["census"]["edge_days"] == {"whole": [], "missing": ["2026-06-30", "2026-09-30"]}
+        (strategy,) = result["strategies"]
+        assert strategy["insert_days"] == 15
+        assert strategy["insert_ranges"] == [{"from": "2026-07-01", "to": "2026-07-15"}]
+        assert strategy["gaps_after"] == [{"from": "2026-06-25", "to": "2026-06-30"}]
+
+        fingerprint = result["fingerprint"]
+        _install(monkeypatch, db, live, q3=bills.bytes())
+        applied = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert applied.outcome == DispatchOutcome.DONE, applied.error_message
+        (call,) = _apply_calls(db)
+        assert [r["date"] for r in call["p_rows"]] == _daterange("2026-07-01", "2026-07-15")
+        assert call["p_expected_gaps_after"] == [{"from": "2026-06-25", "to": "2026-06-30"}]
+        assert "2026-06-30" not in db.csv_days(STRATEGY_ID)
+        provenance = db.provenance(STRATEGY_ID)
+        assert _norm(provenance["unrecovered_gaps"]) == [{"from": "2026-06-25", "to": "2026-06-30"}]
+        assert [(r["from"], r["to"]) for r in provenance["reconstructed_ranges"]] == [
+            ("2026-07-01", "2026-07-15")
+        ]
 
 
 class TestNonExternalPnlIsInTheLiveNumber:
