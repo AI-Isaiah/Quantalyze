@@ -13134,3 +13134,39 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **Fix.** A lease or heartbeat that renews `claimed_at` while a runner works, so the staleness clock measures silence and not batch position. The deferred heartbeat/lease work owns it; a batch size of 1 for the backfill role would also close the mechanism but was not chosen.
 
 **Owner / Trigger:** the deferred heartbeat/lease work. Trigger: QUANTALYZE-2A or QUANTALYZE-A fires again after the 166.5.1 deploy, or the 48 h Sentry read (D-04) shows a P0002 on `derive_allocator_equity`. Closed when a long run's claim age is renewed and a test reproduces a batch-mate wait past 20 minutes without a reset.
+
+## Phase 167.2.1.1 (UPNLVENUES) — routed items (logged 2026-10-22)
+
+### 167.2.1.1-ANCHOR-POSITIONS-READ-FAILURE — a failed positions read on an unforced Bybit or Binance reconstruct anchors at the wallet figure with no data-quality flag (booked 2026-10-22, 167.2.1.1 plan 01 decision PD-B and plan 05, DATA INTEGRITY)
+
+**Reading.** Bybit and Binance reconstruct anchors now add the `fetch_positions()` uPnL in `_fetch_current_equity`. On a DEFAULT (unforced) reconstruct a failed positions read logs a WARNING (venue, exception class, scrubbed message) and anchors at the wallet figure, so that curve is shifted by that day's open uPnL with no DQ flag. This is decision PD-B in 167.2.1.1-01-PLAN.md: not None, because None ships an unanchored zero-cash replay, and no new `EquityDQ` key was added in this phase. Pinned by `test_reconstruct_bybit_positions_read_failure_anchors_at_wallet_and_logs_the_drop` and `test_unforced_reconstruct_with_a_failed_positions_read_still_anchors_at_the_wallet_figure`.
+
+**Forced rebuild.** A forced rebuild refuses instead and writes nothing (plan 05, reason `positions_unreadable`, pinned by `test_forced_rebuild_refuses_and_writes_nothing_when_the_positions_read_fails`). So the unforced path anchors at the wallet figure, and the forced path never does.
+
+**Fix.** On an additive venue, a positions failure either skips the anchor with a named DQ flag or anchors from a stored uPnL on every path.
+
+**Owner / Trigger:** founder routing, candidate Phase 167.2.1.1.1 NAVMTM. Trigger: that WARNING in worker logs during an unforced reconstruct, or a `positions_unreadable` refusal in the D-02 recompute. Closed when a positions failure on an additive venue either skips the anchor with a named DQ flag or anchors from a stored uPnL on every path, and the default-path pins above are flipped to the new rule.
+
+### 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR — the Bybit derive anchor reads the USDT coin only while the reconstruct anchor and the holdings poll read every coin (booked 2026-10-22, 167.2.1.1 plan 01 decision PD-E, DATA INTEGRITY)
+
+**Reading.** The derive anchor (`fetch_usdt_balance_with_status`) reads only the USDT coin. The reconstruct anchor and the holdings poll sum every stable coin. For an account holding a non-USDT coin the three paths disagree by that coin's balance. Pinned by `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin`. Exposure is unmeasured until the D-01 live read.
+
+**Owner / Trigger:** founder routing. Trigger: the D-01 probe reports `non_usdt_coins_present` true for any key. Closed when the derive anchor covers every coin as the reconstruct does, or the restriction is decided and documented, with the pinning test flipped.
+
+### 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY — Bybit positions are read for USDT-settled linear contracts only, so other settle categories carry uPnL the anchor does not add (booked 2026-10-22, 167.2.1.1 RESEARCH, DATA INTEGRITY)
+
+**Reading.** ccxt's Bybit `fetch_positions()` with no symbols reads USDT-settled linear positions only, and the holdings raw-V5 fallback asks for settleCoin USDT. USDC-settled perps and inverse positions carry uPnL that the reconstruct anchor does not add and the holdings poll does not list.
+
+**Owner / Trigger:** founder routing, candidate Phase 167.2.1.1.1.1 MARKSOURCE. Trigger: the D-01 probe reports `non_usdt_upnl_present` true or `positions_upnl_matches_totalperpupl` false for any key. Closed when the anchor and holdings read every settle category (or the account `totalPerpUPL`), with a test.
+
+### 167.2.1.1-BINANCE-FUTURES-WALLET-UNREAD — Binance is read with ccxt's default spot type, so a futures account's collateral never reaches any path (booked 2026-10-22, 167.2.1.1 plan 02 decision PD-D, DATA INTEGRITY)
+
+**Reading.** Binance is read with ccxt's default spot type, so `fetch_balance()` returns the spot wallet while `fetch_positions()` returns USD-M futures positions. A futures account's collateral never reaches the derive anchor, the reconstruct anchor or the holdings spot rows. If Binance is ever read with a futures type, `total` already includes uPnL and the reconstruct additive path double counts. No Binance key exists (2026-10-22 census), so no stored series is affected, and D-03 rules out a PROD step.
+
+**Owner / Trigger:** unowned until a Binance key connects. Trigger: the first active Binance key, or `test_binance_tripwire_repo_reads_the_spot_wallet_only` going red. Closed when the futures wallet is read and the skip set and the derive wedge change together, with real-parser tests.
+
+### 167.2.1.1-MULTIKEY-RECOMPUTE — a forced reconstruct cannot re-anchor an allocator that has any other api_keys row (booked 2026-10-22, 167.2.1.1 plan 04, DATA INTEGRITY, FOUNDER DECISION)
+
+**Reading.** A forced reconstruct re-anchors a SOLE-key allocator through the atomic replace. With any other `api_keys` row of the same user the persist is first-writer-wins DO NOTHING (T-07-V5b), so rows a Bybit key wrote with the old anchor stay. Pinned by `test_forced_rebuild_cannot_overwrite_a_multi_key_allocators_rows`. The D-02 recompute records each such allocator as "recorded, not recomputed" (SC-3).
+
+**Owner / Trigger:** founder decision after the D-02 census. Trigger: the census counts at least one Bybit key whose allocator has another key row. Closed when the founder has decided per allocator (accept as recorded, or a scoped product path) and the decision is recorded.
