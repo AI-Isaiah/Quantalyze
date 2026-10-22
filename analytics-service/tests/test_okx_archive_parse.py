@@ -15,7 +15,7 @@ from __future__ import annotations
 import ast
 import csv
 import io
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -38,6 +38,7 @@ from services.okx_archive_files import (
     parse_archive_csv,
     quarter_bounds,
 )
+from services.okx_archive_reconcile import reconcile_leg
 
 FIXTURES = Path(__file__).parent / "fixtures" / "okx_archive"
 EXCHANGE_SOURCE = Path(__file__).resolve().parents[1] / "services" / "exchange.py"
@@ -118,7 +119,9 @@ def _detail_text(err: ArchiveParseError) -> str:
 
 # ---------------------------------------------------------------------- the quarter
 class TestQuarterBounds:
-    """The plain calendar reading is the one asserted against every file."""
+    """The plain calendar reading is the one asserted against every file.
+
+    These are calendar dates; the file's instants are cut at 00:00 UTC+8 on them (D-15)."""
 
     @pytest.mark.parametrize(
         ("quarter", "start", "end"),
@@ -143,6 +146,7 @@ class TestQuarterRangeAssertion:
 
     OKX's own doc example labels 2024 Q2 as a July-September range; if the assertion
     were missing, a mislabelled file would write another quarter's P&L onto the wrong days.
+    The quarter's calendar dates are cut at 00:00 UTC+8, i.e. 16:00 UTC the day before (D-15).
     """
 
     def test_quarter_q3_file_parsed_as_q2_is_a_named_stop_with_requested_and_observed_dates(self):
@@ -158,20 +162,21 @@ class TestQuarterRangeAssertion:
         assert err.detail["requested"] == "2026 Q3"
 
     def test_quarter_row_one_millisecond_before_the_start_is_a_stop(self):
+        """D-15: Q3 starts at 2026-06-30T16:00:00.000Z (07-01 00:00 UTC+8); one ms earlier is Q2's."""
         header, rows = _read_fixture("q3_like.csv")
-        before = int(_ms("2026-07-01 00:00:00")) - 1
-        rows[0][header.index("ts")] = str(before)
+        rows[0][header.index("ts")] = "1782835199999"
         err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
         assert err.stop_class == "quarter_range_mismatch"
         assert err.detail["observed_min_day"] == "2026-06-30"
         assert err.detail["rows_outside"] == 1
 
     def test_quarter_row_at_the_exclusive_end_is_a_stop(self):
+        """D-15: Q3 ends, exclusive, at 2026-09-30T16:00:00.000Z (10-01 00:00 UTC+8)."""
         header, rows = _read_fixture("q3_like.csv")
-        rows[-1][header.index("ts")] = _ms("2026-10-01 00:00:00")
+        rows[-1][header.index("ts")] = "1790784000000"
         err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
         assert err.stop_class == "quarter_range_mismatch"
-        assert err.detail["observed_max_day"] == "2026-10-01"
+        assert err.detail["observed_max_day"] == "2026-09-30"
 
     def test_a_ts_beyond_the_calendar_is_still_a_named_stop_with_no_observed_days(self):
         """A 16-digit (microsecond-unit) ts is accepted by the digit check but lies past the year
@@ -184,14 +189,17 @@ class TestQuarterRangeAssertion:
         assert err.detail["rows_outside"] == 1
 
     def test_quarter_first_and_last_millisecond_are_inside(self):
-        # q3_like.csv carries a row at 00:00:00.000 on 07-01 and one at 23:59:59.999 on 09-30.
+        # q3_like.csv carries rows at 07-01T00:00:00.000Z and 09-30T15:59:59.999Z (D-15: the last
+        # millisecond before the UTC+8 cut).
         parsed = parse_archive_csv((FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q3")
         assert (parsed.ts_min_day, parsed.ts_max_day) == ("2026-07-01", "2026-09-30")
 
-    def test_quarter_q2_fixture_verifies_ninety_one_days(self):
+    def test_quarter_q2_fixture_covers_ninety_whole_utc_days(self):
+        """D-15: Q2 alone covers 04-01..06-29 as whole UTC days; 03-31 and 06-30 are its edges."""
         parsed = parse_archive_csv((FIXTURES / "q2_like.csv").read_bytes(), year=2026, quarter="Q2")
-        assert (parsed.row_count, len(parsed.covered_days)) == (14, 91)
+        assert (parsed.row_count, len(parsed.covered_days)) == (14, 90)
         assert (parsed.ts_min_day, parsed.ts_max_day) == ("2026-04-01", "2026-06-30")
+        assert (parsed.head_edge_day, parsed.tail_edge_day) == ("2026-03-31", "2026-06-30")
 
     def test_quarter_detail_carries_dates_and_counts_only(self):
         err = _stop(parse_archive_csv, (FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q2")
@@ -818,6 +826,191 @@ class TestBalChainCrossesTheQuarterSeam:
         ]
 
 
+# D-15: OKX cuts a quarter file at 00:00 UTC+8 (16:00 UTC the day before), so a real Q2 file
+# opens on 2026-03-31 and a real Q3 file on 2026-06-30. Each pair is (when UTC, balChg).
+Q2_EDGE_BILLS = [("2026-03-31 20:00:00", "3"), ("2026-04-02 10:00:00", "10"),
+                 ("2026-05-10 10:00:00", "20"), ("2026-06-20 10:00:00", "5"),
+                 ("2026-06-30 10:00:00", "5")]
+Q3_EDGE_BILLS = [("2026-06-30 20:00:00", "7"), ("2026-07-02 10:00:00", "3"),
+                 ("2026-07-15 10:00:00", "4"), ("2026-08-10 10:00:00", "6"),
+                 ("2026-09-01 10:00:00", "8"), ("2026-09-30 10:00:00", "4")]
+
+
+def _edge_pair():
+    """A Q2 and a Q3 file of ONE account cut at 00:00 UTC+8; Q3 opens on Q2's closing 1043."""
+    h2, r2, closing = _ledger("Q2", Q2_EDGE_BILLS, opening="1000", first_id=100)
+    h3, r3, _ = _ledger("Q3", Q3_EDGE_BILLS, opening=str(closing), first_id=200)
+    return _parsed(h2, r2, "Q2"), _parsed(h3, r3, "Q3")
+
+
+class TestQuarterCutAtUtcPlus8:
+    """D-15. OKX cuts quarters at 00:00 UTC+8, not at 00:00 UTC. The real Q2 file therefore
+    starts at 16:00 UTC on 03-31 and a parser on calendar-UTC bounds refuses a correct file.
+    One that accepted it but kept summing by file would publish a partial 03-31, 06-30 or
+    09-30 as if it were a whole day, so a quarter-edge UTC day counts only when both
+    neighbouring files were read."""
+
+    def test_a_q2_q3_pair_cut_at_utc_plus_8_parses_aggregates_whole_utc_days_and_chains_across_the_seam(self):
+        q2, q3 = _edge_pair()
+        # Imported here, after the parse, so the symbol need not exist for the file to collect.
+        from services.okx_archive_files import quarter_edge_days
+
+        assert (q2.ts_min_day, q2.ts_max_day, q2.row_count) == ("2026-03-31", "2026-06-30", 5)
+        assert len(q2.covered_days) == 90
+        assert (q2.head_edge_day, q2.tail_edge_day) == ("2026-03-31", "2026-06-30")
+        assert q2.head_edge_day not in q2.covered_days and q2.tail_edge_day not in q2.covered_days
+        assert (q3.ts_min_day, q3.ts_max_day, q3.row_count) == ("2026-06-30", "2026-09-30", 6)
+        assert len(q3.covered_days) == 91
+        assert (q3.head_edge_day, q3.tail_edge_day) == ("2026-06-30", "2026-09-30")
+        assert q3.head_edge_day not in q3.covered_days and q3.tail_edge_day not in q3.covered_days
+
+        assert quarter_edge_days([q2, q3]) == (
+            frozenset({"2026-06-30"}),
+            frozenset({"2026-03-31", "2026-09-30"}),
+        )
+
+        aggregate = aggregate_archive([q2, q3], None)
+        assert aggregate.realized_by_day == {
+            "2026-04-02": Decimal("10"),
+            "2026-05-10": Decimal("20"),
+            "2026-06-20": Decimal("5"),
+            "2026-06-30": Decimal("12"),  # 5 from Q2's last hours + 7 from Q3's first hours
+            "2026-07-02": Decimal("3"),
+            "2026-07-15": Decimal("4"),
+            "2026-08-10": Decimal("6"),
+            "2026-09-01": Decimal("8"),
+        }
+        first = date(2026, 4, 1)
+        assert aggregate.covered_days == frozenset(
+            (first + timedelta(days=i)).isoformat() for i in range(182)  # 04-01 .. 09-29
+        )
+        assert max(aggregate.covered_days) == "2026-09-29"
+        assert aggregate.edge_days_whole == frozenset({"2026-06-30"})
+        assert aggregate.edge_days_missing == frozenset({"2026-03-31", "2026-09-30"})
+
+        # 11 bills in one USDT chain, the seam pair and both edge-day bills included.
+        assert verify_bal_chain([q2, q3], aggregate.summed_ccys) == {
+            "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-03-31", "last_day": "2026-09-30"}},
+            "total_pairs": 10,
+        }
+
+        reading = reconcile_leg(
+            "realized",
+            aggregate.realized_by_day,
+            {"2026-08-10": Decimal("6"), "2026-09-01": Decimal("8")},
+            ("2026-08-03", "2026-09-29"),
+        )
+        assert reading.ok is True
+        assert reading.days_compared == 58
+
+    # ---- the exact-millisecond bounds (T-167.1.2.2.2.1-46)
+    @staticmethod
+    def _q2_without_its_tail_row():
+        """The Q2 fixture minus its last data line, which sits one ms before the TAIL cut and
+        would otherwise let a wrong tail bound decide a test about the HEAD bound."""
+        header, rows = _read_fixture("q2_like.csv")
+        return header, rows[:-1]
+
+    def test_a_q2_row_at_16_00_utc_on_03_31_is_inside_the_quarter(self):
+        """D-15: Q2 opens at 2026-03-31T16:00:00.000Z (04-01 00:00 UTC+8). A calendar-UTC bound
+        refuses the real Q2 file; this is the first instant it must accept, and 03-31 is an
+        edge day, not a covered one."""
+        header, rows = self._q2_without_its_tail_row()
+        rows.append(_new_row(header, **_row_kwargs("600000099", "2", "2026-04-01 00:00:00", ts="1774972800000")))
+        parsed = parse_archive_csv(_emit(header, rows), year=2026, quarter="Q2")
+        assert parsed.ts_min_day == "2026-03-31"
+        assert "2026-03-31" not in parsed.covered_days
+
+    def test_a_q2_row_one_millisecond_earlier_stops_with_the_utc_days_observed(self):
+        """D-15: one ms before 2026-03-31T16:00Z belongs to Q1. A bound that is too wide
+        (say nine hours instead of eight) would let another quarter's bill into Q2's days."""
+        header, rows = self._q2_without_its_tail_row()
+        rows.append(_new_row(header, **_row_kwargs("600000099", "2", "2026-04-01 00:00:00", ts="1774972799999")))
+        err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q2")
+        assert err.stop_class == "quarter_range_mismatch"
+        assert err.detail["range_start"] == "2026-04-01"
+        assert err.detail["range_end_exclusive"] == "2026-07-01"
+        assert err.detail["observed_min_day"] == "2026-03-31"
+        assert err.detail["rows_outside"] == 1
+
+    def test_the_q2_file_ends_one_millisecond_before_16_00_utc_on_06_30(self):
+        """D-15: Q2 ends, exclusive, at 2026-06-30T16:00:00.000Z. The fixture's last bill is the
+        final millisecond inside; the next instant is Q3's first and must stop Q2."""
+        parsed = parse_archive_csv((FIXTURES / "q2_like.csv").read_bytes(), year=2026, quarter="Q2")
+        assert parsed.ts_max_day == "2026-06-30"
+        header, rows = _read_fixture("q2_like.csv")
+        rows[-1][header.index("ts")] = "1782835200000"
+        err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q2")
+        assert err.stop_class == "quarter_range_mismatch"
+        assert err.detail["observed_max_day"] == "2026-06-30"
+        assert err.detail["rows_outside"] == 1
+
+    def test_a_q3_row_at_16_00_utc_on_06_30_is_inside_the_quarter(self):
+        """D-15: the instant Q2 stops at is the first one Q3 accepts, so no bill is in both
+        files and none falls in neither."""
+        header, rows = _read_fixture("q3_like.csv")
+        rows[0][header.index("ts")] = "1782835200000"
+        parsed = parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")
+        assert parsed.ts_min_day == "2026-06-30"
+
+    # ---- the both-files rule for a quarter-edge UTC day (T-167.1.2.2.2.1-45)
+    def test_an_edge_day_has_a_daily_total_only_when_both_neighbouring_files_were_read(self):
+        """D-15 / TRADESYNC D-02: a quarter-edge UTC day one file reaches holds hours of a day.
+        Summing it would publish a partial day as a whole one, so it has no total, no covered
+        entry and no row until the other half is read."""
+        q2, q3 = _edge_pair()
+        only_q3 = aggregate_archive([q3], None)
+        for day in ("2026-06-30", "2026-09-30"):
+            assert day not in only_q3.realized_by_day
+            assert day not in only_q3.covered_days
+        assert only_q3.edge_days_missing == frozenset({"2026-06-30", "2026-09-30"})
+        only_q2 = aggregate_archive([q2], None)
+        for day in ("2026-03-31", "2026-06-30"):
+            assert day not in only_q2.realized_by_day
+            assert day not in only_q2.covered_days
+        assert aggregate_archive([q2, q3], None).realized_by_day["2026-06-30"] == Decimal("12")
+
+    def test_no_leg_and_no_excluded_month_carries_a_missing_edge_day(self):
+        """D-15 / TRADESYNC D-02: the gate covers every sum, not only the realized one. A funding
+        figure, a flow, a non-external transfer or an excluded-class amount on a day only one
+        file reaches would be a partial day in a leg the factsheet publishes."""
+        header, _ = _read_fixture("q3_like.csv")
+
+        def five(prefix: str, when: str) -> list[list[str]]:
+            kinds = [
+                _row_kwargs(f"{prefix}1", "2", when, pnl="4", fee="-0.5", balChg="3.5"),  # SWAP realized
+                _row_kwargs(f"{prefix}2", "174", when, pnl="0.9", balChg="0.9"),  # funding
+                _row_kwargs(f"{prefix}3", "11", when, instType="", balChg="500"),  # external flow
+                _row_kwargs(f"{prefix}4", "110", when, balChg="-15"),  # liquidation transfer
+                _row_kwargs(f"{prefix}5", "2", when, instType="OPTION", pnl="-1.5", fee="-0.05"),  # excluded
+            ]
+            return [_new_row(header, **kind) for kind in kinds]
+
+        rows = five("8001", "2026-06-30 20:00:00") + five("8002", "2026-07-01 10:00:00")
+        aggregate = _aggregate_q3(_emit(header, rows))
+        legs = (aggregate.realized_by_day, aggregate.funding_by_day,
+                aggregate.flows_by_day, aggregate.non_external_by_day)
+        for leg in legs:
+            assert "2026-07-01" in leg  # the control day, same five rows, is summed
+            assert "2026-06-30" not in leg
+        assert aggregate.excluded_by_month == {"2026-07": {"OPTION": Decimal("-1.55")}}
+        assert "2026-06-30" not in aggregate.covered_days
+
+    @pytest.mark.parametrize(
+        ("overrides", "stop_class"),
+        [
+            ({"subType": "99999", "pnl": "5"}, "unknown_subtype_nonzero"),
+            ({"ccy": "BTC", "subType": "2", "pnl": "0.1"}, "non_usd_ccy"),
+        ],
+    )
+    def test_a_bill_on_a_missing_edge_day_is_still_classified(self, overrides, stop_class):
+        """D-08 / D-15: an accepted file is classified whole. The gate is on the SUMS, never on
+        classification, so an unclassifiable or coin-denominated bill on an edge day still stops."""
+        row = _row_kwargs("8003", "2", "2026-06-30 20:00:00", **overrides)
+        err = _stop(_aggregate_q3, _q3_with(row))
+        assert err.stop_class == stop_class
+
+
 class TestBalChainFloor:
     """N1. A chain that checked 0 or 1 pairs for a currency that carries money proves
     nothing: a single link between two bills cannot tell a complete ledger from a truncated one.
@@ -940,4 +1133,4 @@ class TestLongestBilllessRun:
         rows = [r for r in rows if int(r[header.index("ts")]) < 1_784_600_000_000]  # up to 07-20
         parsed = parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")
         run = longest_billless_run(parsed)
-        assert run["to"] == "2026-09-30" and run["days"] >= 60
+        assert run["to"] == "2026-09-29" and run["days"] >= 60  # D-15: 09-30 is the tail edge

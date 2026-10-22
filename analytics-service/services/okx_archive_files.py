@@ -21,7 +21,7 @@ Stop classes raised here (``ArchiveParseError.stop_class``):
 * ``unparseable_ts``         - ``ts`` is not digits-only epoch milliseconds
 * ``empty_file``             - header only, so no row can authenticate the quarter
 * ``quarter_range_mismatch`` - a ``ts`` lies outside the requested quarter's
-                               half-open UTC calendar range
+                               half-open range, cut at 00:00 UTC+8 (D-15)
 * ``missing_bill_id``        - a row without a ``billId`` (dedup and conflict
                                detection are impossible)
 * ``duplicate_bill_conflict``- one ``billId`` carried with different content
@@ -39,6 +39,15 @@ Quarter labels: OKX documents "2024 Q2" as [2024-07-01, 2024-10-01), which contr
 the plain calendar reading. The code does NOT remap. It asserts the plain reading
 (Q1 January-March ... Q4 October-December) against every file's ``ts`` values and
 stops when they disagree, naming the requested label and the observed UTC dates.
+
+The cut (D-15, measured on the real Q2 file, 2026-10-22): OKX cuts a quarter at 00:00 UTC+8,
+i.e. at 16:00 UTC on the day before the calendar date. A file is therefore accepted on
+``[start 00:00 UTC+8, end 00:00 UTC+8)``, and its first and last UTC days are split by the
+cut. Daily totals stay on whole UTC days: a file's ``covered_days`` are the UTC days it
+covers ALONE, and the two UTC days its cut splits are its ``head_edge_day`` and
+``tail_edge_day``. A quarter-edge UTC day counts only when both neighbouring files were
+read (``quarter_edge_days``); otherwise it holds hours of a day, not a day, and has no
+daily total at all (TRADESYNC D-02).
 """
 from __future__ import annotations
 
@@ -48,7 +57,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final, Mapping
+from typing import Any, Final, Mapping, Sequence
 
 ARCHIVE_HEADER: Final[tuple[str, ...]] = (
     "instType",
@@ -89,6 +98,9 @@ _TYPE_COLUMN: Final[str] = "type"
 
 _QUARTER_FIRST_MONTH: Final[Mapping[str, int]] = {"Q1": 1, "Q2": 4, "Q3": 7, "Q4": 10}
 _MS_PER_DAY: Final[int] = 86_400_000
+# D-15: OKX cuts quarter files at 00:00 UTC+8 (the 2026-10-22 calibrate re-run read a Q2 file
+# whose first bill is on 2026-03-31 UTC). Subtracted from BOTH quarter bounds.
+_QUARTER_CUT_UTC_OFFSET_MS: Final[int] = 8 * 3_600_000
 _EPOCH: Final[date] = date(1970, 1, 1)
 
 # Bound untrusted money strings (mirror of exchange._finite_decimal): a real amount
@@ -130,7 +142,12 @@ class ArchiveRow:
 
 @dataclass(frozen=True)
 class ArchiveFile:
-    """A verified quarter file: every ``ts`` lies inside the requested quarter."""
+    """A verified quarter file: every ``ts`` lies inside the requested quarter, cut at 00:00 UTC+8.
+
+    ``covered_days`` are the WHOLE UTC days the file covers alone: from the quarter's first
+    calendar day up to, not including, its last. ``head_edge_day`` (the day before the quarter's
+    first day) and ``tail_edge_day`` (its last day) are the UTC days OKX's cut splits between this
+    file and its neighbours; neither is in ``covered_days`` (D-15)."""
 
     rows: tuple[ArchiveRow, ...]
     has_type_column: bool
@@ -138,6 +155,8 @@ class ArchiveFile:
     ts_max_day: str
     row_count: int
     covered_days: frozenset[str]
+    head_edge_day: str
+    tail_edge_day: str
     duplicate_rows_dropped: int = 0
 
 
@@ -152,7 +171,7 @@ def quarter_bounds(year: int, quarter: str) -> tuple[date, date]:
 
 
 def longest_billless_run(file: ArchiveFile) -> dict[str, Any]:
-    """The longest run of consecutive covered days on which the file carries NO bill at all.
+    """The longest run of consecutive whole covered days on which the file carries NO bill at all.
 
     Counts and dates only. A quarter file is read as the complete ledger of its quarter, so a
     bill-less day becomes an explicit zero; this reading puts the longest such stretch next to
@@ -170,6 +189,18 @@ def longest_billless_run(file: ArchiveFile) -> dict[str, Any]:
         if len(run) > best_len:
             best_len, best_from, best_to = len(run), run[0], run[-1]
     return {"days": best_len, "from": best_from, "to": best_to}
+
+
+def quarter_edge_days(files: Sequence[ArchiveFile]) -> tuple[frozenset[str], frozenset[str]]:
+    """``(whole, missing)`` quarter-edge UTC days of ``files`` (D-15).
+
+    An edge day is one a quarter cut splits. It is ``whole`` when one file's ``tail_edge_day`` is
+    another file's ``head_edge_day``: both halves were read, so its total is the sum of both files'
+    bills. Every other edge day is ``missing``: only one side was read, so it has no daily total."""
+    heads = {file.head_edge_day for file in files}
+    tails = {file.tail_edge_day for file in files}
+    whole = frozenset(tails & heads)
+    return whole, frozenset((heads | tails) - whole)
 
 
 def _day_number(day: date) -> int:
@@ -221,8 +252,8 @@ def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
     """Parse one decompressed archive CSV for the requested quarter, or stop loud."""
     start, end_excl = quarter_bounds(year, quarter)
     label = f"{year} {quarter}"
-    start_ms = _day_number(start) * _MS_PER_DAY
-    end_ms = _day_number(end_excl) * _MS_PER_DAY
+    start_ms = _day_number(start) * _MS_PER_DAY - _QUARTER_CUT_UTC_OFFSET_MS
+    end_ms = _day_number(end_excl) * _MS_PER_DAY - _QUARTER_CUT_UTC_OFFSET_MS
 
     try:
         text = data.decode("utf-8-sig")
@@ -303,7 +334,8 @@ def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
             )
         )
 
-    covered = frozenset((start + timedelta(days=i)).isoformat() for i in range((end_excl - start).days))
+    # Whole UTC days only: the quarter's last calendar day is its tail edge, not a covered day.
+    covered = frozenset((start + timedelta(days=i)).isoformat() for i in range((end_excl - start).days - 1))
     return ArchiveFile(
         rows=tuple(rows),
         has_type_column=has_type,
@@ -311,5 +343,7 @@ def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
         ts_max_day=_ms_to_day(ts_max),
         row_count=len(rows),
         covered_days=covered,
+        head_edge_day=(start - timedelta(days=1)).isoformat(),
+        tail_edge_day=(end_excl - timedelta(days=1)).isoformat(),
         duplicate_rows_dropped=dropped,
     )

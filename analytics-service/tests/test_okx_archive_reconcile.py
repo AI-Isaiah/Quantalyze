@@ -43,6 +43,8 @@ def _q3_bytes() -> bytes:
 # 2026-07-09 holds a SPOT row (0 - 0.12) and a SWAP row (7.77 - 0.30) = 7.35.
 # 2026-07-15 is partial liquidation 100 only (-25.00 - 2.00); the 110 row is not P&L.
 # 2026-07-20 is a USDC row (3.33 - 0.03); the OPTION row that day is excluded.
+# The fixture's 2026-09-30 bills (-2.02) sit on Q3's tail edge: OKX cuts quarters at 00:00 UTC+8
+# (D-15), so that UTC day is split with Q4, and without Q4 it has no daily total.
 Q3_REALIZED = {
     "2026-07-01": Decimal("5.90"),
     "2026-07-09": Decimal("7.35"),
@@ -52,7 +54,6 @@ Q3_REALIZED = {
     "2026-08-12": Decimal("-0.05"),
     "2026-08-20": Decimal("-12.22"),
     "2026-09-15": Decimal("99.00"),
-    "2026-09-30": Decimal("-2.02"),
 }
 Q3_FUNDING = {
     "2026-07-02": Decimal("0.75"),  # -1.30 + 2.05
@@ -68,14 +69,18 @@ Q3_EXCLUDED = {"2026-07": {"OPTION": Decimal("2.90")}}  # 3.00 - 0.10
 
 
 class TestTracerQ3:
-    """One synthetic Q3 file goes from bytes to a reconciled reading through all three modules."""
+    """One synthetic Q3 file goes from bytes to a reconciled reading through all three modules.
+
+    D-15: the file is cut at 00:00 UTC+8, so it covers the whole UTC days 07-01..09-29 (91) and
+    splits 06-30 and 09-30 with its neighbours; with no neighbour read, those two have no total."""
 
     def test_parse_reads_every_row_and_verifies_the_quarter(self):
         parsed = parse_archive_csv(_q3_bytes(), year=2026, quarter="Q3")
         assert parsed.row_count == 22
         assert parsed.ts_min_day == "2026-07-01"
         assert parsed.ts_max_day == "2026-09-30"
-        assert len(parsed.covered_days) == 92
+        assert len(parsed.covered_days) == 91
+        assert (parsed.head_edge_day, parsed.tail_edge_day) == ("2026-06-30", "2026-09-30")
         assert parsed.has_type_column is False
 
     def test_aggregate_matches_the_hand_computed_legs(self):
@@ -87,24 +92,25 @@ class TestTracerQ3:
         assert agg.non_external_by_day == Q3_NON_EXTERNAL
         assert agg.excluded_by_month == Q3_EXCLUDED
         assert agg.unknown_zero_effect == 0
-        assert len(agg.covered_days) == 92
+        assert len(agg.covered_days) == 91
+        assert agg.edge_days_missing == frozenset({"2026-06-30", "2026-09-30"})
 
     def test_reconcile_against_equal_live_map_is_ok_and_exact(self):
         parsed = parse_archive_csv(_q3_bytes(), year=2026, quarter="Q3")
         agg = aggregate_archive([parsed], None)
-        window = ("2026-07-17", "2026-09-30")
+        window = ("2026-07-17", "2026-09-29")
         live = {d: v for d, v in Q3_REALIZED.items() if d >= window[0]}
         reading = reconcile_leg("realized", agg.realized_by_day, live, window)
         assert reading.ok is True
         assert reading.max_abs_diff == Decimal("0")
         assert reading.window_total_diff == Decimal("0")
-        assert reading.days_compared == 76
+        assert reading.days_compared == 75
         assert reading.misses == ()
 
     def test_one_day_off_by_a_cent_and_a_bit_is_a_named_miss(self):
         parsed = parse_archive_csv(_q3_bytes(), year=2026, quarter="Q3")
         agg = aggregate_archive([parsed], None)
-        window = ("2026-07-17", "2026-09-30")
+        window = ("2026-07-17", "2026-09-29")
         live = {d: v for d, v in Q3_REALIZED.items() if d >= window[0]}
         live["2026-08-12"] = live["2026-08-12"] + Decimal("0.011")
         reading = reconcile_leg("realized", agg.realized_by_day, live, window)

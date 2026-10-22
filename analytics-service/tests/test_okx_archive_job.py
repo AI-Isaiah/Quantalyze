@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -443,7 +444,9 @@ Q3_EXPECTED = {
     "ts_max_day": "2026-09-30",
     "compressed_bytes": 1234,  # what the fake downloader reports, passed through unchanged
 }
-Q3_CENSUS = {
+#: The four count keys of a census. A classification stop's census (`_stop_census`) carries only
+#: these; a passing run's census adds `edge_days` (D-15).
+Q3_CENSUS_COUNTS = {
     "by_ccy": {"USDC": 3, "USDT": 19},
     "by_inst_type": {"(blank)": 2, "FUTURES": 1, "OPTION": 1, "SPOT": 1, "SWAP": 17},
     "by_sub_type": {
@@ -451,6 +454,11 @@ Q3_CENSUS = {
         "173": 3, "174": 2, "2": 6, "3": 1, "5": 1,
     },
     "unknown_zero_effect": 0,
+}
+#: Q3 alone: its head edge 06-30 and its tail edge 09-30 each need a neighbouring file to be whole.
+Q3_CENSUS = {
+    **Q3_CENSUS_COUNTS,
+    "edge_days": {"whole": [], "missing": ["2026-06-30", "2026-09-30"]},
 }
 
 
@@ -541,6 +549,11 @@ class TestTracerCalibrateIngest:
         assert (q2["quarter"], q2["row_count"], q2["compressed_bytes"]) == ("Q2", 14, 987)
         assert (q3["quarter"], q3["row_count"], q3["compressed_bytes"]) == ("Q3", 22, 1234)
         assert sum(result["census"]["by_ccy"].values()) == 14 + 22
+        # D-15: 06-30 is the Q2 tail and the Q3 head, so both files make it whole; 03-31 (Q2 head)
+        # and 09-30 (Q3 tail) have no neighbour read.
+        assert result["census"]["edge_days"] == {
+            "whole": ["2026-06-30"], "missing": ["2026-03-31", "2026-09-30"],
+        }
 
     @pytest.mark.asyncio
     async def test_the_module_keeps_no_mutable_state_between_claims(self) -> None:
@@ -1594,16 +1607,16 @@ PARSE_DETAIL_SUFFIX: dict[str, str] = {
 
 #: The two classification stops whose result block carries the file's census (counts only):
 #: the founder reads the per-currency / per-subType picture there to decide what to do.
-#: Independent literals: each is `Q3_CENSUS` with the one row the case edits moved by hand
+#: Independent literals: each is `Q3_CENSUS_COUNTS` with the one row the case edits moved by hand
 #: (`PARSE_CASES`: the first USDT row becomes BTC; the first `SWAP ... 2` row becomes 99999).
 CENSUS_ON_STOP = {
     "non_usd_ccy": {
-        **Q3_CENSUS,
+        **Q3_CENSUS_COUNTS,
         "by_ccy": {"BTC": 1, "USDC": 3, "USDT": 18},
     },
     "unknown_subtype_nonzero": {
-        **Q3_CENSUS,
-        "by_sub_type": {**Q3_CENSUS["by_sub_type"], "2": 5, "99999": 1},
+        **Q3_CENSUS_COUNTS,
+        "by_sub_type": {**Q3_CENSUS_COUNTS["by_sub_type"], "2": 5, "99999": 1},
     },
 }
 
@@ -1887,7 +1900,10 @@ class TestResultShape:
             assert isinstance(q["ts_min_day"], str) and isinstance(q["ts_max_day"], str)
             assert isinstance(q["row_count"], int) and not isinstance(q["row_count"], bool)
         census = result["census"]
-        assert set(census) == {"by_ccy", "by_inst_type", "by_sub_type", "unknown_zero_effect"}
+        assert set(census) == {"by_ccy", "by_inst_type", "by_sub_type", "unknown_zero_effect", "edge_days"}
+        assert set(census["edge_days"]) == {"whole", "missing"}
+        for days in census["edge_days"].values():
+            assert all(isinstance(d, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) for d in days)
         for key in ("by_ccy", "by_inst_type", "by_sub_type"):
             assert all(isinstance(k, str) and isinstance(v, int) for k, v in census[key].items()), key
         assert isinstance(census["unknown_zero_effect"], int)

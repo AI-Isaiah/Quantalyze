@@ -37,13 +37,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 from typing import AbstractSet, Any, Final, Mapping, Sequence
 
-from services.okx_archive_files import ArchiveFile, ArchiveParseError, ArchiveRow
+from services.okx_archive_files import ArchiveFile, ArchiveParseError, ArchiveRow, quarter_edge_days
 
 
 class Bucket(str, Enum):
@@ -126,7 +125,13 @@ class ArchiveAggregate:
     excluded_by_month: dict[str, dict[str, Decimal]]
     census: dict[str, Any]
     unknown_zero_effect: int
+    #: Whole UTC days with a daily total: every file's ``covered_days`` plus each quarter-edge day
+    #: both neighbouring files reached (D-15). Every sum above is gated on this set.
     covered_days: frozenset[str]
+    #: Quarter-edge UTC days both neighbouring files were read for: their totals hold both halves.
+    edge_days_whole: frozenset[str]
+    #: Quarter-edge UTC days only one file reached. No daily total, no row, never 0.0 (TRADESYNC D-02).
+    edge_days_missing: frozenset[str]
     #: The currencies whose money the legs above actually add up: a USD-family currency with a
     #: nonzero effect on a bill that reached the realized, funding, flow or non-external sum.
     #: This is the scope of ``verify_bal_chain``'s ``MIN_CHAINED_PAIRS`` floor (WR-01): a
@@ -142,18 +147,16 @@ def _bill_order_key(row: ArchiveRow) -> tuple[bool, int, str]:
 def _adjacent_runs(files: Sequence[ArchiveFile]) -> list[list[int]]:
     """Indices of ``files`` grouped into runs of ADJACENT quarters, each run in time order.
 
-    Two files are adjacent when the second's first covered day is the day after the first's
-    last. Only adjacent quarters share a balance history that must chain: Q2 and Q4 without
+    Two files are adjacent when the first's ``tail_edge_day`` is the second's ``head_edge_day``:
+    OKX's UTC+8 cut splits that one UTC day between them (D-15), so the shared edge day is what
+    joins them. Only adjacent quarters share a balance history that must chain: Q2 and Q4 without
     Q3 legitimately differ, and chaining across that hole would stop a complete pair of files."""
-    order = sorted(range(len(files)), key=lambda i: min(files[i].covered_days, default=""))
+    order = sorted(range(len(files)), key=lambda i: files[i].head_edge_day)
     runs: list[list[int]] = []
     for i in order:
-        covered = files[i].covered_days
-        if runs and covered and files[runs[-1][-1]].covered_days:
-            previous_last = date.fromisoformat(max(files[runs[-1][-1]].covered_days))
-            if date.fromisoformat(min(covered)) == previous_last + timedelta(days=1):
-                runs[-1].append(i)
-                continue
+        if runs and files[runs[-1][-1]].tail_edge_day == files[i].head_edge_day:
+            runs[-1].append(i)
+            continue
         runs.append([i])
     return runs
 
@@ -173,7 +176,8 @@ def verify_bal_chain(
     This is the ONE gated chain. It runs per currency over the deduplicated rows of every run
     of ADJACENT requested quarters together, so the Q2 tail -> Q3 head seam is checked too:
     a truncated end of one file or start of the next breaks it there (a per-file chain left
-    that seam unchecked). Two stops, both ``archive_incomplete`` and both writing nothing:
+    that seam unchecked). Adjacent means sharing a quarter-edge UTC day (D-15), and every row is
+    chained, edge-day rows included, because they are real bills. Two stops, both ``archive_incomplete`` and both writing nothing:
 
     * ``bal_chain_break``: any pair breaks anywhere. The detail names, per ccy, the breaks,
       how many of them sit on a pair that crosses two files (``seam_breaks``) and the day of
@@ -288,6 +292,11 @@ def aggregate_archive(
                 raise ArchiveParseError("duplicate_bill_conflict", {"across_files": len(files)})
     rows = list(unique.values())
 
+    # D-15: a quarter-edge UTC day has a daily total only when both neighbouring files were read.
+    # Classification below still reads EVERY row; only the sums are gated on ``covered``.
+    whole, missing = quarter_edge_days(files)
+    covered = frozenset().union(*(f.covered_days for f in files)) | whole
+
     realized: dict[str, Decimal] = defaultdict(Decimal)
     funding: dict[str, Decimal] = defaultdict(Decimal)
     flows: dict[str, Decimal] = defaultdict(Decimal)
@@ -345,6 +354,8 @@ def aggregate_archive(
                     non_usd_rows[row.ccy or _BLANK] += 1
                     non_usd_months[row.ccy or _BLANK].add(month)
                 continue
+            if row.day not in covered:
+                continue
             non_external[row.day] += row.bal_chg
             if nonzero:
                 summed.add(row.ccy)
@@ -360,6 +371,8 @@ def aggregate_archive(
             # Rows the live path never sees (OPTION, EVENTS, blank instType, ...):
             # reported per month and class, never summed into the realized leg.
             if usd:
+                if row.day not in covered:
+                    continue
                 cls = row.inst_type or "BLANK"
                 month_entry = excluded.setdefault(month, {})
                 month_entry[cls] = month_entry.get(cls, Decimal(0)) + row.pnl + row.fee
@@ -373,6 +386,8 @@ def aggregate_archive(
                 non_usd_months[row.ccy or _BLANK].add(month)
             continue
 
+        if row.day not in covered:
+            continue
         if nonzero:
             summed.add(row.ccy)
         if bucket is Bucket.REALIZED:
@@ -414,6 +429,8 @@ def aggregate_archive(
         excluded_by_month=excluded,
         census=census,
         unknown_zero_effect=unknown_zero,
-        covered_days=frozenset().union(*(f.covered_days for f in files)),
+        covered_days=covered,
+        edge_days_whole=whole,
+        edge_days_missing=missing,
         summed_ccys=frozenset(summed),
     )
