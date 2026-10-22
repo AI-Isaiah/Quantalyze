@@ -951,6 +951,40 @@ class TestBlankCcyZeroEffectSkip:
         assert reading["blank_ccy_skipped"] == aggregate_archive([q2, q3], None).census["by_ccy"]["(blank)"]
 
 
+class TestUnchainableTallyAcrossTwoFiles:
+    """D-16 round 1. The calibrate D-16 orders is a Q2 + Q3 re-run, so the tally and the stop
+    totals are read across two files: each file's count, every file's days and the skips of
+    BOTH files must reach the founder."""
+
+    def test_a_zero_effect_blank_ccy_bill_in_each_file_is_skipped_in_each(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        q2 = _parsed(h2, [*r2, _new_row(h2, **_blank("150", "2026-05-01 10:00:00"))], "Q2")
+        q3 = _parsed(h3, [*r3, _new_row(h3, **_blank("250", "2026-08-20 10:00:00"))], "Q3")
+        reading = _chain([q2, q3])
+        assert reading["blank_ccy_skipped"] == 2 == aggregate_archive([q2, q3], None).census["by_ccy"]["(blank)"]
+        assert reading["total_pairs"] == 7
+
+    def test_the_stop_totals_and_days_span_both_files(self):
+        """Q2 holds a non-digit billId, Q3 a blank ccy with money: the totals add the two, the
+        first and last day come from different files, and each file keeps its own count."""
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        q2 = _parsed(h2, [*r2, _new_row(h2, **_blank("x150", "2026-05-01 10:00:00"))], "Q2")
+        q3 = _parsed(h3, [*r3, _new_row(h3, **_blank("250", "2026-08-20 10:00:00", balChg="0.01"))], "Q3")
+        err = _stop(verify_bal_chain, [q2, q3], frozenset())
+        detail = err.detail
+        assert err.stop_class == "archive_incomplete"
+        assert (
+            detail["reason"], detail["rows"], detail["blank_ccy"], detail["nondigit_bill_id"],
+            detail["first_day"], detail["last_day"],
+        ) == ("unchainable_row", 2, 1, 1, "2026-05-01", "2026-08-20")
+        assert [(f["rows"], f["blank_ccy"], f["nondigit_bill_id"]) for f in detail["files"]] == [
+            (1, 0, 1), (1, 1, 0),
+        ]
+        assert [(f["first_day"], f["last_day"]) for f in detail["files"]] == [
+            ("2026-05-01", "2026-05-01"), ("2026-08-20", "2026-08-20"),
+        ]
+
+
 # D-15: OKX cuts a quarter file at 00:00 UTC+8 (16:00 UTC the day before), so a real Q2 file
 # opens on 2026-03-31 and a real Q3 file on 2026-06-30. Each pair is (when UTC, balChg).
 Q2_EDGE_BILLS = [("2026-03-31 20:00:00", "3"), ("2026-04-02 10:00:00", "10"),

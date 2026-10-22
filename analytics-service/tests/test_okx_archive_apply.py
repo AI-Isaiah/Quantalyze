@@ -2665,6 +2665,56 @@ class TestUnchainableRowDiagnostic:
             1, 0, 1, 1,
         )
 
+    @pytest.mark.asyncio
+    async def test_a_two_quarter_stop_names_the_quarter_that_holds_the_bill(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16 round 1. The Q2 + Q3 calibrate is the real shape: the one stopping bill is in
+        Q3, and ``rows_by_quarter`` must say Q3 holds it and Q2 holds none, in input order."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        q2 = TestArchiveCompleteness()._q2()
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000).raw(_nondigit_row("2026-09-01"))
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+
+        outcome = await _run(
+            _meta("calibrate", [STRATEGY_ID], quarters=TestArchiveCompleteness.QUARTERS_Q2_Q3)
+        )
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=unchainable_row "
+            "rows=1 blank_ccy=0 nondigit_bill_id=1 first_day=2026-09-01 last_day=2026-09-01 "
+            "rows_by_quarter=2026-Q2:0,2026-Q3:1"
+        )
+        assert world.result()["info"]["bal_chain"]["blank_ccy_skipped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_two_quarter_calibrate_counts_the_skips_of_both_quarters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-16 round 1. One zero-effect blank-ccy bill in each quarter: ``blank_ccy_skipped``
+        must add both, so it equals the ``(blank)`` census count the runbook compares it to."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        q2 = TestArchiveCompleteness()._q2().raw(_blank_zero_row("2026-05-10"))
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000).raw(_blank_zero_row("2026-09-15"))
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        TestArchiveCompleteness._no_sleep(monkeypatch)
+
+        outcome = await _run(
+            _meta("calibrate", [STRATEGY_ID], quarters=TestArchiveCompleteness.QUARTERS_Q2_Q3)
+        )
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result = world.result()
+        assert result["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 14, "first_day": "2026-04-02", "last_day": "2026-09-15"}},
+            "total_pairs": 14,
+            "blank_ccy_skipped": 2,
+            "floor": 2,
+        }
+        assert result["census"]["by_ccy"]["(blank)"] == 2
+
 
 class TestNonExternalPnlIsInTheLiveNumber:
     """WR-01. A liquidation transfer or forced repayment is not external capital (D-08), but a
