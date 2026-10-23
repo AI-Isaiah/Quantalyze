@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.0.4] - 2026-10-23 — records: close ACCTREBUILD 167.2.1.1.2
+
+### Notes
+- Phase 167.2.1.1.2 ACCTREBUILD closed with verification passed. Shipped in v0.133.0.0 (#1116); the migration applied to TEST and PROD and the baseline was re-dumped (#1118). Its planning artifacts (9 plans, research, three review rounds, security audit, verification) land on main.
+- SC-3 post-deploy (2026-10-23, PROD, counts only): one forced rebuild per account for the 5 multi-key Bybit-backed accounts. 4 refused `account_key_not_working` (their only Bybit key is revoked at the venue), as predicted; the founder accepted them as recorded. 1 refused `account_key_read_failed` twice. No stored row changed.
+- Root cause of the `account_key_read_failed` refusal, from the worker log and read-only probes: Bybit rejects a trade query that starts more than two years back, and the history rebuild's trade read stops after its first page on OKX and Bybit. Routed to Phase 167.2.1.1.2.1 TRADEPAGES (booked in v0.133.0.3).
+- TODOS: `167.2.1.1.2-ACCOUNT-REBUILD-BLOCKERS` carries the measured counts and the founder's close for `account_key_not_working`; `167.2.1.1.2-ACCOUNT-CRAWL-DIAGNOSTICS` is triggered and routed to TRADEPAGES; new `167.2.1.1.2-WEALTH-RETURNS-CAPLOG-FLAKE` books a test that counts every WARNING on its worker (it redded #1119 once).
+- ROADMAP and STATE: the phase is ticked complete and the current position is updated by hand.
+
 ## [0.133.0.3] - 2026-10-23 — roadmap: book TRADEPAGES 167.2.1.1.2.1
 
 ### Notes

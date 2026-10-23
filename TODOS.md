@@ -13188,6 +13188,8 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 
 **Owner / Trigger:** next phase that touches the forced account crawl, or the first post-deploy ACCTREBUILD refusal whose cause cannot be read. Minimal fix: one WARNING in the gather loop naming the member key, venue, kind and the arm's static message; and wording or a scrubbed traceback that separates `unknown` from venue faults.
 
+**Triggered 2026-10-23 (SC-3 post-deploy).** A refusal's audit named only `account_key_read_failed`; the failing member and the venue's message were read from the worker log line `account crawl failed ... venue=bybit exc_class=BadRequest` and a read-only probe. Routed to Phase 167.2.1.1.2.1 TRADEPAGES, the next phase that touches the forced account crawl.
+
 ### 167.2.1.1.2-ACCOUNT-REBUILD-BLOCKERS — a forced account rebuild refuses an account it cannot rebuild in full, and writes nothing (booked 2026-10-22, 167.2.1.1.2 plans 04-08, UPNLVENUES D-04, D-02, DATA INTEGRITY, FOUNDER DECISION)
 
 **Reading.** These refusals are structural: a re-run cannot clear them. Each one writes nothing and leaves the stored curve unchanged (founder D-02, "Refuse that account (Recommended)"; the founder decides per account afterwards).
@@ -13204,3 +13206,13 @@ A Deribit exchange account counts as $0 (both allocator writers store it so) and
 The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybit ones. How many accounts hit each token above is unmeasured until the post-deploy handoff's B'1, and `history_days_unreproduced` cannot be predicted from the database at all.
 
 **Owner / Trigger:** founder decision after the post-deploy handoff (SC-3). Trigger: B'5 records at least one account "recorded, not recomputed" with one of these tokens. Closed when the founder has decided per token and the decision is recorded: accept as recorded, or a scoped product path.
+
+**Measured 2026-10-23 (SC-3 post-deploy, counts only).** 5 accounts run: `account_key_not_working` 4 (each account's only Bybit key is revoked at the venue), `account_key_read_failed` 1 (re-run once, refused again). No other token was hit and no stored row changed. The `account_key_read_failed` account is the trade-read defect routed to Phase 167.2.1.1.2.1 TRADEPAGES (Bybit's two-year trade-query limit, and the first-page-only read on OKX and Bybit), which re-runs that account after its fix.
+
+**CLOSED 2026-10-23 for `account_key_not_working` (founder, verbatim: "Accept as recorded (Recommended)").** The four accounts keep their stored histories; a rebuild becomes possible once their Bybit key is reconnected. The remaining tokens were not hit, so nothing else is decided here.
+
+### 167.2.1.1.2-WEALTH-RETURNS-CAPLOG-FLAKE — a wealth-returns test counts every WARNING on its worker, so a stray urllib3 retry reds the python job (booked 2026-10-23, CI)
+
+**Reading.** `test_malformed_records_are_skipped_with_one_warning_naming_the_series` in `analytics-service/tests/test_wealth_returns.py` asserts exactly one WARNING record from `caplog`, without filtering by logger. On PR #1119 (2026-10-23) a `urllib3.connectionpool` "Retrying" WARNING from another test's background connection on the same xdist worker landed inside its capture: `assert 2 == 1`. The re-run was green. The PR changed no Python.
+
+**Owner / Trigger:** unowned; the next phase that touches `services/wealth_returns.py` or its tests, or a second occurrence. Minimal fix: count only records from the logger the code under test uses.

@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 167.1.2.2.2.1
 current_phase_name: OKXHISTORY
 status: executing
-stopped_at: 167.2.1.1 UPNLVENUES closed; OKXHISTORY plans 18-19 in PR, calibrate re-run next; ACCTREBUILD planning
-last_updated: "2026-10-23T06:30:55.310Z"
-last_activity: 2026-10-22
-last_activity_desc: "167.2.1.1 UPNLVENUES closed (v0.132.10.7 #1110; verification passed)"
-state_head: d45af89dfbf37b7cc0b813480ad69b6002626ed3
+stopped_at: 167.2.1.1.2 ACCTREBUILD closed; OKXHISTORY applied, Step 5 readback after the 2026-10-24 04:30Z tick; TRADEPAGES booked
+last_updated: "2026-10-23T07:10:25.902Z"
+last_activity: 2026-10-23
+last_activity_desc: "167.2.1.1.2 ACCTREBUILD closed (v0.133.0.0 #1116; SC-3 all 5 accounts refused by name)"
+state_head: a0016aa36486dd440f30c51ad0fc19a024993bf4
 progress:
   total_phases: 125
-  completed_phases: 118
-  total_plans: 852
-  completed_plans: 845
-  percent: 94
+  completed_phases: 119
+  total_plans: 861
+  completed_plans: 854
+  percent: 95
 ---
 
 ## ⭐ STATE lineage
@@ -173,10 +173,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 167.1.2.2.2.1 (OKXHISTORY) — EXECUTING
-Plan: 17-19 shipped (D-14, D-15); plan 14 calibrate re-run next
-Status: Executing — several phases in parallel. 167.1.2.2.2.1 OKXHISTORY: plans 18-19 (UTC+8 quarter cut, D-15) in PR, then the calibrate re-run (last run date 2026-12-12). 167.2.1.1.2 ACCTREBUILD is being planned (D-01..D-03). 166.5.1 SENTRYTRIAGE is shipped and waits for its 48 h Sentry readout. 170.1.3 NARROWCHARTS is shipped and waits for its SC-4 browser reading. 167.2.1.1.1 NAVMTM and 167.2.1.1.1.1 MARKSOURCE are booked, not planned. 167.2.1.1 UPNLVENUES closed 2026-10-22 (v0.132.10.7 #1110; D-01 live read confirmed on the one informative Bybit key; the 5 multi-key allocators are owned by ACCTREBUILD; verification passed).
-Last activity: 2026-10-22 — 167.2.1.1 UPNLVENUES closed (v0.132.10.7 #1110; verification passed)
-Progress: [█████████░] 94%
+Plan: 21 shipped (v0.133.0.2); calibrate run 5 clean, apply done 2026-10-23 (founder go); Step 5 readback next
+Status: Executing — several phases in parallel. 167.1.2.2.2.1 OKXHISTORY: apply done 2026-10-23 (70 + 87 days written, 0 gaps left); Step 5 readback after the 2026-10-24 04:30Z tick. 167.2.1.1.2.1 TRADEPAGES booked (founder 2026-10-23), not planned. 166.5.1 SENTRYTRIAGE is shipped and waits for its 48 h Sentry readout. 170.1.3 NARROWCHARTS is shipped and waits for its SC-4 browser reading. 167.2.1.1.1 NAVMTM and 167.2.1.1.1.1 MARKSOURCE are booked, not planned. 167.2.1.1.2 ACCTREBUILD closed 2026-10-23 (v0.133.0.0 #1116; SC-3: 4 accounts refused `account_key_not_working`, accepted as recorded; 1 refused `account_key_read_failed`, routed to TRADEPAGES).
+Last activity: 2026-10-23 — 167.2.1.1.2 ACCTREBUILD closed (v0.133.0.0 #1116; verification passed)
+Progress: [█████████░] 95%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1708,7 +1708,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 164.9.6 and 164.5.2.1 closed; 164.6.6 wave 1 executing; next 164.9.6.1 (after 164.6.6)
+**Stopped At:** 167.2.1.1.2 ACCTREBUILD closed; OKXHISTORY Step 5 readback next; TRADEPAGES booked
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
