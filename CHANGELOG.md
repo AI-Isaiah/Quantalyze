@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.0.3] - 2026-10-23 — roadmap: book TRADEPAGES 167.2.1.1.2.1
+
+### Notes
+- Phase 167.2.1.1.2.1 TRADEPAGES booked after ACCTREBUILD (founder 2026-10-23, "Book a fix phase (Recommended)"). Read-only PROD probes during ACCTREBUILD's post-deploy step found that the allocator history rebuild's trade read stops after the first page on OKX and Bybit (both cap a page at 100, the loop asks for 500), and that Bybit rejects a trade query starting earlier than two years back. Success criteria: read every page, re-run the ACCTREBUILD a2 rebuild, and measure the stored OKX- and Bybit-backed histories for a founder decision. Data integrity.
+
 ## [0.133.0.2] - 2026-10-22 — OKXHISTORY: archive bill ids are read without their export quoting (Phase 167.1.2.2.2.1, plan 21, D-17)
 
 ### Fixed

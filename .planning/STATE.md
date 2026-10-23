@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "167.1.2.2.2.1"
+current_phase: 167.1.2.2.2.1
 current_phase_name: OKXHISTORY
 status: executing
 stopped_at: 167.2.1.1 UPNLVENUES closed; OKXHISTORY plans 18-19 in PR, calibrate re-run next; ACCTREBUILD planning
-last_updated: "2026-10-22T12:55:13.797Z"
+last_updated: "2026-10-23T06:30:55.310Z"
 last_activity: 2026-10-22
 last_activity_desc: "167.2.1.1 UPNLVENUES closed (v0.132.10.7 #1110; verification passed)"
-state_head: 9630f6aa167eb13c4bea21d9c6f260dc21cc4cb6
+state_head: d45af89dfbf37b7cc0b813480ad69b6002626ed3
 progress:
-  total_phases: 124
+  total_phases: 125
   completed_phases: 118
   total_plans: 852
   completed_plans: 845
-  percent: 95
+  percent: 94
 ---
 
 ## ⭐ STATE lineage
@@ -176,7 +176,7 @@ Phase: 167.1.2.2.2.1 (OKXHISTORY) — EXECUTING
 Plan: 17-19 shipped (D-14, D-15); plan 14 calibrate re-run next
 Status: Executing — several phases in parallel. 167.1.2.2.2.1 OKXHISTORY: plans 18-19 (UTC+8 quarter cut, D-15) in PR, then the calibrate re-run (last run date 2026-12-12). 167.2.1.1.2 ACCTREBUILD is being planned (D-01..D-03). 166.5.1 SENTRYTRIAGE is shipped and waits for its 48 h Sentry readout. 170.1.3 NARROWCHARTS is shipped and waits for its SC-4 browser reading. 167.2.1.1.1 NAVMTM and 167.2.1.1.1.1 MARKSOURCE are booked, not planned. 167.2.1.1 UPNLVENUES closed 2026-10-22 (v0.132.10.7 #1110; D-01 live read confirmed on the one informative Bybit key; the 5 multi-key allocators are owned by ACCTREBUILD; verification passed).
 Last activity: 2026-10-22 — 167.2.1.1 UPNLVENUES closed (v0.132.10.7 #1110; verification passed)
-Progress: [█████████░] 95%
+Progress: [█████████░] 94%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -639,6 +639,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2.1.1.1 inserted after Phase 167.2.1.1: NAVMTM: every ingest stores marked NAV incl. unrealized profit plus the unrealized amount; curves use stored marks from storage start (founder 2026-10-22, "remember NAV + unrealized profit")
 - Phase 167.2.1.1.1.1 inserted after Phase 167.2.1.1.1: MARKSOURCE: one stated mark rule on every path; the two allocator equity curves agree while positions are open; last-bar uPnL spike gone (founder 2026-10-22, "Or several phases")
 - Phase 167.2.1.1.2 inserted after Phase 167.2.1.1: ACCTREBUILD: a Bybit-backed account's past allocation history is rebuilt whole-account or refused; OKX-holding accounts get a 90-day rebuild (founder 2026-10-22, split from UPNLVENUES D-04, "Add an OKX 90-day path", "Split Phases if Necessary")
+- Phase 167.2.1.1.2.1 inserted after Phase 167.2.1.1.2: TRADEPAGES: the allocator history rebuild reads every trade page on OKX and Bybit (founder 2026-10-23, from ACCTREBUILD SC-3; data-integrity) (URGENT)
 
 ### Decisions
 
