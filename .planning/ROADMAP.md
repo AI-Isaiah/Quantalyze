@@ -177,6 +177,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — complete 2026-10-22 (v0.132.10.7 #1110; founder 2026-10-22; data-integrity)
 - [ ] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; split from UPNLVENUES D-04; data-integrity)
+- [ ] **Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page** (INSERTED 2026-10-23) — not yet planned (founder 2026-10-23; from ACCTREBUILD SC-3; data-integrity)
 - [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
 - [ ] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after NAVMTM)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -5551,6 +5552,29 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page (INSERTED)
+
+**Goal:** TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page; Bybit is read in 7-day windows and never earlier than its two-year limit.
+**Booked 2026-10-23 by founder decision:** "Book a fix phase (Recommended)", from ACCTREBUILD 167.2.1.1.2 post-deploy SC-3. Data integrity.
+**Evidence** (PROD read-only probes on the analytics service, 2026-10-23, counts only):
+- `_fetch_trades_paginated_one_pass` (analytics-service/services/equity_reconstruction.py) asks `fetch_my_trades` for 500 rows and stops when a page is shorter. OKX and Bybit cap a page at 100, so every pass stops after its first page;
+- Bybit, 89 days: the pass returned 100 trades on one day, while 7-day windows with an explicit endTime found 1300 trades over 15 days. A pass whose first 7 days are quiet returns 0 (the 365-day pass returned 0);
+- OKX: two accounts returned exactly 100 trades each over 89 days;
+- Bybit rejects a trade query that starts earlier than two years back (retCode 10001), and a 730-day window starting at UTC midnight crosses it. That is why ACCTREBUILD account a2 refused `account_key_read_failed` twice;
+- the read has been in use since 2026-04-22, so stored `allocator_equity_snapshots` built from OKX or Bybit trades are likely built from truncated trades.
+
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 167.2.1.1.2 (ACCTREBUILD)
+**Success Criteria** (what must be TRUE):
+1. The rebuild reads every page on OKX and Bybit (Bybit in 7-day windows with an explicit endTime, never earlier than its two-year limit); tests go RED on a 100-row page and on a quiet first window.
+2. After deploy, the ACCTREBUILD a2 forced rebuild is re-run and recorded: recomputed, or refused with a named reason.
+3. The stored OKX- and Bybit-backed histories are measured against a correct re-read, as counts and sizes only; whether to rebuild them is a founder decision, never a silent rewrite.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history (INSERTED)
 
 **Goal:** NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history.
@@ -6568,6 +6592,7 @@ kept verbatim.
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 167.2.1.1 UPNLVENUES | 6/6 | Complete — v0.132.10.7 #1110; D-01 live read confirmed on 1 of 1 informative key; the 5 multi-key allocators are owned by ACCTREBUILD | 2026-10-22 |
 | 167.2.1.1.2 ACCTREBUILD | 0/? | Queued — booked 2026-10-22 (founder), split from UPNLVENUES D-04 | - |
+| 167.2.1.1.2.1 TRADEPAGES | 0/? | Queued — booked 2026-10-23 (founder), from ACCTREBUILD SC-3 | - |
 | 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
 | 167.2.1.1.1.1 MARKSOURCE | 0/? | Queued — booked 2026-10-22 (founder), after NAVMTM | - |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
