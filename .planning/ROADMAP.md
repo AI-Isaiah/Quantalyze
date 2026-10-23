@@ -176,7 +176,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — complete 2026-10-22 (v0.132.10.7 #1110; founder 2026-10-22; data-integrity)
-- [ ] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; split from UPNLVENUES D-04; data-integrity)
+- [x] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — complete 2026-10-23 (v0.133.0.0 #1116; founder 2026-10-22; data-integrity; SC-3: all 5 accounts refused by name, 1 routed to TRADEPAGES)
 - [ ] **Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page** (INSERTED 2026-10-23) — not yet planned (founder 2026-10-23; from ACCTREBUILD SC-3; data-integrity)
 - [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
 - [ ] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after NAVMTM)
@@ -5547,10 +5547,18 @@ Plans:
 3. Post-deploy, each of the 5 accounts is rebuilt or refused, recorded as counts and reasons only.
 4. Stored days the rebuild would drop are a founder decision, never a silent delete.
 
-**Plans:** 0 plans
+**Plans:** 9/9 plans complete (one migration, `replace_allocator_equity_snapshots_window`, reviewed by migration-reviewer and rls-policy-auditor before merge)
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 167.2.1.1.2-01-PLAN.md — migration: window-scoped SECURITY DEFINER replace, stored-days check inside the transaction, boundary row, worker wrapper and refusal mapping (wave 1)
+- [x] 167.2.1.1.2-02-PLAN.md — dashboard reads the `snapshot_rebuild_boundary` row through a defensive parser; no UI note (wave 1)
+- [x] 167.2.1.1.2-03-PLAN.md — SQL gate for the window replace with mutation twins on both lanes (wave 2)
+- [x] 167.2.1.1.2-04-PLAN.md — pure account rules: refusal set, key selection, 90/730-day window, shared-days sum (wave 2)
+- [x] 167.2.1.1.2-05-PLAN.md — census and ratchet pins for the new function and gate (wave 3)
+- [x] 167.2.1.1.2-06-PLAN.md — handler tracer: every forced job rebuilds the whole account through the window call; OKX over 90 days (wave 3)
+- [x] 167.2.1.1.2-07-PLAN.md — refusal pins: every sibling failure refuses and writes nothing (wave 4)
+- [x] 167.2.1.1.2-08-PLAN.md — mixed-venue tracer, marker loop, counted-once pins (wave 5)
+- [x] 167.2.1.1.2-09-PLAN.md — TODOS close, merged-tree gates, orchestrator-owned ship and post-deploy handoff (wave 6)
 
 ### Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page (INSERTED)
 
@@ -6591,7 +6599,7 @@ kept verbatim.
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 167.2.1.1 UPNLVENUES | 6/6 | Complete — v0.132.10.7 #1110; D-01 live read confirmed on 1 of 1 informative key; the 5 multi-key allocators are owned by ACCTREBUILD | 2026-10-22 |
-| 167.2.1.1.2 ACCTREBUILD | 0/? | Queued — booked 2026-10-22 (founder), split from UPNLVENUES D-04 | - |
+| 167.2.1.1.2 ACCTREBUILD | 9/9 | Complete — v0.133.0.0 #1116; SC-3: 4 accounts refused `account_key_not_working` (accepted as recorded), 1 refused `account_key_read_failed` (routed to TRADEPAGES); nothing written | 2026-10-23 |
 | 167.2.1.1.2.1 TRADEPAGES | 0/? | Queued — booked 2026-10-23 (founder), from ACCTREBUILD SC-3 | - |
 | 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
 | 167.2.1.1.1.1 MARKSOURCE | 0/? | Queued — booked 2026-10-22 (founder), after NAVMTM | - |
