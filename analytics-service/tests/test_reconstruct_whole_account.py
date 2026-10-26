@@ -258,7 +258,8 @@ def test_account_window_is_89_days_back_when_any_selected_key_is_okx() -> None:
     with_okx = [_key("key-1", "bybit"), _key("key-2", "okx")]
     assert er._account_rebuild_window(with_okx, end) == (date(2026, 1, 16), 90)
     without_okx = [_key("key-1", "bybit"), _key("key-2", "mt5")]
-    assert er._account_rebuild_window(without_okx, end) == (date(2024, 4, 15), 730)
+    # TRADEPAGES D-01: a Bybit key starts 729 days back (Bybit's two-year limit); window_days stays 730.
+    assert er._account_rebuild_window(without_okx, end) == (date(2024, 4, 16), 730)
 
 
 def test_account_window_reads_the_exchange_case_blind() -> None:
@@ -616,7 +617,8 @@ async def test_forced_rebuild_of_a_two_account_book_replaces_its_window_with_the
 
     boundary = fake.store[("allocator_equity_derived", (ALLOCATOR_ID, "snapshot_rebuild_boundary"))]
     assert boundary["payload"] == {
-        "boundary_date": (END_DATE - timedelta(days=730)).date().isoformat()
+        # TRADEPAGES D-01: two Bybit accounts start 729 days back, inside Bybit's two-year limit.
+        "boundary_date": (END_DATE - timedelta(days=729)).date().isoformat()
     }
 
     assert _marker_of(fake, API_KEY_ID_1) != MARKER, "the job's own key was not marked complete"
@@ -1331,12 +1333,12 @@ def _mutate_on_first_trades_call(exchange: Any, mutate: Any) -> None:
     answers = exchange.fetch_my_trades.side_effect
     first = True
 
-    async def _side_effect(*_args: Any, **_kwargs: Any) -> Any:
+    async def _side_effect(*args: Any, **kwargs: Any) -> Any:
         nonlocal first
         if first:
             first = False
             mutate()
-        return next(answers)
+        return await answers(*args, **kwargs)
 
     exchange.fetch_my_trades = AsyncMock(side_effect=_side_effect)
 
@@ -1785,3 +1787,194 @@ async def test_an_unresolved_identity_refuses_before_any_venue_call(
     )
     assert [c["api_key_id"] for c in calls] == [API_KEY_ID_1], "a sibling session was opened"
     assert _marker_of(fake, API_KEY_ID_2) is None
+
+
+# ------------------------------------------------- 167.2.1.1.2.1 plan 04: naming the member
+#
+# TODOS [167.2.1.1.2-ACCOUNT-CRAWL-DIAGNOSTICS]: a refusal read from a worker log line only
+# could not say WHICH exchange account gave it. The gather loop now logs one static WARNING
+# per refused or failed member (key, venue, and a closed-vocabulary reason or kind), and no
+# dispositions change. The MT5 arm is named by its ``_MT5_BACKFILL_MESSAGES`` key, never by the
+# fixed text, and a venue exception's text never enters any of these lines.
+
+_ER_LOGGER = "quantalyze.analytics.equity_reconstruction"
+
+
+def _records_containing(caplog: pytest.LogCaptureFixture, needle: str) -> list[str]:
+    return [r.getMessage() for r in caplog.records if needle in r.getMessage()]
+
+
+async def _run_forced_mt5_member_job(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: Any,
+    mt5_result: DispatchResult,
+) -> tuple[DispatchResult, Any, dict[str, list[dict[str, Any]]], Any]:
+    """A Bybit job key plus one MT5 sibling whose window fetch settles ``mt5_result``."""
+    _seed_account_key(fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1")
+    _seed_account_key(fake, API_KEY_ID_2, "mt5", venue_account_id="fixture-mt5-2")
+    _seed_sentinel_rows(fake)
+    _seed_older_row(fake)
+    exchange_1 = await _bybit_exchange()
+    mt5_exchange = _crawl_exchange()
+    mt5_exchange.id = "mt5"
+
+    async def _settled(exchange: Any, **kwargs: Any) -> DispatchResult:
+        return mt5_result
+
+    monkeypatch.setattr(er, "_mt5_fetch_window", _settled)
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, mt5_exchange
+    )
+    return result, audit, before, exchange_1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arm", "kind"),
+    [
+        ("kill_switch", "permanent"),
+        ("auth", "permanent"),
+        ("account_snapshot", "permanent"),
+        ("non_finite", "permanent"),
+        ("negative_nav", "permanent"),
+        ("history_unsettled", "transient"),
+    ],
+)
+async def test_a_failed_mt5_member_is_named_in_one_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, arm: str, kind: str
+) -> None:
+    """The MT5 sibling's failure comes back as a ``DispatchResult`` and used to leave no log
+    line at all, so the operator could not tell a kill switch from a rejected sign-in. One
+    WARNING now names the member (key, venue), the kind and the ARM by its table key. The
+    arm's fixed text is not logged, and the job's disposition is the one the existing MT5
+    tests pin: a permanent arm refuses ``account_key_read_failed``, a transient one keeps its
+    own kind and text."""
+    fake = _MarkerFake()
+    message = er._MT5_BACKFILL_MESSAGES[arm]
+    failure = DispatchResult(
+        outcome=DispatchOutcome.FAILED, error_message=message, error_kind=kind  # type: ignore[arg-type]
+    )
+
+    with caplog.at_level("WARNING", logger=_ER_LOGGER):
+        result, audit, before, exchange_1 = await _run_forced_mt5_member_job(
+            monkeypatch, fake, failure
+        )
+
+    (line,) = _records_containing(caplog, "account crawl failed")
+    assert f"key={API_KEY_ID_2}" in line, line
+    assert "venue=mt5" in line, line
+    assert f"error_kind={kind}" in line, line
+    assert f"arm={arm} " in f"{line} ", line
+    assert _records_containing(caplog, message) == [], "the arm's text reached the log"
+    if kind == "permanent":
+        _assert_account_rebuild_refused(
+            fake, result, audit, "account_key_read_failed",
+            before=before, exchanges_crawled=(exchange_1,), exchanges_untouched=(),
+        )
+    else:
+        _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+        assert result.error_message == message, result.error_message
+
+
+@pytest.mark.asyncio
+async def test_an_mt5_member_failure_with_no_known_arm_is_logged_as_unmapped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A message that equals no ``_MT5_BACKFILL_MESSAGES`` value is reported as ``unmapped``,
+    and its text is still not logged."""
+    fake = _MarkerFake()
+    message = "fixture: a text no arm carries " + LEAKED_SIGNATURE
+    failure = DispatchResult(
+        outcome=DispatchOutcome.FAILED, error_message=message, error_kind="transient"
+    )
+
+    with caplog.at_level("WARNING", logger=_ER_LOGGER):
+        await _run_forced_mt5_member_job(monkeypatch, fake, failure)
+
+    (line,) = _records_containing(caplog, "account crawl failed")
+    assert "arm=unmapped" in line, line
+    assert _records_containing(caplog, LEAKED_SIGNATURE) == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_member_is_named_in_one_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sibling whose open positions cannot be read refuses the account
+    (``positions_unreadable``) and, before this line, the worker log said nothing naming that
+    sibling. One WARNING now carries its key, its venue and the closed-vocabulary reason; the
+    venue's own text (the planted signature) is in no record."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_positions = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+
+    with caplog.at_level("WARNING", logger=_ER_LOGGER):
+        result, audit, before, _calls = await _run_forced_two_account_job(
+            monkeypatch, fake, exchange_1, exchange_2
+        )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "positions_unreadable",
+        before=before, exchanges_crawled=(exchange_1, exchange_2), exchanges_untouched=(),
+    )
+    (line,) = _records_containing(caplog, "account crawl refused")
+    assert f"key={API_KEY_ID_2}" in line, line
+    assert "venue=bybit" in line, line
+    assert "reason=positions_unreadable" in line, line
+    assert _records_containing(caplog, LEAKED_SIGNATURE) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fault", "kind", "wording", "absent"),
+    [
+        (
+            KeyError("fixture " + LEAKED_SIGNATURE),
+            "unknown",
+            "unclassified fault (KeyError)",
+            "venue fault",
+        ),
+        (
+            ccxt.NetworkError("fixture " + LEAKED_SIGNATURE),
+            "transient",
+            "retryable venue fault (NetworkError)",
+            "unclassified",
+        ),
+    ],
+    ids=["code_bug_is_unclassified", "network_stays_a_venue_fault"],
+)
+async def test_an_unclassified_member_fault_is_not_called_a_venue_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fault: Exception,
+    kind: str,
+    wording: str,
+    absent: str,
+) -> None:
+    """``classify_exception`` calls a ``KeyError`` ``unknown``: a bug in our code, which the
+    queue still retries. The error text used to blame the venue for it. It now says
+    "unclassified fault", while a transient network error keeps "retryable venue fault".
+    Either way nothing is written and the planted text is in the error, the audit and no
+    log record."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+    exchange_2.fetch_my_trades = AsyncMock(side_effect=fault)
+
+    with caplog.at_level("DEBUG"):
+        result, audit, before, _calls = await _run_forced_two_account_job(
+            monkeypatch, fake, exchange_1, exchange_2
+        )
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before, kind=kind)
+    message = result.error_message or ""
+    assert wording in message, message
+    assert absent not in message, message
+    assert LEAKED_SIGNATURE not in message, message
+    assert not [c for c in audit.call_args_list if LEAKED_SIGNATURE in repr(c)], audit.call_args_list
+    assert _records_containing(caplog, LEAKED_SIGNATURE) == []
