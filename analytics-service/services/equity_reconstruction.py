@@ -103,7 +103,31 @@ logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 # spot-valuation copy.
 RAW_PAYLOAD_CAP_BYTES: int = 4096
 OKX_TRADE_TERMINUS_DAYS: int = 90          # documented OKX cap (RESEARCH.md §1B, A3)
+# Bybit rejects a trade query starting more than two years back (retCode 10001), measured on
+# PROD 2026-10-23 (ACCTREBUILD SC-3 record). TRADEPAGES D-01 starts a Bybit window inside it.
+BYBIT_TRADE_TERMINUS_DAYS: int = 730
 BACKFILL_CAP_DAYS: int = 730                # 2 years (RESEARCH.md §1E recommended cap)
+
+# TRADEPAGES (Phase 167.2.1.1.2.1, D-02): the rebuild's trade read stops only on an
+# empty page, a cursor that does not advance, or the end of its window - never on a
+# page shorter than the requested limit.
+_TRADE_PAGE_LIMIT: Final[int] = 100          # Bybit and OKX page cap, sent explicitly (vendor docs, RESEARCH Q2)
+_BYBIT_TRADE_WINDOW_MS: Final[int] = 7 * 24 * 60 * 60 * 1000  # Bybit: endTime - startTime <= 7 days (vendor doc, RESEARCH Q2)
+_BYBIT_WINDOW_PAGE_CEILING: Final[int] = 100  # pages per 7-day window before the read gives up loudly (RESEARCH Q2)
+_TRADE_PASS_PAGE_CEILING: Final[int] = 500    # pages per walk of the other-venue read (the bound the loop always had)
+# A read cut short (page ceiling, a full page that did not advance, NotSupported mid-walk) raises
+# this ccxt.BadRequest instead of returning a partial list that a rebuild would persist as the whole
+# history. BadRequest is what classify_exception calls permanent, so the forced gather converter
+# refuses account_key_read_failed (no new token) and the unforced job fails with nothing written.
+_TRUNCATED_READ_MESSAGE: Final[str] = (
+    "the trade read was cut short before the venue ran out of trades; nothing was kept"
+)
+
+
+class TruncatedTradeRead(ccxt.BadRequest):  # type: ignore[misc]  # ccxt is untyped
+    """A trade read cut short, raised at the truncation sites only. It is a BadRequest, so
+    every disposition is unchanged; the allocator history probe tells it apart from the
+    two-year guard and from a venue rejection by this class."""
 
 # FLIPRETRY-01 (defensive half, A4 mitigation) — hard per-crawl wall-clock bound
 # for the reconstruct orchestrating crawl. run_reconstruct_allocator_history_job
@@ -578,6 +602,129 @@ def _cap_breakdown(breakdown: dict[str, Any]) -> dict[str, Any]:
 # and the ccxt transfer fetch.
 
 
+def _extend_unseen(
+    trades: list[dict[str, Any]], seen: set[Any], page: list[dict[str, Any]],
+) -> int:
+    """Append the rows of ``page`` whose ``(symbol, id)`` is not in ``seen``; return how
+    many were appended. The symbol is part of the key because OKX numbers a ``tradeId``
+    per instrument, so two instruments of one pass can share an id. A row with no id is
+    always appended: no key is invented."""
+    added = 0
+    for row in page:
+        row_id = row.get("id")
+        if row_id is not None:
+            key = (row.get("symbol"), row_id)
+            if key in seen:
+                continue
+            seen.add(key)
+        trades.append(row)
+        added += 1
+    return added
+
+
+def _next_page_cursor(page: list[dict[str, Any]]) -> str | None:
+    """The Bybit ``nextPageCursor`` ccxt left on a row's ``info`` (the newest row of
+    the page, after ccxt's ascending re-sort), or None. A non-dict ``info`` is
+    tolerated."""
+    for row in page:
+        info = row.get("info")
+        if isinstance(info, dict) and info.get("nextPageCursor"):
+            return str(info["nextPageCursor"])
+    return None
+
+
+async def _fetch_bybit_trades(
+    exchange: Any, since_ms: int, now_ms: int,
+) -> list[dict[str, Any]]:
+    """Every Bybit trade in [since_ms, now_ms], read in 7-day windows.
+
+    Bybit answers a request that carries only a start as the 7 days after it, so a
+    quiet first week reads as an empty book. Each request therefore names a start
+    AND an end at most 7 days apart, the windows tile the range, and a window is
+    paged with Bybit's cursor. A window ends on an empty page, on no cursor, on a
+    page that adds no new row, or on a cursor equal to the previous one; it never
+    ends on a short page. When a window stops on a full page for a reason other
+    than reaching its end, or hits the page ceiling, one WARNING (counts only, never
+    venue text) is logged and the read raises ``ccxt.BadRequest``: a partial list
+    would be persisted as the whole history. A window that ends on a FULL page with no
+    cursor logs the same kind of WARNING but is not refused, because a final page of
+    exactly one page's rows legitimately has no cursor.
+
+    A read whose start is older than Bybit's two-year limit (``BYBIT_TRADE_TERMINUS_DAYS``)
+    at ``now_ms`` is refused here, before any request. The window is fixed when the job starts
+    (``_bybit_window_start``, 729 days back) and ``now_ms`` is taken when the crawl begins, so a
+    job that began before 00:00 UTC and reads after it asks for a start 730 days old.
+    """
+    if since_ms < now_ms - BYBIT_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000:
+        # Refuse, never clamp: a clamp would start the trades after the curve starts, and the
+        # replay's opening balance would be wrong (RESEARCH Anti-Patterns). BadRequest is the
+        # class Bybit's own retCode 10001 arrives as, so the forced gather converter
+        # (account_key_read_failed) and the unforced generic arm (permanent) dispose it as they
+        # already dispose the venue's rejection: no new token, no new exception class (D-01).
+        logger.warning(
+            "bybit trade window starts before the venue's two-year limit "
+            "venue=bybit window_age_days=%d",
+            max(0, (now_ms - since_ms) // 86_400_000),
+        )
+        raise ccxt.BadRequest(
+            "bybit trade window starts before the venue's two-year limit; nothing was read"
+        )
+    trades: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    w_start = since_ms
+    while w_start <= now_ms:
+        w_end = min(w_start + _BYBIT_TRADE_WINDOW_MS - 1, now_ms)
+        cursor: str | None = None
+        for _ in range(_BYBIT_WINDOW_PAGE_CEILING):
+            params: dict[str, Any] = {"until": w_end}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                page = await exchange.fetch_my_trades(
+                    None, w_start, _TRADE_PAGE_LIMIT, params,
+                )
+            except ccxt.NotSupported:
+                if trades:
+                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
+                return trades
+            page = page or []
+            if not page:
+                break
+            added = _extend_unseen(trades, seen, page)
+            nxt = _next_page_cursor(page)
+            if not nxt:
+                if len(page) >= _TRADE_PAGE_LIMIT:
+                    # Not refused: a final page of exactly one page's rows has no cursor too.
+                    logger.warning(
+                        "bybit trade window ended on a full page with no cursor "
+                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                        max(0, (now_ms - w_start) // 86_400_000), len(page), len(trades),
+                    )
+                break
+            if added == 0 or nxt == cursor:
+                if len(page) >= _TRADE_PAGE_LIMIT:
+                    logger.warning(
+                        "bybit trade window stopped on a page that did not advance "
+                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                        max(0, (now_ms - w_start) // 86_400_000), len(page), len(trades),
+                    )
+                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+                break
+            cursor = nxt
+            await _rate_limit_sleep(exchange)
+        else:
+            logger.warning(
+                "bybit trade window hit the page ceiling "
+                "venue=bybit window_age_days=%d pages=%d rows=%d",
+                max(0, (now_ms - w_start) // 86_400_000),
+                _BYBIT_WINDOW_PAGE_CEILING, len(trades),
+            )
+            raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+        w_start = w_end + 1
+        await _rate_limit_sleep(exchange)
+    return trades
+
+
 async def _fetch_trades_with_pagination(
     exchange: Any,
     venue: str,
@@ -593,7 +740,15 @@ async def _fetch_trades_with_pagination(
     default (SPOT), so derivative-only or swap-heavy accounts otherwise
     appear to have zero history. See OKX_INSTRUMENT_TYPES comment for
     the full reasoning. For other venues, a single pass without instType
-    is correct (Binance/Bybit return the full book per call).
+    is correct.
+
+    Stop rule (TRADEPAGES D-02), one for every venue: a read stops only on an
+    empty page, on a cursor that does not advance, or when it reaches the end of
+    its window, never on a page shorter than the requested limit (a venue's page
+    cap sits below the request, so a short page is not the last page). Bybit is
+    read in 7-day windows with an explicit end (``_fetch_bybit_trades``): a
+    request with only a start is answered as a 7-day window. Binance needs a
+    symbol for ``fetch_my_trades`` and returns one page per forward step.
 
     On OKX: if `since` is older than the 90-day terminus, set
     hit_okx_terminus=True and clamp the effective since. Logs the
@@ -601,9 +756,12 @@ async def _fetch_trades_with_pagination(
       "OKX trade history capped at 3 months"
     (RESEARCH.md Pitfall 1 / VOICES-ACCEPTED f9.)
     """
+    if venue.lower() == "bybit":
+        return await _fetch_bybit_trades(exchange, since_ms, now_ms), False
+
     if venue.lower() != "okx":
         trades = await _fetch_trades_paginated_one_pass(
-            exchange, since_ms, limit_per_call, params=None,
+            exchange, since_ms, limit_per_call, params=None, venue=venue.lower(),
         )
         return trades, False
 
@@ -625,14 +783,83 @@ async def _fetch_trades_with_pagination(
     # instrument's fills.
     all_trades: list[dict[str, Any]] = []
     for inst_type in OKX_INSTRUMENT_TYPES:
-        type_trades = await _fetch_trades_paginated_one_pass(
-            exchange,
-            effective_since_ms,
-            limit_per_call,
-            params={"type": inst_type.lower()},
+        all_trades.extend(
+            await _fetch_okx_inst_type_trades(exchange, effective_since_ms, inst_type)
         )
-        all_trades.extend(type_trades)
     return all_trades, hit_okx_terminus
+
+
+async def _fetch_okx_inst_type_trades(
+    exchange: Any, since_ms: int, inst_type: str,
+) -> list[dict[str, Any]]:
+    """Every fill of one OKX instrument type from ``since_ms`` to now, walked BACKWARD.
+
+    OKX's fills-history answers the NEWEST fills of its range, at most 100 per page, so
+    a forward cursor (``since = newest + 1``) can never reach the older ones. The first
+    page has no end bound; each later page asks for fills up to ONE MILLISECOND past
+    the oldest fill read so far. One millisecond past is safe whether OKX's end bound
+    is inclusive or exclusive (an end at the oldest fill itself would, if exclusive,
+    drop the older members of a same-millisecond group split at the page edge), and id
+    dedupe absorbs the fills read twice. Under an inclusive end the fills at oldest + 1
+    take page capacity, so a full page that adds nothing is retried once with the end at
+    the oldest fill itself before the read raises. D-02: the pass ends on an empty page, on a
+    page that adds no new fill, on a cursor that does not advance, or when the oldest
+    fill reaches the window start; never on a page shorter than the request. When
+    the pass stops on a full page for a reason other than reaching the window start,
+    or hits the page ceiling, one WARNING (counts only, never venue text) is logged
+    and the read raises ``ccxt.BadRequest``: a partial list would be persisted as the
+    whole history. A group of same-millisecond fills larger than a page cannot be
+    passed by any timestamp bound; that stop is the loud one.
+    """
+    trades: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    end_ms: int | None = None
+    oldest_seen: int | None = None
+    for _ in range(_TRADE_PASS_PAGE_CEILING):
+        params: dict[str, Any] = {"type": inst_type.lower()}
+        if end_ms is not None:
+            params["until"] = end_ms
+        try:
+            page = await exchange.fetch_my_trades(
+                None, since_ms, _TRADE_PAGE_LIMIT, params,
+            )
+        except ccxt.NotSupported:
+            if trades:
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
+            return trades
+        page = page or []
+        if not page:
+            break
+        added = _extend_unseen(trades, seen, page)
+        page_oldest = min(int(t.get("timestamp") or 0) for t in page)
+        oldest_seen = page_oldest if oldest_seen is None else min(oldest_seen, page_oldest)
+        if oldest_seen <= since_ms:
+            break
+        next_end_ms = oldest_seen + 1
+        if added == 0 or (end_ms is not None and next_end_ms >= end_ms):
+            if len(page) < _TRADE_PAGE_LIMIT:
+                break
+            # An inclusive end re-reads the fills at oldest + 1 and they take page capacity.
+            # A page holding a fill newer than the oldest proves that, so ask once for fills
+            # up to the oldest itself (no +1). Under an exclusive end that would skip the rest
+            # of a same-millisecond group, so a page entirely at the oldest is never retried.
+            if end_ms == oldest_seen or max(int(t.get("timestamp") or 0) for t in page) <= oldest_seen:
+                logger.warning(
+                    "okx trade pass stopped on a page that did not advance "
+                    "venue=okx inst_type=%s page_rows=%d rows=%d",
+                    inst_type, len(page), len(trades),
+                )
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+            next_end_ms = oldest_seen
+        end_ms = next_end_ms
+        await _rate_limit_sleep(exchange)
+    else:
+        logger.warning(
+            "okx trade pass hit the page ceiling venue=okx inst_type=%s pages=%d rows=%d",
+            inst_type, _TRADE_PASS_PAGE_CEILING, len(trades),
+        )
+        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+    return trades
 
 
 async def _fetch_trades_paginated_one_pass(
@@ -640,36 +867,66 @@ async def _fetch_trades_paginated_one_pass(
     since_ms: int,
     limit_per_call: int,
     params: dict[str, Any] | None,
+    *,
+    venue: str = "",
 ) -> list[dict[str, Any]]:
     """Inner pagination loop — one cursor walk against fetch_my_trades with
     a fixed params payload. Caller picks `params` (None for non-OKX, an
     instType selector for OKX). Returns the flat list of trade dicts.
+
+    TRADEPAGES D-02: the walk ends on an empty page or on a page that adds no
+    new row. It does NOT end on a page shorter than ``limit_per_call``: a
+    venue's page cap sits below the request, so a short page is not the last
+    page. The cursor moves to the newest timestamp read, not one past it, and the
+    venue answers rows at or after it, so a same-millisecond group cut by a full
+    page, or a final page sitting exactly on the cursor, is still read; rows seen
+    twice are absorbed by ``_extend_unseen`` (a page holding a row with no id steps
+    one millisecond past instead, since such a row cannot be absorbed). ``venue`` only labels the counts-only
+    WARNINGs. A full page that adds nothing, or the page ceiling, logs one such
+    WARNING and raises ``ccxt.BadRequest`` rather than return a partial list.
     """
     all_trades: list[dict[str, Any]] = []
+    seen: set[Any] = set()
     cursor_ms = since_ms
 
-    # 500 iterations × 500 trades/page = 250k trade ceiling per pass —
-    # plenty for any real allocator's 90-day or 2-year window.
-    for _ in range(500):
+    for _ in range(_TRADE_PASS_PAGE_CEILING):
         try:
             page = await exchange.fetch_my_trades(
                 None, cursor_ms, limit_per_call, params or {},
             )
         except ccxt.NotSupported:
+            if all_trades:
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
             return all_trades
         page = page or []
         if not page:
             break
-        all_trades.extend(page)
-        if len(page) < limit_per_call:
+        if _extend_unseen(all_trades, seen, page) == 0:
+            # Nothing new, so there is nowhere to advance to. A FULL page that ends
+            # the walk this way may have more behind it: a WARNING (counts only,
+            # never venue text) and a refusal. A short one is just the end.
+            if len(page) >= _TRADE_PAGE_LIMIT:
+                logger.warning(
+                    "trade read stopped on a page that did not advance "
+                    "venue=%s rows=%d page_rows=%d",
+                    venue, len(all_trades), len(page),
+                )
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
             break
-        max_ts = max(
-            (int(t.get("timestamp") or 0) for t in page), default=cursor_ms,
+        # A row with no id is never absorbed by ``_extend_unseen``, so step past the newest
+        # timestamp when any row lacks one; the cursor never moves backwards.
+        newest_ms = max(int(t.get("timestamp") or 0) for t in page)
+        cursor_ms = max(
+            cursor_ms,
+            newest_ms if all(t.get("id") is not None for t in page) else newest_ms + 1,
         )
-        if max_ts <= cursor_ms:
-            break
-        cursor_ms = max_ts + 1
         await _rate_limit_sleep(exchange)
+    else:
+        logger.warning(
+            "trade read hit the page ceiling venue=%s pages=%d rows=%d",
+            venue, _TRADE_PASS_PAGE_CEILING, len(all_trades),
+        )
+        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
     return all_trades
 
 
@@ -1976,15 +2233,24 @@ class _AccountCrawlRetryableError(RuntimeError):
 
     Phase-owned, with static text naming only the exception CLASS: the sibling's own
     exception (which can carry the request URL and its signature) is never re-raised, so it
-    reaches neither ``compute_jobs.error_message`` nor the audit (T-167.2.1.1.2-24).
+    reaches neither ``compute_jobs.error_message`` nor the audit (T-167.2.1.1.2-24). An
+    ``unknown`` fault is worded "unclassified fault": it may be a bug in our own code, which
+    a "venue fault" sentence would blame on the venue.
     """
 
     def __init__(self, error_kind: ErrorKind, exc_class: str) -> None:
         self.error_kind = error_kind
-        super().__init__(
-            f"whole-account rebuild crawl hit a retryable venue fault ({exc_class}); "
-            "nothing was written"
-        )
+        if error_kind == "unknown":
+            text = (
+                f"whole-account rebuild crawl hit an unclassified fault ({exc_class}); "
+                "nothing was written"
+            )
+        else:
+            text = (
+                f"whole-account rebuild crawl hit a retryable venue fault ({exc_class}); "
+                "nothing was written"
+            )
+        super().__init__(text)
 
 
 # Phase 167.2.1.1.2 ACCTREBUILD plan 04: the pure rules of the whole-account rebuild. A stored
@@ -2073,6 +2339,20 @@ def _select_account_crawl_keys(
     return selected, zero_contribution
 
 
+def _bybit_window_start(end_date: date) -> date:
+    """The first whole UTC day Bybit still serves: ``BYBIT_TRADE_TERMINUS_DAYS - 1`` (729) days
+    before ``end_date``. TRADEPAGES D-01.
+
+    A start N days back at UTC midnight is N days plus the time of day old. Bybit rejected 730
+    (older than two years for the whole UTC day after its first instant); 729 back is
+    ``729 days + time of day`` old, under 730 days at every instant of the UTC day, and also under
+    a calendar "now minus two years" reading. Older stored days are kept and the seam date is
+    recorded (ACCTREBUILD D-01, D-03). A crawl that begins after the UTC day rolled over is
+    refused by ``_fetch_bybit_trades``, never clamped.
+    """
+    return end_date - timedelta(days=BYBIT_TRADE_TERMINUS_DAYS - 1)
+
+
 def _account_rebuild_window(
     selected_keys: Sequence[Mapping[str, Any]], end_date: date
 ) -> tuple[date, int]:
@@ -2080,7 +2360,9 @@ def _account_rebuild_window(
 
     D-01 / UPNLVENUES D-05, decision AR-5: when ANY selected key is on OKX the window is 90
     calendar days inclusive of today, so ``OKX_TRADE_TERMINUS_DAYS - 1`` (89) days back;
-    otherwise ``BACKFILL_CAP_DAYS`` (730) back. 89, not 90: ``_fetch_trades_with_pagination``
+    otherwise, when ANY selected key is on Bybit, ``_bybit_window_start`` (729 days back, TRADEPAGES
+    D-01: Bybit rejects a start older than two years) with ``BYBIT_TRADE_TERMINUS_DAYS`` as the
+    audit ``window_days``; otherwise ``BACKFILL_CAP_DAYS`` (730) back. 89, not 90: ``_fetch_trades_with_pagination``
     flags the terminus when ``since`` is older than ``now - 90 days``, and a start 90 days
     before today's date is always older than that once the UTC day has begun, which would
     make every OKX crawl refuse ``anchor_skipped_okx_terminus``. One window for the whole
@@ -2089,6 +2371,8 @@ def _account_rebuild_window(
     """
     if any(_key_venue(key) == "okx" for key in selected_keys):
         return end_date - timedelta(days=OKX_TRADE_TERMINUS_DAYS - 1), OKX_TRADE_TERMINUS_DAYS
+    if any(_key_venue(key) == "bybit" for key in selected_keys):
+        return _bybit_window_start(end_date), BYBIT_TRADE_TERMINUS_DAYS
     return end_date - timedelta(days=BACKFILL_CAP_DAYS), BACKFILL_CAP_DAYS
 
 
@@ -4614,8 +4898,32 @@ async def _crawl_whole_account(
         per_account_telemetry: list[dict[str, Any]] = []
         for key, outcome in zip(selected, results):
             if isinstance(outcome, ForcedRebuildRefusedError):
+                # Static fields only: the member's key and venue and the closed-vocabulary
+                # token. The loop raises on the FIRST refused member in key order, so this
+                # names that one (TODOS 167.2.1.1.2-ACCOUNT-CRAWL-DIAGNOSTICS).
+                logger.warning(
+                    "reconstruct_allocator_history account crawl refused "
+                    "allocator=%s key=%s venue=%s reason=%s",
+                    allocator_id, key.get("id"), _key_venue(key), outcome.reason,
+                )
                 raise outcome
             if isinstance(outcome, DispatchResult):
+                # An MT5 member's settled failure. The arm is named by its
+                # ``_MT5_BACKFILL_MESSAGES`` key, never by the fixed text, so the line stays
+                # a closed vocabulary and separates ``auth`` from ``kill_switch``.
+                mt5_arm = next(
+                    (
+                        name for name, text in _MT5_BACKFILL_MESSAGES.items()
+                        if text == outcome.error_message
+                    ),
+                    "unmapped",
+                )
+                logger.warning(
+                    "reconstruct_allocator_history account crawl failed "
+                    "allocator=%s key=%s venue=%s outcome=%s error_kind=%s arm=%s",
+                    allocator_id, key.get("id"), _key_venue(key),
+                    outcome.outcome.value, outcome.error_kind, mt5_arm,
+                )
                 return outcome
             if isinstance(outcome, BaseException):
                 # The exception CLASS only: the venue's text is never logged here, so
@@ -4747,7 +5055,13 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     )
 
     end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=BACKFILL_CAP_DAYS)
+    # TRADEPAGES D-01: a Bybit key starts inside Bybit's two-year limit; every other venue
+    # keeps the cap. The audit's ``backfill_cap_days`` above is unchanged on purpose.
+    start_date = (
+        _bybit_window_start(end_date)
+        if venue == "bybit"
+        else end_date - timedelta(days=BACKFILL_CAP_DAYS)
+    )
     # Set only by a forced job's account crawl; the persist half reads it to choose the
     # window replace over the unforced sole-key replace / multi-key DO NOTHING.
     account: _AccountCrawl | None = None

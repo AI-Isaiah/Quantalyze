@@ -31,6 +31,7 @@ import pytest
 
 from services.equity_reconstruction import run_reconstruct_allocator_history_job
 from services.job_worker import DispatchOutcome
+from tests._trade_pages import VenueTradeBook
 from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
@@ -141,7 +142,12 @@ def _seed_done_job(fake: FakeSupabaseClient, key_id: str) -> None:
 
 def _crawl_exchange(*, fail: bool = False) -> AsyncMock:
     """An exchange whose crawl yields priced history: one BTC buy ten days back
-    and a flat 50000 close for every day."""
+    and a flat 50000 close for every day.
+
+    ``fetch_my_trades`` answers like the venue ``exchange.id`` names AT CALL TIME
+    (TRADEPAGES), so a test that sets ``id`` to ``bybit`` or ``okx`` gets that
+    venue's paging rules; the untyped BTC/USDT trade is served on OKX's spot pass
+    only, once."""
     start = END_DATE - timedelta(days=9)
     ts = int(start.timestamp() * 1000)
     trades = [_make_trade(ts, "BTC/USDT", "buy", 50000.0, 1.0)]
@@ -151,7 +157,7 @@ def _crawl_exchange(*, fail: bool = False) -> AsyncMock:
     if fail:
         exchange.fetch_my_trades = AsyncMock(side_effect=RuntimeError("fixture: fetch failed"))
     else:
-        exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+        exchange.fetch_my_trades = AsyncMock(side_effect=VenueTradeBook(exchange, trades))
     exchange.fetch_deposits = AsyncMock(return_value=[])
     exchange.fetch_withdrawals = AsyncMock(return_value=[])
     exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)

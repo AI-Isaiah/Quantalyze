@@ -2029,9 +2029,10 @@ async def test_m077_okx_fan_out_captures_swap_trades(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_m077_non_okx_venue_unchanged_single_pass(monkeypatch):
-    """Binance / Bybit must NOT fan out — their fetch_my_trades returns
-    the full book per call. Adding 5 instType passes for non-OKX venues
-    would 5x the API call count and risk rate-limit hits for no benefit."""
+    """Binance must NOT fan out — it is read by one forward walk with no instType.
+    Adding 5 instType passes for non-OKX venues would 5x the API call count and
+    risk rate-limit hits for no benefit. (A page shorter than the request is not
+    the end of that walk; tests/test_trade_pages.py pins that.)"""
     fake_supabase = FakeSupabaseClient()
     _install_fake_audit(monkeypatch)
 
