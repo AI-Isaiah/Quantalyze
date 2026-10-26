@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 167.2.1.1.2.1
-current_phase_name: TRADEPAGES
-status: executing
-stopped_at: 170.1.3 NARROWCHARTS closed (SC-4 passed); TRADEPAGES shipped, post-deploy steps pending; NAVMTM in plan revision
-last_updated: "2026-10-26T14:49:12.095Z"
-last_activity: 2026-10-26
-last_activity_desc: "170.1.3 NARROWCHARTS closed (SC-4 redo passed at 390 and 640 px on the deployed gap fix)"
-state_head: 3b35be2435610189be231b780d975c49212acd8b
+current_phase: 167.2.1.1.1
+current_phase_name: NAVMTM
+status: planning
+stopped_at: 167.2.1.1.2.1 TRADEPAGES closed (rebuild none, founder 2026-10-26); NAVMTM in plan revision
+last_updated: "2026-10-26T22:00:46.986Z"
+last_activity: 2026-10-27
+last_activity_desc: 167.2.1.1.2.1 TRADEPAGES closed (probe recorded, no rebuilds, 4 follow-ups booked)
+state_head: 35222ac70c5dfc3124f1417605997027f66ab452
 progress:
   total_phases: 125
-  completed_phases: 122
-  total_plans: 894
-  completed_plans: 887
+  completed_phases: 123
+  total_plans: 900
+  completed_plans: 893
   percent: 98
 ---
 
@@ -172,10 +172,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 167.2.1.1.2.1 (TRADEPAGES) — EXECUTING
-Plan: 06 (post-deploy operator steps)
-Status: Executing — several phases in parallel. 167.2.1.1.2.1 TRADEPAGES shipped as v0.133.0.6 (#1125) and is deployed; its plan 06 post-deploy steps wait on Railway SSH to the analytics service, which fails at the proxy since the 2026-10-26 deploy. 167.2.1.1.1 NAVMTM is in plan revision round 2 (14 plans; D-14 to D-16 added 2026-10-26). 170.1.3 NARROWCHARTS closed 2026-10-26 (gap closure v0.133.0.7 #1126; SC-4 redo 0 clipped labels on the Overview and composer at 390 and 640 px). 167.2.1.1.1.1 MARKSOURCE is booked, not planned, and depends on NAVMTM.
-Last activity: 2026-10-26 — 170.1.3 NARROWCHARTS closed (SC-4 passed post-deploy)
+Phase: 167.2.1.1.1 (NAVMTM) — PLAN REVISION
+Plan: 14 plans in revision round 2 (D-14 to D-16 added 2026-10-26)
+Status: Planning — several phases in parallel. NAVMTM is in plan review. 167.2.1.1.2.1 TRADEPAGES closed 2026-10-27 (v0.133.0.6 #1125; plan 06 probe recorded, no account rebuilt by founder decision 2026-10-26, four follow-ups booked). 170.1.3 NARROWCHARTS closed 2026-10-26 (v0.133.0.7 #1126). 167.2.1.1.1.1 MARKSOURCE is booked, not planned, and depends on NAVMTM.
+Last activity: 2026-10-27 — 167.2.1.1.2.1 TRADEPAGES closed
 Progress: [█████████░] 98%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -1708,7 +1708,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 170.1.3 NARROWCHARTS closed; TRADEPAGES post-deploy pending; NAVMTM plan revision
+**Stopped At:** 167.2.1.1.2.1 TRADEPAGES closed; NAVMTM plan revision
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
