@@ -2217,6 +2217,20 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
  *   NARROWCHARTS_DESKTOP_OUT=e2e/fixtures/narrowcharts-desktop-1280.json \
  *     npx playwright test e2e/layout-narrow.spec.ts -g "desktop reading" --workers=1
  * With NARROWCHARTS_DESKTOP_OUT set the cases write the reading and compare nothing.
+ * That command's `-g "desktop reading"` also selects the long-label cases below; to regenerate
+ * only the standard fixture, select `-g "V1280 (overview|composer): desktop reading"`.
+ *
+ * Gap closure (G-01, G-02): the standard book never draws a long end-of-year percentage nor a
+ * calendar year whose Jan 1 is a Sunday, so it passed while the founder's book cut three labels.
+ * The `long labels` cases run the same rule on a synthetic book (a 366-day window,
+ * 2023-05-01 to 2024-04-30, grown at LONG_DAILY_GROWTH a day): its 2023 end-of-year label has six
+ * integer digits and its 2023 calendar starts on a Sunday, which put a label in the last week
+ * column (D-05 removed that label: a calendar draws only its own year's days). The long-label
+ * desktop reading is a second
+ * fixture, regenerated on the local-stack lane with:
+ *   NARROWCHARTS_LONGLABELS_DESKTOP_OUT=e2e/fixtures/narrowcharts-longlabels-desktop-1280.json \
+ *     npx playwright test e2e/layout-narrow.spec.ts -g "long labels: desktop reading" --workers=1
+ * With NARROWCHARTS_LONGLABELS_DESKTOP_OUT set those cases write the reading and compare nothing.
  */
 const NARROW_VIEWPORTS: { id: string; width: number; height: number }[] = [
   { id: "V390", width: 390, height: 844 },
@@ -2232,6 +2246,19 @@ const COLLAPSIBLE_OPEN_ALL_EVENT_NAME = "collapsible-section:open-all";
 const NARROW_FIXTURE_NAME = `${NAME_PREFIX} NARROWCHARTS`;
 // Fixed so svg text strings do not drift between the BEFORE and AFTER reading.
 const NARROW_ANCHOR_MS = Date.UTC(2026, 9, 20);
+
+// The long-label book (gap closure G-01, G-02). 366 days = 2023-05-01 .. 2024-04-30 inclusive,
+// inside the bundled BTC coverage (2023-04-26 .. 2026-05-12) so the BTC comparator mounts.
+// `seedAllocatorBook` ends ON its anchor day; `seedStrategyWithHistory` ends the day BEFORE its
+// anchor, so the composer's anchor is one day later. 0.03 a day, with the seed's +-0.05 sine,
+// compounds 2023 (244 returns) to +446948.6% and 2024 (121 returns) to +966.4% (computed with
+// `node`); the sine is wide enough that the series has losing days, which Rolling Sortino needs.
+const LONG_DAYS = 366;
+const LONG_ANCHOR_MS = Date.UTC(2024, 3, 30);
+const LONG_DAILY_GROWTH = 0.03;
+const LONG_FIXTURE_NAME = `${NAME_PREFIX} NARROWCHARTS LONG`;
+
+type Book = "standard" | "long";
 
 const EQUITY_ROOT = '[data-testid="overview-equity-curve"]';
 const EQUITY_SVG = 'svg[aria-label="Equity chart"]';
@@ -2263,12 +2290,38 @@ const COMPOSER_EMITTERS: SvgTextEmitterDef[] = [
 
 const OVERVIEW_EMITTERS: SvgTextEmitterDef[] = SHARED_EMITTERS;
 
+// Gap closure: the two svgs whose labels the long book makes long. Listed AHEAD of the shared defs
+// (the first matching def names an svg), so on the long book `eoy-values` replaces `eoy-legend`
+// for the end-of-year svg and `heatmap-2023` takes the 2023 calendar out of `heatmap-months`.
+const EOY_SELECTOR = 'svg[aria-label^="End-of-year returns by calendar year"]';
+const EOY_VALUES_EMITTER: SvgTextEmitterDef = { key: "eoy-values", selector: EOY_SELECTOR };
+const HEATMAP_2023_EMITTER: SvgTextEmitterDef = {
+  key: "heatmap-2023",
+  selector: '[aria-label="Daily-return calendar for 2023"] svg',
+};
+// An end-of-year value label with six integer digits (G-01); the 2023 calendar's one "Jan" text.
+// D-05 (founder 2026-10-26): a calendar draws only its own year's days, so a non-leap year no
+// longer draws a 13th "Jan" for day 366 (1 January of the next year). The G-02 case asserts there
+// is exactly one.
+const EOY_SIX_DIGIT_PATTERN = "^[+-][0-9]{6}\\.[0-9]%$";
+const JAN_PATTERN = "^Jan$";
+const OVERVIEW_LONG_EMITTERS: SvgTextEmitterDef[] = [
+  EOY_VALUES_EMITTER,
+  HEATMAP_2023_EMITTER,
+  ...OVERVIEW_EMITTERS,
+];
+const COMPOSER_LONG_EMITTERS: SvgTextEmitterDef[] = [
+  EOY_VALUES_EMITTER,
+  HEATMAP_2023_EMITTER,
+  ...COMPOSER_EMITTERS,
+];
+
 // Floors are the counts measured on the local-stack lane at V390, V640 and V1280 (the minimum over
 // the three; they differ only for return-quantiles, which draws fewer y ticks on the mobile arm).
 // The Overview does not mount ReturnQuantiles.
 const OVERVIEW_REQUIRED: RequiredEmitter[] = [
   { key: "eoy-legend", minTexts: 3 },
-  { key: "heatmap-months", minTexts: 16 },
+  { key: "heatmap-months", minTexts: 15 },
   { key: "timeseries-y", minTexts: 102 },
 ];
 
@@ -2279,9 +2332,37 @@ const COMPOSER_REQUIRED: RequiredEmitter[] = [
   { key: "rolling-volatility", minTexts: 2, minXAxisTexts: 2 },
   { key: "rolling-sortino", minTexts: 2, minXAxisTexts: 2 },
   { key: "eoy-legend", minTexts: 5 },
-  { key: "heatmap-months", minTexts: 32 },
+  { key: "heatmap-months", minTexts: 30 },
   { key: "return-quantiles", minTexts: 4 },
   { key: "timeseries-y", minTexts: 41 },
+];
+
+// Long-label requirements: every standard requirement, with `eoy-legend` carried by `eoy-values`
+// (the same svg, named by the def listed first) and the 2023 calendar's texts split out of
+// `heatmap-months` into `heatmap-2023`, plus the two long labels as `textPattern` requirements.
+// Floors are the counts measured on the local-stack lane on the long book, the minimum over V390
+// and V640 (and checked at V1280); the NARROWCHARTS-EMITTER lines in the log carry them. They
+// differ between the widths only for return-quantiles (fewer y ticks on the mobile arm) and the
+// rolling charts (fewer x ticks), where the V390 count is the minimum. The Overview does not mount
+// the brush, the quantile box, the rolling charts nor ReturnQuantiles.
+const OVERVIEW_LONG_REQUIRED: RequiredEmitter[] = [
+  { key: "eoy-values", minTexts: 8, textPattern: EOY_SIX_DIGIT_PATTERN },
+  { key: "heatmap-2023", minTexts: 15, textPattern: JAN_PATTERN },
+  { key: "heatmap-months", minTexts: 15 },
+  { key: "timeseries-y", minTexts: 129 },
+];
+
+const COMPOSER_LONG_REQUIRED: RequiredEmitter[] = [
+  { key: "brush", minTexts: 2 },
+  { key: "quantile-box", minTexts: 5 },
+  { key: "rolling-sharpe", minTexts: 9, minXAxisTexts: 4 },
+  { key: "rolling-volatility", minTexts: 9, minXAxisTexts: 4 },
+  { key: "rolling-sortino", minTexts: 9, minXAxisTexts: 4 },
+  { key: "eoy-values", minTexts: 5, textPattern: EOY_SIX_DIGIT_PATTERN },
+  { key: "heatmap-2023", minTexts: 15, textPattern: JAN_PATTERN },
+  { key: "heatmap-months", minTexts: 15 },
+  { key: "return-quantiles", minTexts: 4 },
+  { key: "timeseries-y", minTexts: 48 },
 ];
 
 type Surface = "overview" | "composer";
@@ -2315,10 +2396,23 @@ async function waitForStableWidth(page: Page, selector: string): Promise<void> {
     .toBe(true);
 }
 
-async function openOverview(page: Page, vp: { width: number; height: number }): Promise<void> {
+async function openOverview(
+  page: Page,
+  vp: { width: number; height: number },
+  book: Book = "standard",
+): Promise<void> {
   await page.setViewportSize({ width: vp.width, height: vp.height });
   const allocator = await seedTestAllocator();
-  await seedAllocatorBook({ allocatorUserId: allocator.userId, days: 120, anchorMs: NARROW_ANCHOR_MS });
+  await seedAllocatorBook(
+    book === "long"
+      ? {
+          allocatorUserId: allocator.userId,
+          days: LONG_DAYS,
+          anchorMs: LONG_ANCHOR_MS,
+          dailyGrowth: LONG_DAILY_GROWTH,
+        }
+      : { allocatorUserId: allocator.userId, days: 120, anchorMs: NARROW_ANCHOR_MS },
+  );
   await loginViaForm(page, allocator.email, allocator.password);
   const res = await page.goto("/allocations?tab=overview");
   if (res && res.status() >= 400) {
@@ -2338,16 +2432,30 @@ async function openNarrowComposer(
   page: Page,
   vp: { width: number; height: number },
   days = 400,
+  book: Book = "standard",
 ): Promise<void> {
   await page.setViewportSize({ width: vp.width, height: vp.height });
   await cleanupStrategiesByNamePrefix(NAME_PREFIX);
-  const fixtureId = await seedStrategyWithHistory({
-    days,
-    name: NARROW_FIXTURE_NAME,
-    codename: NARROW_FIXTURE_NAME,
-    withDailyReturns: true,
-    anchorMs: NARROW_ANCHOR_MS,
-  });
+  const fixtureName = book === "long" ? LONG_FIXTURE_NAME : NARROW_FIXTURE_NAME;
+  const fixtureId = await seedStrategyWithHistory(
+    book === "long"
+      ? {
+          days: LONG_DAYS,
+          name: fixtureName,
+          codename: fixtureName,
+          withDailyReturns: true,
+          // The strategy's window ends the day BEFORE its anchor: one day after the Overview's.
+          anchorMs: LONG_ANCHOR_MS + 86_400_000,
+          dailyGrowth: LONG_DAILY_GROWTH,
+        }
+      : {
+          days,
+          name: fixtureName,
+          codename: fixtureName,
+          withDailyReturns: true,
+          anchorMs: NARROW_ANCHOR_MS,
+        },
+  );
   const allocator = await seedTestAllocator();
   await loginViaForm(page, allocator.email, allocator.password);
 
@@ -2360,7 +2468,7 @@ async function openNarrowComposer(
   await expect(
     page.locator('[role="dialog"][aria-label="Browse strategies"]'),
   ).toBeVisible({ timeout: 5_000 });
-  await page.fill('input[placeholder="Search by name or codename"]', NARROW_FIXTURE_NAME);
+  await page.fill('input[placeholder="Search by name or codename"]', fixtureName);
   const fixtureAdd = page.locator(`[data-testid="browse-add-${fixtureId}"]`);
   await expect(fixtureAdd).toBeVisible({ timeout: 10_000 });
   await fixtureAdd.click();
@@ -2407,9 +2515,10 @@ async function openSurface(
   surface: Surface,
   vp: { width: number; height: number },
   composerDays?: number,
+  book: Book = "standard",
 ): Promise<void> {
-  if (surface === "overview") await openOverview(page, vp);
-  else await openNarrowComposer(page, vp, composerDays);
+  if (surface === "overview") await openOverview(page, vp, book);
+  else await openNarrowComposer(page, vp, composerDays, book);
   await expandAll(page, surface);
 }
 
@@ -2430,6 +2539,11 @@ interface ReadingSvg {
 }
 
 const DESKTOP_FIXTURE = path.join(__dirname, "fixtures", "narrowcharts-desktop-1280.json");
+const LONGLABELS_DESKTOP_FIXTURE = path.join(
+  __dirname,
+  "fixtures",
+  "narrowcharts-longlabels-desktop-1280.json",
+);
 // Layout widths and Recharts' arithmetic agree to well under this on one machine; the slop
 // is for the same arithmetic on another one.
 const DESKTOP_SLOP_PX = 0.5;
@@ -2643,6 +2757,86 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
         );
       }
       expect(overlaps, `${vp.id} rolling x labels overlap:\n${overlaps.join("\n")}`).toEqual([]);
+    });
+  }
+
+  // Gap closure G-01, G-02: the two charts the standard book could not draw long. V390 only (the
+  // gap's measured viewport); the 640 reading is the long-label sweep below. Each prints its
+  // `NARROWCHARTS-EMITTER` line, and each fails with `NARROWCHARTS-EMITTER-MISSING` unless its long
+  // label was measured, so neither can pass hollow.
+  test("V390 overview long labels: end-of-year values drawn whole", async ({ page }) => {
+    test.setTimeout(150_000);
+    await openSurface(page, "overview", NARROW_VIEWPORTS[0], undefined, "long");
+    await assertSvgTextInsideSvg(page, "#main-content", "overview-long-eoy V390", EOY_SELECTOR, {
+      emitters: [EOY_VALUES_EMITTER],
+      required: [{ key: "eoy-values", textPattern: EOY_SIX_DIGIT_PATTERN }],
+    });
+  });
+
+  test("V390 overview long labels: 2023 calendar draws no next-year label and every label fits", async ({ page }) => {
+    test.setTimeout(150_000);
+    await openSurface(page, "overview", NARROW_VIEWPORTS[0], undefined, "long");
+    const layouts = await assertSvgTextInsideSvg(
+      page,
+      '[aria-label="Daily-return calendar for 2023"]',
+      "overview-long-calendar2023 V390",
+      "svg",
+      {
+        emitters: [HEATMAP_2023_EMITTER],
+        required: [{ key: "heatmap-2023", textPattern: JAN_PATTERN }],
+      },
+    );
+    // D-05: 2023 starts on a Sunday, so day 366 (1 January 2024) lands in the last week column.
+    // The calendar must not label it: exactly one "Jan", and the clip rule above passed every label.
+    const jans = layouts
+      .filter((l) => l.emitter === "heatmap-2023")
+      .flatMap((l) => l.texts)
+      .filter((t) => t.text === "Jan");
+    expect(jans.length, "2023 calendar must draw exactly one Jan (no next-year label)").toBe(1);
+  });
+
+  // The same whole-surface rule as the standard sweep, on the long book, at the two phone widths.
+  for (const vp of [NARROW_VIEWPORTS[0], NARROW_VIEWPORTS[1]]) {
+    test(`${vp.id} overview long labels: no svg text clipped`, async ({ page }) => {
+      test.setTimeout(150_000);
+      await openSurface(page, "overview", vp, undefined, "long");
+      await assertSvgTextInsideSvg(page, "#main-content", `overview long ${vp.id}`, "svg", {
+        emitters: OVERVIEW_LONG_EMITTERS,
+        required: OVERVIEW_LONG_REQUIRED,
+      });
+    });
+
+    test(`${vp.id} composer long labels: no svg text clipped`, async ({ page }) => {
+      test.setTimeout(180_000);
+      await openSurface(page, "composer", vp, undefined, "long");
+      await assertSvgTextInsideSvg(page, "#main-content", `composer long ${vp.id}`, "svg", {
+        emitters: COMPOSER_LONG_EMITTERS,
+        required: COMPOSER_LONG_REQUIRED,
+      });
+    });
+  }
+
+  // D-04: the long book's 1280 reading, compared on every run (regenerated for D-05 on 2026-10-26).
+  for (const surface of ["overview", "composer"] as const) {
+    test(`V1280 ${surface} long labels: desktop reading`, async ({ page }) => {
+      test.setTimeout(180_000);
+      const vp = NARROW_VIEWPORTS[2];
+      await openSurface(page, surface, vp, undefined, "long");
+      const emitters = surface === "composer" ? COMPOSER_LONG_EMITTERS : OVERVIEW_LONG_EMITTERS;
+      // The clip/offender rule runs here too, so the long book is judged at desktop as well as
+      // at the two phone widths, not only compared against the fixture.
+      const layouts = await assertSvgTextInsideSvg(page, "#main-content", `${surface} long ${vp.id}`, "svg", {
+        emitters,
+        required: surface === "composer" ? COMPOSER_LONG_REQUIRED : OVERVIEW_LONG_REQUIRED,
+      });
+      const reading = toReading(surface, layouts);
+      const texts = reading.reduce((n, s) => n + s.texts.length, 0);
+      console.log(`NARROWCHARTS V1280 ${surface} long reading: ${reading.length} svg(s), ${texts} text(s)`);
+      expect(reading.length, `${surface} long: no svg read (W-02)`).toBeGreaterThan(0);
+      expect(texts, `${surface} long: no svg text read (W-02)`).toBeGreaterThan(0);
+      const out = process.env.NARROWCHARTS_LONGLABELS_DESKTOP_OUT;
+      if (out) writeDesktopReading(out, surface, reading);
+      else compareDesktopReading(LONGLABELS_DESKTOP_FIXTURE, surface, reading);
     });
   }
 

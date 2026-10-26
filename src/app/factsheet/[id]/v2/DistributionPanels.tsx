@@ -10,7 +10,7 @@ import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { pctSigned, ratio, signed } from "./format";
-import { fitBaselineY, fitTickLabel } from "@/lib/chart-ticks";
+import { estLabelWidth, fitBaselineY, fitTickLabel } from "@/lib/chart-ticks";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -102,9 +102,6 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
   const ROW_H = isMobile ? (hasBench ? 44 : 34) : hasBench ? 30 : 22;
   const BAR_H = isMobile ? (hasBench ? 14 : 22) : hasBench ? 11 : 16;
   const PAD = { top: 26, right: 80, bottom: 12, left: 60 };
-  const plotW = VB_W - PAD.left - PAD.right;
-  const VB_H = PAD.top + rows.length * ROW_H + PAD.bottom;
-  const zeroX = PAD.left + plotW / 2;
   // CHART-02 legibility: mobile font-bumps; desktop arms = today's literals.
   const legendFont = isMobile ? 16 : 10;
   // Phase 170.1.3 NARROWCHARTS (D-03c): the legend's baseline follows its font so the text box
@@ -114,6 +111,21 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
   const yearFont = isMobile ? 18 : 11;
   const stratValFont = isMobile ? 18 : 11;
   const benchValFont = isMobile ? 16 : 10;
+  // Phase 170.1.3 NARROWCHARTS (G-01, D-02): the value labels are start-anchored beside the bars, so a
+  // six-digit compounded year ("+446948.6%" at font 18) ran past the svg's right edge. The right
+  // gutter grows from the widest drawn label, the rule ReturnQuantiles (D-03c) and TimeSeriesChart's
+  // padLeft (round 2) already use; the PAD literal stays the minimum, so a label that fits keeps 80
+  // and desktop is unchanged. Anchoring the label inward is not an option here: it would lay it over
+  // the bars. The strings are built once so the width estimate and the drawn text cannot differ.
+  const stratLabels = rows.map(r => (r.strat != null ? pctSigned(r.strat) : null));
+  const benchLabels = rows.map(r => (hasBench && r.bench != null ? pctSigned(r.bench) : null));
+  let widest = 0;
+  for (const l of stratLabels) if (l != null) widest = Math.max(widest, estLabelWidth(l, stratValFont));
+  for (const l of benchLabels) if (l != null) widest = Math.max(widest, estLabelWidth(l, benchValFont));
+  const padRight = Math.max(PAD.right, Math.ceil((widest + 6) / 4) * 4);
+  const plotW = VB_W - PAD.left - padRight;
+  const VB_H = PAD.top + rows.length * ROW_H + PAD.bottom;
+  const zeroX = PAD.left + plotW / 2;
 
   return (
     <figure className="flex flex-col gap-2" style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H + 60}px` }}>
@@ -201,26 +213,26 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
               {/* Right-edge labels: strategy value (accent), benchmark delta if present */}
               {r.strat != null && (
                 <text
-                  x={PAD.left + plotW + 6}
+                  x={VB_W - padRight + 6}
                   y={hasBench ? cy - 2 : cy + 4}
                   textAnchor="start"
                   fontSize={stratValFont}
                   fontFamily="var(--font-mono)"
                   fill="var(--color-text-primary)"
                 >
-                  {pctSigned(r.strat)}
+                  {stratLabels[i]}
                 </text>
               )}
               {hasBench && r.bench != null && (
                 <text
-                  x={PAD.left + plotW + 6}
+                  x={VB_W - padRight + 6}
                   y={cy + 11}
                   textAnchor="start"
                   fontSize={benchValFont}
                   fontFamily="var(--font-mono)"
                   fill="var(--color-text-muted)"
                 >
-                  {pctSigned(r.bench)}
+                  {benchLabels[i]}
                 </text>
               )}
             </g>
