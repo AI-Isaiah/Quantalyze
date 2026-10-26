@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 167.2.1.1.2.1
 current_phase_name: TRADEPAGES
 status: executing
-stopped_at: 166.5.1 SENTRYTRIAGE and 167.1.2.2.2.1 OKXHISTORY closed; TRADEPAGES executing, review fixer round 1
-last_updated: "2026-10-26T06:24:46.665Z"
+stopped_at: 170.1.3 NARROWCHARTS closed (SC-4 passed); TRADEPAGES shipped, post-deploy steps pending; NAVMTM in plan revision
+last_updated: "2026-10-26T14:49:12.095Z"
 last_activity: 2026-10-26
-last_activity_desc: "166.5.1 SENTRYTRIAGE and 167.1.2.2.2.1 OKXHISTORY closed (SC-4 readout 9 groups resolved; OKX apply recomputed, headlines moved)"
-state_head: ef2f6a368332cd1404b3c493005a716149cfa4e1
+last_activity_desc: "170.1.3 NARROWCHARTS closed (SC-4 redo passed at 390 and 640 px on the deployed gap fix)"
+state_head: 3b35be2435610189be231b780d975c49212acd8b
 progress:
   total_phases: 125
-  completed_phases: 121
-  total_plans: 886
-  completed_plans: 879
-  percent: 97
+  completed_phases: 122
+  total_plans: 894
+  completed_plans: 887
+  percent: 98
 ---
 
 ## ⭐ STATE lineage
@@ -173,10 +173,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 167.2.1.1.2.1 (TRADEPAGES) — EXECUTING
-Plan: review fixer round 1
-Status: Executing — several phases in parallel. 167.2.1.1.2.1 TRADEPAGES is in its review fixer round 1. 166.5.1 SENTRYTRIAGE closed 2026-10-26 (v0.132.10.2 #1105; SC-4: 9 Sentry groups had 0 events since the deploy and all 9 were resolved; SC-3 partly met by D-05, residual routed in TODOS). 167.1.2.2.2.1 OKXHISTORY closed 2026-10-26 (applied on PROD 2026-10-23; the 04:30Z ticks did not recompute, so Wave 5 ran for ordinals 1 and 2 and both headlines moved; survival 0). 170.1.3 NARROWCHARTS is shipped and waits for its SC-4 browser reading. 167.2.1.1.1 NAVMTM and 167.2.1.1.1.1 MARKSOURCE are booked, not planned. 167.2.1.1.2 ACCTREBUILD closed 2026-10-23 (v0.133.0.0 #1116).
-Last activity: 2026-10-26 — 166.5.1 SENTRYTRIAGE and 167.1.2.2.2.1 OKXHISTORY closed (verification passed)
-Progress: [█████████░] 97%
+Plan: 06 (post-deploy operator steps)
+Status: Executing — several phases in parallel. 167.2.1.1.2.1 TRADEPAGES shipped as v0.133.0.6 (#1125) and is deployed; its plan 06 post-deploy steps wait on Railway SSH to the analytics service, which fails at the proxy since the 2026-10-26 deploy. 167.2.1.1.1 NAVMTM is in plan revision round 2 (14 plans; D-14 to D-16 added 2026-10-26). 170.1.3 NARROWCHARTS closed 2026-10-26 (gap closure v0.133.0.7 #1126; SC-4 redo 0 clipped labels on the Overview and composer at 390 and 640 px). 167.2.1.1.1.1 MARKSOURCE is booked, not planned, and depends on NAVMTM.
+Last activity: 2026-10-26 — 170.1.3 NARROWCHARTS closed (SC-4 passed post-deploy)
+Progress: [█████████░] 98%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1708,7 +1708,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 166.5.1 SENTRYTRIAGE and 167.1.2.2.2.1 OKXHISTORY closed; TRADEPAGES in review fixer round 1
+**Stopped At:** 170.1.3 NARROWCHARTS closed; TRADEPAGES post-deploy pending; NAVMTM plan revision
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z

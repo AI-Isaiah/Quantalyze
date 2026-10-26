@@ -193,7 +193,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — 8 plans plus review and fix rounds (CSV validation hardening, Sentry redaction of x-service-key and x-tenant-claim), shipped as v0.132.6.0 (#1082); SC-5 390px/640px passed on the seeded local stack; verification passed; security SECURED (completed 2026-10-20)
 - [x] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — 9 plans plus two review fix rounds (failed title reads give a neutral title and report to Sentry; the page-title census covers every title shape), shipped as v0.132.9.0 (#1093); SC-4 read on production at 367 CSS px; verification passed; security SECURED (completed 2026-10-20)
 - [x] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — 10 plans plus three review fix rounds (the portfolio PDF names departed strategies and refuses to print a failed render; the wizard and Exposure table read venue display names; the match-eval route names allocators and strategies server-side; key nicknames no longer default to a raw code), shipped as v0.132.10.0 (#1101); SC-4 PROD correction read 0 mismatches of 3 and the WR-04 label rename read 6 "Deribit key", 1 "OKX key", 0 old-style on PROD 2026-10-21; SC-5 passed at 390 px and 640 CSS px on a seeded local stack, no overflow and no clipped label; verification passed (completed 2026-10-21)
-- [ ] **Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole** (INSERTED 2026-10-20) — not yet planned (founder 2026-10-20; equity chart 400 px floor, clipped axis labels)
+- [x] **Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole** (INSERTED 2026-10-20) — closed 2026-10-26 (SC-4 passed on the deployed gap fix, v0.133.0.7)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
@@ -6398,13 +6398,22 @@ Plans:
 **Success Criteria** (what must be TRUE):
 1. At 390 px the Overview equity chart's SVG is no wider than its card's content box and all of its axis labels are visible. A test goes RED on the 400 px floor.
 2. At 390 px no axis tick label on the /allocations Overview or the scenario composer is clipped by its SVG: each measured label box lies inside its SVG box.
-3. Desktop rendering is unchanged, shown by a desktop-width measurement before and after.
+3. Desktop rendering is unchanged, shown by a desktop-width measurement before and after. **Amended twice (founder):** 2026-10-21 D-04 amendment ("Accept, amend D-04 (Recommended)"), rolling-chart date labels may change at desktop width; 2026-10-26 D-05 ("Fix it: stop at the year's last day (Recommended)"), each year's daily-return calendar draws only that year's days, so every non-leap desktop calendar shows one "Jan" fewer and no boxes outside its year. Both are recorded in `170.1.3-CONTEXT.md`.
 4. After deploy, a 390 px and a 640 px measurement in the logged-in browser are recorded in the phase VERIFICATION.
 
-**Plans:** 0 plans
+**Outcome (closed 2026-10-26):** shipped as v0.132.10.3 NARROWCHARTS and the gap closure v0.133.0.7 (#1126). The first SC-4 reading (2026-10-26) failed on three clipped labels at 390 px (G-01 end-of-year values, G-02 the 2023 calendar's 13th "Jan") and two VOID readings (G-03). Gap plans 05-08 fixed both, with D-05 replacing the interim calendar widening. The SC-4 redo on the deployed fix read 0 clipped labels on the Overview and the composer at 390 and 640 px, with the equity chart inside its card at both widths. Verification passed.
+
+**Plans:** 8/8 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 170.1.3-01-PLAN.md — the Overview equity chart fits its card at 390 px (SC-1)
+- [x] 170.1.3-02-PLAN.md — the composer brush year tick and quantile label are drawn whole (SC-2)
+- [x] 170.1.3-03-PLAN.md — the composer's rolling-chart end-date labels are drawn whole (SC-2)
+- [x] 170.1.3-04-PLAN.md — the remaining emitters, the desktop comparison and the SC-4 handoff (SC-2, SC-3)
+- [x] 170.1.3-05-PLAN.md — gap closure: long-label seed, RED cases and the sweep (G-01, G-02)
+- [x] 170.1.3-06-PLAN.md — gap closure: end-of-year gutter and calendar right edge (G-01, G-02)
+- [x] 170.1.3-07-PLAN.md — gap closure: remaining offenders, full test set, desktop comparison
+- [x] 170.1.3-08-PLAN.md — SC-4 redo on the founder's real book (G-03, SC-4)
 
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
@@ -6654,7 +6663,7 @@ kept verbatim.
 | 170.1 COPY | 8/8 | Complete — CSV never raises or stores a wrong date (grids 135→0, 489→0); Sentry header redaction; SC-5 passed; SECURED | 2026-10-20 · v0.132.6.0 · #1082 |
 | 170.1.1 TITLES | 9/9 | Complete — own tab title on every route under one template; sentence-case headings; /referral removed; SC-4 passed on production; SECURED | 2026-10-20 · v0.132.9.0 · #1093 |
 | 170.1.2 LABELS | 10/10 | Complete — labels and names through shared maps with a database CHECK census; "Unnamed strategy" and "Unknown allocator" on every lookup miss; OutcomeForm placeholder removed; SC-4 PROD correction 0 mismatches of 3; SC-5 390/640 px passed; verification passed | 2026-10-21 · v0.132.10.0 · #1101 |
-| 170.1.3 NARROWCHARTS | 0/? | Queued — booked 2026-10-20 (founder) | - |
+| 170.1.3 NARROWCHARTS | 8/8 | Complete — closed 2026-10-26 (SC-4 passed post-deploy; gap closure v0.133.0.7 #1126) | 2026-10-26 |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
