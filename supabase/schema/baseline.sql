@@ -4536,6 +4536,34 @@ COMMENT ON FUNCTION "public"."enforce_allocator_holdings_owner_coherence"() IS '
 
 
 
+CREATE OR REPLACE FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_expected_owner UUID;
+BEGIN
+  SELECT user_id INTO v_expected_owner
+    FROM public.api_keys
+    WHERE id = NEW.api_key_id;
+  IF v_expected_owner IS NULL THEN
+    RAISE EXCEPTION
+      'api_key_nav_marks.api_key_id (%) does not reference an existing api_keys row',
+      NEW.api_key_id;
+  END IF;
+  IF NEW.allocator_id IS DISTINCT FROM v_expected_owner THEN
+    RAISE EXCEPTION
+      'api_key_nav_marks.allocator_id (%) must match api_keys.user_id (%) for api_key_id %',
+      NEW.allocator_id, v_expected_owner, NEW.api_key_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."enforce_api_keys_account_share_same_owner"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -12803,6 +12831,84 @@ COMMENT ON CONSTRAINT "allocator_preferences_scoring_weight_overrides_shape" ON 
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."api_key_nav_marks" (
+    "id" bigint NOT NULL,
+    "api_key_id" "uuid" NOT NULL,
+    "allocator_id" "uuid" NOT NULL,
+    "mark_day" "date" NOT NULL,
+    "marked_at" timestamp with time zone NOT NULL,
+    "venue" "text" NOT NULL,
+    "nav_usd" numeric NOT NULL,
+    "open_pnl_usd" numeric NOT NULL,
+    "nav_native" numeric,
+    "open_pnl_native" numeric,
+    "native_unit" "text",
+    "price_day" "date",
+    "native_detail" "jsonb",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "api_key_nav_marks_amounts_finite_chk" CHECK ((("nav_usd" <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND ("open_pnl_usd" <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (("nav_native" IS NULL) OR ("nav_native" <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric]))) AND (("open_pnl_native" IS NULL) OR ("open_pnl_native" <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric]))))),
+    CONSTRAINT "api_key_nav_marks_label_chk" CHECK (("mark_day" = ((("marked_at" AT TIME ZONE 'UTC'::"text"))::"date" - 1))),
+    CONSTRAINT "api_key_nav_marks_native_basis_chk" CHECK ((("native_unit" IS NOT NULL) OR ("native_detail" IS NOT NULL))),
+    CONSTRAINT "api_key_nav_marks_native_detail_object_chk" CHECK ((("native_detail" IS NULL) OR ("jsonb_typeof"("native_detail") = 'object'::"text"))),
+    CONSTRAINT "api_key_nav_marks_native_scalars_chk" CHECK (((("nav_native" IS NULL) = ("open_pnl_native" IS NULL)) AND (("nav_native" IS NULL) = ("native_unit" IS NULL)))),
+    CONSTRAINT "api_key_nav_marks_native_unit_chk" CHECK ((("native_unit" IS NULL) OR ("native_unit" ~ '^[A-Z]{2,10}$'::"text"))),
+    CONSTRAINT "api_key_nav_marks_price_day_chk" CHECK ((("price_day" IS NULL) OR ("native_unit" IS NOT NULL))),
+    CONSTRAINT "api_key_nav_marks_venue_chk" CHECK (("venue" = ANY (ARRAY['okx'::"text", 'bybit'::"text", 'binance'::"text", 'deribit'::"text", 'mt5'::"text", 'sfox'::"text"])))
+);
+
+ALTER TABLE ONLY "public"."api_key_nav_marks" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."api_key_nav_marks" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."api_key_nav_marks" IS 'Phase 167.2.1.1.1 NAVMTM (D-01, D-06, D-07, D-11). One row per API key per UTC day: that key''s marked-to-market NAV (equity INCLUDING open profit), the open profit itself, the exact read time, the venue and the owner. WRITE-ONCE: the first writer of a day wins (UNIQUE (api_key_id, mark_day), the worker writes ON CONFLICT DO NOTHING), and service_role holds SELECT and INSERT only, so a stored mark can never be changed or removed by the worker; key and account deletion still erase it through ON DELETE CASCADE. mark_day labels the UTC day that just closed: it equals (marked_at AT TIME ZONE ''UTC'')::date - 1, so a read any time on the following UTC day carries the same label. Owner-read-only through RLS. Marks start at deploy; nothing is backfilled (D-09).';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."allocator_id" IS 'Owning allocator (= api_keys.user_id, enforced by the owner-coherence trigger). ON DELETE CASCADE from auth.users IS the GDPR sanitize path: do NOT add a delete-guard trigger. If one is ever added it MUST exempt current_setting(''quantalyze.sanitize_in_progress'', true) = ''on'' or it aborts account deletion.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."mark_day" IS 'The UTC day this mark closes (D-03): (marked_at AT TIME ZONE ''UTC'')::date - 1, enforced by api_key_nav_marks_label_chk.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."marked_at" IS 'The instant OUR worker read the equity (not the venue''s timestamp). A retry later the same UTC day records its real time (D-11).';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."nav_usd" IS 'Marked-to-market NAV in USD, INCLUDING open profit.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."open_pnl_usd" IS 'Unrealized (open) profit in USD at the read; nav_usd minus open_pnl_usd is the realized-basis balance.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."native_unit" IS 'D-07 native unit of nav_native and open_pnl_native: ''USD'' for a USD-family read, ''BTC'' for a BTC-unit MT5 account; NULL for Deribit, whose figures are per currency in native_detail.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."price_day" IS 'D-07 the close day used to price a native amount into nav_usd; NULL when the native unit is USD and for Deribit, which is priced at its own index and no daily close.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_nav_marks"."native_detail" IS 'D-07 multi-currency detail for Deribit: a JSON object with the native equity and open profit per currency, plus usd_basis = ''venue_index_at_marked_at'', the pricing basis of nav_usd and open_pnl_usd (each currency''s native amount priced at Deribit''s own index read at marked_at, no daily close, so price_day stays NULL). NULL for single-unit venues. Must be a JSON object.';
+
+
+
+ALTER TABLE "public"."api_key_nav_marks" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME "public"."api_key_nav_marks_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -14742,6 +14848,16 @@ ALTER TABLE ONLY "public"."allocator_preferences"
 
 
 
+ALTER TABLE ONLY "public"."api_key_nav_marks"
+    ADD CONSTRAINT "api_key_nav_marks_key_day_key" UNIQUE ("api_key_id", "mark_day");
+
+
+
+ALTER TABLE ONLY "public"."api_key_nav_marks"
+    ADD CONSTRAINT "api_key_nav_marks_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."api_keys"
     ADD CONSTRAINT "api_keys_pkey" PRIMARY KEY ("id");
 
@@ -15125,6 +15241,10 @@ CREATE INDEX "allocator_holdings_ownership_probe_idx" ON "public"."allocator_hol
 
 
 COMMENT ON INDEX "public"."allocator_holdings_ownership_probe_idx" IS 'audit-2026-05-07 H-0984. Covering index for commit_scenario_batch ownership probe (mig 128 P1957). Leading 4-column equality matches the probe predicate; trailing asof DESC matches the latest-asof subquery scan direction.';
+
+
+
+CREATE INDEX "api_key_nav_marks_allocator_day_idx" ON "public"."api_key_nav_marks" USING "btree" ("allocator_id", "mark_day");
 
 
 
@@ -15696,6 +15816,10 @@ CREATE OR REPLACE TRIGGER "allocator_holdings_set_updated_at" BEFORE UPDATE ON "
 
 
 
+CREATE OR REPLACE TRIGGER "api_key_nav_marks_owner_coherence" BEFORE INSERT OR UPDATE ON "public"."api_key_nav_marks" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"();
+
+
+
 CREATE OR REPLACE TRIGGER "api_keys_account_share_same_owner" BEFORE INSERT OR UPDATE OF "account_shared_with_api_key_id" ON "public"."api_keys" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_api_keys_account_share_same_owner"();
 
 
@@ -15925,6 +16049,16 @@ ALTER TABLE ONLY "public"."allocator_preferences"
 
 ALTER TABLE ONLY "public"."allocator_preferences"
     ADD CONSTRAINT "allocator_preferences_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."api_key_nav_marks"
+    ADD CONSTRAINT "api_key_nav_marks_allocator_id_fkey" FOREIGN KEY ("allocator_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."api_key_nav_marks"
+    ADD CONSTRAINT "api_key_nav_marks_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
 
 
 
@@ -16498,6 +16632,17 @@ CREATE POLICY "analytics_read" ON "public"."strategy_analytics" FOR SELECT USING
 
 
 CREATE POLICY "analytics_update_deny" ON "public"."strategy_analytics" FOR UPDATE USING (false);
+
+
+
+ALTER TABLE "public"."api_key_nav_marks" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "api_key_nav_marks_owner_select" ON "public"."api_key_nav_marks" FOR SELECT TO "authenticated" USING (("allocator_id" = "auth"."uid"()));
+
+
+
+COMMENT ON POLICY "api_key_nav_marks_owner_select" ON "public"."api_key_nav_marks" IS 'Owner-only SELECT: an authenticated user reads only its own marks. There is NO INSERT, UPDATE or DELETE policy for authenticated, and no policy for anon, BY DESIGN: the analytics worker is the sole producer through service_role, and the table privileges below withhold every write from every other role. Phase 167.2.1.1.1 / T-167.2.1.1.1-02.';
 
 
 
@@ -17712,6 +17857,13 @@ GRANT ALL ON FUNCTION "public"."enforce_allocator_holdings_owner_coherence"() TO
 
 
 
+REVOKE ALL ON FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"() TO "anon";
+GRANT ALL ON FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() TO "service_role";
 
@@ -18278,6 +18430,17 @@ GRANT ALL ON TABLE "public"."allocator_holdings" TO "service_role";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_preferences" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_preferences" TO "authenticated";
 GRANT ALL ON TABLE "public"."allocator_preferences" TO "service_role";
+
+
+
+GRANT SELECT ON TABLE "public"."api_key_nav_marks" TO "authenticated";
+GRANT SELECT,INSERT ON TABLE "public"."api_key_nav_marks" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."api_key_nav_marks_id_seq" TO "anon";
+GRANT ALL ON SEQUENCE "public"."api_key_nav_marks_id_seq" TO "authenticated";
+GRANT ALL ON SEQUENCE "public"."api_key_nav_marks_id_seq" TO "service_role";
 
 
 
