@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.133.0.8] - 2026-10-26 — records: close NARROWCHARTS 170.1.3
+
+### Notes
+- Phase 170.1.3 NARROWCHARTS is closed, with verification passed. It shipped as v0.132.10.3 and its gap closure as v0.133.0.7 (#1126).
+- SC-4 redo, taken on the deployed gap fix in the founder's signed-in browser, read-only, each width in a click-opened popup of exactly that width measured from its opener: 0 clipped labels on the `/allocations` Overview (296 texts at 390 px, 312 at 640) and the scenario composer (131 at 390, 168 at 640), and the equity chart inside its card at both widths. The composer was read with an unsaved draft composed through "Browse strategies"; nothing was saved. The strategy-page rows, which are recorded but not gated, measured nothing and are recorded as such.
+- The phase directory (8 plans and summaries, five review rounds plus three gap rounds, measurement, SC-4 handoff with its popup amendment, verification) lands on `main`. ROADMAP lists the 8 plans and the outcome, and records both founder amendments to SC-3 (D-04's rolling-chart labels, D-05's calendar that draws only its own year's days). STATE records the close; its current position stays on TRADEPAGES, whose post-deploy steps are pending.
+
 ## [0.133.0.7] - 2026-10-26 — NARROWCHARTS gap closure: no clipped value or month labels on the factsheet at 390 px (Phase 170.1.3)
 
 ### Fixed
