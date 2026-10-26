@@ -30,7 +30,7 @@ from typing import Any
 
 import pandas as pd
 
-from services.external_flows import USD_FAMILY, ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow, FlowInstant
 from services.sfox_client import _TRANSACTIONS_MAX_LIMIT, SfoxClient
 
 # --- Phase-120 bounded crawl + typed-flow extraction (SFOX-05) -------------
@@ -296,6 +296,7 @@ def _utc_day_iso(ts_ms: Any) -> str:
 
 def sfox_flows_by_day(
     transactions: list[dict[str, Any]],
+    instants: list[FlowInstant] | None = None,
 ) -> tuple[pd.Series, list[ExternalFlow]]:
     """Extract the signed daily USD external-flow series + ExternalFlow evidence
     from typed transaction rows.
@@ -312,6 +313,9 @@ def sfox_flows_by_day(
     ascending daily [us] DatetimeIndex (the shape ``chain_linked_twr`` aligns as
     the numerator flow F) and ``evidence`` is the ``list[ExternalFlow]`` the
     DQ-02 evidence shape (plan 120-03) threads downstream.
+
+    ``instants`` (NAVMTM D-23), when given, receives one ``FlowInstant`` per flow row at the row's
+    own epoch-ms timestamp; the returned values are the same whether or not it is passed.
     """
     by_day: dict[str, float] = {}
     evidence: list[ExternalFlow] = []
@@ -351,6 +355,8 @@ def sfox_flows_by_day(
         usd_signed = sign * magnitude
         by_day[iso] = by_day.get(iso, 0.0) + usd_signed
         evidence.append(ExternalFlow(utc_day_iso=iso, usd_signed=usd_signed))
+        if instants is not None:
+            instants.append(FlowInstant(int(row["timestamp"]), iso, usd_signed))
 
     if not by_day:
         return pd.Series(dtype="float64", name="flows"), evidence

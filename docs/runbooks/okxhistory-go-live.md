@@ -28,6 +28,11 @@ radius" and "What this runbook does not cover" before the pre-flight.
 - **Scheduling.** Enqueue outside 04:15-05:45 UTC. That window belongs to the daily trade-sync tick
   (04:30) and the allocator derive (05:30), which share the OKX rate limits and the worker queue
   with this job. The three enqueue forms refuse inside it.
+  > **MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03))** From the live move recorded in `docs/runbooks/navmtm-chain-move-go-live.md`,
+  > the daily chain runs at 00:05Z (benchmark), 00:10Z (trade-sync tick) and 00:40Z (allocator
+  > derive), so the window to stay out of is **00:00-01:45 UTC**. Before that move the window above
+  > still applies. The enqueue forms below now refuse inside 00:00-01:45; until the move is
+  > recorded, ALSO stay out of 04:15-05:45 by hand.
 
 ## What this activates
 
@@ -108,7 +113,8 @@ Counts as measured 2026-10-15 (re-measure with `ordinals` and `worklist`):
 3. **Public numbers change.** Rebuilt days count in headline metrics (D-07). Ordinal 2 is published:
    its `headline_since` moves from 2026-08-02 toward 2026-02-23. Ordinal 1 is `pending_review`: its
    moves toward about 2026-05-24. The factsheet also gains the D-06 line naming each rebuilt range.
-4. **The next tick recomputes anyway.** The daily 04:30Z tick enqueues a derive and a following
+4. **The next tick recomputes anyway.** The daily 04:30Z tick (00:10Z from the live move recorded in
+   `docs/runbooks/navmtm-chain-move-go-live.md`, D-03) enqueues a derive and a following
    analytics compute for each connected key's strategy, so the rebuilt rows reach the headline at the
    next tick whether or not anything else runs. When the founder wants to see the changed headline
    before it is public, `apply` is held until just before the consolidated recompute (Step 3).
@@ -428,7 +434,7 @@ Reads the account and the quarter state; writes nothing. It proves the key is th
 anything is requested from OKX's archive.
 
 Every enqueue form starts from the marker guard, then refuses in SQL when: the time is inside the
-04:15-05:45 UTC window; a rebuild target is missing, sits on a disconnected, inactive or revoked key
+00:00-01:45 UTC window (04:15-05:45 before the NAVMTM chain move, D-03); a rebuild target is missing, sits on a disconnected, inactive or revoked key
 (the D-02 refusal; ordinal 3 is exactly this case), or is on another venue account than the job key.
 It then enqueues, and ends with a readback row counting this run's job and the in-flight jobs.
 
@@ -439,8 +445,10 @@ DECLARE
   v_bad integer;
   v_now time := (now() AT TIME ZONE 'UTC')::time;
 BEGIN
-  IF v_now BETWEEN time '04:15' AND time '05:45' THEN
-    RAISE EXCEPTION 'okx_archive_rebuild: 04:15-05:45 UTC belongs to the daily tick and the allocator derive; run this form outside it';
+  -- MOVED 2026-10-26 (NAVMTM D-03), lineage: the test was BETWEEN time '04:15' AND time '05:45' and the
+  -- message said 04:15-05:45 UTC belongs to the daily tick and the allocator derive.
+  IF v_now BETWEEN time '00:00' AND time '01:45' THEN
+    RAISE EXCEPTION 'okx_archive_rebuild: 00:00-01:45 UTC belongs to the daily chain (benchmark, trade-sync tick, allocator derive); run this form outside it';
   END IF;
   WITH __OKX_UNIVERSE__
   SELECT count(*) INTO v_bad
@@ -742,7 +750,7 @@ No form runs here; the founder reads and decides, with the orchestrator's summar
      disagrees, or `flows` is null.
 5. The headline change for ordinal 2 (published) and ordinal 1 (`pending_review`): `strategies[]`
    `insert_ranges` is what each factsheet will name, and each headline start moves earlier.
-6. **Timing.** The 04:30Z tick recomputes anyway (Blast radius, item 4), so the moment of `apply` is the
+6. **Timing.** The daily tick (04:30Z; 00:10Z from the NAVMTM chain move, D-03) recomputes anyway (Blast radius, item 4), so the moment of `apply` is the
    founder's decision: apply just before the Wave 5 consolidated recompute to review the changed
    headline first, or apply early and let the next tick publish it.
 7. Go / no-go. On go, the founder approves the `fingerprint` from the calibrate result. That value is
@@ -750,7 +758,7 @@ No form runs here; the founder reads and decides, with the orchestrator's summar
 
 ## Step 4 — apply
 
-Run outside 04:15-05:45 UTC. Order: `before`, then `enqueue-apply`, then `job-result`, then `after` and
+Run outside 00:00-01:45 UTC (04:15-05:45 before the NAVMTM chain move, D-03). Order: `before`, then `enqueue-apply`, then `job-result`, then `after` and
 `survival`.
 
 **4a. `before`.** Per ordinal: total `csv_daily_returns` rows, rows inside the stored gap ranges, the
@@ -920,7 +928,7 @@ covered stays named, never 0.0, never interpolated); `legacy_ranges_n` and the o
 
 **4e. `survival`.** Per ordinal, the number of days inside `reconstructed_ranges` that have no
 `csv_daily_returns` row. Expected 0 for every ordinal. It is the check that a rebuilt day was not lost,
-and it is run again after the next 04:30Z tick (Step 5).
+and it is run again after the next daily tick (04:30Z; 00:10Z from the NAVMTM chain move, D-03) (Step 5).
 
 <!-- form: survival -->
 ```sql

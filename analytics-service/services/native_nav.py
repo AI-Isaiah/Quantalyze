@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from services.deribit_txn import _row_utc_day
-from services.external_flows import USD_FAMILY, ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow, FlowInstant
 from services.nav_twr import (
     NavReconstructionError,
     NavTWRMeta,
@@ -256,6 +256,9 @@ class NativeLedger:
     native_flows: Sequence[ExternalFlow]
     terminal_upnl_native: Mapping[str, float]
     full_history: bool
+    # NAVMTM D-23: one entry per external-flow row at the row's own instant, in the row's native
+    # quantity. Additive and unread by the reconstruction; ``native_flow_instants`` values it.
+    flow_instants: tuple[FlowInstant, ...] = ()
 
 
 @dataclass
@@ -1118,3 +1121,24 @@ def native_inception_diagnostics(
         "breach_ratio_balance_anchor_with_cap": _breach_ratio(alt_cap),
         "orphan_unvaluable": orphan_unvaluable,
     }
+
+
+def native_flow_instants(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+) -> list[FlowInstant]:
+    """The ledger's per-row flow instants valued the way ``native_composed_flows`` values a day,
+    ``flowqty x same-day mark`` (USD family at 1.0), so a day's instants sum to that day's
+    composed flow (NAVMTM D-23). Call it after ``native_composed_flows`` has succeeded on the
+    same ledger: every day it values already passed the density contract there. A currency the
+    core skips as zero-value UNMARKABLE has no entry."""
+    out: list[FlowInstant] = []
+    for fi in ledger.flow_instants:
+        branch = classify_currency(fi.currency, indexable=indexable_currencies)
+        if branch is MarkBranch.USD_FAMILY:
+            out.append(fi._replace(currency="USD"))
+        elif branch is MarkBranch.INDEXED:
+            mark = ledger.marks[fi.currency].loc[pd.Timestamp(fi.day)]
+            out.append(fi._replace(amount=fi.amount * float(mark), currency="USD"))
+    return out

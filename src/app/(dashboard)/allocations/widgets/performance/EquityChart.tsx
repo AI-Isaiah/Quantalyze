@@ -18,6 +18,17 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { estLabelWidth, fitTickLabel, pow10 } from "@/lib/chart-ticks";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import {
+  MARKS_LABEL_TRACKING_EM,
+  marksStartCaption,
+  marksStartInRange,
+  marksStartLabelRendered,
+  marksStartSentenceOne,
+  marksTrailingNote,
+  parseMarksStart,
+  placeMarksStartLabel,
+} from "@/lib/nav-marks-start";
+import { formatIsoDate } from "@/app/factsheet/[id]/trade-fetch-lines";
+import {
   isMonotonicByDay,
   localMidnightFromIsoString,
   localMidnightToday,
@@ -299,6 +310,24 @@ type Props = {
    * through don't regress). ISO-8601 string.
    */
   lastSyncAt?: string | null;
+  /**
+   * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the first day recorded equity
+   * begins for the keys the drawn curve includes (`YYYY-MM-DD`, already through
+   * `parseMarksStart`). When it falls inside the period-sliced visible range
+   * (`first < start <= last`) the chart draws the UI-SPEC's note: a solid
+   * secondary line, the tracked label where it fits, and a caption paragraph.
+   * ONLY the My Allocation Equity curve widget passes it, so this chart's
+   * caption is always the multi-account one (S3 included). Absent or `null`:
+   * nothing is drawn and every other mount is unchanged.
+   */
+  marksStart?: string | null;
+  /**
+   * SFH-2 N1: the first day AFTER the last recorded mark among the drawn keys,
+   * when marks have stopped updating (`YYYY-MM-DD`, already through
+   * `parseMarksStart`). Draws "Marks paused from {date}" under the chart. Not
+   * range-gated: the curve ends before this day. Absent or `null`: nothing.
+   */
+  marksTrailingSince?: string | null;
 };
 
 /**
@@ -573,6 +602,8 @@ export function EquityChart({
   hideHeader = false,
   hideLegend = false,
   lastSyncAt = null,
+  marksStart = null,
+  marksTrailingSince = null,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(960);
@@ -1288,6 +1319,37 @@ export function EquityChart({
     visibleEpochs,
   } = projection;
 
+  // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 (167.2.1.1.1-UI-SPEC.md "Visibility
+  // rule" and "Placement and geometry"): the start-of-marks note against the
+  // period-sliced `visible` range this chart is drawing right now, so it follows
+  // a period or custom-range change. Null unless `first < start <= last`; the
+  // line sits at the first visible day on or after the start. The `visible`
+  // series is ascending (sorted before it is sliced), and `n` is its length.
+  let marksStartNote: {
+    xPos: number;
+    date: string;
+    rendered: string;
+    place: ReturnType<typeof placeMarksStartLabel>;
+  } | null = null;
+  if (marksStart && visible.length > 0) {
+    const first = visible[0].date;
+    const last = visible[visible.length - 1].date;
+    if (marksStartInRange(marksStart, { first, last })) {
+      const idx = visible.findIndex((p) => p.date >= marksStart);
+      if (idx >= 0) {
+        const xPos = x(idx);
+        const date = formatIsoDate(marksStart);
+        const rendered = marksStartLabelRendered(date);
+        marksStartNote = {
+          xPos,
+          date,
+          rendered,
+          place: placeMarksStartLabel(xPos, rendered, 12, pad.l, width - pad.r),
+        };
+      }
+    }
+  }
+
   // ── Hover ─────────────────────────────────────────────────────────
   // NEW-C04-06: x is now a calendar-time scale. Invert by mapping the
   // pixel position back to a target epoch and finding the nearest visible
@@ -1708,6 +1770,38 @@ export function EquityChart({
             );
           })}
 
+          {/* D-08 start-of-marks note: one solid secondary line (the only solid
+              vertical line in this plot, so it is told apart from the dashed
+              crosshair and gridlines by pattern) and the tracked uppercase label
+              where it fits. Drawn after the gridlines and axis and before the
+              series paths, so the curve lies over it. */}
+          {marksStartNote && (
+            <g pointerEvents="none" data-testid="marks-start-marker">
+              <title>{marksStartSentenceOne(marksStartNote.date)}</title>
+              <line
+                x1={marksStartNote.xPos}
+                x2={marksStartNote.xPos}
+                y1={pad.t}
+                y2={pad.t + chartH}
+                stroke="var(--color-text-secondary)"
+                strokeWidth={1}
+              />
+              {marksStartNote.place && (
+                <text
+                  x={marksStartNote.place.x}
+                  y={pad.t + 16}
+                  textAnchor={marksStartNote.place.textAnchor}
+                  fontSize={12}
+                  fontFamily="var(--font-mono), monospace"
+                  letterSpacing={`${MARKS_LABEL_TRACKING_EM}em`}
+                  fill="var(--color-text-secondary)"
+                >
+                  {marksStartNote.rendered}
+                </text>
+              )}
+            </g>
+          )}
+
           {/* Benchmark (dashed) — normalized to period start so it
               departs from the 0% baseline alongside the portfolio.
               Hidden when Tweaks → Benchmark overlay = Off. */}
@@ -1971,6 +2065,22 @@ export function EquityChart({
           </div>
         )}
       </div>
+      {/* D-08 caption (UI-SPEC "Caption placement"): real wrapping text after the
+          chart's relative container, the accessible statement (the svg is
+          role="img"). Not a live region: a period change must not announce it. */}
+      {marksStartNote && (
+        <p data-testid="marks-start-note" className="mt-2 text-caption text-text-secondary">
+          {marksStartCaption(marksStartNote.date, true)}
+        </p>
+      )}
+      {marksTrailingSince && (
+        <p
+          data-testid="marks-trailing-note"
+          className="mt-2 text-micro font-mono uppercase tracking-wider text-text-secondary"
+        >
+          {marksTrailingNote(formatIsoDate(marksTrailingSince))}
+        </p>
+      )}
       {/* Intraday toggles (1D / 1W) deferred per CONTEXT §deferred */}
     </div>
   );
@@ -2116,6 +2226,14 @@ function EquityChartWidgetInner({
   );
   const stale = d.allKeysStale ?? false;
   const lastSyncAt = d.lastSyncAt ?? null;
+  // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the schema carries the start as
+  // `unknown` so a malformed value cannot blank this card; the one reader turns
+  // it into a real day or null (a reason-only warning for a malformed value).
+  const marksStart = useMemo(() => parseMarksStart(d.marksStart), [d.marksStart]);
+  const marksTrailingSince = useMemo(
+    () => parseMarksStart(d.marksTrailingSince),
+    [d.marksTrailingSince],
+  );
   const hasBenchmark = !!benchmark && benchmark.length > 0;
   // Phase 115.1 / RD-2 — honest provenance of the equity series. Defaults to
   // "legacy" when the field is absent (first-connect / warm-up payloads omit
@@ -2460,6 +2578,8 @@ function EquityChartWidgetInner({
           customRange={customRange}
           onCustomRangeChange={setCustomRange}
           lastSyncAt={lastSyncAt}
+          marksStart={marksStart}
+          marksTrailingSince={marksTrailingSince}
           hideHeader
           hideLegend
         />

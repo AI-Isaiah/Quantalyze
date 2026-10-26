@@ -124,6 +124,15 @@ export const equityChartWidgetDataSchema = z
     // leaves; the widget defaults to the legacy label when absent.
     equityCurveSource: z.enum(["derived", "legacy"]).optional(),
     derivedCurveComputedAt: z.string().nullable().optional(),
+    // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the first day recorded equity
+    // begins for the keys the drawn curve includes. Deliberately `z.unknown()`,
+    // NOT `z.string()`: a strict schema would send a malformed value down the
+    // boundary's `onInvalid: "empty"` path and blank the whole Equity curve card
+    // over a note. The widget passes it through `parseMarksStart`, which turns
+    // anything but a real `YYYY-MM-DD` day into no note.
+    marksStart: z.unknown().optional(),
+    // SFH-2 N1: the day marks stopped updating; `unknown` for the same reason.
+    marksTrailingSince: z.unknown().optional(),
   })
   .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 

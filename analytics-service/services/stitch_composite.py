@@ -60,7 +60,7 @@ discipline). Worker wiring is Plan 03.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any, NamedTuple
 
 import pandas as pd
@@ -273,13 +273,24 @@ def _consecutive_spans(gap_days: list[pd.Timestamp]) -> list[dict[str, str]]:
     return spans
 
 
-def coverage_mask(clipped: Sequence[tuple[int, pd.Series]]) -> dict[str, Any]:
+def coverage_mask(
+    clipped: Sequence[tuple[int, pd.Series]],
+    covered_days: Collection[str] | None = None,
+) -> dict[str, Any]:
     """The explicit coverage mask for ``data_quality_flags``: per-key first/last-day
     boundaries + day counts, the calendar GAP spans between clipped windows + their
     day count, and any overlap days. Gaps are MARKED (never zero-filled) — the mask
     reads the honest sparse series, so gap-filling before counting would hide a real
     hole (falsifiable: zero-fill → ``gap_day_count`` drops to 0). JSON-serializable
-    primitives only."""
+    primitives only.
+
+    NAVMTM D-05 (2026-10-26, plan 167.2.1.1.1-09): ``covered_days`` (ISO days, additive; the
+    default ``None`` is byte-identical to the one-argument call) names absent days that a
+    member's stored mark covers. From the day a member's marks start, a day with no mark has
+    no row of its own and the NEXT mark's return spans it (one observation, D-15), so such a
+    day is covered by a return, not a hole, and it is not counted as a gap. A real hole between
+    members is NOT in ``covered_days`` and stays a gap span, exactly as before. Only ABSENT
+    days are affected: a named day that has a row changes nothing."""
     per_key: list[dict[str, Any]] = []
     day_seen: dict[pd.Timestamp, int] = {}
     all_days: set[pd.Timestamp] = set()
@@ -307,6 +318,9 @@ def coverage_mask(clipped: Sequence[tuple[int, pd.Series]]) -> dict[str, Any]:
         full = pd.date_range(span_start, span_end, freq="D").as_unit("us")
         present = all_days
         gap_days = [d for d in full if d not in present]
+        if covered_days:
+            covered = set(covered_days)
+            gap_days = [d for d in gap_days if str(d.date()) not in covered]
     else:
         gap_days = []
 

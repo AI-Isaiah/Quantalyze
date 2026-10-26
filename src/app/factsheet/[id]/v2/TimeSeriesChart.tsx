@@ -3,12 +3,23 @@
 import { memo, useDeferredValue, useMemo, useRef, useState, useCallback, useEffect } from "react";
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { usePayload, useXRange, useActiveComparator, useRegimes } from "./factsheet-context";
-import { useBasisSeriesView, useRangeGesture } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { estLabelWidth, niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
 import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import {
+  marksStartCaption,
+  marksStartInRange,
+  marksStartLabelRendered,
+  marksStartSentenceOne,
+  marksTrailingNote,
+  MARKS_LABEL_TRACKING_EM,
+  parseMarksStart,
+  placeMarksStartLabel,
+} from "@/lib/nav-marks-start";
+import { formatIsoDate } from "../trade-fetch-lines";
 
 const VB_W = 880;
 // `left` is the minimum gutter: it grows from the widest y tick label (see `padLeft`).
@@ -73,7 +84,10 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   // through the active-basis view — under mark_to_market with a bundle it is the
   // MTM merge ({...payload, ...seriesByBasis.mark_to_market}); under cash or an
   // absent bundle it is the original payload by reference (byte-identical render).
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
+  // D-08: the active basis, for the cash-drawn gate of the start-of-marks note.
+  const basis = useBasisOrCash();
   const { xRange, setXRange, resetXRange } = useXRange();
   const regimes = useRegimes();
   // The comparator KEY is picker state (frozen context); the comparator BLOCK
@@ -435,6 +449,85 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     plotH,
     X,
   ]);
+
+  // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 / D-12 / L2: the start-of-marks note
+  // (167.2.1.1.1-UI-SPEC.md "Visibility rule" and "Placement and geometry").
+  // Shown only on the cumulative track (config.marksStart), only when the chart is
+  // drawing the cash-settlement series, and only while `first < start <= last` of
+  // the CURRENT zoom window (dates[xStart], dates[xEnd]), so it follows pan, zoom
+  // and reset. Null otherwise, so the SVG is byte-identical to today's.
+  //
+  // The cash-drawn rule mirrors FactsheetView's `onMtm` (three-state): a
+  // mark-to-market or smoothed bundle drawn means the chart shows a series that
+  // marks do not change (plans 07, 08, 09, 16), so the note would name a step the
+  // drawn curve does not contain (ACCTREBUILD OQ-1). The selected basis falling
+  // back to cash (its bundle absent) is cash being drawn, so the note shows.
+  //
+  // The payload field is re-validated here by the one reader, not trusted: the
+  // payload crosses a cache and an owner-built path, and a malformed value must
+  // draw nothing. Parsed in its own memo, so the reason-only warning for a bad
+  // value is not repeated on every pan frame.
+  const marksSince = useMemo(
+    () => (config.marksStart ? parseMarksStart(payload.marksSince) : null),
+    [config.marksStart, payload.marksSince],
+  );
+  const marksStart = useMemo(() => {
+    if (!marksSince) return null;
+    const start = marksSince;
+    const onMtm =
+      (basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null) ||
+      (basis === "smoothed_mtm" && payload.seriesByBasis?.smoothed_mtm != null);
+    if (onMtm) return null;
+    const dates = view.dates;
+    const first = dates[xStart];
+    const last = dates[xEnd];
+    if (first == null || last == null) return null;
+    if (!marksStartInRange(start, { first, last })) return null;
+    // The first drawn index on or after the start day (a start on a day the
+    // series skips lands on the next present day, the FS-01 idiom).
+    const exact = indexOfDate(dates, start);
+    const idx = exact >= 0 ? exact : firstIndexAfter(dates, start);
+    const x = Math.max(padLeft, Math.min(padLeft + plotW, X(idx)));
+    const date = formatIsoDate(start);
+    const rendered = marksStartLabelRendered(date);
+    return {
+      x,
+      date,
+      rendered,
+      place: placeMarksStartLabel(x, rendered, 10, padLeft, padLeft + plotW),
+      // S3: the start is the earliest among several accounts on a composite or an
+      // allocator portfolio chart (UI-SPEC "When S3 is shown").
+      multiAccount:
+        payload.dataQuality?.composite === true ||
+        payload.strategyTypes.includes("allocator_portfolio"),
+    };
+  }, [
+    marksSince,
+    payload.seriesByBasis,
+    payload.dataQuality,
+    payload.strategyTypes,
+    basis,
+    view.dates,
+    xStart,
+    xEnd,
+    padLeft,
+    plotW,
+    X,
+  ]);
+
+  // SFH-2 N1: the marks stopped updating. Says so beside the start note, on the same
+  // cumulative cash-settlement chart and under the same basis rule, but NOT gated on
+  // the zoom window: the series ends before this day, so a pan must not hide it.
+  // Same reader as `marksSince`, so a malformed value draws nothing.
+  const marksTrailingDate = useMemo(() => {
+    if (!config.marksStart) return null;
+    const onMtm =
+      (basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null) ||
+      (basis === "smoothed_mtm" && payload.seriesByBasis?.smoothed_mtm != null);
+    if (onMtm) return null;
+    const day = parseMarksStart(payload.marksTrailingSince);
+    return day ? formatIsoDate(day) : null;
+  }, [config.marksStart, basis, payload.seriesByBasis, payload.marksTrailingSince]);
 
   const yTickTol = useMemo(() => tickTolerance(yTicks.map(t => t.value)), [yTicks]);
   const xTicks = useMemo(
@@ -879,6 +972,37 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             pan/zoom-synced and export-safe. Null on single-key / non-cumulative. */}
         {segmentMarkers}
 
+        {/* D-08 start-of-marks note: one solid secondary line, the tracked label on the
+            second annotation row (the FS-01 labels own the first) and a <title> that
+            carries S1 into an exported SVG. Behind the series, pan/zoom-synced and
+            export-safe like segmentMarkers. Null outside the range / on other charts. */}
+        {marksStart && (
+          <g pointerEvents="none" data-testid="marks-start-marker">
+            <title>{marksStartSentenceOne(marksStart.date)}</title>
+            <line
+              x1={marksStart.x}
+              x2={marksStart.x}
+              y1={PAD.top}
+              y2={PAD.top + plotH}
+              stroke="var(--color-text-secondary)"
+              strokeWidth={1}
+            />
+            {marksStart.place && (
+              <text
+                x={marksStart.place.x}
+                y={PAD.top + 24}
+                textAnchor={marksStart.place.textAnchor}
+                fontSize={10}
+                fontFamily="var(--font-mono)"
+                letterSpacing={`${MARKS_LABEL_TRACKING_EM}em`}
+                fill="var(--color-text-secondary)"
+              >
+                {marksStart.rendered}
+              </text>
+            )}
+          </g>
+        )}
+
         {yTicks.map(t => {
           // The "natural zero" line (baseline = 0 for percent/ratio charts,
           // 1 for growth charts) is the breakeven reference and deserves
@@ -1148,6 +1272,21 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           </g>
         )}
       </ResponsiveChartFrame>
+      {/* D-08 caption (UI-SPEC "Caption placement"): real HTML text after the SVG, the
+          accessible statement. Not a live region: a pan or zoom must not announce it. */}
+      {marksStart && (
+        <figcaption data-testid="marks-start-note" className="text-caption text-text-secondary">
+          {marksStartCaption(marksStart.date, marksStart.multiAccount)}
+        </figcaption>
+      )}
+      {marksTrailingDate && (
+        <figcaption
+          data-testid="marks-trailing-note"
+          className="text-micro font-mono uppercase tracking-wider text-text-secondary"
+        >
+          {marksTrailingNote(marksTrailingDate)}
+        </figcaption>
+      )}
     </figure>
   );
 }

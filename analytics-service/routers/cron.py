@@ -1333,7 +1333,8 @@ async def _sync_single_key(
                 )
 
         # audit-2026-05-07 C-0197 / 2026-06-01 root-cause fix — trigger an
-        # analytics recompute for strategies that received new trades.
+        # analytics recompute for strategies (Phase 18: those that received
+        # new trades; D-02 below: every eligible strategy of a healthy key).
         #
         # The pre-fix code wrote `computation_status='stale'` to
         # strategy_analytics, but that was broken two ways:
@@ -1378,9 +1379,24 @@ async def _sync_single_key(
         # re-drives are safe: `sync_trades` deletes payload-window-scoped before
         # re-inserting, and `enqueue_compute_job` is dedup-safe via the partial
         # unique index named above.
-        recompute_strategy_ids = [
-            sid for sid, stored in per_strategy_stored.items() if stored > 0
-        ]
+        #
+        # D-02 (Phase 167.2.1.1.1 NAVMTM, founder 2026-10-26) — EVERY ELIGIBLE
+        # STRATEGY OF A HEALTHY KEY IS DERIVED EVERY DAY, WHETHER IT TRADED OR
+        # NOT. This list used to keep only `stored > 0`, so a strategy that
+        # stored nothing new was never recomputed and its factsheet never
+        # reached the latest stored mark (RESEARCH Pitfall 5). The key-mode
+        # fan-out already derives every eligible key daily; this is the
+        # strategy half. A degraded fetch still enqueues nothing: its window
+        # was not read, so a derive would only re-crawl a venue that just
+        # failed. A failed or zero-row STORE is no reason to skip the derive,
+        # which re-reads the venue itself. Cost, accepted: a quiet strategy
+        # costs one full-history crawl per day. ⛔ The ADVANCE rule below
+        # (`strategy_advances`) is deliberately untouched: this changes which
+        # strategies are ENQUEUED, never which markers ADVANCE.
+        # `dict.fromkeys` keeps `strategy_ids` order and drops duplicates.
+        recompute_strategy_ids = (
+            [] if fetch_degraded else list(dict.fromkeys(strategy_ids))
+        )
         recompute_enqueue_errors: dict[str, str] = {}
         # Funding-inclusive CSV route (derive_broker_dailies ->
         # compute_analytics_from_csv). MUST mirror the sync_trades epilogue

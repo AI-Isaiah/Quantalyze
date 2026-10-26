@@ -48,7 +48,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple, TypeVar, cast
@@ -203,6 +203,25 @@ from services.account_unit import (
     AccountUnit,
     classify_account_currency,
 )
+from services.nav_marks import (
+    MARKED_EQUITY_VENUES as _NAV_MARK_MARKED_EQUITY_VENUES,
+    UNIFORM_READ_VENUES as _NAV_MARK_UNIFORM_VENUES,
+    StoredMark,
+    build_mark_read,
+    deribit_native_detail,
+    mark_day_for,
+    read_key_marks,
+    read_stored_mark,
+    write_nav_mark,
+)
+from services.external_flows import FlowInstant
+from services.native_nav import native_flow_instants
+from services.nav_marks_apply import (
+    AppliedMark,
+    MarkApplyRefusal,
+    MarkedSeries,
+    apply_marks,
+)
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 from services.strategy_analytics_provenance import (
@@ -352,6 +371,27 @@ _PGRST_SCHEMA_CACHE_MISS: Final[str] = "PGRST204"
 # any other native code stays NULL.
 _BTC_PRICED_UNIT: Final[str] = "BTC"
 
+# 167.2.1.1.1 NAVMTM plan 07 (L3) - the derive-level refusal token for a stored mark that is in
+# another unit than the strategy's own series. ``apply_marks`` (plan 03) refuses with its closed
+# set of five tokens; this one is the derive's, named in the same ``mark_*`` vocabulary, and it
+# takes exactly the same road: a named refusal that writes nothing.
+_MARK_UNIT_MISMATCH: Final[str] = "mark_unit_mismatch"
+# 167.2.1.1.1 NAVMTM plan 16 (L3, D-14, W1) - the derive-level refusal token of an
+# allocated-capital strategy that has a stored mark to apply but whose NAV twin is missing or
+# cannot be valued (a NavReconstructionError from the twin's three helpers, section 5 included).
+# Same road as ``mark_unit_mismatch``: a named refusal that writes nothing.
+_MARK_ALLOCATED_NAV_UNRECONCILED: Final[str] = "mark_allocated_nav_unreconciled"
+
+
+class _MemberNavUnreconciled(Exception):
+    """NAVMTM plan 17 (L3, D-14, W1): a composite's allocated Deribit member has a stored in-window
+    mark but its NAV twin is missing or cannot be valued. ``MarkApplyRefusal`` carries only
+    ``apply_marks``' closed token set, so the composite member seam raises this instead; it takes
+    the same whole-composite refusal road (``token`` is the plan 16 constant, never an amount)."""
+
+    token: Final[str] = _MARK_ALLOCATED_NAV_UNRECONCILED
+
+
 # Phase 164.6.6.3 / D-13 — the FIXED message of an expired MT5 deal-history wait.
 # `error_kind` stays "transient" (no new DB value: that would be a migration that
 # auto-applies to PROD with no reviewer gate), so this constant and the distinct ERROR
@@ -466,6 +506,123 @@ def _utc_now() -> datetime:
     clock: ``latest_completed_close_day`` refuses a naive datetime.
     """
     return datetime.now(timezone.utc)
+
+
+def _marks_in_series_unit(
+    stored: Sequence[StoredMark], series_unit: str | None
+) -> list[AppliedMark] | None:
+    """The stored marks as ``AppliedMark`` in the strategy series' own unit, or ``None`` when one
+    cannot be (167.2.1.1.1 NAVMTM plan 07, L3: ``mark_unit_mismatch``).
+
+    A series in USD (every venue but a native-unit MT5 account) takes each mark's ``nav_usd``. A
+    series in a native unit (``series_unit`` is its code, e.g. BTC) takes ``nav_native`` and only
+    from a mark that was stored in that same unit: a BTC series cannot be re-based on a mark that
+    was stored in another unit or carries no native amount, and a guess would book the difference
+    as the first marked day's return.
+    """
+    out: list[AppliedMark] = []
+    for mark in stored:
+        read_at = datetime.fromisoformat(mark.marked_at)
+        if series_unit is None:
+            out.append(AppliedMark(mark.mark_day, mark.nav_usd, mark.open_pnl_usd, read_at))
+        elif (
+            mark.native_unit == series_unit
+            and mark.nav_native is not None
+            and mark.open_pnl_native is not None
+        ):
+            out.append(
+                AppliedMark(mark.mark_day, mark.nav_native, mark.open_pnl_native, read_at)
+            )
+        else:
+            return None
+    return out
+
+
+def _marks_in_mandate_window(
+    stored: Sequence[StoredMark], config: "ReturnsDenominatorConfig"
+) -> list[StoredMark]:
+    """The stored marks dated inside the mandate's reporting window (NAVMTM D-14, MEDIUM-2):
+    from the schedule's first ``effective_from`` through ``mandate_end``, both inclusive, and
+    unbounded above when the mandate has no end. ISO days compare as strings."""
+    first = config.capital_schedule[0].effective_from.isoformat()
+    end = config.mandate_end.isoformat() if config.mandate_end is not None else None
+    return [m for m in stored if m.mark_day >= first and (end is None or m.mark_day <= end)]
+
+
+def _mandate_window_contains(day: date, config: "ReturnsDenominatorConfig") -> bool:
+    """Whether ``day`` lies in the mandate window (same bounds as ``_marks_in_mandate_window``)."""
+    if day < config.capital_schedule[0].effective_from:
+        return False
+    return config.mandate_end is None or day <= config.mandate_end
+
+
+class _CompositeMarkSummary(NamedTuple):
+    """What the members' applied marks say about a composite's stitched series (NAVMTM plan 09)."""
+
+    covered_days: tuple[str, ...]
+    marks_since: str | None
+    mark_gap_days: tuple[str, ...]
+
+
+def _composite_mark_summary(
+    applied: Mapping[int, MarkedSeries],
+    windows: Mapping[int, tuple[str, str | None]],
+) -> _CompositeMarkSummary:
+    """The composite-level reading of each member's ``apply_marks`` result (167.2.1.1.1 NAVMTM
+    plan 09; D-05, D-12).
+
+    Each member is read INSIDE its own half-open ``[window_start, window_end)`` window, the same
+    convention ``clip_to_window`` cuts by, because only those days reach the stitched series: a
+    covered day of one member outside its window is covered by nothing the composite shows and
+    would hide a real inter-member hole if it were allowed to reach ``coverage_mask``.
+
+    ``covered_days`` is the union of every member's covered days inside its window.
+    ``marks_since`` is the earliest mark day of any member that lies inside that member's window
+    (None when no member has one). ``mark_gap_days`` is the union of the members' own lists,
+    restricted the same way. All ascending ISO days.
+    """
+    covered: set[str] = set()
+    gaps: set[str] = set()
+    starts: list[str] = []
+    for seq, marked in applied.items():
+        window_start, window_end = windows[seq]
+
+        def _inside(day: str, lo: str = window_start, hi: str | None = window_end) -> bool:
+            return day >= lo and (hi is None or day < hi)
+
+        covered.update(d for d in marked.covered_days if _inside(d))
+        gaps.update(d for d in marked.mark_gap_days if _inside(d))
+        starts.extend(d for d in marked.marked_levels if _inside(d))
+    return _CompositeMarkSummary(
+        covered_days=tuple(sorted(covered)),
+        marks_since=min(starts) if starts else None,
+        mark_gap_days=tuple(sorted(gaps)),
+    )
+
+
+def _iso_day_amounts(values: "pd.Series | None") -> dict[str, float]:
+    """A Series indexed by calendar day as ``{ISO day: amount}``, the shape ``apply_marks`` reads."""
+    if values is None:
+        return {}
+    return {ts.date().isoformat(): float(v) for ts, v in values.items()}
+
+
+def _tail_without_open_profit(tail: "pd.Series", nav: float, open_pnl: float) -> "pd.Series":
+    """The realized tail kept after a closed window's last applied mark, with that mark's open
+    profit reversed on its first row (NAVMTM D-24).
+
+    The last mark already booked its open profit ``U`` (the D-04 step), so the level after it is
+    ``M = w + U`` while a realized-basis row is a return on the wallet ``w = M - U``. A position
+    closed in the tail would book ``U`` a second time. The first row's growth factor is therefore
+    taken on ``M``: ``r1' = (1 + r1) * (M - U) / M - 1``. A position closed in the tail nets to its
+    true realized result, and one still open at the window end loses its unrealized profit, the
+    convention before this phase. A row the series left out (NaN) has no growth factor, so the
+    first row that has one carries the reversal."""
+    out = tail.copy()
+    first = out.first_valid_index()
+    if first is not None:
+        out.loc[first] = (1.0 + out.loc[first]) * (nav - open_pnl) / nav - 1.0
+    return out
 
 
 async def _fetch_mt5_account_balance(
@@ -3713,6 +3870,104 @@ def _ccxt_full_history_verdict(
     )
 
 
+async def _read_marked_equity_once_per_day(
+    ctx: Any, venue: str
+) -> tuple[StoredMark | None, tuple[float, float, float] | str | None, datetime | None]:
+    """The Bybit/Binance mark read, at most once per key per UTC day (L4, D-16, W3).
+
+    Returns ``(stored, read, read_at)``. When a mark for (this key, the UTC day that just
+    closed) is already stored, ``stored`` is that row and NO venue call is made at all (no
+    positions, balance or ticker read): the day's mark is write-once, so a second read could
+    only be discarded, and it would cost the venue the added calls the founder accepted ONCE a
+    day (D-16). Otherwise ``read`` is ``equity_reconstruction.read_marked_equity_usd``'s
+    result (a tuple, or a refusal token) and ``read_at`` the instant it returned (D-03).
+
+    The read is bounded by the derive's per-crawl bound, and a timeout or any exception the
+    wrapper did not already turn into a token is ``positions_unreadable``: a refused optional
+    read must never fail the derive or take its timeout arm (which would retry the whole derive).
+    Venue error text is never logged here: the class name only. A database error from the
+    stored-mark read bubbles like every other derive write (the job retries).
+    """
+    key_id: str = ctx.key_row["id"]
+    closed_day = mark_day_for(_utc_now())
+    stored = await db_execute(lambda: read_stored_mark(ctx.supabase, key_id, closed_day))
+    if stored is not None:
+        logger.info(
+            "derive_broker_dailies: nav mark already stored for the closed day, no venue "
+            "read (venue=%s api_key=%s mark_day=%s)",
+            venue, key_id, stored.mark_day,
+        )
+        return stored, None, None
+    from services.equity_reconstruction import read_marked_equity_usd
+
+    read: tuple[float, float, float] | str
+    try:
+        read = await asyncio.wait_for(
+            read_marked_equity_usd(ctx.exchange, venue), timeout=_BROKER_CRAWL_TIMEOUT_S
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "derive_broker_dailies: nav mark read exceeded the %ss bound (venue=%s api_key=%s)",
+            _BROKER_CRAWL_TIMEOUT_S, venue, key_id,
+        )
+        read = "positions_unreadable"
+    except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
+        logger.warning(
+            "derive_broker_dailies: nav mark read raised (exc_class=%s venue=%s api_key=%s)",
+            type(exc).__name__, venue, key_id,
+        )
+        read = "positions_unreadable"
+    return None, read, _utc_now()
+
+
+async def _read_okx_option_refusal_once_per_day(ctx: Any, marked_at: datetime) -> str | None:
+    """The OKX option check (D-18, D-19, plan 19), at most once per key per UTC day (W1).
+
+    Returns ``None`` (no open option, or the day's mark is already stored) or one refusal token
+    from ``nav_marks.MARK_REFUSAL_TOKENS`` for ``build_mark_read(refusal=...)``.
+
+    W1: when a mark for (this key, the UTC day that just closed) is already stored, NO option
+    read is made and ``None`` is returned. The stored row stays the authority and the writer
+    returns it, so a later same-day derive that sees an open option never discards a stored mark.
+    Otherwise ``equity_reconstruction.read_okx_option_exposure`` is awaited under the derive's
+    per-crawl bound; a timeout or any exception it did not already turn into a token is
+    ``option_value_unreadable``, because a refused optional read must never fail the derive or take
+    its timeout arm (which would retry the whole derive).
+
+    B1: the caller awaits this INSIDE the venue ``try``, before ``finally: aclose_exchange``. A
+    read on a closed ccxt exchange raises and would refuse every OKX key every day. Venue error
+    text is never logged here: the class name only. A database error from the stored-mark read
+    bubbles like every other derive write (the job retries).
+    """
+    key_id: str = ctx.key_row["id"]
+    closed_day = mark_day_for(marked_at)
+    stored = await db_execute(lambda: read_stored_mark(ctx.supabase, key_id, closed_day))
+    if stored is not None:
+        logger.info(
+            "derive_broker_dailies: nav mark already stored for the closed day, no option "
+            "read (venue=okx api_key=%s mark_day=%s)",
+            key_id, stored.mark_day,
+        )
+        return None
+    from services.equity_reconstruction import read_okx_option_exposure
+
+    try:
+        return await asyncio.wait_for(
+            read_okx_option_exposure(ctx.exchange), timeout=_BROKER_CRAWL_TIMEOUT_S
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "derive_broker_dailies: okx option read exceeded the %ss bound (api_key=%s)",
+            _BROKER_CRAWL_TIMEOUT_S, key_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
+        logger.warning(
+            "derive_broker_dailies: okx option read raised (exc_class=%s api_key=%s)",
+            type(exc).__name__, key_id,
+        )
+    return "option_value_unreadable"
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -4434,6 +4689,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 error_kind="permanent",
             )
 
+        # 167.2.1.1.1 NAVMTM plan 07 / plan 16 (D-14, BLOCKER 1): which returns basis this derive
+        # builds, decided ONCE here and read by the Deribit branch (the NAV twin request) and by
+        # the marks apply seam below. ``combine_native_ledger`` builds allocated-capital returns
+        # (P&L over scheduled capital, not NAV changes) in exactly one case, a Deribit strategy
+        # with a returns_denominator_config. Every other strategy, a configured ccxt, MT5 or
+        # sFOX one included, returns NAV changes. The dispatch is on the BASIS, never on a
+        # config existing.
+        _returns_are_allocated = venue == "deribit" and denominator_config is not None
+        # Plan 16: whether the cash-pass ledger build is asked for the NAV twin (set in the
+        # Deribit branch, read at the apply seam).
+        _want_nav_twin = False
+
         # Phase 164.6.6.2 / D-01, D-04 — the MT5 account's unit, decided ONCE per derive from
         # the PRE ``account_info`` the read returns. ``None`` for every other venue (their
         # pre-stamp and thresholds are untouched), and for MT5 until the classification below.
@@ -4501,6 +4768,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # change. Same shape as above: ``{"ledger_digest": {...}}`` or ``{"ledger_digest_error":
         # <exception class>}``, deribit key-mode only.
         _ledger_digest: "dict[str, Any] | None" = None
+        # 167.2.1.1.1 NAVMTM D-23: the instant of each raw flow row, in the unit of the day-keyed
+        # flows the marks apply reads (event-time USD, or the account's own unit for MT5). The
+        # branches below fill it where they already walk the rows; the apply places a flow made
+        # on a mark's read day against that mark.
+        _event_flow_instants: list[FlowInstant] = []
+        # NAVMTM review-3 F1: the day of each MT5 flow deal that has no trustworthy instant.
+        _mt5_instantless_days: list[str] = []
         # 167.1.2.2.1 D-03: the numbers behind the §5 inception verdict (the rolled pre-history
         # residual per currency under today's wedge and a balance-anchored one, the inception
         # mark, the throughput, the day-0 capitals, four breach ratios), read off the SAME
@@ -4508,6 +4782,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # ``{"native_inception_diagnostics": {...}}`` or ``{"native_inception_diagnostics_error":
         # <exception class>}``. No gate reads it yet, and a failure never fails the derive.
         _native_inception_diagnostics: "dict[str, Any] | None" = None
+        # 167.2.1.1.1 NAVMTM plan 06 (SC-1, D-02, D-03): the marked-NAV write.
+        #   * ``_mark_read_at`` — the UTC instant this derive finished its equity read, stamped by
+        #     each venue branch right after the read returns (D-03: ``marked_at``). ``None`` until
+        #     a branch that makes a mark read sets it.
+        #   * ``_stored_nav_mark`` — the row the DATABASE holds for this key and closed day after
+        #     the write-once insert, which is the authority downstream (Pitfall 1: the loser of a
+        #     same-day race keeps the winner's row, never its own read). ``None`` when no mark
+        #     was written.
+        #   * ``_nav_mark_refusal`` — the token (``nav_marks.MARK_REFUSAL_TOKENS``) saying why
+        #     the read was not trustworthy; no row, and the derive carries on. ``None`` otherwise.
+        # All three are defined before the venue branches so the key-mode epilogue (its additive
+        # ``nav_mark`` / ``nav_mark_refusal`` fields) and plan 07 read them on every path.
+        _mark_read_at: datetime | None = None
+        _stored_nav_mark: StoredMark | None = None
+        _nav_mark_refusal: str | None = None
+        # Plan 15 (L4, D-16): Bybit/Binance only. ``read_marked_equity_usd``'s result, a tuple
+        # or a refusal token; ``None`` when the day's mark was already stored (W3: then
+        # ``_stored_nav_mark`` is that row from the start and the writer returns it).
+        _marked_equity_read: tuple[float, float, float] | str | None = None
+        # Plan 19 (D-18, D-19): OKX only. The refusal token of the option check
+        # (``read_okx_option_exposure``), or ``None`` for no open option / a mark already stored.
+        _okx_option_refusal: str | None = None
 
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -4529,6 +4825,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 ScopeAuthError,
                 assert_ledger_complete,
                 build_deribit_native_ledger,
+                cash_basis_open_profit_native,
+                cash_basis_open_profit_usd,
                 fetch_deribit_native_account_state,
             )
             from services.allocated_capital import exclude_spot_extraction_for
@@ -4575,6 +4873,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     f"{_BROKER_CRAWL_TIMEOUT_S}s per-crawl bound — retrying rather "
                     "than wedging the worker (FLIPRETRY-01)"
                 ) from _exc
+            # 167.2.1.1.1 D-03: the instant the summaries read finished is the mark's read time.
+            _mark_read_at = _utc_now()
             # HIGH-1: a FAILED / empty summaries read yields EMPTY native maps. A
             # blank read is I/O, NOT a structural refusal — fail RETRYABLE rather
             # than build a ZERO-anchor ledger. A zero anchor rolls every bucket back
@@ -4681,6 +4981,30 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # a §5 residual — no flow channel carries it). Never decouple these two.
             # F1: the SINGLE source shared with the acceptance harness.
             exclude_spot_extraction = exclude_spot_extraction_for(denominator_config)
+            # ── 167.2.1.1.1 NAVMTM plan 16 (D-14, D-10/D-16): THE NAV TWIN REQUEST. ───────────
+            # An allocated-capital ledger drops the net-extraction spot legs (Bug B), so it
+            # cannot give the realized NAV level the first mark is measured against. Plan 13's
+            # twin re-aggregates THE SAME crawl with the legs kept: no second crawl, no extra
+            # venue call. It is requested only when something can use it: a stored mark inside
+            # the mandate window, or this derive's own mark day (it writes that mark, below,
+            # before the apply seam reads the marks again) lying inside the window. A closed
+            # mandate with no in-window mark never builds the twin and its derive is
+            # byte-identical to today. Allocated strategies are strategy mode only, so the key
+            # is the strategy's own.
+            # The keyword is passed ONLY on the allocated path: every other derive makes the call
+            # it always made (plan 13: True needs the extraction exclusion, which only that path
+            # sets).
+            _twin_kwargs: dict[str, Any] = {}
+            if _returns_are_allocated and denominator_config is not None:
+                _early_marks = await db_execute(
+                    lambda: read_key_marks(ctx.supabase, ctx.key_row["id"])
+                )
+                _want_nav_twin = bool(
+                    _marks_in_mandate_window(_early_marks, denominator_config)
+                ) or _mandate_window_contains(
+                    mark_day_for(_utc_now()), denominator_config
+                )
+                _twin_kwargs["nav_twin"] = _want_nav_twin
             try:
                 # v1.9 NATIVE SWITCH (80-03, NAT-05): every Deribit account —
                 # USD-native included — is reconstructed in NATIVE units through
@@ -4701,6 +5025,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     build_deribit_native_ledger(
                         ctx.exchange, account_state=account_state, pnl_basis=pnl_basis,
                         exclude_spot_extraction=exclude_spot_extraction,
+                        **_twin_kwargs,
                     ),
                     timeout=_BROKER_CRAWL_TIMEOUT_S,
                 )
@@ -5390,6 +5715,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     ),
                     timeout=_SFOX_CRAWL_TIMEOUT_S,
                 )
+                # 167.2.1.1.1 D-03: the NAV series (its last observed usd_value is the mark's
+                # NAV) was read now. Stamped BEFORE the transactions crawl, which can run for
+                # minutes and is not part of the equity read.
+                _mark_read_at = _utc_now()
                 # The transactions crawl uses its OWN budget-sized bound (10s/req
                 # rate × 50-page budget) — the 300s balance-history bound would
                 # false-time-out a >30-page ledger into an infinite transient retry.
@@ -5449,7 +5778,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # FAILED + stamp (the LedgerValuationError disposition parity).
             try:
                 _usd_value = _sfox_rows_to_usd_value_series(_bh_rows)
-                _flows_series, _flow_evidence = sfox_flows_by_day(_txn_rows)
+                _flows_series, _flow_evidence = sfox_flows_by_day(
+                    _txn_rows, _event_flow_instants
+                )
             except SfoxFlowValuationError as exc:
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
@@ -5602,6 +5933,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 Mt5DealClassificationError,
                 classify_deal,
                 deal_utc_day,
+                deal_utc_instant_ms,
             )
             from services.mt5_validation import classify_mt5_login_error
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
@@ -5756,6 +6088,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             fresh=_mt5_fresh,
                         ),
                     )
+                    # 167.2.1.1.1 D-03: ``account_info`` (the mark's equity and balance) came
+                    # back with this read.
+                    _mark_read_at = _utc_now()
                 except asyncio.TimeoutError:
                     # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
                     # NEVER an unbounded wedge, NO terminal stamp (FLIPRETRY-01). The
@@ -6389,6 +6724,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _mt5_flow_by_day[_fday] = _mt5_flow_by_day.get(_fday, 0.0) + (
                         0.0 if _raw_profit is None else float(_raw_profit)
                     )
+                    # NAVMTM D-23: the deal's own UTC instant. ``None`` is an untrustworthy
+                    # instant (FLOWTIMING D-07), and nothing is defaulted, so that deal is not
+                    # placed by instant.
+                    _deal_ms = deal_utc_instant_ms(
+                        _deal, int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0"))
+                    )
+                    if _deal_ms is not None:
+                        _event_flow_instants.append(
+                            FlowInstant(
+                                _deal_ms, _fday, 0.0 if _raw_profit is None else float(_raw_profit)
+                            )
+                        )
+                    else:
+                        _mt5_instantless_days.append(_fday)
 
             # Set the shared downstream variables EXACTLY as the sfox branch does so
             # the post-dispatch code runs unchanged. balance_error is False (a live
@@ -6430,6 +6779,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     native_nav_levels=_native_nav_levels,
                     native_flow_by_day=_mt5_flow_by_day,
                 )
+                # The flows are now ``amount x close(flow day)`` (a flow on a day with no
+                # close is not persisted), so the instants are priced the same way.
+                import pandas as _pandas_px
+
+                from services.native_to_usd import _usable_closes
+
+                _close_by_day = _usable_closes(_btc_closes) if _btc_closes is not None else {}
+                _event_flow_instants = [
+                    _fi._replace(amount=_fi.amount * _close_by_day[_pandas_px.Timestamp(_fi.day)])
+                    for _fi in _event_flow_instants
+                    if _pandas_px.Timestamp(_fi.day) in _close_by_day
+                ]
                 returns = _usd_key.returns
                 _day_pnl_usd = _usd_key.day_pnl
                 _realized_terminal = _usd_key.realized_terminal
@@ -6490,6 +6851,30 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         timeout=_BROKER_CRAWL_TIMEOUT_S,
                     )
                 )
+                # 167.2.1.1.1 D-03: the instant this equity read finished is the mark's read time.
+                _mark_read_at = _utc_now()
+                if venue in _NAV_MARK_MARKED_EQUITY_VENUES:
+                    # Plan 15 (L4, D-16): Bybit and Binance marked equity needs a read the
+                    # derive's walletBalance-only figure above does not make. At most once per
+                    # key per UTC day (W3), and a refused read never fails this derive.
+                    (
+                        _stored_nav_mark,
+                        _marked_equity_read,
+                        _read_done_at,
+                    ) = await _read_marked_equity_once_per_day(ctx, venue)
+                    if _read_done_at is not None:
+                        _mark_read_at = _read_done_at
+                elif venue == "okx":
+                    # Plan 19 (D-18, D-19): OKX documents ``totalEq`` without saying whether open
+                    # option value is inside it, so an account holding an option is refused by
+                    # name until that is measured. B1: this read MUST stay here, on the open
+                    # exchange, before the ``finally: aclose_exchange`` below (a read on a closed
+                    # exchange raises and would refuse every OKX key every day). W1: a mark
+                    # already stored for the closed day means no option read at all; the stored
+                    # row stays the authority.
+                    _okx_option_refusal = await _read_okx_option_refusal_once_per_day(
+                        ctx, _mark_read_at
+                    )
                 # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
                 # bills, Binance inception, Bybit last 365 days).
                 realized = await asyncio.wait_for(
@@ -6639,7 +7024,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # disposition as the combine site below.
             try:
                 external_flows = ccxt_rows_to_dated_flows(
-                    _flow_rows, venue=venue, price_index=_price_index
+                    _flow_rows,
+                    venue=venue,
+                    price_index=_price_index,
+                    instants=_event_flow_instants,
                 )
             except NavReconstructionError as exc:
                 return await _dispose_broker_nav_error(
@@ -6662,6 +7050,106 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover
             pass
+
+    # ── 167.2.1.1.1 NAVMTM plan 06 — THE MARK WRITE (SC-1, D-02, D-06, D-11) ───────────────
+    # Every venue branch above assigned ``equity, balance_error, open_unrealized_usd,
+    # upnl_unreadable`` and stamped ``_mark_read_at``; the exchange is closed. This is the ONE
+    # convergence point of both modes and every path that reaches the shared tail (the key-mode
+    # ``<2``-day short-circuit included, so an idle key still gets its mark), BEFORE the ccxt
+    # combine (a later combine failure must not cost the mark) and BEFORE the noise guard below
+    # zeroes ``open_unrealized_usd`` (the mark stores what the venue read, not what the combine
+    # trusts). The mark comes from the read already made: no venue call here (D-02).
+    #
+    # ⛔ THE STORED ROW IS THE AUTHORITY (Pitfall 1). ``write_nav_mark`` inserts write-once
+    # (first writer of the key's closed UTC day wins, D-06), re-selects the row and returns THAT
+    # row; ``_stored_nav_mark`` is what plan 07 and the epilogue read. The local read is never
+    # used again, so a derive that lost the race consumes the winner's figures.
+    #
+    # A read that cannot be trusted stores nothing and sets ``_nav_mark_refusal`` (a token, never
+    # an amount) and the derive carries on: a refused mark never fails the derive. A DATABASE
+    # error on the write bubbles like every other derive write (the job retries).
+    async def _write_nav_mark_for_this_derive() -> tuple[StoredMark | None, str | None]:
+        if venue in _NAV_MARK_MARKED_EQUITY_VENUES and _stored_nav_mark is not None:
+            # W3 (plan 15): the day's mark was already stored when this derive began, so its
+            # read was skipped; that row is the authority and nothing is written.
+            return _stored_nav_mark, None
+        if (
+            venue not in _NAV_MARK_UNIFORM_VENUES
+            and venue not in _NAV_MARK_MARKED_EQUITY_VENUES
+        ) or _mark_read_at is None:
+            return None, None
+        # Per venue (RESEARCH 2): OKX nav = totalEq and open = upl; Deribit nav = the collapsed
+        # USD equity and open = NAV minus wallet (D-21, + the native detail); MT5 nav = equity and open =
+        # equity - balance, in the account's own unit (a BTC account is priced by
+        # ``build_mark_read`` at the closed day's close); sFOX nav = the last observed usd_value
+        # and open = 0.0. All four are the variables the branch above already assigned.
+        _mark_native_unit: str | None = None
+        if venue == "mt5" and _mt5_unit is not None and _mt5_unit.native:
+            _mark_native_unit = _mt5_unit.code
+        # Bybit/Binance (plan 15, L4): the figures come from the anchor's own reading
+        # (``_marked_equity_read``), and the derive's own USDT wallet figure (``equity``, the
+        # level its realized series is anchored on) is what that reading's wallet is checked
+        # against (D-04). ``equity``/``open_unrealized_usd`` are not the mark's there.
+        _marked = venue in _NAV_MARK_MARKED_EQUITY_VENUES
+        _mark_open_pnl = None if _marked else open_unrealized_usd
+        _mark_upnl_unreadable = upnl_unreadable
+        if venue == "deribit":
+            # NAVMTM D-21: a Deribit mark's open profit is NAV minus wallet, ``equity - balance``
+            # per currency at the index the same read priced itself at, not the combined session
+            # uPnL the derive's own wedge (``open_unrealized_usd``) still is. A currency with a
+            # non-zero wedge and no finite index leaves the open profit unpriced, and the mark is
+            # refused ``upnl_unreadable``: nothing is priced on a guess. The read's own
+            # ``upnl_unreadable`` (a garbled session-uPnL field) still refuses, as before.
+            _mark_open_pnl = cash_basis_open_profit_usd(account_state)
+            _mark_upnl_unreadable = upnl_unreadable or _mark_open_pnl is None
+        built = build_mark_read(
+            venue=venue,
+            marked_at=_mark_read_at,
+            equity=None if _marked else equity,
+            open_pnl=_mark_open_pnl,
+            balance_error=balance_error,
+            upnl_unreadable=_mark_upnl_unreadable,
+            marked_equity=_marked_equity_read if _marked else None,
+            refusal=_okx_option_refusal if venue == "okx" else None,
+            usdt_wallet_usd=equity if _marked else None,
+            native_unit=_mark_native_unit,
+            btc_closes=_btc_closes if _mark_native_unit is not None else None,
+            # D-07 / OQ-4: Deribit's per-currency native equity, session uPnL and (D-21) open
+            # profit from the SAME ``account_state`` read the collapsed USD figures came from (no
+            # second read).
+            native_detail=(
+                deribit_native_detail(
+                    account_state.native_equity,
+                    account_state.native_upnl,
+                    cash_basis_open_profit_native(account_state),
+                )
+                if venue == "deribit"
+                else None
+            ),
+        )
+        if isinstance(built, str):
+            logger.warning(
+                "derive_broker_dailies: nav mark refused (token=%s venue=%s api_key=%s)",
+                built, venue, ctx.key_row["id"],
+            )
+            return None, built
+        # Identity comes from the key row, never from the job payload (T-167.2.1.1.1-22).
+        _mark_key_id: str = ctx.key_row["id"]
+        _mark_owner_id: str = ctx.key_row["user_id"]
+        _stored = await db_execute(
+            lambda: write_nav_mark(
+                ctx.supabase, built, api_key_id=_mark_key_id, allocator_id=_mark_owner_id
+            )
+        )
+        logger.info(
+            "derive_broker_dailies: nav mark stored (venue=%s api_key=%s mark_day=%s "
+            "mark_is_this_read=%s)",
+            venue, _mark_key_id, _stored.mark_day,
+            datetime.fromisoformat(_stored.marked_at) == built.marked_at,
+        )
+        return _stored, None
+
+    _stored_nav_mark, _nav_mark_refusal = await _write_nav_mark_for_this_derive()
 
     # v1.9 NATIVE SWITCH: the deribit venue already produced (returns, meta) via
     # the native core above (combine_native_ledger), with its per-currency wedge
@@ -6854,6 +7342,409 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 api_key_id, venue,
             )
 
+    # ── 167.2.1.1.1 NAVMTM plan 07 — THE MARKS APPLY SEAM, STRATEGY MODE (SC-2, SC-3) ───────
+    # From the day a key's marks begin, the strategy's series is the stored marked NAV: every
+    # realized day before the first mark keeps its value (L1), the first mark's step is booked
+    # once as that day's return (D-04), an unmarked day after it gets no row and the next mark's
+    # return covers it as ONE observation (D-05, D-15), and a realized row dated on or after the
+    # first mark is never emitted (Pitfall 7). ``apply_marks`` (plan 03) is the one place that
+    # says how; this seam hands it the BUILDER'S OWN quantities, all already held here, and never
+    # makes a venue call.
+    #
+    # Where it sits is load-bearing. It is after the DQ-02 terminus and the R2-WR-02 realized
+    # terminal (so the series is final), and textually ABOVE the ``<2``-day short-circuit, the
+    # MT5-12 verdict seam and every csv write (L3: "a refusal must cost nothing"). Key mode runs
+    # the same seam (plan 12), together with the compose inputs that must change with it (the
+    # block after the apply below), so no commit persists marked key-mode returns beside
+    # incoherent inputs.
+    #
+    # D-14 / BLOCKER 1: the dispatch is on the RETURNS BASIS (``_returns_are_allocated``, defined
+    # once with the config above), never on whether a config exists. An allocated-capital Deribit
+    # strategy applies its marks too (plan 16): by the DAY-P&L roll on the NAV TWIN of the same
+    # crawl, because its returns are P&L over scheduled capital and cannot roll a NAV level back.
+    # Every other strategy, a configured ccxt, MT5 or sFOX one included, returns NAV changes and
+    # takes the returns roll. Nothing is excluded and no exclusion flag exists.
+    _applied_marks: MarkedSeries | None = None
+    # CR-03: the first day after the last applied mark when the series stops before the day this
+    # derive labels (a refusal streak, a venue state no mark can be taken in). None while current.
+    _marks_trailing_since: str | None = None
+    # Every stored mark of the key, read once: the apply below uses them all, and the key-mode
+    # epilogue looks this derive's label day up in them for the stored-mark anchor (W7).
+    _stored_marks: list[StoredMark] = []
+    # Key mode only (plan 12): the writer basis the apply was given, so the payload that must
+    # change with the marks is rebuilt from the same quantities (Pitfall 4).
+    _key_writer_basis_pnl: "pd.Series | None" = None
+    _stored_marks = await db_execute(
+        lambda: read_key_marks(ctx.supabase, ctx.key_row["id"])
+    )
+    if _mt5_instantless_days:
+        # Such a deal keeps its own day and nothing is defaulted. One that really landed before a
+        # mark's read is booked by that mark and again on its own day, so the count on a read day
+        # is named (counts only, no amount).
+        _read_days = {
+            (date.fromisoformat(_mk.mark_day) + timedelta(days=1)).isoformat()
+            for _mk in _stored_marks
+        }
+        logger.warning(
+            "run_derive_broker_dailies_job: mt5 flow deals without a trustworthy instant keep "
+            "their own day (deals=%d on_a_mark_read_day=%d)",
+            len(_mt5_instantless_days),
+            sum(1 for _d in _mt5_instantless_days if _d in _read_days),
+        )
+    # The marks this derive applies. For an allocated strategy only the marks dated inside the
+    # mandate window count (MEDIUM-2: a mark outside [the schedule's first effective_from,
+    # mandate_end] is not part of the mandate's track). With none inside, the series is the
+    # allocated one unchanged and one line names how many marks lie outside it.
+    _marks_to_apply: list[StoredMark] = _stored_marks
+    if _returns_are_allocated and denominator_config is not None:
+        _marks_to_apply = _marks_in_mandate_window(_stored_marks, denominator_config)
+        if len(_marks_to_apply) < len(_stored_marks):
+            logger.info(
+                "derive_broker_dailies: nav marks outside the mandate window not applied "
+                "(outside=%d inside=%d id=%s)",
+                len(_stored_marks) - len(_marks_to_apply), len(_marks_to_apply), funding_label,
+            )
+        if not _marks_to_apply and _want_nav_twin and _completeness.nav_twin_ledger is None:
+            # W1 (a): the twin was asked for (this derive's own mark day lies in the window)
+            # and could not be built, but there is no stored mark to apply, so the derive
+            # carries on exactly as it did before marks existed.
+            logger.warning(
+                "derive_broker_dailies: nav_twin_unbuildable (error=%s id=%s)",
+                _completeness.nav_twin_error or "twin_absent", funding_label,
+            )
+    if _marks_to_apply:
+        _marks_refusal: str | None = None
+        # Key mode is always USD: a native-unit (BTC) MT5 key has been converted to dollars
+        # at the stored daily closes above, so its marks apply as ``nav_usd``.
+        _series_unit: str | None = (
+            _mt5_unit.code
+            if venue == "mt5" and not is_key_mode and _mt5_unit is not None
+            and _mt5_unit.native
+            else None
+        )
+        _marks_in = _marks_in_series_unit(_marks_to_apply, _series_unit)
+        if _marks_in is None:
+            _marks_refusal = _MARK_UNIT_MISMATCH
+        else:
+            # The builder's own flows by day and (where it has one) its day P&L, per venue,
+            # all computed here in strategy mode from what this derive already holds (no venue
+            # read). Except Deribit's two, which the key-mode path computes where it builds the
+            # NAV and strategy mode never did: they are computed here, only when stored marks
+            # exist, so a strategy derive without marks makes no new call and stays
+            # byte-identical. The first mark's base comes from that mark's own wallet (plan 03
+            # rule 3, review CR-01), so no live realized terminal is read here.
+            _apply_flows: dict[str, float] = {}
+            _apply_instants: list[FlowInstant] = []
+            _apply_day_pnl: dict[str, float] | None = None
+            _apply_roll: Literal["returns", "day_pnl"] = "returns"
+            if is_key_mode and venue in WRITER_BASIS_VENUES:
+                # Plan 12. A key-mode MT5 or Deribit derive has already computed the
+                # quantities its NAV obeys (the day P&L, the composed flows) and stores them
+                # beside the returns, so the apply is handed exactly those and nothing is
+                # recomputed. With a writer basis the base is
+                # rolled on the writer's own identity ``L(d-1) = L(d) - P_d - F_d`` (the
+                # compose rolls the same way in writer-basis mode), because an MT5 day
+                # measured on a DayTiming cohort has a return that is not ``P_d / L(d-1)``.
+                # Without one (a native key with an interior unpriced hole) the returns
+                # roll runs on the event-time flows.
+                _key_writer_basis_pnl = (
+                    _composed_day_pnl_usd
+                    if _composed_day_pnl_usd is not None
+                    else _day_pnl_usd
+                )
+                if (
+                    _composed_flows_usd is not None
+                    and _key_writer_basis_pnl is not None
+                    and not _key_writer_basis_pnl.empty
+                ):
+                    _apply_flows = _iso_day_amounts(_composed_flows_usd)
+                    _apply_instants = (
+                        native_flow_instants(
+                            native_ledger,
+                            indexable_currencies=_completeness.indexable_currencies,
+                        )
+                        if venue == "deribit"
+                        else _event_flow_instants
+                    )
+                    _apply_day_pnl = _iso_day_amounts(_key_writer_basis_pnl)
+                    _apply_roll = "day_pnl"
+                else:
+                    _key_writer_basis_pnl = None
+                    for _xf in external_flows or []:
+                        _apply_flows[_xf.utc_day_iso] = _apply_flows.get(
+                            _xf.utc_day_iso, 0.0
+                        ) + float(_xf.usd_signed)
+                    _apply_instants = _event_flow_instants
+                    _apply_day_pnl = _iso_day_amounts(_day_pnl_usd)
+            elif _returns_are_allocated:
+                # ── NAVMTM plan 16 (D-14, Bug B, W1, L3) ───────────────────────────────────
+                # An allocated-capital strategy's returns are P&L over scheduled capital, not NAV
+                # changes, and its OWN ledger dropped the net-extraction spot legs, so neither can
+                # give the day P&L the first mark's base is rolled back through. They come from
+                # the NAV TWIN of this same crawl (plan 13; no extra venue call, D-10/D-16): the
+                # day P&L and the composed flows off its levels, the same two helpers the key-mode
+                # NAV path calls, rolled by ``roll_basis="day_pnl"`` (plan 03 rule 3:
+                # ``L(S-1) = w_S - P_S - F_S``; the input returns are never read for the base). Only the Deribit allocated path comes here.
+                #
+                # W1 / L3: with a stored in-window mark to apply, a twin that is missing or cannot
+                # be valued (a NavReconstructionError from a helper, section 5 included, or a mark
+                # the twin needs and does not have) means this derive cannot reproduce the mark.
+                # It refuses by name and writes nothing, like every refusal here. A derive with no
+                # mark to apply never reaches this branch (see above) and is unaffected.
+                _twin_ledger = _completeness.nav_twin_ledger
+                if _twin_ledger is None:
+                    _marks_refusal = _MARK_ALLOCATED_NAV_UNRECONCILED
+                else:
+                    try:
+                        _twin_day_pnl = native_ledger_day_pnl(
+                            _twin_ledger, _completeness.indexable_currencies
+                        )
+                        _twin_flows = native_ledger_composed_flows(
+                            _twin_ledger, _completeness.indexable_currencies
+                        )
+                    except NavReconstructionError as _twin_exc:
+                        logger.warning(
+                            "derive_broker_dailies: nav twin not valued (error=%s id=%s)",
+                            type(_twin_exc).__name__, funding_label,
+                        )
+                        _marks_refusal = _MARK_ALLOCATED_NAV_UNRECONCILED
+                    else:
+                        _apply_day_pnl = _iso_day_amounts(_twin_day_pnl)
+                        _apply_flows = _iso_day_amounts(_twin_flows)
+                        _apply_instants = native_flow_instants(
+                            _twin_ledger,
+                            indexable_currencies=_completeness.indexable_currencies,
+                        )
+                        _apply_roll = "day_pnl"
+            elif venue == "deribit":
+                # The NAV path's ledger quantities (the returns path already passed the same
+                # section-5 gate on this ledger, so their exceptions propagate exactly as in
+                # key mode).
+                _apply_day_pnl = _iso_day_amounts(
+                    native_ledger_day_pnl(native_ledger, _completeness.indexable_currencies)
+                )
+                _apply_flows = _iso_day_amounts(
+                    native_ledger_composed_flows(
+                        native_ledger, _completeness.indexable_currencies
+                    )
+                )
+                _apply_instants = native_flow_instants(
+                    native_ledger, indexable_currencies=_completeness.indexable_currencies
+                )
+            else:
+                if venue == "mt5":
+                    # The account's own unit (USD, or BTC for a native-unit account): the
+                    # deal ledger's day-summed flows and its P&L per NAV day.
+                    _apply_flows = dict(_mt5_flow_by_day)
+                    _apply_instants = _event_flow_instants
+                    _apply_day_pnl = _iso_day_amounts(
+                        mt5_day_pnl(
+                            _mt5_deals,
+                            server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                        )
+                    )
+                elif venue == "sfox":
+                    _apply_flows = _iso_day_amounts(_flows_series)
+                    _apply_instants = _event_flow_instants
+                else:
+                    for _xf in external_flows or []:
+                        _apply_flows[_xf.utc_day_iso] = _apply_flows.get(
+                            _xf.utc_day_iso, 0.0
+                        ) + float(_xf.usd_signed)
+                    _apply_instants = _event_flow_instants
+            if _marks_refusal is None:
+                try:
+                    _applied_marks = apply_marks(
+                        returns,
+                        _apply_flows,
+                        _marks_in,
+                        day_pnl=_apply_day_pnl,
+                        roll_basis=_apply_roll,
+                        dust_floor=(
+                            _mt5_unit.floors.dust_nav
+                            if _series_unit is not None and _mt5_unit is not None
+                            else DUST_NAV_FLOOR
+                        ),
+                        flow_instants=_apply_instants,
+                    )
+                except MarkApplyRefusal as _apply_exc:
+                    _marks_refusal = _apply_exc.token
+        if _marks_refusal is not None:
+            # L3: nothing is written, nothing is deleted, and no prestamp lands. The user
+            # copy is fixed and the detail carries the token only (T-167.2.1.1.1-27).
+            # Key mode (plan 12) takes this same return, ABOVE the csv write, the key_inputs
+            # upsert and the compose enqueue, so a refused apply leaves the previous row and
+            # series exactly as they were; it has no strategy_analytics row to stamp (the
+            # helper returns at once in key mode), and the named FAILED result is the record.
+            logger.error(
+                "derive_broker_dailies: nav marks refused (reason=%s venue=%s id=%s)",
+                _marks_refusal, venue, funding_label,
+            )
+            await _stamp_strategy_analytics_failed(
+                "This strategy's marked-to-market values could not be applied to its "
+                "return series, so its performance figures were not updated. The issue "
+                "has been reported to us and needs nothing from you.",
+                detail=f"nav marks refused ({_marks_refusal})",
+                heal_series=False,
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=f"derive_broker_dailies: nav marks refused ({_marks_refusal})",
+                error_kind="permanent",
+            )
+        assert _applied_marks is not None
+        if _applied_marks.terminal is not None:
+            # CR-03 / D-05: "the next mark covers it" holds only if a next mark comes. Once the
+            # last applied mark is older than the day this derive labels, every realized row after
+            # it is dropped (Pitfall 7) and nothing says the series stops there; the day it stops
+            # is stamped. An allocated mandate that has CLOSED ends where its W2 tail ends, so it
+            # never trails.
+            _label_day = mark_day_for(_utc_now())
+            _mandate_closed = (
+                _returns_are_allocated
+                and denominator_config is not None
+                and denominator_config.mandate_end is not None
+                and denominator_config.mandate_end < _label_day
+            )
+            _last_applied = date.fromisoformat(_applied_marks.terminal[0])
+            if not _mandate_closed and _last_applied < _label_day:
+                _marks_trailing_since = (_last_applied + timedelta(days=1)).isoformat()
+        _returns_before_marks = returns
+        returns = _applied_marks.returns
+        if (
+            _returns_are_allocated
+            and denominator_config is not None
+            and denominator_config.mandate_end is not None
+            and _applied_marks.terminal is not None
+        ):
+            # ── NAVMTM plan 16 (W2, T-167.2.1.1.1-55): THE CLOSED MANDATE'S TAIL. ────────────
+            # ``mandate_end`` need not be a marked day. Once the window has CLOSED (mandate_end
+            # is before the day this derive's own mark labels) no later in-window mark will ever
+            # exist to cover the days after the last in-window mark, so the allocated rows dated
+            # in (last applied mark day, mandate_end] are kept VERBATIM: no realized P&L of the
+            # mandate is lost and nothing is invented. They are the combiner's own rows, already
+            # inside the window. While the window is still OPEN, those days are covered by the
+            # next mark's single return (D-05) and no row is kept for them.
+            _tail_from = _applied_marks.terminal[0]
+            _tail_to = denominator_config.mandate_end.isoformat()
+            if _tail_from < _tail_to < mark_day_for(_utc_now()).isoformat():
+                import pandas as _pandas_tail
+
+                _tail = _returns_before_marks[
+                    [_tail_from < _ts.date().isoformat() <= _tail_to
+                     for _ts in _returns_before_marks.index]
+                ]
+                if len(_tail):
+                    assert _marks_in is not None
+                    _tail = _tail_without_open_profit(
+                        _tail, _marks_in[-1].nav, _marks_in[-1].open_pnl
+                    )
+                    returns = _pandas_tail.concat([returns, _tail]).sort_index()
+        # ── NAVMTM plan 16: THE simple-sum rule (NAVMTM D-14). ───────────────────────────────
+        # One rule for cumulative_method 'simple', named the simple-sum rule (NAVMTM D-14): an
+        # allocated-capital strategy keeps its configured cumulative_method, and every
+        # persisted row, the post-start marked returns and any W2 tail rows included, is summed
+        # under 'simple': cumulative return = the sum of every row's return, max drawdown on
+        # that running sum, Sharpe and Sortino on the rows as today. From the first mark a
+        # day's return is the change in marked NAV over the prior marked level net of flows,
+        # not P&L over the allocated capital, and the sum of those is not the compounded NAV
+        # change. This is the change in how these strategies are measured that D-14 names; the
+        # published figure is the series runner's recompute from the persisted rows.
+        if is_key_mode:
+            # ── 167.2.1.1.1 NAVMTM plan 12 (SC-2, SC-3, Pitfall 4): THE KEY_INPUTS THAT
+            # DESCRIBE THE SERIES MOVE WITH THE SERIES. ──────────────────────────────────
+            # The compose rolls each key BACKWARD from the terminal its row states through
+            # the stored returns. It reproduces the stored marks only if the row describes
+            # the MARKED series: the terminal is the last mark's NAV on the last mark day,
+            # the writer basis (MT5, Deribit) is the pre-start day P&L joined with
+            # ``apply_marks``' post-start P&L, and no flow is dated after the last mark.
+            # Any one of them left on the realized basis rolls the levels to the wrong
+            # place or degrades the key blocking (``key_inputs_mismatch``,
+            # ``writer_basis_mismatch``, ``out_of_window_flow``), and My Allocation falls
+            # back to the legacy curve. They are set here, from the one ``apply_marks``
+            # result, so the series and its row cannot disagree.
+            import pandas as _pandas
+
+            assert _applied_marks.terminal is not None  # marks exist, so a last mark does
+            _last_mark_day, _last_mark_nav = _applied_marks.terminal
+            _realized_terminal = (_pandas.Timestamp(_last_mark_day), float(_last_mark_nav))
+            if _applied_marks.flow_moves:
+                # D-23: the apply counted a flow made before a mark's read in that mark's day,
+                # so the flows this row stores state the same placement, or the compose would
+                # roll the day from a flow the marked level already holds.
+                import pandas as _pandas_mv
+
+                from services.external_flows import ExternalFlow as _ExternalFlowMv
+
+                if _key_writer_basis_pnl is not None and _composed_flows_usd is not None:
+                    for _mv_day, _mv_amount in _applied_marks.flow_moves.items():
+                        _mv_from = _pandas_mv.Timestamp(_mv_day) + _pandas_mv.Timedelta(days=1)
+                        _composed_flows_usd = _composed_flows_usd.add(
+                            _pandas_mv.Series(
+                                [_mv_amount, -_mv_amount],
+                                index=_pandas_mv.DatetimeIndex(
+                                    [_pandas_mv.Timestamp(_mv_day), _mv_from]
+                                ).as_unit(_composed_flows_usd.index.unit),
+                            ),
+                            fill_value=0.0,
+                        )
+                else:
+                    external_flows = [
+                        *(external_flows or []),
+                        *(
+                            _f
+                            for _mv_day, _mv_amount in _applied_marks.flow_moves.items()
+                            for _f in (
+                                _ExternalFlowMv(_mv_day, _mv_amount),
+                                _ExternalFlowMv(
+                                    (date.fromisoformat(_mv_day) + timedelta(days=1)).isoformat(),
+                                    -_mv_amount,
+                                ),
+                            )
+                        ),
+                    ]
+            if _applied_marks.held_out_flow_days:
+                # A flow dated after the last mark day is in no base and no numerator, so it
+                # is left out of this derive's stored flows and enters the next derive's
+                # (plan 03 rule 9). Stored, it would sit past the terminal day and read as
+                # ``out_of_window_flow``.
+                _held_out = frozenset(_applied_marks.held_out_flow_days)
+                external_flows = [
+                    _f for _f in (external_flows or []) if _f.utc_day_iso not in _held_out
+                ]
+            if _key_writer_basis_pnl is not None and _composed_flows_usd is not None:
+                # The writer basis after the start is NOT the realized day P&L (the realized
+                # rows from the first mark on are dropped): it is ``apply_marks``' level
+                # identity ``M_d - base - F_d`` on each marked day and 0.0 on a gap day that
+                # carries a flow, joined with the pre-start values untouched (L1). Flows are
+                # the same set, cut at the last mark day.
+                _marks_start = _applied_marks.marks_since
+                assert _marks_start is not None
+                _pre_pnl = _key_writer_basis_pnl[
+                    [_ts.date().isoformat() < _marks_start for _ts in _key_writer_basis_pnl.index]
+                ]
+                _post_pnl = _pandas.Series(
+                    list(_applied_marks.writer_day_pnl.values()),
+                    index=_pandas.DatetimeIndex(
+                        [_pandas.Timestamp(_d) for _d in _applied_marks.writer_day_pnl]
+                    ),
+                    dtype="float64",
+                )
+                _composed_day_pnl_usd = _pandas.concat([_pre_pnl, _post_pnl]).sort_index()
+                _composed_flows_usd = _composed_flows_usd[
+                    [_ts.date().isoformat() <= _last_mark_day for _ts in _composed_flows_usd.index]
+                ]
+            if _native_usd_inputs is not None:
+                # The converted series now ends on the last mark: that is the day the key is
+                # priced through (it is also the day of the terminal stated above).
+                _native_usd_inputs = {**_native_usd_inputs, "priced_through": _last_mark_day}
+        logger.info(
+            "derive_broker_dailies: nav marks applied (marks=%d since=%s gaps=%d mode=%s id=%s)",
+            len(_marks_to_apply), _applied_marks.marks_since,
+            len(_applied_marks.mark_gap_days), "key" if is_key_mode else "strategy",
+            funding_label,
+        )
+
     async def _run_key_mode_compose_epilogue() -> None:
         # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
         # This derive ALREADY crawled the real external flows and read the live
@@ -6920,16 +7811,44 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # dust so a small NEGATIVE equity (|equity| <= DUST but a real-capital
         # problem) degrades rather than being silently omitted as dust.
         _anchor_null_reason: str | None = None
+        # ── 167.2.1.1.1 NAVMTM plan 12 (SC-2, W7, Info 2, Pitfall 1) — THE STORED MARK IS THE
+        # ANCHOR OF A DAY IT COVERS. ─────────────────────────────────────────────────────────
+        # When the persisted series' last day is the closed day THIS derive's read labels
+        # (``mark_day_for`` of its read time) and a mark is stored for it, that stored row, never
+        # this derive's own read, is the authority for the day: a derive that lost the D-06 race,
+        # or read later the same day under D-11, still persists the stored value, so the compose's
+        # last level equals the stored mark. Its read time travels with it (``anchor_asof`` below
+        # is the mark's ``marked_at``), because ``equity_reconstruction._polled_empty_since``
+        # compares ``anchor_asof`` with the holdings poll's time: a positive stored mark read
+        # before an empty poll is then neither proof nor contradiction (the safe direction its
+        # docstring names), never a false contradiction WARNING stamped with a later clock.
+        # In every other case (no mark for the label day, e.g. today's was refused, so the last
+        # mark is older than this derive's label) the live read, its ladder and its clock are the
+        # anchor exactly as before: a stale value must not mask a live zero.
+        _anchor_mark: StoredMark | None = None
+        if (
+            _applied_marks is not None
+            and _applied_marks.terminal is not None
+            and _mark_read_at is not None
+        ):
+            _label_day = mark_day_for(_mark_read_at).isoformat()
+            if _applied_marks.terminal[0] == _label_day:
+                _anchor_mark = next(
+                    (_m for _m in _stored_marks if _m.mark_day == _label_day), None
+                )
         # 164.6.6.2.1 / D-17 — the number the ladder below judges. For a USD key it is the
         # venue's equity. For a native key it is that equity PRICED at the stored close of the
         # latest completed UTC day, so dust, non-positive and non-finite are judged in DOLLARS
         # (a funded 0.4213 BTC account is 26099.535 USD, not a value below the 1000 USD floor),
-        # or ``None`` when that one close is missing (never an older one).
+        # or ``None`` when that one close is missing (never an older one). A stored-mark anchor
+        # is already dollars, priced when the mark was written.
         _anchor_basis: float | None = (
-            float(equity) if equity is not None and not _native_key_usd else None
+            float(_anchor_mark.nav_usd)
+            if _anchor_mark is not None
+            else (float(equity) if equity is not None and not _native_key_usd else None)
         )
         _unpriced_close_day: str | None = None
-        if _native_key_usd and equity is not None:
+        if _anchor_mark is None and _native_key_usd and equity is not None:
             from services.native_to_usd import latest_completed_close_day, price_live_balance
 
             _live_priced = price_live_balance(
@@ -6949,7 +7868,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # so this is never ``dust``; it is not a read failure either, so it is named apart
             # from ``balance_error``. ``unpriced_close_day`` below says which close.
             _anchor_null_reason = "native_unpriced"
-        elif balance_error or _anchor_basis is None:
+        elif _anchor_basis is None or (_anchor_mark is None and balance_error):
+            # (A stored-mark anchor skips the read-failure arms: ``balance_error`` and
+            # ``native_unpriced`` describe THIS derive's own read, which is not the anchor. The
+            # value arms below judge the stored value, the same ladder.)
             _anchor_null_reason = "balance_error"
         elif not math.isfinite(_anchor_basis):
             _anchor_null_reason = "nonfinite"
@@ -6973,7 +7895,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # A present/real anchor carries no reason token (None); a null anchor
             # records WHY so compose can gate dust-omit vs real-failure-degrade.
             "anchor_null_reason": _anchor_null_reason,
-            "anchor_asof": datetime.now(timezone.utc).isoformat(),
+            "anchor_asof": (
+                _anchor_mark.marked_at
+                if _anchor_mark is not None
+                else datetime.now(timezone.utc).isoformat()
+            ),
             "venue": venue,
         }
         # 167.1.2.2 D-15 — ADDITIVE optional fields; a reader that does not know them, and
@@ -7035,6 +7961,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             )
         if _native_inception_verdict is not None:
             _key_inputs_payload["native_inception"] = _native_inception_verdict
+        # 167.2.1.1.1 NAVMTM plan 06 — ADDITIVE optional fields, in the 167.1.2.2 D-15 voice: a
+        # reader that does not know them, and a row written before them, are both fine (the
+        # compose ignores unknown fields). ``nav_mark`` echoes the STORED row this derive keeps
+        # (never its own read, Pitfall 1); ``nav_mark_refusal`` is the token naming why no mark
+        # was stored. Plan 07 and the operator readings use them. Counts and tokens, no log line.
+        if _stored_nav_mark is not None:
+            _key_inputs_payload["nav_mark"] = {
+                "mark_day": _stored_nav_mark.mark_day,
+                "nav_usd": _stored_nav_mark.nav_usd,
+                "open_pnl_usd": _stored_nav_mark.open_pnl_usd,
+                "marked_at": _stored_nav_mark.marked_at,
+            }
+        if _nav_mark_refusal is not None:
+            _key_inputs_payload["nav_mark_refusal"] = _nav_mark_refusal
+        # 167.2.1.1.1 NAVMTM plan 12 — ADDITIVE and present-only, in the 167.1.2.2 D-15 voice: a
+        # reader that does not know them, and a row written before them, are both fine. They say
+        # where this key's marks begin (``marks_since``), which unmarked days the first-to-last
+        # span skipped (``mark_gap_days``, each covered by the next mark's single return, D-05) and,
+        # when the last applied mark is older than the day this derive labels,
+        # ``marks_trailing_since``. No amount; ISO days only.
+        if _applied_marks is not None:
+            _key_inputs_payload["marks_since"] = _applied_marks.marks_since
+            if _applied_marks.mark_gap_days:
+                _key_inputs_payload["mark_gap_days"] = list(_applied_marks.mark_gap_days)
+            if _marks_trailing_since is not None:
+                # SFH round 2 N1: key mode returns before the prestamp, so the first day after
+                # the key's last applied mark when that mark is older than the day this derive
+                # labels is carried here, present-only, for My Allocation to name (an ISO date).
+                _key_inputs_payload["marks_trailing_since"] = _marks_trailing_since
         # 167.1.2.2.1 D-03: Deribit-only and present-only (the ccxt payload keeps its 5 keys).
         if _account_summary_snapshot is not None:
             _key_inputs_payload.update(_account_summary_snapshot)
@@ -7729,6 +8684,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # NAV_TWR_GUARD_KEYS (an annotation on a kept day is not a warning).
     if meta.get("flow_timing_day_level_large") is True:
         _prestamp_flags["flow_timing_day_level_large"] = True
+    # 167.2.1.1.1 NAVMTM plan 07 / D-05, D-12, D-15, L2 - where the key's marks begin and which
+    # days they skipped. ISO dates and lists of them only (T-73-02: no amount), present-only,
+    # and NEVER members of NAV_TWR_GUARD_KEYS: membership promotes a row to
+    # complete_with_warnings, and a marks boundary is a NOTE the factsheet reads, not a warning.
+    # ``marks_covered_from`` is the boundary the series runner (plan 08) reindexes at, stamped
+    # here because the stored rows lack the NaN days that would let it re-derive it. The prestamp
+    # replaces data_quality_flags wholesale, so a re-derive without marks clears all four.
+    if _applied_marks is not None:
+        _prestamp_flags["marks_since"] = _applied_marks.marks_since
+        _prestamp_flags["marks_covered_from"] = _applied_marks.covered_from
+        if _applied_marks.mark_gap_days:
+            _prestamp_flags["mark_gap_days"] = list(_applied_marks.mark_gap_days)
+        if _marks_trailing_since is not None:
+            # CR-03: present-only, a note and never a warning (not a guard key), popped by the
+            # wholesale prestamp the next time the series is current.
+            _prestamp_flags["marks_trailing_since"] = _marks_trailing_since
 
     # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
     # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete
@@ -7850,6 +8821,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # round-trip guard can rebuild it from the sparse rows.
             scalar_returns=returns,
             densify_policy="broker_nan",
+            # 167.2.1.1.1 NAVMTM plan 07 (OQ-8): a day a mark's return covers is neither a gap
+            # span nor a 0.0 day. ``None`` (no marks) is byte-invisible.
+            covered_days=(
+                _applied_marks.covered_days if _applied_marks is not None else None
+            ),
         )
     except ValueError:
         # Heal arm (Pitfall 5): effectively unreachable given the <2-day early exit
@@ -8330,6 +9306,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     from services.broker_dailies import (
         combine_native_ledger,
         gap_fill_daily_returns,
+        native_ledger_composed_flows,
+        native_ledger_day_pnl,
     )
     from services.deribit_ingest import (
         CurrencyEnumerationError,
@@ -8358,7 +9336,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         compute_all_metrics,
         periods_per_year_for_asset_class,
     )
-    from services.nav_twr import NavReconstructionError
+    from services.nav_twr import DUST_NAV_FLOOR, NavReconstructionError
     from services.redact import scrub_freeform_string
 
     supabase = get_supabase()
@@ -8790,8 +9768,261 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         NavReconstructionError,
     )
 
+    # ── 167.2.1.1.1 NAVMTM plan 09 - THE MEMBER MARKS SEAM (SC-2, D-05, D-12, D-14, L3) ──────
+    # The stitch never reads a member's stored return rows: it reconstructs every member live and
+    # stitches the result, so a composite would stay realized-basis while a single-key strategy
+    # moved to marks. This seam applies plan 03's ``apply_marks`` to each member on its OWN cash
+    # series, with that member builder's own flows and realized terminal (the same quantities plan
+    # 07 hands the single-key derive, held here as locals, so no second venue read is made).
+    #
+    # It runs on the CASH pass only (the mark_to_market and smoothed bases are not marked, as in
+    # plan 07), and BEFORE the member is clipped to its window: the first mark is measured against
+    # the realized level on the day before it, which can lie before the window opens, and a clip
+    # first would leave the apply no base day. Marks dated on or after a closed window's end can
+    # change nothing the window shows, so they are not applied (and cannot refuse the composite).
+    #
+    # L3: a member whose stored marks cannot be applied stops the whole composite (a permanent
+    # refusal, nothing persisted), never a silent member degrade that would drop its history.
+    member_marked: dict[int, MarkedSeries] = {}
+    # SFH round 2 N2: the first day a member's rows stop, by member seq, for a member whose window
+    # can still receive a mark but whose last applied mark is older than the day this run labels.
+    member_trailing: dict[int, str] = {}
+    _window_by_seq: dict[int, tuple[str, str | None]] = {
+        int(m["seq"]): (
+            str(m["window_start"])[:10],
+            None if m.get("window_end") is None else str(m["window_end"])[:10],
+        )
+        for m in members
+    }
+
+    def _note_trailing(seq: int, terminal_day: str, closed: bool) -> None:
+        """A member that is still open and whose last applied mark is older than the day this run
+        labels has no row after that mark (Pitfall 7) and the stitch 0.0-fills the days: name the
+        first of them, never before the member's window opens. A closed window or mandate keeps
+        its realized tail (D-24), so it never trails."""
+        label_day = mark_day_for(_utc_now()).isoformat()
+        since = max(
+            (date.fromisoformat(terminal_day) + timedelta(days=1)).isoformat(),
+            _window_by_seq[seq][0],
+        )
+        if not closed and since <= label_day:
+            member_trailing[seq] = since
+
+    async def _apply_member_marks(
+        ctx: Any,
+        seq: int,
+        returns: pd.Series,
+        build_inputs: Callable[
+            [], tuple[dict[str, float], dict[str, float] | None, Sequence[FlowInstant]]
+        ],
+    ) -> pd.Series:
+        """Return ``returns`` with this member key's stored marks applied, or unchanged when it
+        has none that matter. ``build_inputs`` yields ``(flows by day, day P&L, flow instants)``
+        and is called only when there is a mark to apply, so a member without marks makes no new
+        call and stays byte-identical. Raises ``MarkApplyRefusal`` (L3)."""
+        key_id = ctx.key_row["id"]
+        stored_marks = await db_execute(lambda: read_key_marks(ctx.supabase, key_id))
+        window_end = _window_by_seq[seq][1]
+        relevant = [
+            mk for mk in stored_marks if window_end is None or mk.mark_day < window_end
+        ]
+        if not relevant:
+            return returns
+        flows_by_day, day_pnl, flow_instants = await asyncio.to_thread(build_inputs)
+        marked = apply_marks(
+            returns,
+            flows_by_day,
+            [
+                AppliedMark(
+                    mk.mark_day, mk.nav_usd, mk.open_pnl_usd, datetime.fromisoformat(mk.marked_at)
+                )
+                for mk in relevant
+            ],
+            day_pnl=day_pnl,
+            dust_floor=DUST_NAV_FLOOR,
+            flow_instants=flow_instants,
+        )
+        member_marked[seq] = marked
+        out = marked.returns
+        assert marked.terminal is not None
+        _note_trailing(
+            seq, marked.terminal[0],
+            window_end is not None and window_end <= mark_day_for(_utc_now()).isoformat(),
+        )
+        if (
+            window_end is not None
+            and marked.terminal is not None
+            and window_end <= mark_day_for(_utc_now()).isoformat()
+        ):
+            # WR-03 (the W2 tail rule, as for the allocated member): once the window has CLOSED
+            # no later in-window mark will cover the days after the member's last applied mark,
+            # and Pitfall 7 dropped their realized rows, so the stitch would 0.0-fill them and
+            # lose the member's real P&L for them. Its own realized rows dated in (last applied
+            # mark day, window_end) are kept verbatim; while the window is still OPEN the next
+            # mark's single return covers them (D-05) and no row is kept.
+            tail_from = marked.terminal[0]
+            tail = returns[
+                [tail_from < ts.date().isoformat() < window_end for ts in returns.index]
+            ]
+            if len(tail):
+                tail = _tail_without_open_profit(
+                    tail, relevant[-1].nav_usd, relevant[-1].open_pnl_usd
+                )
+                out = pd.concat([out, tail]).sort_index()
+        logger.info(
+            "run_stitch_composite_job: nav marks applied to member (seq=%d marks=%d since=%s gaps=%d)",
+            seq, len(relevant), marked.marks_since, len(marked.mark_gap_days),
+        )
+        return out
+
+    async def _allocated_member_marks(
+        ctx: Any, seq: int, config: "ReturnsDenominatorConfig"
+    ) -> list[StoredMark]:
+        """The stored marks of an ALLOCATED Deribit member's key that its series can use (NAVMTM
+        plan 17, D-14, MEDIUM-2): dated inside the composite's mandate window (plan 16's rule,
+        ``_marks_in_mandate_window``) AND before the member's own closed window end (plan 09's
+        rule: a later mark can change nothing the member's window shows, so it must neither apply
+        nor refuse the composite)."""
+        key_id = ctx.key_row["id"]
+        stored_marks = await db_execute(lambda: read_key_marks(ctx.supabase, key_id))
+        in_mandate = _marks_in_mandate_window(stored_marks, config)
+        if len(in_mandate) < len(stored_marks):
+            logger.info(
+                "run_stitch_composite_job: nav marks outside the mandate window not applied "
+                "(seq=%d outside=%d inside=%d)",
+                seq, len(stored_marks) - len(in_mandate), len(in_mandate),
+            )
+        window_end = _window_by_seq[seq][1]
+        return [mk for mk in in_mandate if window_end is None or mk.mark_day < window_end]
+
+    async def _apply_allocated_member_marks(
+        seq: int,
+        returns: pd.Series,
+        marks: list[StoredMark],
+        completeness: Any,
+        want_twin: bool,
+        config: "ReturnsDenominatorConfig",
+    ) -> pd.Series:
+        """Apply an ALLOCATED Deribit member's in-window marks (NAVMTM plan 17; D-14, Bug B, W1,
+        W2, L3), the composite sibling of plan 16's single-strategy seam. ``returns`` is the
+        member's UNCLIPPED allocated series (P&L over scheduled capital), so the realized NAV
+        level the first mark is measured against is rolled back off the NAV TWIN of the member's
+        own crawl (the allocated ledger dropped the net-extraction legs): the twin's realized
+        terminal, day P&L and composed flows, ``roll_basis="day_pnl"`` (plan 03 rule 3b). It runs
+        before the member is clipped to its window.
+
+        W1: with no in-window mark there is nothing to apply and the member is stitched as it
+        always was (one ``nav_twin_unbuildable`` line when the twin was asked for and is absent).
+        With one, a twin that is missing or cannot be valued (a ``NavReconstructionError`` from a
+        helper, section 5 included) raises ``_MemberNavUnreconciled`` and the composite refuses as
+        a whole. W2: once the mandate has closed, the member's allocated rows after its last
+        applied mark through ``mandate_end`` are kept verbatim."""
+        twin = completeness.nav_twin_ledger
+        if not marks:
+            if want_twin and twin is None:
+                logger.warning(
+                    "run_stitch_composite_job: nav_twin_unbuildable (seq=%d error=%s)",
+                    seq, completeness.nav_twin_error or "twin_absent",
+                )
+            return returns
+        if twin is None:
+            logger.warning(
+                "run_stitch_composite_job: nav_twin_unbuildable (seq=%d error=%s)",
+                seq, completeness.nav_twin_error or "twin_absent",
+            )
+            raise _MemberNavUnreconciled()
+        indexable = completeness.indexable_currencies
+
+        def _twin_inputs() -> tuple[dict[str, float], dict[str, float], list[FlowInstant]]:
+            return (
+                _iso_day_amounts(native_ledger_composed_flows(twin, indexable)),
+                _iso_day_amounts(native_ledger_day_pnl(twin, indexable)),
+                native_flow_instants(twin, indexable_currencies=indexable),
+            )
+
+        try:
+            flows_by_day, day_pnl, flow_instants = await asyncio.to_thread(_twin_inputs)
+        except NavReconstructionError as twin_exc:
+            logger.warning(
+                "run_stitch_composite_job: nav twin not valued (seq=%d error=%s)",
+                seq, type(twin_exc).__name__,
+            )
+            raise _MemberNavUnreconciled() from None
+        marked = apply_marks(
+            returns,
+            flows_by_day,
+            [
+                AppliedMark(
+                    mk.mark_day, mk.nav_usd, mk.open_pnl_usd, datetime.fromisoformat(mk.marked_at)
+                )
+                for mk in marks
+            ],
+            day_pnl=day_pnl,
+            roll_basis="day_pnl",
+            dust_floor=DUST_NAV_FLOOR,
+            flow_instants=flow_instants,
+        )
+        member_marked[seq] = marked
+        out = marked.returns
+        assert marked.terminal is not None
+        # The member is closed at whichever comes first: the end of its mandate (inclusive) or the
+        # last day of its own composite window (the day before ``window_end``). A member rotated
+        # out under an open mandate is closed too: it is not "marks paused" and keeps its tail.
+        _label_day = mark_day_for(_utc_now()).isoformat()
+        _window_end = _window_by_seq[seq][1]
+        _ends: list[str] = []
+        if config.mandate_end is not None:
+            _ends.append(config.mandate_end.isoformat())
+        if _window_end is not None:
+            _ends.append((date.fromisoformat(_window_end) - timedelta(days=1)).isoformat())
+        tail_to = min(_ends) if _ends else None
+        _closed = tail_to is not None and tail_to < _label_day
+        _note_trailing(seq, marked.terminal[0], _closed)
+        if _closed and tail_to is not None and marked.terminal[0] < tail_to:
+            # W2 (T-167.2.1.1.1-55): ``tail_to`` need not be a marked day. Once the member has
+            # CLOSED (before the day this run's marks label) no later in-window mark will cover
+            # the days after the last applied mark, so the member's own allocated rows dated in
+            # (last applied mark day, tail_to] are kept verbatim. While it is still open the
+            # next mark's single return covers them (D-05) and no row is kept.
+            tail_from = marked.terminal[0]
+            tail = returns[
+                [tail_from < ts.date().isoformat() <= tail_to for ts in returns.index]
+            ]
+            if len(tail):
+                tail = _tail_without_open_profit(
+                    tail, marks[-1].nav_usd, marks[-1].open_pnl_usd
+                )
+                out = pd.concat([out, tail]).sort_index()
+        logger.info(
+            "run_stitch_composite_job: nav marks applied to allocated member "
+            "(seq=%d marks=%d since=%s gaps=%d)",
+            seq, len(marks), marked.marks_since, len(marked.mark_gap_days),
+        )
+        return out
+
+    async def _refuse_member_marks(seq: int, reason: str) -> DispatchResult:
+        """L3: the composite's permanent refusal when a member's stored marks cannot be applied.
+        Nothing is persisted (every write sits below the member fan-out); the user copy is fixed
+        and the detail carries the member seq and the closed token only (T-93-04-01, no amount)."""
+        detail = f"nav marks refused (seq={seq}, {reason})"
+        logger.error("run_stitch_composite_job: %s", detail)
+        await _stamp_failed(
+            "This composite's marked-to-market values could not be applied to its return "
+            "series, so its performance figures were not updated. The issue has been "
+            "reported to us and needs nothing from you.",
+            detail=detail,
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"run_stitch_composite_job: {detail}",
+            error_kind="permanent",
+        )
+
     async def _reconstruct_deribit(
-        ctx: Any, basis: str
+        ctx: Any,
+        basis: str,
+        mark_seq: int | None = None,
+        allocated_mark_seq: int | None = None,
     ) -> tuple[pd.Series, bool, dict[str, Any]]:
         """One Deribit member's dense daily-return series for ``basis`` + its
         option-activity signal + the NavTWRMeta guard dict, through the EXISTING
@@ -8811,6 +10042,24 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         OFF the loop via asyncio.to_thread (the rescore pattern at :6398) so it
         can never starve the heartbeat AND the outer wait_for stays able to fire.
         """
+        # NAVMTM plan 17 (D-14, Bug B): the ALLOCATED Deribit member of a configured composite
+        # follows its key's marked NAV from the first mark, as a single allocated strategy does
+        # (plan 16). Its base comes from the NAV TWIN of this same crawl (plan 13; no extra venue
+        # call), so the twin is requested only when something can use it: a stored mark inside the
+        # mandate window, or the window containing the day this run's marks label. A closed
+        # mandate with no in-window mark builds no twin and is byte-identical to today. The
+        # keyword is passed ONLY on this path, so every other member makes the call it always made.
+        _alloc_marks: list[StoredMark] = []
+        _member_wants_nav_twin = False
+        _twin_kwargs: dict[str, Any] = {}
+        if allocated_mark_seq is not None and denominator_config is not None:
+            _alloc_marks = await _allocated_member_marks(
+                ctx, allocated_mark_seq, denominator_config
+            )
+            _member_wants_nav_twin = bool(_alloc_marks) or _mandate_window_contains(
+                mark_day_for(_utc_now()), denominator_config
+            )
+            _twin_kwargs = dict(nav_twin=_member_wants_nav_twin)
         account_state = await asyncio.wait_for(
             fetch_deribit_native_account_state(ctx.exchange),
             timeout=_BROKER_CRAWL_TIMEOUT_S,
@@ -8821,6 +10070,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 account_state=account_state,
                 pnl_basis=basis,
                 exclude_spot_extraction=exclude_spot,
+                **_twin_kwargs,
             ),
             timeout=_BROKER_CRAWL_TIMEOUT_S,
         )
@@ -8835,6 +10085,27 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             completeness.indexable_currencies,
             denominator_config=denominator_config,
         )
+        if mark_seq is not None:
+            # NAVMTM plan 09: the NAV-path ledger quantities, the same two plan 07 reads for a
+            # Deribit strategy. A NavReconstructionError here is the member's structural ledger
+            # failure and takes the existing permanent arm.
+            _indexable = completeness.indexable_currencies
+
+            def _deribit_apply_inputs() -> tuple[
+                dict[str, float], dict[str, float] | None, list[FlowInstant]
+            ]:
+                return (
+                    _iso_day_amounts(native_ledger_composed_flows(ledger, _indexable)),
+                    _iso_day_amounts(native_ledger_day_pnl(ledger, _indexable)),
+                    native_flow_instants(ledger, indexable_currencies=_indexable),
+                )
+
+            returns = await _apply_member_marks(ctx, mark_seq, returns, _deribit_apply_inputs)
+        if allocated_mark_seq is not None and denominator_config is not None:
+            returns = await _apply_allocated_member_marks(
+                allocated_mark_seq, returns, _alloc_marks, completeness, _member_wants_nav_twin,
+                denominator_config,
+            )
         _member_meta_out = dict(member_meta)
         # MED-01 (132 review): bridge the SMOOTHED-pass completeness's pre-retention
         # bucket into the returned member meta — single-key parity (the single-key
@@ -8855,7 +10126,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         return returns, bool(completeness.has_option_activity), _member_meta_out
 
     async def _reconstruct_ccxt_member(
-        ctx: Any, venue: str
+        ctx: Any, venue: str, mark_seq: int | None = None
     ) -> tuple[pd.Series, bool, dict[str, Any]]:
         """HARD-05 (Plan 93-04) — one ccxt (binance/okx/bybit) member's dense
         daily-return series reconstructed HONESTLY through the SAME derive-path
@@ -8962,8 +10233,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # unpriceable non-stable flow — the routing catches it and DEGRADES.
         # WEDGE-01: pure CPU-bound (ccxt_flows.py:164) — off the shared loop so it
         # cannot starve the healthz heartbeat (mirrors the deribit arm).
+        _flow_instants: list[FlowInstant] = []
         external_flows = await asyncio.to_thread(
-            ccxt_rows_to_dated_flows, _flow_rows, venue=venue, price_index=_price_index
+            ccxt_rows_to_dated_flows,
+            _flow_rows,
+            venue=venue,
+            price_index=_price_index,
+            instants=_flow_instants,
         )
 
         # FLOW-04 noise guard (Pitfall 5 / T-77-08): the open-uPnL wedge is only
@@ -9037,6 +10313,23 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         if returns.empty or int(returns.notna().sum()) < 2:
             raise _CcxtMemberDegrade("insufficient_history")
 
+        if mark_seq is not None:
+            # NAVMTM plan 09: this member's stored marks, applied on its own cash series with the
+            # flows this builder just used. The first mark's base comes from that mark's own
+            # wallet (plan 03 rule 3), so the live equity read is not an input. Placed after the
+            # degrade checks so a member that cannot be represented never reaches it.
+            def _ccxt_apply_inputs() -> tuple[
+                dict[str, float], dict[str, float] | None, list[FlowInstant]
+            ]:
+                _flows: dict[str, float] = {}
+                for _xf in external_flows or []:
+                    _flows[_xf.utc_day_iso] = _flows.get(_xf.utc_day_iso, 0.0) + float(
+                        _xf.usd_signed
+                    )
+                return _flows, None, _flow_instants
+
+            returns = await _apply_member_marks(ctx, mark_seq, returns, _ccxt_apply_inputs)
+
         # Cash basis only — has_option_activity is False for ccxt (no options book
         # signal; mark_to_market_available gates OFF non-native venues).
         return returns, False, dict(meta)
@@ -9045,6 +10338,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         basis: str,
         report_progress: bool = False,
         structural_degrade: bool = False,
+        apply_member_marks: bool = False,
     ) -> tuple[
         list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
         list[dict[str, Any]], list[dict[str, Any]],
@@ -9065,6 +10359,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         keep the cash+MTM composite) rather than sinking the whole job. The cash +
         MTM passes leave it False → their existing fail-loud permanent disposition
         is byte-unchanged.
+
+        NAVMTM plan 09: ``apply_member_marks`` is True on the CASH pass only; the
+        mark_to_market and smoothed passes leave it False, so those bases are not marked.
 
         PROG-02: when ``report_progress`` is True (the CASH pass only — Pitfall 1:
         the MTM second pass must NOT restart the per-member counter), publish
@@ -9245,6 +10542,26 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             # degrade and success terminal writes below.
             progress_by_seq[seq]["exchange"] = venue
             progress_by_seq[seq]["label"] = ctx.key_row.get("label")
+            # NAVMTM plan 09 (D-14, BLOCKER 1): the dispatch is on the RETURNS BASIS, never on
+            # whether a config exists. Only the Deribit member of a composite WITH a
+            # returns_denominator_config returns allocated-capital P&L (it mirrors the selector
+            # ``combine_native_ledger`` uses); every ccxt member, configured composite or not, and
+            # the Deribit member of an unconfigured composite return NAV changes and take the
+            # returns roll here. The allocated Deribit member (plan 17, D-14: no member is
+            # excluded from marks) takes the same marks on the NAV TWIN of its own crawl and the
+            # day-P&L roll (plan 16's rule, Bug B: its allocated ledger dropped the net-extraction
+            # legs, so it cannot give the NAV level a mark is measured against), via
+            # ``allocated_mark_seq``. Neither seq is set on the mark_to_market and smoothed
+            # passes. No exclusion flag exists.
+            _member_returns_are_allocated = (
+                venue == "deribit" and denominator_config is not None
+            )
+            _member_mark_seq: int | None = (
+                seq if apply_member_marks and not _member_returns_are_allocated else None
+            )
+            _member_allocated_mark_seq: int | None = (
+                seq if apply_member_marks and _member_returns_are_allocated else None
+            )
             if venue in _COMPOSITE_DEGRADE_VENUES:
                 # HARD-05 (Plan 93-04): try-reconstruct-then-degrade. ATTEMPT honest
                 # reconstruction of the ccxt (binance/okx/bybit) member through the
@@ -9260,8 +10577,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 # is no double-close.
                 try:
                     returns, has_opt, member_meta = await _reconstruct_ccxt_member(
-                        ctx, venue
+                        ctx, venue, mark_seq=_member_mark_seq
                     )
+                except MarkApplyRefusal as _mark_exc:
+                    # L3 (NAVMTM plan 09): a member whose stored marks cannot be applied stops
+                    # the whole composite. MUST precede the degrade and bare-Exception arms so a
+                    # refusal is never turned into a silent member degrade. The `finally` closes.
+                    return await _refuse_member_marks(seq, _mark_exc.token)
                 except _CcxtMemberDegrade as deg:
                     # FIX A / FIX B (Phase 93.1): the member reconstructed without a
                     # structural ledger error but is not honestly representable
@@ -9359,7 +10681,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
             try:
-                returns, has_opt, member_meta = await _reconstruct_deribit(ctx, basis)
+                returns, has_opt, member_meta = await _reconstruct_deribit(
+                    ctx,
+                    basis,
+                    mark_seq=_member_mark_seq,
+                    allocated_mark_seq=_member_allocated_mark_seq,
+                )
+            except (MarkApplyRefusal, _MemberNavUnreconciled) as _mark_exc:
+                # L3 (NAVMTM plan 09): see the ccxt arm. Only the cash pass applies marks, so the
+                # smoothed pass's structural re-raise below never meets this.
+                return await _refuse_member_marks(seq, _mark_exc.token)
             except asyncio.TimeoutError:
                 # WEDGE-01: a member crawl blew its per-crawl wait_for bound
                 # (_BROKER_CRAWL_TIMEOUT_S, set inside _reconstruct_deribit). Mirror
@@ -9447,7 +10778,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # 3. CASH_SETTLEMENT fan-out (always). PROG-02: report_progress=True ONLY on
     # the cash pass — the MTM second pass (below) stays default False so it can
     # never restart the per-member progress counter (Pitfall 1).
-    cash_result = await _reconstruct_all(cash_pnl_basis, report_progress=True)
+    cash_result = await _reconstruct_all(
+        cash_pnl_basis, report_progress=True, apply_member_marks=True
+    )
     if isinstance(cash_result, DispatchResult):
         return cash_result
     clipped_cash, member_signals, venues, member_metas, degraded_members = cash_result
@@ -9510,7 +10843,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     _coverage_input = list(clipped_cash) + [
         (int(d["seq"]), pd.Series(dtype="float64")) for d in degraded_members
     ]
-    mask = coverage_mask(_coverage_input)
+    # NAVMTM plan 09 (D-05, D-12): what the members' applied marks say about the stitched series.
+    # A day a member's mark return covers is neither a gap span nor a flat day; a real hole
+    # between members is not in this set, so it stays a gap span and stays 0.0-filled below. A
+    # degraded member never recorded marks (the seam runs after its degrade checks), and
+    # ``member_marked`` is empty when no member had a stored mark, which keeps every value below
+    # at today's.
+    _mark_summary = _composite_mark_summary(member_marked, _window_by_seq)
+    _covered = _mark_summary.covered_days
+    mask = coverage_mask(_coverage_input, covered_days=_covered)
 
     # 5. #5 collapse (D4): asset_class is THE annualization clock selector — the ONE
     # rule, periods_per_year_for_asset_class(strategies.asset_class) (√365 crypto /
@@ -9619,6 +10960,18 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         persist_basis_series,
     )
 
+    def _scalar_input_without_covered_days(
+        filled: pd.Series, covered: Sequence[str]
+    ) -> pd.Series:
+        """The densified scalar input minus the covered days (NAVMTM plan 09, D-05, D-15): a
+        covered day is inside the next mark's single return, so it is one observation with that
+        return and never a 0.0 observation of its own. Only covered days are removed; every other
+        absent day was 0.0-filled by ``gap_fill_daily_returns`` and stays so (a real hole)."""
+        if not covered:
+            return filled
+        covered_idx = pd.DatetimeIndex([pd.Timestamp(d) for d in covered]).as_unit("us")
+        return filled[~filled.index.isin(covered_idx)]
+
     # Collapse #1 (SC-1): the composite cash basis routes through the SAME shared
     # derive_basis_series as the single-key seam and the MTM arm — the bespoke
     # composite cash closure is DELETED (grep-gate). `stitched_cash` exists (:4206).
@@ -9639,8 +10992,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             # absent inter-member days to 0.0 (flat) while an in-index member-guard NaN
             # is surfaced as `nan_dates` so the round-trip guard reinstates the chain
             # break rather than 0.0-bridging it.
-            scalar_returns=gap_fill_daily_returns(stitched_cash),
+            scalar_returns=_scalar_input_without_covered_days(
+                gap_fill_daily_returns(stitched_cash), _covered
+            ),
             densify_policy="zero_fill",
+            # NAVMTM plan 09: None (byte-invisible) unless a member's marks applied.
+            covered_days=_covered if member_marked else None,
         )
     except ValueError as exc:
         # F-5 (convergence red team), re-homed onto derive_basis_series's ValueError:
@@ -10254,6 +11611,25 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["headline_since"] = _cash_basis_result.headline_since
     else:
         merged_flags.pop("headline_since", None)
+    # NAVMTM plan 09 (D-12): where the members' stored marks begin inside the stitched span and
+    # which days they skipped. Present-only; this path MERGES into the existing flags, so a
+    # re-stitch whose result lacks one POPS it (the ``headline_since`` pop's twin above), or a
+    # stale start date or gap list would outlive the stitch that computed it. Annotation only:
+    # neither is a NAV_TWR_GUARD_KEYS member, so none promotes computation_status.
+    if _mark_summary.marks_since is not None:
+        merged_flags["marks_since"] = _mark_summary.marks_since
+    else:
+        merged_flags.pop("marks_since", None)
+    if _mark_summary.mark_gap_days:
+        merged_flags["mark_gap_days"] = list(_mark_summary.mark_gap_days)
+    else:
+        merged_flags.pop("mark_gap_days", None)
+    # SFH round 2 N2: the earliest day any still-open member's rows stop before the day this run
+    # labels. A note like the two above (not a NAV_TWR_GUARD_KEYS member), popped when current.
+    if member_trailing:
+        merged_flags["marks_trailing_since"] = min(member_trailing.values())
+    else:
+        merged_flags.pop("marks_trailing_since", None)
     # HARD-05 (#): lift the degraded-member records (ccxt members excluded from the
     # stitch this phase) so the user SEES the exclusion on both DQ surfaces. Drop-stale
     # heals on re-stitch (mtm_gated_reason / insufficient_window mirror): an all-Deribit

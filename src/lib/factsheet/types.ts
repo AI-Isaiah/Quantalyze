@@ -717,6 +717,25 @@ export type FactsheetCommon = {
    */
   missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
   /**
+   * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 / D-12: the first day recorded
+   * (marked-to-market) equity begins, `YYYY-MM-DD`, parsed once by
+   * `parseMarksStart` (`src/lib/nav-marks-start.ts`, the only reader) from the
+   * published `data_quality_flags.marks_since` in `fetch-and-build-payload.ts`,
+   * or set by `buildAllocatorPortfolioFactsheetPayload` from the owner's own
+   * marks. The cumulative chart names the day when it falls inside the drawn
+   * range. Optional and absent by default: a payload cached before this field,
+   * a strategy with no marks and a malformed value all read as absent, which
+   * draws no note. The owner-only marks table is never read for a factsheet.
+   */
+  marksSince?: string | null;
+  /**
+   * The first day AFTER the last recorded mark when marks have stopped updating,
+   * `YYYY-MM-DD`, parsed by `parseMarksStart` from the published
+   * `data_quality_flags.marks_trailing_since`. The cumulative chart says "Marks
+   * paused from {date}". Absent by default, which draws nothing.
+   */
+  marksTrailingSince?: string | null;
+  /**
    * FS-03 — persisted per-basis headline scalars. `cash_settlement` drives the D3
    * cash-scalar overlay onto `strategyMetrics` (build-payload.ts). It is present on
    * a COMPOSITE payload (the stitch's persisted `metrics_json_by_basis` object) and,

@@ -70,6 +70,7 @@ from services.ingestion.long_fetch import (
 )
 from services.metrics import periods_per_year_for_asset_class
 from services.mt5_client import Mt5Client, Mt5ClientError, Mt5Session
+from services.nav_marks import StoredMark
 # ⚠️ Imported from the module that OWNS it (`services.mt5_client`), never through a
 # re-export — a name reached through a re-export is a DIFFERENT binding and an
 # assertion on it is a silent no-op (the 151 review-E2 rule). `job_worker`
@@ -996,6 +997,52 @@ async def test_balance_flow_with_none_profit_does_not_crash(monkeypatch) -> None
 
     # No TypeError crash — the evidence fold tolerated what the money fold does.
     assert result.outcome == DispatchOutcome.DONE
+
+
+_NO_INSTANT_LINE = "mt5 flow deals without a trustworthy instant keep their own day"
+
+
+@pytest.mark.asyncio
+async def test_a_flow_deal_without_a_trustworthy_instant_is_counted_in_one_warning(
+    monkeypatch, caplog
+) -> None:
+    """NAVMTM review-3 F1. The BALANCE deposit of 2025-06-04 carries a boolean ``time_msc``, which
+    is no instant (FLOWTIMING D-07), so it keeps its own day and nothing is defaulted. If it really
+    landed before the read of the mark of 2025-06-03 (the read day is 06-04), that mark books it as
+    profit and the day books it again, and nothing used to record that it could. One WARNING names
+    how many deals have no instant and how many of them fall on a mark's read day. The same
+    derive with a good ``time_msc`` on every deal logs no such line."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    mark = StoredMark(
+        "2025-06-03", "2025-06-04T00:10:00+00:00", "mt5", 100_400.0, 0.0, 100_400.0, "USD", 0.0
+    )
+
+    async def _derive(deals: list[dict]) -> None:
+        transport = _FakeMt5Transport(
+            account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
+            deals=deals,
+        )
+        ctx, _capture = _build_ctx(transport)
+        with _apply(_patches(ctx)), patch(
+            "services.job_worker.read_key_marks", new=MagicMock(return_value=[mark])
+        ):
+            await run_derive_broker_dailies_job(_job())
+
+    bad = _canonical_deals()
+    bad[1] = {**bad[1], "time_msc": True}
+    with caplog.at_level("WARNING", logger="quantalyze.analytics.job_worker"):
+        await _derive(bad)
+    lines = [r for r in caplog.records if _NO_INSTANT_LINE in r.getMessage()]
+    assert len(lines) == 1
+    assert lines[0].levelname == "WARNING"
+    assert "deals=1 on_a_mark_read_day=1" in lines[0].getMessage()
+
+    caplog.clear()
+    good = _canonical_deals()
+    good[1] = {**good[1], "time_msc": good[1]["time"] * 1000}
+    with caplog.at_level("WARNING", logger="quantalyze.analytics.job_worker"):
+        await _derive(good)
+    assert not [r for r in caplog.records if _NO_INSTANT_LINE in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------

@@ -313,8 +313,10 @@ def _recording_ledger(
     on the second (MTM) call."""
     calls: list[dict] = []
 
+    # ``nav_twin``: an allocated-capital derive asks the CASH pass for the NAV twin (NAVMTM
+    # plan 16, D-14) and passes the keyword only then; this stand-in builds none.
     async def _impl(exchange: Any, *, account_state: Any, pnl_basis: str,
-                    exclude_spot_extraction: bool) -> Any:
+                    exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
         idx = len(calls)
         calls.append({"pnl_basis": pnl_basis, "account_state": account_state})
         if side_effects is not None and idx < len(side_effects):

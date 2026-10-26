@@ -75,6 +75,22 @@ class ExternalFlow(NamedTuple):
     quantity: float | None = None
 
 
+class FlowInstant(NamedTuple):
+    """One flow at the instant its raw venue row carries (NAVMTM D-23).
+
+    The day-keyed ``ExternalFlow`` and the per-day flow series collapse every flow of a UTC day
+    into one amount. ``apply_marks`` needs the instant to say which side of a mark's read a flow
+    fell on, so a producer that already walks the raw rows also states one ``FlowInstant`` per
+    row. ``day`` is the UTC day key the day aggregate files the row under, and ``amount`` is in
+    the unit of that aggregate (``currency`` names it only for a Deribit native quantity, where
+    the caller values it at the day mark)."""
+
+    at_ms: int
+    day: str
+    amount: float
+    currency: str = "USD"
+
+
 def validate_flow_shape(flow: ExternalFlow) -> ExternalFlow:
     """OPTIONAL shape-only validation of an ``ExternalFlow`` (FLOW-01, T-75-01).
 

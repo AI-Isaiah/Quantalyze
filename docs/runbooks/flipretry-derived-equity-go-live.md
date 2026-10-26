@@ -185,6 +185,9 @@ SELECT cron.schedule(
 > ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** Step 6 moved to `docs/runbooks/derivecron-go-live.md` (its Steps B and C), decisions D-02 and D-04. The orchestrator runs it, not the founder by hand, behind a database-marker guard and a readback. The "never a migration" rule STANDS. Once Step B there has run, live pg_cron state and git agree again (the paragraph above about them diverging intentionally describes 2026-07 to 2026-10). The re-registration is followed in the same session by a manifest re-capture so the cron-drift oracle learns the job.
 
 - **Verify:** `SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'derive-allocator-key-dailies';` shows the job scheduled at `30 5 * * *`.
+  > **MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03):** after the live move recorded in
+  > `docs/runbooks/navmtm-chain-move-go-live.md` the same query reads `40 0 * * *`; `30 5 * * *`
+  > is the schedule of the original registration.
 
 ---
 

@@ -636,6 +636,17 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // GDPR Art. 15 requires they be part of the user's export.
   { kind: "direct", table: "allocator_holdings", user_column: "allocator_id" },
   { kind: "direct", table: "allocator_preferences", user_column: "user_id" },
+  // 2026-10-26 (Phase 167.2.1.1.1 NAVMTM plan 02, D-01): api_key_nav_marks is
+  // user-owned via allocator_id (= api_keys.user_id, enforced by the
+  // enforce_api_key_nav_marks_owner_coherence trigger). Each row is the
+  // owner's marked-to-market NAV and open profit for one key and day, the same
+  // sensitivity class as allocator_equity_snapshots.value_usd, so GDPR Art. 15
+  // requires it in the export. Erasure is the ON DELETE CASCADE from auth.users
+  // and from api_keys (D-06), recorded in SANITIZE_PARITY_ALLOWLIST in
+  // scripts/check-gdpr-export-coverage.ts. The table has a surrogate `id`
+  // identity column, so the `.order("id")` fallback is valid and it needs no
+  // ORDER_COLUMN_OVERRIDES entry.
+  { kind: "direct", table: "api_key_nav_marks", user_column: "allocator_id" },
   // api_keys is exported as a REDACTED projection: GDPR Art. 15
   // entitles the user to know which keys exist on their account, but
   // not to receive the encrypted credential blob (which is internal

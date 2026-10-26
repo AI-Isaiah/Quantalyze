@@ -388,6 +388,21 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "PRESERVE-historical: exchange position/balance snapshots tied to the anonymized profile; no standalone PII. Matches the position_snapshots PRESERVE policy in the existing matrix.",
   },
+  // api_key_nav_marks: Phase 167.2.1.1.1 NAVMTM plan 02 (migration
+  // 20261029120000, D-01 / D-06) — the per-key per-day marked-to-market NAV
+  // store. Declares `allocator_id UUID NOT NULL REFERENCES auth.users(id) ON
+  // DELETE CASCADE` AND `api_key_id UUID NOT NULL REFERENCES api_keys(id) ON
+  // DELETE CASCADE`, so every row is erased when the auth user is deleted
+  // during sanitize, and when a single key is deleted (the CASCADE IS the
+  // erasure mechanism; the table comment forbids a delete-guard trigger
+  // without a sanitize_in_progress exemption). service_role holds no DELETE
+  // privilege on it, and the SQL gate (supabase/tests/test_api_key_nav_marks.sql
+  // arms 6 and 7) proves both cascades still run. Mirrors the
+  // allocator_equity_derived CASCADE-erasure allowlist pattern.
+  api_key_nav_marks: {
+    reason:
+      "Per-key per-day marked-to-market NAV store (migration 20261029120000). ON DELETE CASCADE from auth.users erases every row when the user is sanitized, and ON DELETE CASCADE from api_keys erases a deleted key's rows. No explicit sanitize_user matrix row needed; mirrors the allocator_equity_derived CASCADE-erasure allowlist pattern.",
+  },
   // bridge_outcomes / bridge_outcome_dismissals: cross-party bridge
   // surfaces. Matching the contact_requests PRESERVE pattern - the
   // anonymized profile's identity is non-resolvable once

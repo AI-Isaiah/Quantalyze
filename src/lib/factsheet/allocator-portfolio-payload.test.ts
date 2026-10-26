@@ -324,3 +324,77 @@ describe("buildAllocatorPortfolioFactsheetPayload — the dashboard's BTC closes
     expect(btc.through ?? null).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the embedded portfolio factsheet's
+// cumulative chart follows the same start-of-marks rule as the Equity curve
+// widget above it, so the dashboard's start day rides in as an optional meta
+// field and lands on `payload.marksSince`. Dates are synthetic.
+// ---------------------------------------------------------------------------
+describe("buildAllocatorPortfolioFactsheetPayload - marksStart (NAVMTM D-08)", () => {
+  const isoDay = (startIso: string, i: number) =>
+    new Date(Date.parse(`${startIso}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10);
+  const book: DailyReturn[] = Array.from({ length: 30 }, (_, i) => ({
+    date: isoDay("2026-02-01", i),
+    value: i % 2 === 0 ? 0.004 : -0.002,
+  }));
+  const build = (marksStart?: unknown) =>
+    buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      dailyReturns: book,
+      ...(marksStart === undefined ? {} : { marksStart }),
+    });
+
+  it("a start day in the meta becomes payload.marksSince", () => {
+    expect(build("2026-02-10")!.marksSince).toBe("2026-02-10");
+  });
+
+  it("the payload is still the allocator portfolio, so the chart's caption takes the multi-account form", () => {
+    expect(build("2026-02-10")!.strategyTypes).toContain("allocator_portfolio");
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["null", null],
+    ["an impossible day", "2026-02-30"],
+    ["a number", 20260210],
+  ])("%s reads null, never a date", (_label, value) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(build(value)!.marksSince ?? null).toBeNull();
+  });
+});
+
+// SFH-2 N1: the dashboard's earliest paused-marks day rides in beside the start
+// and lands on `payload.marksTrailingSince`, parsed by the same reader.
+describe("buildAllocatorPortfolioFactsheetPayload - marksTrailingSince (SFH-2 N1)", () => {
+  const isoDay = (startIso: string, i: number) =>
+    new Date(Date.parse(`${startIso}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10);
+  const book: DailyReturn[] = Array.from({ length: 30 }, (_, i) => ({
+    date: isoDay("2026-02-01", i),
+    value: i % 2 === 0 ? 0.004 : -0.002,
+  }));
+  const build = (marksTrailingSince?: unknown, marksStart?: unknown) =>
+    buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      dailyReturns: book,
+      ...(marksTrailingSince === undefined ? {} : { marksTrailingSince }),
+      ...(marksStart === undefined ? {} : { marksStart }),
+    });
+
+  it("a paused-marks day in the meta becomes payload.marksTrailingSince, with or without a start", () => {
+    expect(build("2026-02-20")!.marksTrailingSince).toBe("2026-02-20");
+    const both = build("2026-02-20", "2026-02-10")!;
+    expect(both.marksTrailingSince).toBe("2026-02-20");
+    expect(both.marksSince).toBe("2026-02-10");
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["null", null],
+    ["an impossible day", "2026-02-30"],
+    ["a number", 20260220],
+  ])("%s reads no key at all", (_label, value) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect("marksTrailingSince" in build(value)!).toBe(false);
+  });
+});

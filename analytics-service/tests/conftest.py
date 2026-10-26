@@ -119,6 +119,39 @@ def _handover_recorder_never_reaches_a_real_project(monkeypatch):
     yield
 
 
+# Phase 167.2.1.1.1 NAVMTM plan 06 (2026-10-26): every derive of an OKX, Deribit, MT5 or sFOX
+# key now stores that key's marked NAV through `nav_marks.write_nav_mark`, which INSERTS and
+# then RE-SELECTS the stored row. The ~35 suites that drive `run_derive_broker_dailies_job`
+# over a MagicMock supabase were written before it: their `.execute().data` is a MagicMock, so
+# the re-select finds no row and the writer (correctly) raises. Unpatched, each of them would
+# have to learn a table it is not about. The default here is the writer as if THIS derive's read
+# won the day (the stored row equals the read), with no database call. A suite that is ABOUT the
+# marks (`test_nav_marks_writer.py`, `test_nav_marks_reads.py`) re-binds the real function in
+# its own autouse function-scoped fixture, which runs after this module-scoped one, so its
+# binding wins and is undone back to this default.
+@pytest.fixture(autouse=True, scope="module")
+def _nav_mark_write_defaults_to_this_reads_row():
+    from services import job_worker, nav_marks
+
+    def _write_as_first_writer(supabase, read, *, api_key_id, allocator_id):
+        return nav_marks.StoredMark(
+            mark_day=read.mark_day.isoformat(),
+            marked_at=read.marked_at.isoformat(),
+            venue=read.venue,
+            nav_usd=read.nav_usd,
+            open_pnl_usd=read.open_pnl_usd,
+            nav_native=read.nav_native,
+            native_unit=read.native_unit,
+        )
+
+    # MODULE scope on purpose: several suites run their derive inside a module-scoped
+    # fixture, which a function-scoped patch would not cover. A test's own function-scoped
+    # `monkeypatch.setattr` still wins and is undone back to this default.
+    with pytest.MonkeyPatch.context() as module_patch:
+        module_patch.setattr(job_worker, "write_nav_mark", _write_as_first_writer)
+        yield
+
+
 # Phase 164.6.6.1 plan 06 (2026-10-04): both validate sites now SCHEDULE the
 # validation-terminal scrub after their verdict, so every test that drives a
 # validation past its login spawns a real background scrub task. Unpatched, that

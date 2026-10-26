@@ -185,7 +185,9 @@ git status --short
 Step 2 ends with a commit on a branch that is later merged. A merge to `main` redeploys the
 analytics service, which would cut a running `cron_sync` request and strand in-flight derives on
 the backfill service. On a trade-sync tick day, merge nothing to `main`, from any phase, from
-04:00 UTC to 05:45 UTC. The registration itself (Steps 1 and 2) deploys nothing and can run at
+04:00 UTC to 05:45 UTC (**MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03):** from the live move
+recorded in `docs/runbooks/navmtm-chain-move-go-live.md` the window is 00:00 UTC to 01:45 UTC; before that move this one applies).
+The registration itself (Steps 1 and 2) deploys nothing and can run at
 any time outside that window; only the later merge of the manifest branch is held.
 
 ---

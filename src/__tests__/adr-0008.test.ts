@@ -132,16 +132,32 @@ describe("ADR-0008 reads (guard the guard)", () => {
 });
 
 describe("ADR-0008 job inventory names the daily trade-sync tick", () => {
-  it("has a table row for cron-sync-trades at 30 4 * * * calling /api/cron-sync", () => {
+  it("has a table row for cron-sync-trades at 10 0 * * * calling /api/cron-sync", () => {
     const adr = readAdr();
     const inventory = adr.slice(anchorIndex(adr, "### Job inventory"));
     const row = inventory
       .split("\n")
       .find((l) => l.startsWith("|") && l.includes("cron-sync-trades"));
     expect(row, "no inventory row mentions cron-sync-trades").toBeDefined();
-    expect(row).toContain("30 4 * * *");
+    expect(row).toContain("10 0 * * *");
     expect(row).toContain("/api/cron-sync");
     expect(row).toMatch(/pg_cron/);
+  });
+
+  it("records the NAVMTM move beside the row: a dated note naming D-03 (the slot) and D-02 (every eligible strategy)", () => {
+    // WHY. The schedule lives in PROD cron.job and the committed manifest, not in
+    // code, so the only record of WHY the tick moved from 04:30Z to just after
+    // 00:00Z is this note. A bare schedule edit would leave the ADR giving a
+    // time with no reason and no pointer to the decision that changed it.
+    const note = paragraphs(readAdr()).find(
+      (p) =>
+        /CHANGED \d{4}-\d{2}-\d{2}/.test(p) &&
+        p.includes("cron-sync-trades") &&
+        p.includes("D-03") &&
+        p.includes("D-02"),
+    );
+    expect(note, "no dated CHANGED note names cron-sync-trades with D-03 and D-02").toBeDefined();
+    expect(note).toMatch(/every eligible strategy/);
   });
 
   it("states the D-13 exclusions beside the row: what the tick does NOT read, and why", () => {

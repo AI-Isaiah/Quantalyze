@@ -250,8 +250,18 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * dated `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the
  * re-dump taken after the apply); the finding is EXPECTED until that re-dump. Raising this floor
  * records the function joining the corpus; it does NOT suppress that finding.
+ *
+ * MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM plan 02), 133 -> 134: one ADDITION, not a removal.
+ * `public.enforce_api_key_nav_marks_owner_coherence()` enters the chain via forward migration
+ * 20261029120000_api_key_nav_marks.sql. MEASURED by `node scripts/baseline-content-drift-check.mjs`
+ * on this tree: `functions compared 134 — MATCH 130, DRIFT 3, SNAPSHOT_MISSING 1`. The one
+ * SNAPSHOT_MISSING finding is `enforce_api_key_nav_marks_owner_coherence/0`, whose migration is not
+ * on PROD yet (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in
+ * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply); the finding is
+ * EXPECTED until that re-dump. Raising this floor records the function joining the corpus; it does
+ * NOT suppress that finding.
  */
-export const COMPARED_FLOOR = 133;
+export const COMPARED_FLOOR = 134;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

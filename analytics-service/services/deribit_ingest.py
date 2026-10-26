@@ -34,7 +34,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
@@ -56,6 +56,7 @@ from services.deribit_txn import (
     assert_balance_identity,
     classify_instrument,
     deribit_dated_external_flows_usd,
+    deribit_flow_instants,
     inverse_days_needing_index,
     option_mtm_daily,
     replay_option_positions,
@@ -999,6 +1000,15 @@ class CompletenessReport:
     # never fails silently. Both default ``None`` so every existing constructor stays valid.
     ledger_digest: Mapping[str, Any] | None = None
     ledger_digest_error: str | None = None
+    # Phase 167.2.1.1.1 (NAVMTM D-14) — the realized NAV twin of an ALLOCATED-capital build,
+    # set by ``build_deribit_native_ledger(..., nav_twin=True)`` and ``None`` otherwise. Same
+    # crawl, same marks, flows, account state and terminal wedge as the allocated ledger; only
+    # ``native_pnl`` differs (the net-extraction spot legs are KEPT, so section 5 can close).
+    # If the twin could not be built, ``nav_twin_ledger`` stays ``None`` and ``nav_twin_error``
+    # carries the exception CLASS NAME: the twin is additive and never fails the build. Both
+    # default ``None`` so every existing constructor stays valid.
+    nav_twin_ledger: NativeLedger | None = None
+    nav_twin_error: str | None = None
 
 
 def deribit_ledger_digest(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1780,6 +1790,61 @@ def _cash_basis_wedge(state: DeribitNativeAccountState, ccy: str) -> float:
     )
 
 
+def _cash_wedge_currencies(state: DeribitNativeAccountState) -> set[str]:
+    """The currencies the cash-settlement terminal carries a wedge for: every currency the read
+    reported a session uPnL, an options value or a balance for. One definition, so the terminal
+    the ledger rolls from and the open profit a mark stores (:func:`cash_basis_open_profit_usd`)
+    can never be summed over different sets."""
+    return (
+        {str(c).upper() for c in state.native_upnl}
+        | {str(c).upper() for c in state.native_options_value}
+        | {str(c).upper() for c in state.native_balance}
+    )
+
+
+def cash_basis_open_profit_native(state: DeribitNativeAccountState) -> dict[str, float]:
+    """The account's open profit per currency in NATIVE units, NAV minus wallet (NAVMTM D-21):
+    ``_cash_basis_wedge(state, ccy)`` for every currency the cash terminal carries a wedge for,
+    sorted by currency. Stored as ``native_detail["open_profit"]`` beside the mark."""
+    return {c: _cash_basis_wedge(state, c) for c in sorted(_cash_wedge_currencies(state))}
+
+
+def cash_basis_open_profit_usd(state: DeribitNativeAccountState) -> float | None:
+    """The account's open profit in USD, NAV minus wallet (NAVMTM D-21), from the SAME read the
+    mark's NAV came from: ``sum over currencies of _cash_basis_wedge(state, ccy) x that
+    currency's USD index``. A USD-family currency is already dollars (index 1.0, as in
+    ``deribit_equity_to_usd``); any other uses ``state.index_usd_snapshot``, the index the read
+    priced itself at.
+
+    Why this and not the combined session uPnL the mark used to store: Deribit documents
+    ``equity`` as "balance + futures (session UPL + RPL) + options mark value"
+    (https://docs.deribit.com/api-reference/account-management/private-get_account_summary), so
+    ``equity - balance`` is everything the NAV holds above the cash wallet, the option book's
+    value and the accrued session RPL included, while the session uPnL holds neither. It is the
+    rule the cash-settlement terminal already uses (``_cash_basis_wedge``), so the stored NAV
+    minus the stored open profit is the wallet the ledger rolls its realized series from, and the
+    first marked day's step (D-04) is exactly the open profit stored.
+
+    ``None`` when a currency whose wedge is not zero has no finite index in the read, or when a
+    wedge is not finite: nothing is priced at zero or at another currency's index, the caller
+    refuses the mark. A currency with a zero wedge needs no index."""
+    total = 0.0
+    for ccy in sorted(_cash_wedge_currencies(state)):
+        wedge = _cash_basis_wedge(state, ccy)
+        if not math.isfinite(wedge):
+            return None
+        if wedge == 0.0:
+            continue
+        if ccy in USD_FAMILY:
+            total += wedge
+            continue
+        price = state.index_usd_snapshot.get(ccy)
+        if price is None or not math.isfinite(float(price)):
+            return None
+        total += wedge * float(price)
+    return total
+
+
 def _state_from_summaries(
     summaries: Sequence[Any],
     index_prices: Mapping[str, float],
@@ -2432,6 +2497,7 @@ async def build_deribit_native_ledger(
     sleep: SleepFn = asyncio.sleep,
     pnl_basis: str = DEFAULT_PNL_BASIS,
     exclude_spot_extraction: bool = False,
+    nav_twin: bool = False,
 ) -> tuple[NativeLedger, CompletenessReport]:
     """Assemble a :class:`~services.native_nav.NativeLedger` for the landed Phase-79
     native core from existing Deribit parts + the 80-01 siblings (NAT-04). It
@@ -2460,7 +2526,26 @@ async def build_deribit_native_ledger(
     :func:`assert_ledger_complete` on the report (the adapter never swallows it).
     The collapsed USD anchor stays available via
     :func:`fetch_deribit_native_account_state` for the 80-04 parity panel.
+
+    NAVMTM D-14 (``nav_twin=True``, ALLOCATED mode only): an allocated-capital account's
+    returns follow its key's marked NAV from the first mark, so the derive needs that
+    account's realized NAV LEVEL, and the allocated ledger cannot give it: Bug B drops both
+    legs of every net-extraction spot pair from ``native_pnl``, so its NAV roll fails the
+    section-5 inception gate and drifts by every extraction inside a roll span. The twin
+    re-aggregates the crawl's OWN raw rows with ``exclude_spot_extraction=False`` (and merges
+    the same smoothed ΔMTM book when that basis is on), runs ``assert_balance_identity`` on
+    it in NAV mode, and returns it as ``report.nav_twin_ledger``. It makes NO venue call and
+    no second crawl: the marks, flows, account state and terminal wedge are the allocated
+    ledger's own objects, reused and never rebuilt, so the allocated path cannot move. A twin
+    that cannot be built (a ``LedgerValuationError`` from its aggregation or identity) never
+    fails the build: ``nav_twin_ledger`` stays ``None`` and ``nav_twin_error`` names the class.
     Leak: no raw balances/marks/flows logged."""
+    if nav_twin and not exclude_spot_extraction:
+        raise ValueError(
+            "nav_twin=True needs exclude_spot_extraction=True: the NAV path "
+            "(exclude_spot_extraction=False) already keeps the extraction legs and is its "
+            "own twin"
+        )
     # WR-05: the smoothed replay reconstructs ABSOLUTE option positions from the
     # signed post-trade ``position`` field, so it is only correct over the FULL
     # history (Deribit's txn-log reaches inception — ``full_history=True``
@@ -2669,13 +2754,8 @@ async def build_deribit_native_ledger(
     if pnl_basis in (PNL_BASIS_MARK_TO_MARKET, PNL_BASIS_SMOOTHED_MTM):
         terminal_upnl_native: Mapping[str, float] = state.native_upnl
     else:
-        _wedge_ccys = (
-            {str(c).upper() for c in state.native_upnl}
-            | {str(c).upper() for c in state.native_options_value}
-            | {str(c).upper() for c in state.native_balance}
-        )
         terminal_upnl_native = {
-            c: _cash_basis_wedge(state, c) for c in _wedge_ccys
+            c: _cash_basis_wedge(state, c) for c in _cash_wedge_currencies(state)
         }
     ledger = NativeLedger(
         native_pnl=native_pnl,
@@ -2684,7 +2764,62 @@ async def build_deribit_native_ledger(
         native_flows=native_flows,
         terminal_upnl_native=terminal_upnl_native,
         full_history=True,
+        flow_instants=tuple(deribit_flow_instants(raw_rows)),
     )
+    if nav_twin:
+        # NAVMTM D-14: the allocated ledger above is final and untouched. The twin differs
+        # ONLY in ``native_pnl`` (extraction legs kept); everything else is reused verbatim.
+        try:
+            twin_daily = txn_rows_to_native_daily(
+                raw_rows, pnl_basis=pnl_basis, exclude_spot_extraction=False
+            )
+            twin_series_daily = twin_daily
+            if smoothed_delta_mtm:
+                twin_series_daily = {ccy: dict(days) for ccy, days in twin_daily.items()}
+                for ccy, day_map in smoothed_delta_mtm.items():
+                    bucket = twin_series_daily.setdefault(ccy, {})
+                    for day, change in day_map.items():
+                        bucket[day] = bucket.get(day, 0.0) + change
+            # A currency only the twin carries (an extraction-only USDC leg) needs its own
+            # tolerance floor, by the same rule as the allocated one above.
+            twin_floor = dict(native_floor)
+            for ccy in set(twin_daily) - set(native_floor):
+                if ccy in USD_FAMILY:
+                    twin_floor[ccy] = 1.0
+                    continue
+                twin_mark_series = marks.get(ccy)
+                if twin_mark_series is not None and len(twin_mark_series) > 0:
+                    twin_anchor_mark = float(twin_mark_series.iloc[-1])
+                    if twin_anchor_mark > 0:
+                        twin_floor[ccy] = 1.0 / twin_anchor_mark
+            assert_balance_identity(
+                raw_rows, twin_daily, native_floor=twin_floor, open_option_ccys=open_opt,
+                exclude_spot_extraction=False, pnl_basis=pnl_basis,
+                terminal_book=(
+                    smoothed_terminal_book
+                    if pnl_basis == PNL_BASIS_SMOOTHED_MTM
+                    else None
+                ),
+                native_options_value=state.native_options_value,
+                native_options_session_upl=state.native_options_session_upl,
+                option_delta_mtm=smoothed_delta_mtm,
+            )
+            report.nav_twin_ledger = replace(
+                ledger,
+                native_pnl={
+                    ccy: _native_daily_to_series(day_map)
+                    for ccy, day_map in twin_series_daily.items()
+                },
+            )
+        except LedgerValuationError as exc:
+            # W1: only the twin steps are inside this wrapper. The allocated ledger is already
+            # built and verified above and is returned as without a twin; the derive decides
+            # what a missing twin means for it.
+            report.nav_twin_error = type(exc).__name__
+            logger.warning(
+                "build_deribit_native_ledger: nav twin unbuildable (error=%s)",
+                type(exc).__name__,
+            )
     return ledger, report
 
 

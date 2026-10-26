@@ -88,3 +88,38 @@ describe("compute() with calendarDense: the risk statistics over the zero-filled
     }
   });
 });
+
+/**
+ * 167.2.1.1.1 round-1 WR-01 (D-15). After marks start, an absent day inside a
+ * composite is either a real inter-member hole (a persisted gap span: the server
+ * zero-fills it) or a day a mark's single return covers (the server drops it: one
+ * observation). Offsets 7 and 8 are the hole here; 3 and 13 are covered days. The
+ * server's scalar input is the calendar twin WITHOUT the covered days, built by hand.
+ */
+describe("calendarDense with the persisted gap spans: a covered day is dropped, a gap day is filled (D-15, WR-01)", () => {
+  const GAPS = [{ start: addDays("2025-02-01", 7), end: addDays("2025-02-01", 8) }];
+  const SERVER_INPUT = TWIN.filter((_, o) => o !== 3 && o !== 13);
+
+  it("zero-fills only the days inside a span; positions index the shorter series", () => {
+    const b = metricsBasisSeries(RETS, DATES, { calendarDense: true, missingSegments: GAPS });
+    expect(b.returns).toEqual(SERVER_INPUT);
+    expect(b.positions).toEqual([0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13]);
+  });
+
+  it("an empty span list drops every absent day; no span list fills every one (the legacy form)", () => {
+    expect(metricsBasisSeries(RETS, DATES, { calendarDense: true, missingSegments: [] }).returns).toEqual(RETS);
+    expect(metricsBasisSeries(RETS, DATES, { calendarDense: true }).returns).toEqual(TWIN);
+  });
+
+  it("ann_vol, sharpe and sortino equal compute() of the server's scalar input", () => {
+    const got = compute(RETS, DATES, 0, P, { calendarDense: true, missingSegments: GAPS });
+    const want = compute(SERVER_INPUT, SERVER_INPUT.map((_, i) => addDays("2025-02-01", i)), 0, P);
+    for (const k of ["ann_vol", "sharpe", "sortino"] as const) expect(got[k], k).toBeCloseTo(want[k], 12);
+  });
+
+  it("still throws on a decreasing date", () => {
+    const back = [...DATES];
+    back[6] = addDays(DATES[0], 1);
+    expect(() => metricsBasisSeries(RETS, back, { calendarDense: true, missingSegments: GAPS })).toThrow(/strictly increasing/);
+  });
+});

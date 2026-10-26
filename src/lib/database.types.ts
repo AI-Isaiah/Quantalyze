@@ -333,6 +333,72 @@ export type Database = {
           },
         ]
       }
+      // 2026-10-26 (Phase 167.2.1.1.1 NAVMTM plan 02): api_key_nav_marks is
+      // hand-added from migration 20261029120000, which has NOT applied to PROD
+      // yet. A regen against the linked PROD project drops it until it does;
+      // re-apply it then. Only the api_keys foreign key is listed: the
+      // generator does not list foreign keys into the auth schema (the
+      // allocator_id foreign key to auth.users), as allocator_equity_derived
+      // shows.
+      api_key_nav_marks: {
+        Row: {
+          allocator_id: string
+          api_key_id: string
+          created_at: string
+          id: number
+          mark_day: string
+          marked_at: string
+          nav_native: number | null
+          nav_usd: number
+          native_detail: Json | null
+          native_unit: string | null
+          open_pnl_native: number | null
+          open_pnl_usd: number
+          price_day: string | null
+          venue: string
+        }
+        Insert: {
+          allocator_id: string
+          api_key_id: string
+          created_at?: string
+          id?: never
+          mark_day: string
+          marked_at: string
+          nav_native?: number | null
+          nav_usd: number
+          native_detail?: Json | null
+          native_unit?: string | null
+          open_pnl_native?: number | null
+          open_pnl_usd: number
+          price_day?: string | null
+          venue: string
+        }
+        Update: {
+          allocator_id?: string
+          api_key_id?: string
+          created_at?: string
+          id?: never
+          mark_day?: string
+          marked_at?: string
+          nav_native?: number | null
+          nav_usd?: number
+          native_detail?: Json | null
+          native_unit?: string | null
+          open_pnl_native?: number | null
+          open_pnl_usd?: number
+          price_day?: string | null
+          venue?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_key_nav_marks_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       api_keys: {
         Row: {
           account_balance_native: number | null
