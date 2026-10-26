@@ -203,6 +203,11 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.6.1.1: ANONKEYID — anonymous visitors can no longer read strategies.api_key_id** (INSERTED 2026-10-13) — 8 plans, two PRs (PR-A readers first, PR-B revoke after PR-A's Vercel deploy is READY; O-1) (founder, security) (completed 2026-10-15); shipped v0.131.4.2 (#1025) and v0.131.11.0 (#1040); verification passed, security secured 32/32
 - [x] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — 4 plans, shipped v0.131.4.0 (#1023) (completed 2026-10-14); closed 2026-10-14 (records PR)
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
+- [ ] **Phase 171: READCEILING — an account above the trade-read ceiling is read in full** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
+- [ ] **Phase 172: OKXANCHOR — an OKX account's history rebuild gets a plausible balance anchor** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
+- [ ] **Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
+- [ ] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
+- [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6390,6 +6395,91 @@ Plans:
 - [x] 170.1.2-09: venue display names in the degraded-member lines and wizard member names (wave 2)
 - [x] 170.1.2-10: phase gate, label and id sweep; SC-4 and SC-5 orchestrator-owned (wave 3)
 
+### Phase 171: READCEILING — an account above the trade-read ceiling is read in full
+
+**Goal:** An allocator account whose trade history exceeds the rebuild's trade-read ceiling is read in full within a bounded budget, or refused with a named reason a later run can clear, instead of refusing on every attempt and never getting a history.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.2.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 from TRADEPAGES plan 06 (founder 2026-10-26 "Rebuild none, book follow-ups (Recommended)"; founder 2026-10-27 "You can use add"). Evidence: the 2026-10-26 PROD probe read a6 for 127471 trades in 1378 calls and ended `truncated`; TODOS `167.2.1.1.2.1-READ-CEILING-STRANDS-ACCOUNT`. Data integrity, user-facing.
+
+**Success Criteria** (what must be TRUE):
+1. An a6-shaped account (a Bybit member plus other venues, 730-day window) is read in full within a bounded budget, or refused with a named reason a later run can clear.
+2. Tests go RED on the current ceiling behaviour (a truncated read that refuses on every attempt).
+3. After deploy the TRADEPAGES probe re-reads a6 and the outcome is recorded (counts and tokens only).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 172: OKXANCHOR — an OKX account's history rebuild gets a plausible balance anchor
+
+**Goal:** The history rebuild for an OKX-backed account finds why its balance anchor is judged implausible and either anchors correctly or refuses with the true reason.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.2.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 from TRADEPAGES plan 06 (same founder decisions as Phase 171). Evidence: the 2026-10-26 probe read a4 (OKX, 90-day window) for 1282 trades over 22 calls and refused `anchor_skipped_implausible`; TODOS `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`. Data integrity.
+
+**Success Criteria** (what must be TRUE):
+1. The root cause of a4's `anchor_skipped_implausible` refusal is named from a read-only measurement.
+2. An OKX account with a correct balance anchors and rebuilds; a truly implausible anchor still refuses by name; tests go RED on the old behaviour.
+3. After deploy the probe re-reads a4 and the outcome is recorded.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live
+
+**Goal:** The two gates that block any OKX or Bybit history rebuild are measured on the live worker: OKX's trade ordering on a multi-page read, and how far back Bybit serves deposits and withdrawals.
+**Requirements**: TBD
+**Depends on:** Phase 171, Phase 172
+**Plans:** 0 plans
+
+Booked 2026-10-27 from TRADEPAGES plan 06 (same founder decisions as Phase 171). TODOS `167.2.1.1.2.1-OKX-ORDER-UNMEASURED` and `167.2.1.1.2.1-BYBIT-TRANSFER-DEPTH-UNMEASURED`. Data integrity.
+
+**Success Criteria** (what must be TRUE):
+1. A multi-page OKX read records at least one ordering reading, so the TRADEPAGES gate reads `okx-order: ok` or `violated`, never `unmeasured`.
+2. Bybit deposit and withdrawal depth older than 365 days is measured per kind on a 730-day account.
+3. The gates' outcome decides, with the founder, which stored OKX and Bybit histories are rebuilt.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record
+
+**Goal:** A strategy whose marks have paused no longer triggers the hourly ledger re-crawl, and the reason a mark was refused is kept where only the owner (or an admin) can read it, never in public flags.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 from NAVMTM 167.2.1.1.1 review (REVIEW-2 WR-03, SFH F3 / REVIEW-2 WR-04, routed after three fixer rounds). Not user-facing.
+
+**Success Criteria** (what must be TRUE):
+1. A series whose staleness is explained by `marks_trailing_since` is excluded from the hourly ledger re-crawl (needs a migration to the staleness view or fan-out).
+2. A strategy-mode mark refusal token and its first-seen day are recorded in an owner-only or admin-only store; no public `data_quality_flags` field carries it.
+3. Tests go RED on the re-crawl and on a token reaching a public field.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset
+
+**Goal:** MT5 deal days and instants use the broker's real UTC offset on each date, including daylight-saving changes, so a deposit near a nightly mark read is never placed on the wrong day.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 from NAVMTM 167.2.1.1.1 REVIEW-3 WR-02 (routed after three fixer rounds): with the fixed offset, a deposit in the hour after the read publishes a permanent wrong return outside summer time. Data integrity, user-facing.
+
+**Success Criteria** (what must be TRUE):
+1. The broker's offset rule is measured (which DST rule it follows) and recorded.
+2. MT5 deal day bucketing and D-23 instant placement use the offset in force on the deal's date; tests go RED with the fixed `MT5_SERVER_UTC_OFFSET_S` across a DST change.
+3. Interim, at NAVMTM deploy: the broker's current offset is measured and `MT5_SERVER_UTC_OFFSET_S` set before the first nightly marks.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -6680,6 +6770,11 @@ kept verbatim.
 | 170.6.1.1 ANONKEYID | 8/8 | Complete | 2026-10-15 |
 | 170.6.2 COPYPASS | 4/4 | Complete | 2026-10-14 |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
+| 171 READCEILING | 0/0 | Not started | - |
+| 172 OKXANCHOR | 0/0 | Not started | - |
+| 173 REBUILDGATES | 0/0 | Not started | - |
+| 174 MARKPAUSE | 0/0 | Not started | - |
+| 175 MT5OFFSET | 0/0 | Not started | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
