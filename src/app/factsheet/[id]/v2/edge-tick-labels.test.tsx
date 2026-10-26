@@ -265,3 +265,79 @@ describe("EndOfYearBarsPanel legend stays inside the svg (D-02, D-03c)", () => {
     expect(swatch.getAttribute("y")).toBe("6");
   });
 });
+
+describe("EndOfYearBarsPanel value labels stay inside the svg (G-01, D-02)", () => {
+  // Phase 170.1.3 plan 06 (G-01). The founder's 390 px reading cut a six-digit end-of-year value
+  // ("+446948.6%") 10.7 px past the right edge of the svg: the labels are start-anchored beside the
+  // bars at a fixed right gutter of 80, which only holds a label up to about 7 characters at font 18.
+  // The fix grows the gutter from the widest drawn label (the house rule of ReturnQuantiles and
+  // TimeSeriesChart); it must NOT flip the label to an end anchor, which would lay it over the bars.
+  //
+  // Hand-computed, not read from the code under test. 366 daily rows from 2023-05-01 with
+  // r_i = 0.03 + sin(i / 15) * 0.05 compound 2023 to 4603.6 (`node -e`), so the strategy label is
+  // "+460360.0%" (10 characters) and 2024 is "+966.4%" (7 characters). The default BTC comparator is
+  // drawn too, at font 16 with short labels, so it never sets the gutter here.
+  //   mobile font 18: 10 * 18 * 0.6 = 108; gutter = ceil((108 + 6) / 4) * 4 = 116; x = 880 - 116 + 6 = 770
+  //                   box ends at 770 + 108 = 878 <= 880.
+  //   desktop font 11: 10 * 11 * 0.6 = 66; ceil(72 / 4) * 4 = 72 < 80 so the gutter stays 80; x = 806.
+  const LONG_START = Date.UTC(2023, 4, 1);
+  const longRows = () =>
+    Array.from({ length: 366 }, (_, i) => ({
+      date: new Date(LONG_START + i * 86_400_000).toISOString().slice(0, 10),
+      value: 0.03 + Math.sin(i / 15) * 0.05,
+    }));
+  const mountEoy = (rows: { date: string; value: number }[]) =>
+    render(
+      <FactsheetProvider payload={apiPayload(rows)} persist={false}>
+        <EndOfYearBarsPanel fullHistoryWithheld={false} />
+      </FactsheetProvider>,
+    );
+  const valueTexts = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("svg text")).filter((t) => /^[+-]\d+\.\d%$/.test(t.textContent ?? ""));
+
+  it("mobile: the six-digit label moves the gutter to 116, so x = 770 and its box ends inside 880", () => {
+    vi.mocked(useBreakpoint).mockReturnValue("mobile");
+    const texts = valueTexts(mountEoy(longRows()).container);
+    const long = texts.find((t) => t.textContent === "+460360.0%");
+    if (!long) throw new Error("no +460360.0% value label: the fixture no longer compounds to six digits");
+    expect(long.getAttribute("font-size")).toBe("18");
+    expect(long.getAttribute("x")).toBe("770");
+    expect(long.getAttribute("text-anchor")).toBe("start");
+    for (const t of texts) {
+      const right = Number(t.getAttribute("x")) + (t.textContent ?? "").length * Number(t.getAttribute("font-size")) * 0.6;
+      expect(right).toBeLessThanOrEqual(880);
+      // Nothing hidden, truncated or moved onto a bar.
+      expect(t.getAttribute("text-anchor")).toBe("start");
+    }
+  });
+
+  it("mobile: every label shares the grown gutter, so the 7-character 2024 label sits at 770 too", () => {
+    vi.mocked(useBreakpoint).mockReturnValue("mobile");
+    const texts = valueTexts(mountEoy(longRows()).container);
+    const second = texts.find((t) => t.textContent === "+966.4%");
+    if (!second) throw new Error("no +966.4% value label");
+    expect(second.getAttribute("x")).toBe("770");
+  });
+
+  it("desktop: the same book keeps the gutter at 80 and every label at x = 806", () => {
+    const texts = valueTexts(mountEoy(longRows()).container);
+    expect(texts.map((t) => t.textContent)).toContain("+460360.0%");
+    for (const t of texts) expect(t.getAttribute("x")).toBe("806");
+  });
+
+  it("mobile: labels whose box plus the 6 px gap fits in 80 keep the gutter at 80 (no over-growth)", () => {
+    vi.mocked(useBreakpoint).mockReturnValue("mobile");
+    // A tame book (about 0.01% a day): every strategy and benchmark label stays short.
+    const calm = dailyRows(800, SPAN_START).map((r, i) => ({ date: r.date, value: Math.sin(i / 7) * 0.002 + 0.0001 }));
+    const texts = valueTexts(mountEoy(calm).container);
+    expect(texts.length).toBeGreaterThan(0);
+    // Widest here is the 7-character BTC label at font 16: 67.2 + 6 = 73.2, ceil(73.2 / 4) * 4 = 76 < 80,
+    // so the minimum holds and x = 880 - 80 + 6 = 806.
+    for (const t of texts) {
+      // Precondition, so the case cannot pass by accident: every box plus the 6 px gap fits in 80.
+      const width = (t.textContent ?? "").length * Number(t.getAttribute("font-size")) * 0.6;
+      expect(width + 6).toBeLessThanOrEqual(80);
+      expect(t.getAttribute("x")).toBe("806");
+    }
+  });
+});

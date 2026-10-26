@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.133.0.7] - 2026-10-26 — NARROWCHARTS gap closure: no clipped value or month labels on the factsheet at 390 px (Phase 170.1.3)
+
+### Fixed
+- End-of-year bars (`DistributionPanels.tsx`, `EndOfYearBarsPanel`): the right gutter now grows from the widest strategy or benchmark value label, `max(80, ceil((widest + 6) / 4) * 4)`, and the plot width, zero line and both label positions follow it. The first post-deploy SC-4 reading on 2026-10-26 found these labels cut 10.73 and 0.5 px past the svg edge at 390 px (G-01).
+- Daily-return calendar (`HeatmapPanels.tsx`): each year's calendar draws only that year's days (founder decision D-05). The month-label loop accepted day-of-year 366, so a non-leap year whose 1 January fell on a Sunday drew a 13th "Jan" (1 January of the next year) in its last column, clipped 9.41 px at 390 px (G-02). Hovering or tapping that column showed a next-year date inside the earlier year. The label loop, the canvas draw loop and the hover/tap payload now skip every slot outside the calendar's own UTC year, so the leading previous-year slots and the trailing next-year column draw no box, no label and no tooltip. In-year days without data keep their grey box.
+
+### Changed
+- Every non-leap calendar on desktop shows one "Jan" fewer and no empty boxes before 1 January. This is a deliberate exception to D-04 (desktop unchanged). It replaces the interim fix in this phase's gap plan 06, which widened the calendar's viewBox for the long label and so drew a 2023-type row at a different scale from its neighbours on wide desktops; that widening never shipped.
+
+### Tests
+- A long-label seed (`e2e/helpers/seed-test-project.ts`) with two targeted V390 cases that were RED on the deployed code, plus long-label sweeps at 390, 640 and 1280 and a long-label desktop reading at 1280 with its own fixture (`e2e/fixtures/narrowcharts-longlabels-desktop-1280.json`). The 1280 long-label cases run the clip rule before the comparator.
+- The 2023 calendar case asserts exactly one "Jan" and no clipped label. Calendar emitter floors drop by one label per non-leap calendar, to the measured counts. The standard desktop fixture loses three next-year "Jan" texts (2025 and 2026 calendars); nothing else in it moved.
+- `assertEmittersMeasured` counts `minPatternTexts` per svg, not summed across an emitter's svgs (`src/__tests__/e2e-emitter-pattern-per-svg.test.ts`).
+- Unit pins: the end-of-year gutter at mobile and desktop widths; the 12-label calendar with a leap-year day-366 control; no tooltip for a next-year slot; and a canvas recorder showing no box drawn outside the year while in-year empty days keep theirs. Each was shown RED with its fix neutered.
+
+### Notes
+- NARROWCHARTS-scoped e2e: 24 of 24 on the local stack at the gap head. SC-4 (the real-book browser reading at 390 and 640) is re-taken after this deploys (gap plan 08); the phase stays open until then.
+- `e2e/svg-chart-parity.spec.ts` captures a calendar golden that D-05 changes slightly; review reasoned it stays under the threshold, and a red there would be regenerated for D-05, not read as a regression.
+
 ## [0.133.0.6] - 2026-10-26 — TRADEPAGES: the allocator history rebuild reads every trade the venue holds for its window (Phase 167.2.1.1.2.1)
 
 ### Root cause

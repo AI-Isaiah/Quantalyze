@@ -273,7 +273,7 @@ function YearCalendar({ year, maxAbs, palette }: { year: DailyHeatmapYear; maxAb
   // 4-unit gap below the baseline so a descender never lands on the first cell row (desktop 14).
   const monthY = fitBaselineY(10, monthFont);
   const monthLabelH = monthY + 4;
-  const w = labelW + cols * (CELL + CELL_GAP);
+  const gridW = labelW + cols * (CELL + CELL_GAP);
   const h = monthLabelH + 7 * (CELL + CELL_GAP);
 
   // Month labels — place each at the first column where that month appears.
@@ -284,8 +284,11 @@ function YearCalendar({ year, maxAbs, palette }: { year: DailyHeatmapYear; maxAb
       for (let d = 0; d < 7; d++) {
         // Reverse-engineer the date from week+day+firstWeekOffset.
         const doy = w * 7 + d - year.firstWeekOffset + 1;
-        if (doy < 1 || doy > 366) continue;
         const dt = new Date(Date.UTC(parseInt(year.year, 10), 0, doy));
+        // Phase 170.1.3 NARROWCHARTS (D-05): the calendar draws only its own year's days. Day 366
+        // of a non-leap year is 1 January of the next year; it gets no label here, and the canvas
+        // draw loop in YearCalendarCanvas draws no cell for it either.
+        if (dt.getUTCFullYear() !== parseInt(year.year, 10)) continue;
         const m = dt.getUTCMonth();
         if (m !== lastMonth) {
           out.push({ col: w, label: MONTH_HEADERS[m] });
@@ -302,7 +305,7 @@ function YearCalendar({ year, maxAbs, palette }: { year: DailyHeatmapYear; maxAb
       year={year}
       maxAbs={maxAbs}
       palette={palette}
-      w={w}
+      w={gridW}
       h={h}
       labelW={labelW}
       monthLabelH={monthLabelH}
@@ -406,9 +409,14 @@ function YearCalendarCanvas({
     ctx.clearRect(0, 0, w, h);
     const missingFill = palette.base === "#FFFFFF" ? "#FBFCFD" : "#243044";
     const missingStroke = palette.base === "#FFFFFF" ? "#E2E8F0" : "#334155";
+    const yearNum = parseInt(year.year, 10);
     for (let wk = 0; wk < tintGrid.length; wk++) {
       const row = tintGrid[wk];
       for (let d = 0; d < 7; d++) {
+        // D-05: draw nothing for a slot outside this calendar's own year (the leading days
+        // before Jan 1 and the trailing next-year days). Same year check as the label loop.
+        const doy = wk * 7 + d - year.firstWeekOffset + 1;
+        if (new Date(Date.UTC(yearNum, 0, doy)).getUTCFullYear() !== yearNum) continue;
         const bg = row[d];
         const x = labelW + wk * (CELL + CELL_GAP);
         const y = monthLabelH + d * (CELL + CELL_GAP);
@@ -424,7 +432,7 @@ function YearCalendarCanvas({
         ctx.fillRect(x, y, CELL, CELL);
       }
     }
-  }, [tintGrid, palette, scale, w, h, labelW, monthLabelH]);
+  }, [tintGrid, year, palette, scale, w, h, labelW, monthLabelH]);
 
   // Map a pointer position (relative to the wrapper rect) to its (week, weekday)
   // grid coordinate. The single source of the coord→grid math, shared by the
@@ -454,6 +462,8 @@ function YearCalendarCanvas({
     const doy = wk * 7 + d - year.firstWeekOffset + 1;
     const dt = new Date(Date.UTC(parseInt(year.year, 10), 0, doy));
     if (Number.isNaN(dt.getTime())) return null;
+    // D-05: a trailing-column day that belongs to the next year yields no payload.
+    if (dt.getUTCFullYear() !== parseInt(year.year, 10)) return null;
     const iso = dt.toISOString().slice(0, 10);
     const cx = (labelW + wk * (CELL + CELL_GAP) + CELL / 2) * scale;
     const cy = (monthLabelH + d * (CELL + CELL_GAP) + CELL / 2) * scale;

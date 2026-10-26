@@ -1040,6 +1040,18 @@ export interface RequiredEmitter {
   minTexts?: number;
   /** Minimum measured texts inside a Recharts x axis (default 0). */
   minXAxisTexts?: number;
+  /**
+   * Phase 170.1.3 gap closure: a RegExp SOURCE (a string, so it can be logged) that the emitter's
+   * measured texts are matched against. A required long label (a six-digit percentage, a second
+   * "Jan") must be among the measured texts, or the reading is hollow: the clip rule cannot fail on
+   * a label that was never drawn.
+   */
+  textPattern?: string;
+  /**
+   * Minimum measured texts matching `textPattern` in ONE svg of the emitter (default 1 when
+   * `textPattern` is set): at least one svg must hold this many on its own.
+   */
+  minPatternTexts?: number;
 }
 
 /**
@@ -1057,10 +1069,22 @@ export function assertEmittersMeasured(
     const mine = layouts.filter((l) => l.emitter === req.key);
     const texts = mine.reduce((n, l) => n + l.texts.length, 0);
     const xTexts = mine.reduce((n, l) => n + l.texts.filter((t) => t.inXAxis).length, 0);
-    console.log(`NARROWCHARTS-EMITTER ${label} ${req.key} (texts=${texts}, xAxisTexts=${xTexts})`);
-    if (texts < (req.minTexts ?? 1) || xTexts < (req.minXAxisTexts ?? 0)) {
+    let patternSuffix = "";
+    let patternShort = false;
+    if (req.textPattern !== undefined) {
+      const re = new RegExp(req.textPattern);
+      // Counted per svg: at least one svg must hold the minimum on its own. A sum across the
+      // emitter's svgs would let two svgs with one match each pass a minimum of two.
+      const matched = Math.max(0, ...mine.map((l) => l.texts.filter((t) => re.test(t.text)).length));
+      patternSuffix = ` pattern=${req.textPattern} matched=${matched}`;
+      patternShort = matched < (req.minPatternTexts ?? 1);
+    }
+    console.log(
+      `NARROWCHARTS-EMITTER ${label} ${req.key} (texts=${texts}, xAxisTexts=${xTexts})${patternSuffix}`,
+    );
+    if (texts < (req.minTexts ?? 1) || xTexts < (req.minXAxisTexts ?? 0) || patternShort) {
       missing.push(
-        `NARROWCHARTS-EMITTER-MISSING ${label} ${req.key} (texts=${texts}, xAxisTexts=${xTexts})`,
+        `NARROWCHARTS-EMITTER-MISSING ${label} ${req.key} (texts=${texts}, xAxisTexts=${xTexts})${patternSuffix}`,
       );
     }
   }

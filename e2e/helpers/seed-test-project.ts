@@ -495,6 +495,19 @@ export async function seedWizardDraft(opts: {
   };
 }
 
+/**
+ * Phase 170.1.3 gap closure (G-01, G-02): the daily return the `dailyGrowth` seed option writes on
+ * day `i`. The sine keeps the volatility non-zero and, at +-0.05, is wider than any growth the
+ * option is meant for, so the series has losing days: `rollingSortino` (src/lib/factsheet/rolling.ts)
+ * gives a window with no losing day a gap, and the composer then draws no Rolling Sortino chart at
+ * all (a +-0.01 sine on a 0.03 growth did exactly that). Both seed helpers below build their series
+ * from this one function, so an allocator book and a strategy fixture seeded with the same
+ * `dailyGrowth` agree day for day.
+ */
+function growthReturn(dailyGrowth: number, i: number): number {
+  return dailyGrowth + Math.sin(i / 15) * 0.05;
+}
+
 export async function seedStrategyWithHistory(opts: {
   days: number;
   name?: string;
@@ -553,6 +566,16 @@ export async function seedStrategyWithHistory(opts: {
    * removed by it either; rows are removed by `cleanupStrategiesByNamePrefix`.
    */
   ownerUserId?: string;
+  /**
+   * Phase 170.1.3 gap closure (G-01, G-02): a constant daily growth that makes the end-of-year
+   * value label print six integer digits ("+446948.6%") and lets a window start on 2023-05-01, a
+   * year whose Jan 1 is a Sunday (the calendar then draws a 13th "Jan" in its last column). The
+   * default book never draws either, which is why the seeded gate missed both. The daily return on
+   * day i is `dailyGrowth + sin(i / 15) * 0.05`; `returns_series` (the level), `daily_returns` and
+   * `cumulative_return` all come from that one compounded series. OPT-IN: omitted, every write is
+   * byte-identical to before, because other specs call this helper.
+   */
+  dailyGrowth?: number;
 }): Promise<string> {
   const admin = getAdmin();
 
@@ -638,11 +661,16 @@ export async function seedStrategyWithHistory(opts: {
   // 2. Synthesize a deterministic returns_series of `days` length.
   // Small drift via sin() so the curve isn't flat — drives the equity chart
   // through enough variation to render meaningfully without random noise.
+  const dailyGrowth = opts.dailyGrowth;
+  let level = 1;
   const series = Array.from({ length: opts.days }, (_, i) => ({
     date: new Date(anchorMs - (opts.days - i) * 86_400_000)
       .toISOString()
       .slice(0, 10),
-    value: 1 + Math.sin(i / 30) * 0.05 * (i / Math.max(1, opts.days)),
+    value:
+      dailyGrowth === undefined
+        ? 1 + Math.sin(i / 30) * 0.05 * (i / Math.max(1, opts.days))
+        : (level *= 1 + growthReturn(dailyGrowth, i)),
   }));
 
   // 3. Build a minimal monthly_returns grid (used by Panel 4 + Yearly view)
@@ -726,7 +754,10 @@ export async function seedStrategyWithHistory(opts: {
   const dailyReturns = opts.withDailyReturns
     ? series.map((p, i) => ({
         date: p.date,
-        value: Math.sin(i / 15) * 0.01,
+        value:
+          dailyGrowth === undefined
+            ? Math.sin(i / 15) * 0.01
+            : growthReturn(dailyGrowth, i),
       }))
     : null;
 
@@ -819,6 +850,15 @@ export async function seedAllocatorBook(opts: {
    * (layout-narrow's desktop fixture) pins it, because month ticks move with the date.
    */
   anchorMs?: number;
+  /**
+   * Phase 170.1.3 gap closure (G-01, G-02): a constant daily growth for the equity level, so the
+   * Overview's end-of-year value label prints six integer digits and a window that starts on
+   * 2023-05-01 renders a calendar year whose Jan 1 is a Sunday. The daily return on day i is
+   * `dailyGrowth + sin(i / 15) * 0.05`; the snapshots, the derived `curve` and the derived
+   * `returns` all come from that one compounded level. Omitted = byte-identical to before: other
+   * specs call this.
+   */
+  dailyGrowth?: number;
 }): Promise<{ apiKeyId: string }> {
   const admin = getAdmin();
   const days = opts.days ?? 120;
@@ -916,12 +956,17 @@ export async function seedAllocatorBook(opts: {
   }
 
   // 3. A daily equity curve so EquityChart has a real series to draw.
+  const dailyGrowth = opts.dailyGrowth;
+  let level = 1;
   const snapshots = Array.from({ length: days }, (_, i) => ({
     allocator_id: opts.allocatorUserId,
     asof: new Date(anchorMs - (days - 1 - i) * 86_400_000)
       .toISOString()
       .slice(0, 10),
-    value_usd: 100_000 * (1 + Math.sin(i / 30) * 0.08 * (i / Math.max(1, days))),
+    value_usd:
+      dailyGrowth === undefined
+        ? 100_000 * (1 + Math.sin(i / 30) * 0.08 * (i / Math.max(1, days)))
+        : 100_000 * (level *= 1 + growthReturn(dailyGrowth, i)),
   }));
   const { error: sErr } = await admin
     .from("allocator_equity_snapshots")
@@ -934,7 +979,10 @@ export async function seedAllocatorBook(opts: {
   // alone leave the Overview rebuilding, so the EquityChart would not mount.
   const curve = snapshots.map((s, i) => ({
     date: s.asof,
-    equity_usd: 100_000 * (1 + Math.sin(i / 30) * 0.02),
+    equity_usd:
+      dailyGrowth === undefined
+        ? 100_000 * (1 + Math.sin(i / 30) * 0.02)
+        : s.value_usd,
   }));
   const returns = curve.slice(1).map((point, i) => ({
     date: point.date,
