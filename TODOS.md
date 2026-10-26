@@ -1568,6 +1568,14 @@ through `stitch_composite` after NAVBREACH, run it once, inside that recompute; 
 
 ### 167.1.2.2.2.1-WAVE5-RECOMPUTE — the two rebuilt OKX strategies' headlines move when the Wave 5 recompute reads the rebuilt rows (booked 2026-10-15, Phase 167.1.2.2.2.1 plan 10)
 
+**CLOSED 2026-10-26 (Phase 167.1.2.2.2.1 close-out).** Counts and dates only; the original text below is kept as lineage.
+- **The trigger was met on 2026-10-23.** The `apply` job was `done` for both ordinals (`csv_daily_returns` rows: ordinal 1 109 to 179, ordinal 2 156 to 243; gaps after: none for both) and the analytics service carrying the rebuilt-range reader was deployed.
+- **⛔ The premise "The daily 04:30Z tick's derive-then-compute chain recomputes the same rows anyway" is MEASURED FALSE.** The cron sync derives and recomputes only strategies that synced new trades. The three OKX keys synced 0 trades on 2026-10-24 and 2026-10-25, so the tick recomputed neither strategy and both strategies' `strategy_analytics.computed_at` stayed at 2026-10-23 04:42Z, before the apply. Without a recompute the stored headlines still described the shorter series. The same sentence in `docs/runbooks/okxhistory-go-live.md` Step 5 is corrected the same day.
+- **The recompute was run by the orchestrator, not by the tick.** Wave 5 for ordinals 1 and 2 through `enqueue_compute_job` (`compute_analytics_from_csv`); both jobs `done` on attempt 1 at 06:11Z on 2026-10-26.
+- **Acceptance reading, `worklist` after:** ordinal 1 `headline_since` 2026-05-23 (was 2026-08-02). Ordinal 2 has no `headline_since` and no chain-break flag, so its whole series from 2026-02-23 counts (was 2026-08-02). `unrecovered_gaps` is 0 for both, equal to the apply's `gaps_after`, and `reconstructed_ranges` is present (1 each). `survival` reads 0 days without a row for all four ordinals.
+- **Public line:** ordinal 2's public factsheet names its rebuilt range once and the chart is not marked. Ordinal 1 is `pending_review`, so it is not public.
+- **Lesson for the next reader:** a rebuild that writes `csv_daily_returns` rows never moves a headline by itself. Enqueue the recompute through the guarded path; do not wait for a tick that skips strategies with no new trades.
+
 **Why it is open.** Phase 167.1.2.2.2.1 OKXHISTORY rebuilds the days two OKX strategies lost beyond the
 3-month `bills-archive` reach from OKX's quarterly `bills-history-archive`, and the rebuilt days COUNT in
 headline metrics (D-07). The `apply` job writes `csv_daily_returns` rows and `series_provenance`
@@ -10036,6 +10044,10 @@ without its `code` tag.
   the in-scope account: its `census.by_ccy` is the currency count (runbook `docs/runbooks/okxhistory-go-live.md`,
   Step 2). A non-USD row is the stop class `non_usd_ccy` and a founder STOP; the fix owner is routed by founder
   decision then.
+  ⭐ **2026-10-26 (Phase 167.1.2.2.2.1 close-out): measured for the ARCHIVE, stays open.** Calibrate run 5 (label
+  `20261022T2325`) ingested 1606 archive bills for the in-scope account and all 1606 are USDT, so `non_usd_ccy` did not
+  fire. The trigger (a non-USDT bill in any strategy's window) is not met and the live `fetch_daily_pnl` path is
+  still unconverted and unmeasured for bill classes outside the archive window.
 
 - **[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]** (logged 2026-10-15, review round 3, after three fixer rounds; owner:
   Phase 167.1.2.2.2.1 plan 13 (PR-B), which MUST land them before plan 14's calibrate is read by the founder).
@@ -13134,6 +13146,8 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **Fix.** A lease or heartbeat that renews `claimed_at` while a runner works, so the staleness clock measures silence and not batch position. The deferred heartbeat/lease work owns it; a batch size of 1 for the backfill role would also close the mechanism but was not chosen.
 
 **Owner / Trigger:** the deferred heartbeat/lease work. Trigger: QUANTALYZE-2A or QUANTALYZE-A fires again after the 166.5.1 deploy, or the 48 h Sentry read (D-04) shows a P0002 on `derive_allocator_equity`. Closed when a long run's claim age is renewed and a test reproduces a batch-mate wait past 20 minutes without a reset.
+
+⭐ **2026-10-26 (Phase 166.5.1 close-out): the trigger was read and is NOT met; stays open.** The post-deploy Sentry readout (T_DEPLOY 2026-10-22T06:32:30Z, read 2026-10-26 about 06:20Z, about 96 h later) found 0 events since T_DEPLOY for all nine groups, QUANTALYZE-2A and A included, and all nine were resolved in Sentry. The slow-batch-mate case is latent, not fixed: no P0002 means it has not fired in that window, not that it cannot.
 
 ## Phase 167.2.1.1 (UPNLVENUES) — routed items (logged 2026-10-22)
 

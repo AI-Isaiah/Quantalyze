@@ -159,7 +159,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — 4 plans; closed 2026-10-14 (records PR) (verification passed, PROD glance taken 2026-10-14)
 - [x] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — 9 plans, shipped as v0.131.13.0 (#1047, the runner stamp) and v0.131.13.1 (#1050, the status bridge stops writing the date; migration applied on TEST and PROD); the Wave 5 forced recompute on PROD 2026-10-20 enqueued 42, 23 done each carrying its own runner stamp, 0 too-new dates, 19 failed with their dates held (18 archived keyless CSV strategies, 1 composite with a refused Deribit key, routed to the founder); verification passed; security SECURED (completed 2026-10-20)
-- [ ] **Phase 166.5.1: SENTRYTRIAGE — the three unbooked production Sentry groups are fixed at their root cause or silenced with a stated reason** (INSERTED 2026-10-20) — not yet planned (founder 2026-10-20; demo-allocator cron warning, worker ReadTimeouts, job-state race)
+- [x] **Phase 166.5.1: SENTRYTRIAGE — the three unbooked production Sentry groups are fixed at their root cause or silenced with a stated reason** (INSERTED 2026-10-20) — complete 2026-10-26 (v0.132.10.2 #1105; founder 2026-10-20; verification passed; SC-3 partly met by D-05, residual routed to TODOS; SC-4: all 9 Sentry groups 0 events since the deploy, all resolved)
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
@@ -172,7 +172,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
 - [x] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — 8 plans, two PRs (#991, PR-2); closed 2026-10-12, SC-4 trustworthy clause routed to NAVBREACH (completed 2026-10-12)
 - [x] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — 22 plans (18 deferred), shipped #1009 and #1012 (completed 2026-10-13)
-- [ ] **Phase 167.1.2.2.2.1: OKXHISTORY — an OKX strategy's days older than the 3-month bills window are rebuilt from OKX's quarterly bills archive** (INSERTED 2026-10-09) — not yet planned (founder, split from TRADESYNC D-01)
+- [x] **Phase 167.1.2.2.2.1: OKXHISTORY — an OKX strategy's days older than the 3-month bills window are rebuilt from OKX's quarterly bills archive** (INSERTED 2026-10-09) — complete 2026-10-26 (PR-A v0.132.2.0 #1067, PR-B v0.132.9.8 #1103, calibrate fixes #1108, #1111, #1114, #1115; founder, split from TRADESYNC D-01; data-integrity; applied on PROD 2026-10-23, ordinal 1 +70 days and ordinal 2 +87 days, 0 gaps left; headlines recomputed 2026-10-26; verification passed)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — complete 2026-10-22 (v0.132.10.7 #1110; founder 2026-10-22; data-integrity)
@@ -4565,6 +4565,10 @@ Plans:
 - **(C) QUANTALYZE-2A and QUANTALYZE-A**, 2 + 2 events. `mark_compute_job_done` and `mark_compute_job_failed` find the job back at `pending` instead of `running` (P0002): a job's claim was reset or reclaimed while its runner was still finishing. That job-state race can lose a finished result.
 - **Out of scope, owned elsewhere:** QUANTALYZE-18 (SERVICE_KEY mismatch, booked); the `account_duplicate` refusals (QUANTALYZE-23 and 2H, expected since 167.1.2.1.1 WRITERRESIDUALS); benchmark refresh "no BTC series" (1M, 1N, 1P); the Bybit unmatched-IP funding fetch (21).
 
+**Founder decision 2026-10-21 (AskUserQuestion, "A: helper + move 4 reads (Recommended)"):** ReadTimeout is retried wherever the read-retry helper is already used, the job claim included, and the four pure reads Sentry named for 2D, 2E, 2F and 2G move onto the helper (CONTEXT D-02a).
+**Founder decision 2026-10-21 (AskUserQuestion, "Keep 20 min, book gap (Recommended)", D-05):** the 20-minute `derive_allocator_equity` watchdog override stays; its tests are made able to fail; SC-3 is PARTLY met (a run behind slow 5-job batch-mates can still pass 20 minutes), and the remainder is routed to the deferred heartbeat/lease work (TODOS `[166.5.1-DERIVE-BATCH-RESET-RESIDUAL]`).
+**Founder decision 2026-10-21 (AskUserQuestion, "No retry on resync (Recommended)", D-06):** the resync button's two reads in `routers/process_key.py` go back to a single attempt on a ReadTimeout; a gateway 504 keeps its retry there. The four Sentry-named reads, the claim and the stuck-job reset keep their ReadTimeout retries.
+
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 166.5
 
@@ -4574,10 +4578,13 @@ Plans:
 3. Job-state race: the sequence that returns a running job to `pending` while its runner still finishes is reproduced in a test and fixed at its source (claim, reset or lease), so a finished job is never lost or run twice. The mark functions' refusals stay loud.
 4. After deploy, each group's event rate is read from Sentry over 48 h, and the fixed groups are resolved there.
 
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 166.5.1-01: the cron's allocator query excludes the demo allocator; M-3 ERROR and stale is_example advice removed (D-01, QUANTALYZE-Z) (wave 1)
+- [x] 166.5.1-02: derive_allocator_equity watchdog override from its measured runtime; reset-then-mark reproduced; BACKFILL_KINDS override invariant (D-03, QUANTALYZE-2A/A) (wave 1)
+- [x] 166.5.1-03: the read-retry helper treats ReadTimeout as transient; claim and watchdog reset pinned; measured worst case stated (D-02, D-02a, QUANTALYZE-2B/2C) (wave 2)
+- [x] 166.5.1-04: the four Sentry-named pure reads on the helper (a sync twin for 2D/2G); six-group SC-2 table; SC-4 handoff (D-02a, D-04, QUANTALYZE-2D/2E/2F/2G) (wave 3)
 
 ### Phase 166.1: ENGINEFLOOR — every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio (INSERTED)
 
@@ -5264,6 +5271,9 @@ Plans:
 **Goal:** The days an OKX strategy missed beyond the 3-month `bills-archive` window are rebuilt from OKX's async quarterly `bills-history-archive`, marked as reconstructed, and reconciled against the days both sources cover.
 **Booked:** founder 2026-10-09 (AskUserQuestion: "Split to OKXHISTORY"), split from 167.1.2.2.2 TRADESYNC CONTEXT D-01 ("Rebuild from account bills") after its research showed the work needs a durable two-step job, a new flow source and a calibrated reconciliation. Data integrity.
 **Evidence (TRADESYNC research, 2026-10-09):** OKX's stored "trades" are already bills (`/account/bills`, 7 days; `/account/bills-archive`, 3 months). Older history is reachable only through `bills-history-archive`: quarterly, since 2021-02-01, excluding the current quarter, delivered as a link after about 2 to 3 hours that expires after 5.5 hours, at about 12 requests a day. ccxt's `fetchLedger` does not call it. Deposit history on OKX is retained 90 days, so flows older than that come from bills transfer types, which no code reads today. Three OKX strategies are affected.
+**Re-measured 2026-10-15 (OKXHISTORY discuss):** OKX's current docs add a precondition, "only applicable to the data from the unified account" (unmeasured for the in-scope account); apply is 1 request per 10 s and get 10 per 2 s, while "12 a day" is ccxt's rate-table note, not OKX's; a quarter need not be re-applied within 30 days. On PROD, the two named gaps (70 and 87 days, 2026 Q2-Q3) are the rebuild list; the third affected strategy is on a disconnected key; three in-scope strategies share one venue account.
+**Founder decisions (2026-10-15, AskUserQuestion, all Recommended; full text in the phase CONTEXT.md D-01..D-12):** scope is the two named `unrecovered_gaps` only, the disconnected-key strategy excluded, a read-only check of one strategy's stored June/July 0.0 days against the archive that fails loud on realized P&L (any fix a separate decision), and a reusable durable job triggered by operator runbook. A rebuilt day is recorded in `series_provenance.reconstructed_ranges` (source `okx_bills_history_archive`, no per-row column), gets one plain public line on the factsheet and tear sheet ("{from} – {to}: rebuilt from OKX's quarterly account statement, not the live feed."), no chart marking, and counts in headline metrics. Transfer bill types are external flows, an unknown bill type fails loud, and funding (type 8) stays its own stream. Reconciliation is archive vs live-derived on overlap days at $0.01 per day plus the window total, measured first; a calibration above 1 cent STOPS for the founder (never widened); a miss aborts that strategy's whole rebuild and writes nothing; live days always win. Booked: `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]` in `TODOS.md`; research settles whether the archive rows are all USDT.
+**Founder decision (2026-10-15, "Decide after calibrate", CONTEXT D-13):** `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` stay readings, not gates. The founder sees both in plan 14's calibrate and sets any limit at plan 15's checkpoint.
 **Requirements**: TBD (phase-local)
 **Depends on:** Phase 167.1.2.2.2
 
@@ -5275,10 +5285,38 @@ Plans:
 4. A day neither source covers stays missing and is named on the factsheet (TRADESYNC D-02).
 5. Each affected strategy's history is rebuilt on PROD with before/after readings (marker first, counts only); its recompute joins the Wave 5 consolidated recompute.
 
-**Plans:** 0 plans
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-14, "Ship diagnostic, re-run (Recommended)"):** plan 14's first calibrate stopped on `quarter_range_mismatch` for 2026-Q2 and the stop dropped the observed dates. A diagnostic plan makes the stop carry them (dates and counts only), ships, and calibrate is re-run once; the mismatch fix itself is decided on those dates. Plan 15 waits for a passing calibrate.
+
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-15, "HK bounds, edge days whole-or-missing (Recommended)"):** the D-14 re-run showed the Q2 file starts 2026-03-31 (UTC): OKX cuts quarters on UTC+8. Files are accepted on UTC+8 bounds, daily totals stay on UTC days, and a quarter-edge UTC day counts only when both neighbouring files were read, otherwise it stays missing and named. Then calibrate is re-run.
+
+**⭐ DECIDED 2026-10-22 (founder, CONTEXT D-16, "Diagnose + skip safe rows (Recommended)"):** calibrate run 3 stopped `unchainable_row`; the stop records the cause split, counts and dates, zero-effect blank-ccy rows are skipped from the bal chain and counted, a non-digit billId still stops; then calibrate is re-run.
+
+**⭐ DECIDED 2026-10-22 (orchestrator, CONTEXT D-17, within founder D-16 "Diagnose + skip safe rows (Recommended)"):** calibrate run 4 stopped `unchainable_row` with `nondigit_bill_id=1606` of 1606 rows, a systematic export format. The parser strips surrounding whitespace, tab, apostrophe and double-quote characters from `billId` before any check; a `billId` still not ASCII digits stops `nondigit_bill_id` as before and the stop names a value-free shape of the first offending id (digits `9`, letters `A`, other characters by category or a fixed escape name, plus the length), never the id itself; then calibrate is re-run once.
+
+**Plans:** 21/21 plans complete (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1; plan 17 added for D-14; plans 18-19 added for D-15; plan 20 added for D-16; plan 21 added for D-17)
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 167.1.2.2.2.1-01-PLAN.md — migration: kind `okx_archive_rebuild` (registry + both CHECKs, api_key-only) and the atomic `apply_okx_archive_rebuild` RPC (INVOKER, service_role), 15-arm gate, rollback
+- [x] 167.1.2.2.2.1-02-PLAN.md — archive CSV parse, subType classification (D-08), ccy stop, one-cent reconciliation (D-09/D-10)
+- [x] 167.1.2.2.2.1-03-PLAN.md — SSRF-safe archive download: empty exact-host allow-list, private-address refusal, size/ratio caps
+- [x] 167.1.2.2.2.1-04-PLAN.md — rebuild through the live core with the identity assertion, gap narrowing (SC-4), derive-survival and compute-inclusion pins
+- [x] 167.1.2.2.2.1-05-PLAN.md — `parseReconstructedRanges` reader, payload field, cache-key bump
+- [x] 167.1.2.2.2.1-06-PLAN.md — the D-06 public line on the factsheet and tear sheet
+- [x] 167.1.2.2.2.1-07-PLAN.md — the durable job: worker wiring, key/account/perm/subtype refusals (D-02, D-08) with zero archive calls, preflight, result shape v1 (SC-1)
+- [x] 167.1.2.2.2.1-08-PLAN.md — calibrate evaluation (D-03, D-09..D-11), fingerprint, apply through the RPC
+- [x] 167.1.2.2.2.1-09-PLAN.md — censuses, restore allowlist, baseline gates, SQL/TS literal pin
+- [x] 167.1.2.2.2.1-10-PLAN.md — operator runbook `okxhistory-go-live.md`; TODOS: Wave 5 hand-off, truncation and mixed-ccy measurements
+- [x] 167.1.2.2.2.1-11-PLAN.md — ship PR-A, PROD catalogue read (marker first), deploy check, baseline re-dump
+- [x] 167.1.2.2.2.1-12-PLAN.md — founder step: preflight on the real account (acctLv, read_only, uid, subtypes, link host)
+- [x] 167.1.2.2.2.1-13-PLAN.md — founder decision on host and transfer classes; ship PR-B
+- [x] 167.1.2.2.2.1-14-PLAN.md — founder step: calibrate on the real Q2/Q3 files; any day above one cent STOPS (D-10)
+- [x] 167.1.2.2.2.1-15-PLAN.md — founder decision on apply timing; PROD apply with before/after; survival after the next tick; Wave 5 hand-off
+- [x] 167.1.2.2.2.1-16-PLAN.md — the durable job's stateless wait on OKX and the ingest (download, parse, per-quarter readings); a lost link never yields a partial result (SC-1)
+- [x] 167.1.2.2.2.1-17-PLAN.md — the `quarter_range_mismatch` stop names the requested range, the observed min/max UTC days and the rows outside in `last_error`, dates and counts only (D-14)
+- [x] 167.1.2.2.2.1-18-PLAN.md — D-15 pure layer: quarter files accepted on the 00:00 UTC+8 cut, whole-UTC-day covered sets, a quarter-edge day summed only when both neighbouring files were read, the Q2/Q3 seam chained on the shared edge day
+- [x] 167.1.2.2.2.1-19-PLAN.md — D-15 job layer: the D-10 window over covered whole UTC days, `census.edge_days`, an edge day one file reaches never written and kept in its gap; runbook calibrate reading and the Q3 overlap's last run date 2026-12-12
+- [x] 167.1.2.2.2.1-20-PLAN.md — D-16: the `unchainable_row` stop names the cause split (`blank_ccy`, `nondigit_bill_id`), rows per file and the first/last UTC day in `info.bal_chain` and `last_error` (counts and dates only); a zero-effect blank-ccy bill is skipped from the bal chain and counted; a non-digit billId still stops; runbook calibrate reading
+- [x] 167.1.2.2.2.1-21-PLAN.md — D-17: the parser strips the whitespace, apostrophes and double quotes around each billId before any check (an id of those characters alone is `missing_bill_id`); a billId still not ASCII digits stops `nondigit_bill_id` and names the value-free shape and length of the first such id (`first_nondigit_shape`, `first_nondigit_len`) in `last_error` and `info.bal_chain`; runbook calibrate reading
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
@@ -6582,7 +6620,7 @@ kept verbatim.
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 4/4 | Complete | 2026-10-14 |
 | 166.5 COMPUTEDATSTAMP | 9/9 | Complete — the runner stamps `computed_at` from the database clock and the bridge never writes it; Wave 5 forced recompute on PROD: 42 enqueued, 23 done each with its own stamp, 0 too-new dates, 19 failed with dates held (18 archived CSV, 1 refused Deribit key, founder items); verification passed; SECURED | 2026-10-20 · v0.131.13.0 · #1047, v0.131.13.1 · #1050 |
-| 166.5.1 SENTRYTRIAGE | 0/? | Queued — booked 2026-10-20 (founder) | - |
+| 166.5.1 SENTRYTRIAGE | 4/4 | Complete — v0.132.10.2 #1105; SC-1, SC-2 and SC-4 met, SC-3 partly met by D-05 (residual routed as `166.5.1-DERIVE-BATCH-RESET-RESIDUAL`); post-deploy readout 2026-10-26: 9 Sentry groups, 0 events since the deploy, all 9 resolved; verification passed | 2026-10-26 |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
@@ -6595,7 +6633,7 @@ kept verbatim.
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
 | 167.1.2.2.1 DERIBITWEDGE | 8/8 | Complete | 2026-10-12 |
 | 167.1.2.2.2 TRADESYNC | 21/21 (plan 18 deferred) | Complete | 2026-10-13 |
-| 167.1.2.2.2.1 OKXHISTORY | 0/? | Queued — booked 2026-10-09 (founder, split from TRADESYNC D-01) | - |
+| 167.1.2.2.2.1 OKXHISTORY | 21/21 | Complete — PR-A #1067, PR-B #1103, calibrate fixes #1108, #1111, #1114, #1115 (v0.133.0.2); calibrate run 5 clean (0 days above one cent); applied on PROD 2026-10-23 (ordinal 1 109 to 179 rows, ordinal 2 156 to 243, 0 gaps left); the 04:30Z ticks did not recompute, so Wave 5 ran 2026-10-26: ordinal 1 `headline_since` 2026-05-23, ordinal 2 whole series from 2026-02-23; survival 0; verification passed | 2026-10-26 |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 167.2.1.1 UPNLVENUES | 6/6 | Complete — v0.132.10.7 #1110; D-01 live read confirmed on 1 of 1 informative key; the 5 multi-key allocators are owned by ACCTREBUILD | 2026-10-22 |

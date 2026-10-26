@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.0.5] - 2026-10-26 — records: close SENTRYTRIAGE 166.5.1 and OKXHISTORY 167.1.2.2.2.1
+
+### Notes
+- Phase 166.5.1 SENTRYTRIAGE closed with verification passed. Shipped in v0.132.10.2 (#1105). Its planning artifacts (4 plans, review rounds 1 and 2, verification) land here.
+- SC-4 post-deploy readout (2026-10-26, counts and times only): T_DEPLOY was 2026-10-22T06:32:30Z, the first Railway analytics deployment live with the phase's merge, read from the deployment history. The groups were read at about 06:20Z on 2026-10-26, about 96 h later. All nine had 0 events since T_DEPLOY: QUANTALYZE-Z (last seen 2026-10-22 05:00Z), 2B (2026-10-22 02:48Z), and 2C, 2D, 2E, 2F, 2G, 2A and A (all last seen 2026-10-18 to 2026-10-20). All nine were resolved in Sentry on 2026-10-26, each with a comment naming the readout. SC-3 stays PARTLY met by founder decision D-05; the residual remains booked as `166.5.1-DERIVE-BATCH-RESET-RESIDUAL`, whose trigger was read and is not met.
+- Phase 167.1.2.2.2.1 OKXHISTORY closed with verification passed. Shipped across #1067 (PR-A), #1103 (PR-B) and the calibrate-driven fixes #1108, #1111, #1114 and #1115. Its planning artifacts (21 plans, research, patterns, reviews, security, verification) land here, with the SUMMARYs for plans 14 and 15 written.
+- Plan 14, calibrate run 5 (label `20261022T2325`), clean: 1606 USDT archive bills, a balance chain of 1605 pairs from 2026-03-31 to 2026-09-30, 0 days above one cent over the reconcile window 2026-07-27 to 2026-09-29, the D-03 zero-check 0 hits on 73 days. Runs 1 to 4 each stopped on a real defect and were fixed by plans 17 to 21. Founder go on 2026-10-23.
+- Plan 15, apply (label `20261023T0547`), PROD: the RPC applied for both ordinals. `csv_daily_returns` rows: ordinal 1 109 to 179, ordinal 2 156 to 243. Gaps after: none for both. Survival: 0 days without a row.
+- Step 5 read-back (2026-10-26): the daily 04:30Z tick after the apply did NOT recompute the two strategies, so the Wave 5 recompute was run for ordinals 1 and 2 through `enqueue_compute_job` (`compute_analytics_from_csv`), both done on attempt 1 at 06:11Z. Ordinal 1 `headline_since` is now 2026-05-23 (was 2026-08-02). Ordinal 2 has no `headline_since` and no chain-break flag, so its whole series from 2026-02-23 counts (was 2026-08-02). `unrecovered_gaps` is 0 for both, equal to the apply's `gaps_after`; `reconstructed_ranges` is present (1 each); survival is 0 days without a row for all four ordinals. Ordinal 2's public factsheet names its rebuilt range once and the chart is not marked; ordinal 1 is `pending_review`, so it is not public.
+
+### Root cause
+- The recorded premise that the daily 04:30Z tick recomputes a freshly rebuilt strategy was false. The cron sync derives and recomputes only strategies that synced new trades, and the three OKX keys synced 0 trades on 2026-10-24 and 2026-10-25, so `strategy_analytics.computed_at` stayed at its pre-apply value of 2026-10-23 04:42Z and the headlines did not move until the recompute was run by hand.
+
+### Changed
+- `docs/runbooks/okxhistory-go-live.md` Step 5 carries a dated correction: the tick recomputes only strategies that synced new trades, so run the recompute through `enqueue_compute_job` (`compute_analytics_from_csv`) once per rebuilt ordinal. The old sentence is kept as lineage.
+- TODOS: `167.1.2.2.2.1-WAVE5-RECOMPUTE` is CLOSED 2026-10-26 with its false tick premise marked as measured false (original text kept). `167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY` gains the archive census (1606 of 1606 bills USDT) and stays open; `166.5.1-DERIVE-BATCH-RESET-RESIDUAL` gains the readout and stays open.
+- ROADMAP and STATE: both phases are ticked complete with their plan rows, the Progress rows carry dated prose, and STATE's current position stays on 167.2.1.1.2.1 TRADEPAGES, not the next phase in roadmap order.
+
 ## [0.133.0.4] - 2026-10-23 — records: close ACCTREBUILD 167.2.1.1.2
 
 ### Notes
