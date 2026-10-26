@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.0.9] - 2026-10-27 — records: close TRADEPAGES 167.2.1.1.2.1
+
+### Notes
+- Phase 167.2.1.1.2.1 TRADEPAGES is closed, with verification passed. The code shipped as v0.133.0.6 (#1125); this entry lands the post-deploy record. SC-1 is verified in code. SC-2 and SC-3 are closed by a founder decision, not by rebuilds.
+- Plan 06 Task 1 ran once on the deployed worker (the same commit as main). Railway SSH is broken, so the probe ran on the production backfill worker by temporarily changing its start command, with founder approval; the command is restored. The import check printed the expected five values. Probe exit 1. The probe proved the multi-page read live: an OKX account read 1282 trades over 22 calls and a Bybit account 127471 over 1378 calls (128753 trades in all). It could compare no stored history: 0 of 6 accounts comparable.
+- Why: four of six accounts have no working key (`account_key_not_working`); the OKX account was refused `anchor_skipped_implausible`; the Bybit account's read ended `truncated` at the read ceiling. Both gates read `unmeasured` (`okx-order`: an OKX read past one page carried 0 ordering readings; `bybit-transfers`: a 730-day Bybit window with 0 transfers older than 365 days cannot tell a depth limit from an empty year).
+- Founder decision 2026-10-26, "Rebuild none, book follow-ups (Recommended)": Tasks 2 and 3 are not run, no forced job was enqueued, and stored histories stay as recorded ("Accept as recorded"). Recorded as CONTEXT D-05 and a ROADMAP amendment to SC-2 and SC-3; both gate override lines carry scope none.
+- Booked in TODOS.md: a dated 2026-10-26 reading on `167.2.1.1.2.1-READ-CEILING-STRANDS-ACCOUNT`, and new entries `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`, `167.2.1.1.2.1-OKX-ORDER-UNMEASURED` and `167.2.1.1.2.1-BYBIT-TRANSFER-DEPTH-UNMEASURED`. The last two gate any OKX rebuild and any 730-day Bybit rebuild.
+- The phase directory (6 plans and summaries, three review rounds, research, security, verification) lands on `main`. ROADMAP lists the plans and the outcome; STATE names 167.2.1.1.1 NAVMTM as the current phase, in plan revision.
+
 ## [0.133.0.8] - 2026-10-26 — records: close NARROWCHARTS 170.1.3
 
 ### Notes

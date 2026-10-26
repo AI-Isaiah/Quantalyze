@@ -177,7 +177,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — complete 2026-10-22 (v0.132.10.7 #1110; founder 2026-10-22; data-integrity)
 - [x] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — complete 2026-10-23 (v0.133.0.0 #1116; founder 2026-10-22; data-integrity; SC-3: all 5 accounts refused by name, 1 routed to TRADEPAGES)
-- [ ] **Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page** (INSERTED 2026-10-23) — not yet planned (founder 2026-10-23; from ACCTREBUILD SC-3; data-integrity)
+- [x] **Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page** (INSERTED 2026-10-23) — complete 2026-10-27 (v0.133.0.6 #1125; founder 2026-10-23; from ACCTREBUILD SC-3; data-integrity; SC-2 and SC-3 closed by founder decision 2026-10-26, rebuild none)
 - [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
 - [ ] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after NAVMTM)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -5614,12 +5614,19 @@ Plans:
 **Success Criteria** (what must be TRUE):
 1. The rebuild reads every page on OKX and Bybit (Bybit in 7-day windows with an explicit endTime, never earlier than its two-year limit); tests go RED on a 100-row page and on a quiet first window.
 2. After deploy, the ACCTREBUILD a2 forced rebuild is re-run and recorded: recomputed, or refused with a named reason.
-3. The stored OKX- and Bybit-backed histories are measured against a correct re-read, as counts and sizes only; whether to rebuild them is a founder decision, never a silent rewrite.
+3. The stored OKX- and Bybit-backed histories are measured against a correct re-read, as counts and sizes only, and every account that can be rebuilt is rebuilt in this phase through the forced whole-account rebuild, each outcome recorded (founder D-04, 2026-10-23, "Rebuild within this phase"; this replaces the original wording that left rebuilding to a later founder decision).
 
-**Plans:** 0 plans
+**Amendment 2026-10-26 (founder, "Rebuild none, book follow-ups (Recommended)"; CONTEXT D-05):** SC-2 and SC-3 are closed by this decision, not by rebuilds. The post-deploy probe proved the multi-page read live (a4 read 1282 trades over 22 calls, a6 127471 over 1378 calls) but compared no stored history: four of six accounts have no working key, a4 was refused `anchor_skipped_implausible`, a6 was truncated at the read ceiling, and the OKX ordering and Bybit transfer-depth gates read `unmeasured`. SC-2's a2 re-run and SC-3's measurement and rebuilds are not run; stored histories stay as recorded. Follow-ups are booked in TODOS.md.
+
+**Plans:** 6/6 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 167.2.1.1.2.1-01-PLAN.md — trade read for Bybit and other venues: one stop rule, Bybit 7-day windows with an explicit end, venue-faithful fakes, RED on a 100-row page and a quiet first window (wave 1)
+- [x] 167.2.1.1.2.1-02-PLAN.md — OKX walked backward with an explicit end bound, ties at the page edge read once under either bound (wave 2)
+- [x] 167.2.1.1.2.1-03-PLAN.md — Bybit window 729 days back on both window sites (D-01) and the midnight-edge refusal, no new token (wave 3)
+- [x] 167.2.1.1.2.1-04-PLAN.md — crawl diagnostics WARNINGs with static fields; TODOS close and three follow-ups booked (wave 4)
+- [x] 167.2.1.1.2.1-05-PLAN.md — read-only allocator history probe with the live OKX ordering check (D-03) (wave 1)
+- [x] 167.2.1.1.2.1-06-PLAN.md — operator-run post-deploy: probe, OKX ordering gate, a2 re-run, D-04 rebuilds, outcomes recorded (wave 5, not autonomous); closed 2026-10-26 with the probe recorded and no rebuilds (founder)
 
 ### Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history (INSERTED)
 
@@ -6647,7 +6654,7 @@ kept verbatim.
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 167.2.1.1 UPNLVENUES | 6/6 | Complete — v0.132.10.7 #1110; D-01 live read confirmed on 1 of 1 informative key; the 5 multi-key allocators are owned by ACCTREBUILD | 2026-10-22 |
 | 167.2.1.1.2 ACCTREBUILD | 9/9 | Complete — v0.133.0.0 #1116; SC-3: 4 accounts refused `account_key_not_working` (accepted as recorded), 1 refused `account_key_read_failed` (routed to TRADEPAGES); nothing written | 2026-10-23 |
-| 167.2.1.1.2.1 TRADEPAGES | 0/? | Queued — booked 2026-10-23 (founder), from ACCTREBUILD SC-3 | - |
+| 167.2.1.1.2.1 TRADEPAGES | 6/6 | Complete — v0.133.0.6 #1125; SC-1 verified in code; SC-2 and SC-3 closed by founder decision 2026-10-26 (rebuild none, probe recorded: 0 of 6 accounts comparable, 4 have no working key); 4 follow-ups booked | 2026-10-27 |
 | 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
 | 167.2.1.1.1.1 MARKSOURCE | 0/? | Queued — booked 2026-10-22 (founder), after NAVMTM | - |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
