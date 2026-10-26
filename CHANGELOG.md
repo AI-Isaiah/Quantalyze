@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.0.10] - 2026-10-27 — book five follow-up phases (171-175)
+
+### Notes
+- Books five follow-up phases with `/gsd-phase` add (founder 2026-10-27, "You can use add"), each a single topic with goal and success criteria in ROADMAP:
+  - 171 READCEILING: an allocator account above the trade-read ceiling is read in full or refused with a clearable reason (TRADEPAGES probe: a Bybit-backed account ended `truncated`).
+  - 172 OKXANCHOR: an OKX account's history rebuild gets a plausible balance anchor (TRADEPAGES probe: `anchor_skipped_implausible`).
+  - 173 REBUILDGATES: OKX trade ordering and Bybit transfer depth are measured live; both gate any further OKX or Bybit rebuild.
+  - 174 MARKPAUSE: a paused marked series stops the hourly re-crawl, and a strategy's mark refusal reason is kept owner-only (NAVMTM review REVIEW-2 WR-03, SFH F3).
+  - 175 MT5OFFSET: MT5 deal times follow the broker's daylight-saving offset (NAVMTM REVIEW-3 WR-02); interim, the broker's current offset is measured and set at NAVMTM deploy.
+- 171-173 come from the founder's TRADEPAGES decision of 2026-10-26, "Rebuild none, book follow-ups (Recommended)". 174-175 are the NAVMTM review findings routed after three fixer rounds.
+- STATE's Roadmap Evolution lists the five additions. No code change.
+
 ## [0.133.0.9] - 2026-10-27 — records: close TRADEPAGES 167.2.1.1.2.1
 
 ### Notes
