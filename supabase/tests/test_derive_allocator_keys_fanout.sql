@@ -90,7 +90,7 @@ DECLARE
   raised       BOOLEAN;
   v_constraint TEXT;
   v_strat      UUID;  v_port UUID;  v_alloc UUID;  v_api UUID;
-  v_cron_hour  INT;
+  v_rule       RECORD;
 BEGIN
   -- ----- presence gate (test-DB lag) -------------------------------------
   IF NOT EXISTS (
@@ -319,7 +319,31 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (5): a derive_broker_dailies row with an api_key_id target was REJECTED — the api_key coherence arm did NOT survive the CHECK re-base (the exact 20260710130000-warned silent failure)';
   END IF;
 
-  -- ----- ASSERTION 6: cron job registered at a safe hour (1-22) -----------
+  -- ----- ASSERTION 6: cron job registered at least 5 minutes after the day roll,
+  --                      no later than hour 22 (D-13) -------------------------
+  -- ⭐ CHANGED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-13, a consequence of D-03).
+  --    Founder 2026-10-26, D-13: "Minimum offset after midnight (Recommended)".
+  --    This assertion's band (hours 1-22) is replaced by a rule that the chain
+  --    runs at least a few minutes after 00:00Z, because D-03 moves the daily
+  --    chain to just after 00:00 UTC so that every stored mark sits on the UTC
+  --    day boundary and labels the day that just closed. The rule R:
+  --      minute and hour are plain integers, and
+  --      (hour = 0 AND minute >= 5) OR (1 <= hour <= 22).
+  --    Why five minutes answers the reason the old band gave (below): the roll is
+  --    over before the fan-out starts, so `v_today` in the fan-out (a dedup key
+  --    only, never a mark label) is already the new date and no longer changes
+  --    under it. The UPPER bound (22) is kept unchanged on purpose: this change
+  --    removes the hour-0 prohibition and nothing else. Hour 23, minutes 00-04
+  --    of hour 0, and any non-integer field ('*/5', '0-30', a list) stay refused.
+  --    The arm id and the file's arm count are unchanged; the twin below moved
+  --    from '30 0 * * *' (now ALLOWED) to '2 0 * * *' (still forbidden: inside
+  --    the roll). Rule R is exercised on a literal table of nine schedules AND on
+  --    the live row by one shared expression, so the table proves the very rule
+  --    that judges the live schedule.
+  -- ⭐ LINEAGE — the original arm, kept verbatim in substance below. It read the
+  --    hour into `v_cron_hour` and raised outside 1-22; that band and the hour-0
+  --    prohibition it argues for are SUPERSEDED by the note above, and the
+  --    RED-UNDER-M twin line is the live version.
   -- RED-UNDER: re-register derive-allocator-key-dailies on the LIVE database at
   --            00:30 UTC — `cron.schedule('derive-allocator-key-dailies',
   --            '30 0 * * *', …)`, which upserts by name. Hour 0 is outside the
@@ -340,16 +364,48 @@ BEGIN
   -- ⚠️ ORACLE SCOPE: on a lane cron.job holds whatever this apply list just
   --    scheduled, so what is proven here is that the assertion is FALSIFIABLE,
   --    not that PROD's row is correct. See the file header.
-  -- RED-UNDER-M: {"arm":"6","apply":[{"kind":"sql","stmt":"SELECT cron.schedule('derive-allocator-key-dailies', '30 0 * * *', 'SELECT enqueue_derive_broker_dailies_for_allocator_keys();')"}]}
+  -- RED-UNDER-M: {"arm":"6","apply":[{"kind":"sql","stmt":"SELECT cron.schedule('derive-allocator-key-dailies', '2 0 * * *', 'SELECT enqueue_derive_broker_dailies_for_allocator_keys();')"}]}
   IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
     IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'derive-allocator-key-dailies') THEN
       RAISE EXCEPTION 'TEST FAILED (6): cron.job derive-allocator-key-dailies not registered';
     END IF;
-    SELECT (split_part(schedule, ' ', 2))::INT INTO v_cron_hour
-      FROM cron.job WHERE jobname = 'derive-allocator-key-dailies';
-    IF v_cron_hour IS NULL OR v_cron_hour < 1 OR v_cron_hour > 22 THEN
-      RAISE EXCEPTION 'TEST FAILED (6): derive-allocator-key-dailies cron hour must stay 1-22 (got %)', v_cron_hour;
-    END IF;
+    -- D-13 rule R, evaluated by ONE expression over a literal table AND the live
+    -- row, so the rule that is proven able to refuse is the rule that judges
+    -- PROD's schedule. Fields that are not plain 1-2 digit integers ('*/5',
+    -- '0-30', '1,2', '') are refused by the CASE before any cast runs.
+    FOR v_rule IN
+      WITH cand(ord, sched, expected, is_live) AS (
+        VALUES (1, '40 0 * * *',   TRUE,  FALSE),
+               (2, '10 0 * * *',   TRUE,  FALSE),
+               (3, '5 0 * * *',    TRUE,  FALSE),
+               (4, '30 5 * * *',   TRUE,  FALSE),
+               (5, '4 0 * * *',    FALSE, FALSE),
+               (6, '0 0 * * *',    FALSE, FALSE),
+               (7, '30 23 * * *',  FALSE, FALSE),
+               (8, '*/5 0 * * *',  FALSE, FALSE),
+               (9, '0-30 1 * * *', FALSE, FALSE)
+        UNION ALL
+        SELECT 10, schedule, TRUE, TRUE
+          FROM cron.job WHERE jobname = 'derive-allocator-key-dailies'
+      ), parts AS (
+        SELECT ord, sched, expected, is_live,
+               split_part(sched, ' ', 1) AS m, split_part(sched, ' ', 2) AS h
+          FROM cand
+      )
+      SELECT ord, sched, expected, is_live,
+             CASE WHEN m ~ '^[0-9]{1,2}$' AND h ~ '^[0-9]{1,2}$'
+                  THEN ((h::INT = 0 AND m::INT >= 5) OR h::INT BETWEEN 1 AND 22)
+                  ELSE FALSE END AS got
+        FROM parts ORDER BY ord
+    LOOP
+      IF v_rule.got IS DISTINCT FROM v_rule.expected THEN
+        IF v_rule.is_live THEN
+          RAISE EXCEPTION 'TEST FAILED (6): derive-allocator-key-dailies must run at least 5 minutes after 00:00Z and no later than hour 22 (got %)', v_rule.sched;
+        ELSE
+          RAISE EXCEPTION 'TEST FAILED (6): rule % expected % got %', v_rule.sched, v_rule.expected, v_rule.got;
+        END IF;
+      END IF;
+    END LOOP;
   ELSE
     RAISE NOTICE 'pg_cron not present — skipping cron assertion (local dev)';
   END IF;

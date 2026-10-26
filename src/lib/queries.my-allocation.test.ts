@@ -194,6 +194,10 @@ const state = vi.hoisted(() => ({
   // Rows carry a flattened `metadata->>final_status` so the `.eq()` on that
   // JSON path filters like PostgREST does.
   auditLog: [] as Array<Record<string, unknown>>,
+  // Phase 167.2.1.1.1 (NAVMTM) plan 10 - the owner's raw marks. getMyAllocationDashboard
+  // no longer reads them (round-1 SFH F2: the start comes from the published
+  // key_inputs `marks_since`); a test seeds them to prove they name nothing.
+  navMarks: [] as Array<{ allocator_id: string; api_key_id: string; mark_day: string }>,
 }));
 
 function resetState() {
@@ -215,6 +219,7 @@ function resetState() {
   state.tableErrors = {};
   state.maxRows = null;
   state.auditLog = [];
+  state.navMarks = [];
   chainAudit.entries.length = 0;
 }
 
@@ -360,6 +365,8 @@ function buildChain(table: string) {
         return applyFilters(state.computeJobs as Array<Record<string, unknown>>);
       case "audit_log":
         return applyFilters(state.auditLog);
+      case "api_key_nav_marks":
+        return applyFilters(state.navMarks as Array<Record<string, unknown>>);
       default:
         return [];
     }
@@ -475,7 +482,13 @@ function buildChain(table: string) {
     ) => {
       // Injected read failure for THIS table (state.tableErrors) — the shape
       // PostgREST returns: null data alongside a non-null error.
-      const injected = state.tableErrors[table];
+      // The key_inputs list read (`.in("kind", ...)`) is failable on its own, so the
+      // equity_curve read beside it can stay healthy.
+      const injected =
+        state.tableErrors[table] ??
+        (table === "allocator_equity_derived" && filters.some((f) => f.op === "in" && f.column === "kind")
+          ? state.tableErrors["allocator_equity_derived:key_inputs"]
+          : null);
       if (injected) {
         resolve({ data: null, error: injected });
         return;
@@ -5705,5 +5718,333 @@ describe("getMyAllocationDashboard — historyReconstructFailed waits on a recon
         level: "warning",
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 + the UI-SPEC planner check. The
+// dashboard names the day recorded equity begins for the Equity curve note: the
+// earliest PUBLISHED `marks_since` (the `key_inputs:<id>` row the derive writes
+// only after apply_marks succeeded) among the keys the DRAWN curve includes (the
+// allocator-eligible live keys, plus the departed keys the D-09 rule includes).
+// One read on the USER client under the owner's RLS, with an explicit allocator
+// filter. A note must never name a step the drawn curve does not contain, so a
+// departed key the curve leaves out, or a key whose apply was refused, can never
+// supply the date. Dates are synthetic.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard - marksStart names the first recorded-equity day of the drawn keys (NAVMTM D-08)", () => {
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+  });
+
+  const liveKey = (id: string) => ({
+    ...aum04Key(id, "binance"),
+    venue_account_id: `acct-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_inclusion: null,
+  });
+  const departedKey = (id: string, over: Record<string, unknown> = {}) => ({
+    ...aum04Key(id, "okx"),
+    is_active: false,
+    disconnected_at: "2026-04-20T00:00:00Z",
+    venue_account_id: `acct-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_inclusion: null,
+    ...over,
+  });
+  const returnsFor = (apiKeyId: string, days: string[]) =>
+    days.map((date) => ({ api_key_id: apiKeyId, allocator_id: "user-1", date, daily_return: 0.004 }));
+  /** A key's stored derive inputs, carrying the published start when its apply succeeded. */
+  const mark = (apiKeyId: string, marks_since: string, allocator_id = "user-1") => ({
+    allocator_id,
+    kind: `key_inputs:${apiKeyId}`,
+    payload: { marks_since } as Record<string, unknown>,
+  });
+  const GONE_DAYS = ["2026-03-01", "2026-03-02", "2026-04-10"];
+
+  /** A ready v2 derived row carrying the given writer flags. */
+  function readyRow(flags: string[] = []) {
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.flags = flags;
+    row.payload.returns = [
+      { date: "2026-03-11", r: 0.0038 },
+      { date: "2026-03-12", r: 0.0011 },
+      { date: "2026-03-13", r: 0.0039 },
+    ];
+    return row;
+  }
+
+  async function read() {
+    const { getMyAllocationDashboard } = await import("./queries");
+    return getMyAllocationDashboard("user-1");
+  }
+  const marksReads = () =>
+    chainAudit.entries.filter(
+      (e) => e.table === "allocator_equity_derived" && e.ins.some((i) => i.column === "kind"),
+    );
+  const idsOf = (entry: { ins: Array<{ column: string; value: unknown }> }) =>
+    [...((entry.ins.find((i) => i.column === "kind")?.value as string[]) ?? [])]
+      .map((k) => k.replace("key_inputs:", ""))
+      .sort();
+
+  it("reads the earliest published start across the included keys, on the owner's filter", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), liveKey("k-live-2")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(mark("k-live", "2026-03-08"), mark("k-live-2", "2026-03-06"));
+
+    const result = await read();
+
+    expect(result.marksStart).toBe("2026-03-06");
+    const reads = marksReads();
+    expect(reads).toHaveLength(1);
+    expect(reads[0].eqs).toContainEqual({ column: "allocator_id", value: "user-1" });
+    expect(idsOf(reads[0])).toEqual(["k-live", "k-live-2"]);
+  });
+
+  it("a key whose apply was refused publishes no start, so its raw marks never name the step (SFH F2)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), liveKey("k-refused")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(mark("k-live", "2026-03-08"), {
+      allocator_id: "user-1",
+      kind: "key_inputs:k-refused",
+      payload: { nav_mark_refusal: "mark_unit_mismatch" },
+    });
+    // The marks table holds an earlier day for the refused key; the curve never applied it.
+    state.navMarks = [
+      { allocator_id: "user-1", api_key_id: "k-refused", mark_day: "2026-02-01" },
+      { allocator_id: "user-1", api_key_id: "k-live", mark_day: "2026-03-08" },
+    ];
+
+    const result = await read();
+
+    expect(result.marksStart).toBe("2026-03-08");
+    expect(chainAudit.entries.filter((e) => e.table === "api_key_nav_marks")).toHaveLength(0);
+  });
+
+  it("every included key refused: no start, whatever the marks table holds (SFH F2)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-refused")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push({
+      allocator_id: "user-1",
+      kind: "key_inputs:k-refused",
+      payload: { nav_mark_refusal: "mark_base_nonpositive" },
+    });
+    state.navMarks = [{ allocator_id: "user-1", api_key_id: "k-refused", mark_day: "2026-02-01" }];
+
+    expect((await read()).marksStart).toBeNull();
+  });
+
+  it("another owner's earlier marks are never the answer (the explicit allocator filter)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-08"), mark("k-live", "2026-01-02", "user-2")]);
+
+    expect((await read()).marksStart).toBe("2026-03-08");
+  });
+
+  it("a departed key the owner excluded is outside the filter, so its earlier marks never name the step", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone", { history_inclusion: "exclude" })];
+    state.csvDailyReturns = returnsFor("k-gone", GONE_DAYS);
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-08"), mark("k-gone", "2026-02-01")]);
+
+    const result = await read();
+
+    expect(idsOf(marksReads()[0])).toEqual(["k-live"]);
+    expect(result.marksStart).toBe("2026-03-08");
+  });
+
+  it("a departed key the D-09 rule includes is in the filter, and its earlier mark names the step", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    // A distinct account of its own, history ends at its disconnect: the rule includes it.
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = returnsFor("k-gone", GONE_DAYS);
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-08"), mark("k-gone", "2026-02-10")]);
+
+    const result = await read();
+
+    expect(idsOf(marksReads()[0])).toEqual(["k-gone", "k-live"]);
+    expect(result.marksStart).toBe("2026-02-10");
+  });
+
+  it("a departed key with no returns days has nothing in the curve, so it is outside the filter", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-08"), mark("k-gone", "2026-02-10")]);
+
+    const result = await read();
+
+    expect(idsOf(marksReads()[0])).toEqual(["k-live"]);
+    expect(result.marksStart).toBe("2026-03-08");
+  });
+
+  it("departed_history_unavailable set and the earliest row on a departed key: null, the note fails closed", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = returnsFor("k-gone", GONE_DAYS);
+    state.allocatorEquityDerived = [readyRow(["departed_history_unavailable"])];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-08"), mark("k-gone", "2026-02-10")]);
+
+    const result = await read();
+
+    // Positive control: the flag really reached the payload.
+    expect(result.departedHistoryUnavailable).toBe(true);
+    expect(result.marksStart).toBeNull();
+  });
+
+  it("the same flag with the earliest row on a live key names that key's day", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = returnsFor("k-gone", GONE_DAYS);
+    state.allocatorEquityDerived = [readyRow(["departed_history_unavailable"])];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-02-10"), mark("k-gone", "2026-03-08")]);
+
+    const result = await read();
+
+    expect(result.departedHistoryUnavailable).toBe(true);
+    expect(result.marksStart).toBe("2026-02-10");
+  });
+
+  // SFH-2 N1: the same rows publish `marks_trailing_since` when a key's marks stop
+  // updating; the earliest across the drawn keys is named, under the same rules.
+  const paused = (apiKeyId: string, marks_trailing_since: unknown) => ({
+    allocator_id: "user-1",
+    kind: `key_inputs:${apiKeyId}`,
+    payload: { marks_since: "2026-03-01", marks_trailing_since } as Record<string, unknown>,
+  });
+
+  it("reads the earliest published paused-marks day across the included keys", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), liveKey("k-live-2"), liveKey("k-current")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(
+      paused("k-live", "2026-03-12"),
+      paused("k-live-2", "2026-03-09"),
+      mark("k-current", "2026-03-02"),
+    );
+
+    const result = await read();
+
+    expect(result.marksTrailingSince).toBe("2026-03-09");
+    expect(result.marksStart).toBe("2026-03-01");
+  });
+
+  it("no key paused, or a malformed day: null", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(mark("k-live", "2026-03-08"));
+    expect((await read()).marksTrailingSince).toBeNull();
+
+    resetState();
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(paused("k-live", "2026-03-32"));
+    expect((await read()).marksTrailingSince).toBeNull();
+  });
+
+  it("another owner's paused key and a departed key the owner excluded never name the day", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone", { history_inclusion: "exclude" })];
+    state.csvDailyReturns = returnsFor("k-gone", GONE_DAYS);
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(
+      paused("k-live", "2026-03-12"),
+      paused("k-gone", "2026-03-05"),
+      { ...paused("k-live", "2026-03-02"), allocator_id: "user-2" },
+    );
+
+    expect((await read()).marksTrailingSince).toBe("2026-03-12");
+  });
+
+  it("departed_history_unavailable set and the earliest paused day on a departed key: null, fail closed", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = returnsFor("k-gone", GONE_DAYS);
+    state.allocatorEquityDerived = [readyRow(["departed_history_unavailable"])];
+    state.allocatorEquityDerived.push(paused("k-live", "2026-03-12"), paused("k-gone", "2026-03-05"));
+
+    const result = await read();
+
+    expect(result.departedHistoryUnavailable).toBe(true);
+    expect(result.marksTrailingSince).toBeNull();
+    // The start is judged on its own rows: both keys start the same day, the live one is first.
+    expect(result.marksStart).toBe("2026-03-01");
+  });
+
+  it("a failed read is non-fatal: null, a reason-only warning, a Sentry capture, and the dashboard still returns", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-08")]);
+    const failure = { message: "connection reset (test)" };
+    state.tableErrors["allocator_equity_derived:key_inputs"] = failure;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+
+    const result = await read();
+
+    expect(result.marksStart).toBeNull();
+    expect(result.equityHistoryState).toBe("ready");
+    expect(captureSpy).toHaveBeenCalledWith(
+      failure,
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          op: "getMyAllocationDashboard",
+          reason: "nav_marks_start_read_failed",
+        }),
+      }),
+    );
+    expect(warnSpy.mock.calls.map((c) => String(c[0])).join("\n")).toContain("key_inputs marks_since read failed");
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  it("no rows reads null; an empty included set makes no read at all", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow()];
+    expect((await read()).marksStart).toBeNull();
+    expect(marksReads()).toHaveLength(1);
+
+    resetState();
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-08")]);
+    expect((await read()).marksStart).toBeNull();
+    expect(marksReads()).toHaveLength(0);
+  });
+
+  it("the fresh-allocator branch (no portfolio) carries it too", async () => {
+    state.portfolios = [];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-03-06")]);
+
+    expect((await read()).marksStart).toBe("2026-03-06");
+  });
+
+  it("a malformed stored day names no start (the one reader validates it)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow()];
+    state.allocatorEquityDerived.push(...[mark("k-live", "2026-02-30")]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    expect((await read()).marksStart).toBeNull();
   });
 });

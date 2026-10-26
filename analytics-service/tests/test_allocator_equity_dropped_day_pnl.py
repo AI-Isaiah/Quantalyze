@@ -995,7 +995,13 @@ async def test_a_ccxt_key_persists_the_payload_it_always_did() -> None:
 
     assert result.outcome == DispatchOutcome.DONE
     payload = _key_inputs_payload(capture, "key-b")
-    assert set(payload) == {"flows", "anchor_usd", "anchor_null_reason", "anchor_asof", "venue"}
+    # NAVMTM plan 15: a Binance derive now makes a mark outcome of its own (L4). This harness's
+    # exchange is a bare mock with no readable balance, so the outcome is a refusal token and
+    # the payload gains exactly that one additive field; the per-day NAV fields stay absent.
+    assert set(payload) == {
+        "flows", "anchor_usd", "anchor_null_reason", "anchor_asof", "venue", "nav_mark_refusal",
+    }
+    assert payload["nav_mark_refusal"] == "balance_error"
 
 
 # ── the compose job: the stored field reaches the replay ─────────────────────

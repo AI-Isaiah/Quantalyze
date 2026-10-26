@@ -4918,6 +4918,7 @@ jobs:
           # inserted between them — or at a different indent — makes the table
           # read as GONE. Keep prose above this line.
           #   test_analytics_service_settings_and_vault_tick.sql 13
+          #   test_api_key_nav_marks.sql                      11
           #   test_bridge_outcomes_decision_delete_cascade.sql    8
           #   test_compute_job_fence_errcode.sql              8
           #   test_create_wizard_strategy_for_key.sql         9
@@ -5131,6 +5132,15 @@ jobs:
           #   last-key cascade, the seam named at the first rebuilt day, the earliest seam kept), so it
           #   now declares `ALL 15 ARMS EXECUTED` (arms 1-15) and ARMS_FLOOR moves 358 -> 362 (+4);
           #   SENTINEL_FLOOR stays 23. The mutation runner's ARMS_FLOOR moved 788 -> 792, the same +4.
+          # Re-measured 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02), ONE file joined:
+          #   test_api_key_nav_marks.sql declares `ALL 11 ARMS EXECUTED` (arms 1-11), so
+          #   SENTINEL_FLOOR moves 23 -> 24 and ARMS_FLOOR 362 -> 373 (+11). It posts nothing
+          #   and runs on the ordinary sql-tests lane; its arms also bite on the pg-lane under
+          #   sql-mutation (mutation runner, same date: FILES_FLOOR 79 -> 80 and ARMS_FLOOR
+          #   792 -> 803, the same +11 arms, one full run). The row sits in the contiguous
+          #   table above, in file-name order, and ci-anti-skip-gate.contract.test.ts read 24
+          #   sentinel-bearing files against the table's 23 (`expected [ ...(24) ] to deeply
+          #   equal [ ...(23) ]`) before this edit. The file's own sentinel was read, not this table.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5138,8 +5148,8 @@ jobs:
           #   test_sync_status_computed_at_runner_only.sql     10
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=23  # files declaring a sentinel
-          ARMS_FLOOR=362     # 13 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 15 + 14 + 7 + 15 + 4 + 103 + 20 + 16 + 10 + 7 + 23
+          SENTINEL_FLOOR=24  # files declaring a sentinel
+          ARMS_FLOOR=373     # 13 + 11 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 15 + 14 + 7 + 15 + 4 + 103 + 20 + 16 + 10 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

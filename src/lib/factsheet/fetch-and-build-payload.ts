@@ -36,6 +36,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "@/lib/nav-marks-start";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { parseUnrecoveredGaps, readReconstructedRanges } from "./trade-fetch-provenance";
@@ -437,7 +438,7 @@ async function resolveFactsheetInputs(
   // 164.6.6.2.2 D-05: the curve is read by the row's own method, so the flags
   // are read BEFORE the series is resolved.
   const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; pnl_dominated_guard?: unknown; flow_timing_day_level?: unknown; flow_timing_day_level_large?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; pnl_dominated_guard?: unknown; flow_timing_day_level?: unknown; flow_timing_day_level_large?: unknown; marks_since?: unknown; marks_trailing_since?: unknown }
     | null
     | undefined;
   let dailyReturns = resolveDailyReturnSeries(
@@ -936,7 +937,25 @@ async function buildFromResolved(
     benchmark: strategy.benchmark ?? null,
     assetClass: strategy.asset_class ?? null,
   };
-  const nativePayload = buildFactsheetPayload(strategyArg, dailyReturns, buildOpts);
+  const built = buildFactsheetPayload(strategyArg, dailyReturns, buildOpts);
+  // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 / D-12 / L2: the day recorded equity
+  // begins, read from the PUBLISHED analytics flag and parsed once by the one
+  // reader. By spread, only when present, so a strategy with no marks (and a
+  // payload cached before this field) stays byte-identical. The owner-only marks
+  // table is never read here: a factsheet shows what the compute published.
+  // Every later return below derives from this object, so the single-key, the
+  // composite and the native-unit USD arms all carry it.
+  const marksSince = parseMarksStart(dqf?.[MARKS_SINCE_FLAG]);
+  // The day marks stopped updating (SFH-2 N1): the same parser, the same spread.
+  const marksTrailingSince = parseMarksStart(dqf?.[MARKS_TRAILING_SINCE_FLAG]);
+  const nativePayload =
+    marksSince || marksTrailingSince
+      ? {
+          ...built,
+          ...(marksSince ? { marksSince } : {}),
+          ...(marksTrailingSince ? { marksTrailingSince } : {}),
+        }
+      : built;
 
   // Phase 164.6.6.2.1 (D-01, D-03, D-15) — a native strategy ships its USD view
   // beside the native payload. By spread, so a USD payload (and a composite) has

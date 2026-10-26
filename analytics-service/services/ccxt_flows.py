@@ -55,8 +55,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from services.closed_sets import STABLECOINS
-from services.deribit_txn import _row_utc_day
-from services.external_flows import ExternalFlow
+from services.deribit_txn import _row_utc_day, _row_utc_instant
+from services.external_flows import ExternalFlow, FlowInstant
 from services.nav_twr import NavReconstructionError
 
 # Canonical price-index key: (utc_day_iso 'YYYY-MM-DD', UPPERCASE currency code).
@@ -166,6 +166,7 @@ def ccxt_rows_to_dated_flows(
     *,
     venue: str,
     price_index: PriceIndex,
+    instants: list[FlowInstant] | None = None,
 ) -> list[ExternalFlow]:
     """Convert ccxt deposit/withdrawal rows into a per-UTC-day
     ``list[ExternalFlow]`` (sorted ascending by day), applying the per-venue
@@ -195,6 +196,10 @@ def ccxt_rows_to_dated_flows(
     like the Deribit producer). The day key uses the shared ``_row_utc_day``
     helper so a midnight-adjacent flow lands on the same ``t`` as the pnl it
     offsets. ``price_index`` is the ONLY price source (injected by 76-04).
+
+    ``instants`` (NAVMTM D-23), when given, receives one ``FlowInstant`` per surviving row at the
+    row's own timestamp, valued exactly as that row enters its day's sum, so a day's instants add
+    up to the day's flow. The returned flows are the same whether or not it is passed.
     """
     normalized = str(venue).lower()
     if normalized not in _KNOWN_VENUES:
@@ -290,6 +295,9 @@ def ccxt_rows_to_dated_flows(
         fee_usd = _fee_usd(
             row, day=day, flow_ccy=currency, flow_price=price, price_index=price_index
         )
-        by_day[day] = by_day.get(day, 0.0) + sign * amount * price - fee_usd
+        row_usd = sign * amount * price - fee_usd
+        by_day[day] = by_day.get(day, 0.0) + row_usd
+        if instants is not None:
+            instants.append(FlowInstant(int(_row_utc_instant(row.get("timestamp"))), day, row_usd))
 
     return [ExternalFlow(day, usd) for day, usd in sorted(by_day.items())]

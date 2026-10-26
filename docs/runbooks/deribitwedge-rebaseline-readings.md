@@ -171,7 +171,8 @@ k AS (
 A reading of the post-fix capture is meaningful only when (a) the deployed analytics commit
 descends from the DERIBITWEDGE PR-1 merge (`/health` `git_sha`, then
 `git merge-base --is-ancestor <merge> <deployed>` exits 0) AND (b) a 05:30 UTC derive has run on
-that code. A cron "success" only means the fan-out queued jobs. The proof of (b) is on the
+that code (**MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03):** the derive runs at 00:40 UTC from the live move recorded in
+`docs/runbooks/navmtm-chain-move-go-live.md`; read every "05:30 UTC derive" in this runbook as that slot after the move). A cron "success" only means the fan-out queued jobs. The proof of (b) is on the
 worker side: the key's `key_inputs` row has `computed_at` at or after the slot AND carries
 `account_summary`. `cron-run` shows the queueing; `capture-read` shows the work.
 
@@ -724,7 +725,8 @@ runbook step; this file only reads before and after it.
 Written by plan 07 of Phase 167.1.2.2.1 for the Wave 5 consolidated recompute (D-18). Accounts
 and keys are by rank (this runbook's ranks), never by id. Counts, ratios and verdicts only.
 
-**The timing fact that shapes everything below.** The daily 05:30 UTC cron
+**The timing fact that shapes everything below.** (**MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03):** from the live move recorded in
+`docs/runbooks/navmtm-chain-move-go-live.md` the slot below is 00:40 UTC.) The daily 05:30 UTC cron
 (`derive-allocator-key-dailies`) re-derives EVERY connected Deribit key with whatever analytics
 code is deployed. So the keys' returns move at the first 05:30 UTC derive after PR-2 deploys,
 whoever schedules it. Merging and deploying PR-2 IS the keys' re-baseline (CONTEXT D-18 note of

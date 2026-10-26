@@ -1249,3 +1249,86 @@ describe("164.6.6.2.1 plan 11 — a native strategy ships a server-built USD pay
     expect("usdView" in payload).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 / D-12 / L2: the published
+// `data_quality_flags.marks_since` becomes `payload.marksSince` through the one
+// reader. The owner-only marks table is never read for a factsheet (T-167.2.1.1.1-34).
+// ---------------------------------------------------------------------------
+describe("167.2.1.1.1 plan 10 - marks_since on the analytics row becomes payload.marksSince", () => {
+  it("a published start date reaches the single-key payload", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { marks_since: "2024-01-20" } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.marksSince).toBe("2024-01-20");
+  });
+
+  it("it reaches the composite payload too", async () => {
+    seed(
+      composite({
+        metrics_json_by_basis: { cash_settlement: FULL_CASH },
+        data_quality_flags: { composite: true, marks_since: "2024-01-20" },
+      }),
+      csvRows(30),
+    );
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.marksSince).toBe("2024-01-20");
+  });
+
+  it("it reaches a native-unit strategy's payload beside the USD view", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { native_unit: "BTC", marks_since: "2024-01-20" } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.marksSince).toBe("2024-01-20");
+  });
+
+  it.each([
+    ["no flags at all", null],
+    ["a flags blob without marks_since", { insufficient_window: false }],
+    ["an impossible calendar day", { marks_since: "2024-02-30" }],
+    ["a number", { marks_since: 20240120 }],
+    ["a timestamp", { marks_since: "2024-01-20T00:00:00Z" }],
+    ["null", { marks_since: null }],
+  ])("%s: the payload has no marksSince KEY at all, and nothing malformed is rendered as a date", async (_label, flags) => {
+    seed(single({ daily_returns: points(30), data_quality_flags: flags }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect("marksSince" in (payload as object)).toBe(false);
+  });
+
+  // SFH-2 N1: the day marks stopped updating rides the same flags blob.
+  it("a published marks_trailing_since reaches the single-key, the composite and the native-unit payloads", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { marks_since: "2024-01-20", marks_trailing_since: "2024-02-03" } }));
+    expect((await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility))?.marksTrailingSince).toBe("2024-02-03");
+
+    seed(
+      composite({
+        metrics_json_by_basis: { cash_settlement: FULL_CASH },
+        data_quality_flags: { composite: true, marks_trailing_since: "2024-02-03" },
+      }),
+      csvRows(30),
+    );
+    expect((await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility))?.marksTrailingSince).toBe("2024-02-03");
+
+    seed(single({ daily_returns: points(30), data_quality_flags: { native_unit: "BTC", marks_trailing_since: "2024-02-03" } }));
+    expect((await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility))?.marksTrailingSince).toBe("2024-02-03");
+  });
+
+  it.each([
+    ["absent", { marks_since: "2024-01-20" }],
+    ["an impossible calendar day", { marks_trailing_since: "2024-02-30" }],
+    ["a number", { marks_trailing_since: 20240203 }],
+    ["null", { marks_trailing_since: null }],
+  ])("%s: the payload has no marksTrailingSince KEY at all", async (_label, flags) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    seed(single({ daily_returns: points(30), data_quality_flags: flags }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect("marksTrailingSince" in (payload as object)).toBe(false);
+  });
+
+  it("the flag is read from the published analytics row and the marks table is never read", () => {
+    const src = readFileSync(join(__dirname, "fetch-and-build-payload.ts"), "utf8");
+    expect(src).toContain("parseMarksStart(dqf?.[MARKS_SINCE_FLAG])");
+    expect(src).not.toContain("api_key_nav_marks");
+  });
+});

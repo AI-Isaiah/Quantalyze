@@ -84,10 +84,29 @@ requires published-OR-owner, and the fixed `(strategy_id, kind)` PK is collision
 across concurrent teasers. A SUBMITTER-keyed teaser series for lead capture is deferred
 scope (Phase 106 / a dedicated slice — USER 2026-07-14) and MUST NOT key on the archived
 sentinel; that is a separate future concern, not a gap in this invariant.
+
+Phase 167.2.1.1.1 NAVMTM addendum (D-05, OQ-8, D-15): covered days
+-------------------------------------------------------------------
+From the day a key's marks start, a day with no stored mark has NO row (D-05, "No row;
+next mark covers it"): the next stored mark's single return spans it. Such an absence is
+neither a day the derive refuses (a gap span would make the reader draw a missing-segment
+annotation for a day that is, by design, inside the next return) nor a flat day (a
+0.0-filled scalar input would count it as an observation of its own). The additive
+`covered_days` keyword names those days. A covered day is left out of `gap_spans` and out
+of the DEFAULT scalar input, and `conventions["covered_day_count"]` echoes how many were
+given. The count is the only echo: the list itself lives in the strategy's flags. A multi-day
+return therefore counts as ONE observation in volatility, Sharpe and drawdown (D-15,
+founder 2026-10-26: "Yes, one observation"); nothing is spread over the gap days. An
+absence that is NOT covered keeps its old treatment exactly (gap span, 0.0 fill), and a
+caller-supplied `scalar_returns` is used verbatim because that caller has already
+conditioned it. With `covered_days` absent every output is byte-identical to before.
 """
 from __future__ import annotations
 
+import re
+from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -133,6 +152,26 @@ _PAYLOAD_SCHEMA_VERSION = 2
 # The closed set of scalar-input conditioning policies a caller may echo (D1). Fail
 # loud on anything outside it — these are code-controlled constants, never user input.
 _ALLOWED_DENSIFY_POLICIES = ("sparse", "broker_nan", "zero_fill")
+
+_COVERED_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _parse_covered_days(covered_days: Collection[str]) -> pd.DatetimeIndex:
+    """The covered days as a `us` DatetimeIndex. Every member must be an exact
+    `YYYY-MM-DD` calendar date; the text names the keyword and never the value."""
+    parsed: list[pd.Timestamp] = []
+    for day in covered_days:
+        if not (isinstance(day, str) and _COVERED_DAY_RE.fullmatch(day)):
+            raise ValueError(
+                "derive_basis_series: covered_days must hold YYYY-MM-DD calendar dates."
+            )
+        try:
+            parsed.append(pd.Timestamp(date.fromisoformat(day)))
+        except ValueError:
+            raise ValueError(
+                "derive_basis_series: covered_days must hold YYYY-MM-DD calendar dates."
+            ) from None
+    return pd.DatetimeIndex(parsed).as_unit("us")
 
 
 @dataclass(frozen=True)
@@ -207,6 +246,7 @@ def derive_basis_series(
     benchmark_symbol: str | None = None,
     scalar_returns: pd.Series | None = None,
     densify_policy: str | None = None,
+    covered_days: Collection[str] | None = None,
 ) -> BasisSeriesResult:
     """Derive the persisted form + scalar cache + coverage mask from an
     already-computed daily-return series (basis-agnostic; NO new math).
@@ -230,8 +270,15 @@ def derive_basis_series(
     NaN break is reinstated rather than 0.0-bridged. Both params default None →
     byte-invisible (today's behavior; no `densify` echo, `nan_dates` None).
 
-    Raises `ValueError` when `densify_policy` is outside the closed set, or when fewer
-    than 2 finite rows survive sanitize (mirrors the `compute_all_metrics` contract —
+    `covered_days` (NAVMTM, additive; default None is byte-invisible) is a collection of
+    ISO days whose ABSENCE a stored mark's return covers (D-05). A covered day is left out
+    of `gap_spans` and out of the default scalar input (never 0.0-filled), and
+    `conventions["covered_day_count"]` is set; a caller-supplied `scalar_returns` is used
+    verbatim. See the module docstring (D-15: a spanning return is one observation).
+
+    Raises `ValueError` when `densify_policy` is outside the closed set, when
+    `covered_days` holds anything but exact `YYYY-MM-DD` dates or a day that has a row,
+    or when fewer than 2 finite rows survive sanitize (mirrors the `compute_all_metrics` contract —
     call sites keep their degrade/fail handling).
     """
     if densify_policy is not None and densify_policy not in _ALLOWED_DENSIFY_POLICIES:
@@ -246,11 +293,25 @@ def derive_basis_series(
             "derive_basis_series: fewer than 2 finite daily returns after sanitize."
         )
 
+    covered_idx: pd.DatetimeIndex | None = None
+    if covered_days is not None:
+        covered_idx = _parse_covered_days(covered_days)
+        if covered_idx.isin(sparse.index).any():
+            raise ValueError(
+                "derive_basis_series: covered_days must not name a day that has a row."
+            )
+
     # D1: the scalar cache is computed from the caller's exact conditioned series when
     # supplied (legacy byte-identity by construction), else today's gap_fill(sparse).
     # The rows/gap_spans pipeline below stays on `sparse` untouched — rows and
     # scalar-input are decoupled.
-    scalar_input = scalar_returns if scalar_returns is not None else gap_fill_daily_returns(sparse)
+    if scalar_returns is not None:
+        scalar_input = scalar_returns
+    else:
+        scalar_input = gap_fill_daily_returns(sparse)
+        if covered_idx is not None:
+            # NAVMTM: a covered day is inside the next mark's return, not a flat day.
+            scalar_input = scalar_input[~scalar_input.index.isin(covered_idx)]
     metrics = compute_all_metrics(
         scalar_input,
         benchmark_rets,
@@ -267,7 +328,10 @@ def derive_basis_series(
     full_idx = pd.date_range(
         sparse.index.min(), sparse.index.max(), freq="D"
     ).as_unit("us")
-    absent_days = list(full_idx.difference(sparse.index))
+    absent_idx = full_idx.difference(sparse.index)
+    if covered_idx is not None:
+        absent_idx = absent_idx[~absent_idx.isin(covered_idx)]
+    absent_days = list(absent_idx)
     gap_spans = _consecutive_spans(absent_days)
 
     conventions: dict[str, Any] = {
@@ -288,6 +352,9 @@ def derive_basis_series(
     # `benchmark` — omitted (byte-invisible) when the caller passes no policy.
     if densify_policy is not None:
         conventions["densify"] = densify_policy
+    # NAVMTM: the count only (the list lives in the strategy's flags); absent when not given.
+    if covered_idx is not None:
+        conventions["covered_day_count"] = len(covered_idx.unique())
 
     # Phase 105 (D1): under `zero_fill` ONLY, surface the in-index NaN dates of the
     # caller's scalar input (a preserved member-guard NaN break) so the round-trip

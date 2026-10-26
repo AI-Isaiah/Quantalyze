@@ -81,6 +81,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // Phase 164.6.6.2.1 plan 17 (D-20): the native-unit accounts the total
     // leaves out on an unpriced day. Empty when absent.
     unpricedNativeAccounts = [],
+    // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the first day recorded equity
+    // begins for the keys the drawn curve includes. Absent reads as null (no
+    // note). The embedded portfolio factsheet's cumulative chart names it when
+    // it falls inside the drawn range, as the Equity curve widget above it does.
+    marksStart = null,
+    // SFH-2 N1: the first day without a mark when marks stopped updating.
+    marksTrailingSince = null,
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
@@ -118,12 +125,16 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             aum: analytics?.total_aum ?? null,
             dailyReturns: equityDailyReturns,
             btcBenchmarkPrices,
+            marksStart,
+            marksTrailingSince,
           }),
     [
       isRebuilding,
       equityDailyPoints,
       equityDailyReturns,
       btcBenchmarkPrices,
+      marksStart,
+      marksTrailingSince,
       props.allocator_id,
       portfolio,
       analytics,

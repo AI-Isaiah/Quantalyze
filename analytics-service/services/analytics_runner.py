@@ -22,10 +22,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping
-from datetime import datetime, timezone
-from typing import Any, TypedDict
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, NamedTuple, TypedDict
 
 from fastapi import HTTPException
 from postgrest.exceptions import APIError
@@ -228,6 +229,28 @@ class DataQualityFlags(TypedDict, total=False):
     # NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
     # computation_status or set computation_warned. ---
     native_unit: str
+    # --- Phase 167.2.1.1.1 NAVMTM (D-12): the first UTC day this strategy's series uses a
+    # stored marked-to-market NAV instead of a realized-basis value (YYYY-MM-DD). Stamped by
+    # the broker derive's pre-stamp and carried present-only by run_csv_strategy_analytics,
+    # which rebuilds data_quality_flags wholesale. The factsheet reads it to draw the small
+    # "marked from" note. An annotation, NEVER a warning: deliberately in neither
+    # NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
+    # computation_status or set computation_warned. The owner-only marks table is never read. ---
+    marks_since: str
+    # --- NAVMTM (D-05): the first day whose absence a stored mark's return covers instead
+    # of the derive refusing it (apply_marks' covered_from). The derive stamps it; the runner
+    # reads it back so its load-boundary reindex cannot disagree with the derive. Same
+    # present-only, never-a-warning rule as marks_since. ---
+    marks_covered_from: str
+    # --- NAVMTM (D-05, D-15): the unmarked calendar days a later mark's return spans. A list
+    # of YYYY-MM-DD days, named so the post-deploy readout can report how often a return spans
+    # a gap. Same rule as marks_since: an annotation, never a warning, never a chain break. ---
+    mark_gap_days: list[str]
+    # --- NAVMTM (D-05, review CR-03): the first day after the key's last applied mark when no
+    # mark covers the days up to the day this derive labels, so the published series stops
+    # before today. Present-only (YYYY-MM-DD), popped when the series is current, and the same
+    # annotation-never-a-warning rule as marks_since: it never changes computation_status. ---
+    marks_trailing_since: str
     # --- Phase 164.6.6.2 (D-25): at least one MEASURED day started from a balance below the
     # unit's material equity (BTC 1e-4), so its return can be extreme. Stamped by the broker
     # derive's pre-stamp and carried present-only by run_csv_strategy_analytics. An
@@ -1349,6 +1372,72 @@ def _without_gap_day_points(
     return out
 
 
+# Phase 167.2.1.1.1 NAVMTM (D-12): the four keys the broker derive pre-stamps from the
+# stored marks. They are INPUTS here (a worker-written JSONB read back) and become PUBLIC
+# flags, so each one is validated before it moves the reindex boundary or reaches a
+# factsheet viewer (T-167.2.1.1.1-28). The rule is the snapshot-rebuild-boundary rule
+# (src/lib/snapshot-rebuild-boundary.ts): a real calendar date written exactly YYYY-MM-DD.
+_NAVMTM_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_NAVMTM_DAY_KEYS = ("marks_since", "marks_covered_from", "marks_trailing_since")
+_NAVMTM_DAY_LIST_KEYS = ("mark_gap_days",)
+
+
+class _NavmtmFlags(NamedTuple):
+    """The validated NAVMTM prestamp values; ``None`` is absent or dropped."""
+
+    marks_since: str | None
+    marks_covered_from: str | None
+    mark_gap_days: list[str] | None
+    marks_trailing_since: str | None
+
+
+def _is_iso_calendar_day(value: object) -> bool:
+    """True for a real calendar date written exactly as ``YYYY-MM-DD``."""
+    if not (isinstance(value, str) and _NAVMTM_DAY_RE.fullmatch(value)):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _read_navmtm_flags(existing_flags: Mapping[str, Any], strategy_id: str) -> _NavmtmFlags:
+    """Validate the NAVMTM keys of the derive's prestamp. An absent (or null) key is
+    simply absent. A malformed key is dropped with one warning that names the key and the
+    reason and never the value, so a bad prestamp neither moves the reindex boundary nor
+    reaches the published row."""
+    kept: dict[str, Any] = {}
+    for key in _NAVMTM_DAY_KEYS:
+        value = existing_flags.get(key)
+        if value is None:
+            continue
+        if _is_iso_calendar_day(value):
+            kept[key] = value
+        else:
+            logger.warning(
+                "csv analytics: NAVMTM flag %s is malformed (%s) for %s; not carried",
+                key, "not a YYYY-MM-DD calendar date", strategy_id,
+            )
+    for key in _NAVMTM_DAY_LIST_KEYS:
+        value = existing_flags.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list) and all(_is_iso_calendar_day(d) for d in value):
+            kept[key] = list(value)
+        else:
+            logger.warning(
+                "csv analytics: NAVMTM flag %s is malformed (%s) for %s; not carried",
+                key, "not a list of YYYY-MM-DD calendar dates", strategy_id,
+            )
+    return _NavmtmFlags(
+        marks_since=kept.get("marks_since"),
+        marks_covered_from=kept.get("marks_covered_from"),
+        mark_gap_days=kept.get("mark_gap_days"),
+        marks_trailing_since=kept.get("marks_trailing_since"),
+    )
+
+
 async def run_csv_strategy_analytics(
     strategy_id: str,
     *,
@@ -1890,13 +1979,22 @@ async def run_csv_strategy_analytics(
             # 0.0-fill for guard days was exactly the dishonest fabrication the root-cause
             # fix removed — keeping the dead branch invited re-routing the headline back
             # through the divergent path.
-            if _is_broker_sourced and not returns.empty:
-                dense_index = pd.date_range(
-                    returns.index.min(), returns.index.max(), freq="D"
-                )
-                returns = returns.reindex(dense_index)
-                returns.name = "returns"
-
+            #
+            # Phase 167.2.1.1.1 NAVMTM (D-05): a day the NEXT stored mark's return covers is
+            # not a refused day. From the day a key's marks start, the derive stores a
+            # return only on a marked day, so a missed mark leaves an absent in-span day that
+            # the reindex above would turn into a NaN chain break and move `headline_since`:
+            # the opposite of "No row; next mark covers it". The derive therefore pre-stamps
+            # `marks_covered_from` (apply_marks' covered_from, the first day whose absence a
+            # mark covers), and the dense reindex runs only over the rows dated BEFORE it.
+            # The boundary comes from the derive and not from the stored rows because stored
+            # rows lack the NaN days: re-deriving it here would let the two disagree. A
+            # refused day before the boundary keeps its NaN exactly as today, including one
+            # immediately before it (a NaN needs a valid day after it to matter, and the
+            # first mark row is one). Rows on or after it are used as stored.
+            #
+            # The pre-stamp is read BEFORE the reindex for that reason. It is a pure read
+            # of the row the later steps read; nothing between the two positions writes it.
             # Phase 76 / 101 / 164.6.6.2: the broker derive PRE-STAMPS flags onto this
             # row before enqueuing this run, and this run rebuilds data_quality_flags
             # wholesale, so they are read here and carried below. Read BEFORE the
@@ -1914,6 +2012,52 @@ async def run_csv_strategy_analytics(
                 return dict(row.get("data_quality_flags") or {})
 
             existing_flags = await db_execute(_read_existing_flags)
+            _navmtm = _read_navmtm_flags(existing_flags, strategy_id)
+            _covered_days: list[str] | None = None
+
+            if _is_broker_sourced and not returns.empty:
+                if _navmtm.marks_covered_from is None:
+                    dense_index = pd.date_range(
+                        returns.index.min(), returns.index.max(), freq="D"
+                    )
+                    returns = returns.reindex(dense_index)
+                else:
+                    _boundary = pd.Timestamp(
+                        date.fromisoformat(_navmtm.marks_covered_from)
+                    )
+                    _pre = returns[returns.index < _boundary]
+                    _post = returns[returns.index >= _boundary]
+                    if not _pre.empty:
+                        # With rows on or after the boundary, the NaN days run up to the
+                        # day before it. With none, nothing follows to break against, so
+                        # the span ends at the last stored row exactly as it always has.
+                        _pre_end = (
+                            _boundary - timedelta(days=1)
+                            if not _post.empty
+                            else _pre.index.max()
+                        )
+                        _pre = _pre.reindex(
+                            pd.date_range(_pre.index.min(), _pre_end, freq="D")
+                        )
+                    # Concatenate only the non-empty parts (an empty part would change
+                    # the dtype pandas infers).
+                    _parts = [part for part in (_pre, _post) if not part.empty]
+                    returns = _parts[0] if len(_parts) == 1 else pd.concat(_parts)
+                    # Every absent day of the loaded span on or after the boundary. On a
+                    # single-key series that is exactly the set apply_marks names.
+                    _post_days = {ts.date().isoformat() for ts in _post.index}
+                    _covered_days = (
+                        [
+                            ts.date().isoformat()
+                            for ts in pd.date_range(
+                                _post.index.min(), _post.index.max(), freq="D"
+                            )
+                            if ts.date().isoformat() not in _post_days
+                        ]
+                        if not _post.empty
+                        else []
+                    )
+                returns.name = "returns"
 
             # D-10 (RESEARCH Pitfall 4): a native-unit series (a BTC MT5 account) is
             # NOT paired with the benchmark. get_benchmark_returns("BTC") returns USD
@@ -2005,6 +2149,10 @@ async def run_csv_strategy_analytics(
                 benchmark_symbol="BTC",
                 scalar_returns=returns,
                 densify_policy="broker_nan" if _is_broker_sourced else "sparse",
+                # NAVMTM (D-05): the covered days are neither gap spans of the persisted
+                # cash series nor flat days in the scalar input. None (no boundary) is
+                # byte-invisible.
+                covered_days=_covered_days,
             )
 
             # D-02 (167.1.2.2.2-07): the load boundary above reinstated NaN on every
@@ -2103,6 +2251,22 @@ async def run_csv_strategy_analytics(
             # "complete" and computation_warned False.
             if _native_unit is not None:
                 data_quality_flags["native_unit"] = _native_unit
+
+            # Phase 167.2.1.1.1 NAVMTM (D-12, D-05, D-15): carry the marks-start date, the
+            # covered-from boundary and the two day lists PRESENT-ONLY, validated above, and
+            # OUTSIDE both `_warned` loops, exactly like native_unit. The rebuild is wholesale,
+            # so an unbridged pre-stamp would be wiped seconds after the derive wrote it. They
+            # are an annotation, never a warning: a clean marked account stays exact-string
+            # "complete" with computation_warned False. The owner-only marks table is never
+            # read here; only a date and day names reach the published row.
+            if _navmtm.marks_since is not None:
+                data_quality_flags["marks_since"] = _navmtm.marks_since
+            if _navmtm.marks_covered_from is not None:
+                data_quality_flags["marks_covered_from"] = _navmtm.marks_covered_from
+            if _navmtm.mark_gap_days is not None:
+                data_quality_flags["mark_gap_days"] = _navmtm.mark_gap_days
+            if _navmtm.marks_trailing_since is not None:
+                data_quality_flags["marks_trailing_since"] = _navmtm.marks_trailing_since
 
             # Phase 164.6.6.2 (D-25): carry the small-base annotation PRESENT-ONLY and
             # OUTSIDE both `_warned` loops above, exactly like native_unit. The rebuild of

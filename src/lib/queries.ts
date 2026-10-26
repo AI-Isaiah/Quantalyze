@@ -94,6 +94,8 @@ import {
   SNAPSHOT_REBUILD_BOUNDARY_KIND,
   type SnapshotRebuildBoundary,
 } from "./snapshot-rebuild-boundary";
+import { departedHistoryInclusion, isDepartedKey, type DepartedHistoryKey } from "./departed-history";
+import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "./nav-marks-start";
 import {
   PERCENTILE_METRICS,
   scoreAgainstPopulation,
@@ -3383,6 +3385,30 @@ export interface MyAllocationDashboardPayload {
    */
   snapshotRebuildBoundary?: SnapshotRebuildBoundary | null;
   /**
+   * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 and the UI-SPEC planner check. The
+   * first day recorded (marked-to-market) equity begins for the keys the DRAWN
+   * curve includes: the earliest `mark_day` of the allocator-eligible live keys
+   * and of the departed keys the D-09 rule includes, read from the owner's own
+   * `api_key_nav_marks` rows under owner RLS. The Equity curve widget and the
+   * embedded portfolio factsheet name it when it falls inside the drawn range.
+   * `null` means no marks yet, an empty included set, a failed read (logged and
+   * reported, never fatal), a malformed day, or the fail-closed case: the
+   * derive reported `departed_history_unavailable` (it left out a departed
+   * account the rule includes, without naming which) and the earliest row
+   * belongs to a departed key, so the note would risk naming a step the curve
+   * does not contain. Optional so legacy fixtures compile; the producer always
+   * sets it.
+   */
+  marksStart?: string | null;
+  /**
+   * SFH-2 N1. The earliest `marks_trailing_since` among the same keys (the first
+   * day without a mark when a key's marks stopped updating), read from the same
+   * `key_inputs` rows with the same fail-closed rule as `marksStart`. `null` means
+   * no key reports paused marks, or any of the cases that null `marksStart`.
+   * Optional so legacy fixtures compile; the producer always sets it.
+   */
+  marksTrailingSince?: string | null;
+  /**
    * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
    * written, on `asof`, by a poll that could not read their open positions
    * (`fetchLatestHoldingsPerKey`'s `partialReads`). Bound to the poll that
@@ -4073,6 +4099,127 @@ export function buildPerKeyReturnsByApiKeyId(
     (result[r.api_key_id] ??= []).push({ date: r.date, value: r.daily_return });
   }
   return result;
+}
+
+/**
+ * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 and the UI-SPEC planner check. The
+ * keys the DRAWN Equity curve includes, so the start-of-marks note names a step
+ * the curve contains: the allocator-eligible live keys, plus every departed key
+ * the D-09 rule includes (`departedHistoryInclusion`, the TS twin of the
+ * derive's `departed_history_inclusion`). The rule reads the dashboard's own key
+ * rows and each key's first and last returns day from `perKeyReturnsByApiKeyId`;
+ * the one input the dashboard does not hold is a departed key's saved balance
+ * (`anchored`), which the derive reports as `departed_history_unavailable`, the
+ * flag the read below fails closed on.
+ */
+function marksIncludedKeys(
+  apiKeys: ReadonlyArray<ApiKeyUserView>,
+  perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
+  allocatorEligibleApiKeyIds: ReadonlyArray<string>,
+): { included: string[]; departedIncluded: Set<string> } {
+  const historyKeys: DepartedHistoryKey[] = apiKeys.map((k) => {
+    let first: string | null = null;
+    let last: string | null = null;
+    for (const point of perKeyReturnsByApiKeyId[k.id] ?? []) {
+      if (first === null || point.date < first) first = point.date;
+      if (last === null || point.date > last) last = point.date;
+    }
+    return {
+      id: k.id,
+      exchange: k.exchange,
+      venue_account_id: k.venue_account_id ?? null,
+      account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
+      account_share_kind: k.account_share_kind ?? null,
+      is_active: k.is_active,
+      disconnected_at: k.disconnected_at ?? null,
+      sync_status: k.sync_status ?? null,
+      history_inclusion: k.history_inclusion ?? null,
+      first_returns_day: first,
+      last_returns_day: last,
+    };
+  });
+  const departedIncluded = new Set<string>();
+  for (const key of historyKeys) {
+    if (isDepartedKey(key) && departedHistoryInclusion(key, historyKeys).included) {
+      departedIncluded.add(key.id);
+    }
+  }
+  return {
+    included: [...new Set([...allocatorEligibleApiKeyIds, ...departedIncluded])],
+    departedIncluded,
+  };
+}
+
+/** The `allocator_equity_derived.kind` of a key's stored derive inputs: this prefix plus the key id. */
+const KEY_INPUTS_KIND_PREFIX = "key_inputs:";
+
+/**
+ * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08. The earliest PUBLISHED `marks_since`
+ * among `includedKeyIds`: ONE read of their `key_inputs:<id>` rows on the USER
+ * client under the owner's RLS, with the allocator filter written out (defence in
+ * depth atop RLS, T-167.2.1.1.1-35). Never the service-role client. The derive
+ * writes `marks_since` into a key's row only after `apply_marks` succeeded, so a
+ * key whose apply was refused names no start; the raw marks table would name one
+ * the drawn curve does not contain (round-1 SFH F2).
+ *
+ * NON-FATAL by design, in the snapshot_rebuild_boundary read's voice: a failed
+ * read logs the reason, reports to Sentry at warning level and names no start,
+ * leaving every other dashboard field as it was. Fail closed on
+ * `departed_history_unavailable`: the derived payload does not say which departed
+ * account it left out, so when the earliest row belongs to a departed key the
+ * curve may not contain that key, and the note names nothing.
+ *
+ * SFH-2 N1: the same rows also carry `marks_trailing_since`, the first day
+ * without a mark when a key's marks stopped updating. The earliest across the
+ * drawn keys is returned beside the start, under the same fail-closed rule.
+ */
+async function readMarksStart(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  includedKeyIds: string[],
+  departedIncluded: ReadonlySet<string>,
+  departedHistoryUnavailable: boolean,
+): Promise<{ start: string | null; trailingSince: string | null }> {
+  const none = { start: null, trailingSince: null };
+  if (includedKeyIds.length === 0) return none;
+  const { data, error } = await supabase
+    .from("allocator_equity_derived")
+    .select("kind, payload")
+    .eq("allocator_id", userId)
+    .in("kind", includedKeyIds.map((id) => KEY_INPUTS_KIND_PREFIX + id));
+  if (error) {
+    console.warn(
+      "[queries.getMyAllocationDashboard] key_inputs marks_since read failed (naming no recorded-equity start):",
+      error.message ?? "unknown supabase error",
+    );
+    scheduleDerivedRowCapture(
+      captureToSentry(error, {
+        tags: { op: "getMyAllocationDashboard", reason: "nav_marks_start_read_failed" },
+        level: "warning",
+      }),
+    );
+    return none;
+  }
+  let earliest: { day: string; keyId: string } | null = null;
+  let earliestTrailing: { day: string; keyId: string } | null = null;
+  for (const row of data ?? []) {
+    const payload = row.payload as Record<string, unknown> | null;
+    const keyId = row.kind.slice(KEY_INPUTS_KIND_PREFIX.length);
+    const day = parseMarksStart(payload?.[MARKS_SINCE_FLAG]);
+    if (day !== null && (earliest === null || day < earliest.day)) {
+      earliest = { day, keyId };
+    }
+    const trailing = parseMarksStart(payload?.[MARKS_TRAILING_SINCE_FLAG]);
+    if (trailing !== null && (earliestTrailing === null || trailing < earliestTrailing.day)) {
+      earliestTrailing = { day: trailing, keyId };
+    }
+  }
+  const failsClosed = (e: { keyId: string } | null) =>
+    e === null || (departedHistoryUnavailable && departedIncluded.has(e.keyId));
+  return {
+    start: failsClosed(earliest) ? null : earliest!.day,
+    trailingSince: failsClosed(earliestTrailing) ? null : earliestTrailing!.day,
+  };
 }
 
 const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -6045,6 +6192,23 @@ export const getMyAllocationDashboard = cache(
         )
       : emptyLiveBaselineMetrics(phase07.holdingsSummary);
 
+    // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the day recorded equity begins for
+    // the keys the drawn curve includes. After `allocatorEligibleApiKeyIds` and
+    // `phase07.departedHistoryUnavailable` are known, which the key set and the
+    // fail-closed case both read. Carried on both return branches below.
+    const marksKeys = marksIncludedKeys(
+      apiKeys,
+      perKeyReturnsByApiKeyId,
+      allocatorEligibleApiKeyIds,
+    );
+    const { start: marksStart, trailingSince: marksTrailingSince } = await readMarksStart(
+      supabase,
+      userId,
+      marksKeys.included,
+      marksKeys.departedIncluded,
+      phase07.departedHistoryUnavailable === true,
+    );
+
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
     // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
     // can rely on it. Trust the `userId` argument: callers (the Server
@@ -6098,6 +6262,8 @@ export const getMyAllocationDashboard = cache(
         ...phase07,
         btcBenchmarkPrices,
         snapshotRebuildBoundary,
+        marksStart,
+        marksTrailingSince,
       };
     }
 
@@ -6596,6 +6762,8 @@ export const getMyAllocationDashboard = cache(
       ...phase07,
       btcBenchmarkPrices,
       snapshotRebuildBoundary,
+      marksStart,
+      marksTrailingSince,
     };
   },
 );

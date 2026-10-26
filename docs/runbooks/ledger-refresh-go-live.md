@@ -438,6 +438,12 @@ SELECT cron.schedule(
 `retention_compute_jobs_orphaned_running` terminalizer at `:50`, and every occupied daily slot
 (03:00, 03:05, 03:10, 03:15, 03:20, 03:30, 04:00, 04:15, 05:00, 05:30 UTC).
 
+> **MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03).** The daily chain now runs at
+> 00:05Z (benchmark), 00:10Z (trade-sync tick) and 00:40Z (allocator derive) from the live move
+> recorded in `docs/runbooks/navmtm-chain-move-go-live.md`. Minute 25 still clears all
+> three, so this choice stands; the merge hold for a ledger-refresh change is 00:00-01:45 UTC from
+> that move.
+
 **Verify:**
 
 ```sql

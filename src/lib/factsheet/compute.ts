@@ -399,6 +399,14 @@ export type ComputeConventions = {
   cumulativeMethod?: "geometric" | "arithmetic";
   dayBasis?: "calendar" | "active";
   calendarDense?: boolean;
+  /**
+   * 167.2.1.1.1 (D-15, review WR-01) — the composite's persisted gap spans
+   * (inclusive both ends). With `calendarDense`, only an absent day INSIDE one
+   * is zero-filled, as the server's scalar input does; any other absent day is a
+   * day a mark's single return covers and is dropped, not counted as a flat
+   * observation. Absent means no span information: every absent day is filled.
+   */
+  missingSegments?: ReadonlyArray<{ start: string; end: string }>;
 };
 
 /**
@@ -431,16 +439,24 @@ export function metricsBasisSeries(
     }
     const returns: number[] = [];
     const positions: Array<number | null> = [];
+    const gapOffsets = conventions.missingSegments?.map((g) => [
+      calendarDayOffset(dates[0], g.start),
+      calendarDayOffset(dates[0], g.end),
+    ]);
+    let day = 0; // calendar offset of the next day to place
     for (let i = 0; i < rets.length; i++) {
       const offset = calendarDayOffset(dates[0], dates[i]);
-      if (!Number.isFinite(offset) || offset < returns.length) {
+      if (!Number.isFinite(offset) || offset < day) {
         throw new Error(
           `metricsBasisSeries(): a calendar-dense series needs strictly increasing dates (got ${dates[i]} at index ${i}, after ${dates[i - 1] ?? "the start"})`,
         );
       }
-      while (returns.length < offset) returns.push(0);
+      for (; day < offset; day++) {
+        if (!gapOffsets || gapOffsets.some(([from, to]) => day >= from && day <= to)) returns.push(0);
+      }
       positions.push(returns.length);
       returns.push(rets[i]);
+      day = offset + 1;
     }
     return { returns, positions };
   }

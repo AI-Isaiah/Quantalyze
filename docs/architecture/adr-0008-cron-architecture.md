@@ -98,7 +98,7 @@ Assign each mechanism a workload class:
 | Analytics warmup | 0 0 * * * | Vercel Cron (1) | `/api/cron/warm-analytics` |
 | Alert digest | 0 9 * * * | Vercel Cron (4) | `/api/alert-digest` |
 | Match recompute | Hourly | pg_cron (3) | FastAPI `/api/match/cron-recompute` |
-| Trade sync (`cron-sync-trades`) | 30 4 * * * | pg_cron (3) | FastAPI `/api/cron-sync`, called by `public.cron_sync_tick()` |
+| Trade sync (`cron-sync-trades`) | 10 0 * * * | pg_cron (3) | FastAPI `/api/cron-sync`, called by `public.cron_sync_tick()` |
 | Stuck-`computing` reaper | `*/15 * * * *` | pg_cron, **in-DB SQL** (no FastAPI hop) | `reap_strategy_analytics_stuck_computing` |
 | Compute trigger | On insert | Edge Function (3) | `compute-trigger` |
 | Admin notification | On event | Edge Function (3) | `notify-admin` |
@@ -116,6 +116,21 @@ Assign each mechanism a workload class:
 > deactivated, so the `revoked` counter would read non-zero forever and poison any
 > alarm built on it. The "Compute trigger" row above is historical: see the
 > correction under Evidence.
+
+> **CHANGED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM) — the trade-sync schedule and
+> what the tick enqueues.** D-03 moved the daily chain to just after 00:00 UTC so
+> that every stored account mark sits on the UTC day boundary and labels the day
+> that just closed: `refresh-benchmark` (Vercel) at 00:05Z, `cron-sync-trades` at
+> 00:10Z, `derive-allocator-key-dailies` at 00:40Z, in that order. The row above
+> previously read `30 4 * * *`. The schedule lives in PROD `cron.job` and in the
+> committed manifest `scripts/prod-prober/cron-manifest.json`; the live move is an
+> operator step (`docs/runbooks/navmtm-chain-move-go-live.md`) and the manifest is
+> re-captured by the prober after it, never edited by hand. D-02: the tick now
+> enqueues a derive for every eligible strategy of a key whose fetch was not
+> degraded, not only those that stored new trades, so every eligible strategy of a
+> healthy key is derived daily and its mark is written. The exclusions in the
+> correction above are unchanged. Until the live move the job still runs at its old
+> time and this row describes the committed intent.
 
 > The reaper (added v0.52.0.0) is a **sixth shape** the five mechanisms above do
 > not describe: pg_cron running SQL directly in the database, with no service

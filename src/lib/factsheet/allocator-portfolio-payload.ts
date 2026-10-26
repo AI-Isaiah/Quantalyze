@@ -2,6 +2,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { BenchmarkPricesOpt, FactsheetPayload } from "./types";
 import { buildFactsheetPayload } from "./build-payload";
 import { equityCurveToDailyReturns } from "./resolve-series";
+import { parseMarksStart } from "@/lib/nav-marks-start";
 
 // Phase 147 / SC2 — ONE series-resolution mechanism. Both functions moved verbatim to the
 // leaf `./resolve-series` (which does NOT import ./build-payload) so the OG route and the
@@ -40,6 +41,23 @@ export interface AllocatorPortfolioMetadata {
    * payload built without the field) passes no opt: today's fixture path.
    */
   btcBenchmarkPrices?: BenchmarkPricesOpt | null;
+  /**
+   * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08. The dashboard payload's
+   * `marksStart`: the first day recorded equity begins for the keys the drawn
+   * curve includes (`MyAllocationDashboardPayload.marksStart`). Passed on so the
+   * embedded portfolio factsheet's cumulative chart follows the same rule as the
+   * Equity curve widget above it; it lands on `payload.marksSince`. Typed
+   * `unknown` and parsed by the one reader (`parseMarksStart`) here, so a
+   * malformed value reads as no start and can never reach a chart. Absent or
+   * `null` is no start.
+   */
+  marksStart?: unknown;
+  /**
+   * The dashboard payload's `marksTrailingSince`: the first day AFTER the last
+   * recorded mark among the drawn keys, when marks have stopped updating. Lands
+   * on `payload.marksTrailingSince`; parsed by the same reader as `marksStart`.
+   */
+  marksTrailingSince?: unknown;
 }
 
 /**
@@ -72,7 +90,7 @@ export function buildAllocatorPortfolioFactsheetPayload(
   const strategyId = `portfolio:${meta.allocatorId}`;
   const portfolioName = meta.portfolioName?.trim() || "My Portfolio";
 
-  return buildFactsheetPayload(
+  const payload = buildFactsheetPayload(
     {
       id: strategyId,
       name: portfolioName,
@@ -113,4 +131,14 @@ export function buildAllocatorPortfolioFactsheetPayload(
     dailyReturns,
     meta.btcBenchmarkPrices != null ? { benchmarkPrices: meta.btcBenchmarkPrices } : undefined,
   );
+  // D-08: by spread and only when a start is named, so a book with no marks
+  // keeps the payload it had before this field.
+  const marksSince = parseMarksStart(meta.marksStart);
+  const marksTrailingSince = parseMarksStart(meta.marksTrailingSince);
+  if (payload === null || (!marksSince && !marksTrailingSince)) return payload;
+  return {
+    ...payload,
+    ...(marksSince ? { marksSince } : {}),
+    ...(marksTrailingSince ? { marksTrailingSince } : {}),
+  };
 }

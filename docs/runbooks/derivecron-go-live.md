@@ -11,6 +11,12 @@ every day. The cost is stated under Blast radius below. Read it before the pre-f
 One daily PROD `pg_cron` job named `derive-allocator-key-dailies`, schedule `30 5 * * *`, command
 `SELECT enqueue_derive_broker_dailies_for_allocator_keys();`.
 
+> **MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03).** From the live move recorded in
+> `docs/runbooks/navmtm-chain-move-go-live.md` the schedule is `40 0 * * *`
+> (00:40Z), after the trade-sync tick at 00:10Z. Every 05:30 statement below (the merge hold, the
+> first tick, the D-06 reads' `RUN_AT`) describes the original registration and holds until that
+> move; after it, read 05:30Z as 00:40Z and the hold as 00:00-01:45 UTC.
+
 The chain it starts:
 
 1. The fan-out enqueues one key-mode `derive_broker_dailies` job per eligible `api_keys` row
@@ -347,6 +353,10 @@ row).
 known-clean baseline.
 
 ### P6 — the merge hold
+
+**MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03):** from the live move recorded in
+`docs/runbooks/navmtm-chain-move-go-live.md` a scheduled run starts at 00:40Z and the hold is
+00:00-01:45 UTC; the sentence below states the original rule.
 
 No merge to `main`, from any phase, from (the Step A start, or 05:30Z of a scheduled run) MINUS
 the deploy latency, until open backfill-kind jobs are 0. Reason: a merge redeploys the backfill

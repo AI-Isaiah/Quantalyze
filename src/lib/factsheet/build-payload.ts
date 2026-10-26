@@ -388,6 +388,7 @@ export function deriveSeriesBundle(
     cumulativeMethod: isArithmetic ? "arithmetic" : "geometric",
     dayBasis,
     calendarDense,
+    missingSegments: args.missingSegments,
   });
   const stratEquity = fullMetrics.eq;
   const stratDd = fullMetrics.dd;
@@ -411,9 +412,9 @@ export function deriveSeriesBundle(
   // so every array stays index-aligned with `dates` and plan 169.1-02's window
   // restriction and `rollingStats`' "Now" hold unchanged. The window stays picked
   // on `stratRet.length`; a basis series shorter than it is all null (D-33).
-  const basis = metricsBasisSeries(stratRet, dates, { dayBasis, calendarDense });
+  const basis = metricsBasisSeries(stratRet, dates, { dayBasis, calendarDense, missingSegments: args.missingSegments });
   const onBasis = (rolled: Array<number | null>) => basis.positions.map((pos) => (pos === null ? null : rolled[pos]));
-  const dense = metricsBasisSeries(stratRet, dates, { calendarDense });
+  const dense = metricsBasisSeries(stratRet, dates, { calendarDense, missingSegments: args.missingSegments });
   const onDense = (rolled: Array<number | null>) => dense.positions.map((pos) => (pos === null ? null : rolled[pos]));
 
   // Benchmark alignments on THIS bundle's own date axis (169.5 D-54: one
@@ -717,6 +718,7 @@ function buildFromBuildableSeries(
     cumulativeMethod: isArithmetic ? "arithmetic" : "geometric",
     dayBasis,
     calendarDense,
+    missingSegments: opts?.missingSegments,
   });
 
   // Phase 90 (D3) — cash-scalar overlay. The KpiStrip's seven headline scalars

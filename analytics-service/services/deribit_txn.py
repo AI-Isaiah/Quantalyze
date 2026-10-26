@@ -76,7 +76,7 @@ from typing import AbstractSet, Any
 # here keeps the module network-free — external_flows.py imports stdlib + typing
 # ONLY (no ccxt/pandas/supabase/services.exchange), so the purity source-scan
 # guard (test_deribit_txn.py) still holds.
-from services.external_flows import USD_FAMILY, ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow, FlowInstant
 
 # Sentinel distinguishing an ABSENT dict key from a present ``None``/``0`` value.
 _MISSING: Any = object()
@@ -1541,6 +1541,33 @@ def deribit_dated_external_flows_usd(
         ExternalFlow(day, by_day_ccy_usd[(day, ccy)], ccy, by_day_ccy_qty[(day, ccy)])
         for (day, ccy) in sorted(by_day_ccy_usd)
     ]
+
+
+def deribit_flow_instants(rows: Sequence[Mapping[str, Any]]) -> list[FlowInstant]:
+    """One :class:`FlowInstant` per external-flow row ``deribit_dated_external_flows_usd`` keeps
+    (the same ``_EXTERNAL_FLOW_TYPES`` rows with a nonzero ``change``), at the row's own
+    millisecond timestamp (NAVMTM D-23). ``amount`` is the signed native ``change`` and
+    ``currency`` its UPPERCASE code: the day aggregate values each currency at the day mark, so
+    the caller values the same quantity the same way. Called on rows the producer above has
+    already accepted, so it neither re-validates nor skips silently: a row it cannot read
+    raises like the producer does."""
+    out: list[FlowInstant] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in _EXTERNAL_FLOW_TYPES:
+            continue
+        change = _coerce_float(row.get("change"), field="change", row=row)
+        if change == 0.0:
+            continue
+        ts = row.get("timestamp")
+        try:
+            day = _row_utc_day(ts)
+            at_ms = int(_row_utc_instant(ts))
+        except ValueError as e:
+            raise LedgerValuationError(str(e)) from e
+        out.append(FlowInstant(at_ms, day, change, str(row.get("currency", "")).upper()))
+    return out
 
 
 def txn_rows_to_daily_records(

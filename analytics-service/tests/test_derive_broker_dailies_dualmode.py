@@ -75,6 +75,10 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
 
     ctx = MagicMock()
     ctx.exchange = AsyncMock()
+    # NAVMTM plan 19 (D-18, D-19): an OKX derive reads the account's open option positions once a
+    # day. The deliberate default is "no options", so every OKX test that is not ABOUT option value
+    # keeps its assertions; a bare AsyncMock would answer with a non-dict and refuse the mark.
+    ctx.exchange.privateGetAccountPositions = AsyncMock(return_value={"data": []})
     ctx.supabase = MagicMock()
     ctx.strategy_row = strategy_row
     ctx.key_row = key_row

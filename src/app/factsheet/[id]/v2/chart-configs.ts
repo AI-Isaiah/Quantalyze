@@ -79,6 +79,12 @@ export type ChartConfig = {
    *  only on key:"cumulative". Absent (single-key) or with both payload fields
    *  absent → renders nothing (byte-identical). Mirrors ddHighlights gating. */
   segmentMarkers?: boolean;
+  /** Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: render the start-of-marks note when
+   *  `payload.marksSince` falls inside the drawn range: a solid secondary line, the
+   *  tracked label and an HTML caption (UI-SPEC). Set true only on key:"cumulative"
+   *  (the one equity chart of the published factsheet). Absent, or with no
+   *  `marksSince` in range, renders nothing. Mirrors segmentMarkers gating. */
+  marksStart?: boolean;
   /** Per-config stroke widths. Daily Returns wants a thin line so the noise reads as noise. */
   stratWidth?: number;
   comparatorWidth?: number;
@@ -141,6 +147,8 @@ export const CHART_CONFIGS: ChartConfig[] = [
     rebaseOnZoom: true,
     // FS-01/FS-02 composite seam overlay lives on the cumulative track only.
     segmentMarkers: true,
+    // D-08: the start-of-marks note lives on the cumulative track only.
+    marksStart: true,
   },
   {
     key: "cumVsBench",

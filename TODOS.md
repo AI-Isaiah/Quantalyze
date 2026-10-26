@@ -13194,6 +13194,16 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 - Retired with plan 06: the `multi_key`, `sibling_lookup_failed`, `replay_empty` and `history_outside_replay` tokens and their tests, and the old Python stored-history pre-read (the "accepted race") with them. `test_forced_rebuild_refusal_reasons_are_a_closed_set` pins the 15 that remain.
 - What the account rebuild cannot do is booked as [167.2.1.1.2-ACCOUNT-REBUILD-BLOCKERS], and how many accounts hit each refusal is unmeasured until the post-deploy handoff records it (`history_days_unreproduced` cannot be predicted from the database at all).
 
+## Phase 167.2.1.1.1 (NAVMTM) — routed items (logged 2026-10-26)
+
+### 167.2.1.1.1-UNFORCED-ANCHOR-BYBIT-USDT-UPNL — the unforced reconstruct anchor ships a USDT-linear-only Bybit uPnL with no warning (booked 2026-10-26, NAVMTM D-17, DATA INTEGRITY)
+
+**Reading.** `_fetch_current_equity` on its unforced path (`refuse_unread_positions=False`, the default reconstruct) adds the uPnL of ccxt's bare `fetch_positions()`, which on Bybit reads `category=linear, settleCoin=USDT` only, one page. The `totalPerpUPL` cross-check that would expose a USDC-settled or inverse position runs only on the forced path. So for an account that also holds USDC or inverse positions (or options) the default reconstruct anchors on a partial uPnL and logs nothing. Same root cause as `167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY` above, which names the coverage; this entry names the missing warning on the unforced path.
+
+**Not fixed by NAVMTM.** D-17 (founder 2026-10-26, "Use Bybit's account total (Recommended)") moved only the MARK path to the Unified Trading Account totals (plan 18). The history rebuild's anchor is unchanged on both paths, by scope: it belongs to the history rebuild, not to NAVMTM.
+
+**Owner / Trigger:** founder routing, the history rebuild (ACCTREBUILD line). Trigger: any Bybit key whose `totalPerpUPL` differs from its USDT-linear position sum, as plan 11's pre-merge dry run or a forced-rebuild `positions_unreadable` shows. Closed when the unforced Bybit anchor either reads the account totals (as the mark does) or refuses or flags a partial uPnL by name, with a test that fails on today's silent partial read.
+
 ## Phase 167.2.1.1.2 (ACCTREBUILD) — routed items (logged 2026-10-22)
 
 ### 167.2.1.1.2-ACCOUNT-CRAWL-DIAGNOSTICS — a failed forced account crawl does not name the failing member or a code fault (booked 2026-10-22, 167.2.1.1.2 review round 3, DIAGNOSTIC, CLOSED 2026-10-23)

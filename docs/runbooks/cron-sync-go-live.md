@@ -12,6 +12,11 @@ Read "Blast radius" and "What this runbook does not cover" before the pre-flight
 One daily PROD `pg_cron` job named `cron-sync-trades`, schedule `30 4 * * *` (UTC), command
 `SELECT public.cron_sync_tick();`.
 
+> **MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03).** From the live move recorded in
+> `docs/runbooks/navmtm-chain-move-go-live.md` the schedule is `10 0 * * *`
+> (00:10Z), ahead of which `/api/cron/refresh-benchmark` runs at 00:05Z. Every 04:30 or 04:15-05:45
+> statement below describes the original registration and holds until that move.
+
 The chain it starts:
 
 1. `public.cron_sync_tick()` reads the service key from Vault and the service URL from
@@ -48,6 +53,13 @@ allocator derive floods, and at 04:30 that queue is idle; (c) it leaves 30 minut
 05:00 refresh; (d) the 03:30 Vercel `reconcile-strategies` read of `api_keys.last_sync_at` still
 sees a value inside its 24-hour gate. If the listing shows another job at `30 4 * * *`, stop and
 choose a different slot with the founder before Step C.
+
+> **MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03).** The four reasons above are
+> re-derived for the 00:10Z slot in `docs/runbooks/navmtm-chain-move-go-live.md`
+> ("Why these slots"): (a) the 04:00 poll no longer precedes the sync; (b) the sync's strategy
+> derives and the fan-out are 30 minutes apart (00:10Z and 00:40Z), a starting value the first run
+> measures; (c) the 05:00 refresh never read what the sync stores, so that margin is gone; (d) the
+> 03:30 reconcile read now sees a value about 3 hours old.
 
 ## Why it is safe now
 
@@ -462,7 +474,10 @@ known-clean baseline.
 
 ### P6 — the merge hold
 
-On a tick day, no merge to `main`, from any phase, from 04:15 UTC to 05:45 UTC. Reason: a merge
+On a tick day, no merge to `main`, from any phase, from 04:15 UTC to 05:45 UTC.
+**MOVED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, D-03):** from the live move recorded in
+`docs/runbooks/navmtm-chain-move-go-live.md` the hold is **00:00 UTC to 01:45 UTC**; before that move the
+window in this sentence applies. Reason: a merge
 redeploys the analytics service, which would cut a running `cron_sync` request, and a later
 deploy strands in-flight strategy derives on the backfill service. During the Step B rehearsal
 the hold runs from the start of the tick until `open_backfill_jobs` is 0 again.

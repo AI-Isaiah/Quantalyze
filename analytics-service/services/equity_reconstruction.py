@@ -29,6 +29,7 @@ import logging
 # non-finite anchor published as a complete series. Top-level, where it is read.
 import math
 import os
+import re
 from bisect import bisect_right
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -3762,8 +3763,76 @@ class _AnchorPartialSet(set[str]):
     """
 
     positions_unread: bool = False
+    # Phase 167.2.1.1.1 plan 15 (L4): the ALL-ASSET wallet total (every held asset priced, BEFORE
+    # the positions' uPnL is added), set where the function takes ``_wallet_total``. ``None``
+    # until that point is reached. The marks writer needs it to state the open profit as
+    # ``total - wallet_total_usd`` and to check the wallet basis against the derive's own USDT
+    # figure; it rides this side channel (PD-J) so no caller's two-value unpacking changes.
+    wallet_total_usd: float | None = None
+
+
 _BYBIT_UPNL_TOLERANCE_USD: Final[float] = 1.0
 _BYBIT_UPNL_TOLERANCE_REL: Final[float] = 0.005
+
+
+async def _price_wallet_totals(
+    exchange: Any, totals: dict[Any, Any],
+) -> tuple[float, _AnchorPartialSet]:
+    """Price every held asset of ``balance["total"]`` in USD: the wallet, before any open profit.
+
+    Extracted unchanged from ``_fetch_current_equity`` (Phase 167.2.1.1.1 plan 18) so the forced
+    rebuild path and the Bybit UTA mark read (``_read_bybit_uta_mark``) price a wallet with ONE
+    rule: stablecoins and ``_EXTRA_STABLECOIN_SUFFIXES`` at 1.0, every other asset with
+    ``fetch_ticker("<ASSET>/USDT")`` in the order ``totals`` lists them, a failed ticker read
+    recorded in the returned partial set (the total is then an undercount).
+    """
+    partial_unpriced = _AnchorPartialSet()
+    total = 0.0
+    for asset, qty in totals.items():
+        if qty is None:
+            continue
+        try:
+            q = float(qty)
+        except (TypeError, ValueError):
+            continue
+        if q <= 0:
+            continue
+        asset_upper = str(asset).upper()
+        if asset_upper in STABLECOINS:
+            total += q
+            continue
+        # red-team/H-2: _EXTRA_STABLECOIN_SUFFIXES (USDE, PYUSD, USDB)
+        # are NOT in STABLECOINS (by design — they drive symbol-suffix
+        # logic not price-skip logic). But they ARE stable-value assets.
+        # Without this guard, fetch_ticker("USDE/USDT") is attempted; on
+        # venues without a liquid pair it fails → partial_unpriced.add →
+        # anchor unconditionally skipped for every OKX account holding
+        # USDe collateral (extremely common). Treat them as $1 per unit.
+        if any(asset_upper == suf for suf in _EXTRA_STABLECOIN_SUFFIXES):
+            total += q
+            continue
+        # Price non-stablecoin spot via a single ticker call. Best-
+        # effort — a missing ticker records the asset as unpriced so
+        # the caller can decide whether to trust the anchor.
+        px = 0.0
+        _ticker_fetch_failed = False
+        try:
+            t = await exchange.fetch_ticker(f"{asset_upper}/USDT")
+            px = float((t or {}).get("last") or 0.0) if isinstance(t, dict) else 0.0
+        except Exception:  # noqa: BLE001
+            px = 0.0
+            _ticker_fetch_failed = True
+        # NEW-C01-02 (silent-failure/F-06 fix): track assets that priced
+        # to zero because of a FETCH FAILURE (auth error, network error,
+        # missing ticker) — those represent unknown equity that could cause
+        # the anchor to understate the true total. A genuine zero (delisted
+        # token, or exchange returns 0.0 as last price) contributes 0 to
+        # the anchor regardless, so skipping the anchor for it is wrong.
+        # Only mark as partial_unpriced when the ticker fetch failed.
+        if _ticker_fetch_failed:
+            partial_unpriced.add(asset_upper)
+        total += q * px
+    return total, partial_unpriced
 
 
 async def _fetch_current_equity(
@@ -3821,51 +3890,7 @@ async def _fetch_current_equity(
         totals = balance.get("total") or {}
         if not isinstance(totals, dict):
             return None, partial_unpriced
-        total = 0.0
-        for asset, qty in totals.items():
-            if qty is None:
-                continue
-            try:
-                q = float(qty)
-            except (TypeError, ValueError):
-                continue
-            if q <= 0:
-                continue
-            asset_upper = str(asset).upper()
-            if asset_upper in STABLECOINS:
-                total += q
-                continue
-            # red-team/H-2: _EXTRA_STABLECOIN_SUFFIXES (USDE, PYUSD, USDB)
-            # are NOT in STABLECOINS (by design — they drive symbol-suffix
-            # logic not price-skip logic). But they ARE stable-value assets.
-            # Without this guard, fetch_ticker("USDE/USDT") is attempted; on
-            # venues without a liquid pair it fails → partial_unpriced.add →
-            # anchor unconditionally skipped for every OKX account holding
-            # USDe collateral (extremely common). Treat them as $1 per unit.
-            if any(asset_upper == suf for suf in _EXTRA_STABLECOIN_SUFFIXES):
-                total += q
-                continue
-            # Price non-stablecoin spot via a single ticker call. Best-
-            # effort — a missing ticker records the asset as unpriced so
-            # the caller can decide whether to trust the anchor.
-            px = 0.0
-            _ticker_fetch_failed = False
-            try:
-                t = await exchange.fetch_ticker(f"{asset_upper}/USDT")
-                px = float((t or {}).get("last") or 0.0) if isinstance(t, dict) else 0.0
-            except Exception:  # noqa: BLE001
-                px = 0.0
-                _ticker_fetch_failed = True
-            # NEW-C01-02 (silent-failure/F-06 fix): track assets that priced
-            # to zero because of a FETCH FAILURE (auth error, network error,
-            # missing ticker) — those represent unknown equity that could cause
-            # the anchor to understate the true total. A genuine zero (delisted
-            # token, or exchange returns 0.0 as last price) contributes 0 to
-            # the anchor regardless, so skipping the anchor for it is wrong.
-            # Only mark as partial_unpriced when the ticker fetch failed.
-            if _ticker_fetch_failed:
-                partial_unpriced.add(asset_upper)
-            total += q * px
+        total, partial_unpriced = await _price_wallet_totals(exchange, totals)
 
         # NEW-C01-05, reversed for Bybit by Phase 167.2.1.1 (the earlier text
         # claimed Bybit V5 reports fetch_balance['total'] equity-inclusive; it
@@ -3922,6 +3947,7 @@ async def _fetch_current_equity(
         ):
             raise ForcedRebuildRefusedError("positions_unreadable")
         _wallet_total = total
+        partial_unpriced.wallet_total_usd = total
         for p in positions:
             if not isinstance(p, dict):
                 continue
@@ -3960,6 +3986,423 @@ async def _fetch_current_equity(
     except Exception as exc:  # noqa: BLE001
         logger.warning("anchor: _fetch_current_equity failed venue=%s: %s", venue, exc)
         return None, partial_unpriced
+
+
+def _finite_float(value: Any) -> float | None:
+    """``value`` as a finite float, or ``None`` (absent, ``None``, non-numeric, NaN or infinite)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+#: The values Bybit's ``/v5/account/info`` documents for ``marginMode`` (one of them is refused by
+#: name below). Anything else is a field this reader has not been shown to describe: refuse.
+_BYBIT_MARGIN_MODES: Final[frozenset[str]] = frozenset({"REGULAR_MARGIN", "PORTFOLIO_MARGIN"})
+
+
+def _bybit_uta2_status(raw: Any) -> bool:
+    """True only for a venue-reported ``unifiedMarginStatus`` of 5 or 6 (an integer, or the digits
+    of one). A bool, a float, text, ``None`` and a missing field are all False."""
+    if isinstance(raw, bool):
+        return False
+    if isinstance(raw, int):
+        return raw in (5, 6)
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        return int(raw) in (5, 6)
+    return False
+
+
+async def _read_bybit_uta_mark(exchange: Any) -> tuple[float, float, float] | str:
+    """The Bybit mark from the Unified Trading Account's own totals (NAVMTM plan 18, D-17, D-18).
+
+    Returns ``(nav_usd, open_pnl_usd, wallet_usd)`` = ``(totalEquity, totalEquity -
+    totalWalletBalance, totalWalletBalance)`` or ONE refusal token from
+    ``nav_marks.MARK_REFUSAL_TOKENS``.
+
+    D-17, verbatim: "The Bybit mark takes NAV and open profit from those totals with no position
+    walk. It refuses by name when the venue does not itself report UTA 2.0
+    (``unifiedMarginStatus`` 5 or 6, never ccxt's default when the field is missing), when the
+    account is in isolated margin, when any coin carries a non-zero borrow, when a field is
+    missing or not finite, or when Bybit's ``totalWalletBalance`` disagrees with our own
+    independently priced wallet (``wallet_total_usd``) beyond the anchor's tolerance. The existing
+    ``totalPerpUPL`` cross-check is retired on this path, because it would compare Bybit's figure
+    with itself."
+    D-18, verbatim: "The Bybit NAV is ``totalEquity`` (wallet plus perpetual and futures open
+    profit plus option value). The stored open profit is ``totalEquity - totalWalletBalance``, so
+    the D-04 step books option value with the rest of the open profit."
+
+    Sources (the Bybit V5 documentation, re-read 2026-10-26):
+    https://bybit-exchange.github.io/docs/v5/account/wallet-balance (``totalEquity`` is "∑Asset
+    Equity By USD value of each asset"; a coin's equity is "walletBalance - spotBorrow +
+    unrealisedPnl + Asset Option Value" while ``totalWalletBalance`` sums ``walletBalance``, so
+    with borrowing the two totals sit on different bases and the derivatives liabilities in
+    ``borrowAmount`` ("spot liabilities + derivatives liabilities") are not shown to be netted:
+    any non-zero borrow is refused rather than interpreted; "All account wide fields are not
+    applicable to isolated margin"),
+    https://bybit-exchange.github.io/docs/v5/acct-mode (UTA 2.0 integrates inverse, USDT and USDC
+    perpetuals and futures, spot and options; under UTA 1.0 the inverse book sits in a separate
+    ``CONTRACT`` account that the UNIFIED totals do not contain) and
+    https://bybit-exchange.github.io/docs/v5/account/account-info (``unifiedMarginStatus``,
+    ``marginMode``).
+
+    Why the status and margin mode come ONLY from this function's own ``/v5/account/info`` read and
+    never from ``exchange.options``: ccxt caches ``options["unifiedMarginStatus"]`` the first time
+    ``fetch_balance`` runs and DEFAULTS it to 6 (UTA 2.0 pro) when the field is absent from the
+    response (ccxt 4.5.85 and 4.5.88 ``is_unified_enabled``). A venue that said nothing must not
+    be believed to be a UTA 2.0 account, so a missing, other or non-numeric status is
+    ``account_mode_unsupported``.
+
+    The ladder, in this order, every refusal naming itself and writing nothing: a raised read or a
+    response with no list is ``balance_error``; status not 5 or 6 -> ``account_mode_unsupported``;
+    ``marginMode`` ``ISOLATED_MARGIN`` -> ``isolated_margin_unsupported`` (absent or not a
+    documented mode -> ``uta_totals_unreadable``); a coin list that is not a list, or a
+    ``borrowAmount`` that is missing or not finite -> ``uta_totals_unreadable``, else any non-zero
+    ``borrowAmount`` -> ``borrow_present``; ``totalEquity`` or ``totalWalletBalance`` missing or
+    not finite -> ``uta_totals_unreadable``. Only then is our own wallet priced (a refused account
+    costs no ticker read): one of our ticker reads failing -> ``wallet_unpriced`` (judged before
+    the comparison, because our wallet is then a known undercount), and ``totalWalletBalance``
+    differing from our wallet by more than ``max(_BYBIT_UPNL_TOLERANCE_USD,
+    _BYBIT_UPNL_TOLERANCE_REL x |our wallet|)`` -> ``uta_wallet_mismatch``. D-04's
+    ``wallet_basis_mismatch`` against the derive's own USDT wallet is judged afterwards, in
+    ``nav_marks.build_mark_read``.
+
+    The ``totalPerpUPL`` cross-check is retired HERE only. The forced history-rebuild path
+    (``_fetch_current_equity(..., refuse_unread_positions=True)``) still sums the positions it
+    reads and checks them against ``totalPerpUPL``: there the positions are an independent reading
+    of the same figure. Both paths price a wallet through ``_price_wallet_totals``.
+
+    Calls per Bybit key per UTC day (amends D-16 for Bybit): ONE ``fetch_balance()`` (ccxt adds
+    its own cached ``/v5/user/query-api`` and ``/v5/account/info`` reads on a fresh exchange
+    object, as before), ONE ``/v5/account/info`` read of our own, and one ``fetch_ticker`` per
+    held non-stable coin. No positions read. Venue error text never leaves this function: a raised
+    read is logged by exception class only.
+    """
+    try:
+        balance = await exchange.fetch_balance()
+        account = await exchange.privateGetV5AccountInfo()
+    except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
+        # ccxt error text can carry a request signature: the class name only.
+        logger.warning(
+            "bybit uta mark: venue read failed exc_class=%s", type(exc).__name__,
+        )
+        return "balance_error"
+
+    try:
+        entries = balance["info"]["result"]["list"]
+        wallet_balances = balance["total"]
+        info = account["result"]
+    except (KeyError, TypeError):
+        return "balance_error"
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or not isinstance(entries[0], dict)
+        or not isinstance(wallet_balances, dict)
+        or not isinstance(info, dict)
+    ):
+        return "balance_error"
+    entry: dict[str, Any] = entries[0]
+
+    if not _bybit_uta2_status(info.get("unifiedMarginStatus")):
+        return "account_mode_unsupported"
+    margin_mode = info.get("marginMode")
+    if margin_mode == "ISOLATED_MARGIN":
+        return "isolated_margin_unsupported"
+    if margin_mode not in _BYBIT_MARGIN_MODES:
+        return "uta_totals_unreadable"
+
+    coins = entry.get("coin")
+    if not isinstance(coins, list):
+        return "uta_totals_unreadable"
+    borrowed = False
+    for coin in coins:
+        if not isinstance(coin, dict):
+            return "uta_totals_unreadable"
+        amount = _finite_float(coin.get("borrowAmount"))
+        if amount is None:
+            return "uta_totals_unreadable"
+        if amount != 0.0:
+            borrowed = True
+    if borrowed:
+        return "borrow_present"
+
+    total_equity = _finite_float(entry.get("totalEquity"))
+    total_wallet = _finite_float(entry.get("totalWalletBalance"))
+    if total_equity is None or total_wallet is None:
+        return "uta_totals_unreadable"
+
+    our_wallet, partial = await _price_wallet_totals(exchange, wallet_balances)
+    if partial:
+        return "wallet_unpriced"
+    if abs(total_wallet - our_wallet) > max(
+        _BYBIT_UPNL_TOLERANCE_USD, _BYBIT_UPNL_TOLERANCE_REL * abs(our_wallet),
+    ):
+        return "uta_wallet_mismatch"
+    return total_equity, total_equity - total_wallet, total_wallet
+
+
+#: The Binance error codes that mean "this key has no access to the European Options account"
+#: and therefore no option value (NAVMTM plan 19, D-20, D-22). ⛔ I2: ``-2015`` is a PLACEHOLDER
+#: the first post-deploy run (plan 11) measures: ccxt 4.5.85 and 4.5.88 map BOTH ``-2015`` and
+#: ``-2014`` (a bad key) to ``AuthenticationError``, so the exception class cannot tell the two
+#: apart and the reader goes by the numeric code parsed from the error text. A different code
+#: observed after deploy stops plan 11 and goes to the founder.
+_BINANCE_OPTIONS_NO_ACCESS_CODES: Final[frozenset[str]] = frozenset({"-2015"})
+
+#: Binance puts ``{"code":-2015,"msg":"..."}`` in the error text ccxt raises; the code is the only
+#: part this reader takes from it.
+_BINANCE_ERROR_CODE_RE: Final[re.Pattern[str]] = re.compile(r'"code"\s*:\s*"?(-?\d+)"?')
+
+
+def _binance_error_code(exc: BaseException) -> str | None:
+    """The Binance numeric error code in ``exc``'s text (``"-2015"``), or ``None``."""
+    match = _BINANCE_ERROR_CODE_RE.search(str(exc))
+    return match.group(1) if match else None
+
+
+async def _binance_options_call(exchange: Any, method: str, endpoint: str) -> tuple[str, Any]:
+    """One Binance European Options read: ``("ok", body)``, ``("no_access", None)`` or
+    ``("unreadable", None)``.
+
+    ``no_access`` only for a raised read whose parsed numeric code is in
+    ``_BINANCE_OPTIONS_NO_ACCESS_CODES``, never by exception class. Every other raise is
+    ``unreadable``. Both outcomes log ONE line in this stable format, which plan 11's post-deploy
+    dry run greps to decide whether the pinned code was observed::
+
+        binance options read: endpoint=<marginAccount|position> outcome=<no_access|unreadable> parsed_code=<code|none> exc_class=<class|none>
+
+    ``parsed_code`` is the signed integer parsed from the error text (``-2015``) or ``none``;
+    the venue's own text is never logged.
+    """
+    try:
+        body = await getattr(exchange, method)()
+    except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
+        code = _binance_error_code(exc)
+        outcome = "no_access" if code in _BINANCE_OPTIONS_NO_ACCESS_CODES else "unreadable"
+        (logger.info if outcome == "no_access" else logger.warning)(
+            "binance options read: endpoint=%s outcome=%s parsed_code=%s exc_class=%s",
+            endpoint, outcome, code if code is not None else "none", type(exc).__name__,
+        )
+        return outcome, None
+    return "ok", body
+
+
+def _binance_options_verdict(
+    endpoint: str, rows: Any, fields: tuple[str, ...], *, require_all: bool,
+) -> str:
+    """``"zero"``, ``"holds"`` or ``"unreadable"`` for one options reply's list of rows.
+
+    Every row must be a dict whose ``fields`` are finite numbers (all of them with
+    ``require_all``, else at least one); a row with any non-zero finite value among them is a
+    holding. A holding wins over a garbled sibling row. A reply that is not a list is unreadable.
+    """
+    garbled = holds = False
+    if isinstance(rows, list):
+        for row in rows:
+            values = [_finite_float(row.get(f)) for f in fields] if isinstance(row, dict) else []
+            known = [v for v in values if v is not None]
+            if not known or (require_all and len(known) != len(fields)):
+                garbled = True
+            elif any(v != 0.0 for v in known):
+                holds = True
+    else:
+        garbled = True
+    if holds:
+        return "holds"
+    if garbled:
+        logger.warning(
+            "binance options read: endpoint=%s outcome=unreadable parsed_code=none "
+            "exc_class=none", endpoint,
+        )
+        return "unreadable"
+    return "zero"
+
+
+async def _read_binance_options_exposure(exchange: Any) -> str | None:
+    """Whether a Binance key holds European Options value, as a refusal token (plan 19, D-20, D-22).
+
+    ``None`` = zero option value, ``"option_value_unverified"`` = a non-zero options balance or an
+    open position, ``"option_value_unreadable"`` = a read or a shape that cannot be trusted. Both
+    tokens are in ``nav_marks.MARK_REFUSAL_TOKENS``. Called only after the L4 read on the same key
+    has succeeded. Two reads, always both, each judged on its own: ``GET /eapi/v1/marginAccount``
+    (``asset[].marginBalance`` and ``asset[].equity`` must both be zero) and
+    ``GET /eapi/v1/position`` (a row with a non-zero ``quantity`` or ``markValue`` is an open
+    position). A read refused with a code in ``_BINANCE_OPTIONS_NO_ACCESS_CODES`` counts as zero.
+    A known holding beats an unreadable sibling.
+    """
+    margin_state, margin = await _binance_options_call(
+        exchange, "eapiPrivateGetMarginAccount", "marginAccount",
+    )
+    position_state, position = await _binance_options_call(
+        exchange, "eapiPrivateGetPosition", "position",
+    )
+    margin_rows = margin.get("asset") if isinstance(margin, dict) else None
+    verdicts = [
+        _binance_options_verdict(
+            "marginAccount", margin_rows, ("marginBalance", "equity"), require_all=True,
+        ) if margin_state == "ok" else ("zero" if margin_state == "no_access" else "unreadable"),
+        _binance_options_verdict(
+            "position", position, ("quantity", "markValue"), require_all=False,
+        ) if position_state == "ok" else ("zero" if position_state == "no_access" else "unreadable"),
+    ]
+    if "holds" in verdicts:
+        return "option_value_unverified"
+    if "unreadable" in verdicts:
+        return "option_value_unreadable"
+    return None
+
+
+async def read_okx_option_exposure(exchange: Any) -> str | None:
+    """Whether an OKX account holds an open option, as a refusal token (NAVMTM plan 19, D-18, D-19).
+
+    Returns ``None`` when the account holds no open option (the mark is then written as before),
+    ``"option_value_unverified"`` when it holds at least one, or ``"option_value_unreadable"``
+    when the positions could not be read. Both tokens are in ``nav_marks.MARK_REFUSAL_TOKENS``.
+
+    D-18, verbatim: "each venue's NAV includes open option value or the mark is refused by name;
+    option value is never omitted silently." D-19 (founder 2026-10-26, "Refuse until measured"):
+    OKX documents ``totalEq`` and per-currency ``eq`` without saying whether option market value
+    is inside them
+    (https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-balance), while option value is
+    documented per position (``optVal``,
+    https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-positions). So an account with an
+    open option is refused until the post-deploy measurement shows whether ``totalEq`` carries it
+    and a later change lifts the refusal.
+
+    The one call: ``GET /api/v5/account/positions?instType=OPTION`` through ccxt's implicit
+    ``privateGetAccountPositions``, once per key per UTC day (the caller skips it when the day's
+    mark is already stored). A raised read, a body that is not a dict, a ``data`` that is not a
+    list, an entry that is not a dict, or an entry whose ``pos`` is not a finite number is
+    ``option_value_unreadable``: a garbled reply is never "no options". A ``pos`` of exactly zero
+    is a flat row, not an open option. When an open option and a garbled entry both appear, the
+    known holder wins (``option_value_unverified``).
+
+    The caller must make this read on an OPEN exchange, before ``aclose_exchange``: a read on a
+    closed ccxt exchange raises and would refuse every OKX key every day (B1). Venue error text
+    never leaves this function: a raised read is logged by exception class only, and the logs
+    carry counts and tokens, never an amount.
+    """
+    try:
+        response = await exchange.privateGetAccountPositions({"instType": "OPTION"})
+    except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
+        # ccxt error text can carry a request signature: the class name only.
+        logger.warning("okx option exposure: venue read failed exc_class=%s", type(exc).__name__)
+        return "option_value_unreadable"
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, list):
+        logger.warning("okx option exposure: positions reply has no data list")
+        return "option_value_unreadable"
+    open_positions = 0
+    garbled = 0
+    for entry in data:
+        pos = _finite_float(entry.get("pos")) if isinstance(entry, dict) else None
+        if pos is None:
+            garbled += 1
+        elif pos != 0.0:
+            open_positions += 1
+    if open_positions:
+        logger.info(
+            "okx option exposure: open option positions present (count=%d garbled=%d)",
+            open_positions, garbled,
+        )
+        return "option_value_unverified"
+    if garbled:
+        logger.warning("okx option exposure: unreadable position entries (count=%d)", garbled)
+        return "option_value_unreadable"
+    return None
+
+
+async def read_marked_equity_usd(exchange: Any, venue: str) -> tuple[float, float, float] | str:
+    """The NAVMTM mark's Bybit/Binance read (Phase 167.2.1.1.1 plans 15 and 18, L4, D-04, D-16, D-17).
+
+    Returns ``(nav_usd, open_pnl_usd, wallet_usd)`` or ONE refusal token from
+    ``nav_marks.MARK_REFUSAL_TOKENS``.
+
+    BYBIT (plan 18, D-17 and D-18, amending L4 for Bybit): the Unified Trading Account's own
+    totals, through ``_read_bybit_uta_mark`` - ``nav_usd = totalEquity`` (option value included),
+    ``open_pnl_usd = totalEquity - totalWalletBalance``, ``wallet_usd = totalWalletBalance`` - with
+    NO positions call, refused by name for any account those totals cannot describe (not UTA 2.0,
+    isolated margin, borrowing, a missing or non-finite field, a wallet that disagrees with our
+    own pricing, an unpriced asset). Calls per key per UTC day: one ``fetch_balance()``, one
+    ``/v5/account/info`` read, one ``fetch_ticker("<ASSET>/USDT")`` per held non-stable asset.
+
+    BINANCE (plan 15, L4 as written, verbatim): "Bybit and Binance marked equity is wallet balance
+    plus position open profit, read the way the reconstruct anchor reads it, never the derive's
+    `walletBalance`-only figure." It calls ``_fetch_current_equity(exchange, venue,
+    refuse_unread_positions=True)`` ONCE and does not copy its rule: two readings of one rule drift
+    apart, and the stored mark is only the anchor's reading while it is the anchor's own function
+    that produced it. ``nav_usd`` is the anchor total, ``wallet_usd`` is the anchor's own all-asset
+    wallet total (``_AnchorPartialSet.wallet_total_usd``) and ``open_pnl_usd`` is their
+    difference, the summed position ``unrealizedPnl``.
+
+    Binance tokens: a ``ForcedRebuildRefusedError`` (a raised, non-list or page-limit positions
+    read, an unreadable open position) is ``positions_unreadable``; no total, or no wallet total,
+    is ``balance_error``; a held asset whose ticker read failed (the anchor's partial-unpriced set)
+    is ``wallet_unpriced``. Venue error text never leaves this function: the anchor logs the
+    scrubbed text, the token carries none.
+
+    Binance calls per key per UTC day (D-16, accepted by the founder): ``fetch_balance()`` once,
+    ``fetch_positions()`` once, and ``fetch_ticker("<ASSET>/USDT")`` once per held asset that is
+    neither a stablecoin nor one of the extra stablecoin suffixes. What ``fetch_positions()``
+    with no arguments requests was read from the installed ccxt 4.5.85 sources (the pin in
+    ``requirements.txt`` is 4.5.88: re-read ``binance.fetch_positions_risk`` when it moves):
+    one ``positionRisk`` request for the linear USD-M book (after ``load_markets`` and
+    ``load_leverage_brackets`` on a fresh exchange object, which ccxt caches per object).
+
+    BINANCE OPTIONS (plan 19, D-18, D-20, D-22): the European Options account is separate and the
+    L4 read does not see it. D-18, verbatim: "each venue's NAV includes open option value or the
+    mark is refused by name; option value is never omitted silently." D-20 (founder 2026-10-26,
+    "Refuse holders; no-access counts as zero"): after the L4 read on the same key has SUCCEEDED,
+    ``_read_binance_options_exposure`` reads ``GET /eapi/v1/marginAccount``
+    (https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-options/api/rest-api/account,
+    fields documented by name only) and ``GET /eapi/v1/position``
+    (https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-options/api/rest-api/trade#option-position-information,
+    ``markValue`` per position). Every options asset at zero ``marginBalance`` and ``equity`` with
+    no open position keeps the L4 tuple; any non-zero balance or open position is
+    ``option_value_unverified``; a read refused with a code in
+    ``_BINANCE_OPTIONS_NO_ACCESS_CODES`` is zero option value (one log line naming the parsed
+    code); any other error or a garbled shape is ``option_value_unreadable``. An L4 refusal is
+    returned as it stands and no options read is made.
+
+    ⛔ I2, the limit of what is proven: the constant holds ``-2015`` until the first post-deploy run
+    measures the code a key without options permission really receives. The tests pin only what
+    ccxt itself states: in ccxt 4.5.85 and 4.5.88 ``binance().exceptions['exact']['-2015']`` is
+    ``AuthenticationError``, the SAME class as ``-2014``, so the class cannot tell options
+    no-access from a bad key. The reader therefore recognises no-access by the numeric code parsed
+    from the error text, never by the exception class, and no test can prove Binance returns
+    ``-2015`` for options access. A different observed code stops plan 11 and goes to the founder.
+
+    Added Binance calls per key per UTC day (amends D-16): one ``/eapi/v1/marginAccount`` and one
+    ``/eapi/v1/position`` read, both skipped when the day's mark is already stored.
+
+    Only for Bybit and Binance: OKX reads ``totalEq`` from the equity read the derive makes, plus
+    (D-19) the one option-positions read of ``read_okx_option_exposure``; the other venues are not
+    ccxt venues here.
+    """
+    if venue.lower() not in ("bybit", "binance"):
+        raise ValueError("read_marked_equity_usd: Bybit and Binance only")
+    if venue.lower() == "bybit":
+        return await _read_bybit_uta_mark(exchange)
+    try:
+        total, partial = await _fetch_current_equity(
+            exchange, venue, refuse_unread_positions=True,
+        )
+    except ForcedRebuildRefusedError:
+        return "positions_unreadable"
+    wallet = getattr(partial, "wallet_total_usd", None)
+    if total is None or wallet is None:
+        return "balance_error"
+    if partial:
+        return "wallet_unpriced"
+    # Plan 19 (D-18, D-20, D-22): the L4 read does not see the separate European Options account.
+    options_refusal = await _read_binance_options_exposure(exchange)
+    if options_refusal is not None:
+        return options_refusal
+    return total, total - wallet, wallet
 
 
 # ---------------------------------------------------------------------------

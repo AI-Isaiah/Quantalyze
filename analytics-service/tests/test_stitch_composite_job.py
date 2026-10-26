@@ -1350,7 +1350,7 @@ async def test_smoothed_composite_structural_failure_degrades() -> None:
     )
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                     exclude_spot_extraction: bool) -> Any:
+                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
         # The cash fan-out builds cleanly; the smoothed re-crawl hits a structural
         # mark-hole on the first member.
         if pnl_basis == "smoothed_mtm":
@@ -1415,7 +1415,7 @@ async def test_smoothed_composite_budget_overrun_degrades(monkeypatch) -> None:
     )
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                     exclude_spot_extraction: bool) -> Any:
+                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
         # The cash fan-out returns instantly; the smoothed re-crawl overruns the
         # bounded slice (~0.7s) so the outer wait_for fires and degrades.
         if pnl_basis == "smoothed_mtm":
@@ -1518,13 +1518,13 @@ async def test_smoothed_cash_degraded_member_divergence_fails_transient() -> Non
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     _flows_calls = {"n": 0}
 
-    def _flows_side_effect(rows: Any, *, venue: str, price_index: Any) -> Any:
+    def _flows_side_effect(rows: Any, *, venue: str, price_index: Any, **kw: Any) -> Any:
         _flows_calls["n"] += 1
         if _flows_calls["n"] == 1:
             # Cash pass seq-2: a transient live-read failure → seq 2 degrades.
             raise NavReconstructionError("cash-pass transient unpriceable flow")
         # Smoothed pass seq-2: the re-crawl now succeeds → seq 2 reconstructs.
-        return _real_flows(rows, venue=venue, price_index=price_index)
+        return _real_flows(rows, venue=venue, price_index=price_index, **kw)
 
     patches = _deribit_patches(
         fake,
@@ -2839,13 +2839,13 @@ async def test_mtm_cash_degraded_member_divergence_fails_transient() -> None:
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     _flows_calls = {"n": 0}
 
-    def _flows_side_effect(rows: Any, *, venue: str, price_index: Any) -> Any:
+    def _flows_side_effect(rows: Any, *, venue: str, price_index: Any, **kw: Any) -> Any:
         _flows_calls["n"] += 1
         if _flows_calls["n"] == 1:
             # Cash pass seq-2: a transient live-read failure → seq 2 degrades.
             raise NavReconstructionError("cash-pass transient unpriceable flow")
         # MTM pass seq-2: the re-crawl now succeeds → seq 2 reconstructs.
-        return _real_flows(rows, venue=venue, price_index=price_index)
+        return _real_flows(rows, venue=venue, price_index=price_index, **kw)
 
     patches = _deribit_patches(
         fake,

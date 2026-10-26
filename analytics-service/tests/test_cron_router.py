@@ -2882,16 +2882,24 @@ class TestC0197CronTriggersAnalyticsRecompute:
         )
 
     @pytest.mark.asyncio
-    async def test_no_recompute_enqueue_when_nothing_stored(self):
+    async def test_d02_failed_store_still_enqueues_and_holds(self):
         """If sync_trades stored zero trades across the board (e.g. all
-        per-strategy RPCs failed), DO NOT enqueue a recompute — nothing
-        changed, and a useless compute_analytics job would just churn.
+        per-strategy RPCs failed), the derive is STILL enqueued: the derive
+        re-reads the venue itself, so a failed store is no reason to skip it.
+        The strategy is nonetheless HELD (its marker does not advance), because
+        the advance rule is untouched.
+
+        Superseded 2026-10-26 by D-02 (Phase 167.2.1.1.1 NAVMTM): every
+        eligible strategy of a healthy key gets a daily derive; the old
+        `stored > 0` guard is gone by founder decision. This test was
+        `test_no_recompute_enqueue_when_nothing_stored` and pinned the opposite.
         """
         mock_supabase = MagicMock()
         rpc_calls: list[tuple[str, dict]] = []
 
         # Every rpc raises — sync_trades fails for all strategies, so
-        # per_strategy_stored stays 0 and no recompute should be attempted.
+        # per_strategy_stored stays 0. The enqueue is attempted anyway (D-02)
+        # and, because this harness raises on EVERY rpc, it fails too.
         def _rpc(name: str, args: dict):
             rpc_calls.append((name, args))
             chain = MagicMock()
@@ -2945,14 +2953,22 @@ class TestC0197CronTriggersAnalyticsRecompute:
             key_row = _make_key_row(strategy_ids=["strat-A"])
             result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
 
-        # All RPCs failed → status=error, AND no recompute enqueue fired.
+        # All RPCs failed → status=error. D-02: the enqueue WAS attempted for
+        # the strategy, its failure is recorded, and the strategy is held.
         assert result["status"] == "error"
         enqueue_args = [
             args for (name, args) in rpc_calls if name == "enqueue_compute_job"
         ]
-        assert enqueue_args == [], (
-            f"Expected zero compute_analytics enqueues when nothing stored; "
+        assert enqueue_args == [
+            {"p_strategy_id": "strat-A", "p_kind": "derive_broker_dailies"}
+        ], (
+            f"D-02: a failed store must still attempt the derive enqueue; "
             f"got {enqueue_args!r}"
+        )
+        assert list(result["recompute_enqueue_errors"]) == ["strat-A"], result
+        assert result["strategy_cursors_held"] == ["strat-A"], (
+            "the advance rule is unchanged: a strategy that stored nothing "
+            f"from fetched trades is HELD. Got {result!r}"
         )
         assert sa_update_calls == [], (
             f"Expected zero strategy_analytics UPDATEs when nothing stored; "
@@ -2960,12 +2976,18 @@ class TestC0197CronTriggersAnalyticsRecompute:
         )
 
     @pytest.mark.asyncio
-    async def test_clean_zero_count_stored_does_not_enqueue_recompute(self):
+    async def test_d02_zero_stored_with_trades_still_enqueues(self):
         """A clean `sync_trades` success that stored ZERO new trades
-        (`data=0`, NOT an exception) must also skip the recompute enqueue.
-        This pins the `stored > 0` guard specifically — distinct from the
-        exception path above — so a regression loosening it to `>= 0`
-        (unconditional enqueue) is caught.
+        (`data=0`, NOT an exception) still enqueues the derive. Distinct from
+        the exception path above: the store worked, it just had nothing new.
+        The key status stays `held` and `per_strategy_stored` stays 0, exactly
+        as before D-02.
+
+        Superseded 2026-10-26 by D-02 (Phase 167.2.1.1.1 NAVMTM): every
+        eligible strategy of a healthy key gets a daily derive; the old
+        `stored > 0` guard is gone by founder decision. This test was
+        `test_clean_zero_count_stored_does_not_enqueue_recompute` and pinned
+        the opposite.
         """
         mock_supabase = MagicMock()
         rpc_calls: list[tuple[str, dict]] = []
@@ -3012,16 +3034,132 @@ class TestC0197CronTriggersAnalyticsRecompute:
         # `held` bucket was introduced; that incidental expectation WAS the
         # "stalled key reports itself healthy" defect, in the same class as
         # the empty-`strategy_ids` path. The guard this test exists to pin
-        # (`stored > 0` gating the recompute enqueue) is unchanged below.
+        # (the status and the per-strategy count) is unchanged below; only the
+        # enqueue expectation moved, by D-02.
         assert result["status"] == "held"
         assert result["per_strategy_stored"]["strat-A"] == 0
         enqueue_args = [
             args for (name, args) in rpc_calls if name == "enqueue_compute_job"
         ]
-        assert enqueue_args == [], (
-            f"A clean zero-stored sync must NOT enqueue a recompute (the "
-            f"`stored > 0` guard); got {enqueue_args!r}"
+        assert enqueue_args == [
+            {"p_strategy_id": "strat-A", "p_kind": "derive_broker_dailies"}
+        ], (
+            f"D-02: a clean zero-stored sync must still enqueue the derive "
+            f"for the strategy; got {enqueue_args!r}"
         )
+
+    # ------------------------------------------------------------------
+    # D-02 (Phase 167.2.1.1.1 NAVMTM, founder 2026-10-26): "Every active key
+    # gets a daily derive or mark whether it traded or not." The tests below
+    # drive the real `_sync_single_key` through the shared per-tick harness, so
+    # the number asserted is the RPC the tick actually issued.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _d02_tick(
+        *,
+        trades: list[dict[str, Any]],
+        dq_flags: dict[str, Any] | None = None,
+        failing_strategy_ids: set[str] | None = None,
+        enqueue_failing_strategy_ids: set[str] | None = None,
+    ) -> tuple[dict[str, Any], list[tuple[str, dict]]]:
+        rpc_calls: list[tuple[str, dict]] = []
+        result, _keys, _cursors = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=_ONE_TICK_AGO,
+                strategy_cursors={"strat-A": _ONE_TICK_AGO, "strat-B": _ONE_TICK_AGO},
+            ),
+            failing_strategy_ids=failing_strategy_ids or set(),
+            enqueue_failing_strategy_ids=enqueue_failing_strategy_ids,
+            fetch_mock=AsyncMock(return_value=trades),
+            trades=trades,
+            rpc_calls=rpc_calls,
+            dq_flags=dq_flags,
+        )
+        return result, rpc_calls
+
+    @pytest.mark.asyncio
+    async def test_d02_quiet_strategy_is_enqueued_daily(self):
+        """The defect D-02 closes: a key that fetched NOTHING (a quiet
+        strategy) used to get no derive, so its factsheet never reached the
+        latest stored mark. Now each eligible strategy gets exactly one
+        `derive_broker_dailies` enqueue, with nothing stored.
+        """
+        result, rpc_calls = await self._d02_tick(trades=[])
+
+        assert result["status"] == "ok", result
+        assert not [c for c in rpc_calls if c[0] == "sync_trades"], (
+            "a quiet tick has nothing to store; the enqueue must not depend on it"
+        )
+        enqueue_args = [a for (n, a) in rpc_calls if n == "enqueue_compute_job"]
+        assert sorted(a["p_strategy_id"] for a in enqueue_args) == [
+            "strat-A",
+            "strat-B",
+        ], f"one enqueue per eligible strategy, got {enqueue_args!r}"
+        assert all(a["p_kind"] == "derive_broker_dailies" for a in enqueue_args), (
+            enqueue_args
+        )
+
+    @pytest.mark.asyncio
+    async def test_d02_degraded_fetch_enqueues_nothing(self):
+        """The unchanged half of the rule: a fetch that did not read its whole
+        window enqueues nothing for the key. Both an empty crash and a crash
+        that returned rows are covered, because a crashed fetch looks idle.
+        """
+        crash = TestADegradedFetchIsNeverOk.CRASH_FLAGS
+        for trades in ([], [{"id": "t1"}]):
+            result, rpc_calls = await self._d02_tick(trades=trades, dq_flags=crash)
+
+            assert result["status"] == "error", result
+            assert not [c for c in rpc_calls if c[0] == "enqueue_compute_job"], (
+                f"a degraded fetch (trades={trades!r}) must enqueue nothing; "
+                f"got {rpc_calls!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_d02_advance_rule_unchanged(self):
+        """T-167.2.1.1.1-13: D-02 changes which strategies are ENQUEUED, never
+        which markers ADVANCE. The expected held set is computed here from the
+        pre-D-02 `strategy_advances` formula, written out independently of the
+        router, and compared with the set the router reports as held.
+        """
+        crash = TestADegradedFetchIsNeverOk.CRASH_FLAGS
+        one = [{"id": "t1"}]
+        # (trades, dq_flags, failing store, failing enqueue)
+        cases: list[tuple[list, dict | None, set[str], set[str]]] = [
+            ([], None, set(), set()),  # idle tick: both advance
+            (one, None, set(), set()),  # stored > 0, enqueue ok: both advance
+            (one, None, {"strat-B"}, set()),  # stored == 0 with trades: B held
+            (one, None, set(), {"strat-A"}),  # enqueue error: A held
+            ([], crash, set(), set()),  # degraded: both held
+            (one, crash, set(), set()),  # degraded with rows: both held
+            # The idle disjunct wins over an enqueue failure, exactly as before
+            # D-02 (there was no enqueue on an idle tick then, so this is the
+            # one cell the change makes reachable: pinned, not endorsed).
+            ([], None, set(), {"strat-A"}),
+        ]
+        for trades, dq_flags, failing, enqueue_failing in cases:
+            result, _rpc = await self._d02_tick(
+                trades=trades,
+                dq_flags=dq_flags,
+                failing_strategy_ids=failing,
+                enqueue_failing_strategy_ids=enqueue_failing,
+            )
+            degraded = dq_flags is not None
+            expected_held: list[str] = []
+            for sid in ("strat-A", "strat-B"):
+                stored = 0 if (degraded or not trades or sid in failing) else len(trades)
+                advances = (not degraded) and (
+                    (not trades) or (stored > 0 and sid not in enqueue_failing)
+                )
+                if not advances:
+                    expected_held.append(sid)
+            assert result.get("strategy_cursors_held", []) == expected_held, (
+                f"case trades={trades!r} flags={dq_flags!r} failing={failing!r} "
+                f"enqueue_failing={enqueue_failing!r}: expected held "
+                f"{expected_held!r}, got {result.get('strategy_cursors_held')!r}"
+            )
 
 
 class TestC0198CursorOnlyAdvancesWhenStored:
