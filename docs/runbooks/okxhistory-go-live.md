@@ -952,6 +952,15 @@ regardless, and by the Wave 5 consolidated recompute when it runs first. The han
 `167.1.2.2.2.1-WAVE5-RECOMPUTE` in `TODOS.md`, with its Owner, trigger (the apply job `done` and the
 analytics service deployed) and acceptance reading.
 
+⛔ **CORRECTED 2026-10-26 (OKXHISTORY close-out; the paragraph above is kept as lineage).** The sentence
+"recomputed by the next 04:30Z tick's derive-then-compute chain regardless" is false as measured. The cron
+sync derives and recomputes only strategies that synced NEW trades, and the three OKX keys synced 0 trades
+on 2026-10-24 and 2026-10-25, so the tick recomputed neither strategy and `strategy_analytics.computed_at`
+did not move (it stayed at its pre-apply 2026-10-23 value). Do not wait for the tick. Run the recompute yourself,
+once per rebuilt ordinal (1 and 2), through the product's own guarded path:
+`enqueue_compute_job` with kind `compute_analytics_from_csv`, then read the job `done` and run the
+read-backs below.
+
 After the recompute (or the next tick), read back, per ordinal 1 and 2:
 
 1. `worklist`: `headline_since` has moved earlier (ordinal 2 from 2026-08-02 toward 2026-02-23, ordinal 1
