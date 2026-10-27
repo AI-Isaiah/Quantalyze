@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.2.0] - 2026-10-27 — MARKPAUSE: a paused marked series is re-derived weekly, and a mark refusal is kept owner-only
+
+### Changed
+- Migration `20261030120000_ledger_fanout_marks_paused_weekly.sql` re-creates `enqueue_ledger_refresh_for_strategies` alone (single-key arm; `enqueue_ledger_composite_refresh` untouched, no `cron.schedule`), re-based on the `20260924120000` body. A strategy whose `strategy_analytics.data_quality_flags` carries `marks_trailing_since` keeps the 20-hour attempt cooldown while the pause is under 3 days old and moves to a 7-day cooldown once it is 3 or more days old (D-01, refined by D-04 after review round 1). A missing or malformed flag value keeps the 20-hour window: the value must match an ISO date shape before it is compared, as text, so it can never raise inside the tick. The pause throttles the fan-out and never excludes a strategy for good. The catalogue-only verify block gains check 12 (flag key, the seven-day window and the 3-day cutoff present).
+- `supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql` regenerated for the new body.
+
+### Added
+- An owner-only record of why a key's NAV mark was refused (D-02): `allocator_equity_derived` rows of kind `nav_mark_refusal:<api_key_id>` (`NAV_MARK_REFUSAL_KIND_PREFIX` in `analytics-service/services/nav_marks.py`), payload `{token, first_seen_day, last_seen_day}`. Written from the shared mark seam in `job_worker.py` for strategy and key mode; a later refusal keeps `first_seen_day` and moves `last_seen_day`; the row is deleted once the key marks again. The token is validated against `MARK_REFUSAL_TOKENS` and never goes into the public `data_quality_flags`. The writer and the clearer never raise: a failure logs one WARNING naming the api key and the exception class. No migration: the `kind` column has no CHECK.
+- A read-only SQL readout of those rows in `docs/runbooks/navmtm-chain-move-go-live.md` (D-03), counting eligible keys only, with its shape pinned by `analytics-service/tests/test_nav_marks_refusal_record.py`. `docs/runbooks/ledger-refresh-go-live.md` documents the weekly window and the 3-day cutoff.
+
+### Tests
+- `supabase/tests/test_ledger_refresh_fanout.sql` arms P1-P5: a pause over 3 days old with a 2-day-old attempt is not enqueued (P1), the identical unpaused strategy is (P2), a paused strategy is re-admitted after 7 days (P3), a pause under 3 days old keeps the 20-hour cooldown (P4), and an empty flag value keeps it too (P5). Sentinel 26 → 31; every edit-kind twin re-pointed to the new migration and recounted on its bytes. pg-lane fixture 03 gains `strategy_analytics.data_quality_flags`.
+- `test_nav_marks_refusal_record.py` (new) covers the refusal row in strategy and key mode, first-seen preservation, clearing on a stored or already-stored mark, that no token in the set reaches public flags, the never-raise contract on write and delete, and that the runbook readout selects the worker's prefix; `test_ledger_refresh_gates.py` moves its fan-out pointer and superseded set to the 174 migration; `test_derive_broker_dailies_dualmode.py` now allows the owner-only refusal row as the one write on an unreadable mark.
+- Censuses moved together: `scripts/mutation-floors.mjs` `ARMS_FLOOR` 803 → 808 (`FILES_FLOOR` and `WAIVED_CEILING` unchanged), the `ci.yml` sentinel-step table and `ARMS_FLOOR` 373 → 378 (`SENTINEL_FLOOR` stays 24), and the pins in `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, `gate-family-meta.test.ts` and `drift-check-scripts.test.ts`.
+
+### Notes
+- Review: three rounds of code review and silent-failure hunt. Round 1 fixed MR-01 / SFH F1 (the weekly window froze a strategy's public chart for up to 7 days after one transient refusal, answered by D-04) and MR-02 / SFH F3 (readout scope, warning content, the never-raise test). Round 2 fixed SFH-2 N1 (a malformed flag value sorting below the cutoff took the 7-day window). Round 3 clean. Verifier passed; security audit SECURED.
+- Not user-facing. After the PROD apply the baseline re-dump records the new migration as carried; until then `baseline-content-drift` may read the regenerated function snapshot against the older dump.
+- Deferred, not built: an alert after N nights of the same refusal token, and a dedicated refusal table with an admin read policy.
+
 ## [0.133.1.2] - 2026-10-27 — NAVMTM: the daily chain runs at 00:10Z, manifest re-captured
 
 ### Changed

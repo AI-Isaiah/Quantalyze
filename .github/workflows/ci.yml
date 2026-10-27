@@ -4909,6 +4909,24 @@ jobs:
           #   so SENTINEL_FLOOR stays 13 and ARMS_FLOOR moves 239 -> 240, read off each
           #   file's own first `ALL N ARMS EXECUTED` sentinel. The mutation runner's own
           #   ARMS_FLOOR moved 555 -> 556 in the same fix, also +1.
+          # Re-measured 2026-10-27 (Phase 174 MARKPAUSE, plan 01), ONE move:
+          #   test_ledger_refresh_fanout.sql 26 -> 29, arms P1, P2 and P3 (a paused
+          #   marked strategy is re-admitted weekly, never excluded for good). No file
+          #   joined, so SENTINEL_FLOOR stays 24 and ARMS_FLOOR moves 373 -> 376, read
+          #   off the file's own `ALL N ARMS EXECUTED` sentinel. The mutation runner's
+          #   own ARMS_FLOOR moved 803 -> 806 in the same phase, also +3.
+          # Re-measured 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04), ONE move:
+          #   test_ledger_refresh_fanout.sql 29 -> 30, arm P4 (a pause under 3 days old
+          #   keeps the 20-hour cooldown). No file joined, so SENTINEL_FLOOR stays 24
+          #   and ARMS_FLOOR moves 376 -> 377, read off the file's own `ALL N ARMS
+          #   EXECUTED` sentinel. The mutation runner's own ARMS_FLOOR moved 806 -> 807
+          #   in the same round, also +1.
+          # Re-measured 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1), ONE move:
+          #   test_ledger_refresh_fanout.sql 30 -> 31, arm P5 (a malformed flag value
+          #   keeps the 20-hour cooldown). No file joined, so SENTINEL_FLOOR stays 24
+          #   and ARMS_FLOOR moves 377 -> 378, read off the file's own `ALL N ARMS
+          #   EXECUTED` sentinel. The mutation runner's own ARMS_FLOOR moved 807 -> 808
+          #   in the same round, also +1.
           # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
           # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
           # list arms P or Q although both run, so this table AGREED WITH A STALE
@@ -4928,7 +4946,7 @@ jobs:
           #   test_fan_in_lock_order_race.sql                     8
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          23
-          #   test_ledger_refresh_fanout.sql                 26
+          #   test_ledger_refresh_fanout.sql                 31
           #   test_ledger_refresh_staleness.sql               8
           #   test_okx_archive_rebuild.sql                   15
           #   test_ops_staleness_check.sql                   14
@@ -5149,7 +5167,7 @@ jobs:
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
           SENTINEL_FLOOR=24  # files declaring a sentinel
-          ARMS_FLOOR=373     # 13 + 11 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 15 + 14 + 7 + 15 + 4 + 103 + 20 + 16 + 10 + 7 + 23
+          ARMS_FLOOR=378     # 13 + 11 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 31 + 8 + 15 + 14 + 7 + 15 + 4 + 103 + 20 + 16 + 10 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

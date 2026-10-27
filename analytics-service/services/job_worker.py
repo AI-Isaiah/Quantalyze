@@ -204,7 +204,9 @@ from services.account_unit import (
     classify_account_currency,
 )
 from services.nav_marks import (
+    MARK_REFUSAL_TOKENS,
     MARKED_EQUITY_VENUES as _NAV_MARK_MARKED_EQUITY_VENUES,
+    NAV_MARK_REFUSAL_KIND_PREFIX,
     UNIFORM_READ_VENUES as _NAV_MARK_UNIFORM_VENUES,
     StoredMark,
     build_mark_read,
@@ -3605,6 +3607,96 @@ async def _persist_refused_key_capture(
             venue,
             type(exc).__name__,
         )
+
+
+async def _record_nav_mark_refusal(
+    supabase: Any,
+    *,
+    allocator_id: str,
+    api_key_id: str,
+    token: str,
+    day: str,
+) -> None:
+    """Keep why a key's mark was refused, and since which day, where only its owner can read it
+    (174 MARKPAUSE D-02, REVIEW-2 WR-04).
+
+    ``allocator_equity_derived`` ``kind = NAV_MARK_REFUSAL_KIND_PREFIX + <api_key_id>``, payload
+    ``{token, first_seen_day, last_seen_day}`` and nothing else: the token is from the closed set
+    ``MARK_REFUSAL_TOKENS`` and the days are ISO UTC label days (``mark_day_for``). A later refusal of
+    the same key keeps the row's ``first_seen_day`` and moves ``last_seen_day`` (and the token, if it
+    changed). The token is NEVER written to ``strategy_analytics.data_quality_flags``, which is
+    publicly readable for a published strategy. The ``kind`` column has no CHECK, so this family
+    needs no migration.
+
+    NEVER raises (NAVMTM L3: a refused mark never fails a derive, and neither does the note of it):
+    a failure logs one WARNING carrying the api key id and the exception class name only."""
+    if token not in MARK_REFUSAL_TOKENS:
+        logger.warning("derive_broker_dailies: nav mark refusal not recorded (token outside the set)")
+        return
+    kind = NAV_MARK_REFUSAL_KIND_PREFIX + api_key_id
+
+    def _persist() -> None:
+        existing = (
+            supabase.table("allocator_equity_derived")
+            .select("payload")
+            .eq("allocator_id", allocator_id)
+            .eq("kind", kind)
+            .limit(1)
+            .execute()
+            .data
+        )
+        first_seen = day
+        if isinstance(existing, list) and existing:
+            payload = existing[0].get("payload")
+            carried = payload.get("first_seen_day") if isinstance(payload, dict) else None
+            if isinstance(carried, str) and carried:
+                first_seen = carried
+        supabase.table("allocator_equity_derived").upsert(
+            {
+                "allocator_id": allocator_id,
+                "kind": kind,
+                "payload": {
+                    "token": token,
+                    "first_seen_day": first_seen,
+                    "last_seen_day": day,
+                },
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="allocator_id,kind",
+        ).execute()
+
+    try:
+        await db_execute(_persist)
+    except Exception as exc:  # noqa: BLE001 - additive; the derive's outcome must not change
+        logger.warning(
+            "derive_broker_dailies: nav mark refusal not recorded (api_key=%s, error=%s)",
+            api_key_id,
+            type(exc).__name__,
+        )
+
+
+async def _clear_nav_mark_refusal(
+    supabase: Any, *, allocator_id: str, api_key_id: str
+) -> None:
+    """Delete the key's refusal row once a derive stores or finds the day's mark (174 D-02).
+
+    NEVER raises: a failure logs one WARNING carrying the api key id and the exception class name only."""
+
+    def _delete() -> None:
+        supabase.table("allocator_equity_derived").delete().eq(
+            "allocator_id", allocator_id
+        ).eq("kind", NAV_MARK_REFUSAL_KIND_PREFIX + api_key_id).execute()
+
+    try:
+        await db_execute(_delete)
+    except Exception as exc:  # noqa: BLE001 - additive; the derive's outcome must not change
+        logger.warning(
+            "derive_broker_dailies: nav mark refusal not cleared (api_key=%s, error=%s)",
+            api_key_id,
+            type(exc).__name__,
+        )
+
+
 class _NativeKeyUsd(NamedTuple):
     """A native-unit key's inputs in USD, plus what a missing close left out (164.6.6.2.1)."""
 
@@ -7072,6 +7164,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         if venue in _NAV_MARK_MARKED_EQUITY_VENUES and _stored_nav_mark is not None:
             # W3 (plan 15): the day's mark was already stored when this derive began, so its
             # read was skipped; that row is the authority and nothing is written.
+            await _clear_nav_mark_refusal(
+                ctx.supabase,
+                allocator_id=ctx.key_row["user_id"],
+                api_key_id=ctx.key_row["id"],
+            )
             return _stored_nav_mark, None
         if (
             venue not in _NAV_MARK_UNIFORM_VENUES
@@ -7132,6 +7229,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "derive_broker_dailies: nav mark refused (token=%s venue=%s api_key=%s)",
                 built, venue, ctx.key_row["id"],
             )
+            # 174 D-02: the token and its first-seen day go to an owner-only row, never to the
+            # public ``data_quality_flags``. Never raises, so the derive carries on unchanged.
+            await _record_nav_mark_refusal(
+                ctx.supabase,
+                allocator_id=ctx.key_row["user_id"],
+                api_key_id=ctx.key_row["id"],
+                token=built,
+                day=mark_day_for(_mark_read_at).isoformat(),
+            )
             return None, built
         # Identity comes from the key row, never from the job payload (T-167.2.1.1.1-22).
         _mark_key_id: str = ctx.key_row["id"]
@@ -7146,6 +7252,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             "mark_is_this_read=%s)",
             venue, _mark_key_id, _stored.mark_day,
             datetime.fromisoformat(_stored.marked_at) == built.marked_at,
+        )
+        await _clear_nav_mark_refusal(
+            ctx.supabase, allocator_id=_mark_owner_id, api_key_id=_mark_key_id
         )
         return _stored, None
 

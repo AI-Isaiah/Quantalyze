@@ -125,6 +125,12 @@ MARK_REFUSAL_TOKENS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: The ``kind`` prefix of the owner-only row that records WHY a key's mark was refused and since which
+#: day (174 MARKPAUSE D-02): ``allocator_equity_derived`` ``kind = NAV_MARK_REFUSAL_KIND_PREFIX +
+#: <api_key_id>``. Owner-SELECT, service-role write; the token never goes into the publicly readable
+#: ``strategy_analytics.data_quality_flags``. The runbook readout selects by this same prefix.
+NAV_MARK_REFUSAL_KIND_PREFIX: Final[str] = "nav_mark_refusal:"
+
 #: Keyset page size and ceiling for ``read_key_marks``. A key has at most one mark a day, so
 #: the ceiling (one million rows) is a corruption tripwire, never a working limit.
 _MARKS_PAGE_SIZE: Final[int] = 1000

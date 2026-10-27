@@ -523,7 +523,15 @@ class TestNavReconstructionErrorPermanentCatch:
         assert result.error_kind == "permanent"
         # Key-mode has NO per-key analytics row — mirrors the <2 branch: no stamp,
         # no csv write, no enqueue.
-        assert capture["upserts"] == [], (
+        # The one write allowed is the mark seam's private refusal note (174 MARKPAUSE D-02): it
+        # runs BEFORE the combine, on the mocked exchange's unreadable mark, and is owner-only.
+        # Everything else (key_inputs, csv, analytics) must stay untouched.
+        others = [
+            u for u in capture["upserts"]
+            if not (u[0] == "allocator_equity_derived"
+                    and str(u[1].get("kind", "")).startswith("nav_mark_refusal:"))
+        ]
+        assert others == [], (
             f"key-mode NAV fault must not touch any table; got {capture['upserts']!r}"
         )
         assert capture["rpc_calls"] == []
