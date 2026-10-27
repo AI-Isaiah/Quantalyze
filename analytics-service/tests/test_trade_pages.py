@@ -816,6 +816,88 @@ async def test_a_bybit_window_whose_timestamps_never_run_out_stops_at_the_segmen
         assert _SIGNATURE not in record.getMessage()
 
 
+async def test_an_empty_first_page_of_a_continuation_segment_is_refused_not_taken_as_the_end(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """WR-01 (171 fix round 1). A continuation segment asks for ``[start, oldest + 1]``, which holds
+    the rows already read at ``oldest``, so an EMPTY answer to its first page means the venue
+    misbehaved. It was taken as the end of the window: 30 of 100 rows came back as the whole
+    window with no warning. It is refused, once and counts-only, as an uncertain stop."""
+    _small_segments(monkeypatch)
+    trades = trade_rows(100, _T0 + DAY_MS, 1000, id_prefix="e")
+    for row in trades:
+        row["info"]["note"] = _SIGNATURE
+    exchange = _venue_exchange("bybit", trades, page_cap=_SEGMENT_CAP)
+    book = exchange.book
+    cursorless = 0
+
+    async def _empty_on_the_second_segment(symbol: Any, since: Any, limit: Any, params: dict[str, Any]) -> Any:
+        nonlocal cursorless
+        if not params.get("cursor"):
+            cursorless += 1
+            if cursorless == 2:
+                return []
+        return await book(symbol, since, limit, params)
+
+    exchange.fetch_my_trades = AsyncMock(side_effect=_empty_on_the_second_segment)
+
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
+        await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
+
+    assert excinfo.value.site == "bybit_no_advance"
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "did not advance" in warnings[0].getMessage()
+    for record in caplog.records:
+        assert _SIGNATURE not in record.getMessage()
+
+
+def _short_last_page_that_keeps_a_cursor(*, same_cursor: bool) -> tuple[Any, list[Any]]:
+    """A Bybit exchange holding 150 rows (distinct milliseconds). The first page is the newest 100
+    with a cursor; every request that carries a cursor answers the same short 50-row last page
+    WITH a cursor again, the one it was sent (``same_cursor``) or a fresh one (so the page adds no
+    new row). Returns the exchange and the list of cursors sent."""
+    newest_first = sorted(trade_rows(150, _T0 + DAY_MS, 1000, id_prefix="r"), key=lambda r: -r["timestamp"])
+    sent: list[Any] = []
+
+    async def _fetch(_symbol: Any, _since: Any, _limit: Any, params: dict[str, Any]) -> list[dict[str, Any]]:
+        cursor = params.get("cursor")
+        sent.append(cursor)
+        if cursor is None:
+            page, nxt = newest_first[:100], "c1"
+        else:
+            page, nxt = newest_first[100:], ("c1" if same_cursor else f"c{len(sent)}")
+        page = [dict(r, info=dict(r["info"])) for r in page]
+        page[0]["info"]["nextPageCursor"] = nxt
+        return list(reversed(page))  # ccxt re-sorts a page ascending
+
+    exchange = AsyncMock()
+    exchange.id = "bybit"
+    exchange.fetch_my_trades = AsyncMock(side_effect=_fetch)
+    return exchange, sent
+
+
+@pytest.mark.parametrize("same_cursor", [True, False])
+async def test_a_short_page_that_repeats_its_cursor_or_adds_nothing_ends_the_window(
+    same_cursor: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """WR-02 (171 fix round 1), TRADEPAGES D-02: a walk stops on an empty page, a non-advancing
+    cursor or the window end. A SHORT page that repeats its cursor or adds no row is such a
+    non-advancing end, and the window is complete with every row read. Plan 02 had made it a
+    stalled segment continued by time, which ends in a permanent ``bybit_no_advance`` refusal for a
+    venue quirk the deployed read had always survived. Only a FULL stalled page continues by time."""
+    exchange, sent = _short_last_page_that_keeps_a_cursor(same_cursor=same_cursor)
+
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    read, _ = await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
+
+    assert len({t["id"] for t in read}) == 150
+    # first page, last page; a fresh cursor needs one more request to show the page adds nothing
+    assert len(sent) == (2 if same_cursor else 3)
+    assert _warnings(caplog) == []
+
+
 def test_every_truncated_read_names_a_closed_site() -> None:
     """D-01 pin. Every place the module raises ``TruncatedTradeRead`` passes the shared message
     and a string-literal ``site=``, the literals are exactly ``TRUNCATED_READ_SITES``, and a site
