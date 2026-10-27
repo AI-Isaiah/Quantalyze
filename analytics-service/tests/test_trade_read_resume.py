@@ -658,6 +658,30 @@ async def test_a_store_fault_reads_the_book_without_the_store(
     assert not [r for r in caplog.records if _SIGNATURE in r.getMessage()]
 
 
+async def test_a_store_fault_on_a_book_over_one_run_retries_instead_of_failing_permanent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """S-2. With the store down there is no resume, so layer 1 must read the whole book in one run.
+    A book above its capacity raises ``TruncatedTradeRead``, a ``BadRequest`` the queue would fail
+    PERMANENT: the refusal this phase removes, blamed on the venue, for what is a store fault. The
+    job must instead end transient (retried once the store is back), with nothing persisted and no
+    venue text in the failure."""
+    book = _big_book(signature=True)
+    monkeypatch.setattr(er, "_BYBIT_WINDOW_SEGMENT_CEILING", 1)  # window 3 (450 trades) is over one run's reach
+
+    caplog.set_level(logging.INFO)
+    caplog.clear()
+    fake = _StoreDown()
+    result, _exchange, _audit, _clock = await _run_with_database(monkeypatch, fake, book, budget_s=45.0)
+
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "transient", result
+    assert _SIGNATURE not in (result.error_message or "")
+    assert not _snapshots(fake)
+    assert not _defer_calls(fake)
+    assert not [r for r in caplog.records if _SIGNATURE in r.getMessage()]
+
+
 async def test_a_store_fault_on_save_keeps_the_trades_in_the_claim(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
