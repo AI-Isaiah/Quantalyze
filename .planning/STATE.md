@@ -444,6 +444,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 173 added (2026-10-27, /gsd-phase add, founder "You can use add"): REBUILDGATES, from TRADEPAGES plan 06 (OKX ordering and Bybit transfer depth)
 - Phase 174 added (2026-10-27, /gsd-phase add, founder "You can use add"): MARKPAUSE, from NAVMTM review (hourly re-crawl of a paused series; owner-only refusal record)
 - Phase 175 added (2026-10-27, /gsd-phase add, founder "You can use add"): MT5OFFSET, from NAVMTM REVIEW-3 WR-02 (DST-aware broker offset)
+- Phase 176 added (2026-10-27, /gsd-phase add, founder "You can use add"): LEGACYRETIRE, from MARKSOURCE CONTEXT D-01 (retire the legacy allocator equity curve)
 - Phase 164.6.6.3.6 inserted after Phase 164.6.6.3: MT5SERVERLEARN: measure headless resolution of an unknown MT5 server, then learn servers on successful validation (founder 2026-10-06, AskUserQuestion 'Ship static, book the dynamic phase')
 - Phase 164.6.6.3.5 inserted after Phase 164.6.6.3: DOMAINONE: rho redirects to quantalyze.xyz; the 18 quantalyze.com mentions are checked and fixed (founder 2026-10-06, AskUserQuestion 'Book it')
 - Phase 164.6.6.3 UATFIXES **edited 2026-10-05 (/gsd-phase --edit, hand-written)**: items 9 (`MT5-UNKNOWN-BROKER-SERVER-HANG-01`, a key on a broker server the terminals do not know hangs 45.6 s and fails) and 10 (`MT5-SCRUB-OWED-COPY-01`, the owed-scrub 424 reads as a network timeout) added from Phase 164.6.6.1's 2026-10-05 live checks. Founder: book the follow-ups into 164.6.6.3.
