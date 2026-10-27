@@ -292,3 +292,110 @@ async def test_a_stored_window_round_trips_through_postgrest() -> None:
         print(f"values read back as int and equal after float(): {widened} (all >= 1e16)")
     finally:
         _cleanup(admin, user_id, key_id)
+
+
+def _a_trade(i: int) -> dict:
+    return {
+        "timestamp": 1_700_000_000_000 + i, "symbol": "BTC/USDT:USDT", "side": "buy",
+        "amount": 0.5, "price": 30000.5, "cost": 15000.25, "fee": {"cost": 1.5},
+    }
+
+
+async def test_claim_bookkeeping_holds_on_the_real_tables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The claim counters ride real primary keys and the grants the migration gives
+    ``service_role``: the upserts land, an UPDATE (``record_progress``) and a DELETE (the
+    version discard) are accepted, and the third stalled claim of one job stops by name."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+    user_id = key_id = None
+    try:
+        user_id, key_id = _seed_key(admin)
+        job = str(uuid.uuid4())
+        start_ms = 1_700_000_000_000
+
+        # A window stored first, so the version discard below has something to remove.
+        assert await store.save_window(admin, key_id, start_ms, start_ms + _WEEK_MS, [_a_trade(0)]) is True
+        assert len(_window_rows(admin, key_id)) == 1
+
+        # Three claims of one job, none recording progress: each counts as stalled.
+        first = await _claim(admin, key_id, since_ms=start_ms, job_id=job)
+        assert (first.claims, first.stalled_claims, first.grid_origin_ms) == (1, 1, start_ms)
+        assert set(first.stored) == {start_ms}
+        await _claim(admin, key_id, since_ms=start_ms + 86_400_000, job_id=job)
+        third = await _claim(admin, key_id, since_ms=start_ms + 2 * 86_400_000, job_id=job)
+        assert (third.claims, third.stalled_claims) == (3, 3)
+        # The grid origin stays the first claim's start while since_ms moves forward.
+        assert third.grid_origin_ms == start_ms
+        row = _state_row(admin, key_id)
+        assert row is not None and (row["claims"], row["stalled_claims"]) == (3, 3), row
+        assert row["last_job_id"] == job
+
+        # The fourth claim of the same job is refused by name and writes nothing.
+        with pytest.raises(store.TradeReadStalled) as stalled:
+            await store.begin_claim(admin, key_id, venue="bybit", since_ms=start_ms, job_id=job)
+        assert stalled.value.cause == "stalled_claims"
+        row = _state_row(admin, key_id)
+        assert row is not None and (row["claims"], row["stalled_claims"]) == (3, 3), row
+
+        # A NEW job starts at zero stalled claims (then counts itself as one) and keeps the window.
+        other = await _claim(admin, key_id, since_ms=start_ms, job_id=str(uuid.uuid4()))
+        assert (other.stalled_claims, other.claims) == (1, 4)
+        assert set(other.stored) == {start_ms}
+
+        # service_role's UPDATE is granted: record_progress swallows a fault, so read the row.
+        await store.record_progress(admin, key_id)
+        row = _state_row(admin, key_id)
+        assert row is not None and row["stalled_claims"] == 0, row
+
+        # Another read version discards the key's rows in BOTH tables (service_role's DELETE),
+        # then starts over: one claim, the new version, no window.
+        monkeypatch.setattr(store, "TRADE_READ_VERSION", 2)
+        fresh = await _claim(admin, key_id, since_ms=start_ms, job_id=str(uuid.uuid4()))
+        assert (fresh.claims, fresh.stalled_claims) == (1, 1)
+        assert fresh.stored == {}
+        assert _window_rows(admin, key_id) == []
+        row = _state_row(admin, key_id)
+        assert row is not None and (row["claims"], row["read_version"]) == (1, 2), row
+    finally:
+        _cleanup(admin, user_id, key_id)
+
+
+async def test_the_purges_remove_only_what_they_name() -> None:
+    """``purge_expired`` removes only expired rows and ``purge_keys`` only the named key's, on
+    the real tables (service_role's DELETE, and the foreign key to ``api_keys``)."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+    a_user = a_key = b_user = b_key = None
+    try:
+        a_user, a_key = _seed_key(admin)
+        b_user, b_key = _seed_key(admin)
+        w1, w2 = 1_700_000_000_000, 1_700_000_000_000 + _WEEK_MS
+        for key in (a_key, b_key):
+            await _claim(admin, key, since_ms=w1, job_id=str(uuid.uuid4()))
+            assert await store.save_window(admin, key, w1, w1 + _WEEK_MS, [_a_trade(1)]) is True
+        assert await store.save_window(admin, a_key, w2, w2 + _WEEK_MS, [_a_trade(2)]) is True
+
+        def starts(key) -> list[int]:  # type: ignore[no-untyped-def]
+            return sorted(r["window_start_ms"] for r in _window_rows(admin, key))
+
+        assert starts(a_key) == [w1, w2] and starts(b_key) == [w1]
+
+        # Force A's first window expired by a direct service_role UPDATE of expires_at.
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        admin.table(store.WINDOW_TABLE).update({"expires_at": past}).eq("api_key_id", a_key).eq(
+            "window_start_ms", w1
+        ).execute()
+
+        await store.purge_expired(admin)
+        assert starts(a_key) == [w2], "purge_expired must remove only the expired window"
+        assert starts(b_key) == [w1]
+        assert _state_row(admin, a_key) is not None and _state_row(admin, b_key) is not None
+
+        await store.purge_keys(admin, [a_key])
+        assert starts(a_key) == [] and _state_row(admin, a_key) is None
+        assert starts(b_key) == [w1] and _state_row(admin, b_key) is not None
+    finally:
+        _cleanup(admin, a_user, a_key)
+        _cleanup(admin, b_user, b_key)
