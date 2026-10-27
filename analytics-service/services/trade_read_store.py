@@ -212,6 +212,66 @@ class ReadState:
     stalled_claims: int
 
 
+class TradeReadDeferred(Exception):
+    """This claim ran out of budget before the read was whole; its progress is stored.
+
+    Not a ccxt class, so ``classify_exception`` never calls it permanent. Counts only: the
+    message holds three integers and nothing the venue said.
+    """
+
+    def __init__(self, windows_done: int, windows_total: int, trades_stored: int) -> None:
+        self.windows_done = windows_done
+        self.windows_total = windows_total
+        self.trades_stored = trades_stored
+        super().__init__(
+            f"trade read deferred: windows={windows_done}/{windows_total} "
+            f"trades_stored={trades_stored}"
+        )
+
+
+class TradeReadStalled(Exception):
+    """A read that makes no progress is stopped by name.
+
+    ``cause`` is ``"stalled_claims"`` (``STALLED_CLAIMS_LIMIT`` claims of one job without a
+    window stored) or ``"job_age"`` (the job is past ``JOB_BACKSTOP_S``). The stored state is
+    kept, so a later run can clear it. Counts only.
+    """
+
+    def __init__(self, cause: str, claims: int) -> None:
+        self.cause = cause
+        self.claims = claims
+        super().__init__(f"trade read stalled: cause={cause} claims={claims}")
+
+
+@dataclass(frozen=True)
+class TradeReadScope:
+    """What the read needs to consult the store, carried by a ContextVar (see ``trade_read_scope``)
+    so the pinned crawl call gains no keyword."""
+
+    supabase: Any
+    api_key_id: str | None
+    deadline: float
+    job_id: str | None
+    job_created_at: Any
+
+
+def _created_ms(created_at: Any) -> int | None:
+    if isinstance(created_at, datetime):
+        moment = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+        return int(moment.timestamp() * 1000)
+    return _parse_ms(created_at)
+
+
+def job_too_old(scope: TradeReadScope) -> bool:
+    """True when the job is ``JOB_BACKSTOP_S`` or more past its own ``created_at``. A
+    ``created_at`` that cannot be read counts as too old: a bound that cannot be evaluated must
+    not become no bound at all (the OKX archive job's F7 precedent)."""
+    created = _created_ms(scope.job_created_at)
+    if created is None:
+        return True
+    return max(0.0, (_wall_ms() - created) / 1000.0) >= JOB_BACKSTOP_S
+
+
 # ---------------------------------------------------------------------------
 # Store calls
 # ---------------------------------------------------------------------------
@@ -320,16 +380,153 @@ async def _load_window_meta(supabase: Any, api_key_id: str, now_ms: int) -> dict
     return stored
 
 
+async def _delete_keys(supabase: Any, api_key_ids: list[str]) -> None:
+    """Both tables' rows of these keys (windows first: they are the bulk)."""
+    for table in (WINDOW_TABLE, STATE_TABLE):
+        def _delete(table: str = table) -> Any:
+            return supabase.table(table).delete().in_("api_key_id", api_key_ids).execute()
+
+        await db_execute(_delete)
+
+
+def _state_usable(row: dict[str, Any], since_ms: int, now_ms: int) -> bool:
+    """A state row is kept only when it is current: this read version, unexpired, well formed,
+    and its grid origin is not later than the caller's start (a wider window than the one
+    stored cannot reuse windows tiled from a later origin)."""
+    origin = row.get("grid_origin_ms")
+    claims = row.get("claims")
+    stalled = row.get("stalled_claims")
+    expires_ms = _parse_ms(row.get("expires_at"))
+    return (
+        _is_int(origin)
+        and _is_int(claims) and claims >= 0
+        and _is_int(stalled) and stalled >= 0
+        and row.get("read_version") == TRADE_READ_VERSION
+        and expires_ms is not None and expires_ms > now_ms
+        and since_ms >= origin
+    )
+
+
+async def _begin_claim(
+    supabase: Any, api_key_id: str, venue: str, since_ms: int, job_id: str | None
+) -> ReadState:
+    now_ms = _wall_ms()
+
+    def _read_state() -> Any:
+        return (
+            supabase.table(STATE_TABLE)
+            .select(",".join(STATE_COLUMNS))
+            .eq("api_key_id", api_key_id)
+            .execute()
+        )
+
+    found = rows(await db_execute(_read_state))
+    row = dict(found[0]) if found else None
+    if row is not None and not _state_usable(row, since_ms, now_ms):
+        await _delete_keys(supabase, [api_key_id])
+        row = None
+
+    if row is None:
+        origin, claims, stalled = since_ms, 1, 1
+    else:
+        origin = int(row["grid_origin_ms"])
+        # Another job starts at zero stalled claims and keeps the stored windows: the stop is
+        # a reason a later run can clear.
+        prior_stalled = int(row["stalled_claims"]) if row.get("last_job_id") == job_id else 0
+        if prior_stalled >= STALLED_CLAIMS_LIMIT:
+            raise TradeReadStalled("stalled_claims", int(row["claims"]))
+        claims = int(row["claims"]) + 1
+        stalled = prior_stalled + 1
+
+    # Pessimistic: this claim counts as stalled until record_progress says otherwise, so a
+    # claim that is cut, reclaimed or killed needs no code at its end to be counted.
+    await _upsert(
+        supabase,
+        STATE_TABLE,
+        {
+            "api_key_id": api_key_id,
+            "venue": venue,
+            "grid_origin_ms": origin,
+            "read_version": TRADE_READ_VERSION,
+            "claims": claims,
+            "stalled_claims": stalled,
+            "last_job_id": job_id,
+            "updated_at": _iso(now_ms),
+            "expires_at": _iso(now_ms + STORE_EXPIRY_S * 1000),
+        },
+        "api_key_id",
+    )
+    await purge_expired(supabase)
+    stored = await _load_window_meta(supabase, api_key_id, now_ms)
+    return ReadState(origin, stored, claims, stalled)
+
+
 async def begin_claim(
     supabase: Any, api_key_id: str, *, venue: str, since_ms: int, job_id: str | None
 ) -> ReadState | None:
-    """Metadata half of a claim: which complete windows of this key are stored."""
+    """Start one claim of the read of ``api_key_id`` and say what is already stored.
+
+    In this order: read the key's state row; discard both tables' rows of the key when its read
+    version differs, it has expired or ``since_ms`` is earlier than its grid origin; reset the
+    stalled count when ``job_id`` is not the job that last claimed; raise ``TradeReadStalled``
+    (writing nothing) when this job already has ``STALLED_CLAIMS_LIMIT`` stalled claims; count
+    the claim (claims and stalled claims, both +1, expiry refreshed); purge expired rows; load
+    the metadata of the whole, current windows. Only the first claim's ``since_ms`` becomes the
+    grid origin, so windows stay aligned while ``since_ms`` moves forward a day at a time.
+
+    Returns None on a store fault (this claim reads without the store); see the module docstring.
+    """
     try:
-        stored = await _load_window_meta(supabase, api_key_id, _wall_ms())
-        return ReadState(since_ms, stored, 0, 0)
+        return await _begin_claim(supabase, api_key_id, venue, since_ms, job_id)
+    except TradeReadStalled:
+        raise
     except Exception as exc:  # noqa: BLE001 - disposition: this claim reads without the store
         _log_fault(exc, api_key_id, "this claim reads without the store")
         return None
+
+
+async def record_progress(supabase: Any, api_key_id: str) -> None:
+    """At least one window was stored in this claim: the job is not stalled."""
+    try:
+        def _reset() -> Any:
+            return (
+                supabase.table(STATE_TABLE)
+                .update({"stalled_claims": 0, "updated_at": _iso(_wall_ms())})
+                .eq("api_key_id", api_key_id)
+                .execute()
+            )
+
+        await db_execute(_reset)
+    except Exception as exc:  # noqa: BLE001 - disposition: normal return
+        _log_fault(exc, api_key_id, "the stalled-claims count was not reset")
+
+
+async def purge_keys(supabase: Any, api_key_ids: list[str]) -> None:
+    """Delete these keys' rows in both tables. Best effort: the 7-day expiry is the backstop."""
+    if not api_key_ids:
+        return
+    try:
+        await _delete_keys(supabase, list(api_key_ids))
+    except Exception as exc:  # noqa: BLE001 - disposition: normal return
+        logger.warning(
+            "trade read store unavailable (%s) keys=%d: rows left to expire",
+            type(exc).__name__, len(api_key_ids),
+        )
+
+
+async def purge_expired(supabase: Any) -> None:
+    """Delete every key's expired rows in both tables. Best effort."""
+    try:
+        now_iso = _iso(_wall_ms())
+        for table in (WINDOW_TABLE, STATE_TABLE):
+            def _delete(table: str = table) -> Any:
+                return supabase.table(table).delete().lte("expires_at", now_iso).execute()
+
+            await db_execute(_delete)
+    except Exception as exc:  # noqa: BLE001 - disposition: normal return
+        logger.warning(
+            "trade read store unavailable (%s): expired rows left in place", type(exc).__name__
+        )
 
 
 async def load_window(

@@ -165,6 +165,10 @@ class _FakeTable:
         self._select_ranges.append((col, "lte", val))
         return self
 
+    def lt(self, col: str, val):
+        self._select_ranges.append((col, "lt", val))
+        return self
+
     def order(self, *_args, **_kwargs):
         return self
 
@@ -184,6 +188,30 @@ class _FakeTable:
         return self
 
     # --- execute ---
+    def _row_matches(self, row: dict) -> bool:
+        """Every filter of this chain, for select AND delete (one predicate, so the two
+        cannot drift: a delete that ignored a range or an in-list used to remove the whole
+        table)."""
+        if not all(row.get(c) == v for c, v in self._select_filters):
+            return False
+        if any(row.get(c) == v for c, v in self._select_neq_filters):
+            return False
+        if any(row.get(c) is not None for c in self._select_is_null_cols):
+            return False
+        if not all(row.get(c) in vals for c, vals in self._select_in_filters):
+            return False
+        for col, op, val in self._select_ranges:
+            rv = row.get(col)
+            if rv is None:
+                return False
+            if op == "gte" and not (rv >= val):
+                return False
+            if op == "lte" and not (rv <= val):
+                return False
+            if op == "lt" and not (rv < val):
+                return False
+        return True
+
     def execute(self):
         if self._pending_op == "upsert":
             conflict_cols = (self._pending_on_conflict or "").split(",")
@@ -241,11 +269,7 @@ class _FakeTable:
                 if tbl != self._name:
                     continue
                 row = self._store[key]
-                if not all(row.get(c) == v for c, v in self._select_filters):
-                    continue
-                if any(row.get(c) == v for c, v in self._select_neq_filters):
-                    continue
-                if any(row.get(c) is not None for c in self._select_is_null_cols):
+                if not self._row_matches(row):
                     continue
                 deleted.append(dict(row))
                 del self._store[key]
@@ -260,28 +284,7 @@ class _FakeTable:
             for (tbl, _pk), row in self._store.items():
                 if tbl != self._name:
                     continue
-                if not all(row.get(c) == v for c, v in self._select_filters):
-                    continue
-                if any(row.get(c) == v for c, v in self._select_neq_filters):
-                    continue
-                if any(row.get(c) is not None for c in self._select_is_null_cols):
-                    continue
-                if not all(row.get(c) in vals for c, vals in self._select_in_filters):
-                    continue
-                # range filters
-                ok = True
-                for col, op, val in self._select_ranges:
-                    rv = row.get(col)
-                    if rv is None:
-                        ok = False
-                        break
-                    if op == "gte" and not (rv >= val):
-                        ok = False
-                        break
-                    if op == "lte" and not (rv <= val):
-                        ok = False
-                        break
-                if not ok:
+                if not self._row_matches(row):
                     continue
                 matched.append(dict(row))
 
