@@ -54,6 +54,15 @@ Consequence: a store that answers ``begin_claim`` but refuses every write makes 
 the job ends at the named stall after ``STALLED_CLAIMS_LIMIT`` claims, never in an endless defer
 loop.
 
+The scope: how the read reaches the store without a new keyword
+---------------------------------------------------------------
+The read's crawl call is pinned (five positionals, no extra keyword), so the store is carried in
+by a frozen ``TradeReadScope`` held in a ``ContextVar`` whose default is None. The handler sets
+it with ``trade_read_scope(...)`` around the crawl; the read consults
+``current_trade_read_scope()``. Without a scope the store is never reached: the probe and every
+caller that sets none read exactly as they did before the store existed. The deadline lives on
+the scope and is measured on a monotonic seam (``claim_deadline``, ``deadline_passed``).
+
 Module hygiene
 --------------
 This module imports neither ``services.job_worker`` nor ``services.equity_reconstruction``: the
@@ -64,6 +73,10 @@ from __future__ import annotations
 
 import logging
 import math
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final, TypeGuard
@@ -109,6 +122,10 @@ _META_COLUMNS: Final[str] = (
 _CHUNK_COLUMNS: Final[str] = (
     "chunk_index,chunk_count,window_end_ms,read_version,n_trades,expires_at,trades"
 )
+
+
+#: Monotonic clock seam for the claim deadline (tests drive it).
+_monotonic = time.monotonic
 
 
 def _wall_ms() -> int:
@@ -253,6 +270,41 @@ class TradeReadScope:
     deadline: float
     job_id: str | None
     job_created_at: Any
+
+
+# The scope that carries the store into the read WITHOUT a new keyword on the pinned crawl call
+# (PD-J). The default is None, an immutable sentinel: a mutable default would be captured once at
+# module load and shared by every task (the ``_LAST_DQ_FLAGS`` precedent in ``services.exchange``).
+# With no scope set, nothing in this module is reached and the read behaves as it did before the
+# store existed (the probe and every caller that sets none).
+_SCOPE: ContextVar[TradeReadScope | None] = ContextVar("trade_read_scope", default=None)
+
+
+@contextmanager
+def trade_read_scope(scope: TradeReadScope) -> Iterator[None]:
+    """Make ``scope`` the current scope for the enclosed block, in this task only, and put
+    the previous one back afterwards, also when the block raises."""
+    token = _SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        _SCOPE.reset(token)
+
+
+def current_trade_read_scope() -> TradeReadScope | None:
+    """The scope of the enclosing ``trade_read_scope`` block, None outside one."""
+    return _SCOPE.get()
+
+
+def claim_deadline(budget_s: float) -> float:
+    """The monotonic instant ``budget_s`` seconds from now. Taken once at crawl start so every
+    member of a whole-account read shares it."""
+    return _monotonic() + budget_s
+
+
+def deadline_passed(scope: TradeReadScope) -> bool:
+    """True once the monotonic clock has reached the scope's deadline."""
+    return _monotonic() >= scope.deadline
 
 
 def _created_ms(created_at: Any) -> int | None:

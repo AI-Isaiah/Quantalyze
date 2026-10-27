@@ -683,3 +683,121 @@ async def test_a_store_fault_is_a_disposition_not_a_crash(
     cancelling = _BrokenClient(asyncio.CancelledError())
     with pytest.raises(asyncio.CancelledError):
         await store.begin_claim(cancelling, KEY, venue="bybit", since_ms=ORIGIN_MS, job_id=JOB)
+
+
+# ---------------------------------------------------------------------------
+# The scope, the deadline, the stop signals and log hygiene
+# ---------------------------------------------------------------------------
+
+
+def _a_scope(label: str = "a", deadline: float = 100.0) -> Any:
+    from services import trade_read_store as store
+
+    return store.TradeReadScope(
+        supabase=label, api_key_id=KEY, deadline=deadline, job_id=JOB, job_created_at=None
+    )
+
+
+async def test_the_scope_is_unset_by_default_and_reset_after_use() -> None:
+    """Without a scope nothing in the store is reached; a scope never outlives its block, not
+    even when the block raises, and tasks do not see each other's scopes."""
+    from services import trade_read_store as store
+
+    assert store.current_trade_read_scope() is None
+    scope = _a_scope()
+    with store.trade_read_scope(scope):
+        assert store.current_trade_read_scope() is scope
+    assert store.current_trade_read_scope() is None
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with store.trade_read_scope(scope):
+            raise RuntimeError("boom")
+    assert store.current_trade_read_scope() is None
+
+    async def _member(label: str) -> Any:
+        mine = _a_scope(label)
+        with store.trade_read_scope(mine):
+            await asyncio.sleep(0.01)
+            seen = store.current_trade_read_scope()
+            await asyncio.sleep(0.01)
+            return seen is mine and store.current_trade_read_scope() is mine
+
+    assert await asyncio.gather(_member("one"), _member("two"), _member("three")) == [True] * 3
+    assert store.current_trade_read_scope() is None
+
+
+def test_the_deadline_follows_the_monotonic_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services import trade_read_store as store
+
+    now = {"t": 1_000.0}
+    monkeypatch.setattr(store, "_monotonic", lambda: now["t"])
+    deadline = store.claim_deadline(900.0)
+    assert deadline == 1_900.0
+    scope = _a_scope(deadline=deadline)
+
+    assert store.deadline_passed(scope) is False
+    now["t"] = 1_899.999
+    assert store.deadline_passed(scope) is False
+    now["t"] = 1_900.0
+    assert store.deadline_passed(scope) is True
+    now["t"] = 5_000.0
+    assert store.deadline_passed(scope) is True
+
+
+def test_the_stop_signals_carry_counts_only() -> None:
+    import ccxt.async_support as ccxt
+
+    from services import trade_read_store as store
+    from services.job_worker import classify_exception
+
+    deferred = store.TradeReadDeferred(windows_done=37, windows_total=104, trades_stored=51234)
+    stalled = store.TradeReadStalled("job_age", 2)
+    assert str(deferred) == "trade read deferred: windows=37/104 trades_stored=51234"
+    assert str(stalled) == "trade read stalled: cause=job_age claims=2"
+    assert (deferred.windows_done, deferred.windows_total, deferred.trades_stored) == (37, 104, 51234)
+    assert (stalled.cause, stalled.claims) == ("job_age", 2)
+    for signal in (deferred, stalled):
+        assert not isinstance(signal, ccxt.BaseError)
+        kind, _message = classify_exception(signal)
+        assert kind != "permanent", "a stop signal must never read as a permanent venue refusal"
+
+
+async def test_no_store_log_line_carries_a_stored_value(
+    clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    from services import trade_read_store as store
+
+    client = JsonFakeClient()
+    with caplog.at_level(logging.DEBUG):
+        # An unstorable window whose symbol is the signature.
+        bad = _a_trade(ORIGIN_MS + 1, symbol=_SIGNATURE)
+        bad["price"] = float("nan")
+        assert await store.save_window(client, KEY, ORIGIN_MS, ORIGIN_MS + WEEK_MS, [bad]) is False
+        # A stored chunk whose trade is malformed and carries the signature.
+        _put_chunk(client, ORIGIN_MS, 0, 1,
+                   trades=[["not-an-int", _SIGNATURE, "buy", 1.0, 2.0, 2.0, 0.0]])
+        meta = store.WindowMeta(ORIGIN_MS, ORIGIN_MS + WEEK_MS, 1, 1)
+        assert await store.load_window(client, KEY, meta) is None
+        # A count mismatch.
+        _put_chunk(client, ORIGIN_MS + WEEK_MS, 0, 1, n_trades=9,
+                   trades=[[ORIGIN_MS + WEEK_MS + 1, _SIGNATURE, "buy", 1.0, 2.0, 2.0, 0.0]])
+        assert await store.load_window(
+            client, KEY, store.WindowMeta(ORIGIN_MS + WEEK_MS, ORIGIN_MS + 2 * WEEK_MS, 1, 9)
+        ) is None
+        # Client errors whose text is the signature, on every public call.
+        broken = _BrokenClient(RuntimeError(_SIGNATURE))
+        assert await store.begin_claim(broken, KEY, venue="bybit", since_ms=ORIGIN_MS, job_id=JOB) is None
+        assert await store.save_window(
+            broken, KEY, ORIGIN_MS, ORIGIN_MS + WEEK_MS, [_a_trade(ORIGIN_MS + 1, _SIGNATURE)]
+        ) is False
+        assert await store.load_window(broken, KEY, meta) is None
+        await store.record_progress(broken, KEY)
+        await store.purge_keys(broken, [KEY])
+        await store.purge_expired(broken)
+
+    records = [r for r in caplog.records if r.name == _LOGGER]
+    assert len(records) >= 9, "every path above logs, so the check below has something to read"
+    for record in records:
+        assert _SIGNATURE not in record.getMessage()
+        assert _SIGNATURE not in str(record.args)
+        assert record.exc_info is None, "never logger.exception: a traceback quotes the row"
