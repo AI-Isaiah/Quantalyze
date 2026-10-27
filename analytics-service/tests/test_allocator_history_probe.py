@@ -941,6 +941,20 @@ def test_the_declared_vocabulary_is_the_rebuilds_own_refusal_tokens() -> None:
     assert hp.sig3(0.123456) == 0.123
 
 
+def test_the_probe_knows_every_typed_truncation_site() -> None:
+    """Phase 171 READCEILING D-01: the rebuild raises a ``TruncatedTradeRead`` carrying one of the
+    closed ``er.TRUNCATED_READ_SITES`` tokens, and the probe reports a typed cut-short read by
+    that token. A site the rebuild can raise but the probe does not declare would be reported
+    ``unknown``, which hides which stop fired in exactly the measurement made to find it.
+
+    2026-10-27 (plan 10): the 16th forced-refusal token, ``account_key_read_stalled``, needed no
+    probe edit: the probe's selection and member-refusal vocabularies are derived from
+    ``er.FORCED_REBUILD_REFUSAL_REASONS``, and the test above emits every token of that set."""
+    assert set(er.TRUNCATED_READ_SITES) <= set(hp._TRUNCATED_SITES), (
+        sorted(set(er.TRUNCATED_READ_SITES) - set(hp._TRUNCATED_SITES))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pure measurements.
 # ---------------------------------------------------------------------------
