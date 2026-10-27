@@ -42,6 +42,7 @@ import ccxt
 import pytest
 
 from services import equity_reconstruction as er
+from services import trade_read_store as store
 from services.equity_reconstruction import run_reconstruct_allocator_history_job
 from services.job_worker import DispatchOutcome, DispatchResult
 from tests.test_equity_reconstruction import (
@@ -74,6 +75,16 @@ from tests.test_reconstruct_marker_writer import (
     _marker_of,
     _MarkerFake,
     _RecordingTable,
+)
+from tests.test_trade_read_resume import (
+    _DEFER_REASON,
+    _JOB_ID,
+    _WINDOWS,
+    _big_book,
+    _Clock,
+    _defer_calls,
+    _store_rows,
+    _venue,
 )
 from tests.test_upnl_venues import (
     BYBIT_LINEAR_POSITIONS,
@@ -1978,3 +1989,151 @@ async def test_an_unclassified_member_fault_is_not_called_a_venue_fault(
     assert LEAKED_SIGNATURE not in message, message
     assert not [c for c in audit.call_args_list if LEAKED_SIGNATURE in repr(c)], audit.call_args_list
     assert _records_containing(caplog, LEAKED_SIGNATURE) == []
+
+
+# ----------------------------------------------- READCEILING (Phase 171): the forced path resumes
+#
+# An a6-shaped account (a Bybit member plus other venues) is rebuilt by the FORCED path. Its Bybit
+# member's trade read may be too big for one claim; the handler then defers the whole job and the
+# next claim resumes from the windows the store kept. These tests drive that through the real
+# handler, the real account crawl and the in-memory database, on the fake clocks of
+# tests/test_trade_read_resume.py (one second per venue request).
+
+
+def _forced_claim_job(token: str, key_id: str = API_KEY_ID_1) -> dict[str, Any]:
+    """A forced job as the queue hands it over on a claim: its id, claim token and age."""
+    return {
+        **_forced_job(key_id),
+        "id": _JOB_ID,
+        "claim_token": token,
+        "created_at": (END_DATE - timedelta(hours=1)).isoformat(),
+    }
+
+
+def _resume_rig(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _Clock,
+    *,
+    budget_s: float,
+    bybit_is_job_key: bool = True,
+) -> _MarkerFake:
+    """The a6-shaped book (the Bybit member is key 1, the job's own, and key 2 is MT5; or the
+    other way round), the fake clocks, a lowered page ceiling and the claim budget. The MT5
+    member answers ten typed deal-ledger days, as in the mixed-venue test, so the sum has days
+    to add."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake, second_exchange="mt5")
+    if not bybit_is_job_key:
+        _seed_account_key(fake, API_KEY_ID_1, "mt5", venue_account_id="fixture-acct-1")
+        _seed_account_key(fake, API_KEY_ID_2, "bybit", venue_account_id="fixture-acct-2")
+    monkeypatch.setattr(store, "_monotonic", lambda: clock.t)
+    monkeypatch.setattr(store, "_wall_ms", lambda: clock.wall_ms)
+    monkeypatch.setattr(er, "_TRADE_READ_CLAIM_BUDGET_S", budget_s)
+    monkeypatch.setattr(er, "_BYBIT_WINDOW_PAGE_CEILING", 2)
+    _install_recording_mt5_fetch(monkeypatch)
+    _freeze_now(monkeypatch)
+    return fake
+
+
+def _mt5_member() -> AsyncMock:
+    exchange = _crawl_exchange()
+    exchange.id = "mt5"
+    return exchange
+
+
+def _store_key_ids(fake: Any) -> set[str]:
+    return {str(r["api_key_id"]) for r in _store_rows(fake)}
+
+
+@pytest.mark.asyncio
+async def test_a_forced_account_whose_bybit_read_is_deferred_writes_nothing_then_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SC-1 on the forced path, D-02. The allocator holds a Bybit account (the job's own key,
+    a book far too big for one claim) and an MT5 account. Claim 1 runs out of budget at a window
+    boundary of the Bybit member's read: the WHOLE job is deferred through ``defer_compute_job``
+    on its own claim token, the account's stored history is exactly as it was (no window
+    replace, no failure audit, no marker write), and the windows read so far are kept in the
+    store under the Bybit member's key. Claim 2 reuses them, finishes, replaces the window ONCE
+    and purges the store rows of every member.
+
+    RED at the base commit: the forced path set no scope, so the read ran whole in one claim (or
+    the deferral was read as an unknown fault); it never deferred."""
+    clock = _Clock()
+    fake = _resume_rig(monkeypatch, clock, budget_s=45.0)
+    book = _big_book()
+    exchange_1 = await _venue(book, clock)
+    audit = _install_fake_audit(monkeypatch)
+    _install_account_preflight(
+        monkeypatch, fake, {API_KEY_ID_1: exchange_1, API_KEY_ID_2: _mt5_member()}
+    )
+    before = _book_state(fake)
+
+    first = await run_reconstruct_allocator_history_job(_forced_claim_job("T1"))
+
+    assert first.outcome == DispatchOutcome.DEFERRED, first
+    (defer,) = _defer_calls(fake)
+    assert defer["p_job_id"] == _JOB_ID
+    assert defer["p_claim_token"] == "T1"
+    assert _DEFER_REASON.match(defer["p_reason"]), defer["p_reason"]
+    assert _book_state(fake) == before, "a deferred forced rebuild changed the stored history"
+    assert fake.api_key_updates() == [], fake.api_key_updates()
+    assert _window_rpc_calls(fake) == []
+    assert [n for (n, _p) in fake.rpc_calls if n.startswith("replace_allocator")] == []
+    assert _audit_metadata(audit, FAILED_ACTION) == []
+    assert not [c for c in audit.call_args_list if c.kwargs["action"] in COMPLETION_ACTIONS]
+    assert fake.rows_for(store.WINDOW_TABLE), "the claim stored no window"
+    assert _store_key_ids(fake) == {API_KEY_ID_1}, "only the Bybit member has store rows"
+    claim_one_calls = exchange_1.fetch_my_trades.await_count
+
+    monkeypatch.setattr(er, "_TRADE_READ_CLAIM_BUDGET_S", 1e9)
+    second = await run_reconstruct_allocator_history_job(_forced_claim_job("T2"))
+
+    assert second.outcome == DispatchOutcome.DONE, second
+    assert len(_window_rpc_calls(fake)) == 1, fake.rpc_calls
+    assert [n for (n, _p) in fake.rpc_calls if n == "replace_allocator_equity_snapshots"] == []
+    assert len(_defer_calls(fake)) == 1, "the second claim deferred again"
+    assert not _store_rows(fake), "every member's store rows are purged once the history is written"
+    assert exchange_1.fetch_my_trades.await_count > claim_one_calls
+    in_window = [r for r in fake.rows_for("allocator_equity_snapshots") if r["value_usd"] != SENTINEL_VALUE]
+    assert in_window, "the window replace wrote no row"
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["account_rebuild"] is True
+    assert complete["account_exchange_accounts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_each_member_reads_under_its_own_key_not_the_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The member binding. Here the job's own key (key 1) is the MT5 account and the Bybit
+    member that needs the store is its SIBLING (key 2). The windows its read keeps must be filed
+    under key 2 and nothing else: the scope the handler sets names no key, so a read that fell
+    back to the job's key (or to none, which is the old whole-read) would store under key 1 or
+    never defer. The next claim finds those windows under key 2 and completes, and both members'
+    store rows are purged."""
+    clock = _Clock()
+    fake = _resume_rig(monkeypatch, clock, budget_s=45.0, bybit_is_job_key=False)
+    exchange_2 = await _venue(_big_book(), clock)
+    _install_fake_audit(monkeypatch)
+    _install_account_preflight(
+        monkeypatch, fake, {API_KEY_ID_1: _mt5_member(), API_KEY_ID_2: exchange_2}
+    )
+
+    first = await run_reconstruct_allocator_history_job(_forced_claim_job("T1"))
+
+    assert first.outcome == DispatchOutcome.DEFERRED, first
+    assert _store_key_ids(fake) == {API_KEY_ID_2}, _store_key_ids(fake)
+    kept = {r["window_start_ms"] for r in fake.rows_for(store.WINDOW_TABLE)}
+    claim_one_calls = exchange_2.fetch_my_trades.await_count
+
+    monkeypatch.setattr(er, "_TRADE_READ_CLAIM_BUDGET_S", 1e9)
+    second = await run_reconstruct_allocator_history_job(_forced_claim_job("T2"))
+
+    assert second.outcome == DispatchOutcome.DONE, second
+    assert len(_window_rpc_calls(fake)) == 1
+    assert not _store_rows(fake), "both members' store rows are purged"
+    # The second claim read only what the first left: a read that ignored the windows kept under
+    # key 2 would have asked the venue for the whole book again, one request per window at least.
+    claim_two_calls = exchange_2.fetch_my_trades.await_count - claim_one_calls
+    assert claim_two_calls < _WINDOWS - len(kept) + 5, (len(kept), claim_one_calls, claim_two_calls)

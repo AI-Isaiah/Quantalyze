@@ -20,6 +20,7 @@ copy (e.g. "Only 3 months of history available on OKX").
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 # WR-01 — `math.isfinite` guards the MT5 NAV anchor in `_mt5_fetch_window`. This
@@ -5500,6 +5501,13 @@ async def _crawl_account_key(
     limit is stamped on the key (so the circuit breaker parks it) and re-raised unchanged;
     the caller is the only place that converts a non-refusal failure. An empty curve refuses
     ``account_key_no_rows``: summing would otherwise treat the account as having no days.
+
+    READCEILING (Phase 171, D-02) member binding: under a trade-read scope (the forced handler
+    sets one around the account crawl) a non-MT5 member's read runs in a copy of that scope
+    naming THIS member's key id, so a Bybit member keeps and reuses its own windows in the
+    trade-read store and the job's key is never borrowed for a sibling. The scope rides a
+    ContextVar, so the pinned crawl call keeps its exact keywords (PD-J). The read may end in
+    ``store.TradeReadDeferred``; it propagates unchanged (``_crawl_whole_account`` decides it).
     """
     venue = _key_venue(key_row)
     try:
@@ -5516,9 +5524,25 @@ async def _crawl_account_key(
                 return outcome
             rows, _hit_terminus, telemetry = outcome
         else:
-            rows, _hit_terminus, telemetry = await _fetch_and_price_window(
-                exchange, venue, supabase, start_date, end_date, require_anchor=True,
-            )
+            # READCEILING (Phase 171, D-02): when the account crawl set a trade-read scope, this
+            # member reads under a copy of it that names the member's OWN key. The store keys
+            # every window by api key, and the scope the handler set carries none, because it is
+            # shared by every member (one deadline, one job). The binding is a ContextVar write
+            # inside this member's own task (``asyncio.gather`` gives each coroutine its own
+            # context copy), so a sibling never sees it and the pinned call below gains no
+            # keyword (PD-J). Only a Bybit read consults it.
+            scope = store.current_trade_read_scope()
+            if scope is None:
+                rows, _hit_terminus, telemetry = await _fetch_and_price_window(
+                    exchange, venue, supabase, start_date, end_date, require_anchor=True,
+                )
+            else:
+                with store.trade_read_scope(
+                    dataclasses.replace(scope, api_key_id=str(key_row["id"]))
+                ):
+                    rows, _hit_terminus, telemetry = await _fetch_and_price_window(
+                        exchange, venue, supabase, start_date, end_date, require_anchor=True,
+                    )
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(supabase, dict(key_row), exc)
         raise
@@ -5552,6 +5576,18 @@ async def _crawl_whole_account(
     ``account_key_read_failed`` after one WARNING: this loop is the only converter. Every
     session this function opened is closed in ``finally``; the job's own session stays with
     the handler's ``finally``.
+
+    READCEILING (Phase 171, D-02): a member's trade read may end in ``store.TradeReadDeferred``
+    (its claim budget ran out; the windows it read are kept). The deferral is decided LAST:
+    the loop remembers the first one in key order and keeps going, so every other outcome (a
+    refusal, an MT5 member's settled failure, a permanent failure, a retryable fault) decides
+    the claim exactly as it did before, and only when every other member settled cleanly is
+    the deferral re-raised for the handler to defer the whole job. Why last: a refusal or a
+    permanent failure is deterministic, so deferring on it would only burn claims; the stored
+    windows survive a FAILED claim, so a sibling's retryable fault ending the claim loses no
+    read progress; and no existing outcome or pinned test moves. It is never classified here as
+    an unknown fault (the generic arm would end the job FAILED unknown). Nothing is summed or
+    persisted from a claim that deferred.
     """
     own_key_id = str(job["api_key_id"])
     selected, zero_contribution = _select_account_crawl_keys(account_keys, own_key_id)
@@ -5604,7 +5640,15 @@ async def _crawl_whole_account(
         )
         per_account_rows: list[list[dict[str, Any]]] = []
         per_account_telemetry: list[dict[str, Any]] = []
+        first_deferral: tuple[store.TradeReadDeferred, Mapping[str, Any]] | None = None
         for key, outcome in zip(selected, results):
+            if isinstance(outcome, store.TradeReadDeferred):
+                # Remembered, not raised: a later member's refusal, settled failure or fault
+                # still decides the claim first (the docstring says why). The key order keeps
+                # the first deferral, which is the one the WARNING below names.
+                if first_deferral is None:
+                    first_deferral = (outcome, key)
+                continue
             if isinstance(outcome, ForcedRebuildRefusedError):
                 # Static fields only: the member's key and venue and the closed-vocabulary
                 # token. The loop raises on the FIRST refused member in key order, so this
@@ -5652,6 +5696,15 @@ async def _crawl_whole_account(
                 raise ForcedRebuildRefusedError("account_key_read_failed") from None
             per_account_rows.append(outcome[0])
             per_account_telemetry.append(outcome[1])
+        if first_deferral is not None:
+            deferral, deferred_key = first_deferral
+            logger.warning(
+                "reconstruct_allocator_history account crawl deferred "
+                "allocator=%s key=%s venue=%s windows_done=%d windows_total=%d",
+                allocator_id, deferred_key.get("id"), _key_venue(deferred_key),
+                deferral.windows_done, deferral.windows_total,
+            )
+            raise deferral
     finally:
         for exchange in opened:
             try:
@@ -5801,10 +5854,23 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 # becomes the classified transient below. The key set is read FIRST, so an
                 # unreadable one refuses before any venue call.
                 _account_keys = await _read_account_keys(ctx.supabase, allocator_id, api_key_id)
-                _account_outcome = await asyncio.wait_for(
-                    _crawl_whole_account(ctx, job, allocator_id, _account_keys, end_date),
-                    timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                # READCEILING (Phase 171, D-02): the account crawl runs under ONE trade-read
+                # scope, taken here so every member shares one claim deadline and the job's id
+                # and age. It names no key (``api_key_id=None``): ``_crawl_account_key`` binds
+                # each member's own. The crawl call is unchanged.
+                _forced_job_id = job.get("id")
+                _forced_scope = store.TradeReadScope(
+                    supabase=ctx.supabase,
+                    api_key_id=None,
+                    deadline=store.claim_deadline(_TRADE_READ_CLAIM_BUDGET_S),
+                    job_id=str(_forced_job_id) if _forced_job_id is not None else None,
+                    job_created_at=job.get("created_at"),
                 )
+                with store.trade_read_scope(_forced_scope):
+                    _account_outcome = await asyncio.wait_for(
+                        _crawl_whole_account(ctx, job, allocator_id, _account_keys, end_date),
+                        timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                    )
                 if isinstance(_account_outcome, DispatchResult):
                     # A sibling key's circuit-breaker cooldown deferred this job (no audit),
                     # or an MT5 account's window fetch failed without writing an audit of
