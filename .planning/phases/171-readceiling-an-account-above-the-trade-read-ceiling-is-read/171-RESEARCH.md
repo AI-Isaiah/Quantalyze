@@ -508,24 +508,31 @@ book = VenueTradeBook(ex, trade_rows(10_500, SINCE + DAY_MS, 50, id_prefix="w"))
 | A12 | 7 days is the right store expiry and 3 stalled claims / 24 h the right stop | sections 2, 5 | Tuning only |
 | A13 | ccxt 4.5.88 prices `v5/execution/list` like the locally read 4.5.64 | Standard Stack | Budget tuning only |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+Each question carries a one-line resolution (2026-10-27, planning; revised after the plan check) naming the decision or plan that closes it.
 
 1. **Does D-01 need its own ship before the dependent plans?**
    - Known: the probe runs from the deployed commit; D-01 says code that depends on which limit fired waits for the reading; the layer-1 design is robust to both outcomes.
    - Unclear: whether the founder wants a probe-only PR first.
    - Recommendation: plan 01 is probe-only (Python, no migration) and shipped alone; the orchestrator runs it on the backfill worker (operator step, not an executor task) and records the reading before plans 02+ are executed. If the founder declines a split ship, proceed with layer 1 and read the outcome at SC-3.
+   - **RESOLVED:** superseded by orchestrator decision 2: no probe-only PR. Plan 01 makes the probe derive the stop site from its own call log (and refuse an older rebuild module by `DEPLOYED_ER_NAMES`), plan 05 runs that file on the backfill worker against the code deployed today before the phase ships, and plan 12 Task 1 step 0 is the ship gate that requires plan 05's `d01-ship: go`. No code branches on the site (plan 02's continuation covers both), so plans 02-11 do not wait on the reading; the ship does.
 
 2. **Owner read policy on the new tables?**
    - Known: CONTEXT says "owner/service-role RLS"; no UI reads the rows.
    - Recommendation: service-role only. If an owner SELECT is wanted, add `allocator_id` (cascade) and the NAV-marks coherence trigger (which adds a SECURITY DEFINER function and its snapshot/VAC-04 work).
+   - **RESOLVED:** CONTEXT D-02, narrowed at planning (orchestrator 2026-10-27): service-role only, RLS forced, no owner policy, no `allocator_id`, no trigger or SECURITY DEFINER function. Implemented in plan 03 (TR-2, gate arms 1 and 8).
 
 3. **A cap on stored trades (the "any size" tension).**
    - Known: no cap means unbounded storage for a venue that keeps producing; the stall and age stops bound it in time, not in size.
    - Recommendation: no cap and no extra token in this phase; the segment ceiling bounds one window and the 24 h backstop bounds the job. Record a number in the plan if storage proves a problem.
+   - **RESOLVED:** no size cap and no extra token. One request is bounded by the 5,000-trade chunk and its CHECK (plan 03 TR-1, plan 04), one window by the segment ceiling (plan 02), one job in time by the stalled-claims stop and the 24 h backstop (plans 04, 08), and storage in time by the 7-day expiry with its purges: at claim start, on DONE (plan 07) and the hourly watchdog sweep that also reaches an idle key (plan 08).
 
 4. **Is cross-run persistence exercised by a6 at all?** (see Summary finding 1). Surface it in the plan so the SC-3 record is not misread as having proven layer 2.
+   - **RESOLVED:** layer 2 is proven by synthetic books and the live lane (plans 07, 08, 09, 10, 11); plan 12 Task 2 writes the fixed `sc3-layer2-proof:` line and a `sc3-layer2-needed:` line from a6's elapsed seconds, so the post-deploy probe (which reads without a store scope) is never read as proof of layer 2.
 
 5. **Where do the post-deploy handoff docs live and who updates them?** They are `.planning` artefacts; the ship branch must change nothing under `.planning` (user memory), so update them in the planning commit.
+   - **RESOLVED:** plan 10 Task 2 appends a dated amendment (adds lines only) to the ACCTREBUILD 09 SUMMARY handoff on the phase branch; it reaches main through the orchestrator's records PR, never through the ship branch.
 
 ## Environment Availability
 

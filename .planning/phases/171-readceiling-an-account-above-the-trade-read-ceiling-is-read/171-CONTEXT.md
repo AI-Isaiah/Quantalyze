@@ -13,6 +13,9 @@ An allocator account whose trade history is larger than the rebuild's per-run re
 <decisions>
 ## Implementation Decisions
 
+- **D-01:** Measure first: re-probe a6 and record which limit stopped the read (detail below).
+- **D-02:** Resumable across runs, founder 2026-10-27 (detail below).
+
 ### Carried (not re-asked)
 - TRADEPAGES 167.2.1.1.2.1 D-01 ("Shorten the window"), D-02 (a walk stops only on an empty page, a non-advancing cursor or the window end; Bybit in 7-day windows), D-05 ("Rebuild none, book follow-ups").
 - ACCTREBUILD 167.2.1.1.2 D-01..D-03: older stored days kept; a stored in-window day the rebuild does not reproduce refuses the account and writes nothing; the seam is recorded. UPNLVENUES D-04/D-05 and ACCTREBUILD AR-5/AR-7: one window shared by all members, anchor required.
@@ -25,6 +28,7 @@ The first plan re-probes a6 (read-only, counts only, the allocator_history_probe
 
 ### D-02 Read model: resumable across runs
 Founder 2026-10-27, AskUserQuestion: "Resumable across runs" (chosen over the recommended single time budget with stall-splitting). The read position and what has been read are kept between runs so a book of any size eventually completes; each run reads within the existing crawl bound and defers (`defer_compute_job`) instead of refusing. Nothing is written to the allocator's history until the read is complete (ACCTREBUILD D-02). Persisted trade data needs a migration with owner/service-role RLS and an expiry, migration-reviewer and rls-policy-auditor clean before merge (PROD auto-applies after TEST), and a catalogue-only verify block.
+Narrowed at planning (orchestrator, 2026-10-27): the stored read state is service-role only (RLS forced, no owner policy, no `allocator_id`, no trigger or SECURITY DEFINER function), because no UI reads it; stricter than "owner/service-role".
 
 ### Claude's Discretion
 - What is persisted (raw trades vs fold state), how the fixed two-year edge and the moving `now` are pinned at job start, and the expiry.

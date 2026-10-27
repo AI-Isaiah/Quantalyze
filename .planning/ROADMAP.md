@@ -6400,7 +6400,7 @@ Plans:
 **Goal:** An allocator account whose trade history exceeds the rebuild's trade-read ceiling is read in full within a bounded budget, or refused with a named reason a later run can clear, instead of refusing on every attempt and never getting a history.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.2.1
-**Plans:** 0 plans
+**Plans:** 12 plans
 
 Booked 2026-10-27 from TRADEPAGES plan 06 (founder 2026-10-26 "Rebuild none, book follow-ups (Recommended)"; founder 2026-10-27 "You can use add"). Evidence: the 2026-10-26 PROD probe read a6 for 127471 trades in 1378 calls and ended `truncated`; TODOS `167.2.1.1.2.1-READ-CEILING-STRANDS-ACCOUNT`. Data integrity, user-facing.
 
@@ -6409,8 +6409,32 @@ Booked 2026-10-27 from TRADEPAGES plan 06 (founder 2026-10-26 "Rebuild none, boo
 2. Tests go RED on the current ceiling behaviour (a truncated read that refuses on every attempt).
 3. After deploy the TRADEPAGES probe re-reads a6 and the outcome is recorded (counts and tokens only).
 
+Decisions: CONTEXT D-01 (measure first), D-02 founder 2026-10-27 "Resumable across runs" (chosen over the single-budget recommendation); stored read state narrowed to service-role only at planning (no UI reads it).
+
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [ ] 171-01-PLAN.md — probe names which limit stopped a Bybit read (D-01 keys, derived site, deployed-names guard) (wave 1)
+- [ ] 171-02-PLAN.md — layer 1: a Bybit window over the page ceiling is continued by time inside one run; every truncated read names a closed site (wave 1)
+- [ ] 171-03-PLAN.md — migration: two service-role-only trade-read store tables, data-keeping rollback, 8-arm SQL gate with RED-UNDER twins (wave 1, lane)
+- [ ] 171-04-PLAN.md — trade-read store module: compact chunked windows, claim bookkeeping, scope without a new keyword (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 171-05-PLAN.md — operator: D-01 reading of a6 on the backfill worker against the deployed code (wave 2, not autonomous)
+- [ ] 171-06-PLAN.md — census: types, mutation floors and every census file for the new gate (wave 2, lane)
+- [ ] 171-07-PLAN.md — layer 2 unforced: a book too big for one claim defers and resumes; a store fault reads without the store (D-02) (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 171-08-PLAN.md — layer 2 unforced: single-pass oracles, a read with no progress stops by name, hourly watchdog sweep of expired store rows (wave 3)
+- [ ] 171-11-PLAN.md — live store probe on the local-stack lane: exact round trip through PostgREST, bookkeeping and purges (wave 3, lane)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 171-09-PLAN.md — layer 2 forced: a deferral writes nothing and is decided last behind every sibling verdict (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 171-10-PLAN.md — 16th refusal token `account_key_read_stalled`, its pins, the probe pin and the handoff amendment (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 171-12-PLAN.md — operator: pre-ship D-01 gate, then post-deploy SC-3: probe re-reads a6, verdict beside D-01, deploy order and any a6 job recorded (wave 6, not autonomous)
 
 ### Phase 172: OKXANCHOR — an OKX account's history rebuild gets a plausible balance anchor
 
