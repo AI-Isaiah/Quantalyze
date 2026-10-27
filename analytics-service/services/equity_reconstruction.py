@@ -945,9 +945,7 @@ async def _read_bybit_trades_resumable(
     stored window's trades count as read), otherwise ``TruncatedTradeRead`` (``bybit_not_supported``).
 
     ``begin_claim`` answers None on a store fault: the read is then ``_read_bybit_range`` for
-    the whole range (no budget, no store call, no extra log line: the store logged once). A
-    ``TruncatedTradeRead`` from that read becomes a transient ``ccxt.RequestTimeout`` (static
-    text): with no resume the book may exceed one run, and that is not a venue rejection.
+    the whole range (no budget, no store call, no extra log line: the store logged once).
     ``begin_claim`` may raise ``TradeReadStalled`` (a decision, not a fault), as the job-age
     check above does.
     """
@@ -956,15 +954,7 @@ async def _read_bybit_trades_resumable(
         supabase, api_key_id, venue="bybit", since_ms=since_ms, job_id=scope.job_id
     )
     if state is None:
-        try:
-            return await _read_bybit_range(exchange, since_ms, now_ms)
-        except TruncatedTradeRead:
-            # A store fault left no resume, so a book above one run's reach is a fault of ours,
-            # not the venue's. Transient, so the queue retries once the store is back; static
-            # text, no venue text.
-            raise ccxt.RequestTimeout(
-                "the trade store was unavailable and the trade read could not finish in one run"
-            ) from None
+        return await _read_bybit_range(exchange, since_ms, now_ms)
 
     origin = state.grid_origin_ms
     first = (since_ms - origin) // _BYBIT_TRADE_WINDOW_MS
