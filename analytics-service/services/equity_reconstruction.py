@@ -701,7 +701,7 @@ async def _read_bybit_window(
     seen: set[Any],
     *,
     earlier_rows: int = 0,
-) -> None:
+) -> bool:
     """Read one Bybit window ``[w_start, w_end]`` whole into ``trades`` (READCEILING, Phase 171).
 
     A SEGMENT is the cursor walk of old: at most ``_BYBIT_WINDOW_PAGE_CEILING`` pages on
@@ -729,6 +729,11 @@ async def _read_bybit_window(
     lowered: one counts-only WARNING and ``TruncatedTradeRead`` (``bybit_no_advance``). More
     than ``_BYBIT_WINDOW_SEGMENT_CEILING`` segments end the same way (``bybit_segment_ceiling``).
     What it cannot pass: more than one segment's rows at ONE millisecond.
+
+    Returns True when the venue ran out of trades (an empty page, or a short page with no cursor)
+    and False when the window ended on an UNCERTAIN stop (a full page with no cursor, or a short
+    page that repeated its cursor or added nothing): the rows are read, but a caller that keeps
+    windows for later claims must not keep one that may be partial (T-171-04).
 
     ``NotSupported`` after any row was read raises (``bybit_not_supported``); before any row it
     propagates so ``_fetch_bybit_trades`` can return the empty book. A row counts as read when it
@@ -766,7 +771,7 @@ async def _read_bybit_window(
                     # misbehaved. No time bound can fix that, so it takes the no-advance stop below.
                     empty_continuation = True
                     break
-                return
+                return True
             page_rows = len(page)
             added = _extend_unseen(trades, seen, page)
             stamps = [int(t["timestamp"]) for t in page if t.get("timestamp") is not None]
@@ -783,13 +788,14 @@ async def _read_bybit_window(
                         "venue=bybit window_age_days=%d page_rows=%d rows=%d",
                         age_days, len(page), len(trades),
                     )
-                return
+                    return False
+                return True
             if cursor is not None and (
                 nxt == cursor
                 or (added == 0 and (boundary is None or any(ts < boundary for ts in stamps)))
             ):
                 if len(page) < _TRADE_PAGE_LIMIT:
-                    return  # TRADEPAGES D-02: a short page that does not advance is the window's end
+                    return False  # TRADEPAGES D-02: a short page that does not advance ends the window
                 break  # a FULL stalled page ends the segment; the window is continued by time below
             cursor = nxt
             await _rate_limit_sleep(exchange)
@@ -984,12 +990,12 @@ async def _read_bybit_trades_resumable(
                 read_from, read_to = max(ws, since_ms), min(grid_end, now_ms)
             fresh: list[dict[str, Any]] = []
             try:
-                await _read_bybit_window(
+                complete = await _read_bybit_window(
                     exchange, read_from, read_to, now_ms, fresh, set(), earlier_rows=trades_read
                 )
             except ccxt.NotSupported:
                 return []  # raised only when no row was read at all: the empty book
-            if storable and await store.save_window(supabase, api_key_id, ws, grid_end, fresh):
+            if storable and complete and await store.save_window(supabase, api_key_id, ws, grid_end, fresh):
                 windows_kept += 1
                 trades_kept += len(fresh)
                 if not progress_recorded:

@@ -521,6 +521,58 @@ async def test_the_tail_is_read_even_after_the_deadline(monkeypatch: pytest.Monk
     assert _stored_starts(fake) == {_window_start(0), _window_start(1)}
 
 
+def _short_page_that_keeps_its_cursor(
+    first_window_rows: list[dict[str, Any]], rest: Any, clock: _Clock
+) -> Any:
+    """A Bybit exchange that answers grid window 0 like a quirky venue (the newest 100 rows with a
+    cursor, then the short last page again whatever cursor it is sent, with the same cursor) and
+    every other window from ``rest``, a VenueTradeBook."""
+    newest_first = sorted(first_window_rows, key=lambda r: -r["timestamp"])
+
+    async def _fetch(symbol: Any, since: Any, limit: Any, params: dict[str, Any]) -> list[dict[str, Any]]:
+        clock.t += 1.0
+        if since != _window_start(0):
+            return await rest(symbol, since, limit, params)
+        page = newest_first[:100] if not params.get("cursor") else newest_first[100:]
+        page = [dict(r, info=dict(r["info"])) for r in page]
+        page[0]["info"]["nextPageCursor"] = "c1"
+        return list(reversed(page))  # ccxt re-sorts a page ascending
+
+    exchange = AsyncMock()
+    exchange.id = "bybit"
+    exchange.fetch_my_trades = AsyncMock(side_effect=_fetch)
+    return exchange
+
+
+@pytest.mark.parametrize("shape", ["full_page_no_cursor", "short_stalled_page"])
+async def test_a_window_that_ended_on_an_uncertain_stop_is_used_but_never_stored(
+    shape: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-1 (171 fix round 1), T-171-04: a stored window is reused by every later claim and job of
+    the key for days, so it must be one the venue ran out of trades for. Grid window 0 here ends
+    on an uncertain stop: a FULL page that carries no cursor (it may have had more behind it), or a
+    short page that repeats its cursor (the venue's last page, or a quirk hiding more). Its trades
+    are still in this claim's output, but only the window that ended on an empty page or a short
+    page with no cursor (window 1) is stored."""
+    clock = _Clock()
+    fake = FakeSupabaseClient()
+    now_ms = _window_start(3) + 1_800_000
+    rest = _spread_book(range(1, 4))
+    if shape == "full_page_no_cursor":
+        first = trade_rows(100, _window_start(0) + 1000, 60_000, id_prefix="u")
+        exchange = _clocked_exchange(first + rest, clock)
+    else:
+        first = trade_rows(150, _window_start(0) + 1000, 60_000, id_prefix="u")
+        quirky = AsyncMock()
+        quirky.id = "bybit"
+        exchange = _short_page_that_keeps_its_cursor(first, VenueTradeBook(quirky, rest), clock)
+
+    read = await _read(exchange, _scope(fake, clock, monkeypatch, budget_s=1e9), now_ms=now_ms)
+
+    assert _fingerprint(read) == _expected(first + rest, _START_MS, now_ms)
+    assert _stored_starts(fake) == {_window_start(1)}  # window 2 sits in the settle hour
+
+
 # --------------------------------------------------------------------------- store faults
 
 
