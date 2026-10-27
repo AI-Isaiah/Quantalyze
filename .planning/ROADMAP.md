@@ -6400,7 +6400,7 @@ Plans:
 **Goal:** An allocator account whose trade history exceeds the rebuild's trade-read ceiling is read in full within a bounded budget, or refused with a named reason a later run can clear, instead of refusing on every attempt and never getting a history.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.2.1
-**Plans:** 12 plans
+**Plans:** 4/12 plans executed
 
 Booked 2026-10-27 from TRADEPAGES plan 06 (founder 2026-10-26 "Rebuild none, book follow-ups (Recommended)"; founder 2026-10-27 "You can use add"). Evidence: the 2026-10-26 PROD probe read a6 for 127471 trades in 1378 calls and ended `truncated`; TODOS `167.2.1.1.2.1-READ-CEILING-STRANDS-ACCOUNT`. Data integrity, user-facing.
 
@@ -6413,10 +6413,10 @@ Decisions: CONTEXT D-01 (measure first), D-02 founder 2026-10-27 "Resumable acro
 
 Plans:
 **Wave 1**
-- [ ] 171-01-PLAN.md — probe names which limit stopped a Bybit read (D-01 keys, derived site, deployed-names guard) (wave 1)
-- [ ] 171-02-PLAN.md — layer 1: a Bybit window over the page ceiling is continued by time inside one run; every truncated read names a closed site (wave 1)
-- [ ] 171-03-PLAN.md — migration: two service-role-only trade-read store tables, data-keeping rollback, 8-arm SQL gate with RED-UNDER twins (wave 1, lane)
-- [ ] 171-04-PLAN.md — trade-read store module: compact chunked windows, claim bookkeeping, scope without a new keyword (wave 1)
+- [x] 171-01-PLAN.md — probe names which limit stopped a Bybit read (D-01 keys, derived site, deployed-names guard) (wave 1)
+- [x] 171-02-PLAN.md — layer 1: a Bybit window over the page ceiling is continued by time inside one run; every truncated read names a closed site (wave 1)
+- [x] 171-03-PLAN.md — migration: two service-role-only trade-read store tables, data-keeping rollback, 8-arm SQL gate with RED-UNDER twins (wave 1, lane)
+- [x] 171-04-PLAN.md — trade-read store module: compact chunked windows, claim bookkeeping, scope without a new keyword (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 171-05-PLAN.md — operator: D-01 reading of a6 on the backfill worker against the deployed code (wave 2, not autonomous)
