@@ -255,12 +255,19 @@ async def test_a_bybit_window_ending_on_a_full_page_with_no_cursor_warns_but_is_
         assert _SIGNATURE not in record.getMessage()
 
 
-async def test_a_bybit_window_that_never_runs_out_hits_the_page_ceiling_loudly(
+async def test_a_bybit_window_that_never_runs_out_stops_loudly_when_its_end_cannot_be_lowered(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A venue that answers a full page of new rows and a new cursor forever is cut off at
-    the ceiling: one WARNING that carries counts only, and the read raises rather than hand
-    back the first 10,000 rows as the whole window."""
+    """A venue that answers a full page of new rows and a new cursor forever, all at the same
+    timestamps, is cut off: one WARNING that carries counts only, and the read raises rather
+    than hand back the rows read so far as the whole window.
+
+    READCEILING (Phase 171) moved this pin. It used to assert ``calls == page ceiling`` and a
+    "ceiling" WARNING, because the first segment's ceiling was the stop. A window is now
+    continued by time, so this fake reads two segments (the second ends on the same oldest
+    timestamp, its end bound one past it), takes the one retry with the end AT the oldest
+    timestamp (its pages carry rows newer than the oldest), and only then stops, on the rule
+    that the end bound cannot be lowered: three segments of pages."""
     calls = 0
 
     async def _endless(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
@@ -277,13 +284,14 @@ async def test_a_bybit_window_that_never_runs_out_hits_the_page_ceiling_loudly(
     exchange.fetch_my_trades = AsyncMock(side_effect=_endless)
 
     caplog.set_level(logging.WARNING, logger=_LOGGER)
-    with pytest.raises(er.TruncatedTradeRead):
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
         await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
 
-    assert calls == er._BYBIT_WINDOW_PAGE_CEILING
+    assert calls == 3 * er._BYBIT_WINDOW_PAGE_CEILING
+    assert excinfo.value.site == "bybit_no_advance"
     warnings = _warnings(caplog)
     assert len(warnings) == 1
-    assert "ceiling" in warnings[0].getMessage()
+    assert "did not advance" in warnings[0].getMessage()
     for record in caplog.records:
         assert _SIGNATURE not in record.getMessage()
 

@@ -114,7 +114,11 @@ BACKFILL_CAP_DAYS: int = 730                # 2 years (RESEARCH.md §1E recommen
 # page shorter than the requested limit.
 _TRADE_PAGE_LIMIT: Final[int] = 100          # Bybit and OKX page cap, sent explicitly (vendor docs, RESEARCH Q2)
 _BYBIT_TRADE_WINDOW_MS: Final[int] = 7 * 24 * 60 * 60 * 1000  # Bybit: endTime - startTime <= 7 days (vendor doc, RESEARCH Q2)
-_BYBIT_WINDOW_PAGE_CEILING: Final[int] = 100  # pages per 7-day window before the read gives up loudly (RESEARCH Q2)
+_BYBIT_WINDOW_PAGE_CEILING: Final[int] = 100  # pages per SEGMENT of a 7-day window (RESEARCH Q2); a window above it is continued by time
+# READCEILING (Phase 171): a 7-day window is read as segments of at most the page ceiling above.
+# This bounds the segments of ONE window, so a venue whose timestamps fall forever still ends
+# loudly (about 10^6 rows per window; RESEARCH section 3).
+_BYBIT_WINDOW_SEGMENT_CEILING: Final[int] = 100
 _TRADE_PASS_PAGE_CEILING: Final[int] = 500    # pages per walk of the other-venue read (the bound the loop always had)
 # A read cut short (page ceiling, a full page that did not advance, NotSupported mid-walk) raises
 # this ccxt.BadRequest instead of returning a partial list that a rebuild would persist as the whole
@@ -123,12 +127,30 @@ _TRADE_PASS_PAGE_CEILING: Final[int] = 500    # pages per walk of the other-venu
 _TRUNCATED_READ_MESSAGE: Final[str] = (
     "the trade read was cut short before the venue ran out of trades; nothing was kept"
 )
+# READCEILING (Phase 171, D-01): the closed set of places a trade read can be cut short, one
+# token per raise-site kind. Each is written as a literal at its raise site (a test scans for
+# them), and the allocator history probe declares the same nine names.
+TRUNCATED_READ_SITES: Final[frozenset[str]] = frozenset({
+    "bybit_not_supported", "bybit_no_advance", "bybit_segment_ceiling",
+    "okx_not_supported", "okx_no_advance", "okx_page_ceiling",
+    "generic_not_supported", "generic_no_advance", "generic_page_ceiling",
+})
 
 
 class TruncatedTradeRead(ccxt.BadRequest):  # type: ignore[misc]  # ccxt is untyped
     """A trade read cut short, raised at the truncation sites only. It is a BadRequest, so
     every disposition is unchanged; the allocator history probe tells it apart from the
-    two-year guard and from a venue rejection by this class."""
+    two-year guard and from a venue rejection by this class.
+
+    ``site`` is a closed token from ``TRUNCATED_READ_SITES`` naming which stop fired (D-01);
+    the probe prints it. A site outside the set is a programming error and raises
+    ``ValueError`` at construction."""
+
+    def __init__(self, message: str, *, site: str) -> None:
+        if site not in TRUNCATED_READ_SITES:
+            raise ValueError(f"unknown truncated-read site: {site!r}")
+        super().__init__(message)
+        self.site = site
 
 # FLIPRETRY-01 (defensive half, A4 mitigation) — hard per-crawl wall-clock bound
 # for the reconstruct orchestrating crawl. run_reconstruct_allocator_history_job
@@ -634,6 +656,118 @@ def _next_page_cursor(page: list[dict[str, Any]]) -> str | None:
     return None
 
 
+async def _read_bybit_window(
+    exchange: Any,
+    w_start: int,
+    w_end: int,
+    now_ms: int,
+    trades: list[dict[str, Any]],
+    seen: set[Any],
+) -> None:
+    """Read one Bybit window ``[w_start, w_end]`` whole into ``trades`` (READCEILING, Phase 171).
+
+    A SEGMENT is the cursor walk of old: at most ``_BYBIT_WINDOW_PAGE_CEILING`` pages on
+    ``[w_start, end]``, the first sent with no cursor. The window ends only on an empty page or
+    on a page with no cursor (a FULL page with none logs one WARNING and is not refused: a final
+    page of exactly one page's rows has no cursor either). A page fetched WITH a cursor is
+    stalled, and ends its segment, when it returns the cursor it was sent or adds no new row
+    although it holds one OLDER than the oldest timestamp read before the segment began (in a
+    window's first segment: any row). The first pages of a later segment re-read the old
+    boundary by design, so a page that adds nothing while every row sits at or above that
+    boundary is not stalled.
+
+    A segment that ends without the window ending is CONTINUED BY TIME, never by a cursor
+    (no cursor is relied on across segments): with ``oldest`` the oldest timestamp read in the
+    window, (1) when ``oldest + 1`` is below the current end, a new cursor-less segment starts
+    on ``[w_start, oldest + 1]``, safe under an inclusive or an exclusive end bound, and id
+    dedupe absorbs the rows read twice; (2) else, once per value of ``oldest``, when the segment
+    returned a row newer than ``oldest`` (proof the end bound is inclusive, so the rows at
+    ``oldest + 1`` took segment capacity) a segment starts on ``[w_start, oldest]``, the OKX
+    walk's own one-time retry; under an exclusive end that would skip the rest of a group at
+    ``oldest``, which is why the proof is required first; (3) else the end bound cannot be
+    lowered: one counts-only WARNING and ``TruncatedTradeRead`` (``bybit_no_advance``). More
+    than ``_BYBIT_WINDOW_SEGMENT_CEILING`` segments end the same way (``bybit_segment_ceiling``).
+    What it cannot pass: more than one segment's rows at ONE millisecond.
+
+    ``NotSupported`` after any row was read raises (``bybit_not_supported``); before any row it
+    propagates so ``_fetch_bybit_trades`` can return the empty book. ``now_ms`` only labels the
+    ``window_age_days`` field of the WARNINGs, which carry counts and class names, never venue text.
+    """
+    age_days = max(0, (now_ms - w_start) // 86_400_000)
+    end = w_end
+    oldest: int | None = None  # the oldest timestamp read in this window so far
+    retried_at: int | None = None  # the value of ``oldest`` the one inclusive-end retry was spent on
+    for _segment in range(_BYBIT_WINDOW_SEGMENT_CEILING):
+        boundary = oldest  # the oldest timestamp read before this segment began
+        segment_newest: int | None = None
+        cursor: str | None = None
+        page_rows = 0
+        for _ in range(_BYBIT_WINDOW_PAGE_CEILING):
+            params: dict[str, Any] = {"until": end}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                page = await exchange.fetch_my_trades(
+                    None, w_start, _TRADE_PAGE_LIMIT, params,
+                )
+            except ccxt.NotSupported:
+                if trades:
+                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_not_supported") from None
+                raise
+            page = page or []
+            if not page:
+                return
+            page_rows = len(page)
+            added = _extend_unseen(trades, seen, page)
+            stamps = [int(t["timestamp"]) for t in page if t.get("timestamp") is not None]
+            if stamps:
+                oldest = min(stamps) if oldest is None else min(oldest, min(stamps))
+                newest = max(stamps)
+                segment_newest = newest if segment_newest is None else max(segment_newest, newest)
+            nxt = _next_page_cursor(page)
+            if not nxt:
+                if len(page) >= _TRADE_PAGE_LIMIT:
+                    # Not refused: a final page of exactly one page's rows has no cursor too.
+                    logger.warning(
+                        "bybit trade window ended on a full page with no cursor "
+                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                        age_days, len(page), len(trades),
+                    )
+                return
+            if cursor is not None and (
+                nxt == cursor
+                or (added == 0 and (boundary is None or any(ts < boundary for ts in stamps)))
+            ):
+                break  # a stalled page ends the segment; the window is continued by time below
+            cursor = nxt
+            await _rate_limit_sleep(exchange)
+        if oldest is not None and oldest + 1 < end:
+            end = oldest + 1
+        elif (
+            oldest is not None
+            and oldest < end
+            and retried_at != oldest
+            and segment_newest is not None
+            and segment_newest > oldest
+        ):
+            retried_at = oldest
+            end = oldest
+        else:
+            logger.warning(
+                "bybit trade window stopped on a page that did not advance "
+                "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                age_days, page_rows, len(trades),
+            )
+            raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_no_advance")
+        await _rate_limit_sleep(exchange)
+    logger.warning(
+        "bybit trade window hit the segment ceiling "
+        "venue=bybit window_age_days=%d segments=%d rows=%d",
+        age_days, _BYBIT_WINDOW_SEGMENT_CEILING, len(trades),
+    )
+    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_segment_ceiling")
+
+
 async def _fetch_bybit_trades(
     exchange: Any, since_ms: int, now_ms: int,
 ) -> list[dict[str, Any]]:
@@ -641,15 +775,17 @@ async def _fetch_bybit_trades(
 
     Bybit answers a request that carries only a start as the 7 days after it, so a
     quiet first week reads as an empty book. Each request therefore names a start
-    AND an end at most 7 days apart, the windows tile the range, and a window is
-    paged with Bybit's cursor. A window ends on an empty page, on no cursor, on a
-    page that adds no new row, or on a cursor equal to the previous one; it never
-    ends on a short page. When a window stops on a full page for a reason other
-    than reaching its end, or hits the page ceiling, one WARNING (counts only, never
-    venue text) is logged and the read raises ``ccxt.BadRequest``: a partial list
-    would be persisted as the whole history. A window that ends on a FULL page with no
-    cursor logs the same kind of WARNING but is not refused, because a final page of
-    exactly one page's rows legitimately has no cursor.
+    AND an end at most 7 days apart, the windows tile the range, and each window is
+    read by ``_read_bybit_window``: paged with Bybit's cursor in segments of at most
+    ``_BYBIT_WINDOW_PAGE_CEILING`` pages, and a window holding more than one segment is
+    CONTINUED BY TIME (the end bound is lowered to one millisecond past the oldest trade
+    read and a new cursor-less segment starts; no cursor is relied on across segments, and
+    id dedupe absorbs the overlap), Phase 171 READCEILING. A window never ends on a short
+    page. A segment that cannot lower the window's end bound, and a window of more than
+    ``_BYBIT_WINDOW_SEGMENT_CEILING`` segments, log one WARNING (counts only, never venue
+    text) and raise ``TruncatedTradeRead`` carrying a typed ``site``: a partial list would be
+    persisted as the whole history. More than one segment of executions at a SINGLE
+    millisecond cannot be passed by any timestamp bound, and stays that loud stop.
 
     A read whose start is older than Bybit's two-year limit (``BYBIT_TRADE_TERMINUS_DAYS``)
     at ``now_ms`` is refused here, before any request. The window is fixed when the job starts
@@ -675,52 +811,10 @@ async def _fetch_bybit_trades(
     w_start = since_ms
     while w_start <= now_ms:
         w_end = min(w_start + _BYBIT_TRADE_WINDOW_MS - 1, now_ms)
-        cursor: str | None = None
-        for _ in range(_BYBIT_WINDOW_PAGE_CEILING):
-            params: dict[str, Any] = {"until": w_end}
-            if cursor:
-                params["cursor"] = cursor
-            try:
-                page = await exchange.fetch_my_trades(
-                    None, w_start, _TRADE_PAGE_LIMIT, params,
-                )
-            except ccxt.NotSupported:
-                if trades:
-                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
-                return trades
-            page = page or []
-            if not page:
-                break
-            added = _extend_unseen(trades, seen, page)
-            nxt = _next_page_cursor(page)
-            if not nxt:
-                if len(page) >= _TRADE_PAGE_LIMIT:
-                    # Not refused: a final page of exactly one page's rows has no cursor too.
-                    logger.warning(
-                        "bybit trade window ended on a full page with no cursor "
-                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
-                        max(0, (now_ms - w_start) // 86_400_000), len(page), len(trades),
-                    )
-                break
-            if added == 0 or nxt == cursor:
-                if len(page) >= _TRADE_PAGE_LIMIT:
-                    logger.warning(
-                        "bybit trade window stopped on a page that did not advance "
-                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
-                        max(0, (now_ms - w_start) // 86_400_000), len(page), len(trades),
-                    )
-                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
-                break
-            cursor = nxt
-            await _rate_limit_sleep(exchange)
-        else:
-            logger.warning(
-                "bybit trade window hit the page ceiling "
-                "venue=bybit window_age_days=%d pages=%d rows=%d",
-                max(0, (now_ms - w_start) // 86_400_000),
-                _BYBIT_WINDOW_PAGE_CEILING, len(trades),
-            )
-            raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+        try:
+            await _read_bybit_window(exchange, w_start, w_end, now_ms, trades, seen)
+        except ccxt.NotSupported:
+            return trades  # raised only before any row was read, so this is the empty book
         w_start = w_end + 1
         await _rate_limit_sleep(exchange)
     return trades
@@ -826,7 +920,7 @@ async def _fetch_okx_inst_type_trades(
             )
         except ccxt.NotSupported:
             if trades:
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="okx_not_supported") from None
             return trades
         page = page or []
         if not page:
@@ -850,7 +944,7 @@ async def _fetch_okx_inst_type_trades(
                     "venue=okx inst_type=%s page_rows=%d rows=%d",
                     inst_type, len(page), len(trades),
                 )
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="okx_no_advance")
             next_end_ms = oldest_seen
         end_ms = next_end_ms
         await _rate_limit_sleep(exchange)
@@ -859,7 +953,7 @@ async def _fetch_okx_inst_type_trades(
             "okx trade pass hit the page ceiling venue=okx inst_type=%s pages=%d rows=%d",
             inst_type, _TRADE_PASS_PAGE_CEILING, len(trades),
         )
-        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="okx_page_ceiling")
     return trades
 
 
@@ -897,7 +991,7 @@ async def _fetch_trades_paginated_one_pass(
             )
         except ccxt.NotSupported:
             if all_trades:
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="generic_not_supported") from None
             return all_trades
         page = page or []
         if not page:
@@ -912,7 +1006,7 @@ async def _fetch_trades_paginated_one_pass(
                     "venue=%s rows=%d page_rows=%d",
                     venue, len(all_trades), len(page),
                 )
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="generic_no_advance")
             break
         # A row with no id is never absorbed by ``_extend_unseen``, so step past the newest
         # timestamp when any row lacks one; the cursor never moves backwards.
@@ -927,7 +1021,7 @@ async def _fetch_trades_paginated_one_pass(
             "trade read hit the page ceiling venue=%s pages=%d rows=%d",
             venue, _TRADE_PASS_PAGE_CEILING, len(all_trades),
         )
-        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="generic_page_ceiling")
     return all_trades
 
 
