@@ -717,3 +717,47 @@ async def test_an_unscoped_read_is_layer_one_exactly(monkeypatch: pytest.MonkeyP
     )
     assert jobless.fetch_my_trades.await_args_list == unscoped.fetch_my_trades.await_args_list
     assert _fingerprint(read_again) == _fingerprint(read)
+
+
+async def test_not_supported_keeps_its_meaning_across_windows_and_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 02's rule, now that each window is read into its own list: ``NotSupported`` is the
+    empty book only when no trade was read at all. After a window that held trades (read in this
+    claim, or STORED by an earlier one) it is a typed truncation, never a quietly short book."""
+    book = _spread_book(range(0, 1))
+
+    def _unsupported_after_window_zero(exchange: Any) -> Any:
+        real = exchange.fetch_my_trades.side_effect
+
+        async def _fetch(symbol: Any, since: Any, limit: Any, params: Any) -> list[dict[str, Any]]:
+            if since >= _window_start(1):
+                raise er.ccxt.NotSupported("fixture: not supported")
+            return await real(symbol, since, limit, params)
+
+        exchange.fetch_my_trades = AsyncMock(side_effect=_fetch)
+        return exchange
+
+    clock = _Clock()
+    fake = FakeSupabaseClient()
+    exchange = _unsupported_after_window_zero(_clocked_exchange(book, clock))
+    with pytest.raises(er.TruncatedTradeRead) as in_claim:
+        await _read(exchange, _scope(fake, clock, monkeypatch, budget_s=1e9))
+    assert in_claim.value.site == "bybit_not_supported"
+    assert _stored_starts(fake) == {_window_start(0)}
+
+    # A later job: window 0 comes from the store, so this claim reads no trade from the venue,
+    # and the refusal at window 1 still sees the trades window 0 held.
+    with pytest.raises(er.TruncatedTradeRead) as from_store:
+        await _read(
+            exchange,
+            _scope(fake, clock, monkeypatch, budget_s=1e9, job_id="00000000-0000-0000-0000-0000000000f2"),
+        )
+    assert from_store.value.site == "bybit_not_supported"
+
+    # Nothing read at all: the empty book, as in layer 1.
+    empty = AsyncMock()
+    empty.id = "bybit"
+    empty.fetch_my_trades = AsyncMock(side_effect=er.ccxt.NotSupported("fixture: not supported"))
+    fresh_clock = _Clock()
+    assert await _read(empty, _scope(FakeSupabaseClient(), fresh_clock, monkeypatch, budget_s=1e9)) == []
