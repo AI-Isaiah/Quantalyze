@@ -1,8 +1,10 @@
 """Pure, I/O-free MT5 DEAL_TYPE classifier + server-time→UTC day seam.
 
 This module mirrors ``services/deribit_txn.py``'s pure-classification-core
-discipline: it imports ONLY the standard library + typing (no network, no
-pandas), so the correctness tests are network-free and revert-proof. It is the
+discipline: it imports ONLY the standard library, typing and one other
+stdlib-only leaf, ``services.mt5_server_clock`` (no network, no pandas, no import
+cycle: the clock imports nothing from ``services``), so the correctness tests are
+network-free and revert-proof. It is the
 ONE place the MT5 ``DEAL_TYPE`` table lives — ``combine_mt5_deal_ledger`` imports
 from here rather than re-implementing the table (the backbone-unification
 principle: nothing re-classifies).
@@ -47,6 +49,8 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from typing import Any, Literal
+
+from services.mt5_server_clock import Mt5ServerClock, fixed_server_clock
 
 _EPOCH0 = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -181,12 +185,17 @@ def deal_cash_effect(deal: Mapping[str, Any]) -> float:
     return total
 
 
-def _require_offset_seconds(server_utc_offset_s: Any) -> None:
-    """Validate the one server-UTC offset argument the day and the instant share."""
+def _server_clock(server_utc_offset_s: Any) -> Mt5ServerClock:
+    """The one clock the day and the instant share: an ``Mt5ServerClock`` as given,
+    or a bare int (seconds) wrapped as the fixed form. Anything else fails loud."""
+    if isinstance(server_utc_offset_s, Mt5ServerClock):
+        return server_utc_offset_s
     if isinstance(server_utc_offset_s, bool) or not isinstance(server_utc_offset_s, int):
         raise Mt5DealClassificationError(
-            "MT5 server_utc_offset_s must be an int (seconds) — fail loud"
+            "MT5 server_utc_offset_s must be an int (seconds) or an Mt5ServerClock "
+            "— fail loud"
         )
+    return fixed_server_clock(server_utc_offset_s)
 
 
 def _server_epoch_seconds(time_value: Any) -> float:
@@ -224,22 +233,44 @@ def _utc_day_of_server_epoch(epoch: float, server_utc_offset_s: int) -> str:
         ) from exc
 
 
-def deal_utc_day(time_value: Any, server_utc_offset_s: int) -> str:
+def _deal_offsets(clock: Mt5ServerClock, epoch: float) -> tuple[int, int | None]:
+    """``(day offset, instant offset)`` in force at the deal's own broker wall
+    second, looked up ONCE so the day and the instant always read one clock. A
+    wall second the clock cannot date (an epoch ``datetime`` cannot represent, or a
+    year outside the DST rule's 2007-2099 span) fails loud with text that names the
+    rule's span, so it is not read as a fault in the account's own ledger."""
+    try:
+        wall = math.floor(epoch)
+        return clock.day_offset_s(wall), clock.instant_offset_s(wall)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise Mt5DealClassificationError(
+            "MT5 deal time is outside the dates the broker server-clock rule "
+            "covers (2007-2099) — fail loud"
+        ) from exc
+
+
+def deal_utc_day(time_value: Any, server_utc_offset_s: int | Mt5ServerClock) -> str:
     """Normalize a broker-server-time deal timestamp to its UTC calendar day
     (ISO ``YYYY-MM-DD``) — the ONE server-time→UTC seam (mt5-spike-gonogo.md §7).
 
     MT5 ``history_deals_get`` returns ``time`` in the broker's server timezone
     (a whole/half-hour offset from UTC), VERBATIM (mt5_client.py:237-239).
-    ``server_utc_offset_s`` is the recorded server-ahead-of-UTC offset in seconds;
-    subtract it BEFORE bucketing so a near-midnight deal cannot drift onto the
-    wrong day (Pitfall 1). The offset value itself is ``[ASSUMED A2]`` until the
-    live spike (Phase 134/139) confirms it per broker.
+    ``server_utc_offset_s`` is the server clock: a bare int is the fixed
+    server-ahead-of-UTC offset in seconds, and an ``Mt5ServerClock`` follows the
+    broker's daylight-saving rule (Phase 175, D-01) and gives the offset in force
+    at THIS deal's own wall second. Subtract it BEFORE bucketing so a
+    near-midnight deal cannot drift onto the wrong day (Pitfall 1). Which clock
+    is configured is the worker setting resolved by
+    ``mt5_server_clock.resolve_mt5_server_clock``; checking it against the live
+    server is Phase 155's (MT5-06), not this seam's.
 
     A missing / undatable / non-numeric / non-finite time RAISES — a deal we
     cannot date must never be silently dropped (mirror
     ``deribit_txn._row_utc_day``'s fail-loud posture)."""
-    _require_offset_seconds(server_utc_offset_s)
-    return _utc_day_of_server_epoch(_server_epoch_seconds(time_value), server_utc_offset_s)
+    clock = _server_clock(server_utc_offset_s)
+    epoch = _server_epoch_seconds(time_value)
+    day_offset_s, _instant_offset_s = _deal_offsets(clock, epoch)
+    return _utc_day_of_server_epoch(epoch, day_offset_s)
 
 
 def _integral_millis(value: Any) -> int | None:
@@ -254,7 +285,9 @@ def _integral_millis(value: Any) -> int | None:
     return None
 
 
-def deal_utc_instant_ms(deal: Mapping[str, Any], server_utc_offset_s: int) -> int | None:
+def deal_utc_instant_ms(
+    deal: Mapping[str, Any], server_utc_offset_s: int | Mt5ServerClock
+) -> int | None:
     """A deal's UTC instant in epoch MILLISECONDS, or ``None`` when it cannot be
     trusted (FLOWTIMING D-08, D-09, D-07).
 
@@ -274,15 +307,28 @@ def deal_utc_instant_ms(deal: Mapping[str, Any], server_utc_offset_s: int) -> in
     falls in a different second than the deal's own ``time``. Nothing is ever
     defaulted: not to ``time``, not to midnight, not to noon.
 
-    Known limit (Pitfall 3, recorded here, not fixed): ``server_utc_offset_s`` is
-    one fixed integer, so across a broker DST change it is an hour off for WHICH
-    UTC DAY a near-midnight deal lands on. The order of deals and flows within the
-    broker clock is exact either way, and that order is all the fold uses."""
-    _require_offset_seconds(server_utc_offset_s)
+    The offset decides which UTC day a deal lands on AND, since NAVMTM D-23, on
+    which side of a mark's read a flow falls: a mark is a true-UTC observation, so
+    a flow is compared with it by its own instant. The offset therefore has to be
+    right per deal, and it now comes from the broker's rule (Phase 175, D-01): an
+    ``Mt5ServerClock`` looks up the offset in force at THIS deal's broker wall
+    second, once, for the day and the instant alike (NAVMTM REVIEW-3 WR-02: a
+    fixed integer was an hour off for the months the broker is on standard time).
+    In the one hour a transition repeats or skips, the broker clock names two
+    candidate instants or none, so the instant is ``None`` and the day uses the
+    first occurrence (or the pre-transition offset), which cannot change the UTC
+    day. Residual assumption A2: a broker that flips its clock at another weekend
+    moment than the rule's is an hour off for the deals stamped in between."""
+    clock = _server_clock(server_utc_offset_s)
     epoch = _server_epoch_seconds(deal.get("time"))
+    day_offset_s, instant_offset_s = _deal_offsets(clock, epoch)
     # Same range check deal_utc_day performs, so the instant never succeeds where
     # the day raises; the day string is also the agreement oracle below.
-    day = _utc_day_of_server_epoch(epoch, server_utc_offset_s)
+    day = _utc_day_of_server_epoch(epoch, day_offset_s)
+    if instant_offset_s is None:
+        # A repeated or skipped broker hour (D-07): no trustworthy instant, never a
+        # default. The day above still stands.
+        return None
 
     raw_msc = deal.get("time_msc")
     if raw_msc is None:
@@ -295,7 +341,7 @@ def deal_utc_instant_ms(deal: Mapping[str, Any], server_utc_offset_s: int) -> in
         if msc is None or msc // 1000 != math.floor(epoch):
             return None
         server_ms = msc
-    instant_ms = server_ms - server_utc_offset_s * 1000
+    instant_ms = server_ms - instant_offset_s * 1000
 
     # The instant must sit on the UTC day deal_utc_day gives this deal. Exact
     # integer arithmetic; a disagreement (a sub-millisecond rounding edge at a

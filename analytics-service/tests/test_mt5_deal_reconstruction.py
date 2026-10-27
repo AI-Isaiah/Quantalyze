@@ -42,6 +42,7 @@ from services.account_unit import USD_FLOORS, classify_account_currency
 from services.allocator_equity_derive import _SELF_CHECK_ABS, _SELF_CHECK_REL
 from services.broker_dailies import (
     combine_mt5_deal_ledger,
+    mt5_day_pnl,
     reconstruct_mt5_nav_levels,
 )
 from services.closed_sets import CRYPTO_VENUES
@@ -225,7 +226,7 @@ def test_deposit_day_is_not_a_return_spike() -> None:
     as +300 of trading PnL books the trading return 300/100_400, NEVER the
     (110_700−100_400)/100_400 ≈ +10.26% cash spike."""
     returns, _meta = combine_mt5_deal_ledger(
-        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     vals = returns.to_numpy()
     assert len(returns) == 4  # day2..day5 dense (day3 gap-filled)
@@ -251,7 +252,7 @@ def test_withdrawal_day_neither_depresses_nor_inflates() -> None:
     deals = _canonical_deposit_deals()
     deals[1] = {**deals[1], "profit": -5_000.0}  # BALANCE withdrawal on day4
     returns, _meta = combine_mt5_deal_ledger(
-        deals, account_equity=95_500.0, account_balance=95_500.0
+        deals, account_equity=95_500.0, account_balance=95_500.0, server_utc_offset_s=0
     )
     vals = returns.to_numpy()
     assert vals[0] == pytest.approx(400 / 100_000, abs=1e-12)
@@ -272,7 +273,7 @@ def test_zero_cash_rotation_flow_is_zero() -> None:
     """
     deals = [d for d in _canonical_deposit_deals() if d["type"] != 2]
     returns, _meta = combine_mt5_deal_ledger(
-        deals, account_equity=100_500.0, account_balance=100_500.0
+        deals, account_equity=100_500.0, account_balance=100_500.0, server_utc_offset_s=0
     )
     vals = returns.to_numpy()
     assert len(returns) == 4
@@ -287,7 +288,7 @@ def test_no_activity_day_is_flat_ledger_complete() -> None:
     (0.0), not an unknown gap (contrast sFOX's sampled NAV). Day3 carries no
     deals and must read exactly 0.0."""
     returns, _meta = combine_mt5_deal_ledger(
-        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     # Day3 = 2025-06-03 (the interior no-activity day).
     day3 = pd.Timestamp("2025-06-03")
@@ -303,14 +304,14 @@ def test_unknown_deal_type_kills_the_whole_combine() -> None:
          "fee": 0.0, "time": _epoch(2025, 6, 5)}
     )
     with pytest.raises(Mt5DealClassificationError):
-        combine_mt5_deal_ledger(deals, account_equity=110_500.0, account_balance=110_500.0)
+        combine_mt5_deal_ledger(deals, account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0)
 
 
 def test_combiner_returns_sibling_shape() -> None:
     """The combiner returns the byte-identical sibling shape: a float Series on an
     ascending daily DatetimeIndex (unit [us]) + a plain dict meta."""
     returns, meta = combine_mt5_deal_ledger(
-        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     assert isinstance(returns, pd.Series)
     assert str(returns.dtype) == "float64"
@@ -387,7 +388,7 @@ def test_returns_series_unambiguous_for_quantstats() -> None:
     PRICES. The reconstructed MT5 series must carry at least one strictly negative
     value and no value > 1.0 so the price-vs-returns heuristic can never flip."""
     returns, _meta = combine_mt5_deal_ledger(
-        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     vals = returns.to_numpy()
     assert (vals < 0).any()      # at least one strictly negative day
@@ -447,7 +448,7 @@ def test_sub_1000_equity_reconstructs_off_real_anchor_not_fabricated_base() -> N
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
     ]
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=900.0, account_balance=900.0
+        deals, account_equity=900.0, account_balance=900.0, server_utc_offset_s=0
     )
     vals = returns.to_numpy()
     assert len(returns) == 2                                    # 06-02, 06-03 dense
@@ -495,7 +496,7 @@ def test_genuinely_dust_equity_fails_dust_guard_not_rescaled() -> None:
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
     ]
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=50.0, account_balance=50.0
+        deals, account_equity=50.0, account_balance=50.0, server_utc_offset_s=0
     )
     # Honest DQ-01 dust rejection, NOT a fabricated base:
     assert not meta.get("used_heuristic_capital")
@@ -526,7 +527,7 @@ def test_flow_channel_rejects_bool_profit_like_trading_channel() -> None:
     deals[1] = {**deals[1], "profit": True}
     with pytest.raises(Mt5DealClassificationError):
         combine_mt5_deal_ledger(
-            deals, account_equity=110_500.0, account_balance=110_500.0
+            deals, account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
         )
 
 
@@ -587,6 +588,7 @@ def test_levels_terminal_anchors_to_the_realized_balance() -> None:
         _canonical_deposit_deals(),
         account_equity=111_000.0,
         account_balance=110_500.0,
+        server_utc_offset_s=0,
     )
     _assert_band(float(nav.iloc[-1]), 110_500.0, "terminal level")
     # ⛔ The wrong anchor: the live equity, uPnL still inside it.
@@ -616,10 +618,10 @@ def test_levels_and_returns_agree_under_forward_replay() -> None:
     """
     deals = _canonical_deposit_deals()
     nav, _nav_meta = reconstruct_mt5_nav_levels(
-        deals, account_equity=110_500.0, account_balance=110_500.0
+        deals, account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     returns, _r_meta = combine_mt5_deal_ledger(
-        deals, account_equity=110_500.0, account_balance=110_500.0
+        deals, account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
 
     # The fixture's external flows, written as hand literals (deposit +, withdrawal −).
@@ -656,10 +658,10 @@ def test_levels_index_is_sparse_and_never_zero_filled() -> None:
     the last known balance, never a zero-fill."""
     deals = _canonical_deposit_deals()
     nav, _meta = reconstruct_mt5_nav_levels(
-        deals, account_equity=110_500.0, account_balance=110_500.0
+        deals, account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     returns, _r_meta = combine_mt5_deal_ledger(
-        deals, account_equity=110_500.0, account_balance=110_500.0
+        deals, account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     day3 = pd.Timestamp("2025-06-03")
     assert day3 in returns.index and returns.loc[day3] == pytest.approx(0.0, abs=1e-12)
@@ -690,7 +692,7 @@ def test_quiet_day_deposit_is_its_own_level_day() -> None:
          "fee": 0.0, "time": _epoch(2025, 6, 3)}
     )
     nav, _meta = reconstruct_mt5_nav_levels(
-        deals, account_equity=115_500.0, account_balance=115_500.0
+        deals, account_equity=115_500.0, account_balance=115_500.0, server_utc_offset_s=0
     )
     day3 = pd.Timestamp("2025-06-03")
     assert day3 in nav.index, (
@@ -716,10 +718,10 @@ def test_empty_ledger_yields_an_empty_level_series_never_a_flat_curve() -> None:
          "fee": 0.0, "time": _epoch(2025, 6, 4)},
     ]
     nav, nav_meta = reconstruct_mt5_nav_levels(
-        flow_only, account_equity=60_000.0, account_balance=60_000.0
+        flow_only, account_equity=60_000.0, account_balance=60_000.0, server_utc_offset_s=0
     )
     _returns, returns_meta = combine_mt5_deal_ledger(
-        flow_only, account_equity=60_000.0, account_balance=60_000.0
+        flow_only, account_equity=60_000.0, account_balance=60_000.0, server_utc_offset_s=0
     )
     assert nav.empty
     assert str(nav.dtype) == "float64"
@@ -738,7 +740,7 @@ def test_levels_sibling_fails_loud_on_an_unclassifiable_deal() -> None:
     )
     with pytest.raises(Mt5DealClassificationError):
         reconstruct_mt5_nav_levels(
-            deals, account_equity=110_500.0, account_balance=110_500.0
+            deals, account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
         )
 
 
@@ -773,10 +775,10 @@ def test_flow_dominated_day_is_measured_and_its_level_is_honest() -> None:
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
     ]
     nav, nav_meta = reconstruct_mt5_nav_levels(
-        deals, account_equity=300_100.0, account_balance=300_100.0
+        deals, account_equity=300_100.0, account_balance=300_100.0, server_utc_offset_s=0
     )
     returns, r_meta = combine_mt5_deal_ledger(
-        deals, account_equity=300_100.0, account_balance=300_100.0
+        deals, account_equity=300_100.0, account_balance=300_100.0, server_utc_offset_s=0
     )
     flow_day = pd.Timestamp("2025-06-02")
 
@@ -829,10 +831,10 @@ def test_guard_broken_day_still_has_an_honest_level() -> None:
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
     ]
     nav, nav_meta = reconstruct_mt5_nav_levels(
-        deals, account_equity=31_000.0, account_balance=31_000.0
+        deals, account_equity=31_000.0, account_balance=31_000.0, server_utc_offset_s=0
     )
     returns, _r_meta = combine_mt5_deal_ledger(
-        deals, account_equity=31_000.0, account_balance=31_000.0
+        deals, account_equity=31_000.0, account_balance=31_000.0, server_utc_offset_s=0
     )
     broken = pd.Timestamp("2025-06-02")
 
@@ -894,7 +896,7 @@ def test_btc_account_gets_real_returns_under_btc_floors() -> None:
     """
     deals = [_btc_deal(0.002, 2), _btc_deal(-0.005, 3)]
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=0.015, account_balance=0.015, floors=_BTC
+        deals, account_equity=0.015, account_balance=0.015, floors=_BTC, server_utc_offset_s=0
     )
     vals = returns.to_numpy()
     assert len(returns) == 2
@@ -905,7 +907,7 @@ def test_btc_account_gets_real_returns_under_btc_floors() -> None:
 
     # The defect, in a test: the unit-blind default judges the same ledger as dust.
     _r, usd_meta = combine_mt5_deal_ledger(
-        deals, account_equity=0.015, account_balance=0.015
+        deals, account_equity=0.015, account_balance=0.015, server_utc_offset_s=0
     )
     assert usd_meta.get("dust_nav_guard") is True
 
@@ -932,7 +934,7 @@ def test_btc_account_between_1e7_and_0_001_is_measured_not_guarded() -> None:
     """
     a_deals = [_btc_deal(0.0001, 2), _btc_deal(-0.0002, 3)]
     a_returns, a_meta = combine_mt5_deal_ledger(
-        a_deals, account_equity=0.0007, account_balance=0.0007, floors=_BTC
+        a_deals, account_equity=0.0007, account_balance=0.0007, floors=_BTC, server_utc_offset_s=0
     )
     assert not a_meta.get("dust_nav_guard")
     assert int(a_returns.notna().sum()) == 2
@@ -941,7 +943,7 @@ def test_btc_account_between_1e7_and_0_001_is_measured_not_guarded() -> None:
 
     b_deals = [_btc_deal(1e-7, 2), _btc_deal(-1e-7, 3)]
     b_returns, b_meta = combine_mt5_deal_ledger(
-        b_deals, account_equity=4e-7, account_balance=4e-7, floors=_BTC
+        b_deals, account_equity=4e-7, account_balance=4e-7, floors=_BTC, server_utc_offset_s=0
     )
     assert not b_meta.get("dust_nav_guard")
     assert int(b_returns.notna().sum()) == 2
@@ -959,7 +961,7 @@ def test_btc_account_below_1e7_is_still_dust_guarded() -> None:
     0 usable days, never a substituted base."""
     deals = [_btc_deal(1e-8, 2), _btc_deal(-2e-8, 3)]
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=6e-8, account_balance=6e-8, floors=_BTC
+        deals, account_equity=6e-8, account_balance=6e-8, floors=_BTC, server_utc_offset_s=0
     )
     assert meta.get("dust_nav_guard") is True
     assert int(returns.notna().sum()) == 0
@@ -982,10 +984,10 @@ def test_scaled_usd_fixture_under_btc_floors_equals_unscaled_under_usd_floors() 
     scaled = [_btc_deal(-0.0006, 2, kind=1), _btc_deal(-0.0005, 3, kind=1)]
 
     usd_returns, usd_meta = combine_mt5_deal_ledger(
-        usd, account_equity=900.0, account_balance=900.0
+        usd, account_equity=900.0, account_balance=900.0, server_utc_offset_s=0
     )
     btc_returns, btc_meta = combine_mt5_deal_ledger(
-        scaled, account_equity=0.0009, account_balance=0.0009, floors=_BTC
+        scaled, account_equity=0.0009, account_balance=0.0009, floors=_BTC, server_utc_offset_s=0
     )
     assert btc_returns.to_numpy() == pytest.approx(usd_returns.to_numpy(), abs=1e-12)
     assert btc_meta == usd_meta
@@ -993,7 +995,7 @@ def test_scaled_usd_fixture_under_btc_floors_equals_unscaled_under_usd_floors() 
 
     # Same scaled fixture, unit-blind: every day dust-guarded (NaN), nothing usable.
     blind_returns, blind_meta = combine_mt5_deal_ledger(
-        scaled, account_equity=0.0009, account_balance=0.0009
+        scaled, account_equity=0.0009, account_balance=0.0009, server_utc_offset_s=0
     )
     assert blind_meta.get("dust_nav_guard") is True
     assert int(blind_returns.notna().sum()) == 0
@@ -1003,7 +1005,7 @@ def test_default_floors_are_the_usd_row() -> None:
     """Handing USD_FLOORS explicitly is the same call as handing nothing: the
     default-preserving keyword is what keeps every other caller byte-identical."""
     deals = _canonical_deposit_deals()
-    kwargs = dict(account_equity=110_500.0, account_balance=110_500.0)
+    kwargs = dict(account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0)
     default_r, default_m = combine_mt5_deal_ledger(deals, **kwargs)
     explicit_r, explicit_m = combine_mt5_deal_ledger(deals, floors=USD_FLOORS, **kwargs)
     pd.testing.assert_series_equal(default_r, explicit_r)
@@ -1017,18 +1019,18 @@ def test_nav_levels_meta_reads_the_same_floors_as_the_returns_path() -> None:
     set of facts). Same ledger as the 0.02 / 0.015 oracle: NAVs 0.020 (06-02), 0.015."""
     deals = [_btc_deal(0.002, 2), _btc_deal(-0.005, 3)]
     nav, nav_meta = reconstruct_mt5_nav_levels(
-        deals, account_equity=0.015, account_balance=0.015, floors=_BTC
+        deals, account_equity=0.015, account_balance=0.015, floors=_BTC, server_utc_offset_s=0
     )
     assert nav.iloc[0] == pytest.approx(0.020, abs=1e-12)   # NAV(06-02)
     assert nav.iloc[-1] == pytest.approx(0.015, abs=1e-12)  # terminal
     assert not nav_meta.get("dust_nav_guard")
     _r, ret_meta = combine_mt5_deal_ledger(
-        deals, account_equity=0.015, account_balance=0.015, floors=_BTC
+        deals, account_equity=0.015, account_balance=0.015, floors=_BTC, server_utc_offset_s=0
     )
     assert nav_meta == ret_meta
     # Unit-blind default reports dust: the two paths would otherwise disagree.
     _n, blind_meta = reconstruct_mt5_nav_levels(
-        deals, account_equity=0.015, account_balance=0.015
+        deals, account_equity=0.015, account_balance=0.015, server_utc_offset_s=0
     )
     assert blind_meta.get("dust_nav_guard") is True
 
@@ -1159,6 +1161,7 @@ def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
         account_equity=float(terminal),
         account_balance=float(terminal),
         floors=_BTC,
+        server_utc_offset_s=0,
     )
     first = pd.Timestamp(_MM2X_FIRST_DEPOSIT)
     assert returns.index[0] == first
@@ -1239,7 +1242,7 @@ def test_no_return_is_emitted_before_the_first_deposit(residue: str) -> None:
     events, _expected, _small = _mm2x_ledger(terminal, Fraction(1))
     equity = float(terminal + Fraction(residue))
     returns, meta = combine_mt5_deal_ledger(
-        _mm2x_deals(events), account_equity=equity, account_balance=equity, floors=_BTC
+        _mm2x_deals(events), account_equity=equity, account_balance=equity, floors=_BTC, server_utc_offset_s=0
     )
     first = pd.Timestamp(_MM2X_FIRST_DEPOSIT)
     assert returns.index.min() == first, "a row exists before the first deposit"
@@ -1299,7 +1302,7 @@ def test_day0_of_a_full_history_ledger_is_its_inception_whatever_the_residue_sig
     ]
     equity = float(Fraction("0.101") + Fraction(residue))
     returns, meta = combine_mt5_deal_ledger(
-        _mm2x_deals(events), account_equity=equity, account_balance=equity, floors=_BTC
+        _mm2x_deals(events), account_equity=equity, account_balance=equity, floors=_BTC, server_utc_offset_s=0
     )
     day0 = returns.loc[pd.Timestamp(d0)]
     guards = ("negative_nav_guard", "dust_nav_guard", "pnl_dominated_guard",
@@ -1367,7 +1370,7 @@ def test_legacy_deals_without_position_ids_keep_the_day_level_rule() -> None:
     annotation, not a warning). Canonical ledger: +10_000 deposit and +300 P&L on 06-04,
     prior NAV 100_400, so r = 300 / 100_400 (the deposit is not a gain)."""
     returns, meta = combine_mt5_deal_ledger(
-        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0, server_utc_offset_s=0
     )
     assert float(returns.loc[pd.Timestamp("2025-06-04")]) == pytest.approx(300 / 100_400, abs=1e-12)
     assert meta["flow_timing_day_level"] is True
@@ -1418,6 +1421,7 @@ def test_wr01_post_withdrawal_tiny_base_is_measured_exactly_and_flagged() -> Non
     returns, meta = combine_mt5_deal_ledger(
         _mm2x_deals(events),
         account_equity=float(terminal), account_balance=float(terminal), floors=_BTC,
+        server_utc_offset_s=0,
     )
     for day, value in exact.items():
         assert returns.loc[pd.Timestamp(day)] == pytest.approx(float(value), abs=1e-9), day
@@ -1449,7 +1453,7 @@ def test_small_base_flag_follows_the_material_equity_threshold(
     r2 = Fraction("-0.00002") / (e + Fraction("0.00002"))
     deals = [_btc_deal(1e-5, 2), _btc_deal(-2e-5, 3, kind=1)]
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=equity, account_balance=equity, floors=_BTC
+        deals, account_equity=equity, account_balance=equity, floors=_BTC, server_utc_offset_s=0
     )
     assert returns.to_numpy() == pytest.approx([float(r1), float(r2)], abs=1e-9)
     if flagged:
@@ -1621,6 +1625,7 @@ def test_mm2x_timed_deposit_day_is_measured_on_the_capital_the_position_opened_o
     returns, meta = combine_mt5_deal_ledger(
         deals, account_equity=_terminal(flows, positions),
         account_balance=_terminal(flows, positions), floors=_BTC,
+        server_utc_offset_s=0,
     )
     d0, d1 = _MM2X_FIRST_DEPOSIT, _MM2X_FIRST_DEPOSIT + timedelta(1)
     oracle = _timed_oracle(flows, positions)
@@ -1804,7 +1809,7 @@ def _wr02_ledger(flow: Fraction | None) -> tuple[list[dict], float]:
 
 def _wr02_day_return(flow: Fraction | None) -> float:
     deals, equity = _wr02_ledger(flow)
-    returns, meta = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=equity)
+    returns, meta = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=equity, server_utc_offset_s=0)
     assert not (set(meta) & {"dust_nav_guard", "negative_nav_guard", "pnl_dominated_guard"})
     return float(returns.loc[pd.Timestamp(_D1)])
 
@@ -1832,7 +1837,7 @@ def test_wr02_a_zero_amount_balance_deal_is_a_no_op_when_positions_overlap() -> 
             deals.append(_timed_flow_deal(_utc_ms(d1, 10), Fraction(0)))
         deals += _timed_position_deals(7302, _utc_ms(d1, 11), _utc_ms(d1, 14), Fraction(1000))
         returns, _meta = combine_mt5_deal_ledger(
-            deals, account_equity=12_000.0, account_balance=12_000.0
+            deals, account_equity=12_000.0, account_balance=12_000.0, server_utc_offset_s=0
         )
         assert float(returns.loc[pd.Timestamp(d1)]) == pytest.approx(0.2, abs=1e-12), with_zero
 
@@ -1885,7 +1890,7 @@ def test_overnight_cash_booked_before_a_later_open_is_in_that_opens_base() -> No
     deals.append(_timed_flow_deal(_utc_ms(d1, 10), Fraction(1000)))
     deals += _timed_position_deals(7201, _utc_ms(d1, 11), _utc_ms(d1, 12), Fraction(110))
     equity = float(Fraction(10_000 + 300 + 1000 + 110))
-    returns, _meta = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=equity)
+    returns, _meta = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=equity, server_utc_offset_s=0)
     assert float(returns.loc[pd.Timestamp(d1)]) == pytest.approx(
         1.03 * (1.0 + 110.0 / 11_300.0) - 1.0, abs=1e-12
     )
@@ -2106,5 +2111,124 @@ def test_mt5_day_pnl_is_untouched_by_the_timing() -> None:
     from services.broker_dailies import mt5_day_pnl
 
     deals, _flows, _positions = _mm2x_timed_deals()
-    pnl = mt5_day_pnl(deals)
+    pnl = mt5_day_pnl(deals, server_utc_offset_s=0)
     assert [float(v) for v in pnl.to_numpy()] == pytest.approx([0.0, 0.011], abs=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# Phase 175 (MT5OFFSET) SC-2 for the fold: a DST rule buckets every deal with the offset in
+# force on ITS OWN date, and no single integer can.
+# ---------------------------------------------------------------------------
+def _straddling_the_us_fall_change_deals() -> list[dict]:
+    """BROKER WALL times (the epoch is the wall clock written as if it were UTC).
+
+    The broker follows the US rule: UTC+3 while US daylight time runs, UTC+2 from the US change
+    at 2025-11-02T06:00Z. By hand:
+      deposit 10_000 at wall 2025-10-01 12:00 (UTC+3)   -> true 2025-10-01T09:00Z, day 2025-10-01
+      +100 close   at wall 2025-10-31 02:30 (UTC+3)     -> true 2025-10-30T23:30Z, day 2025-10-30
+      +200 close   at wall 2025-11-04 02:30 (UTC+2)     -> true 2025-11-04T00:30Z, day 2025-11-04
+    """
+    zero = {"swap": 0.0, "commission": 0.0, "fee": 0.0}
+
+    def _wall(y: int, mo: int, d: int, h: int, mi: int = 0) -> int:
+        return int(datetime(y, mo, d, h, mi, tzinfo=timezone.utc).timestamp())
+
+    return [
+        {"type": 2, "profit": 10_000.0, "time": _wall(2025, 10, 1, 12), **zero},
+        {"type": 1, "entry": 1, "profit": 100.0, "time": _wall(2025, 10, 31, 2, 30), **zero},
+        {"type": 1, "entry": 1, "profit": 200.0, "time": _wall(2025, 11, 4, 2, 30), **zero},
+    ]
+
+
+def _trading_days(pnl: pd.Series) -> dict[str, float]:
+    return {ts.strftime("%Y-%m-%d"): float(v) for ts, v in pnl.items() if float(v) != 0.0}
+
+
+def test_a_ledger_straddling_the_us_fall_change_is_bucketed_per_deal_by_the_rule_and_by_no_integer() -> None:
+    """Phase 175 SC-2. One integer cannot describe a broker whose clock changes: each deal is
+    converted with the offset in force on its own date. Equity = balance = 10_300 = 10_000 + 100
+    + 200, so the reconstruction rolls back from 10_300 with no floating wedge.
+
+    Hand arithmetic under the rule: NAV 10_000 (2025-10-01), 10_100 after the +100 on 2025-10-30,
+    10_300 after the +200 on 2025-11-04. Returns: 100 / 10_000 = 0.01 on 2025-10-30 and
+    200 / 10_100 on 2025-11-04. The same ledger under a fixed UTC+3 files the +200 on 2025-11-03
+    (23:30Z), under a fixed UTC+2 it files the +100 on 2025-10-31 (00:30Z): the rule's two trading
+    days equal neither integer's."""
+    from services.broker_dailies import mt5_day_pnl
+    from services.mt5_server_clock import server_clock_for_rule
+
+    deals = _straddling_the_us_fall_change_deals()
+    rule = server_clock_for_rule("us")
+
+    # mt5_day_pnl: the rule's trading days, and the two fixed integers' days.
+    assert _trading_days(mt5_day_pnl(deals, server_utc_offset_s=rule)) == {
+        "2025-10-30": 100.0,
+        "2025-11-04": 200.0,
+    }
+    assert _trading_days(mt5_day_pnl(deals, server_utc_offset_s=10800)) == {
+        "2025-10-30": 100.0,
+        "2025-11-03": 200.0,
+    }
+    assert _trading_days(mt5_day_pnl(deals, server_utc_offset_s=7200)) == {
+        "2025-10-31": 100.0,
+        "2025-11-04": 200.0,
+    }
+
+    # reconstruct_mt5_nav_levels: the event days only, at the hand-derived levels.
+    levels, _meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=10_300.0, account_balance=10_300.0, server_utc_offset_s=rule
+    )
+    assert {ts.strftime("%Y-%m-%d"): float(v) for ts, v in levels.items()} == pytest.approx(
+        {"2025-10-01": 10_000.0, "2025-10-30": 10_100.0, "2025-11-04": 10_300.0}, abs=1e-9
+    )
+    fixed_3_levels, _m3 = reconstruct_mt5_nav_levels(
+        deals, account_equity=10_300.0, account_balance=10_300.0, server_utc_offset_s=10800
+    )
+    assert "2025-11-04" not in {ts.strftime("%Y-%m-%d") for ts in fixed_3_levels.index}
+    fixed_2_levels, _m2 = reconstruct_mt5_nav_levels(
+        deals, account_equity=10_300.0, account_balance=10_300.0, server_utc_offset_s=7200
+    )
+    assert "2025-10-30" not in {ts.strftime("%Y-%m-%d") for ts in fixed_2_levels.index}
+
+    # combine_mt5_deal_ledger: the return lands on the rule's day, not on a fixed integer's.
+    returns, _rmeta = combine_mt5_deal_ledger(
+        deals, account_equity=10_300.0, account_balance=10_300.0, server_utc_offset_s=rule
+    )
+    assert float(returns.loc[pd.Timestamp("2025-10-30")]) == pytest.approx(0.01, abs=1e-12)
+    assert float(returns.loc[pd.Timestamp("2025-11-04")]) == pytest.approx(
+        200.0 / 10_100.0, abs=1e-12
+    )
+    on_fixed_3, _m = combine_mt5_deal_ledger(
+        deals, account_equity=10_300.0, account_balance=10_300.0, server_utc_offset_s=10800
+    )
+    # The series ends on the last event day, so under UTC+3 there is no 2025-11-04 row at all.
+    assert pd.Timestamp("2025-11-04") not in on_fixed_3.index
+    assert float(on_fixed_3.loc[pd.Timestamp("2025-11-03")]) != 0.0
+    on_fixed_2, _m = combine_mt5_deal_ledger(
+        deals, account_equity=10_300.0, account_balance=10_300.0, server_utc_offset_s=7200
+    )
+    assert float(on_fixed_2.loc[pd.Timestamp("2025-10-30")]) == 0.0
+    assert float(on_fixed_2.loc[pd.Timestamp("2025-10-31")]) != 0.0
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(
+            lambda deals: combine_mt5_deal_ledger(deals, account_equity=1.0, account_balance=1.0),
+            id="combine_mt5_deal_ledger",
+        ),
+        pytest.param(
+            lambda deals: reconstruct_mt5_nav_levels(deals, account_equity=1.0, account_balance=1.0),
+            id="reconstruct_mt5_nav_levels",
+        ),
+        pytest.param(lambda deals: mt5_day_pnl(deals), id="mt5_day_pnl"),
+    ],
+)
+def test_a_missing_broker_clock_is_a_type_error_not_a_utc_default(call) -> None:
+    """Review 175 round 1 WR-02 / SFH-03 (D-01 removes the silent "0" default). A caller that
+    leaves the broker clock out must fail at the call site, not bucket every MT5 deal as if the
+    broker ran on UTC (2-3 hours off, no fault raised). Reddens if any of the three public folds
+    regains a default."""
+    with pytest.raises(TypeError, match="server_utc_offset_s"):
+        call(_canonical_deposit_deals())

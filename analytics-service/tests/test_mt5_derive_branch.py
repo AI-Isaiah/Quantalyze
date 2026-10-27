@@ -2554,6 +2554,7 @@ def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None
     (``compute_jobs.error_message``, ``computation_error``). Run through the REAL
     classifier none may read as a credential or wrong-server verdict, and none may
     carry an amount, a login or a server."""
+    from services.mt5_server_clock import MT5_SERVER_CLOCK_CONFIG_MESSAGES
     from services.mt5_validation import (
         _AUTH_PHRASES,
         _WRONG_SERVER_PHRASES,
@@ -2561,6 +2562,7 @@ def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None
     )
 
     assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
+    assert MT5_SERVER_CLOCK_CONFIG_MESSAGES
     texts = [
         jw._MT5_CURRENCY_BLANK_MESSAGE,
         jw._MT5_BTC_CLOSES_UNREADABLE_MESSAGE,
@@ -2569,7 +2571,165 @@ def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None
         _MALFORMED_STAMP,
         "Returns in EUR are not supported yet, so no metric is computed.",
         "Returns in BTC are not supported yet, so no metric is computed.",
+        # Phase 175: the derive writes the broker-clock configuration messages into
+        # ``compute_jobs.error_message`` (a re-classifiable field) behind this prefix.
+        *("derive_broker_dailies: " + message for message in MT5_SERVER_CLOCK_CONFIG_MESSAGES),
     ]
     for text in texts:
         verdict = classify_mt5_login_error(Mt5ClientError(0, text))
         assert verdict == "transient", (text, verdict)
+
+
+# ---------------------------------------------------------------------------
+# Phase 175 (MT5OFFSET) — the derive resolves ONE broker clock and hands it to every site.
+# ---------------------------------------------------------------------------
+def _winter_deposit_after_the_read_deals() -> list[dict]:
+    """All times are BROKER WALL times. Under the ``us`` and ``eu`` rules the broker is on
+    UTC+2 on these dates, so the deposit of wall 2025-11-11 02:30 is true 2025-11-11T00:30Z,
+    i.e. AFTER the stored mark's read at 00:10Z. Under a fixed UTC+3 it would read as
+    2025-11-10T23:30Z, before the read and on the previous day (the WR-02 defect)."""
+
+    def _wall(y: int, mo: int, d: int, h: int, mi: int = 0) -> int:
+        return int(datetime(y, mo, d, h, mi, tzinfo=timezone.utc).timestamp())
+
+    deposit_wall = _wall(2025, 11, 11, 2, 30)
+    zero = {"swap": 0.0, "commission": 0.0, "fee": 0.0}
+    return [
+        {"type": 0, "entry": 1, "profit": 500.0, "time": _wall(2025, 11, 9, 12), **zero},
+        {"type": 2, "profit": 50_000.0, "time": deposit_wall, "time_msc": deposit_wall * 1000, **zero},
+        {"type": 1, "entry": 1, "profit": 100.0, "time": _wall(2025, 11, 12, 12), **zero},
+    ]
+
+
+async def _derive_and_observe_apply_marks() -> tuple[object, MagicMock]:
+    from services.nav_marks_apply import apply_marks as real_apply_marks
+
+    mark = StoredMark(
+        "2025-11-10", "2025-11-11T00:10:00+00:00", "mt5", 100_500.0, 0.0, 100_500.0, "USD", 0.0
+    )
+    transport = _FakeMt5Transport(
+        account={"equity": 150_600.0, "balance": 150_600.0, "currency": "USD", "login": 123456},
+        deals=_winter_deposit_after_the_read_deals(),
+    )
+    ctx, _capture = _build_ctx(transport)
+    with _apply(_patches(ctx)), patch(
+        "services.job_worker.read_key_marks", new=MagicMock(return_value=[mark])
+    ), patch("services.job_worker.apply_marks", wraps=real_apply_marks) as spy:
+        result = await run_derive_broker_dailies_job(_job())
+    return result, spy
+
+
+@pytest.mark.asyncio
+async def test_a_winter_deposit_after_the_read_reaches_apply_marks_on_its_true_day_under_the_us_rule(
+    monkeypatch, caplog
+) -> None:
+    """Phase 175 SC-2 at the job level. Under ``MT5_SERVER_TIME_RULE=us`` the broker is UTC+2
+    in November, so a deposit made at true 2025-11-11T00:30Z is filed on 2025-11-11 with that
+    instant, after the mark's read at 00:10Z. The day separates the rule from the fixed
+    10800 (the control below), and the instant is asserted too so the flow is placed against the
+    mark's read by its true time and not by its wall time. Pitfall 4: the flow's day, its instant
+    and the day P&L come from the same clock."""
+    from services.external_flows import FlowInstant
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULE", "us")
+    monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics.job_worker"):
+        result, spy = await _derive_and_observe_apply_marks()
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert spy.call_count == 1
+    args, kwargs = spy.call_args
+    flows_by_day = args[1]
+    assert flows_by_day == {"2025-11-11": 50_000.0}
+    true_ms = int(datetime(2025, 11, 11, 0, 30, tzinfo=timezone.utc).timestamp()) * 1000
+    assert kwargs["flow_instants"] == [FlowInstant(true_ms, "2025-11-11", 50_000.0)]
+    day_pnl = kwargs["day_pnl"]
+    assert "2025-11-11" in day_pnl and "2025-11-10" not in day_pnl
+    assert day_pnl["2025-11-09"] == 500.0
+    assert not [r for r in caplog.records if _NO_INSTANT_LINE in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_the_same_deposit_under_the_fixed_10800_is_filed_on_the_mark_day(
+    monkeypatch,
+) -> None:
+    """The control of the test above (Phase 175 WR-02): the same derive under the fixed
+    UTC+3 files the same deposit on 2025-11-10 and reads its instant as 23:30Z, an hour
+    before the mark's read, so the two tests can tell the rule from the fixed integer."""
+    from services.external_flows import FlowInstant
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.delenv("MT5_SERVER_TIME_RULE", raising=False)
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "10800")
+    result, spy = await _derive_and_observe_apply_marks()
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert spy.call_count == 1
+    args, kwargs = spy.call_args
+    assert args[1] == {"2025-11-10": 50_000.0}
+    wrong_ms = int(datetime(2025, 11, 10, 23, 30, tzinfo=timezone.utc).timestamp()) * 1000
+    assert kwargs["flow_instants"] == [FlowInstant(wrong_ms, "2025-11-10", 50_000.0)]
+    assert "2025-11-10" in kwargs["day_pnl"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rule", "offset"),
+    [
+        pytest.param(None, None, id="neither-variable-set"),
+        pytest.param("summer", None, id="unknown-rule-id"),
+        pytest.param("us", "10800", id="both-variables-set"),
+    ],
+)
+async def test_a_clock_configuration_fault_fails_transient_and_makes_no_terminal_read(
+    monkeypatch, caplog, rule: str | None, offset: str | None
+) -> None:
+    """Phase 175 Pitfall 3 / T-175-10. A broker-clock configuration fault belongs to the
+    operator, not to the user's strategy: the derive ends FAILED ``transient`` (D-04, so
+    the job retries and, if the fault persists, the status bridge stamps the "automatic retries
+    exhausted" sentence) with the resolver's closed-set text, writes no ``strategy_analytics``
+    row itself, persists no series, and never touches the terminal. The next nightly derive is a
+    new job, so a corrected variable heals it. The text carries none of the planted values.
+    The fault is logged once at ERROR, naming the arm and carrying only the resolver's
+    value-free text (SFH-02)."""
+    import logging
+
+    from services.mt5_server_clock import MT5_SERVER_CLOCK_CONFIG_MESSAGES
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.delenv("MT5_SERVER_TIME_RULE", raising=False)
+    monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+    if rule is not None:
+        monkeypatch.setenv("MT5_SERVER_TIME_RULE", rule)
+    if offset is not None:
+        monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", offset)
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport)
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics"):
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    fault_lines = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.ERROR and "arm=server_clock_config" in r.getMessage()
+    ]
+    assert len(fault_lines) == 1, [r.getMessage() for r in caplog.records]
+    for planted in ("summer", "10800"):
+        assert planted not in fault_lines[0], fault_lines[0]
+    message = result.error_message or ""
+    prefix = "derive_broker_dailies: "
+    assert message.startswith(prefix), message
+    assert message[len(prefix):] in MT5_SERVER_CLOCK_CONFIG_MESSAGES, message
+    for planted in ("summer", "10800"):
+        assert planted not in message, message
+    assert transport.calls == [], (
+        f"a clock fault must end the derive before the terminal is touched; got {transport.calls!r}"
+    )
+    assert not any(u[0] == "strategy_analytics" for u in capture["upserts"]), "the handler writes no row"
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])

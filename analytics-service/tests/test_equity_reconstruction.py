@@ -6355,6 +6355,107 @@ async def test_mt5_backfill_kill_switch_refuses_before_any_terminal_read(
 
 
 @pytest.mark.asyncio
+async def test_mt5_backfill_under_the_us_rule_reconstructs_with_the_resolved_clock(
+    monkeypatch, _mt5_terminal_state,
+):
+    """Phase 175 / D-01 — the seventh and last read of the broker clock. The backfill
+    resolves the clock ONCE (right after its own kill-switch gate) and hands it to the
+    levels fold, so the one-time allocator snapshots bucket by the SAME clock as the
+    derive. The canonical deals sit at broker noon, so the persisted levels equal the
+    hand literals under either offset: that proves the rule path reconstructs. The
+    ``wraps`` spy proves the date-INDEPENDENT half, that the fold received the resolved
+    rule clock and not an integer re-read from the environment (the bucketing itself is
+    proven in plans 01 and 03)."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+    monkeypatch.setenv("MT5_SERVER_TIME_RULE", "us")
+    from services import broker_dailies
+    from services.job_worker import DispatchOutcome
+    from services.mt5_server_clock import server_clock_for_rule
+
+    seen: list[object] = []
+    real = broker_dailies.reconstruct_mt5_nav_levels
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs.get("server_utc_offset_s"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(broker_dailies, "reconstruct_mt5_nav_levels", _spy)
+
+    today = datetime.now(timezone.utc).date()
+    deals, expected_levels = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals)
+    session = _mt5_session(transport)
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_preflight(monkeypatch, "mt5", fake_supabase, session)
+    _install_fake_audit(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        f"{result.error_kind} / {result.error_message}"
+    )
+    assert seen == [server_clock_for_rule("us")], seen
+    persisted = _persisted_by_asof(fake_supabase)
+    for iso, want in expected_levels.items():
+        assert persisted[iso] == pytest.approx(want, abs=0.01), (iso, persisted)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rule", "offset"),
+    [
+        pytest.param(None, None, id="neither-variable-set"),
+        pytest.param("us", "10800", id="both-variables-set"),
+    ],
+)
+async def test_mt5_backfill_clock_configuration_fault_is_transient_and_touches_nothing(
+    monkeypatch, _mt5_terminal_state, rule, offset,
+):
+    """Phase 175 / D-01, RESEARCH A8 — a missing or contradictory worker clock setting
+    is an OPERATOR fault. The backfill is a one-time rebuild, so the verdict is
+    TRANSIENT (it must retry once the variable is fixed), carrying its own fixed,
+    classifier-safe text. It is decided before the terminal lease: no terminal call
+    (apart from the shared teardown), nothing persisted, one `reconstruct_failed` audit
+    for venue mt5, and the configured value is never in the verdict."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+    monkeypatch.delenv("MT5_SERVER_TIME_RULE", raising=False)
+    if rule is not None:
+        monkeypatch.setenv("MT5_SERVER_TIME_RULE", rule)
+    if offset is not None:
+        monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", offset)
+    from services.equity_reconstruction import _MT5_BACKFILL_MESSAGES
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals)
+    _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "a one-time rebuild must retry once the operator fixes the variable"
+    )
+    assert result.error_message == _MT5_BACKFILL_MESSAGES["server_clock_config"]
+    assert "10800" not in (result.error_message or "")
+    assert [c for c in transport.calls if c != "transport_close"] == [], (
+        f"a clock fault performed a terminal call: {transport.calls}"
+    )
+    _assert_nothing_persisted(fake_supabase)
+    failed = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_failed"
+    ]
+    assert len(failed) == 1, audit_mock.call_args_list
+    assert failed[0].kwargs["metadata"]["venue"] == "mt5"
+    assert failed[0].kwargs["metadata"]["error_kind"] == "transient"
+
+
+@pytest.mark.asyncio
 async def test_mt5_backfill_auth_rejection_is_permanent(
     monkeypatch, _mt5_terminal_state,
 ):

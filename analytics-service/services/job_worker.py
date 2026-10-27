@@ -6010,6 +6010,36 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_message=f"derive_broker_dailies: {MT5_DISABLED_DETAIL}",
                     error_kind="permanent",
                 )
+            # ⭐ 175 / D-01 — the broker clock, resolved ONCE per derive: before the first
+            # terminal read and before any imports of the MT5 modules, and handed to every
+            # offset site below (the combine, both day-P&L calls, the native-key levels, the
+            # flow day and the flow instant), so one derive never mixes two clocks (Pitfall 4).
+            # A configuration fault (neither variable set, an unknown rule id, both set) is the
+            # operator's, not the user's strategy: it fails the derive TRANSIENT (D-04, founder
+            # 2026-10-27) with the resolver's closed-set, value-free text. THIS handler writes
+            # no strategy_analytics stamp, persists no row and makes no terminal call
+            # (Pitfall 3). The job retries; if the fault persists, mark_compute_job_failed
+            # runs the sync_strategy_analytics_status bridge, which stamps the true
+            # "automatic retries exhausted" sentence, not the permanent "Contact support" one.
+            # The next nightly derive is a new job, so a corrected variable heals the row.
+            from services.mt5_server_clock import (
+                Mt5ServerClockConfigError,
+                resolve_mt5_server_clock,
+            )
+
+            try:
+                _mt5_clock = resolve_mt5_server_clock()
+            except Mt5ServerClockConfigError as _clock_exc:
+                logger.error(
+                    "derive_broker_dailies: mt5 server clock configuration fault "
+                    "(job=%s arm=server_clock_config) — %s",
+                    job.get("id"), _clock_exc,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=f"derive_broker_dailies: {_clock_exc}",
+                    error_kind="transient",
+                )
             from services.broker_dailies import (
                 combine_mt5_deal_ledger,
                 mt5_day_pnl,
@@ -6651,9 +6681,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
             # (e) THE combine: the deal ledger → cashflow-neutral daily TWR via the
             # EXISTING chain_linked_twr (flow-in-numerator, full DQ-01 guard set)
-            # anchored to the LIVE equity. server_utc_offset_s is the [ASSUMED A2]
-            # env-threaded broker offset (confirmed at the 134/139 live spike; plan
-            # 136-05 checkpoint). An unclassifiable DEAL_TYPE (the deribit
+            # anchored to the LIVE equity. server_utc_offset_s is the broker clock
+            # resolved ONCE for this derive (Phase 175 D-01): a DST rule or the fixed
+            # integer, threaded to every offset site. An unclassifiable DEAL_TYPE (the deribit
             # 'correction' lesson) raises Mt5DealClassificationError → PERMANENT +
             # stamp (never retry an unknown type forever); a structural NAV/TWR
             # refusal raises NavReconstructionError → the SHARED terminal
@@ -6673,14 +6703,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         _mt5_deals,
                         account_equity=_mt5_equity,
                         account_balance=_mt5_balance,
-                        server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                        server_utc_offset_s=_mt5_clock,
                         floors=_mt5_unit.floors,
                     )
                     if is_key_mode:
                         # D-15: the deal ledger's P&L per NAV day, for the days the TWR drops.
                         _day_pnl_usd = mt5_day_pnl(
                             _mt5_deals,
-                            server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                            server_utc_offset_s=_mt5_clock,
                         )
                         if not _day_pnl_usd.empty:
                             # CR-01: the level ``reconstruct_nav_and_twr`` rolled from, the
@@ -6699,9 +6729,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                                 _mt5_deals,
                                 account_equity=_mt5_equity,
                                 account_balance=_mt5_balance,
-                                server_utc_offset_s=int(
-                                    os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")
-                                ),
+                                server_utc_offset_s=_mt5_clock,
                                 floors=_mt5_unit.floors,
                             )
             except Mt5DealClassificationError as exc:
@@ -6802,10 +6830,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # unit, and the key_inputs flows are USD-signed.
             for _deal in ([] if _native_unit_key_skip else _mt5_deals):
                 if classify_deal(_deal) == "external_flow":
-                    _fday = deal_utc_day(
-                        _deal.get("time"),
-                        int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
-                    )
+                    _fday = deal_utc_day(_deal.get("time"), _mt5_clock)
                     # RED-TEAM: None-coalesce EXACTLY as combine_mt5_deal_ledger does
                     # (`0.0 if raw is None else ...`). A BALANCE/CREDIT deal with an
                     # explicit profit=None PASSES the combine but a raw float(None)
@@ -6819,9 +6844,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     # NAVMTM D-23: the deal's own UTC instant. ``None`` is an untrustworthy
                     # instant (FLOWTIMING D-07), and nothing is defaulted, so that deal is not
                     # placed by instant.
-                    _deal_ms = deal_utc_instant_ms(
-                        _deal, int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0"))
-                    )
+                    _deal_ms = deal_utc_instant_ms(_deal, _mt5_clock)
                     if _deal_ms is not None:
                         _event_flow_instants.append(
                             FlowInstant(
@@ -7649,7 +7672,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _apply_day_pnl = _iso_day_amounts(
                         mt5_day_pnl(
                             _mt5_deals,
-                            server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                            server_utc_offset_s=_mt5_clock,
                         )
                     )
                 elif venue == "sfox":

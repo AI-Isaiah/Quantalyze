@@ -591,9 +591,9 @@ def test_mt5_deal_ledger_shape_end_to_end(book: Book) -> None:
     payload -> the compose's replay. The levels are the oracle's navs."""
     deals = _mt5_deals(book)
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=book.anchor, account_balance=book.anchor
+        deals, account_equity=book.anchor, account_balance=book.anchor, server_utc_offset_s=0
     )
-    day_pnl = mt5_day_pnl(deals)
+    day_pnl = mt5_day_pnl(deals, server_utc_offset_s=0)
 
     stored_pnl = _persisted_roundtrip(returns, day_pnl)
     assert stored_pnl == pytest.approx(book.dropped_pnl)  # exactly the dropped days
@@ -627,7 +627,7 @@ def test_mt5_day_pnl_is_empty_without_a_trading_deal() -> None:
     """Like the returns path: a deposit-only ledger has no track record to complete."""
     deal = {"type": 2, "profit": 100.0, "swap": 0.0, "commission": 0.0, "fee": 0.0,
             "time": _epoch(0)}
-    assert mt5_day_pnl([deal]).empty
+    assert mt5_day_pnl([deal], server_utc_offset_s=0).empty
 
 
 def _usdc_native_ledger(book: Book) -> NativeLedger:
