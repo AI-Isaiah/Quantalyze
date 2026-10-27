@@ -816,6 +816,43 @@ async def test_a_bybit_window_whose_timestamps_never_run_out_stops_at_the_segmen
         assert _SIGNATURE not in record.getMessage()
 
 
+async def test_an_empty_first_page_of_a_continuation_segment_is_refused_not_taken_as_the_end(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """WR-01 (171 fix round 1). A continuation segment asks for ``[start, oldest + 1]``, which holds
+    the rows already read at ``oldest``, so an EMPTY answer to its first page means the venue
+    misbehaved. It was taken as the end of the window: 30 of 100 rows came back as the whole
+    window with no warning. It is refused, once and counts-only, as an uncertain stop."""
+    _small_segments(monkeypatch)
+    trades = trade_rows(100, _T0 + DAY_MS, 1000, id_prefix="e")
+    for row in trades:
+        row["info"]["note"] = _SIGNATURE
+    exchange = _venue_exchange("bybit", trades, page_cap=_SEGMENT_CAP)
+    book = exchange.book
+    cursorless = 0
+
+    async def _empty_on_the_second_segment(symbol: Any, since: Any, limit: Any, params: dict[str, Any]) -> Any:
+        nonlocal cursorless
+        if not params.get("cursor"):
+            cursorless += 1
+            if cursorless == 2:
+                return []
+        return await book(symbol, since, limit, params)
+
+    exchange.fetch_my_trades = AsyncMock(side_effect=_empty_on_the_second_segment)
+
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
+        await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
+
+    assert excinfo.value.site == "bybit_no_advance"
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "did not advance" in warnings[0].getMessage()
+    for record in caplog.records:
+        assert _SIGNATURE not in record.getMessage()
+
+
 def test_every_truncated_read_names_a_closed_site() -> None:
     """D-01 pin. Every place the module raises ``TruncatedTradeRead`` passes the shared message
     and a string-literal ``site=``, the literals are exactly ``TRUNCATED_READ_SITES``, and a site

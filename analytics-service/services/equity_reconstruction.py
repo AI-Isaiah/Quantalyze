@@ -705,7 +705,9 @@ async def _read_bybit_window(
     """Read one Bybit window ``[w_start, w_end]`` whole into ``trades`` (READCEILING, Phase 171).
 
     A SEGMENT is the cursor walk of old: at most ``_BYBIT_WINDOW_PAGE_CEILING`` pages on
-    ``[w_start, end]``, the first sent with no cursor. The window ends only on an empty page or
+    ``[w_start, end]``, the first sent with no cursor. The window ends only on an empty page (but
+    not the first page of a continuation segment, which holds the rows already read and so is
+    refused as ``bybit_no_advance`` when empty) or
     on a page with no cursor (a FULL page with none logs one WARNING and is not refused: a final
     page of exactly one page's rows has no cursor either). A page fetched WITH a cursor is
     stalled, and ends its segment, when it returns the cursor it was sent or adds no new row
@@ -742,6 +744,7 @@ async def _read_bybit_window(
         segment_newest: int | None = None
         cursor: str | None = None
         page_rows = 0
+        empty_continuation = False
         for _ in range(_BYBIT_WINDOW_PAGE_CEILING):
             params: dict[str, Any] = {"until": end}
             if cursor:
@@ -756,6 +759,12 @@ async def _read_bybit_window(
                 raise
             page = page or []
             if not page:
+                if _segment > 0 and cursor is None:
+                    # A continuation segment asks for ``[w_start, oldest + 1]`` (or ``oldest``),
+                    # which holds the rows already read at ``oldest``: empty means the venue
+                    # misbehaved. No time bound can fix that, so it takes the no-advance stop below.
+                    empty_continuation = True
+                    break
                 return
             page_rows = len(page)
             added = _extend_unseen(trades, seen, page)
@@ -781,10 +790,11 @@ async def _read_bybit_window(
                 break  # a stalled page ends the segment; the window is continued by time below
             cursor = nxt
             await _rate_limit_sleep(exchange)
-        if oldest is not None and oldest + 1 < end:
+        if not empty_continuation and oldest is not None and oldest + 1 < end:
             end = oldest + 1
         elif (
-            oldest is not None
+            not empty_continuation
+            and oldest is not None
             and oldest < end
             and retried_at != oldest
             and segment_newest is not None
