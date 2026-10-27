@@ -868,7 +868,7 @@ def _short_last_page_that_keeps_a_cursor(*, same_cursor: bool) -> tuple[Any, lis
             page, nxt = newest_first[:100], "c1"
         else:
             page, nxt = newest_first[100:], ("c1" if same_cursor else f"c{len(sent)}")
-        page = [dict(r, info=dict(r["info"])) for r in page]
+        page = [dict(r, info=dict(r["info"], note=_SIGNATURE)) for r in page]
         page[0]["info"]["nextPageCursor"] = nxt
         return list(reversed(page))  # ccxt re-sorts a page ascending
 
@@ -895,7 +895,15 @@ async def test_a_short_page_that_repeats_its_cursor_or_adds_nothing_ends_the_win
     assert len({t["id"] for t in read}) == 150
     # first page, last page; a fresh cursor needs one more request to show the page adds nothing
     assert len(sent) == (2 if same_cursor else 3)
-    assert _warnings(caplog) == []
+    # R2-1 (171 fix round 2): the window ends with rows the venue may still hold more of, so it says
+    # so once, by counts only (the sibling full-page-no-cursor exit already does). Not a refusal.
+    # (Until 2026-10-27 this pinned no WARNING at all.)
+    warned = _warnings(caplog)
+    assert len(warned) == 1
+    message = warned[0].getMessage()
+    assert "did not advance" in message
+    assert "venue=bybit" in message and "page_rows=50" in message and "rows=150" in message
+    assert _SIGNATURE not in message
 
 
 def test_every_truncated_read_names_a_closed_site() -> None:

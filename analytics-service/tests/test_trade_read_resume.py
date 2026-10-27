@@ -15,6 +15,7 @@ calls, the new one returns every trade.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import re
@@ -658,16 +659,19 @@ async def test_a_store_fault_reads_the_book_without_the_store(
     assert not [r for r in caplog.records if _SIGNATURE in r.getMessage()]
 
 
-async def test_a_store_fault_on_a_book_over_one_run_retries_instead_of_failing_permanent(
+async def test_a_book_over_one_run_with_the_store_down_ends_on_the_crawl_timeout_as_transient(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """S-2. With the store down there is no resume, so layer 1 must read the whole book in one run.
-    A book above its capacity raises ``TruncatedTradeRead``, a ``BadRequest`` the queue would fail
-    PERMANENT: the refusal this phase removes, blamed on the venue, for what is a store fault. The
-    job must instead end transient (retried once the store is back), with nothing persisted and no
-    venue text in the failure."""
+    """Round-2 WR-01. With the store down there is no resume and layer 1 has no page or run budget:
+    a book too big for one run ends on the crawl's wall-clock bound, ``asyncio.TimeoutError``, which
+    the handler already classes TRANSIENT (retried once the store is back). Nothing is persisted."""
     book = _big_book(signature=True)
-    monkeypatch.setattr(er, "_BYBIT_WINDOW_SEGMENT_CEILING", 1)  # window 3 (450 trades) is over one run's reach
+
+    async def _slow_sleep(_exchange: Any) -> None:
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(er, "_rate_limit_sleep", _slow_sleep)
+    monkeypatch.setattr(er, "_RECONSTRUCT_CRAWL_TIMEOUT_S", 0.3)
 
     caplog.set_level(logging.INFO)
     caplog.clear()
@@ -676,9 +680,32 @@ async def test_a_store_fault_on_a_book_over_one_run_retries_instead_of_failing_p
 
     assert result.outcome == DispatchOutcome.FAILED, result
     assert result.error_kind == "transient", result
+    assert "per-crawl wall-clock bound" in (result.error_message or "")
     assert _SIGNATURE not in (result.error_message or "")
     assert not _snapshots(fake)
     assert not _defer_calls(fake)
+    assert not [r for r in caplog.records if _SIGNATURE in r.getMessage()]
+
+
+@pytest.mark.parametrize("store_up", [True, False])
+async def test_a_truncated_read_stays_permanent_whether_the_store_is_up_or_down(
+    store_up: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Round-2 WR-01. ``TruncatedTradeRead`` is the venue's deterministic per-window refusal (here
+    ``bybit_segment_ceiling``). The resumable read refuses it permanently, and the store being down
+    must not turn the same refusal into a retry that blames the store. Nothing is persisted."""
+    book = _big_book(signature=True)
+    monkeypatch.setattr(er, "_BYBIT_WINDOW_SEGMENT_CEILING", 1)  # window 3 (450 trades) is over the ceiling
+
+    caplog.set_level(logging.INFO)
+    caplog.clear()
+    fake = FakeSupabaseClient() if store_up else _StoreDown()
+    result, _exchange, _audit, _clock = await _run_with_database(monkeypatch, fake, book, budget_s=1e9)
+
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "permanent", result
+    assert _SIGNATURE not in (result.error_message or "")
+    assert not _snapshots(fake)
     assert not [r for r in caplog.records if _SIGNATURE in r.getMessage()]
 
 
