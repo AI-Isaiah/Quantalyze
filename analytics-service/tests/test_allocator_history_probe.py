@@ -1271,13 +1271,22 @@ def _window_reader(services: "_Services", exc: BaseException) -> Any:
     return _reader
 
 
+def _deployed_truncated() -> er.TruncatedTradeRead:
+    """A truncation as the worker code deployed before Phase 171 raised it: no ``site``
+    attribute, so the probe must derive the site from its call log (D-01). Phase 171 made
+    ``site`` a required keyword, so the deployed-era form is built around that constructor."""
+    exc = er.TruncatedTradeRead.__new__(er.TruncatedTradeRead)
+    Exception.__init__(exc, er._TRUNCATED_READ_MESSAGE)
+    return exc
+
+
 async def test_a_truncated_bybit_read_names_the_window_ceiling_from_the_call_log(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ceiling = hp.er._BYBIT_WINDOW_PAGE_CEILING
     venue = _StubVenue(_bybit_window_pages(ceiling))
     services = _Services(_bybit_only_book(), [venue])
-    services.reader = _window_reader(services, er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE))
+    services.reader = _window_reader(services, _deployed_truncated())
     services.install(monkeypatch)
 
     assert await hp.run() == 1
@@ -1383,16 +1392,16 @@ def test_a_typed_site_on_the_exception_wins_over_the_call_log() -> None:
     ceiling_log = _advancing_window(hp.er._BYBIT_WINDOW_PAGE_CEILING)
     assert hp.derive_truncated_site("bybit", ceiling_log) == "bybit_window_ceiling"  # the log alone
 
-    typed = er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE)
-    typed.site = "bybit_segment_ceiling"  # type: ignore[attr-defined]
+    typed = _deployed_truncated()
+    typed.site = "bybit_segment_ceiling"
     assert hp.truncated_site_of(typed, "bybit", ceiling_log) == "bybit_segment_ceiling"
 
-    drifted = er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE)
-    drifted.site = "a_site_nobody_declared"  # type: ignore[attr-defined]
+    drifted = _deployed_truncated()
+    drifted.site = "a_site_nobody_declared"
     assert "a_site_nobody_declared" not in hp._TRUNCATED_SITES
     assert hp.truncated_site_of(drifted, "bybit", ceiling_log) == "unknown"
 
-    untyped = er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE)
+    untyped = _deployed_truncated()
     assert hp.truncated_site_of(untyped, "bybit", ceiling_log) == "bybit_window_ceiling"
 
 
