@@ -93,6 +93,28 @@ def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.name == _LOGGER and r.levelno == logging.WARNING]
 
 
+def _falling_timestamps_exchange() -> tuple[Any, list[int]]:
+    """A Bybit exchange that never runs out and never repeats itself: every call answers a full
+    page of fresh ids whose timestamps all sit just below the ``until`` it was sent, with a fresh
+    cursor. Each segment therefore lowers the end bound by a hundred milliseconds, so only the
+    segment ceiling can stop it. Returns the exchange and its list of call ``until`` values."""
+    untils: list[int] = []
+
+    async def _fall(_symbol: Any, _since: Any, _limit: Any, params: dict[str, Any]) -> list[dict[str, Any]]:
+        untils.append(int(params["until"]))
+        call = len(untils)
+        rows = trade_rows(100, int(params["until"]) - 100, 1, id_prefix=f"f{call}-")
+        for row in rows:
+            row["info"] = {"note": _SIGNATURE}
+        rows[-1]["info"]["nextPageCursor"] = f"cursor-{call}"
+        return rows
+
+    exchange = AsyncMock()
+    exchange.id = "bybit"
+    exchange.fetch_my_trades = AsyncMock(side_effect=_fall)
+    return exchange, untils
+
+
 async def test_bybit_reads_every_page_of_a_window_holding_more_than_one_page() -> None:
     """250 trades inside one 7-day window, served at most 100 per page, are all read.
     Real ccxt builds the request and parses the answer."""
@@ -206,6 +228,7 @@ async def test_a_venue_that_repeats_its_page_ends_the_read_with_one_warning(
 
     # The forced gather converter maps a permanent class to account_key_read_failed.
     assert classify_exception(excinfo.value)[0] == "permanent"
+    assert excinfo.value.site == ("bybit_no_advance" if venue == "bybit" else "generic_no_advance")
     warnings = _warnings(caplog)
     assert len(warnings) == 1
     message = warnings[0].getMessage()
@@ -255,12 +278,19 @@ async def test_a_bybit_window_ending_on_a_full_page_with_no_cursor_warns_but_is_
         assert _SIGNATURE not in record.getMessage()
 
 
-async def test_a_bybit_window_that_never_runs_out_hits_the_page_ceiling_loudly(
+async def test_a_bybit_window_that_never_runs_out_stops_loudly_when_its_end_cannot_be_lowered(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A venue that answers a full page of new rows and a new cursor forever is cut off at
-    the ceiling: one WARNING that carries counts only, and the read raises rather than hand
-    back the first 10,000 rows as the whole window."""
+    """A venue that answers a full page of new rows and a new cursor forever, all at the same
+    timestamps, is cut off: one WARNING that carries counts only, and the read raises rather
+    than hand back the rows read so far as the whole window.
+
+    READCEILING (Phase 171) moved this pin. It used to assert ``calls == page ceiling`` and a
+    "ceiling" WARNING, because the first segment's ceiling was the stop. A window is now
+    continued by time, so this fake reads two segments (the second ends on the same oldest
+    timestamp, its end bound one past it), takes the one retry with the end AT the oldest
+    timestamp (its pages carry rows newer than the oldest), and only then stops, on the rule
+    that the end bound cannot be lowered: three segments of pages."""
     calls = 0
 
     async def _endless(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
@@ -277,13 +307,14 @@ async def test_a_bybit_window_that_never_runs_out_hits_the_page_ceiling_loudly(
     exchange.fetch_my_trades = AsyncMock(side_effect=_endless)
 
     caplog.set_level(logging.WARNING, logger=_LOGGER)
-    with pytest.raises(er.TruncatedTradeRead):
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
         await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
 
-    assert calls == er._BYBIT_WINDOW_PAGE_CEILING
+    assert calls == 3 * er._BYBIT_WINDOW_PAGE_CEILING
+    assert excinfo.value.site == "bybit_no_advance"
     warnings = _warnings(caplog)
     assert len(warnings) == 1
-    assert "ceiling" in warnings[0].getMessage()
+    assert "did not advance" in warnings[0].getMessage()
     for record in caplog.records:
         assert _SIGNATURE not in record.getMessage()
 
@@ -309,9 +340,10 @@ async def test_the_other_venue_walk_that_never_runs_out_hits_the_page_ceiling_lo
     exchange.fetch_my_trades = AsyncMock(side_effect=_newer_every_time)
 
     caplog.set_level(logging.WARNING, logger=_LOGGER)
-    with pytest.raises(er.TruncatedTradeRead):
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
         await er._fetch_trades_with_pagination(exchange, "binance", _T0, _T0 + 10 * DAY_MS)
 
+    assert excinfo.value.site == "generic_page_ceiling"
     assert calls == er._TRADE_PASS_PAGE_CEILING
     warnings = _warnings(caplog)
     assert len(warnings) == 1
@@ -475,8 +507,9 @@ async def test_okx_refuses_a_single_millisecond_group_larger_than_a_page(
     older = trade_rows(30, now - 50 * DAY_MS, 60_000, symbol="BTC/USDT:USDT", inst_type="SWAP", id_prefix="o")
     group = trade_rows(120, now - 10 * DAY_MS, 0, symbol="BTC/USDT:USDT", inst_type="SWAP", id_prefix="g")
     client = real_ccxt_client("okx", older + group, end_exclusive=end_exclusive)
-    with pytest.raises(er.TruncatedTradeRead):
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
         await _read_okx(client, now=now, since=now - 86 * DAY_MS)
+    assert excinfo.value.site == "okx_no_advance"
 
 
 def _okx_only_swap(page_for: Any) -> Any:
@@ -511,6 +544,7 @@ async def test_an_okx_pass_that_repeats_its_page_ends_with_one_warning(
         await er._fetch_trades_with_pagination(exchange, "okx", now - 86 * DAY_MS, now)
 
     assert classify_exception(excinfo.value)[0] == "permanent"
+    assert excinfo.value.site == "okx_no_advance"
     warnings = _warnings(caplog)
     assert len(warnings) == 1
     message = warnings[0].getMessage()
@@ -557,9 +591,10 @@ async def test_an_okx_pass_that_never_runs_out_hits_the_page_ceiling_loudly(
 
     exchange = _okx_only_swap(_older_every_time)
     caplog.set_level(logging.WARNING, logger=_LOGGER)
-    with pytest.raises(er.TruncatedTradeRead):
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
         await er._fetch_trades_with_pagination(exchange, "okx", now - 86 * DAY_MS, now)
 
+    assert excinfo.value.site == "okx_page_ceiling"
     assert calls == er._TRADE_PASS_PAGE_CEILING
     warnings = _warnings(caplog)
     assert len(warnings) == 1
@@ -628,6 +663,7 @@ async def test_not_supported_after_rows_were_read_fails_the_read(venue: str) -> 
     with pytest.raises(er.TruncatedTradeRead) as excinfo:
         await er._fetch_trades_with_pagination(exchange, venue, now - 86 * DAY_MS, now)
     assert classify_exception(excinfo.value)[0] == "permanent"
+    assert excinfo.value.site == ("generic" if venue == "binance" else venue) + "_not_supported"
 
 
 @pytest.mark.parametrize("venue", ["bybit", "okx", "binance"])
@@ -693,3 +729,113 @@ async def test_the_other_venue_walk_reads_rows_with_no_id_once_each() -> None:
     )
     assert len(read) == 150
     assert len({t["timestamp"] for t in read}) == 150
+
+
+# ---------------------------------------------------------------------------
+# Phase 171 READCEILING plan 02: the boundary cases of continuing a window by time
+# ---------------------------------------------------------------------------
+
+_SEGMENT_PAGES = 3  # pages per segment in the small-segment tests below
+_SEGMENT_CAP = 10  # rows per page, so a segment holds 30 rows
+
+
+def _small_segments(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(er, "_BYBIT_WINDOW_PAGE_CEILING", _SEGMENT_PAGES)
+
+
+async def test_a_same_millisecond_group_across_a_segment_edge_is_read_whole(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The first 30-row segment ends INSIDE a group of rows sharing one millisecond: 15 rows at
+    T+1 and 15 of the 18 at T. The next segment re-reads that boundary by design (an inclusive
+    end bound), so it adds nothing and is not a stall; the one retry with the end AT T then
+    reaches the rest of the group and everything older. Every row is read, with no WARNING."""
+    _small_segments(monkeypatch)
+    group_ms = _T0 + 2 * DAY_MS
+    trades = (
+        trade_rows(25, _T0 + DAY_MS, 1000, id_prefix="o")
+        + trade_rows(18, group_ms, 0, id_prefix="g")
+        + trade_rows(15, group_ms + 1, 0, id_prefix="h")
+    )
+    exchange = _venue_exchange("bybit", trades, page_cap=_SEGMENT_CAP)
+
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    read, _ = await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
+
+    assert len({t["id"] for t in read}) == 58
+    assert len(read) == 58
+    assert _warnings(caplog) == []
+
+
+async def test_more_than_a_segment_of_executions_at_one_millisecond_stops_loudly(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """31 rows at ONE millisecond cannot be passed by any timestamp bound when a segment holds
+    30: the next segment re-reads the same 30. It must stop, loudly and once, rather than hand
+    back 30 of 31 as the whole window."""
+    _small_segments(monkeypatch)
+    trades = trade_rows(31, _T0 + 2 * DAY_MS, 0, id_prefix="g")
+    for row in trades:
+        row["info"]["note"] = _SIGNATURE
+    exchange = _venue_exchange("bybit", trades, page_cap=_SEGMENT_CAP)
+
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
+        await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
+
+    assert excinfo.value.site == "bybit_no_advance"
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "did not advance" in warnings[0].getMessage()
+    for record in caplog.records:
+        assert _SIGNATURE not in record.getMessage()
+
+
+async def test_a_bybit_window_whose_timestamps_never_run_out_stops_at_the_segment_ceiling(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every segment of this venue lowers the end bound, so the strict-lowering stop never
+    fires; only the segment ceiling can end it. Four segments of three pages, then one WARNING
+    and a typed site."""
+    monkeypatch.setattr(er, "_BYBIT_WINDOW_PAGE_CEILING", _SEGMENT_PAGES)
+    monkeypatch.setattr(er, "_BYBIT_WINDOW_SEGMENT_CEILING", 4)
+    exchange, untils = _falling_timestamps_exchange()
+
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    with pytest.raises(er.TruncatedTradeRead) as excinfo:
+        await er._fetch_trades_with_pagination(exchange, "bybit", _T0, _T0 + 3 * DAY_MS)
+
+    assert excinfo.value.site == "bybit_segment_ceiling"
+    assert len(untils) == 4 * _SEGMENT_PAGES
+    per_segment = untils[::_SEGMENT_PAGES]
+    assert per_segment == sorted(set(per_segment), reverse=True)  # each segment's end is strictly lower
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "segment ceiling" in warnings[0].getMessage()
+    for record in caplog.records:
+        assert _SIGNATURE not in record.getMessage()
+
+
+def test_every_truncated_read_names_a_closed_site() -> None:
+    """D-01 pin. Every place the module raises ``TruncatedTradeRead`` passes the shared message
+    and a string-literal ``site=``, the literals are exactly ``TRUNCATED_READ_SITES``, and a site
+    outside the set cannot be constructed. A raise site that forgot its site would otherwise only
+    show as a probe row that prints no site."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(er))
+    sites: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "TruncatedTradeRead"):
+            continue
+        assert len(node.args) == 1 and isinstance(node.args[0], ast.Name)
+        assert node.args[0].id == "_TRUNCATED_READ_MESSAGE"
+        assert [k.arg for k in node.keywords] == ["site"], f"line {node.lineno}"
+        value = node.keywords[0].value
+        assert isinstance(value, ast.Constant) and isinstance(value.value, str), f"line {node.lineno}"
+        sites.append(value.value)
+
+    assert sorted(sites) == sorted(er.TRUNCATED_READ_SITES)  # nine raise sites, one token each
+    with pytest.raises(ValueError):
+        er.TruncatedTradeRead("x", site="nope")

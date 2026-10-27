@@ -1203,7 +1203,7 @@ async def test_a_failed_member_is_recorded_by_class_the_other_account_is_measure
 @pytest.mark.parametrize(
     ("effect", "expected"),
     [
-        (lambda ccxt: er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE), "truncated"),
+        (lambda ccxt: er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE, site="generic_no_advance"), "truncated"),
         (lambda ccxt: ccxt.BadRequest("bybit trade window starts before the venue's two-year limit"), "BadRequest"),
     ],
     ids=["truncated-read", "two-year-guard"],
