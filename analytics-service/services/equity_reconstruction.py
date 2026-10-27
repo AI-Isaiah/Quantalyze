@@ -2441,7 +2441,7 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
 # writes a curve only when that curve is anchored to today's venue equity INCLUDING the
 # open-position uPnL. Any other outcome refuses: the job fails (error_kind "permanent", PD-I:
 # no automatic re-crawl) and nothing is written. This is the closed set of reasons; the
-# post-deploy handoff matches the "forced rebuild refused (" prefix and these 15 tokens, and
+# post-deploy handoff matches the "forced rebuild refused (" prefix and these 16 tokens, and
 # a test pins both halves. The unforced path is untouched (PD-B).
 #
 # Phase 167.2.1.1.2 (UPNLVENUES D-04, D-02 of this phase): the rebuild is now WHOLE-ACCOUNT,
@@ -2451,6 +2451,11 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
 # old sole-key path (multi_key, sibling_lookup_failed, replay_empty, history_outside_replay)
 # left the set with it, and their raise sites left the handler with the unified forced path
 # (decision AR-7): a test pins that every token raised in this module is in the set.
+#
+# 2026-10-27, Phase 171 READCEILING: the set gained its 16th token, ``account_key_read_stalled``
+# (a member's resumable trade read made no progress across claims, or its job reached the 24 h
+# backstop). The stored windows are KEPT, so a later run can clear it; that is why the handoff
+# lists it with the re-enqueue-once tokens.
 FORCED_REBUILD_ANCHOR_REASONS: Final[frozenset[str]] = frozenset(
     {
         "positions_unreadable",
@@ -2472,6 +2477,7 @@ FORCED_REBUILD_ACCOUNT_REASONS: Final[frozenset[str]] = frozenset(
         "account_sum_empty",
         "account_keys_changed",
         "history_days_unreproduced",
+        "account_key_read_stalled",
     }
 )
 FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = (
@@ -5588,6 +5594,11 @@ async def _crawl_whole_account(
     read progress; and no existing outcome or pinned test moves. It is never classified here as
     an unknown fault (the generic arm would end the job FAILED unknown). Nothing is summed or
     persisted from a claim that deferred.
+
+    A member whose read makes no progress (``store.TradeReadStalled``) is the other READCEILING
+    outcome. It is decided in key order like a refusal, as ``account_key_read_stalled``: a stall
+    is deterministic (deferring again would only burn claims), and the member's stored windows
+    are kept so a later run resumes from them.
     """
     own_key_id = str(job["api_key_id"])
     selected, zero_contribution = _select_account_crawl_keys(account_keys, own_key_id)
@@ -5659,6 +5670,20 @@ async def _crawl_whole_account(
                     allocator_id, key.get("id"), _key_venue(key), outcome.reason,
                 )
                 raise outcome
+            if isinstance(outcome, store.TradeReadStalled):
+                # READCEILING (Phase 171, D-02): this member's read made no progress (three
+                # claims that stored no window, or its job is past the 24 h backstop). Decided
+                # here, in key order like a refusal and BEFORE the generic arm below, which
+                # would call it an unknown fault and have the queue retry a read that is
+                # already known to be stuck. The member's stored windows are KEPT on purpose:
+                # a refusal a later run can clear must leave the read that run resumes from.
+                # Static fields only: the member's key and venue and the closed token.
+                logger.warning(
+                    "reconstruct_allocator_history account crawl refused "
+                    "allocator=%s key=%s venue=%s reason=%s",
+                    allocator_id, key.get("id"), _key_venue(key), "account_key_read_stalled",
+                )
+                raise ForcedRebuildRefusedError("account_key_read_stalled") from None
             if isinstance(outcome, DispatchResult):
                 # An MT5 member's settled failure. The arm is named by its
                 # ``_MT5_BACKFILL_MESSAGES`` key, never by the fixed text, so the line stays
@@ -6023,6 +6048,14 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 ctx.supabase, job, deferred, allocator_id, api_key_id, venue
             )
         except store.TradeReadStalled as stalled:
+            if forced:
+                # The forced side (Phase 171 plan 10): a stall that reaches the handler on a
+                # forced job (the account crawl's outcome loop converts a member's stall
+                # first, so this is the defensive path) is the same closed refusal, through
+                # the one place a refused forced rebuild is recorded.
+                return _forced_refusal_result(
+                    allocator_id, api_key_id, venue, "account_key_read_stalled"
+                )
             # READCEILING (Phase 171, D-02): a read that makes no progress ends by NAME instead
             # of deferring forever (a defer burns no attempt). Either ``begin_claim`` refused the
             # job's next claim after STALLED_CLAIMS_LIMIT claims that stored no window, or the
