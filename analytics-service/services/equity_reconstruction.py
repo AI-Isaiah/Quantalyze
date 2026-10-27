@@ -5672,6 +5672,22 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 
     KEY-SCOPED per VOICES-ACCEPTED f1 — reads job['api_key_id'], derives
     allocator_id from ctx.key_row['user_id'].
+
+    READCEILING (Phase 171, D-02): a Bybit read too big for one claim DEFERS instead of
+    refusing. The unforced crawl runs inside a trade-read scope, the read keeps each complete
+    7-day window in the trade-read store, and a claim whose budget runs out at a window boundary
+    ends DEFERRED through ``defer_compute_job`` (``_defer_reconstruct``); the next claim reuses the
+    stored windows. Nothing reaches the allocator's history until the read is whole, and the key's
+    store rows are purged once it is written. Side effect, by design (RESEARCH section 6): a
+    pending (deferred) reconstruct counts as in flight (``_RECONSTRUCT_IN_FLIGHT_STATUSES``), so
+    it holds a zero-snapshot book's first daily refresh for the life of the job, bounded by the
+    24 h job-age backstop (plan 08).
+
+    A store fault never breaks a Bybit reconstruct: when the store cannot be reached
+    (``begin_claim`` answers None, e.g. the tables do not exist yet because the worker deployed
+    before the migration applied) the read is the pre-store read for the whole range, with no
+    budget and no deferral, and a window that cannot be saved stays in this claim's read. Deploy
+    order is therefore not load-bearing.
     """
     ctx = await _allocator_key_preflight(job, "run_reconstruct_allocator_history_job")
     if isinstance(ctx, DispatchResult):

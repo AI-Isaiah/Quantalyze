@@ -19,10 +19,12 @@ import copy
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from postgrest.exceptions import APIError
 
 from services import equity_reconstruction as er
 from services import trade_read_store as store
@@ -375,3 +377,343 @@ async def test_a_reclaimed_job_yields_instead_of_failing(monkeypatch: pytest.Mon
     assert len(_defer_calls(fake)) == 1
     assert not _failure_audits(audit)
     assert not _snapshots(fake)
+
+
+# --------------------------------------------------------------------------- direct reads
+#
+# The tests below call ``er._fetch_bybit_trades`` under a hand-built scope, so they can look at
+# the store (the handler purges it on DONE) and put the deadline exactly where the rule under
+# test is decided.
+
+
+def _clocked_exchange(book: list[dict[str, Any]], clock: _Clock) -> Any:
+    """A bare Bybit exchange over ``book``; every trade request costs the fake clock a second."""
+    exchange = AsyncMock()
+    exchange.id = "bybit"
+    venue_book = VenueTradeBook(exchange, book)
+
+    async def _fetch(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        clock.t += 1.0
+        return await venue_book(*args, **kwargs)
+
+    exchange.fetch_my_trades = AsyncMock(side_effect=_fetch)
+    return exchange
+
+
+def _scope(
+    fake: Any, clock: _Clock, monkeypatch: pytest.MonkeyPatch, *, budget_s: float, job_id: str | None = _JOB_ID
+) -> store.TradeReadScope:
+    monkeypatch.setattr(store, "_monotonic", lambda: clock.t)
+    return store.TradeReadScope(
+        supabase=fake,
+        api_key_id=API_KEY_ID_1,
+        deadline=store.claim_deadline(budget_s),
+        job_id=job_id,
+        job_created_at=None,
+    )
+
+
+async def _read(
+    exchange: Any, scope: store.TradeReadScope, since_ms: int = _START_MS, now_ms: int = _NOW_MS
+) -> list[dict[str, Any]]:
+    with store.trade_read_scope(scope):
+        return await er._fetch_bybit_trades(exchange, since_ms, now_ms)
+
+
+def _fingerprint(trades: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    """What the replay reads of a trade, sorted: the oracle compares a read to the book itself."""
+    return sorted((t["timestamp"], t["symbol"], t["side"], t["amount"], t["price"], t["cost"]) for t in trades)
+
+
+def _expected(book: list[dict[str, Any]], since_ms: int, now_ms: int) -> list[tuple[Any, ...]]:
+    return _fingerprint([t for t in book if since_ms <= t["timestamp"] <= now_ms])
+
+
+def _stored_starts(fake: FakeSupabaseClient) -> set[int]:
+    return {r["window_start_ms"] for r in fake.rows_for(store.WINDOW_TABLE)}
+
+
+def _spread_book(windows: range, *, step_ms: int = 4 * 3_600_000) -> list[dict[str, Any]]:
+    """40 trades in each given grid window, spread over its first 6.7 days (an amount per window)."""
+    book: list[dict[str, Any]] = []
+    for k in windows:
+        for row in trade_rows(40, _window_start(k) + 1000, step_ms, id_prefix=f"s{k:03d}-"):
+            row["amount"] = 0.001 * (k + 1)
+            row["cost"] = row["price"] * row["amount"]
+            book.append(row)
+    return book
+
+
+async def test_the_window_holding_now_is_never_stored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RESEARCH section 2. A window is stored only when it is complete AND settled: the window
+    holding now is still receiving trades, and so is the one that ended inside the last hour. The
+    read is made 30 minutes into grid window 10, so windows 0 to 8 are stored, window 9 (ended 30
+    minutes ago) and window 10 (holding now) are read live and kept out of the store, and every
+    trade is still in the output."""
+    clock = _Clock()
+    fake = FakeSupabaseClient()
+    now_ms = _window_start(10) + 1_800_000
+    book = _spread_book(range(0, 12))
+    exchange = _clocked_exchange(book, clock)
+
+    read = await _read(exchange, _scope(fake, clock, monkeypatch, budget_s=1e9), now_ms=now_ms)
+
+    assert _fingerprint(read) == _expected(book, _START_MS, now_ms)
+    assert _stored_starts(fake) == {_window_start(k) for k in range(9)}
+    assert any(_window_start(9) <= t["timestamp"] <= now_ms for t in read), "the settle hour holds trades"
+
+
+async def test_a_window_starting_before_the_read_start_is_read_but_never_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RESEARCH section 2. Claim A (one job) stores grid window 0 and defers. Claim B, a later job
+    whose start sits 10 days in, finds window 0 stored (it is cut to the new start: all of it lies
+    before) and window 1 STRADDLING the start: window 1 begins before the read start, so it is read
+    over ``[start, window end]``, its earlier trades are not asked for, and it is NOT stored, because
+    a stored window is always a whole grid window."""
+    clock = _Clock()
+    fake = FakeSupabaseClient()
+    book = _spread_book(range(0, 4))
+    exchange = _clocked_exchange(book, clock)
+
+    with pytest.raises(store.TradeReadDeferred):
+        await _read(exchange, _scope(fake, clock, monkeypatch, budget_s=0.5))
+    assert _stored_starts(fake) == {_window_start(0)}
+
+    later_start = _START_MS + 10 * DAY_MS
+    clock.t += 10_000
+    read = await _read(
+        exchange,
+        _scope(fake, clock, monkeypatch, budget_s=1e9, job_id="00000000-0000-0000-0000-0000000000f2"),
+        since_ms=later_start,
+    )
+
+    assert _fingerprint(read) == _expected(book, later_start, _NOW_MS)
+    assert any(_window_start(1) < t["timestamp"] < later_start for t in book), "window 1 holds earlier trades"
+    assert all(t["timestamp"] >= later_start for t in read)
+    stored = _stored_starts(fake)
+    assert _window_start(1) not in stored
+    assert _window_start(0) in stored and _window_start(2) in stored
+
+
+async def test_the_tail_is_read_even_after_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-02. The budget is checked only before a window that could be stored. Here the deadline
+    passes right after the last storable window (window 1), yet the two windows left (the settle
+    hour's and the one holding now) are always read in the claim that reaches them: the claim
+    completes instead of deferring on a window that can never be stored."""
+    clock = _Clock()
+    fake = FakeSupabaseClient()
+    now_ms = _window_start(3) + 1_800_000
+    book = _spread_book(range(0, 4))
+    exchange = _clocked_exchange(book, clock)
+
+    read = await _read(exchange, _scope(fake, clock, monkeypatch, budget_s=2.0), now_ms=now_ms)
+
+    assert store.deadline_passed(_scope(fake, clock, monkeypatch, budget_s=0.0)) is True
+    assert clock.t >= 1000.0 + 2.0, "the deadline had passed before the tail was read"
+    assert _fingerprint(read) == _expected(book, _START_MS, now_ms)
+    assert _stored_starts(fake) == {_window_start(0), _window_start(1)}
+
+
+# --------------------------------------------------------------------------- store faults
+
+
+class _StoreDown(FakeSupabaseClient):
+    """A database whose trade-read tables do not exist (the worker deployed before the migration
+    applied). The error text carries a planted signature: nothing may log it."""
+
+    def table(self, name: str) -> Any:
+        if name in (store.STATE_TABLE, store.WINDOW_TABLE):
+            raise APIError(
+                {"code": "42P01", "message": f"relation does not exist {_SIGNATURE}", "details": None, "hint": None}
+            )
+        return super().table(name)
+
+
+class _WindowWritesRefused(FakeSupabaseClient):
+    """A database that answers every read but refuses every write to the windows table."""
+
+    def table(self, name: str) -> Any:
+        inner = super().table(name)
+        if name != store.WINDOW_TABLE:
+            return inner
+
+        class _Refusing:
+            def __getattr__(self, attr: str) -> Any:
+                if attr in ("upsert", "delete", "insert"):
+                    raise APIError(
+                        {"code": "57014", "message": f"write refused {_SIGNATURE}", "details": None, "hint": None}
+                    )
+                return getattr(inner, attr)
+
+        return _Refusing()
+
+
+def _store_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records
+        if r.name == "quantalyze.analytics.trade_read_store" and r.levelno == logging.WARNING
+    ]
+
+
+async def _run_with_database(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient, book: list[dict[str, Any]], budget_s: float
+) -> tuple[Any, Any, Any, _Clock]:
+    clock = _Clock()
+    monkeypatch.setattr(store, "_monotonic", lambda: clock.t)
+    monkeypatch.setattr(er, "_TRADE_READ_CLAIM_BUDGET_S", budget_s)
+    monkeypatch.setattr(er, "_BYBIT_WINDOW_PAGE_CEILING", 2)
+    _freeze_now_at(monkeypatch, END_DATE)
+    _seed_key(fake, API_KEY_ID_1, exchange="bybit", attempts=0)
+    exchange = await _venue(book, clock)
+    audit = _install(monkeypatch, fake, exchange)
+    result = await er.run_reconstruct_allocator_history_job(_claim_job("T1"))
+    return result, exchange, audit, clock
+
+
+async def test_a_store_fault_reads_the_book_without_the_store(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-171-34. The worker can run before the migration applies, so the tables may not exist. A
+    Bybit reconstruct must then end exactly as it did before the store existed: with a budget
+    small enough that a working store WOULD defer, the job still reads the whole book in one pass
+    (the same venue requests as layer 1 alone, no budget), makes no ``defer_compute_job`` call and
+    persists the same rows. The store logs its fault once, by class name, never by the error text."""
+    book = _big_book()
+    oracle_rows, single_pass_calls = await _single_pass(monkeypatch, book)
+
+    caplog.set_level(logging.INFO)
+    caplog.clear()
+    fake = _StoreDown()
+    result, exchange, audit, _clock = await _run_with_database(monkeypatch, fake, book, budget_s=45.0)
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert not _defer_calls(fake)
+    assert exchange.fetch_my_trades.await_count == single_pass_calls
+    assert _snapshots(fake) == oracle_rows
+    assert not _failure_audits(audit)
+    faults = [r for r in _store_warnings(caplog) if "this claim reads without the store" in r.getMessage()]
+    assert len(faults) == 1
+    assert "APIError" in faults[0].getMessage()
+    assert all("APIError" in r.getMessage() for r in _store_warnings(caplog))
+    assert not [r for r in caplog.records if _SIGNATURE in r.getMessage()]
+
+
+async def test_a_store_fault_on_save_keeps_the_trades_in_the_claim(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-171-34. The store answers but refuses every window write: ``save_window`` returns False,
+    each window stays unstored and its trades stay in this claim's read, so with a budget that
+    never runs out the job completes with the rows one unscoped read persists. No window row exists."""
+    book = _big_book()
+    oracle_rows, _single_pass_calls = await _single_pass(monkeypatch, book)
+
+    caplog.set_level(logging.INFO)
+    caplog.clear()
+    fake = _WindowWritesRefused()
+    result, _exchange, audit, _clock = await _run_with_database(monkeypatch, fake, book, budget_s=1e9)
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert not _defer_calls(fake)
+    assert _snapshots(fake) == oracle_rows
+    assert not fake.rows_for(store.WINDOW_TABLE)
+    assert not _failure_audits(audit)
+    assert not [r for r in caplog.records if _SIGNATURE in r.getMessage()]
+
+
+# --------------------------------------------------------------------------- the budget, hygiene
+
+
+def test_the_claim_budget_must_sit_below_the_crawl_bound() -> None:
+    """The soft budget is only soft if the hard bound can still fire after it: a budget at or above
+    the bound, one that is not positive, and text that is not a number all fail the import."""
+    assert er._validated_claim_budget("900", 1500.0) == 900.0
+    assert er._validated_claim_budget(None, 1500.0) == 900.0
+    for bad in ("0", "-1", "1500", "1500.5", "nan", "abc", ""):
+        with pytest.raises(ValueError):
+            er._validated_claim_budget(bad, 1500.0)
+    assert 0.0 < er._TRADE_READ_CLAIM_BUDGET_S < er._RECONSTRUCT_CRAWL_TIMEOUT_S
+
+
+async def test_no_deferral_text_carries_venue_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-171-24. A signature planted in every trade's ``info`` (venue text) reaches no log record,
+    no audit call, no RPC argument and no stored row, across a deferred claim and the claim that
+    completes."""
+    book = _big_book(signature=True)
+    clock = _Clock()
+    fake = _rig(monkeypatch, clock, budget_s=45.0)
+    exchange = await _venue(book, clock)
+    audit = _install(monkeypatch, fake, exchange)
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+
+    first = await er.run_reconstruct_allocator_history_job(_claim_job("T1"))
+    stored_after_first = repr(_store_rows(fake))
+    monkeypatch.setattr(er, "_TRADE_READ_CLAIM_BUDGET_S", 1e9)
+    second = await er.run_reconstruct_allocator_history_job(_claim_job("T2"))
+
+    assert (first.outcome, second.outcome) == (DispatchOutcome.DEFERRED, DispatchOutcome.DONE)
+    assert _defer_calls(fake), "the claim did defer"
+    assert _SIGNATURE not in stored_after_first
+    assert _SIGNATURE not in repr(fake.rpc_calls)
+    assert _SIGNATURE not in repr(audit.call_args_list)
+    assert not [r for r in caplog.records if _SIGNATURE in r.getMessage() or _SIGNATURE in repr(r.args)]
+
+
+def test_the_store_names_match_the_migration() -> None:
+    """The store writes columns by NAME and the migration declares them: a rename on either side
+    alone would make every write fail at the first claim. Read straight from plan 03's file."""
+    repo_root = Path(__file__).resolve().parents[2]
+    (migration,) = (repo_root / "supabase" / "migrations").glob("*_allocator_trade_reads.sql")
+    sql = "\n".join(
+        line for line in migration.read_text().splitlines() if not line.lstrip().startswith("--")
+    )
+    blocks = dict(
+        re.findall(r"CREATE TABLE public\.(allocator_trade_read\w*)\s*\((.*?)\n\);", sql, re.DOTALL)
+    )
+    assert set(blocks) == {store.STATE_TABLE, store.WINDOW_TABLE}
+
+    def _columns(block: str) -> set[str]:
+        # A column line is indented two spaces and starts with a lowercase name; constraints,
+        # keys and their continuation lines start with a keyword or sit deeper.
+        return set(re.findall(r"^  ([a-z][a-z0-9_]*)\s+[A-Z]", block, re.MULTILINE))
+
+    assert _columns(blocks[store.STATE_TABLE]) == set(store.STATE_COLUMNS)
+    assert _columns(blocks[store.WINDOW_TABLE]) == set(store.WINDOW_COLUMNS)
+
+
+async def test_an_unscoped_read_is_layer_one_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a scope (the probe, any caller that sets none), and with a scope that names no job,
+    the Bybit read is plan 02's layer 1: one request per window, tiled from the start, and not one
+    store call. The expected requests are written out here, not taken from the code under test."""
+    for name in ("begin_claim", "load_window", "save_window", "record_progress", "purge_keys"):
+        async def _forbidden(*_a: Any, **_k: Any) -> Any:
+            raise AssertionError("the store was reached by an unscoped read")
+
+        monkeypatch.setattr(store, name, _forbidden)
+    book = _spread_book(range(0, 3))
+    now_ms = _START_MS + 20 * DAY_MS
+    expected_windows = []
+    w_start = _START_MS
+    while w_start <= now_ms:
+        expected_windows.append((w_start, min(w_start + BYBIT_WINDOW_MS - 1, now_ms)))
+        w_start = expected_windows[-1][1] + 1
+
+    unscoped = _clocked_exchange(book, _Clock())
+    read = await er._fetch_bybit_trades(unscoped, _START_MS, now_ms)
+
+    assert [
+        (c.args[1], c.args[3]["until"]) for c in unscoped.fetch_my_trades.await_args_list
+    ] == expected_windows
+    assert _fingerprint(read) == _expected(book, _START_MS, now_ms)
+
+    clock = _Clock()
+    jobless = _clocked_exchange(book, clock)
+    refusing = _StoreDown()
+    read_again = await _read(
+        jobless, _scope(refusing, clock, monkeypatch, budget_s=0.0, job_id=None), now_ms=now_ms
+    )
+    assert jobless.fetch_my_trades.await_args_list == unscoped.fetch_my_trades.await_args_list
+    assert _fingerprint(read_again) == _fingerprint(read)
