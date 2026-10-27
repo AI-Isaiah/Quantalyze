@@ -795,7 +795,14 @@ async def _read_bybit_window(
                 or (added == 0 and (boundary is None or any(ts < boundary for ts in stamps)))
             ):
                 if len(page) < _TRADE_PAGE_LIMIT:
-                    return False  # TRADEPAGES D-02: a short page that does not advance ends the window
+                    # TRADEPAGES D-02: a short page that does not advance ends the window. Not
+                    # refused, but said once (counts only): the venue handed back a cursor.
+                    logger.warning(
+                        "bybit trade window ended on a page that did not advance "
+                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                        age_days, len(page), len(trades),
+                    )
+                    return False
                 break  # a FULL stalled page ends the segment; the window is continued by time below
             cursor = nxt
             await _rate_limit_sleep(exchange)
