@@ -20,6 +20,7 @@ copy (e.g. "Only 3 months of history available on OKX").
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 # WR-01 — `math.isfinite` guards the MT5 NAV anchor in `_mt5_fetch_window`. This
@@ -42,6 +43,7 @@ import pandas as pd
 import sentry_sdk
 from postgrest.exceptions import APIError
 
+from services import trade_read_store as store
 from services.account_identity import VENUES_WITH_ACCOUNT_ID
 from services.allocator_positions import read_native_unpriced_days
 from services.allocator_equity_derive import (
@@ -78,6 +80,7 @@ from services.job_worker import (
     _ExchangeContext,
     _allocator_key_preflight,
     _emit_audit,
+    _defer_lost_ownership,
     _stamp_429,
     classify_exception,
 )
@@ -114,7 +117,11 @@ BACKFILL_CAP_DAYS: int = 730                # 2 years (RESEARCH.md §1E recommen
 # page shorter than the requested limit.
 _TRADE_PAGE_LIMIT: Final[int] = 100          # Bybit and OKX page cap, sent explicitly (vendor docs, RESEARCH Q2)
 _BYBIT_TRADE_WINDOW_MS: Final[int] = 7 * 24 * 60 * 60 * 1000  # Bybit: endTime - startTime <= 7 days (vendor doc, RESEARCH Q2)
-_BYBIT_WINDOW_PAGE_CEILING: Final[int] = 100  # pages per 7-day window before the read gives up loudly (RESEARCH Q2)
+_BYBIT_WINDOW_PAGE_CEILING: Final[int] = 100  # pages per SEGMENT of a 7-day window (RESEARCH Q2); a window above it is continued by time
+# READCEILING (Phase 171): a 7-day window is read as segments of at most the page ceiling above.
+# This bounds the segments of ONE window, so a venue whose timestamps fall forever still ends
+# loudly (about 10^6 rows per window; RESEARCH section 3).
+_BYBIT_WINDOW_SEGMENT_CEILING: Final[int] = 100
 _TRADE_PASS_PAGE_CEILING: Final[int] = 500    # pages per walk of the other-venue read (the bound the loop always had)
 # A read cut short (page ceiling, a full page that did not advance, NotSupported mid-walk) raises
 # this ccxt.BadRequest instead of returning a partial list that a rebuild would persist as the whole
@@ -123,12 +130,30 @@ _TRADE_PASS_PAGE_CEILING: Final[int] = 500    # pages per walk of the other-venu
 _TRUNCATED_READ_MESSAGE: Final[str] = (
     "the trade read was cut short before the venue ran out of trades; nothing was kept"
 )
+# READCEILING (Phase 171, D-01): the closed set of places a trade read can be cut short, one
+# token per raise-site kind. Each is written as a literal at its raise site (a test scans for
+# them), and the allocator history probe declares the same nine names.
+TRUNCATED_READ_SITES: Final[frozenset[str]] = frozenset({
+    "bybit_not_supported", "bybit_no_advance", "bybit_segment_ceiling",
+    "okx_not_supported", "okx_no_advance", "okx_page_ceiling",
+    "generic_not_supported", "generic_no_advance", "generic_page_ceiling",
+})
 
 
 class TruncatedTradeRead(ccxt.BadRequest):  # type: ignore[misc]  # ccxt is untyped
     """A trade read cut short, raised at the truncation sites only. It is a BadRequest, so
     every disposition is unchanged; the allocator history probe tells it apart from the
-    two-year guard and from a venue rejection by this class."""
+    two-year guard and from a venue rejection by this class.
+
+    ``site`` is a closed token from ``TRUNCATED_READ_SITES`` naming which stop fired (D-01);
+    the probe prints it. A site outside the set is a programming error and raises
+    ``ValueError`` at construction."""
+
+    def __init__(self, message: str, *, site: str) -> None:
+        if site not in TRUNCATED_READ_SITES:
+            raise ValueError(f"unknown truncated-read site: {site!r}")
+        super().__init__(message)
+        self.site = site
 
 # FLIPRETRY-01 (defensive half, A4 mitigation) — hard per-crawl wall-clock bound
 # for the reconstruct orchestrating crawl. run_reconstruct_allocator_history_job
@@ -144,6 +169,39 @@ class TruncatedTradeRead(ccxt.BadRequest):  # type: ignore[misc]  # ccxt is unty
 _RECONSTRUCT_CRAWL_TIMEOUT_S: float = float(
     os.getenv("RECONSTRUCT_CRAWL_TIMEOUT_S", "1500")
 )
+
+
+def _validated_claim_budget(raw: str | None, hard_bound: float) -> float:
+    """The soft claim budget (seconds) of a resumable trade read, validated.
+
+    READCEILING (Phase 171, D-02). ``raw`` is the ``TRADE_READ_CLAIM_BUDGET_S`` text (None gives
+    the 900 s default). The budget is a SOFT bound, checked only before a window that could be
+    stored, so it must sit strictly inside the hard ``asyncio.wait_for`` bound (``hard_bound``)
+    or it could never fire first. Raises ``ValueError`` on text that is not a number, a budget
+    that is not positive, and one at or above the hard bound (NaN fails both comparisons). The
+    check runs at import, like the crawl bound's own env override, so a bad value fails the
+    deploy instead of a claim. The message is static.
+    """
+    budget = 900.0 if raw is None else float(raw)
+    if not 0.0 < budget < hard_bound:
+        raise ValueError(
+            "TRADE_READ_CLAIM_BUDGET_S must be positive and below the reconstruct crawl bound"
+        )
+    return budget
+
+
+# READCEILING (Phase 171, D-02): the soft per-claim read budget, taken ONCE before the crawl and
+# checked only at a window boundary (``_read_bybit_trades_resumable``). The hard
+# ``asyncio.wait_for`` bound above is unchanged and still ends a claim that overruns it.
+_TRADE_READ_CLAIM_BUDGET_S: float = _validated_claim_budget(
+    os.getenv("TRADE_READ_CLAIM_BUDGET_S"), _RECONSTRUCT_CRAWL_TIMEOUT_S
+)
+#: How long a deferred reconstruct waits before its next claim (``defer_compute_job`` raises
+#: above 3600 s).
+_TRADE_READ_DEFER_S: Final[int] = 120
+#: A grid window ends this long before now at the earliest to be STORABLE: the window holding
+#: now, and the hour before it, are still receiving trades and are always read live.
+_STORE_SETTLE_MS: Final[int] = 3_600_000
 COINGECKO_BASE: str = "https://api.coingecko.com/api/v3"
 COINGECKO_MIN_SLEEP_SECS: float = 2.0       # stay below 30 RPM free tier
 
@@ -634,6 +692,148 @@ def _next_page_cursor(page: list[dict[str, Any]]) -> str | None:
     return None
 
 
+async def _read_bybit_window(
+    exchange: Any,
+    w_start: int,
+    w_end: int,
+    now_ms: int,
+    trades: list[dict[str, Any]],
+    seen: set[Any],
+    *,
+    earlier_rows: int = 0,
+) -> bool:
+    """Read one Bybit window ``[w_start, w_end]`` whole into ``trades`` (READCEILING, Phase 171).
+
+    A SEGMENT is the cursor walk of old: at most ``_BYBIT_WINDOW_PAGE_CEILING`` pages on
+    ``[w_start, end]``, the first sent with no cursor. The window ends only on an empty page (but
+    not the first page of a continuation segment, which holds the rows already read and so is
+    refused as ``bybit_no_advance`` when empty) or
+    on a page with no cursor (a FULL page with none logs one WARNING and is not refused: a final
+    page of exactly one page's rows has no cursor either). A page fetched WITH a cursor is
+    stalled when it returns the cursor it was sent or adds no new row although it holds one
+    OLDER than the oldest timestamp read before the segment began (in a window's first segment:
+    any row). A stalled SHORT page ends the window (TRADEPAGES D-02); a stalled FULL page ends
+    its segment only. The first pages of a later segment re-read the old
+    boundary by design, so a page that adds nothing while every row sits at or above that
+    boundary is not stalled.
+
+    A segment that ends without the window ending is CONTINUED BY TIME, never by a cursor
+    (no cursor is relied on across segments): with ``oldest`` the oldest timestamp read in the
+    window, (1) when ``oldest + 1`` is below the current end, a new cursor-less segment starts
+    on ``[w_start, oldest + 1]``, safe under an inclusive or an exclusive end bound, and id
+    dedupe absorbs the rows read twice; (2) else, once per value of ``oldest``, when the segment
+    returned a row newer than ``oldest`` (proof the end bound is inclusive, so the rows at
+    ``oldest + 1`` took segment capacity) a segment starts on ``[w_start, oldest]``, the OKX
+    walk's own one-time retry; under an exclusive end that would skip the rest of a group at
+    ``oldest``, which is why the proof is required first; (3) else the end bound cannot be
+    lowered: one counts-only WARNING and ``TruncatedTradeRead`` (``bybit_no_advance``). More
+    than ``_BYBIT_WINDOW_SEGMENT_CEILING`` segments end the same way (``bybit_segment_ceiling``).
+    What it cannot pass: more than one segment's rows at ONE millisecond.
+
+    Returns True when the venue ran out of trades (an empty page, or a short page with no cursor)
+    and False when the window ended on an UNCERTAIN stop (a full page with no cursor, or a short
+    page that repeated its cursor or added nothing): the rows are read, but a caller that keeps
+    windows for later claims must not keep one that may be partial (T-171-04).
+
+    ``NotSupported`` after any row was read raises (``bybit_not_supported``); before any row it
+    propagates so ``_fetch_bybit_trades`` can return the empty book. A row counts as read when it
+    is in ``trades`` or among the ``earlier_rows`` the caller read in earlier windows into other
+    lists (the resumable read keeps one list per window). ``now_ms`` only labels the
+    ``window_age_days`` field of the WARNINGs, which carry counts and class names, never venue text.
+    """
+    age_days = max(0, (now_ms - w_start) // 86_400_000)
+    end = w_end
+    oldest: int | None = None  # the oldest timestamp read in this window so far
+    retried_at: int | None = None  # the value of ``oldest`` the one inclusive-end retry was spent on
+    for _segment in range(_BYBIT_WINDOW_SEGMENT_CEILING):
+        boundary = oldest  # the oldest timestamp read before this segment began
+        segment_newest: int | None = None
+        cursor: str | None = None
+        page_rows = 0
+        empty_continuation = False
+        for _ in range(_BYBIT_WINDOW_PAGE_CEILING):
+            params: dict[str, Any] = {"until": end}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                page = await exchange.fetch_my_trades(
+                    None, w_start, _TRADE_PAGE_LIMIT, params,
+                )
+            except ccxt.NotSupported:
+                if trades or earlier_rows:
+                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_not_supported") from None
+                raise
+            page = page or []
+            if not page:
+                if _segment > 0 and cursor is None:
+                    # A continuation segment asks for ``[w_start, oldest + 1]`` (or ``oldest``),
+                    # which holds the rows already read at ``oldest``: empty means the venue
+                    # misbehaved. No time bound can fix that, so it takes the no-advance stop below.
+                    empty_continuation = True
+                    break
+                return True
+            page_rows = len(page)
+            added = _extend_unseen(trades, seen, page)
+            stamps = [int(t["timestamp"]) for t in page if t.get("timestamp") is not None]
+            if stamps:
+                oldest = min(stamps) if oldest is None else min(oldest, min(stamps))
+                newest = max(stamps)
+                segment_newest = newest if segment_newest is None else max(segment_newest, newest)
+            nxt = _next_page_cursor(page)
+            if not nxt:
+                if len(page) >= _TRADE_PAGE_LIMIT:
+                    # Not refused: a final page of exactly one page's rows has no cursor too.
+                    logger.warning(
+                        "bybit trade window ended on a full page with no cursor "
+                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                        age_days, len(page), len(trades),
+                    )
+                    return False
+                return True
+            if cursor is not None and (
+                nxt == cursor
+                or (added == 0 and (boundary is None or any(ts < boundary for ts in stamps)))
+            ):
+                if len(page) < _TRADE_PAGE_LIMIT:
+                    # TRADEPAGES D-02: a short page that does not advance ends the window. Not
+                    # refused, but said once (counts only): the venue handed back a cursor.
+                    logger.warning(
+                        "bybit trade window ended on a page that did not advance "
+                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                        age_days, len(page), len(trades),
+                    )
+                    return False
+                break  # a FULL stalled page ends the segment; the window is continued by time below
+            cursor = nxt
+            await _rate_limit_sleep(exchange)
+        if not empty_continuation and oldest is not None and oldest + 1 < end:
+            end = oldest + 1
+        elif (
+            not empty_continuation
+            and oldest is not None
+            and oldest < end
+            and retried_at != oldest
+            and segment_newest is not None
+            and segment_newest > oldest
+        ):
+            retried_at = oldest
+            end = oldest
+        else:
+            logger.warning(
+                "bybit trade window stopped on a page that did not advance "
+                "venue=bybit window_age_days=%d page_rows=%d rows=%d",
+                age_days, page_rows, len(trades),
+            )
+            raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_no_advance")
+        await _rate_limit_sleep(exchange)
+    logger.warning(
+        "bybit trade window hit the segment ceiling "
+        "venue=bybit window_age_days=%d segments=%d rows=%d",
+        age_days, _BYBIT_WINDOW_SEGMENT_CEILING, len(trades),
+    )
+    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_segment_ceiling")
+
+
 async def _fetch_bybit_trades(
     exchange: Any, since_ms: int, now_ms: int,
 ) -> list[dict[str, Any]]:
@@ -641,20 +841,30 @@ async def _fetch_bybit_trades(
 
     Bybit answers a request that carries only a start as the 7 days after it, so a
     quiet first week reads as an empty book. Each request therefore names a start
-    AND an end at most 7 days apart, the windows tile the range, and a window is
-    paged with Bybit's cursor. A window ends on an empty page, on no cursor, on a
-    page that adds no new row, or on a cursor equal to the previous one; it never
-    ends on a short page. When a window stops on a full page for a reason other
-    than reaching its end, or hits the page ceiling, one WARNING (counts only, never
-    venue text) is logged and the read raises ``ccxt.BadRequest``: a partial list
-    would be persisted as the whole history. A window that ends on a FULL page with no
-    cursor logs the same kind of WARNING but is not refused, because a final page of
-    exactly one page's rows legitimately has no cursor.
+    AND an end at most 7 days apart, the windows tile the range, and each window is
+    read by ``_read_bybit_window``: paged with Bybit's cursor in segments of at most
+    ``_BYBIT_WINDOW_PAGE_CEILING`` pages, and a window holding more than one segment is
+    CONTINUED BY TIME (the end bound is lowered to one millisecond past the oldest trade
+    read and a new cursor-less segment starts; no cursor is relied on across segments, and
+    id dedupe absorbs the overlap), Phase 171 READCEILING. A window never ends on a short
+    page. A segment that cannot lower the window's end bound, and a window of more than
+    ``_BYBIT_WINDOW_SEGMENT_CEILING`` segments, log one WARNING (counts only, never venue
+    text) and raise ``TruncatedTradeRead`` carrying a typed ``site``: a partial list would be
+    persisted as the whole history. More than one segment of executions at a SINGLE
+    millisecond cannot be passed by any timestamp bound, and stays that loud stop.
 
     A read whose start is older than Bybit's two-year limit (``BYBIT_TRADE_TERMINUS_DAYS``)
     at ``now_ms`` is refused here, before any request. The window is fixed when the job starts
     (``_bybit_window_start``, 729 days back) and ``now_ms`` is taken when the crawl begins, so a
     job that began before 00:00 UTC and reads after it asks for a start 730 days old.
+
+    Resumable read (READCEILING D-02). When the enclosing crawl set a ``TradeReadScope`` that
+    names both the api key and the job (``store.current_trade_read_scope()``), the read keeps
+    its progress between claims in the trade-read store (``_read_bybit_trades_resumable``).
+    Without a scope (the allocator history probe, any caller that sets none), and when the store
+    is unavailable (``begin_claim`` answers None: a store fault, including the tables not
+    existing yet because the worker deployed before the migration applied), it is the read
+    above exactly: no budget, no deferral, no store call.
     """
     if since_ms < now_ms - BYBIT_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000:
         # Refuse, never clamp: a clamp would start the trades after the curve starts, and the
@@ -670,60 +880,142 @@ async def _fetch_bybit_trades(
         raise ccxt.BadRequest(
             "bybit trade window starts before the venue's two-year limit; nothing was read"
         )
+    scope = store.current_trade_read_scope()
+    if scope is not None and scope.api_key_id is not None and scope.job_id is not None:
+        return await _read_bybit_trades_resumable(exchange, since_ms, now_ms, scope, scope.api_key_id)
+    return await _read_bybit_range(exchange, since_ms, now_ms)
+
+
+async def _read_bybit_range(
+    exchange: Any, since_ms: int, now_ms: int,
+) -> list[dict[str, Any]]:
+    """The layer-1 read of ``[since_ms, now_ms]``: 7-day windows tiled from ``since_ms``, each
+    read whole by ``_read_bybit_window``, one trade list and one id set for the range."""
     trades: list[dict[str, Any]] = []
     seen: set[Any] = set()
     w_start = since_ms
     while w_start <= now_ms:
         w_end = min(w_start + _BYBIT_TRADE_WINDOW_MS - 1, now_ms)
-        cursor: str | None = None
-        for _ in range(_BYBIT_WINDOW_PAGE_CEILING):
-            params: dict[str, Any] = {"until": w_end}
-            if cursor:
-                params["cursor"] = cursor
-            try:
-                page = await exchange.fetch_my_trades(
-                    None, w_start, _TRADE_PAGE_LIMIT, params,
-                )
-            except ccxt.NotSupported:
-                if trades:
-                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
-                return trades
-            page = page or []
-            if not page:
-                break
-            added = _extend_unseen(trades, seen, page)
-            nxt = _next_page_cursor(page)
-            if not nxt:
-                if len(page) >= _TRADE_PAGE_LIMIT:
-                    # Not refused: a final page of exactly one page's rows has no cursor too.
-                    logger.warning(
-                        "bybit trade window ended on a full page with no cursor "
-                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
-                        max(0, (now_ms - w_start) // 86_400_000), len(page), len(trades),
-                    )
-                break
-            if added == 0 or nxt == cursor:
-                if len(page) >= _TRADE_PAGE_LIMIT:
-                    logger.warning(
-                        "bybit trade window stopped on a page that did not advance "
-                        "venue=bybit window_age_days=%d page_rows=%d rows=%d",
-                        max(0, (now_ms - w_start) // 86_400_000), len(page), len(trades),
-                    )
-                    raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
-                break
-            cursor = nxt
-            await _rate_limit_sleep(exchange)
-        else:
-            logger.warning(
-                "bybit trade window hit the page ceiling "
-                "venue=bybit window_age_days=%d pages=%d rows=%d",
-                max(0, (now_ms - w_start) // 86_400_000),
-                _BYBIT_WINDOW_PAGE_CEILING, len(trades),
-            )
-            raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+        try:
+            await _read_bybit_window(exchange, w_start, w_end, now_ms, trades, seen)
+        except ccxt.NotSupported:
+            return trades  # raised only before any row was read, so this is the empty book
         w_start = w_end + 1
         await _rate_limit_sleep(exchange)
     return trades
+
+
+def _as_stored_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    """The trade as the store keeps it (the seven projected fields), so a window read in this
+    claim and one loaded from the store reach the replay in ONE shape. A trade that does not
+    project (the store refuses it too) is kept as the venue sent it, as the layer-1 read does."""
+    try:
+        return store.unproject_trade(store.project_trade(trade))
+    except ValueError:
+        return trade
+
+
+async def _read_bybit_trades_resumable(
+    exchange: Any,
+    since_ms: int,
+    now_ms: int,
+    scope: store.TradeReadScope,
+    api_key_id: str,
+) -> list[dict[str, Any]]:
+    """The Bybit read of ``[since_ms, now_ms]`` that keeps its progress between claims
+    (READCEILING, Phase 171, D-02; RESEARCH sections 2 and 4).
+
+    The range is tiled on a GRID: ``origin + k * _BYBIT_TRADE_WINDOW_MS``, with ``origin`` the
+    first claim's start (``ReadState.grid_origin_ms``), so windows stay aligned while the
+    start moves forward a day at a time. Only grid windows overlapping the range are visited,
+    oldest first. Per window:
+
+    1. stored and ``load_window`` returns rows: use them (no venue request);
+    2. else, if the window is STORABLE (it starts at or after ``since_ms`` and ends more than
+       ``_STORE_SETTLE_MS`` before now): when the claim budget is spent, raise
+       ``TradeReadDeferred`` (the handler defers the job; the windows stored so far stay), or
+       ``TradeReadStalled("job_age")`` when the job is 24 h or older (the handler fails it;
+       the windows stay for a later job);
+       otherwise read it whole over its grid bounds, then keep it (``save_window``; False
+       leaves it unstored, its trades stay in this claim's output) and, on the first save of
+       the claim, ``record_progress``;
+    3. else (the window holding now, or a grid window that starts before ``since_ms``) read it
+       live over ``[max(ws, since_ms), min(grid end, now_ms)]``: never stored, never subject to
+       the budget, so a claim that reaches the tail always finishes it.
+
+    The budget is therefore SOFT: checked only before a window that could be stored. Every
+    window's trades enter the output in the store's shape (``_as_stored_trade``), in window and
+    read order, so the replay over the claims' union is the replay over one pass. A stored
+    window that starts before ``since_ms`` is cut to ``timestamp >= since_ms``. When every window
+    is covered, ``record_progress`` runs (completion is progress) and the list is returned.
+    ``NotSupported`` keeps layer 1's meaning: the empty book when no trade was read at all (a
+    stored window's trades count as read), otherwise ``TruncatedTradeRead`` (``bybit_not_supported``).
+
+    ``begin_claim`` answers None on a store fault: the read is then ``_read_bybit_range`` for
+    the whole range (no budget, no store call, no extra log line: the store logged once).
+    ``begin_claim`` may raise ``TradeReadStalled`` (a decision, not a fault), as the job-age
+    check above does.
+    """
+    supabase = scope.supabase
+    state = await store.begin_claim(
+        supabase, api_key_id, venue="bybit", since_ms=since_ms, job_id=scope.job_id
+    )
+    if state is None:
+        return await _read_bybit_range(exchange, since_ms, now_ms)
+
+    origin = state.grid_origin_ms
+    first = (since_ms - origin) // _BYBIT_TRADE_WINDOW_MS
+    last = (now_ms - origin) // _BYBIT_TRADE_WINDOW_MS
+    windows_total = last - first + 1
+    output: list[dict[str, Any]] = []
+    trades_read = 0  # every trade read or loaded so far, before the since_ms cut
+    windows_kept = 0  # windows now held in the store
+    trades_kept = 0
+    progress_recorded = False
+    for k in range(first, last + 1):
+        ws = origin + k * _BYBIT_TRADE_WINDOW_MS
+        grid_end = ws + _BYBIT_TRADE_WINDOW_MS - 1
+        window: list[dict[str, Any]] | None = None
+        meta = state.stored.get(ws)
+        if meta is not None:
+            window = await store.load_window(supabase, api_key_id, meta)
+            if window is not None:
+                windows_kept += 1
+                trades_kept += len(window)
+        if window is None:
+            storable = ws >= since_ms and grid_end < now_ms - _STORE_SETTLE_MS
+            if storable:
+                if store.deadline_passed(scope):
+                    # The only other stop besides ``begin_claim``'s stalled-claims count: a defer
+                    # burns no attempt, so a job that has waited a day stops here by name instead
+                    # of deferring forever (its stored windows are kept for a later job).
+                    if store.job_too_old(scope):
+                        raise store.TradeReadStalled("job_age", state.claims)
+                    raise store.TradeReadDeferred(windows_kept, windows_total, trades_kept)
+                read_from, read_to = ws, grid_end
+            else:
+                read_from, read_to = max(ws, since_ms), min(grid_end, now_ms)
+            fresh: list[dict[str, Any]] = []
+            try:
+                complete = await _read_bybit_window(
+                    exchange, read_from, read_to, now_ms, fresh, set(), earlier_rows=trades_read
+                )
+            except ccxt.NotSupported:
+                return []  # raised only when no row was read at all: the empty book
+            if storable and complete and await store.save_window(supabase, api_key_id, ws, grid_end, fresh):
+                windows_kept += 1
+                trades_kept += len(fresh)
+                if not progress_recorded:
+                    await store.record_progress(supabase, api_key_id)
+                    progress_recorded = True
+            window = [_as_stored_trade(t) for t in fresh]
+            await _rate_limit_sleep(exchange)
+        trades_read += len(window)
+        if ws < since_ms:
+            window = [t for t in window if (t.get("timestamp") or 0) >= since_ms]
+        output.extend(window)
+    await store.record_progress(supabase, api_key_id)
+    return output
 
 
 async def _fetch_trades_with_pagination(
@@ -826,7 +1118,7 @@ async def _fetch_okx_inst_type_trades(
             )
         except ccxt.NotSupported:
             if trades:
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="okx_not_supported") from None
             return trades
         page = page or []
         if not page:
@@ -850,7 +1142,7 @@ async def _fetch_okx_inst_type_trades(
                     "venue=okx inst_type=%s page_rows=%d rows=%d",
                     inst_type, len(page), len(trades),
                 )
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="okx_no_advance")
             next_end_ms = oldest_seen
         end_ms = next_end_ms
         await _rate_limit_sleep(exchange)
@@ -859,7 +1151,7 @@ async def _fetch_okx_inst_type_trades(
             "okx trade pass hit the page ceiling venue=okx inst_type=%s pages=%d rows=%d",
             inst_type, _TRADE_PASS_PAGE_CEILING, len(trades),
         )
-        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="okx_page_ceiling")
     return trades
 
 
@@ -897,7 +1189,7 @@ async def _fetch_trades_paginated_one_pass(
             )
         except ccxt.NotSupported:
             if all_trades:
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE) from None
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="generic_not_supported") from None
             return all_trades
         page = page or []
         if not page:
@@ -912,7 +1204,7 @@ async def _fetch_trades_paginated_one_pass(
                     "venue=%s rows=%d page_rows=%d",
                     venue, len(all_trades), len(page),
                 )
-                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+                raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="generic_no_advance")
             break
         # A row with no id is never absorbed by ``_extend_unseen``, so step past the newest
         # timestamp when any row lacks one; the cursor never moves backwards.
@@ -927,7 +1219,7 @@ async def _fetch_trades_paginated_one_pass(
             "trade read hit the page ceiling venue=%s pages=%d rows=%d",
             venue, _TRADE_PASS_PAGE_CEILING, len(all_trades),
         )
-        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE)
+        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="generic_page_ceiling")
     return all_trades
 
 
@@ -2175,7 +2467,7 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
 # writes a curve only when that curve is anchored to today's venue equity INCLUDING the
 # open-position uPnL. Any other outcome refuses: the job fails (error_kind "permanent", PD-I:
 # no automatic re-crawl) and nothing is written. This is the closed set of reasons; the
-# post-deploy handoff matches the "forced rebuild refused (" prefix and these 15 tokens, and
+# post-deploy handoff matches the "forced rebuild refused (" prefix and these 16 tokens, and
 # a test pins both halves. The unforced path is untouched (PD-B).
 #
 # Phase 167.2.1.1.2 (UPNLVENUES D-04, D-02 of this phase): the rebuild is now WHOLE-ACCOUNT,
@@ -2185,6 +2477,11 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
 # old sole-key path (multi_key, sibling_lookup_failed, replay_empty, history_outside_replay)
 # left the set with it, and their raise sites left the handler with the unified forced path
 # (decision AR-7): a test pins that every token raised in this module is in the set.
+#
+# 2026-10-27, Phase 171 READCEILING: the set gained its 16th token, ``account_key_read_stalled``
+# (a member's resumable trade read made no progress across claims, or its job reached the 24 h
+# backstop). The stored windows are KEPT, so a later run can clear it; that is why the handoff
+# lists it with the re-enqueue-once tokens.
 FORCED_REBUILD_ANCHOR_REASONS: Final[frozenset[str]] = frozenset(
     {
         "positions_unreadable",
@@ -2206,6 +2503,7 @@ FORCED_REBUILD_ACCOUNT_REASONS: Final[frozenset[str]] = frozenset(
         "account_sum_empty",
         "account_keys_changed",
         "history_days_unreproduced",
+        "account_key_read_stalled",
     }
 )
 FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = (
@@ -5263,6 +5561,13 @@ async def _crawl_account_key(
     limit is stamped on the key (so the circuit breaker parks it) and re-raised unchanged;
     the caller is the only place that converts a non-refusal failure. An empty curve refuses
     ``account_key_no_rows``: summing would otherwise treat the account as having no days.
+
+    READCEILING (Phase 171, D-02) member binding: under a trade-read scope (the forced handler
+    sets one around the account crawl) a non-MT5 member's read runs in a copy of that scope
+    naming THIS member's key id, so a Bybit member keeps and reuses its own windows in the
+    trade-read store and the job's key is never borrowed for a sibling. The scope rides a
+    ContextVar, so the pinned crawl call keeps its exact keywords (PD-J). The read may end in
+    ``store.TradeReadDeferred``; it propagates unchanged (``_crawl_whole_account`` decides it).
     """
     venue = _key_venue(key_row)
     try:
@@ -5279,9 +5584,25 @@ async def _crawl_account_key(
                 return outcome
             rows, _hit_terminus, telemetry = outcome
         else:
-            rows, _hit_terminus, telemetry = await _fetch_and_price_window(
-                exchange, venue, supabase, start_date, end_date, require_anchor=True,
-            )
+            # READCEILING (Phase 171, D-02): when the account crawl set a trade-read scope, this
+            # member reads under a copy of it that names the member's OWN key. The store keys
+            # every window by api key, and the scope the handler set carries none, because it is
+            # shared by every member (one deadline, one job). The binding is a ContextVar write
+            # inside this member's own task (``asyncio.gather`` gives each coroutine its own
+            # context copy), so a sibling never sees it and the pinned call below gains no
+            # keyword (PD-J). Only a Bybit read consults it.
+            scope = store.current_trade_read_scope()
+            if scope is None:
+                rows, _hit_terminus, telemetry = await _fetch_and_price_window(
+                    exchange, venue, supabase, start_date, end_date, require_anchor=True,
+                )
+            else:
+                with store.trade_read_scope(
+                    dataclasses.replace(scope, api_key_id=str(key_row["id"]))
+                ):
+                    rows, _hit_terminus, telemetry = await _fetch_and_price_window(
+                        exchange, venue, supabase, start_date, end_date, require_anchor=True,
+                    )
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(supabase, dict(key_row), exc)
         raise
@@ -5315,6 +5636,23 @@ async def _crawl_whole_account(
     ``account_key_read_failed`` after one WARNING: this loop is the only converter. Every
     session this function opened is closed in ``finally``; the job's own session stays with
     the handler's ``finally``.
+
+    READCEILING (Phase 171, D-02): a member's trade read may end in ``store.TradeReadDeferred``
+    (its claim budget ran out; the windows it read are kept). The deferral is decided LAST:
+    the loop remembers the first one in key order and keeps going, so every other outcome (a
+    refusal, an MT5 member's settled failure, a permanent failure, a retryable fault) decides
+    the claim exactly as it did before, and only when every other member settled cleanly is
+    the deferral re-raised for the handler to defer the whole job. Why last: a refusal or a
+    permanent failure is deterministic, so deferring on it would only burn claims; the stored
+    windows survive a FAILED claim, so a sibling's retryable fault ending the claim loses no
+    read progress; and no existing outcome or pinned test moves. It is never classified here as
+    an unknown fault (the generic arm would end the job FAILED unknown). Nothing is summed or
+    persisted from a claim that deferred.
+
+    A member whose read makes no progress (``store.TradeReadStalled``) is the other READCEILING
+    outcome. It is decided in key order like a refusal, as ``account_key_read_stalled``: a stall
+    is deterministic (deferring again would only burn claims), and the member's stored windows
+    are kept so a later run resumes from them.
     """
     own_key_id = str(job["api_key_id"])
     selected, zero_contribution = _select_account_crawl_keys(account_keys, own_key_id)
@@ -5367,7 +5705,15 @@ async def _crawl_whole_account(
         )
         per_account_rows: list[list[dict[str, Any]]] = []
         per_account_telemetry: list[dict[str, Any]] = []
+        first_deferral: tuple[store.TradeReadDeferred, Mapping[str, Any]] | None = None
         for key, outcome in zip(selected, results):
+            if isinstance(outcome, store.TradeReadDeferred):
+                # Remembered, not raised: a later member's refusal, settled failure or fault
+                # still decides the claim first (the docstring says why). The key order keeps
+                # the first deferral, which is the one the WARNING below names.
+                if first_deferral is None:
+                    first_deferral = (outcome, key)
+                continue
             if isinstance(outcome, ForcedRebuildRefusedError):
                 # Static fields only: the member's key and venue and the closed-vocabulary
                 # token. The loop raises on the FIRST refused member in key order, so this
@@ -5378,6 +5724,20 @@ async def _crawl_whole_account(
                     allocator_id, key.get("id"), _key_venue(key), outcome.reason,
                 )
                 raise outcome
+            if isinstance(outcome, store.TradeReadStalled):
+                # READCEILING (Phase 171, D-02): this member's read made no progress (three
+                # claims that stored no window, or its job is past the 24 h backstop). Decided
+                # here, in key order like a refusal and BEFORE the generic arm below, which
+                # would call it an unknown fault and have the queue retry a read that is
+                # already known to be stuck. The member's stored windows are KEPT on purpose:
+                # a refusal a later run can clear must leave the read that run resumes from.
+                # Static fields only: the member's key and venue and the closed token.
+                logger.warning(
+                    "reconstruct_allocator_history account crawl refused "
+                    "allocator=%s key=%s venue=%s reason=%s",
+                    allocator_id, key.get("id"), _key_venue(key), "account_key_read_stalled",
+                )
+                raise ForcedRebuildRefusedError("account_key_read_stalled") from None
             if isinstance(outcome, DispatchResult):
                 # An MT5 member's settled failure. The arm is named by its
                 # ``_MT5_BACKFILL_MESSAGES`` key, never by the fixed text, so the line stays
@@ -5415,6 +5775,15 @@ async def _crawl_whole_account(
                 raise ForcedRebuildRefusedError("account_key_read_failed") from None
             per_account_rows.append(outcome[0])
             per_account_telemetry.append(outcome[1])
+        if first_deferral is not None:
+            deferral, deferred_key = first_deferral
+            logger.warning(
+                "reconstruct_allocator_history account crawl deferred "
+                "allocator=%s key=%s venue=%s windows_done=%d windows_total=%d",
+                allocator_id, deferred_key.get("id"), _key_venue(deferred_key),
+                deferral.windows_done, deferral.windows_total,
+            )
+            raise deferral
     finally:
         for exchange in opened:
             try:
@@ -5443,6 +5812,22 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 
     KEY-SCOPED per VOICES-ACCEPTED f1 — reads job['api_key_id'], derives
     allocator_id from ctx.key_row['user_id'].
+
+    READCEILING (Phase 171, D-02): a Bybit read too big for one claim DEFERS instead of
+    refusing. The unforced crawl runs inside a trade-read scope, the read keeps each complete
+    7-day window in the trade-read store, and a claim whose budget runs out at a window boundary
+    ends DEFERRED through ``defer_compute_job`` (``_defer_reconstruct``); the next claim reuses the
+    stored windows. Nothing reaches the allocator's history until the read is whole, and the key's
+    store rows are purged once it is written. Side effect, by design (RESEARCH section 6): a
+    pending (deferred) reconstruct counts as in flight (``_RECONSTRUCT_IN_FLIGHT_STATUSES``), so
+    it holds a zero-snapshot book's first daily refresh for the life of the job, bounded by the
+    24 h job-age backstop (plan 08).
+
+    A store fault never breaks a Bybit reconstruct: when the store cannot be reached
+    (``begin_claim`` answers None, e.g. the tables do not exist yet because the worker deployed
+    before the migration applied) the read is the pre-store read for the whole range, with no
+    budget and no deferral, and a window that cannot be saved stays in this claim's read. Deploy
+    order is therefore not load-bearing.
     """
     ctx = await _allocator_key_preflight(job, "run_reconstruct_allocator_history_job")
     if isinstance(ctx, DispatchResult):
@@ -5548,10 +5933,23 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 # becomes the classified transient below. The key set is read FIRST, so an
                 # unreadable one refuses before any venue call.
                 _account_keys = await _read_account_keys(ctx.supabase, allocator_id, api_key_id)
-                _account_outcome = await asyncio.wait_for(
-                    _crawl_whole_account(ctx, job, allocator_id, _account_keys, end_date),
-                    timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                # READCEILING (Phase 171, D-02): the account crawl runs under ONE trade-read
+                # scope, taken here so every member shares one claim deadline and the job's id
+                # and age. It names no key (``api_key_id=None``): ``_crawl_account_key`` binds
+                # each member's own. The crawl call is unchanged.
+                _forced_job_id = job.get("id")
+                _forced_scope = store.TradeReadScope(
+                    supabase=ctx.supabase,
+                    api_key_id=None,
+                    deadline=store.claim_deadline(_TRADE_READ_CLAIM_BUDGET_S),
+                    job_id=str(_forced_job_id) if _forced_job_id is not None else None,
+                    job_created_at=job.get("created_at"),
                 )
+                with store.trade_read_scope(_forced_scope):
+                    _account_outcome = await asyncio.wait_for(
+                        _crawl_whole_account(ctx, job, allocator_id, _account_keys, end_date),
+                        timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                    )
                 if isinstance(_account_outcome, DispatchResult):
                     # A sibling key's circuit-breaker cooldown deferred this job (no audit),
                     # or an MT5 account's window fetch failed without writing an audit of
@@ -5607,12 +6005,27 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 # FLIPRETRY-01 (defensive): the orchestrating window crawl is HARD-BOUNDED
                 # so a hang becomes a classified transient (the except asyncio.TimeoutError
                 # arm below), never an unbounded await that wedges the worker loop.
+                #
+                # READCEILING (Phase 171, D-02): the trade read keeps its progress between
+                # claims. The scope rides a ContextVar (the crawl call is pinned to five
+                # positional arguments, PD-J), is taken once here so the claim budget starts
+                # now, and is consulted only by the Bybit read; OKX and the generic walk never
+                # look at it.
                 _crawl = _fetch_and_price_window(
                     ctx.exchange, venue, ctx.supabase, start_date, end_date,
                 )
-                rows, hit_terminus, telemetry = await asyncio.wait_for(
-                    _crawl, timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                _job_id = job.get("id")
+                _read_scope = store.TradeReadScope(
+                    supabase=ctx.supabase,
+                    api_key_id=str(api_key_id),
+                    deadline=store.claim_deadline(_TRADE_READ_CLAIM_BUDGET_S),
+                    job_id=str(_job_id) if _job_id is not None else None,
+                    job_created_at=job.get("created_at"),
                 )
+                with store.trade_read_scope(_read_scope):
+                    rows, hit_terminus, telemetry = await asyncio.wait_for(
+                        _crawl, timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
+                    )
             # D-02 / AR-2: a stored day the rebuilt rows lack is refused INSIDE the window
             # call's transaction (history_days_unreproduced), never from a read made here.
         except ForcedRebuildRefusedError as exc:
@@ -5677,6 +6090,55 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 outcome=DispatchOutcome.FAILED,
                 error_message=sanitized,
                 error_kind="transient",
+            )
+        except store.TradeReadDeferred as deferred:
+            # READCEILING (Phase 171, D-02): this claim's read budget ran out at a window
+            # boundary and its progress is kept in the trade-read store. Nothing has been
+            # persisted (this is before the persist half), so the job is parked for its next
+            # claim instead of failed. MUST precede the generic arm below (Pitfall 4): it is a
+            # plain Exception and classify_exception would otherwise fail the job. No audit: a
+            # deferral is not a failure and the action vocabulary is closed.
+            return await _defer_reconstruct(
+                ctx.supabase, job, deferred, allocator_id, api_key_id, venue
+            )
+        except store.TradeReadStalled as stalled:
+            if forced:
+                # The forced side (Phase 171 plan 10): a stall that reaches the handler on a
+                # forced job (the account crawl's outcome loop converts a member's stall
+                # first, so this is the defensive path) is the same closed refusal, through
+                # the one place a refused forced rebuild is recorded.
+                return _forced_refusal_result(
+                    allocator_id, api_key_id, venue, "account_key_read_stalled"
+                )
+            # READCEILING (Phase 171, D-02): a read that makes no progress ends by NAME instead
+            # of deferring forever (a defer burns no attempt). Either ``begin_claim`` refused the
+            # job's next claim after STALLED_CLAIMS_LIMIT claims that stored no window, or the
+            # defer point was reached by a job past its 24 h backstop. MUST precede the generic
+            # arm (a plain Exception, which classify_exception would call unknown). Nothing has
+            # been persisted, and the stored windows are KEPT on purpose: a later job resumes
+            # from them (RECONMARKER D-17 re-enqueues it) and the hourly worker sweep removes
+            # them at their expiry. The text is static plus a closed cause and an integer
+            # (H-3: nothing the venue said). Not a new audit action: the closed vocabulary's
+            # ``reconstruct_failed`` carries it, as every other failure here does.
+            sanitized = (
+                f"trade read stopped: cause={stalled.cause} claims={stalled.claims}; nothing was "
+                "written to the allocator's history, the stored windows are kept and a later run "
+                "resumes from them"
+            )
+            logger.warning(
+                "reconstruct_allocator_history trade read stopped cause=%s claims=%d "
+                "allocator=%s key=%s venue=%s",
+                stalled.cause, stalled.claims, allocator_id, api_key_id, venue,
+            )
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {"error_kind": "permanent", "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind="permanent",
             )
         except Exception as exc:  # noqa: BLE001
             # H-1172: log the error before sanitisation so the original error
@@ -6021,7 +6483,70 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
         "reconstruct_allocator_history: persisted %d rows for allocator %s (venue=%s, depth=%s)",
         count, allocator_id, venue, depth_months,
     )
+    # READCEILING (Phase 171, D-02): the history is written and the key is marked, so the stored
+    # trade windows have done their work. Best effort by construction (the 7-day expiry is the
+    # backstop). Only a read that can have used the store has rows to remove: a Bybit read, or
+    # the account rebuild (whose member keys are named by the rebuilt account).
+    if venue == "bybit" or account is not None:
+        purge_ids = {str(api_key_id)}
+        if account is not None:
+            purge_ids |= set(account.account_key_ids)
+        await store.purge_keys(ctx.supabase, sorted(purge_ids))
     return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+async def _defer_reconstruct(
+    supabase: Any,
+    job: dict[str, Any],
+    deferred: store.TradeReadDeferred,
+    allocator_id: Any,
+    api_key_id: Any,
+    venue: str,
+) -> DispatchResult:
+    """Park a reconstruct whose read ran out of claim budget (READCEILING D-02).
+
+    ``defer_compute_job`` returns the job to ``pending`` ``_TRADE_READ_DEFER_S`` from now,
+    decrements ``attempts`` (waiting never burns a retry) and is fenced on the job's own claim
+    token. ``dispatch()`` runs no mark RPC for a DEFERRED result, so the handler makes the call
+    itself (the OKX archive job's ``_defer_job`` precedent). ``p_reason`` becomes the job's
+    ``last_error`` and is a static class plus three counts, never venue text. A watchdog reclaim
+    gives the job to another worker (SQLSTATE 55006): it is yielded (DEFERRED), not failed.
+    Any other RPC failure is re-raised and dispatch classifies it. No audit is written.
+    """
+    reason = (
+        f"trade read deferred (windows {deferred.windows_done}/{deferred.windows_total}, "
+        f"trades {deferred.trades_stored})"
+    )
+
+    def _defer() -> Any:
+        return supabase.rpc(
+            "defer_compute_job",
+            {
+                "p_job_id": job.get("id"),
+                "p_defer_seconds": _TRADE_READ_DEFER_S,
+                "p_reason": reason,
+                "p_claim_token": job.get("claim_token"),
+            },
+        ).execute()
+
+    try:
+        await db_execute(_defer)
+    except asyncio.CancelledError:
+        raise  # never swallow cancellation
+    except Exception as exc:  # noqa: BLE001
+        if _defer_lost_ownership(exc):
+            logger.info(
+                "reconstruct_allocator_history: defer preempted allocator=%s key=%s venue=%s "
+                "(another worker owns the job after a watchdog reclaim)",
+                allocator_id, api_key_id, venue,
+            )
+            return DispatchResult(outcome=DispatchOutcome.DEFERRED)
+        raise
+    logger.info(
+        "reconstruct_allocator_history: %s allocator=%s key=%s venue=%s (defer %ds)",
+        reason, allocator_id, api_key_id, venue, _TRADE_READ_DEFER_S,
+    )
+    return DispatchResult(outcome=DispatchOutcome.DEFERRED)
 
 
 # 167.1.2.1.1 D-14: the Sentry ``refresh_outcome`` of each hold reason. A closed

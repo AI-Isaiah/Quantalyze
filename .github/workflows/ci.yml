@@ -4935,6 +4935,7 @@ jobs:
           # reads the rows below AS A CONTIGUOUS, EQUALLY-INDENTED BLOCK: prose
           # inserted between them — or at a different indent — makes the table
           # read as GONE. Keep prose above this line.
+          #   test_allocator_trade_reads.sql                   8
           #   test_analytics_service_settings_and_vault_tick.sql 13
           #   test_api_key_nav_marks.sql                      11
           #   test_bridge_outcomes_decision_delete_cascade.sql    8
@@ -5159,6 +5160,15 @@ jobs:
           #   table above, in file-name order, and ci-anti-skip-gate.contract.test.ts read 24
           #   sentinel-bearing files against the table's 23 (`expected [ ...(24) ] to deeply
           #   equal [ ...(23) ]`) before this edit. The file's own sentinel was read, not this table.
+          # Re-measured 2026-10-27 (Phase 171 READCEILING, plan 06), ONE file joined:
+          #   test_allocator_trade_reads.sql declares `ALL 8 ARMS EXECUTED` (arms 1-8), so
+          #   SENTINEL_FLOOR moves 24 -> 25 and ARMS_FLOOR 373 -> 381 (+8). It posts nothing
+          #   and runs on the ordinary sql-tests lane; its arms also bite on the pg-lane under
+          #   sql-mutation (mutation runner, same date: FILES_FLOOR 80 -> 81 and ARMS_FLOOR
+          #   803 -> 811, the same +8 arms, one full run). The row sits in the contiguous
+          #   table above, in file-name order, and ci-anti-skip-gate.contract.test.ts read 25
+          #   sentinel-bearing files against the table's 24 (`expected [ ...(25) ] to deeply
+          #   equal [ ...(24) ]`) before this edit. The file's own sentinel was read, not this table.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5166,8 +5176,13 @@ jobs:
           #   test_sync_status_computed_at_runner_only.sql     10
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=24  # files declaring a sentinel
-          ARMS_FLOOR=378     # 13 + 11 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 31 + 8 + 15 + 14 + 7 + 15 + 4 + 103 + 20 + 16 + 10 + 7 + 23
+          # MERGE 2026-10-27 (Phase 171 READCEILING merged with origin/main 04f5568a9, Phase 174 MARKPAUSE): both
+          #   blocks above moved the floors from the same base (24/373). The merged table carries both
+          #   (test_allocator_trade_reads.sql 8, test_ledger_refresh_fanout.sql 31), so SENTINEL_FLOOR is 25
+          #   and ARMS_FLOOR 386, re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never
+          #   by adding the moves.
+          SENTINEL_FLOOR=25  # files declaring a sentinel
+          ARMS_FLOOR=386     # 8 + 13 + 11 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 31 + 8 + 15 + 14 + 7 + 15 + 4 + 103 + 20 + 16 + 10 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

@@ -1306,7 +1306,14 @@
 // sections 11 / judged 11 / annotated 11 / waived 0 / biting 11`, and `test_derive_allocator_keys_fanout.sql: sections 7 / judged 7 / annotated
 // 7 / waived 0 / biting 7` (plan 05 replaced the body of its ASSERTION 6; the arm count did not move). The stale-low direction was observed
 // first: `RATCHET STALE: 80 of 107 gate files are now annotated but FILES_FLOOR is still 79.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 80;
+// RAISED 80 -> 81 2026-10-27 (Phase 171 READCEILING plan 06): +1 file, test_allocator_trade_reads.sql (migration 20261031120000, eight arms),
+// so 81 of 108 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file edited during it, exit 0: `scope: FULL 81/81
+// annotated files`, `lane-concurrency: 4`, `coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`, `lane-invocations: 811 ... plus 81 baseline /
+// 81 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane
+// time: mean 5.0s over 811 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_allocator_trade_reads.sql:
+// sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`. The stale-low direction was observed first: `RATCHET STALE: 81 of 108 gate files
+// are now annotated but FILES_FLOOR is still 80.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 81;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3304,7 +3311,16 @@ export const FILES_FLOOR = 80;
 // `test_ledger_refresh_fanout.sql: sections 36 / judged 36 / annotated 36 / waived 0 / biting 36`. FILES_FLOOR stays 80 (no file joined). WAIVED_CEILING stays 0.
 // RAISED 807 -> 808 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1, founder decision D-04): +1 biting arm, P5 of test_ledger_refresh_fanout.sql
 // (30 -> 31 arms, 36 -> 37 twin sections; a malformed marks_trailing_since value keeps the 20-hour cooldown). FILES_FLOOR stays 80 (no file joined). WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 808;
+// RAISED 803 -> 811 2026-10-27 (Phase 171 READCEILING plan 06): +8 biting arms, the eight arms of the NEW gate test_allocator_trade_reads.sql
+// (migration 20261031120000). MEASURED by the same single run recorded under FILES_FLOOR: `arms: 811/811/0`, `biting: 811`, `lane-invocations: 811`;
+// per-file `test_allocator_trade_reads.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`. The stale-low direction was observed first:
+// `The corpus declares 811 twin(s) of which 0 are waivers, so a green run bites 811. ARMS_FLOOR is 803.` WAIVED_CEILING stays 0 - no waiver was added.
+// MERGE 2026-10-27 (Phase 171 READCEILING merged with origin/main 04f5568a9, Phases 174 MARKPAUSE and 175 MT5OFFSET): both blocks above moved
+// ARMS_FLOOR from the same base (803). The merged corpus carries both, so ARMS_FLOOR is 816, MEASURED by ONE full
+// `node scripts/mutation-runner/run.mjs` on the merged tree: `scope: FULL 81/81 annotated files`, `coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`,
+// `lane-invocations: 816 ... plus 81 baseline / 81 restore leg(s)` (the two tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0; per-file
+// `test_allocator_trade_reads.sql: ... biting 8` and `test_ledger_refresh_fanout.sql: ... biting 37`. FILES_FLOOR stays 81. WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 816;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
