@@ -1248,6 +1248,182 @@ async def test_a_truncated_bybit_read_names_the_window_ceiling_from_the_call_log
         assert leak not in captured.out + captured.err, leak
 
 
+# ---------------------------------------------------------------------------
+# D-01: which limit stopped a cut-short read, derived from the call log.
+# ---------------------------------------------------------------------------
+
+
+def _log_call(
+    tag: str,
+    *,
+    since: int = 1_000,
+    rows: int = 100,
+    step_ms: int = 7,
+    cursor_repeated: bool = False,
+    reuse_of: "hp._Call | None" = None,
+) -> "hp._Call":
+    """One recorded call of a window. ``reuse_of`` returns that call's ids again (a page that
+    added nothing new)."""
+    if reuse_of is not None:
+        ids = reuse_of.ids
+    else:
+        ids = tuple((None, f"fake-trade-{tag}-{i}") for i in range(rows))
+    newest = 5_000_000
+    return hp._Call(
+        since=since,
+        params={"until": since + 604_799_999},
+        rows=rows,
+        ids=ids,
+        rows_without_id=0,
+        oldest_ts=newest - (rows - 1) * step_ms,
+        newest_ts=newest,
+        cursor_repeated=cursor_repeated,
+    )
+
+
+def _advancing_window(n: int, *, since: int = 1_000) -> "list[hp._Call]":
+    return [_log_call(f"w{since}-{k}", since=since) for k in range(n)]
+
+
+def test_a_full_page_that_added_nothing_is_a_stalled_page() -> None:
+    window = _advancing_window(4)
+    repeat = _log_call("again", reuse_of=window[1])
+    assert hp.derive_truncated_site("bybit", [*window, repeat]) == "bybit_stalled_page"
+    # The same verdict when the page brought new ids but returned the cursor it was sent.
+    stuck_cursor = _log_call("fresh", cursor_repeated=True)
+    assert hp.derive_truncated_site("bybit", [*window, stuck_cursor]) == "bybit_stalled_page"
+
+
+def test_a_full_page_at_one_millisecond_is_a_stalled_one_ms_page() -> None:
+    window = _advancing_window(3)
+    repeat = _log_call("again", reuse_of=window[0], step_ms=0)
+    assert repeat.oldest_ts == repeat.newest_ts
+    assert hp.derive_truncated_site("bybit", [*window, repeat]) == "bybit_stalled_one_ms"
+
+
+def test_a_stall_on_the_hundredth_call_is_the_stall_not_the_ceiling() -> None:
+    ceiling = hp.er._BYBIT_WINDOW_PAGE_CEILING
+    window = _advancing_window(ceiling - 1)
+    stalled = _log_call("again", reuse_of=window[-1])
+    assert len(window) + 1 == ceiling
+    assert hp.derive_truncated_site("bybit", [*window, stalled]) == "bybit_stalled_page"
+    # Control: the same hundred calls, every page advancing, is the ceiling.
+    assert hp.derive_truncated_site("bybit", _advancing_window(ceiling)) == "bybit_window_ceiling"
+
+
+def test_a_window_ended_short_of_the_ceiling_without_a_stall_is_unknown() -> None:
+    assert hp.derive_truncated_site("bybit", _advancing_window(37)) == "unknown"
+    assert hp.derive_truncated_site("okx", _advancing_window(hp.er._BYBIT_WINDOW_PAGE_CEILING)) == "unknown"
+    assert hp.derive_truncated_site("bybit", []) == "unknown"
+    # A short last page is not a stall: only a FULL page can have stopped with fills unread.
+    short = _log_call("short", rows=40)
+    assert hp.derive_truncated_site("bybit", [*_advancing_window(3), short]) == "unknown"
+
+
+def test_the_last_window_is_the_trailing_calls_that_share_one_since() -> None:
+    calls = [
+        *_advancing_window(5, since=1_000),
+        *_advancing_window(7, since=2_000),
+        *_advancing_window(4, since=3_000),
+    ]
+    assert hp.last_window_calls(calls) == 4
+    assert hp.last_window_calls(calls[:12]) == 7
+    assert hp.last_window_calls([]) == 0
+
+
+def test_a_typed_site_on_the_exception_wins_over_the_call_log() -> None:
+    ceiling_log = _advancing_window(hp.er._BYBIT_WINDOW_PAGE_CEILING)
+    assert hp.derive_truncated_site("bybit", ceiling_log) == "bybit_window_ceiling"  # the log alone
+
+    typed = er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE)
+    typed.site = "bybit_segment_ceiling"  # type: ignore[attr-defined]
+    assert hp.truncated_site_of(typed, "bybit", ceiling_log) == "bybit_segment_ceiling"
+
+    drifted = er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE)
+    drifted.site = "a_site_nobody_declared"  # type: ignore[attr-defined]
+    assert "a_site_nobody_declared" not in hp._TRUNCATED_SITES
+    assert hp.truncated_site_of(drifted, "bybit", ceiling_log) == "unknown"
+
+    untyped = er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE)
+    assert hp.truncated_site_of(untyped, "bybit", ceiling_log) == "bybit_window_ceiling"
+
+
+@pytest.mark.parametrize(
+    ("days", "bucket"),
+    [
+        (0, "0-29"),
+        (29, "0-29"),
+        (30, "30-89"),
+        (89, "30-89"),
+        (90, "90-179"),
+        (179, "90-179"),
+        (180, "180-364"),
+        (364, "180-364"),
+        (365, "365-546"),
+        (546, "365-546"),
+        (547, "547-729"),
+        (729, "547-729"),
+        (730, "730+"),
+    ],
+)
+def test_window_age_buckets_have_closed_edges(days: int, bucket: str) -> None:
+    assert hp.window_age_bucket(_ms(_TODAY) - days * 86_400_000, _TODAY) == bucket
+    assert bucket in hp._WINDOW_AGE_BUCKETS
+
+
+def test_a_window_with_no_known_start_has_no_age_bucket() -> None:
+    assert hp.window_age_bucket(None, _TODAY) == "none"
+
+
+@pytest.mark.parametrize("kind", ["rejected", "timeout"])
+async def test_a_member_that_failed_for_another_reason_records_no_site(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    import ccxt
+
+    if kind == "timeout":
+        monkeypatch.setattr("services.equity_reconstruction._RECONSTRUCT_CRAWL_TIMEOUT_S", 0.05)
+        venue = _StubVenue([[]], hang=True)
+    else:
+        venue = _StubVenue([[]], fetch_effect=ccxt.AuthenticationError("fake rejection"))
+    services = _Services(_bybit_only_book(), [venue])
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    account, _summary = _stdout_records(capsys)
+    assert account["failure_class"] != "truncated" and account["members_failed"] == 1
+    assert (account["truncated_site"], account["last_window_age_bucket"]) == ("none", "none")
+    assert account["last_window_calls"] == 0
+
+
+async def test_read_elapsed_seconds_are_whole_seconds_from_the_monotonic_seam(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = iter([100.0, 112.7])
+    services = _Services(_okx_only_book(), [_StubVenue([_trade_page("ok", 5, newest_ms=_ms(_TODAY))])])
+    services.install(monkeypatch)
+    monkeypatch.setattr(hp, "_monotonic", lambda: next(clock))
+
+    assert await hp.run() == 0
+    account, _summary = _stdout_records(capsys)
+    assert account["read_elapsed_s"] == 12  # floored, not rounded to 13
+
+
+def test_the_emitter_refuses_an_out_of_vocabulary_site_or_bucket() -> None:
+    rec = hp._account_record("a1", "2026-10-23")
+    hp.emit_record(rec)  # control: the defaults print
+    for key, value in (
+        ("truncated_site", "ceiling"),
+        ("last_window_age_bucket", "400"),
+        ("last_window_calls", -1),
+        ("read_elapsed_s", 1.5),
+    ):
+        with pytest.raises(ValueError) as exc:
+            hp.emit_record(dict(rec, **{key: value}))
+        assert key in str(exc.value)
+        assert str(value) not in str(exc.value).replace(key, "")
+
+
 async def test_a_read_past_the_crawl_bound_is_recorded_as_a_timeout(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
