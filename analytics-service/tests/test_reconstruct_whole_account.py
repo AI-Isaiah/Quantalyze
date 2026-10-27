@@ -2292,3 +2292,107 @@ async def test_precedence_a_deferral_is_not_an_unknown_fault(
     assert "windows_done=7 windows_total=105" in line, line
     assert _records_containing(caplog, "account crawl failed") == []
     assert exchanges[API_KEY_ID_1].fetch_my_trades.await_count > 0, "the other member was not crawled"
+
+
+# --------------------------------------------------------------------------- plan 10
+#
+# A forced read that makes no progress ends by NAME. The stall is a decision the trade-read store
+# makes (``begin_claim`` after three claims that stored no window, or the 24 h job-age check at a
+# defer point), so it is refused with its own closed token, never read as an unknown fault (which
+# would retry the job) and never written as a partial history.
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_bybit_member_refuses_the_account_by_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SC-1 on the forced path, D-02. The Bybit member (the job's own key, a book far too big
+    for one claim) is read by a job that is already past its 24 h backstop. It stores the windows
+    its budget allows and is then stopped at its defer point with ``TradeReadStalled``. The
+    account refuses ``account_key_read_stalled``: FAILED permanent, nothing written (the book is
+    as it was, no window replace), exactly one refusal WARNING that names the member, and the
+    member's stored windows KEPT, because a refusal a later run can clear must not discard the
+    read that run would resume from.
+
+    RED at the base commit: the stall reached the loop's generic arm and the job ended FAILED
+    unknown (``_AccountCrawlRetryableError``), which the queue retries."""
+    clock = _Clock()
+    fake = _resume_rig(monkeypatch, clock, budget_s=45.0)
+    exchange_1 = await _venue(_big_book(), clock)
+    audit = _install_fake_audit(monkeypatch)
+    _install_account_preflight(
+        monkeypatch, fake, {API_KEY_ID_1: exchange_1, API_KEY_ID_2: _mt5_member()}
+    )
+    before = _book_state(fake)
+    job = {
+        **_forced_claim_job("T1"),
+        "created_at": (END_DATE - timedelta(hours=30)).isoformat(),
+    }
+
+    with caplog.at_level("WARNING", logger=_ER_LOGGER):
+        result = await run_reconstruct_allocator_history_job(job)
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_key_read_stalled",
+        before=before, exchanges_crawled=(exchange_1,), exchanges_untouched=(),
+    )
+    assert _defer_calls(fake) == [], "a stalled read was deferred instead of refused"
+    assert fake.rows_for(store.WINDOW_TABLE), "the stall discarded the windows already read"
+    assert _store_key_ids(fake) == {API_KEY_ID_1}, "the member's windows are kept under its own key"
+    (line,) = _records_containing(caplog, "account crawl refused")
+    assert f"key={API_KEY_ID_1}" in line, line
+    assert "venue=bybit" in line, line
+    assert "reason=account_key_read_stalled" in line, line
+    assert _records_containing(caplog, "account crawl failed") == []
+
+
+@pytest.mark.asyncio
+async def test_a_forced_job_stalled_at_claim_start_refuses_by_the_same_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defensive path. A ``TradeReadStalled`` that reaches the HANDLER on a forced job (the
+    outcome loop normally converts a member's stall first; here the account crawl itself is
+    made to raise one) gets the forced refusal text through ``_forced_refusal_result``: the
+    closed token, the refusal prefix the post-deploy handoff matches, one failure audit, nothing
+    written. An UNFORCED job's stall keeps the text it has always had (no refusal prefix, no
+    token): the forced wording is for the forced path only."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    async def _stalled_crawl(*_args: Any, **_kwargs: Any) -> Any:
+        raise store.TradeReadStalled("stalled_claims", store.STALLED_CLAIMS_LIMIT)
+
+    monkeypatch.setattr(er, "_crawl_whole_account", _stalled_crawl)
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_key_read_stalled",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+    # The unforced twin: the same stall raised by the sole-key crawl keeps its own text.
+    unforced_fake = _MarkerFake()
+    _seed_account_key(unforced_fake, API_KEY_ID_1, "bybit", venue_account_id="fixture-acct-1", marker=None)
+
+    async def _stalled_window(*_args: Any, **_kwargs: Any) -> Any:
+        raise store.TradeReadStalled("stalled_claims", store.STALLED_CLAIMS_LIMIT)
+
+    monkeypatch.setattr(er, "_fetch_and_price_window", _stalled_window)
+    unforced_audit = _install_fake_audit(monkeypatch)
+    _install_account_preflight(
+        monkeypatch, unforced_fake, {API_KEY_ID_1: await _bybit_exchange()},
+    )
+    unforced = await run_reconstruct_allocator_history_job({**_forced_job(), "metadata": {}})
+
+    assert unforced.outcome == DispatchOutcome.FAILED, unforced
+    assert (unforced.error_message or "").startswith("trade read stopped: cause=stalled_claims"), (
+        unforced.error_message
+    )
+    assert REFUSAL_PREFIX not in (unforced.error_message or ""), unforced.error_message
+    (unforced_failure,) = _audit_metadata(unforced_audit, FAILED_ACTION)
+    assert unforced_failure["sanitized_message"] == unforced.error_message
