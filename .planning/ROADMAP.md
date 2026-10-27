@@ -6400,7 +6400,7 @@ Plans:
 **Goal:** An allocator account whose trade history exceeds the rebuild's trade-read ceiling is read in full within a bounded budget, or refused with a named reason a later run can clear, instead of refusing on every attempt and never getting a history.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.2.1
-**Plans:** 8/12 plans executed
+**Plans:** 9/12 plans executed
 
 Booked 2026-10-27 from TRADEPAGES plan 06 (founder 2026-10-26 "Rebuild none, book follow-ups (Recommended)"; founder 2026-10-27 "You can use add"). Evidence: the 2026-10-26 PROD probe read a6 for 127471 trades in 1378 calls and ended `truncated`; TODOS `167.2.1.1.2.1-READ-CEILING-STRANDS-ACCOUNT`. Data integrity, user-facing.
 
@@ -6428,7 +6428,7 @@ Plans:
 - [x] 171-11-PLAN.md — live store probe on the local-stack lane: exact round trip through PostgREST, bookkeeping and purges (wave 3, lane)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 171-09-PLAN.md — layer 2 forced: a deferral writes nothing and is decided last behind every sibling verdict (wave 4)
+- [x] 171-09-PLAN.md — layer 2 forced: a deferral writes nothing and is decided last behind every sibling verdict (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 171-10-PLAN.md — 16th refusal token `account_key_read_stalled`, its pins, the probe pin and the handoff amendment (wave 5)
