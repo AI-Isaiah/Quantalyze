@@ -8,7 +8,29 @@
 -- 164.7-WR02, WR-10) AND, IN TURN, BY
 -- 20260917120000_ledger_fanout_admit_private.sql (Phase 164.5.1.1 /
 -- FANOUT-COHORT-PRIVATE-01) AND, IN TURN, BY
--- 20260924120000_ledger_fanout_failure_count.sql (Phase 164.6 / OPS-08-F2).
+-- 20260924120000_ledger_fanout_failure_count.sql (Phase 164.6 / OPS-08-F2) AND,
+-- IN TURN, BY
+-- 20261030120000_ledger_fanout_marks_paused_weekly.sql (Phase 174 / MARKPAUSE).
+--
+-- ⛔ RE-POINTED A FIFTH TIME, 2026-10-27 (Phase 174 plan 01), AND THE PARAGRAPHS
+-- BELOW THAT NAME 20260924120000 ARE NOW LINEAGE. The apply list ends with
+-- 20261030120000, which re-creates the SINGLE-KEY body ALONE (the composite body
+-- stays in 20260924120000, and the composite gate keeps pointing there), so ALL
+-- 29 edit-kind twin steps that named 20260924120000 were re-pointed to it IN THE
+-- SAME COMMIT as the apply-list entry (TRAP E / C-02, a fifth time) and every
+-- `find` was recounted with `grep -c -F` on the new file's final bytes
+-- (the per-needle table is in the plan SUMMARY). Because the new file holds ONE
+-- body, the needles that matched twice there now match once and carry
+-- `occurrences: 1` with no `nth`; the interval needle matched four times there
+-- and matches TWICE here (the attempt cooldown's unpaused branch, then the
+-- failed-attempt cooldown), so its three steps keep `nth` 1, 1 and 2.
+-- ⛔ The per-arm RED-UNDER paragraphs below still say "in 20260924120000" and
+-- still quote `occurrences: 2` or `4` for these needles: read them as the lineage
+-- of the 164.6 counts. The machine-executable RED-UNDER-M objects are the live
+-- record, and the runner fails a stale one as occurrence-mismatch.
+-- Arms P1, P2, P3, P4 and P5 are new in this phase: 26 arms -> 31; 32 twin sections ->
+-- 37. P1 is RED at the base migration by construction (its 2-day-old attempt is
+-- past the 20-hour window), which is how the phase's re-crawl cost was shown.
 --
 -- ⛔ RE-POINTED A FOURTH TIME, 2026-09-24 (Phase 164.6 plan 03), AND THE TWO
 -- PARAGRAPHS BELOW THAT NAME 20260917120000 AND "WHY `nth` IS GONE" ARE NOW
@@ -200,7 +222,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 26 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 31 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -321,7 +343,7 @@
 -- ⚠️ The sentinel string itself is deliberately NOT repeated in this header:
 -- this file's own verify pins it to exactly ONE occurrence, so that the roster
 -- can only be edited where it is RAISED.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260716130000_strategies_status_private.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","supabase/migrations/20260917120000_ledger_fanout_admit_private.sql","supabase/migrations/20260924120000_ledger_fanout_failure_count.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260716130000_strategies_status_private.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","supabase/migrations/20260917120000_ledger_fanout_admit_private.sql","supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql"]}
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -434,6 +456,14 @@ DECLARE
   v_err_msg    TEXT;     -- arms R, U, V2: … and its message
   v_meta_w     JSONB;    -- arm W: the real failure's row
   v_cnt_w      INTEGER;  -- arm W: failure rows naming a lost-race candidate
+  -- ⛔ Arms P1, P2 and P3 (Phase 174 MARKPAUSE plan 01) add these under the SAME rule
+  --    as arm J's three: a missing DECLARE is a 42601 that stops the WHOLE block
+  --    compiling, so every arm would vanish together.
+  s_mp1        UUID;     -- arm P1: stale, marks-PAUSED, last attempt 2 days ago
+  s_mp2        UUID;     -- arm P2: the identical strategy, marks NOT paused
+  s_mp3        UUID;     -- arm P3: marks-PAUSED, but its last attempt is 8 days old
+  s_mp4        UUID;     -- arm P4: marks paused only YESTERDAY, attempt 2 days old
+  s_mp5        UUID;     -- arm P5: MALFORMED (empty) marks flag, attempt 2 days old
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- RED-UNDER: DROP the function on the live lane after the migrations have
@@ -643,6 +673,16 @@ BEGIN
   -- Arm R's two fixtures. Named `lrf R%` ON PURPOSE: the poison trigger below
   -- selects by NAME, because a trigger function cannot see this block's
   -- PL/pgSQL variables. Seeded PARKED like every other fixture.
+  -- Arms P1 and P2 (Phase 174 MARKPAUSE): two otherwise identical strategies on
+  -- DIFFERENT venues, so the per-venue cap cannot be what separates them.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf MP1', 'draft') RETURNING id INTO s_mp1;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2,     'lrf MP2', 'draft') RETURNING id INTO s_mp2;
+  -- Arm P3: the paused strategy whose attempt is OLDER than the week.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf MP3', 'draft') RETURNING id INTO s_mp3;
+  -- Arm P4 (D-04): the YOUNG pause, the counterpart of P1's old one.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf MP4', 'draft') RETURNING id INTO s_mp4;
+  -- Arm P5 (D-04): the MALFORMED flag, the counterpart of P1's well-formed one.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf MP5', 'draft') RETURNING id INTO s_mp5;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R1', 'draft') RETURNING id INTO s_r1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R2', 'draft') RETURNING id INTO s_r2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_inactive, 'lrf H1', 'draft') RETURNING id INTO s_h_inact;
@@ -731,6 +771,50 @@ BEGIN
   INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
   VALUES (s_f, 'derive_broker_dailies', 'done', now() - INTERVAL '2 hours');
 
+  -- Arms P1 and P2's analytics rows, stale on the same moderate footing as arm
+  -- P's (never the oldest row on the table, so they cannot steal G1/G2's slots).
+  -- The ONLY difference between the two is the flags column: P1 carries the
+  -- marks-paused key, P2 carries an empty object. Their attempts are the same
+  -- terminal derive, created 2 DAYS ago, so the 20-hour window has expired for
+  -- both and only a longer window for the paused one can tell them apart.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series, data_quality_flags)
+  VALUES (s_mp1, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 27, 'YYYY-MM-DD'), 'value', 0.002)),
+          jsonb_build_object('marks_trailing_since', to_char(CURRENT_DATE - 5, 'YYYY-MM-DD')));
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series, data_quality_flags)
+  VALUES (s_mp2, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 27, 'YYYY-MM-DD'), 'value', 0.002)),
+          '{}'::jsonb);
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_mp1, 'derive_broker_dailies', 'done', now() - INTERVAL '2 days'),
+         (s_mp2, 'derive_broker_dailies', 'done', now() - INTERVAL '2 days');
+  -- Arm P3's row: paused exactly like P1's, but its last attempt is 8 DAYS old,
+  -- one day past the week. Stale on the same footing as P1 and P2.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series, data_quality_flags)
+  VALUES (s_mp3, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 27, 'YYYY-MM-DD'), 'value', 0.002)),
+          jsonb_build_object('marks_trailing_since', to_char(CURRENT_DATE - 12, 'YYYY-MM-DD')));
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_mp3, 'derive_broker_dailies', 'done', now() - INTERVAL '8 days');
+  -- Arm P4's row: the pause began YESTERDAY (under 3 days old), with the same
+  -- 2-day-old attempt as P1's. P1's flag is 5 days old, so the two differ ONLY
+  -- in how long the pause has lasted.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series, data_quality_flags)
+  VALUES (s_mp4, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 27, 'YYYY-MM-DD'), 'value', 0.002)),
+          jsonb_build_object('marks_trailing_since', to_char(CURRENT_DATE - 1, 'YYYY-MM-DD')));
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_mp4, 'derive_broker_dailies', 'done', now() - INTERVAL '2 days');
+  -- Arm P5's row: the flag key is present but its value is an EMPTY string, which
+  -- sorts below every ISO date, with the same 2-day-old attempt as P1's. P1's
+  -- value is a real date 5 days old, so the two differ ONLY in the value's shape.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series, data_quality_flags)
+  VALUES (s_mp5, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 27, 'YYYY-MM-DD'), 'value', 0.002)),
+          jsonb_build_object('marks_trailing_since', ''));
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_mp5, 'derive_broker_dailies', 'done', now() - INTERVAL '2 days');
+
   RAISE NOTICE 'Seed OK.';
 
   -- ======================================================================
@@ -774,7 +858,7 @@ BEGIN
   --    the order rather than to widen the mutation.
   -- ⚠️ The needle spans the NOTICE line, which names THIS function, so it is
   --    unique in a file holding both fan-out bodies. No `nth` is needed or used.
-  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","replace":"IF v_enabled IS NOT NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","replace":"IF v_enabled IS NOT NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_a;
 
   DELETE FROM public.system_flags WHERE key = 'ledger_refresh_enabled';
@@ -829,7 +913,7 @@ BEGIN
   --    it matches TWICE. `nth: 1` is the single-key body, MEASURED (its CREATE
   --    OR REPLACE is first in the file); the composite body is left UNMUTATED,
   --    which is what keeps the sibling gate's M1 independent of this one.
-  -- RED-UNDER-M: {"arm":"M1","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"v_cause := 'flag_row_invisible_or_absent';","replace":"v_cause := NULL;","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"M1","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"v_cause := 'flag_row_invisible_or_absent';","replace":"v_cause := NULL;","occurrences":1}]}
   SELECT count(*) INTO v_cnt_m1
     FROM public.cron_runs
    WHERE cron_name = 'ledger_refresh_fanout'
@@ -855,7 +939,7 @@ BEGIN
   --    green. Neither mutation can redden both. The token
   --    `IS DISTINCT FROM TRUE` is preserved for the same apply-time reason arm
   --    A's twin preserves it.
-  -- RED-UNDER-M: {"arm":"K","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","replace":"IF v_enabled IS NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"K","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"IF v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","replace":"IF v_enabled IS NULL AND v_enabled IS DISTINCT FROM TRUE THEN\n    RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: dormant","occurrences":1}]}
   INSERT INTO public.system_flags (key, enabled)
   VALUES ('ledger_refresh_enabled', FALSE)
   ON CONFLICT (key) DO UPDATE SET enabled = FALSE;
@@ -917,7 +1001,7 @@ BEGIN
   --    of the same guard, which is why three arms and not one.
   -- ⚠️ The needle spans the WARNING text, which names THIS function, so it is
   --    unique in a file holding both fan-out bodies. No `nth` is needed or used.
-  -- RED-UNDER-M: {"arm":"L","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := NULL;","replace":"'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := TRUE;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"L","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := NULL;","replace":"'enqueue_ledger_refresh_for_strategies: activation flag read failed (SQLSTATE %); treating as dormant', SQLSTATE;\n    v_enabled := TRUE;","occurrences":1}]}
   SET LOCAL lock_timeout = '2s';
   BEGIN
     ALTER TABLE public.system_flags RENAME TO system_flags_arm_l;
@@ -1015,7 +1099,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 26 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 31 ARMS EXECUTED and exits 0.
   -- ⛔ THE TWO PROSE MENTIONS ABOVE CARRY THE COUNT ON PURPOSE AND MUST MOVE
   -- WITH IT. The anti-skip gate reads this file's sentinel with a
   -- `grep -aoE "ALL [0-9]+ ARMS EXECUTED" | head -1`, so the FIRST match in
@@ -1024,7 +1108,7 @@ BEGIN
   -- at 15 while the NOTICE said 18 made the gate read 15, disagree with
   -- ci.yml's derivation, and fail — with no hint that a COMMENT was the
   -- source. Prose here is load-bearing, not decoration.
-  -- RED-UNDER-M: {"arm":"M2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"v_cause := 'flag_read_failed';","replace":"v_cause := NULL;","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"M2","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"v_cause := 'flag_read_failed';","replace":"v_cause := NULL;","occurrences":1}]}
   IF v_cnt_m2 <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (M2): the flag read RAISED and the fan-out wrote % instrument row(s) naming flag_read_failed AND carrying a non-NULL metadata->>''sqlstate'', expected exactly 1. The guard swallows the error and WARNs, which is correct and is exactly what arm L proves — but a WARNING is not a trace pg_cron keeps, so without this row a fan-out that has been failing its activation read on every tick for weeks is indistinguishable from one that is dormant by design. This is the APPGUC-WARNING-UNINSTRUMENTED-01 half of WR-10. A count of 0 here is EITHER no row at all OR a row whose `sqlstate` key has gone: the key is what separates 42P01 from 42501 from a planner fault, check 7 of the migration cannot see its deletion (that check asserts the statement shape of the INSERT, which survives), and this arm is the only reader of the key.', v_cnt_m2;
   END IF;
@@ -1044,7 +1128,7 @@ BEGIN
   --            byte-for-byte marker the non-destructive failure guard in
   --            job_worker.py reads back before it declines to downgrade a
   --            published row.
-  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"'source', 'ledger-refresh',","replace":"'source', 'ledger-refresh-drifted',","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"'source', 'ledger-refresh',","replace":"'source', 'ledger-refresh-drifted',","occurrences":1}]}
   -- ARM B — POSITIVE (LEDGER-01). Same seed, switch on.
   -- ======================================================================
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -1103,7 +1187,7 @@ BEGIN
   --    failed-attempt cooldown with the same 20-hour window, placed AFTER
   --    its attempt cooldown, so the interval step reads `occurrences: 4`
   --    and `nth: 1` still selects THIS body's attempt cooldown.
-  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":4,"nth":1},{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":1}]}
   -- ARM E — DEDUPE. A second tick while the job is in flight adds nothing.
   -- ======================================================================
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -1168,7 +1252,7 @@ BEGIN
   --    scripts/mutation-runner/GRAMMAR.md rule 2 records a real instance of that
   --    abort. What the migration asserts instead is the conjunct's SHAPE, bound
   --    to the column, which this mutation preserves by construction.
-  -- RED-UNDER-M: {"arm":"P","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND s.status IN ('published', 'pending_review', 'private')","replace":"AND s.status IN ('published', 'pending_review')","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"P","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND s.status IN ('published', 'pending_review', 'private')","replace":"AND s.status IN ('published', 'pending_review')","occurrences":1}]}
   UPDATE strategies SET status = 'private' WHERE id = s_p;
 
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -1322,7 +1406,7 @@ BEGIN
   --    `occurrences: 1` makes the runner report occurrence-mismatch (the
   --    mutation not applied, so the arm not tested), and `nth: 2` would mutate
   --    the COMPOSITE body, which no arm in this file calls.
-  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_c;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -1354,7 +1438,7 @@ BEGIN
   --            green here is trusted: the composite REACHES the conjunct (the
   --            api_keys join is LEFT and the key conjuncts are NULL-tolerant),
   --            so it is is_composite, and nothing else, that excludes it.
-  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND lrs.is_composite = FALSE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND lrs.is_composite = FALSE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_d;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -1398,7 +1482,7 @@ BEGIN
   --    failed-attempt cooldown with the same 20-hour window, placed AFTER
   --    its attempt cooldown, so the interval step reads `occurrences: 4`
   --    and `nth: 1` still selects THIS body's attempt cooldown.
-  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":4,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":2,"nth":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_f;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -1413,6 +1497,135 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (F): a strategy whose last attempt is 21 hours old produced % enqueue(s), expected 1 — the cooldown has been widened past its derivation and stale strategies would never be refreshed', v_ret;
   END IF;
   UPDATE strategies SET status = 'draft' WHERE id = s_f;
+
+  -- ======================================================================
+  -- ARMS P1 / P2 — A PAUSED MARKED SERIES IS RE-ADMITTED WEEKLY, NOT DAILY
+  -- (Phase 174 MARKPAUSE, founder decision D-01 "Re-admit weekly"). Two
+  -- otherwise identical stale single-key strategies on different venues, each
+  -- with ONE terminal derive attempt created 2 DAYS ago — past the 20-hour
+  -- window, well inside 7 days. The only difference is whether their
+  -- strategy_analytics.data_quality_flags carries a marks-paused key that is 3 or
+  -- more days old (D-04: P1's is 5 days old).
+  --
+  -- A MATCHED PAIR, for the reason this header gives for every bound: without
+  -- P2 a body that excludes EVERY strategy with an attempt this week passes P1;
+  -- without P1 the 20-hour cooldown the base migration ships passes P2. Only
+  -- the pair pins "the pause throttles, and ONLY the pause".
+  --
+  -- ⛔ THE POINT IS COST. A strategy whose marks paused stays stale (its
+  -- returns series stops advancing), so the 20-hour attempt cooldown re-derives
+  -- it about once a day for as long as the pause lasts. P1 is RED at the base
+  -- migration (20260924120000) by construction.
+  -- ======================================================================
+  -- RED-UNDER: shorten the paused window in 20261030120000 so that it no longer
+  --            covers a 2-day-old attempt. The window is rewritten to the
+  --            seven days minus six, i.e. ONE day, keeping the original token as
+  --            a prefix so the migration's apply-time verify (which needles the
+  --            seven-day interval) still passes and the ARM, not the apply, is
+  --            the first failure. P1's strategy is then admitted again, exactly
+  --            as under the base migration's daily cooldown.
+  -- RED-UNDER-M: {"arm":"P1","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"THEN INTERVAL '7 days'","replace":"THEN INTERVAL '7 days' - INTERVAL '6 days'","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id IN (s_mp1, s_mp2);
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_mp1 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P1): a strategy whose marks are PAUSED and whose last derive attempt is 2 days old was enqueued (% new job(s)), expected 0 — the pause is no longer throttled to one re-derive a week, so every paused series costs a full re-derive a day for as long as it stays paused. Likely cause: the attempt cooldown does not widen for a strategy carrying the marks-paused flag.', v_cnt;
+  END IF;
+
+  -- RED-UNDER: make the paused test match the unpaused twin as well — the
+  --            paused test is widened (in front of the whole EXISTS, so the
+  --            shape and age conjuncts cannot narrow it) to also accept an EMPTY
+  --            flags object, which is exactly what P2's row carries. The original
+  --            predicate is kept intact so the apply-time verify still passes.
+  --            P2's strategy then gets the 7-day window it must not have, and
+  --            is NOT enqueued.
+  -- RED-UNDER-M: {"arm":"P2","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"WHEN EXISTS (","replace":"WHEN EXISTS (SELECT 1 FROM public.strategy_analytics sb WHERE sb.strategy_id = lrs.strategy_id AND sb.data_quality_flags = '{}'::jsonb) OR EXISTS (","occurrences":1}]}
+  SELECT count(*) INTO v_cnt2 FROM compute_jobs
+   WHERE strategy_id = s_mp2 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt2 <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2): the identical strategy WITHOUT the marks-paused flag and with the same 2-day-old attempt produced % new job(s), expected exactly 1 — the weekly window leaked onto an unpaused strategy, so it would be refreshed less often than its 20-hour cooldown promises and its factsheet would go stale for days.', v_cnt2;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_mp1, s_mp2);
+
+  -- ======================================================================
+  -- ARM P3 — THE PAUSE THROTTLES, IT NEVER EXCLUDES FOR GOOD. A strategy whose
+  -- marks are paused and whose only attempt is 8 days old IS enqueued: the week
+  -- has passed, so it is re-admitted. Without this arm a body that excludes
+  -- every paused strategy outright passes P1 and P2 together — and a paused
+  -- strategy is the one whose derive is the only recurring path that clears the
+  -- flag once its marks resume, so excluding it would freeze its public
+  -- factsheet on the paused figures for good.
+  -- ======================================================================
+  -- RED-UNDER: widen the paused window in 20261030120000 from 7 days to 30, written
+  --            as the seven-day token plus 23 days so the migration's apply-time
+  --            verify still passes and the ARM, not the apply, is the first
+  --            failure. An 8-day-old attempt is then still inside the window,
+  --            P3's strategy is NOT enqueued, and a paused strategy is
+  --            effectively excluded for a month. P1 stays green: widening only
+  --            lengthens the throttle it measures.
+  -- RED-UNDER-M: {"arm":"P3","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"THEN INTERVAL '7 days'","replace":"THEN INTERVAL '7 days' + INTERVAL '23 days'","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_mp3;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_mp3 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 OR v_ret <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (P3): a strategy whose marks are PAUSED and whose last derive attempt is 8 days old produced % new job(s) (tick returned %), expected exactly 1 and 1 — the pause no longer re-admits after the week, so a paused strategy is excluded for good and its public factsheet freezes on the paused figures even after its marks resume. Likely cause: the paused attempt window is longer than 7 days.', v_cnt, v_ret;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_mp3;
+
+  -- ======================================================================
+  -- ARM P4 — A YOUNG PAUSE KEEPS THE 20-HOUR COOLDOWN (founder decision D-04,
+  -- review round 1 MR-01 / SFH F1). The matched twin of arm P1: the same
+  -- 2-day-old attempt, but the pause began YESTERDAY (under 3 days). One
+  -- transient refusal stamps the flag and marks resume the next day, so a
+  -- weekly window from day one froze the public chart for up to 7 days. P4 IS
+  -- enqueued. Without P4 a body that gives every flagged strategy the week (the
+  -- D-01 original) passes P1, P2 and P3 together; without P1 a body that never
+  -- widens passes P4. Only the pair pins "weekly only once the pause is 3+ days".
+  -- ======================================================================
+  -- RED-UNDER: move the three-day cutoff in 20261030120000 30 days forward, so
+  --            every flagged pause counts as old. The `CURRENT_DATE - 3` token
+  --            is kept as the prefix so the migration's apply-time verify still
+  --            passes and the ARM, not the apply, is the first failure. P4's
+  --            one-day-old pause then gets the 7-day window and is NOT enqueued.
+  --            P1 stays green: the cutoff only widens what counts as old.
+  -- RED-UNDER-M: {"arm":"P4","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"CURRENT_DATE - 3, 'YYYY-MM-DD')","replace":"CURRENT_DATE - 3 + 30, 'YYYY-MM-DD')","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_mp4;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_mp4 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 OR v_ret <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (P4): a strategy whose marks paused only YESTERDAY and whose last derive attempt is 2 days old produced % new job(s) (tick returned %), expected exactly 1 and 1 — a pause under 3 days old was given the weekly window, so one transient refused read freezes the public chart for up to a week although marks resume the next day. Likely cause: the weekly window no longer waits for the pause to be 3 days old.', v_cnt, v_ret;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_mp4;
+
+  -- ======================================================================
+  -- ARM P5 — A MALFORMED FLAG VALUE KEEPS THE 20-HOUR COOLDOWN (founder
+  -- decision D-04: "a malformed flag value falls back to 20 hours and never
+  -- raises inside the tick"; silent-failure hunt round 2, N1). The matched twin
+  -- of arm P1: the same 2-day-old attempt, but the flag's value is an EMPTY
+  -- string, not a date. The value is compared as text and '' sorts below every
+  -- ISO date, so without the shape test it counts as an OLD pause and gets the
+  -- weekly window. P5 IS enqueued. Without P5 a body that compares the raw text
+  -- passes P1 through P4; without P1 a body that never widens passes P5.
+  -- ======================================================================
+  -- RED-UNDER: remove the ISO-shape conjunct from the paused test in
+  --            20261030120000, leaving the text comparison itself intact. The
+  --            migration's apply-time verify does not needle that conjunct, so
+  --            the apply passes and the ARM is the first failure. P5's empty
+  --            value then sorts below the cutoff, counts as an old pause, gets
+  --            the 7-day window and is NOT enqueued. P1 stays green: its value
+  --            is a real date.
+  -- RED-UNDER-M: {"arm":"P5","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND (sa.data_quality_flags ->> 'marks_trailing_since') ~ '^\\d{4}-\\d{2}-\\d{2}$'","replace":"AND TRUE","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_mp5;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_mp5 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 OR v_ret <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (P5): a strategy whose marks flag carries a MALFORMED value (an empty string) and whose last derive attempt is 2 days old produced % new job(s) (tick returned %), expected exactly 1 and 1 — a malformed marks_trailing_since was given the weekly window, so a bad value written out of band freezes the public chart for up to a week. Likely cause: the paused test no longer checks that the value is an ISO date before comparing it.', v_cnt, v_ret;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_mp5;
 
   -- ======================================================================
   -- ARM G1 — the PER-VENUE CAP (D-09). Six stale eligible strategies on ONE
@@ -1431,7 +1644,7 @@ BEGIN
   --            that serialises every job starves every other venue" result this
   --            arm names, and the discrimination the LIMIT-strictly-greater-
   --            than-cap rule exists to preserve.
-  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHERE c.venue_rank <= 2","replace":"WHERE c.venue_rank <= 4","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"WHERE c.venue_rank <= 2","replace":"WHERE c.venue_rank <= 4","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(g1_v1);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 2 THEN
@@ -1464,7 +1677,7 @@ BEGIN
   --            is the static gate). The needle carries its indentation: the
   --            unindented `LIMIT 4` at :194 is PROSE, and mutating a comment
   --            would be a no-op reported as a non-biting arm.
-  -- RED-UNDER-M: {"arm":"G2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"       LIMIT 4","replace":"       LIMIT 3","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G2","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"       LIMIT 4","replace":"       LIMIT 3","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(g2_v1) OR id = ANY(g2_v2);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 4 THEN
@@ -1499,7 +1712,7 @@ BEGIN
   --    `occurrences: 1` makes the runner report occurrence-mismatch (the
   --    mutation not applied, so the arm not tested), and `nth: 2` would mutate
   --    the COMPOSITE body, which no arm in this file calls.
-  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id IN (s_h_inact, s_h_revoked, s_h_disc);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -1522,7 +1735,7 @@ BEGIN
   --    `occurrences: 1` makes the runner report occurrence-mismatch (the
   --    mutation not applied, so the arm not tested), and `nth: 2` would mutate
   --    the COMPOSITE body, which no arm in this file calls.
-  -- RED-UNDER-M: {"arm":"H/inactive","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND COALESCE(ak.is_active, TRUE)","replace":"AND (COALESCE(ak.is_active, TRUE) OR TRUE)","occurrences":2,"nth":1}],"neuter":[{"arm":"H"}]}
+  -- RED-UNDER-M: {"arm":"H/inactive","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND COALESCE(ak.is_active, TRUE)","replace":"AND (COALESCE(ak.is_active, TRUE) OR TRUE)","occurrences":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_inact;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/inactive): an INACTIVE key produced % job(s), expected 0', v_cnt;
@@ -1541,7 +1754,7 @@ BEGIN
   --    `occurrences: 1` makes the runner report occurrence-mismatch (the
   --    mutation not applied, so the arm not tested), and `nth: 2` would mutate
   --    the COMPOSITE body, which no arm in this file calls.
-  -- RED-UNDER-M: {"arm":"H/revoked","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":2,"nth":1}],"neuter":[{"arm":"H"}]}
+  -- RED-UNDER-M: {"arm":"H/revoked","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_revoked;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/revoked): a REVOKED key produced % job(s), expected 0 — a revoked key keeps is_active TRUE, so the is_active conjunct alone does not cover this case', v_cnt;
@@ -1560,7 +1773,7 @@ BEGIN
   --    `occurrences: 1` makes the runner report occurrence-mismatch (the
   --    mutation not applied, so the arm not tested), and `nth: 2` would mutate
   --    the COMPOSITE body, which no arm in this file calls.
-  -- RED-UNDER-M: {"arm":"H/disconnected","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"AND ak.disconnected_at IS NULL","replace":"AND (ak.disconnected_at IS NULL OR TRUE)","occurrences":2,"nth":1}],"neuter":[{"arm":"H"}]}
+  -- RED-UNDER-M: {"arm":"H/disconnected","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"AND ak.disconnected_at IS NULL","replace":"AND (ak.disconnected_at IS NULL OR TRUE)","occurrences":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_disc;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/disconnected): a DISCONNECTED key produced % job(s), expected 0 — a soft-disconnected key also keeps is_active TRUE', v_cnt;
@@ -1823,7 +2036,7 @@ BEGIN
   --    mutated here, so the twin cannot abort the apply before the arms run
   --    and report a `no-red` that measured nothing — the trap GRAMMAR.md rule 2
   --    records.
-  -- RED-UNDER-M: {"arm":"R","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"RAISE WARNING 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","replace":"RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"R","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"RAISE WARNING 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","replace":"RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: one candidate failed to enqueue (SQLSTATE %); continuing', SQLSTATE;","occurrences":1}]}
   CREATE FUNCTION pg_temp.lrf_poison() RETURNS TRIGGER LANGUAGE plpgsql AS $poison$
   BEGIN
     IF EXISTS (SELECT 1 FROM strategies WHERE id = NEW.strategy_id AND name LIKE 'lrf R%') THEN
@@ -1950,7 +2163,7 @@ BEGIN
   --    apply-time block needles the failed-target KEY and the failure row's
   --    count KEY, and this mutation preserves both, so the apply survives and
   --    the ARM is the first failure.
-  -- RED-UNDER-M: {"arm":"N","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"v_failed := v_failed + 1;","replace":"v_failed := v_failed + 0;","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"N","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"v_failed := v_failed + 1;","replace":"v_failed := v_failed + 0;","occurrences":1}]}
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf N1', 'draft') RETURNING id INTO s_n1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf N2', 'draft') RETURNING id INTO s_n2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2, 'lrf N3', 'draft') RETURNING id INTO s_n3;
@@ -2024,7 +2237,7 @@ BEGIN
   --            says enqueued 1 against a tick that returned 2, and the
   --            agreement read below fails.
   -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
-  -- RED-UNDER-M: {"arm":"N2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"'enqueued_count', v_enqueued,","replace":"'enqueued_count', v_failed,","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"N2","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"'enqueued_count', v_enqueued,","replace":"'enqueued_count', v_failed,","occurrences":1}]}
   SELECT metadata INTO v_meta_n
     FROM public.cron_runs
    WHERE cron_name = 'ledger_refresh_fanout'
@@ -2072,7 +2285,7 @@ BEGIN
   --    the single-key body comes first. Not a migration needle: that file's
   --    apply-time block needles the failed-attempt cooldown by its heartbeat
   --    read, which this mutation leaves intact.
-  -- RED-UNDER-M: {"arm":"T","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":4,"nth":2}]}
+  -- RED-UNDER-M: {"arm":"T","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":2,"nth":2}]}
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf T1', 'draft') RETURNING id INTO s_t1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf T2', 'draft') RETURNING id INTO s_t2;
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
@@ -2121,7 +2334,7 @@ BEGIN
   --    the apply-time block's ordering needle until this arm was added; that
   --    block now needles the failure row's count KEY instead, so the apply
   --    survives this mutation and the ARM is the first failure.
-  -- RED-UNDER-M: {"arm":"N3","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_failed > 0 THEN","replace":"IF v_failed >= 0 THEN","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"N3","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"IF v_failed > 0 THEN","replace":"IF v_failed >= 0 THEN","occurrences":1}]}
   SELECT count(*) INTO v_fail_post
     FROM public.cron_runs
    WHERE cron_name = 'ledger_refresh_fanout'
@@ -2164,7 +2377,7 @@ BEGIN
   --    (the composite body's NOTICE names composite jobs). Not a migration
   --    needle, and the apply-time block deliberately does not assert the
   --    raise ABSENT, so the apply survives and the ARM is the first failure.
-  -- RED-UNDER-M: {"arm":"U","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued %","replace":"IF v_enqueued = 0 AND v_failed > 0 THEN\n    RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: every candidate this tick failed to enqueue (% failed, 0 enqueued)', v_failed;\n  END IF;\n  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued %","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"U","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued %","replace":"IF v_enqueued = 0 AND v_failed > 0 THEN\n    RAISE EXCEPTION 'enqueue_ledger_refresh_for_strategies: every candidate this tick failed to enqueue (% failed, 0 enqueued)', v_failed;\n  END IF;\n  RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued %","occurrences":1}]}
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf U1', 'draft') RETURNING id INTO s_u1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf U2', 'draft') RETURNING id INTO s_u2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf U3', 'draft') RETURNING id INTO s_u3;
@@ -2300,7 +2513,7 @@ BEGIN
   --            tick below enqueued its healthy candidate, so the re-raise rolls
   --            that good enqueue back and the call raises instead of returning.
   -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
-  -- RED-UNDER-M: {"arm":"V1","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enqueued = 0 THEN","replace":"IF v_enqueued >= 0 THEN","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"V1","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"IF v_enqueued = 0 THEN","replace":"IF v_enqueued >= 0 THEN","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id IN (s_v1, s_v2);
   v_ret := NULL;
   v_err_state := NULL;
@@ -2332,7 +2545,7 @@ BEGIN
   --            WARNING, and the tick returns 0 with no failure row at all:
   --            neither the prober nor the cooldown ever sees it.
   -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
-  -- RED-UNDER-M: {"arm":"V2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"IF v_enqueued = 0 THEN","replace":"IF v_enqueued < 0 THEN","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"V2","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"IF v_enqueued = 0 THEN","replace":"IF v_enqueued < 0 THEN","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id IN (s_v3, s_v4);
   v_err_state := NULL;
   v_err_msg := NULL;
@@ -2368,7 +2581,7 @@ BEGIN
   --            40001 candidate is then counted as a failure and named, and
   --            the lost-race name read below fails.
   -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
-  -- RED-UNDER-M: {"arm":"W","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHEN serialization_failure THEN","replace":"WHEN SQLSTATE 'LRW00' THEN","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"W","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"WHEN serialization_failure THEN","replace":"WHEN SQLSTATE 'LRW00' THEN","occurrences":1}]}
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf W1', 'draft') RETURNING id INTO s_w1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrf W2', 'draft') RETURNING id INTO s_w2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2, 'lrf W3', 'draft') RETURNING id INTO s_w3;
@@ -2419,7 +2632,7 @@ BEGIN
   -- ⚠️ `occurrences: 2, nth: 1`, single-key body first. Not a migration needle.
   --    A sub-arm of W, like H/inactive is of H: arm W's own assertion above
   --    still passes under this twin, so this read is the first failure.
-  -- RED-UNDER-M: {"arm":"W/deadlock","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"WHEN serialization_failure THEN","replace":"WHEN serialization_failure OR deadlock_detected THEN","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"W/deadlock","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_ledger_fanout_marks_paused_weekly.sql","find":"WHEN serialization_failure THEN","replace":"WHEN serialization_failure OR deadlock_detected THEN","occurrences":1}]}
   SELECT metadata INTO v_meta_w
     FROM public.cron_runs
    WHERE cron_name = 'ledger_refresh_fanout'
@@ -2436,7 +2649,7 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
 
-  RAISE NOTICE 'ALL 26 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, and every one of those claims is falsifiable.';
+  RAISE NOTICE 'ALL 31 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;

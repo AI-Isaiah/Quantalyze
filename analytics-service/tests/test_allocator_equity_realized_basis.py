@@ -103,8 +103,8 @@ def _mt5_replay(book: Book, wedge: Fraction):
     upnl = wedge * nav_t
     balance, equity = float(nav_t), float(nav_t + upnl)
     deals = _mt5_deals(book)
-    returns, _ = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=balance)
-    day_pnl = mt5_day_pnl(deals)
+    returns, _ = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=balance, server_utc_offset_s=0)
+    day_pnl = mt5_day_pnl(deals, server_utc_offset_s=0)
     stored = _persisted_roundtrip(returns, day_pnl)
     # the terminal the derive must store is the ORACLE's last nav (the balance), on the
     # last NAV day: not the live equity, and not read back from the replay
@@ -309,9 +309,9 @@ def test_an_old_row_without_the_terminal_rolls_from_the_anchor_as_before() -> No
     old row does, not as something to want: the next derive of the key rewrites the row."""
     book = funding_and_dominated_book()
     returns, _ = combine_mt5_deal_ledger(
-        _mt5_deals(book), account_equity=float(book.nav[-1]) * 1.01, account_balance=book.anchor
+        _mt5_deals(book), account_equity=float(book.nav[-1]) * 1.01, account_balance=book.anchor, server_utc_offset_s=0
     )
-    stored = _persisted_roundtrip(returns, mt5_day_pnl(_mt5_deals(book)))
+    stored = _persisted_roundtrip(returns, mt5_day_pnl(_mt5_deals(book), server_utc_offset_s=0))
     args = (_stored(returns), book.flows, float(book.nav[-1]) * 1.01)
     absent = replay_key_equity(*args, history_reaches_inception=True, dropped_day_pnl=stored)
     none = replay_key_equity(

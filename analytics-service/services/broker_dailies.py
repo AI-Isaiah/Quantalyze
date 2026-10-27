@@ -71,6 +71,7 @@ from services.mt5_deals import (
     deal_utc_day,
     deal_utc_instant_ms,
 )
+from services.mt5_server_clock import Mt5ServerClock
 from services.native_nav import (
     NativeLedger,
     native_composed_flows,
@@ -617,7 +618,7 @@ def _mt5_flow_day_timing(
     flow_deals: Sequence[tuple[Mapping[str, Any], float]],
     trading_deals: Sequence[tuple[Mapping[str, Any], int | None, int | None, int, float]],
     in_days_by_position: Mapping[int, Sequence[tuple[str, Mapping[str, Any]]]],
-    server_utc_offset_s: int,
+    server_utc_offset_s: int | Mt5ServerClock,
 ) -> DayTiming | None:
     """The ``DayTiming`` of ONE flow day, or ``None`` when any instant it needs cannot be
     trusted (164.6.6.2.3 D-02/D-04/D-07/D-09).
@@ -626,6 +627,8 @@ def _mt5_flow_day_timing(
     ``trading_deals``: this day's trading deals as ``(deal, position_id, entry_code,
     type_code, cash)``. ``in_days_by_position``: for every position id, its
     ``DEAL_ENTRY_IN`` deals with the UTC day the fold already bucketed them on.
+    ``server_utc_offset_s`` is the broker clock: a ``Mt5ServerClock`` (a DST rule) or the fixed
+    integer offset (Phase 175 D-01).
 
     This is the only place an instant is resolved, and only for the deals of a flow day
     (plus the IN deals those days need), so a bad ``time_msc`` anywhere else cannot reach
@@ -697,7 +700,7 @@ def _mt5_flow_day_timing(
 
 def _fold_mt5_deals(
     deals: Sequence[Mapping[str, Any]],
-    server_utc_offset_s: int,
+    server_utc_offset_s: int | Mt5ServerClock,
 ) -> tuple[pd.Series, list[ExternalFlow], dict[pd.Timestamp, DayTiming]]:
     """The ONE MT5 deal fold — classify, bucket per UTC day, shape.
 
@@ -707,6 +710,8 @@ def _fold_mt5_deals(
     flow day whose instants could all be resolved (164.6.6.2.3). ``timing`` holds ONLY
     flow days: a day without a flow is measured by the plain daily formula, so no instant
     is read for it and a malformed ``time_msc`` there changes nothing.
+    ``server_utc_offset_s`` is the broker clock: a ``Mt5ServerClock`` (a DST rule) or the fixed
+    integer offset (Phase 175 D-01).
 
     WHY THIS IS A SHARED HELPER AND NOT AN INLINE LOOP (A-01). Three public functions
     in this module need these SAME objects: ``combine_mt5_deal_ledger`` chain-links
@@ -806,7 +811,7 @@ def combine_mt5_deal_ledger(
     account_equity: float,
     account_balance: float,
     *,
-    server_utc_offset_s: int = 0,
+    server_utc_offset_s: int | Mt5ServerClock,
     floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """The MT5 sibling of ``combine_native_ledger`` (:174) and
@@ -816,6 +821,8 @@ def combine_mt5_deal_ledger(
     an ascending daily DatetimeIndex unit ``[us]`` + a plain ``NavTWRMeta`` dict),
     so EVERYTHING downstream — ``derive_basis_series``, ``compute_all_metrics``,
     persistence, the factsheet — is untouched.
+    ``server_utc_offset_s`` is the broker clock: a ``Mt5ServerClock`` (a DST rule) or the fixed
+    integer offset (Phase 175 D-01).
 
     The account is single-currency in its deposit unit; the caller passes that unit's
     ``floors`` (``services.account_unit``, D-01..D-07), so a BTC account's NAV is judged
@@ -953,12 +960,12 @@ def reconstruct_mt5_nav_levels(
     account_equity: float,
     account_balance: float,
     *,
-    server_utc_offset_s: int = 0,
+    server_utc_offset_s: int | Mt5ServerClock,
     floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """The NAV-**LEVELS** sibling of ``combine_mt5_deal_ledger`` — same ledger, same
     fold, same arithmetic core, but it returns DOLLAR BALANCES instead of daily
-    percentage changes.
+    percentage changes. ``server_utc_offset_s`` is the broker clock: a ``Mt5ServerClock`` (a DST rule) or the fixed integer offset (Phase 175 D-01).
 
     A LEVEL IS NOT A RETURN, and the distinction is the whole reason this function
     exists (A-01). ``combine_mt5_deal_ledger`` emits ``r_t``, a dimensionless daily
@@ -1071,12 +1078,12 @@ def reconstruct_mt5_nav_levels(
 def mt5_day_pnl(
     deals: Sequence[Mapping[str, Any]],
     *,
-    server_utc_offset_s: int = 0,
+    server_utc_offset_s: int | Mt5ServerClock,
 ) -> pd.Series:
     """The MT5 account's actual P&L on every NAV day, from the deal ledger
     (167.1.2.2 D-15): per UTC day, the trading deals' cash effect
     (``profit + swap + commission + fee``) on the union of trading days and
-    external-flow days, a flow-only day being a zero-P&L day.
+    external-flow days, a flow-only day being a zero-P&L day. ``server_utc_offset_s`` is the broker clock: a ``Mt5ServerClock`` (a DST rule) or the fixed integer offset (Phase 175 D-01).
 
     This is ``NAV_t - NAV_{t-1} - F_t`` on the series ``combine_mt5_deal_ledger``
     chains its returns from: ``reconstruct_nav`` rolls

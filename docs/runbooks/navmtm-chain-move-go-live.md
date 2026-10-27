@@ -179,10 +179,26 @@ Any item that does not return its expected answer is an ABORT: do not run Step B
   **Abort if** the version is below 1.3 or the function is absent from `pg_proc`.
 - **P5 — the working tree is clean.** `git status --short` prints nothing, so the manifest Step C
   produces is reviewable against a known-clean baseline.
+- **P6 — the broker server clock is measured and the worker setting matches it.** On a trading
+  day, while a liquid symbol is visibly ticking, read the server time MT5 Market Watch shows and
+  UTC at the same moment; the difference rounded to whole hours is server minus UTC. Then read
+  the MT5 clock setting on every Railway service that runs the analytics worker (at the time of
+  writing `quantalyze-analytics` and `quantalyze-analytics-backfill`): either
+  `MT5_SERVER_UTC_OFFSET_S` alone (the fixed form, whole seconds) or, once Phase 175 is live,
+  `MT5_SERVER_TIME_RULE` alone (`eu`: daylight saving from the last Sunday of March to the last
+  Sunday of October, at 01:00 UTC; `us`: from the second Sunday of March to the first Sunday of
+  November, at 02:00 New York time; both +2 h outside daylight saving and +3 h inside it). The
+  setting must give today's reading. Record the date, the whole-hour difference and the setting
+  (a rule id or a whole-hour count) in the SUMMARY of the plan being executed, never the server
+  name, a login or a balance. **Abort if** the setting is absent on any of those services, both
+  variables are set, or the setting disagrees with the reading, because a flow made in the hour
+  after a mark's read is then filed on the wrong side of it (Phase 167.2.1.1.1 REVIEW-3 WR-02,
+  Phase 175).
 
 ## Step B — the move
 
 Re-run P0, P2 and P3 immediately before it, and keep the merge hold (below) from now on.
+Re-run P6 too when the move happens on another day than the P6 reading.
 
 One statement moves both jobs, so both move or neither does. The guard first refuses unless the
 database names PRODUCTION AND both jobs are at their expected starting schedule and command (a
@@ -272,6 +288,55 @@ convention above.
 6. **Refusals by token.** Per refusal token, the count in the worker log lines of that night.
 7. **The cron set equals the manifest.** The next hourly prober run's `cron-drift` arm reports no
    defect.
+
+## Mark refusals (Phase 174)
+
+*Added 2026-10-27 (Phase 174 MARKPAUSE, D-02 and D-03).* When a derive's mark read is refused, the
+reason and the day it began are kept on one row per key, in `allocator_equity_derived`,
+`kind = 'nav_mark_refusal:<api_key_id>'`. The row is owner-SELECT and service-role write, so it is
+readable by the key's owner or by an admin through the service role, and it is **never** in the
+public `strategy_analytics.data_quality_flags`. The payload is `{token, first_seen_day,
+last_seen_day}` and nothing else: ISO UTC label days (a read at 00:10Z on the 8th labels the 7th)
+and a token from the closed set `MARK_REFUSAL_TOKENS` in `analytics-service/services/nav_marks.py`,
+which is where each token's meaning is written. A later refusal of the same key keeps
+`first_seen_day` and moves `last_seen_day`; the row is deleted when a derive of that key stores or
+finds the day's mark. A row therefore means "this key was last refused on `last_seen_day`", not "the
+key is paused now": a row can be stale if the clear failed (it logs a WARNING and is not retried), and
+a key that was disconnected, revoked, deactivated or deleted while refused never clears its row. The
+readout counts only keys that can still be derived, but even for those, compare `last_seen_day` with
+the key's latest derive before reading a row as a live pause.
+
+The readout is read-only, runs through the marker-first convention above, and names no owner id and
+no key id: it returns one row per token and day pair with a count.
+
+<!-- form: mark-refusals -->
+```sql
+WITH m AS (
+  SELECT coalesce((SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()) = __MARKER__, false)::int AS marker_is_prod
+)
+SELECT m.marker_is_prod, r.token, r.first_seen_day, r.last_seen_day, r.refused_keys
+  FROM m
+  LEFT JOIN (
+    SELECT aed.payload->>'token' AS token,
+           aed.payload->>'first_seen_day' AS first_seen_day,
+           aed.payload->>'last_seen_day' AS last_seen_day,
+           count(*) AS refused_keys
+      FROM public.allocator_equity_derived aed
+      JOIN public.api_keys ak
+        ON aed.kind = 'nav_mark_refusal:' || ak.id::text
+       AND ak.user_id = aed.allocator_id
+       AND ak.disconnected_at IS NULL
+       AND ak.sync_status IS DISTINCT FROM 'revoked'
+       AND ak.is_active
+     WHERE aed.kind LIKE 'nav_mark_refusal:%'
+     GROUP BY 1, 2, 3
+  ) r ON true
+ ORDER BY r.token, r.first_seen_day;
+```
+
+Render and run it with `node "$NM_SP/form.mjs" mark-refusals > "$NM_SP/mark-refusals.sql"` then
+`q "$NM_SP/mark-refusals.sql"`. Expect `marker_is_prod = 1` on every row. With no refused key the
+readout is one row with NULLs after the marker column.
 
 ## Merge and deploy hold
 

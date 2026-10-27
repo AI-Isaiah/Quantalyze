@@ -745,7 +745,8 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792, +4 arms (12-15) of test_replace_allocator_equity_snapshots_window.sql. MEASURED: this pin read `expected 792 to be 788`, and ONE full runner run printed `arms: 792/792/0`.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(totalAnchored).toBe(811);
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    expect(totalAnchored).toBe(816);
   });
 });
 
@@ -2165,9 +2166,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792 in arms/biting/lane-invocations, the window-replace row 11 -> 15 sections, the mean line (1.6s over 792), copied from ONE full lane run.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792/792/0 -> 803/803/0, 792 -> 803, 79 -> 80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803/803/0 -> 811/811/0, 803 -> 811, 80 -> 81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    "arms: 811/811/0   (executed/annotated/waived)",
-    "biting: 811   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 811   (arm lanes actually spawned — tallied inside runLane, independent of the 811 the verdict loop counted; plus 81 baseline / 81 restore leg(s))",
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    "arms: 816/816/0   (executed/annotated/waived)",
+    "biting: 816   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 816   (arm lanes actually spawned — tallied inside runLane, independent of the 816 the verdict loop counted; plus 81 baseline / 81 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2270,7 +2272,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_get_verified_cohort_rank_gate.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_guard_wizard_draft_updates_auth_uid.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
     "  file test_ledger_refresh_composite_arm.sql: sections 29 / judged 29 / annotated 29 / waived 0 / biting 29",
-    "  file test_ledger_refresh_fanout.sql: sections 32 / judged 32 / annotated 32 / waived 0 / biting 32",
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE, plan 01): 32 -> 35 (P1, P2, P3). The per-file rows must sum to the aggregate, which moved 803 -> 806 with them; every `803`/`804`/`802` in a CODE line of this file moved +3 in the same commit, while the dated CURRENCY comments above them stay as lineage.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04): 35 -> 36 (P4), aggregate 806 -> 807; every `806`/`805`/`807` in a CODE line of this file moved +1.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1): 36 -> 37 (P5), aggregate 807 -> 808; every `807`/`806`/`808` in a CODE line of this file moved +1.
+    "  file test_ledger_refresh_fanout.sql: sections 37 / judged 37 / annotated 37 / waived 0 / biting 37",
     "  file test_ledger_refresh_staleness.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     // ⭐ ADDED 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): the
     // LANE-ONLY two-backend dblink gate, arms L1-L4, copied from the full run's
@@ -2348,7 +2353,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): mean 2.4s -> 2.5s over 738, from the same full run.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 1.6 -> 1.7, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 1.7 -> 5.0, 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    "per-arm lane time: mean 5.0s over 811 arm run(s)",
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    "per-arm lane time: mean 2.4s over 816 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2387,7 +2393,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(r.out).toContain("811 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    expect(r.out).toContain("816 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2693,8 +2700,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 787/788 -> 791/792, both halves together (offset -1 kept).
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 791 -> 802, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 802 -> 810, 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(r.out).toContain("rows sum to 810 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 811");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    expect(r.out).toContain("rows sum to 815 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 816");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2740,7 +2748,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788/789 -> 792/793 in the same splices.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const severed = GREEN_LOG.replace(/^lane-invocations: 811 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    const severed = GREEN_LOG.replace(/^lane-invocations: 816 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
@@ -2751,7 +2760,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the severed-tally message now reads executed=643 lane-invocations=0 biting=643.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(r.out).toContain("executed=811 lane-invocations=0 biting=811");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    expect(r.out).toContain("executed=816 lane-invocations=0 biting=816");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2796,12 +2806,13 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the extra lane-invocation is 644 against 643 executed.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 804 -> 812; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const extra = GREEN_LOG.replace(/^lane-invocations: 811 /m, "lane-invocations: 812 ");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    const extra = GREEN_LOG.replace(/^lane-invocations: 816 /m, "lane-invocations: 817 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 804 -> 812; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(r.out).toContain("executed=811 lane-invocations=812 biting=811");
+    expect(r.out).toContain("executed=816 lane-invocations=817 biting=816");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2824,7 +2835,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the garbled lane-invocations replace the 643 tally.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 811 /m, "lane-invocations: abc ");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 816 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2875,7 +2887,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the waived-arm replacement now rewrites arms 643/643/0.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 792/792 -> 803/803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 803/803 -> 811/811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const waived = GREEN_LOG.replace(/^arms: 811\/811\/0 /m, `arms: 811/811/${WAIVED_CEILING + 1} `);
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    const waived = GREEN_LOG.replace(/^arms: 816\/816\/0 /m, `arms: 816/816/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2950,19 +2963,21 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the zero-executed replacement now rewrites arms 0/643/0.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 0/792/0 -> 0/803/0; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 0/803/0 -> 0/811/0; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const zero = GREEN_LOG.replace(/^arms: 811\/811\/0 /m, "arms: 0/811/0 ");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    const zero = GREEN_LOG.replace(/^arms: 816\/816\/0 /m, "arms: 0/816/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 615 -> 630, moved INDIVIDUALLY with the 616 -> 631 splice (offset +1 kept).
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 804 -> 812; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const spliced = GREEN_LOG.replace(/^biting: 811 /m, "biting: 812 ");
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+    const spliced = GREEN_LOG.replace(/^biting: 816 /m, "biting: 817 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 793 -> 804, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 804 -> 812, 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(s.out).toContain("biting (812) exceeds executed (811)");
+    expect(s.out).toContain("biting (817) exceeds executed (816)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -3125,7 +3140,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 788 -> 792, the floor and the measured biting count together.
       // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
       // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-      expect(r.out).toContain("biting arms 811 >= 811");
+      // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
+      expect(r.out).toContain("biting arms 816 >= 816");
     }
   });
 

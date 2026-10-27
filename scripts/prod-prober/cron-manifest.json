@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "normalization": "ws-collapse-v2",
-  "captured_at": "2026-10-14T19:54:50.752Z",
+  "captured_at": "2026-10-27T09:47:19.550Z",
   "database_marker": "⛔ PRODUCTION — real customer data. No seeds, no fixtures, no DELETE without a scoped id.",
   "jobs": [
     {
@@ -47,7 +47,7 @@
     {
       "jobid": 43,
       "jobname": "cron-sync-trades",
-      "schedule": "30 4 * * *",
+      "schedule": "10 0 * * *",
       "active": true,
       "database": "postgres",
       "username": "postgres",
@@ -57,7 +57,7 @@
     {
       "jobid": 42,
       "jobname": "derive-allocator-key-dailies",
-      "schedule": "30 5 * * *",
+      "schedule": "40 0 * * *",
       "active": true,
       "database": "postgres",
       "username": "postgres",

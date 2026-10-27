@@ -5033,12 +5033,21 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // sentinel-bearing files against the table's 23 (`expected [ ...(24) ] to deeply
     // equal [ ...(23) ]`) and `expected 24 to be 23` against the floor; 362 + 11 = 373 is the
     // table's own sum, which that test re-derives from the corpus.
+    // RAISED 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1), 24/377 -> 24/378: test_ledger_refresh_fanout.sql grew arm P5 and now declares `ALL 31 ARMS EXECUTED`.
+    // RAISED 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04), 24/376 -> 24/377: test_ledger_refresh_fanout.sql grew arm P4 and now declares `ALL 30 ARMS EXECUTED`.
+    // RAISED 2026-10-27 (Phase 174 MARKPAUSE, plan 01), 24/373 -> 24/376.
+    // test_ledger_refresh_fanout.sql grew arms P1, P2 and P3 and now declares `ALL 29 ARMS
+    // EXECUTED`, so the floor moves +3 and the sentinel-bearing file count stays 24. 373 + 3 = 376
+    // is the table's own sum, which ci-anti-skip-gate.contract.test.ts re-derives from the corpus.
     // RAISED 2026-10-27 (Phase 171 READCEILING, plan 06), 24/373 -> 25/381.
     // test_allocator_trade_reads.sql JOINED (an ordinary sql-tests gate: it posts nothing) and
     // declares `ALL 8 ARMS EXECUTED`. MEASURED: ci-anti-skip-gate.contract.test.ts read 25
     // sentinel-bearing files against the table's 24 (`expected [ ...(25) ] to deeply
     // equal [ ...(24) ]`) and `expected 25 to be 24` against the floor; 373 + 8 = 381 is the
     // table's own sum, which that test re-derives from the corpus.
+    // MERGE 2026-10-27 (Phase 171 READCEILING merged with origin/main 04f5568a9): both raises above moved from 24/373,
+    // so the merged floor is 25/386 (the 171 file joined at 8 arms, the fan-out file is at 31), re-derived by
+    // ci-anti-skip-gate.contract.test.ts on the merged tree.
     const res = spawnSync(
       "grep",
       ["-ac", "SENTINEL_FLOOR=25", ".github/workflows/ci.yml"],
@@ -5052,7 +5061,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=381", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=386", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

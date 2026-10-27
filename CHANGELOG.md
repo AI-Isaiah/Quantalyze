@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.133.3.0] - 2026-10-27 — MT5OFFSET: MT5 deal days and instants follow the broker's daylight-saving clock
+
+### Root cause
+- Every MT5 offset site read `int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0"))`: one fixed integer for the whole ledger, and a silent `0` when the variable was missing. The broker's server clock moves between +2 h and +3 h with daylight saving, so after a change a fixed `10800` files a deposit made in the hour after a mark's 00:10Z read on the day before, and places its instant one hour early (NAVMTM 167.2.1.1.1 REVIEW-3 WR-02). Marks themselves are offset-independent and need no repair; only flow placement and day bucketing depend on the offset.
+
+### Added
+- `analytics-service/services/mt5_server_clock.py` (new stdlib-only leaf, plan 01): `Mt5ServerClock` with an `eu` rule (last Sunday of March to last Sunday of October, at 01:00 UTC), a `us` rule (second Sunday of March to first Sunday of November, at 02:00 New York time) and a `fixed` form for a broker without daylight saving; `resolve_mt5_server_clock()` is the one reader of `MT5_SERVER_TIME_RULE` and `MT5_SERVER_UTC_OFFSET_S` (D-01). Neither set, both set, or an unknown rule id raises `Mt5ServerClockConfigError` with a fixed text that names the variables and the allowed ids, never a configured value. A repeated broker hour gives no instant (FLOWTIMING D-07); the day uses the first candidate, or the standard offset in a skipped hour.
+- `analytics-service/scripts/mt5offset_dry_run.py` (plan 04): a read-only before/after over captured MT5 ledgers, folding each key under the legacy integer and the target rule. Per key it reports counts and ordinals only (`mt5-key-N`, ids kept in a separate map, all output scrubbed) and a verdict of `rebuild`, `none` or `not measured`. It exits 1 when the capture holds no keys or any key is `not measured` (review SFH-01), so a run that measured nothing cannot read as clean. It feeds D-03's forced-rebuild list.
+
+### Changed
+- `analytics-service/services/mt5_deals.py`: `deal_utc_day` and `deal_utc_instant_ms` accept `int | Mt5ServerClock` (a bare int is wrapped as the fixed form; bool, float, str and None are refused) and look the day and instant offsets up once per deal from the deal's own wall time, so both always come from one clock. The note claiming order within the broker clock is exact is rewritten. An out-of-span deal time names the rule's year span (review SFH-04).
+- `analytics-service/services/broker_dailies.py`: `combine_mt5_deal_ledger`, `reconstruct_mt5_nav_levels` and `mt5_day_pnl` take the broker clock as a REQUIRED keyword argument with no default (review WR-02 / SFH-03), so a missing clock is a `TypeError`, never a silent UTC.
+- `analytics-service/services/job_worker.py` (plan 03): `run_derive_broker_dailies_job` resolves the clock once, before the first terminal read, and threads it to all six MT5 offset sites (ledger combine, day P&L, NAV levels, flow day, the NAVMTM D-23 flow instant, apply-marks day P&L). A clock configuration fault returns `FAILED` with `error_kind="transient"` (founder decision D-04, review WR-01, superseding plan 03's "permanent, no stamp"), logs one ERROR line naming `arm=server_clock_config` and the job id (review SFH-02), and makes no write and no terminal read. If it persists, the retries end with the true "automatic retries exhausted" sentence on the strategy.
+- `analytics-service/services/equity_reconstruction.py` (plan 05): the MT5 allocator-history backfill resolves the clock once after the go-dark gate and before the terminal lease, and a fault is the new transient `server_clock_config` arm with a fixed, value-free message.
+- Runbooks: `docs/runbooks/navmtm-chain-move-go-live.md` gains pre-flight P6 (measure the broker server clock on a trading day, check every worker service carries exactly one matching setting, abort otherwise), re-run before Step B on another day; `docs/runbooks/mt5-go-live.md` Step 2 names the two settings and their fail-loud rule (plan 02 Task 2).
+
+### Tests
+- `tests/test_mt5_server_clock.py` (new): both rules against `zoneinfo` at every quarter-hour 2024-2029 with the repeated and skipped hours counted, day invariance at the transition edges for 93 years, the configuration-fault table, and AST pins: `test_single_reader` (no other module names either setting), `test_one_clock_per_derive` (exactly six sites, each passing the one clock) and `test_one_clock_per_backfill`.
+- `tests/test_mt5_deal_timing.py`, `test_mt5_deal_reconstruction.py`, `test_mt5_derive_branch.py`: a winter deposit after the mark read reaches apply-marks on its true day under the `us` rule, with a fixed-10800 control that reproduces the defect; a ledger straddling the 2026-11-01 US change bucketed per deal; the derive's transient clock fault in three environments with no terminal read; the missing-clock `TypeError`.
+- `tests/test_equity_reconstruction.py`, `test_reconstruct_whole_account.py`: the backfill under the `us` rule and its transient fault; `tests/test_mt5offset_dry_run.py` (new): verdicts, ordinals, error rows, CLI usage errors, redaction and a read-only import pin. Other MT5 tests updated for the required clock argument.
+- `tests/conftest.py`: an autouse fixture sets `MT5_SERVER_UTC_OFFSET_S=0` and clears `MT5_SERVER_TIME_RULE`, reproducing the pre-175 arithmetic exactly for the tests that never set the variable; rule and fault tests override it.
+
+### Notes
+- ⚠️ **Deploy precondition.** There is no silent `0` any more: a worker service carrying neither setting fails every MT5 derive and backfill. `MT5_SERVER_UTC_OFFSET_S=10800` is set on both worker services (reading R1, +3 h, recorded under plan 02), so this deploy changes no derived number. The rule id is not switched on yet.
+- **Pending operator work (verifier `human_needed`).** Reading R2 (plan 02 Task 3) on a trading day after 2026-11-01 06:00Z separates the `us` rule from a fixed +3: if the broker follows the US rule, the interim integer must move to `7200` after the US change. Plan 06 then captures the live ledgers, runs the dry run once per legacy offset the history was written under, switches both services to `MT5_SERVER_TIME_RULE` (removing the integer, since both set is a fault), and force-rebuilds allocator history only for the keys whose days moved (D-03).
+- **Open review item SFH-05 (MEDIUM, operator-facing, recorded not fixed).** A clock fault that a retry heals ends `done` with no error text, so plan 06's `config_fault=0` check cannot see it. Plan 06 must also count MT5 derive jobs with `attempts > 1` after the switch and read the `arm=server_clock_config` ERROR log per service, and read `compute_jobs.last_error`, not `error_message` (IN-12).
+- **Known limit IN-06.** The clock is one setting per worker: every admitted MT5 server is bucketed by the same rule. A second broker with a different clock would be bucketed silently by the first one's rule, as the old integer was. A tripwire belongs with admitting a second broker.
+- No live server-clock check here; that stays with Phase 155 / MT5-06. No migration.
+- Review: three rounds of code review and silent-failure hunt. Round 1 fixed WR-01/SFH-02 (fault logged, false no-stamp claim corrected), WR-02/SFH-03 (required clock argument), SFH-04 (span text) and SFH-01 (dry-run silence); round 2 fixed WR-01 under D-04 and the IN-08 texts; round 3 left only SFH-05 and INFO items. Verifier: code half reproduced independently (zoneinfo oracle, mutation of the rule clocks to a fixed 10800 turns the SC-2 tests RED). Security audit SECURED. The phase's planning, research, review and verification records live on the phase branch and are not part of this diff.
+
+## [0.133.2.1] - 2026-10-27 — BASELINE: automated re-dump after the PROD apply of 6807be34
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `40514974360`, after the PROD apply of merge `6807be34`: sha256 `82d513ee…` → `abaa7f88…`.
+- Shape, old → new: tables 64 → 64, policies 156 → 156, function statements 134 → 134, distinct function names 132 → 132, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261030120000_ledger_fanout_marks_paused_weekly.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.2.0 → 0.133.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=309 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `40514974360` succeeded, and this entry was composed by the `redump-pr` job. Run `40514974360` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.133.2.0] - 2026-10-27 — MARKPAUSE: a paused marked series is re-derived weekly, and a mark refusal is kept owner-only
+
+### Changed
+- Migration `20261030120000_ledger_fanout_marks_paused_weekly.sql` re-creates `enqueue_ledger_refresh_for_strategies` alone (single-key arm; `enqueue_ledger_composite_refresh` untouched, no `cron.schedule`), re-based on the `20260924120000` body. A strategy whose `strategy_analytics.data_quality_flags` carries `marks_trailing_since` keeps the 20-hour attempt cooldown while the pause is under 3 days old and moves to a 7-day cooldown once it is 3 or more days old (D-01, refined by D-04 after review round 1). A missing or malformed flag value keeps the 20-hour window: the value must match an ISO date shape before it is compared, as text, so it can never raise inside the tick. The pause throttles the fan-out and never excludes a strategy for good. The catalogue-only verify block gains check 12 (flag key, the seven-day window and the 3-day cutoff present).
+- `supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql` regenerated for the new body.
+
+### Added
+- An owner-only record of why a key's NAV mark was refused (D-02): `allocator_equity_derived` rows of kind `nav_mark_refusal:<api_key_id>` (`NAV_MARK_REFUSAL_KIND_PREFIX` in `analytics-service/services/nav_marks.py`), payload `{token, first_seen_day, last_seen_day}`. Written from the shared mark seam in `job_worker.py` for strategy and key mode; a later refusal keeps `first_seen_day` and moves `last_seen_day`; the row is deleted once the key marks again. The token is validated against `MARK_REFUSAL_TOKENS` and never goes into the public `data_quality_flags`. The writer and the clearer never raise: a failure logs one WARNING naming the key as `api_key_id` and the exception class (the label `api_key` is one the log scrubber in `services/redact.py` redacts, which hid the key and failed CI's first run on this PR). No migration: the `kind` column has no CHECK.
+- A read-only SQL readout of those rows in `docs/runbooks/navmtm-chain-move-go-live.md` (D-03), counting eligible keys only, with its shape pinned by `analytics-service/tests/test_nav_marks_refusal_record.py`. `docs/runbooks/ledger-refresh-go-live.md` documents the weekly window and the 3-day cutoff.
+
+### Tests
+- `supabase/tests/test_ledger_refresh_fanout.sql` arms P1-P5: a pause over 3 days old with a 2-day-old attempt is not enqueued (P1), the identical unpaused strategy is (P2), a paused strategy is re-admitted after 7 days (P3), a pause under 3 days old keeps the 20-hour cooldown (P4), and an empty flag value keeps it too (P5). Sentinel 26 → 31; every edit-kind twin re-pointed to the new migration and recounted on its bytes. pg-lane fixture 03 gains `strategy_analytics.data_quality_flags`.
+- `test_nav_marks_refusal_record.py` (new) covers the refusal row in strategy and key mode, first-seen preservation, clearing on a stored or already-stored mark, that no token in the set reaches public flags, the never-raise contract on write and delete, and that the runbook readout selects the worker's prefix; `test_ledger_refresh_gates.py` moves its fan-out pointer and superseded set to the 174 migration; `test_derive_broker_dailies_dualmode.py` now allows the owner-only refusal row as the one write on an unreadable mark.
+- Censuses moved together: `scripts/mutation-floors.mjs` `ARMS_FLOOR` 803 → 808 (`FILES_FLOOR` and `WAIVED_CEILING` unchanged), the `ci.yml` sentinel-step table and `ARMS_FLOOR` 373 → 378 (`SENTINEL_FLOOR` stays 24), and the pins in `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, `gate-family-meta.test.ts` and `drift-check-scripts.test.ts`.
+
+### Notes
+- Review: three rounds of code review and silent-failure hunt. Round 1 fixed MR-01 / SFH F1 (the weekly window froze a strategy's public chart for up to 7 days after one transient refusal, answered by D-04) and MR-02 / SFH F3 (readout scope, warning content, the never-raise test). Round 2 fixed SFH-2 N1 (a malformed flag value sorting below the cutoff took the 7-day window). Round 3 clean. Verifier passed; security audit SECURED.
+- Not user-facing. After the PROD apply the baseline re-dump records the new migration as carried; until then `baseline-content-drift` may read the regenerated function snapshot against the older dump.
+- Deferred, not built: an alert after N nights of the same refusal token, and a dedicated refusal table with an admin read policy.
+
+## [0.133.1.2] - 2026-10-27 — NAVMTM: the daily chain runs at 00:10Z, manifest re-captured
+
+### Changed
+- PROD `pg_cron`: `cron-sync-trades` moved from `30 4 * * *` to `10 0 * * *` and `derive-allocator-key-dailies` from `30 5 * * *` to `40 0 * * *` (NAVMTM D-03, D-13), by hand per `docs/runbooks/navmtm-chain-move-go-live.md` Step B behind its marker and compare-and-set guard. Job ids and command texts are unchanged.
+- `scripts/prod-prober/cron-manifest.json` re-captured from PROD (Step C). The diff is exactly the two schedules and `captured_at`; `--preflight-repoint` reads 19 rows matching, the prober self-test passes 91/91.
+
+### Notes
+- Pre-flight before the move: marker named PRODUCTION; both Railway services and Vercel on main 53f25ac3; manifest matched PROD; no open `derive_broker_dailies` job; pg_cron 1.6.4 with `cron.alter_job`. The funding-arrival probe (plan 11 rule 1) read clear at 08:00Z.
+- From now on the merge and deploy hold is 00:00-01:45 UTC (the runbook's "Merge and deploy hold"), replacing 04:00-05:45.
+- `poll-allocator-positions` and `refresh-allocator-equity` stay at 04:00Z and 05:00Z; MARKSOURCE owns aligning them.
+
 ## [0.133.1.1] - 2026-10-26 — BASELINE: automated re-dump after the PROD apply of bc913db7
 
 ### Changed

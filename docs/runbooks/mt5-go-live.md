@@ -193,6 +193,13 @@ item, not a knob. Two gateways would need two accounts and a routing rule as wel
 3. Verify the VNC-displayed **server clock** against UTC to confirm the
    broker-server-time offset — this closes the Phase-134 leg-4 `[ASSUMED]` estimate and
    feeds `MT5_SOAK_SERVER_OFFSET_MIN` (139-01) / the 136 UTC-normalization seam.
+   Since Phase 175 the worker reads the broker offset as a rule, `MT5_SERVER_TIME_RULE`
+   (`eu` or `us`, +2 h in winter and +3 h in summer) or, for a broker without daylight
+   saving, `MT5_SERVER_UTC_OFFSET_S` alone (whole seconds); never both and never neither
+   (each is a fail-loud configuration error: the derive retries, then stamps the strategy
+   with the automatic-retries sentence). Take the reading on a weekday while a liquid
+   symbol ticks; the procedure and the record format are pre-flight P6 of
+   `docs/runbooks/navmtm-chain-move-go-live.md`.
 4. **⛔ TURN OFF the terminal's external-Python trade disable — every MT5 validation
    fails while it is on (153.3 / D-31).** In the same VNC session, open
    *Tools → Options → Expert Advisors* and clear the option **"Disable automatic trading
