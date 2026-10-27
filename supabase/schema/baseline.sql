@@ -5494,7 +5494,7 @@ COMMENT ON FUNCTION "public"."enqueue_ledger_composite_refresh"() IS 'Phase 161.
 CREATE OR REPLACE FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
-    AS $$
+    AS $_$
 DECLARE
   v_enabled  BOOLEAN;
   v_row      RECORD;
@@ -5833,7 +5833,29 @@ BEGIN
                   FROM public.compute_jobs cj
                  WHERE cj.strategy_id = lrs.strategy_id
                    AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
-                   AND cj.created_at > now() - INTERVAL '20 hours'
+                   -- Phase 174 MARKPAUSE (D-01, "Re-admit weekly", refined by
+                   -- D-04): a strategy whose marks have been paused for 3 days
+                   -- or more keeps this cooldown for 7 days instead of 20
+                   -- hours, so a long-paused series is re-derived once a week
+                   -- and not once a day. The flag's value is the pause's first
+                   -- trailing day (an ISO date string), shape-tested and compared as
+                   -- TEXT so a malformed value can never raise inside the tick and
+                   -- keeps the 20 hours. A younger
+                   -- pause, or a missing value, keeps the 20 hours, so a one-day
+                   -- refusal that clears the next day is not frozen for a week.
+                   -- Still keyed on the ATTEMPT, never the success, and a
+                   -- throttle, never an exclusion: with no attempt in 7 days it
+                   -- is admitted again.
+                   AND cj.created_at > now() - CASE
+                         WHEN EXISTS (
+                           SELECT 1
+                             FROM public.strategy_analytics sa
+                            WHERE sa.strategy_id = lrs.strategy_id
+                              AND (sa.data_quality_flags ->> 'marks_trailing_since') ~ '^\d{4}-\d{2}-\d{2}$'
+                              AND sa.data_quality_flags ->> 'marks_trailing_since' <= to_char(CURRENT_DATE - 3, 'YYYY-MM-DD')
+                         ) THEN INTERVAL '7 days'
+                         ELSE INTERVAL '20 hours'
+                       END
               )
           -- Failed-attempt cooldown (164.6 review fix, HIGH-2). A candidate
           -- whose enqueue RAISED inserted no compute_jobs row, so the attempt
@@ -6078,13 +6100,13 @@ BEGIN
   RAISE NOTICE 'enqueue_ledger_refresh_for_strategies: enqueued % refresh job(s) this tick; % candidate(s) failed to enqueue; % lost an enqueue race', v_enqueued, v_failed, v_lost_race;
   RETURN v_enqueued;
 END;
-$$;
+$_$;
 
 
 ALTER FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() IS 'Phase 161.1 / LEDGER-01,-02,-04: the recurring single-key refresh fan-out for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01; the read is fail-CLOSED — a missing row, a FALSE row and a failing read are all dormant). Selects stale, non-composite, key-eligible strategies from public.ledger_refresh_staleness — declaring no venue of its own — and enqueues derive_broker_dailies in strategy-mode (the chain TAIL, which auto-chains to compute_analytics_from_csv; the chain HEAD is a provable no-op on a published strategy). Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), an in-flight conjunct, a per-venue rank cap and a per-tick burst LIMIT. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md. Phase 164.8.6: a dormant tick whose cause is a MISSING or INVISIBLE activation row, or a read that RAISED, also writes one counted public.cron_runs row (cron_name ''ledger_refresh_fanout'', status ''error'') naming that cause in `error` and in `metadata`; the healthy FALSE row writes nothing. Phase 164.6: a tick in which at least one candidate failed to enqueue writes one public.cron_runs row under the same cron_name with error ''candidate_enqueue_failed'' and the failed count, the enqueued count and the failed strategy ids in `metadata`; the return value still counts only the jobs inserted.';
+COMMENT ON FUNCTION "public"."enqueue_ledger_refresh_for_strategies"() IS 'Phase 161.1 / LEDGER-01,-02,-04: the recurring single-key refresh fan-out for ledger-backed venues. Parameterless SECURITY DEFINER; returns the number of jobs ACTUALLY INSERTED this tick. DORMANT unless public.system_flags holds the key ''ledger_refresh_enabled'' with enabled = TRUE (Phase 164.7 / D-01; the read is fail-CLOSED — a missing row, a FALSE row and a failing read are all dormant). Selects stale, non-composite, key-eligible strategies from public.ledger_refresh_staleness — declaring no venue of its own — and enqueues derive_broker_dailies in strategy-mode (the chain TAIL, which auto-chains to compute_analytics_from_csv; the chain HEAD is a provable no-op on a published strategy). Bounded by a 20-hour ATTEMPT cooldown (the binding constraint), an in-flight conjunct, a per-venue rank cap and a per-tick burst LIMIT. Registers no schedule; activation is a founder LIVE op per docs/runbooks/ledger-refresh-go-live.md. Phase 164.8.6: a dormant tick whose cause is a MISSING or INVISIBLE activation row, or a read that RAISED, also writes one counted public.cron_runs row (cron_name ''ledger_refresh_fanout'', status ''error'') naming that cause in `error` and in `metadata`; the healthy FALSE row writes nothing. Phase 164.6: a tick in which at least one candidate failed to enqueue writes one public.cron_runs row under the same cron_name with error ''candidate_enqueue_failed'' and the failed count, the enqueued count and the failed strategy ids in `metadata`; the return value still counts only the jobs inserted. Phase 174: a strategy whose marks have been paused for 3 days or more keeps the attempt cooldown for 7 days instead of 20 hours.';
 
 
 
