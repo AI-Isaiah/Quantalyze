@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.133.1.2] - 2026-10-27 — NAVMTM: the daily chain runs at 00:10Z, manifest re-captured
+
+### Changed
+- PROD `pg_cron`: `cron-sync-trades` moved from `30 4 * * *` to `10 0 * * *` and `derive-allocator-key-dailies` from `30 5 * * *` to `40 0 * * *` (NAVMTM D-03, D-13), by hand per `docs/runbooks/navmtm-chain-move-go-live.md` Step B behind its marker and compare-and-set guard. Job ids and command texts are unchanged.
+- `scripts/prod-prober/cron-manifest.json` re-captured from PROD (Step C). The diff is exactly the two schedules and `captured_at`; `--preflight-repoint` reads 19 rows matching, the prober self-test passes 91/91.
+
+### Notes
+- Pre-flight before the move: marker named PRODUCTION; both Railway services and Vercel on main 53f25ac3; manifest matched PROD; no open `derive_broker_dailies` job; pg_cron 1.6.4 with `cron.alter_job`. The funding-arrival probe (plan 11 rule 1) read clear at 08:00Z.
+- From now on the merge and deploy hold is 00:00-01:45 UTC (the runbook's "Merge and deploy hold"), replacing 04:00-05:45.
+- `poll-allocator-positions` and `refresh-allocator-equity` stay at 04:00Z and 05:00Z; MARKSOURCE owns aligning them.
+
 ## [0.133.1.1] - 2026-10-26 — BASELINE: automated re-dump after the PROD apply of bc913db7
 
 ### Changed
