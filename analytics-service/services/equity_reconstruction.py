@@ -906,7 +906,9 @@ async def _read_bybit_trades_resumable(
     1. stored and ``load_window`` returns rows: use them (no venue request);
     2. else, if the window is STORABLE (it starts at or after ``since_ms`` and ends more than
        ``_STORE_SETTLE_MS`` before now): when the claim budget is spent, raise
-       ``TradeReadDeferred`` (the handler defers the job; the windows stored so far stay);
+       ``TradeReadDeferred`` (the handler defers the job; the windows stored so far stay), or
+       ``TradeReadStalled("job_age")`` when the job is 24 h or older (the handler fails it;
+       the windows stay for a later job);
        otherwise read it whole over its grid bounds, then keep it (``save_window``; False
        leaves it unstored, its trades stay in this claim's output) and, on the first save of
        the claim, ``record_progress``;
@@ -924,7 +926,8 @@ async def _read_bybit_trades_resumable(
 
     ``begin_claim`` answers None on a store fault: the read is then ``_read_bybit_range`` for
     the whole range (no budget, no store call, no extra log line: the store logged once).
-    ``begin_claim`` may raise ``TradeReadStalled`` (a decision, not a fault).
+    ``begin_claim`` may raise ``TradeReadStalled`` (a decision, not a fault), as the job-age
+    check above does.
     """
     supabase = scope.supabase
     state = await store.begin_claim(
@@ -956,6 +959,11 @@ async def _read_bybit_trades_resumable(
             storable = ws >= since_ms and grid_end < now_ms - _STORE_SETTLE_MS
             if storable:
                 if store.deadline_passed(scope):
+                    # The only other stop besides ``begin_claim``'s stalled-claims count: a defer
+                    # burns no attempt, so a job that has waited a day stops here by name instead
+                    # of deferring forever (its stored windows are kept for a later job).
+                    if store.job_too_old(scope):
+                        raise store.TradeReadStalled("job_age", state.claims)
                     raise store.TradeReadDeferred(windows_kept, windows_total, trades_kept)
                 read_from, read_to = ws, grid_end
             else:
@@ -5947,6 +5955,37 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             # deferral is not a failure and the action vocabulary is closed.
             return await _defer_reconstruct(
                 ctx.supabase, job, deferred, allocator_id, api_key_id, venue
+            )
+        except store.TradeReadStalled as stalled:
+            # READCEILING (Phase 171, D-02): a read that makes no progress ends by NAME instead
+            # of deferring forever (a defer burns no attempt). Either ``begin_claim`` refused the
+            # job's next claim after STALLED_CLAIMS_LIMIT claims that stored no window, or the
+            # defer point was reached by a job past its 24 h backstop. MUST precede the generic
+            # arm (a plain Exception, which classify_exception would call unknown). Nothing has
+            # been persisted, and the stored windows are KEPT on purpose: a later job resumes
+            # from them (RECONMARKER D-17 re-enqueues it) and the hourly worker sweep removes
+            # them at their expiry. The text is static plus a closed cause and an integer
+            # (H-3: nothing the venue said). Not a new audit action: the closed vocabulary's
+            # ``reconstruct_failed`` carries it, as every other failure here does.
+            sanitized = (
+                f"trade read stopped: cause={stalled.cause} claims={stalled.claims}; nothing was "
+                "written to the allocator's history, the stored windows are kept and a later run "
+                "resumes from them"
+            )
+            logger.warning(
+                "reconstruct_allocator_history trade read stopped cause=%s claims=%d "
+                "allocator=%s key=%s venue=%s",
+                stalled.cause, stalled.claims, allocator_id, api_key_id, venue,
+            )
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {"error_kind": "permanent", "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind="permanent",
             )
         except Exception as exc:  # noqa: BLE001
             # H-1172: log the error before sanitisation so the original error

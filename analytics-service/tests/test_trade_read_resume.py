@@ -180,10 +180,14 @@ _SIGNATURE = "SIG-resume-4f1c9a"
 
 
 class _Clock:
-    """The fake monotonic clock behind ``store._monotonic``."""
+    """The fake clocks behind ``store._monotonic`` (``t``, seconds) and ``store._wall_ms``
+    (``wall_ms``, epoch milliseconds, at the handler's frozen instant). The job-age rule and the
+    rows' expiry read the wall clock, so a test that runs a job created at ``END_DATE`` must move
+    that clock too, or the real date makes every such job a day old."""
 
     def __init__(self) -> None:
         self.t = 1000.0
+        self.wall_ms = _NOW_MS
 
 
 def _window_start(k: int) -> int:
@@ -249,6 +253,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, clock: _Clock, *, budget_s: float) -> 
     fake = FakeSupabaseClient()
     _seed_key(fake, API_KEY_ID_1, exchange="bybit", attempts=0)
     monkeypatch.setattr(store, "_monotonic", lambda: clock.t)
+    monkeypatch.setattr(store, "_wall_ms", lambda: clock.wall_ms)
     monkeypatch.setattr(er, "_TRADE_READ_CLAIM_BUDGET_S", budget_s)
     monkeypatch.setattr(er, "_BYBIT_WINDOW_PAGE_CEILING", 2)
     _freeze_now_at(monkeypatch, END_DATE)
@@ -404,12 +409,13 @@ def _scope(
     fake: Any, clock: _Clock, monkeypatch: pytest.MonkeyPatch, *, budget_s: float, job_id: str | None = _JOB_ID
 ) -> store.TradeReadScope:
     monkeypatch.setattr(store, "_monotonic", lambda: clock.t)
+    monkeypatch.setattr(store, "_wall_ms", lambda: clock.wall_ms)
     return store.TradeReadScope(
         supabase=fake,
         api_key_id=API_KEY_ID_1,
         deadline=store.claim_deadline(budget_s),
         job_id=job_id,
-        job_created_at=None,
+        job_created_at=(END_DATE - timedelta(hours=1)).isoformat(),
     )
 
 
@@ -561,6 +567,7 @@ async def _run_with_database(
 ) -> tuple[Any, Any, Any, _Clock]:
     clock = _Clock()
     monkeypatch.setattr(store, "_monotonic", lambda: clock.t)
+    monkeypatch.setattr(store, "_wall_ms", lambda: clock.wall_ms)
     monkeypatch.setattr(er, "_TRADE_READ_CLAIM_BUDGET_S", budget_s)
     monkeypatch.setattr(er, "_BYBIT_WINDOW_PAGE_CEILING", 2)
     _freeze_now_at(monkeypatch, END_DATE)
@@ -761,3 +768,350 @@ async def test_not_supported_keeps_its_meaning_across_windows_and_claims(
     empty.fetch_my_trades = AsyncMock(side_effect=er.ccxt.NotSupported("fixture: not supported"))
     fresh_clock = _Clock()
     assert await _read(empty, _scope(FakeSupabaseClient(), fresh_clock, monkeypatch, budget_s=1e9)) == []
+
+
+# --------------------------------------------------------------------------- plan 08
+#
+# A read that makes no progress stops by name (T-171-22), and kept progress does not outlive its
+# expiry even when no job ever comes back for it (T-171-35, the watchdog sweep).
+
+_STALL_MESSAGE = re.compile(
+    r"^trade read stopped: cause=(stalled_claims|job_age) claims=[0-9]+; nothing was written to the "
+    r"allocator's history, the stored windows are kept and a later run resumes from them$"
+)
+_OTHER_JOB_ID = "00000000-0000-0000-0000-0000000000f2"
+_WEEK_S = 7 * 24 * 3600
+
+
+async def _seed_one_stored_window(fake: FakeSupabaseClient, book: list[dict[str, Any]]) -> None:
+    """Window 0 of the book kept in the store by an earlier job, the way a completed claim leaves
+    it: a state row (grid origin = the read start) and one whole window."""
+    state = await store.begin_claim(
+        fake, API_KEY_ID_1, venue="bybit", since_ms=_START_MS, job_id="00000000-0000-0000-0000-0000000000e0"
+    )
+    assert state is not None
+    start, end = _window_start(0), _window_start(0) + BYBIT_WINDOW_MS - 1
+    assert await store.save_window(
+        fake, API_KEY_ID_1, start, end, [t for t in book if start <= t["timestamp"] <= end]
+    )
+
+
+def _stall_job(token: str, job_id: str = _JOB_ID) -> dict[str, Any]:
+    return {**_claim_job(token), "id": job_id}
+
+
+async def test_three_stalled_claims_stop_the_unforced_job_by_name_and_the_sweep_removes_the_expired_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-171-22 and T-171-35, D-02. With a budget of zero no NEW window is ever stored, so a job
+    that claims again and again makes no progress. Defer burns no attempt, so only the stalled-claims
+    count can end it: claims 1 to 3 DEFER, claim 4 FAILS permanent with a static message naming the
+    cause and the claim count, with ONE ``reconstruct_failed`` audit, the history unwritten and the
+    stored window and state row KEPT (a later job resumes from them: a new job id defers again, it
+    does not stall at once). The kept rows are then removed by ``main_worker``'s sweep once they are
+    past their 7 day expiry, though no claim ever touches the key again, and that sweep runs at most
+    once per interval. At the old behaviour claim 4 reached the generic arm (a different message)
+    and nothing removed the rows."""
+    import main_worker
+
+    book = _big_book()
+    clock = _Clock()
+    fake = _rig(monkeypatch, clock, budget_s=0.0)
+    exchange = await _venue(book, clock)
+    audit = _install(monkeypatch, fake, exchange)
+    await _seed_one_stored_window(fake, book)
+    key_before = copy.deepcopy(fake.store[("api_keys", (API_KEY_ID_1,))])
+
+    for n in (1, 2, 3):
+        deferred = await er.run_reconstruct_allocator_history_job(_stall_job(f"T{n}"))
+        assert deferred.outcome == DispatchOutcome.DEFERRED, (n, deferred)
+    assert len(_defer_calls(fake)) == 3
+    assert not _failure_audits(audit)
+
+    stopped = await er.run_reconstruct_allocator_history_job(_stall_job("T4"))
+
+    assert stopped.outcome == DispatchOutcome.FAILED, stopped
+    assert stopped.error_kind == "permanent"
+    assert _STALL_MESSAGE.match(stopped.error_message or ""), stopped.error_message
+    assert "cause=stalled_claims" in (stopped.error_message or "")
+    (failure,) = _failure_audits(audit)
+    assert failure.kwargs["metadata"] == {
+        "error_kind": "permanent", "sanitized_message": stopped.error_message,
+    }
+    assert len(_defer_calls(fake)) == 3, "the stop is not a deferral"
+    assert not _snapshots(fake) and not fake.rows_for("allocator_equity_derived")
+    assert fake.store[("api_keys", (API_KEY_ID_1,))] == key_before
+    (state_row,) = fake.rows_for(store.STATE_TABLE)
+    assert state_row["stalled_claims"] == store.STALLED_CLAIMS_LIMIT
+    assert _stored_starts(fake) == {_window_start(0)}, "the stored window is kept"
+
+    # A NEW job reads again from the kept window: it defers, it is not stopped at once.
+    again = await er.run_reconstruct_allocator_history_job(_stall_job("T5", _OTHER_JOB_ID))
+    assert again.outcome == DispatchOutcome.DEFERRED, again
+    assert len(_defer_calls(fake)) == 4
+    assert _stored_starts(fake) == {_window_start(0)}
+    assert len(_store_rows(fake)) == 2  # the state row and window 0
+
+    # Nobody comes back for the key. The store's wall clock moves past the expiry, and the worker's
+    # sweep (not a claim) removes the rows, at most once per interval.
+    purge_calls = 0
+    real_purge = main_worker.trade_read_store.purge_expired
+
+    async def _counting_purge(supabase: Any) -> None:
+        nonlocal purge_calls
+        purge_calls += 1
+        await real_purge(supabase)
+
+    sweep_now = [5000.0]
+    monkeypatch.setattr(main_worker.trade_read_store, "purge_expired", _counting_purge)
+    monkeypatch.setattr(main_worker, "get_supabase", lambda: fake)
+    monkeypatch.setattr(main_worker, "_sweep_clock", lambda: sweep_now[0])
+    monkeypatch.setattr(main_worker, "_last_trade_read_sweep", None)
+
+    clock.wall_ms += (_WEEK_S + 1) * 1000
+    assert len(_store_rows(fake)) == 2
+    await main_worker.sweep_expired_trade_reads()
+    assert purge_calls == 1
+    assert not _store_rows(fake), "an expired key's rows are swept without any claim"
+
+    sweep_now[0] += 60.0
+    await main_worker.sweep_expired_trade_reads()
+    assert purge_calls == 1, "a sweep 60 s after the last one deletes nothing"
+
+    sweep_now[0] += main_worker._TRADE_READ_SWEEP_INTERVAL_S
+    await main_worker.sweep_expired_trade_reads()
+    assert purge_calls == 2
+
+
+# ------------------------------------------------------------ SC-1: claims replay as one pass
+
+
+def _day_of(ms: int) -> Any:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date()
+
+
+def _replay(trades: list[dict[str, Any]], since_ms: int, now_ms: int) -> list[dict[str, Any]]:
+    """The equity replay of a trade list over [since, now]: the number the dashboard shows."""
+    start_date, end_date = _day_of(since_ms), _day_of(now_ms)
+    days = (end_date - start_date).days + 1
+    ohlcv = {
+        "BTC": [
+            (str(start_date.fromordinal(start_date.toordinal() + d)), 40_000.0 + 25.0 * d)
+            for d in range(days)
+        ]
+    }
+    deposits = [{"timestamp": since_ms, "currency": "USDT", "amount": 50_000_000.0}]
+    return er._compute_daily_equity(trades, deposits, [], ohlcv, {}, start_date, end_date)
+
+
+def _a6_shaped_book() -> list[dict[str, Any]]:
+    """The shape that motivated the phase: a finite book over the 105 grid windows of a 729 day
+    range, 40 small trades in each (one more than a segment, 10,500, in window 40), fees in all
+    three shapes the venue sends (a dict, a bare number, none), an amount that differs per window
+    so the replayed equity moves, and a handful of trades in the window that holds now."""
+    book: list[dict[str, Any]] = []
+    for k in range(_WINDOWS):
+        rows = (
+            trade_rows(10_500, _window_start(k) + 1000, 50, id_prefix=f"big{k:03d}-")
+            if k == 40
+            else trade_rows(40, _window_start(k) + 1000, 60_000, id_prefix=f"s{k:03d}-")
+        )
+        for i, row in enumerate(rows):
+            row["amount"] = 0.001 * (1 + k % 7)
+            row["cost"] = row["price"] * row["amount"]
+            row["fee"] = (
+                {"cost": 0.05 * (1 + i % 3), "currency": "USDT"} if i % 3 == 0
+                else 0.02 if i % 3 == 1
+                else None
+            )
+        book += rows
+    return book
+
+
+async def test_a_book_read_across_claims_equals_a_single_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SC-1, the equivalence oracle. An a6-shaped book read across several claims of ONE job (a
+    small budget, so each claim stores some windows and defers) gives the same equity replay as one
+    unscoped pass over the book, every field of every day. The oracle is the unscoped read plus the
+    replay, not a re-implementation of the claim logic: a window lost, doubled or reordered by the
+    claims shows as a different curve. At the old behaviour (no store) there is nothing to resume,
+    so this property did not exist."""
+    book = _a6_shaped_book()
+    clock = _Clock()
+    fake = FakeSupabaseClient()
+
+    single = await er._fetch_trades_with_pagination(
+        _clocked_exchange(book, _Clock()), "bybit", _START_MS, _NOW_MS
+    )
+    oracle_trades = single[0]
+    assert len(oracle_trades) == len(book)
+
+    exchange = _clocked_exchange(book, clock)
+    claims = 0
+    resumed: list[dict[str, Any]] | None = None
+    while resumed is None:
+        claims += 1
+        assert claims < 40, "the job must finish"
+        scope = _scope(fake, clock, monkeypatch, budget_s=25.0)
+        windows_before = len(_stored_starts(fake))
+        try:
+            with store.trade_read_scope(scope):
+                resumed, _terminus = await er._fetch_trades_with_pagination(
+                    exchange, "bybit", _START_MS, _NOW_MS
+                )
+        except store.TradeReadDeferred:
+            assert len(_stored_starts(fake)) > windows_before, "every deferred claim stored a window"
+
+    assert claims >= 4, f"the oracle needs a read across at least four claims, got {claims}"
+    assert len(resumed) == len(book)
+    assert {(t["symbol"], t["timestamp"], t["amount"]) for t in resumed} == {
+        (t["symbol"], t["timestamp"], t["amount"]) for t in oracle_trades
+    }
+    replayed = _replay(resumed, _START_MS, _NOW_MS)
+    assert len(replayed) == 730
+    assert len({r["value_usd"] for r in replayed}) > 5, "the curve must move"
+    assert replayed == _replay(oracle_trades, _START_MS, _NOW_MS)
+
+
+async def test_a_resumed_read_on_the_next_day_equals_a_single_pass_from_the_new_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SC-1, the next UTC day. Claim 1 (day D) stores some windows and defers. Claim 2 runs a day
+    later: the read start and "now" both moved forward a day. The grid origin of the first claim is
+    KEPT (so the stored windows still line up), the output holds no trade before the new start, and
+    its replay equals one unscoped pass that starts at the new start."""
+    book = _spread_book(range(0, 10))
+    clock = _Clock()
+    fake = FakeSupabaseClient()
+    exchange = _clocked_exchange(book, clock)
+    now_one = _window_start(9) + 2 * DAY_MS
+    since_two, now_two = _START_MS + DAY_MS, now_one + DAY_MS
+
+    with pytest.raises(store.TradeReadDeferred):
+        with store.trade_read_scope(_scope(fake, clock, monkeypatch, budget_s=2.5)):
+            await er._fetch_trades_with_pagination(exchange, "bybit", _START_MS, now_one)
+    assert _stored_starts(fake) == {_window_start(k) for k in range(3)}
+
+    clock.t += 120.0
+    clock.wall_ms += DAY_MS
+    with store.trade_read_scope(_scope(fake, clock, monkeypatch, budget_s=1e9)):
+        resumed, _terminus = await er._fetch_trades_with_pagination(exchange, "bybit", since_two, now_two)
+
+    (state_row,) = fake.rows_for(store.STATE_TABLE)
+    assert state_row["grid_origin_ms"] == _START_MS, "the first claim's grid origin is kept"
+    assert any(t["timestamp"] < since_two for t in book), "the book holds trades before the new start"
+    assert all(t["timestamp"] >= since_two for t in resumed)
+    oracle, _ = await er._fetch_trades_with_pagination(
+        _clocked_exchange(book, _Clock()), "bybit", since_two, now_two
+    )
+    assert _fingerprint(resumed) == _fingerprint(oracle)
+    replayed = _replay(resumed, since_two, now_two)
+    assert len({r["value_usd"] for r in replayed}) > 3, "the curve must move"
+    assert replayed == _replay(oracle, since_two, now_two)
+
+
+async def _one_claim(
+    monkeypatch: pytest.MonkeyPatch, created_at: Any
+) -> tuple[Any, FakeSupabaseClient, Any]:
+    """One claim of a job created at ``created_at``, with a budget that runs out at a boundary."""
+    clock = _Clock()
+    fake = _rig(monkeypatch, clock, budget_s=45.0)
+    exchange = await _venue(_big_book(), clock)
+    audit = _install(monkeypatch, fake, exchange)
+    job = {**_claim_job("T1"), "created_at": created_at}
+    return await er.run_reconstruct_allocator_history_job(job), fake, audit
+
+
+async def test_a_day_old_job_is_stalled_by_name_at_its_defer_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-171-22, the backstop. A defer burns no attempt, so a job that keeps being deferred past
+    a day is stopped at its defer point, by name (cause ``job_age``), with its windows kept. A
+    ``created_at`` that cannot be read counts as too old (a bound that cannot be evaluated must not
+    become no bound). The same point on a job one hour old DEFERS."""
+    young, fake_young, audit_young = await _one_claim(
+        monkeypatch, (END_DATE - timedelta(hours=1)).isoformat()
+    )
+    assert young.outcome == DispatchOutcome.DEFERRED, young
+    assert not _failure_audits(audit_young)
+
+    for created_at in ((END_DATE - timedelta(hours=25)).isoformat(), "not a timestamp", None):
+        stopped, fake, audit = await _one_claim(monkeypatch, created_at)
+
+        assert stopped.outcome == DispatchOutcome.FAILED, (created_at, stopped)
+        assert stopped.error_kind == "permanent"
+        assert _STALL_MESSAGE.match(stopped.error_message or ""), stopped.error_message
+        assert "cause=job_age" in (stopped.error_message or "")
+        assert len(_failure_audits(audit)) == 1
+        assert not _defer_calls(fake)
+        assert not _snapshots(fake)
+        assert _stored_starts(fake), "the windows read so far are kept for a later job"
+
+
+async def test_the_watchdog_loop_runs_the_trade_read_sweep_and_survives_its_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-171-35 and T-171-36. The sweep is only worth having if the watchdog loop calls it, and it
+    must never stop the loop: a sweep that raises on its first call is called again on the next
+    tick, and the loop task ends without an exception. (The orphan-sweep loop test's technique.)"""
+    import asyncio
+
+    import main_worker
+
+    calls = 0
+    shutdown = asyncio.Event()
+    monkeypatch.setattr(main_worker, "SHUTDOWN", shutdown)
+
+    async def _tick() -> None:
+        return None
+
+    async def _orphans() -> None:
+        return None
+
+    async def _sweep() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("fixture: sweep blew up")
+        shutdown.set()
+
+    monkeypatch.setattr(main_worker, "watchdog_tick", _tick)
+    monkeypatch.setattr(main_worker, "report_orphaned_capped_reconstructs", _orphans)
+    monkeypatch.setattr(main_worker, "sweep_expired_trade_reads", _sweep)
+
+    task = asyncio.create_task(main_worker.watchdog_loop(interval=0.01))
+    done, pending = await asyncio.wait({task}, timeout=3.0)
+    for p in pending:
+        p.cancel()
+
+    assert task in done, "watchdog_loop hung"
+    assert calls >= 2, f"the trade read sweep ran {calls} time(s); a failing sweep stopped the loop"
+    assert task.exception() is None
+
+
+async def test_a_stalled_job_carries_no_venue_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """H-3 and T-171-24 for the stop. A signature planted in every trade's ``info`` (venue text)
+    reaches no log record, no audit call, no RPC argument, no stored row and neither stall message,
+    across the stalled-claims stop and the job-age stop. Both messages are a closed cause plus an
+    integer, so nothing a venue said can ride into ``compute_jobs.last_error`` or the audit trail."""
+    book = _big_book(signature=True)
+    clock = _Clock()
+    fake = _rig(monkeypatch, clock, budget_s=0.0)
+    exchange = await _venue(book, clock)
+    audit = _install(monkeypatch, fake, exchange)
+    await _seed_one_stored_window(fake, book)
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+
+    results = [await er.run_reconstruct_allocator_history_job(_stall_job(f"T{n}")) for n in (1, 2, 3, 4)]
+    old = await er.run_reconstruct_allocator_history_job(
+        {**_stall_job("T5", _OTHER_JOB_ID), "created_at": (END_DATE - timedelta(hours=30)).isoformat()}
+    )
+
+    assert [r.outcome for r in results] == [DispatchOutcome.DEFERRED] * 3 + [DispatchOutcome.FAILED]
+    assert old.outcome == DispatchOutcome.FAILED
+    assert "cause=stalled_claims" in (results[3].error_message or "")
+    assert "cause=job_age" in (old.error_message or "")
+    assert len(_failure_audits(audit)) == 2
+    for text in (repr(results), repr(old), repr(audit.call_args_list), repr(fake.rpc_calls), repr(_store_rows(fake))):
+        assert _SIGNATURE not in text
+    assert not [r for r in caplog.records if _SIGNATURE in r.getMessage() or _SIGNATURE in repr(r.args)]

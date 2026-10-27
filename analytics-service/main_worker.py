@@ -112,6 +112,7 @@ import main_worker_healthz  # top-level module (not in services/); stdlib-only, 
 from sentry_init import init_sentry
 from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
+from services import trade_read_store
 from services.job_worker import (
     DispatchOutcome,
     ErrorKind,
@@ -1300,6 +1301,40 @@ async def dispatch_loop(worker_id: str, interval: float = 30.0) -> None:
     logger.info("dispatch_loop exiting (shutdown)")
 
 
+#: Phase 171 READCEILING: an expired trade-read store row is physically removed at most this long
+#: after its ``expires_at``, while any worker process runs.
+_TRADE_READ_SWEEP_INTERVAL_S: Final[float] = 3600.0
+#: The sweep's clock (a seam: tests drive it) and the instant this process last swept.
+_sweep_clock = time.monotonic
+_last_trade_read_sweep: float | None = None
+
+
+async def sweep_expired_trade_reads() -> None:
+    """Delete the trade-read store's expired rows, at most once per ``_TRADE_READ_SWEEP_INTERVAL_S``
+    per process (Phase 171 READCEILING, D-02's expiry).
+
+    A read that stalls keeps its windows on purpose, so a later job can resume from them. That
+    leaves a key whose rows nobody claims again (an abandoned or idle key) holding per-fill data
+    past its expiry, because the only other purges are a claim on the same key and the delete on
+    DONE. The recorded retention bound is therefore: a row is physically removed at most
+    ``_TRADE_READ_SWEEP_INTERVAL_S`` after its ``expires_at`` (7 days after its last write) while
+    any worker process runs, and earlier on DONE or with its key or account. It lives in the
+    watchdog loop because that is the existing recurring path of every worker process, the API's
+    included (the ``report_orphaned_capped_reconstructs`` precedent of Phase 167.1.2.1), and no
+    database-scheduled job is added.
+
+    The time is stamped BEFORE the purge so that a failing database is retried an hour later, not
+    on every watchdog tick. ``purge_expired`` is best effort and logs its own class-only warning.
+    """
+    global _last_trade_read_sweep
+    now = _sweep_clock()
+    last = _last_trade_read_sweep
+    if last is not None and now - last < _TRADE_READ_SWEEP_INTERVAL_S:
+        return
+    _last_trade_read_sweep = now
+    await trade_read_store.purge_expired(get_supabase())
+
+
 async def watchdog_loop(interval: float = 60.0) -> None:
     """Watchdog loop: reclaims stalled jobs every `interval` seconds."""
     while not SHUTDOWN.is_set():
@@ -1316,6 +1351,14 @@ async def watchdog_loop(interval: float = 60.0) -> None:
             await report_orphaned_capped_reconstructs()
         except Exception as exc:  # noqa: BLE001
             logger.error("watchdog_loop orphan cap sweep failed: %s", exc, exc_info=True)
+
+        # Phase 171 READCEILING (D-02): kept trade-read rows do not outlive their expiry. Its own
+        # guard, after the reclaim and the orphan sweep: it must never stop the loop or the
+        # reclaim. The class name only is logged (a database error can quote a row).
+        try:
+            await sweep_expired_trade_reads()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("watchdog_loop trade read sweep failed: %s", type(exc).__name__)
 
         try:
             await asyncio.wait_for(SHUTDOWN.wait(), timeout=interval)
