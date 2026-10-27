@@ -210,6 +210,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
 - [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
 - [ ] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — booked 2026-10-27 from MARKSOURCE plan 03 (founder 2026-10-27 "Deribit moved-flow pricing"), not planned yet
+- [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6515,6 +6516,23 @@ Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 plan 03 (RESEARCH A5: Deribit's 
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt
+
+**Goal:** The stored OKX snapshot rows that counted open profit twice are rebuilt inside the 90-day window, once Phase 173 has measured OKX trade ordering at 0 violations, so past OKX equity reads the same as the MARKSOURCE forward fix.
+**Requirements**: TBD
+**Depends on:** Phase 173, Phase 167.2.1.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 CONTEXT D-09 (founder 2026-10-27 "Measure gate first, then rewrite (Recommended)"): MARKSOURCE ships the forward fix of D-05 and records the stored-row rewrite as a deferral. MARKSOURCE census 2026-10-27: 248 suspect days over 3 accounts, 164 inside the 90-day window. Data integrity, user-facing.
+
+**Success Criteria** (what must be TRUE):
+1. The Phase 173 OKX ordering gate reading (`okx-order: ok`, 0 violations) is cited by run before any rewrite; any other reading stops the phase.
+2. The 90-day window is rebuilt through the product's forced-rebuild path, with a before/after census (counts only, marker query first) from MARKSOURCE's `docs/runbooks/marksource-okx-census/okx-snapshot-rows.sql` (on the MARKSOURCE branch, not yet on main at booking).
+3. Rows older than the 90-day window and `allocator_holdings` history are named as kept, with their counts.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -6812,6 +6830,7 @@ kept verbatim.
 | 175 MT5OFFSET | 0/0 | Not started | - |
 | 176 LEGACYRETIRE | 0/0 | Not started | - |
 | 177 DERIBITFLOWS | 0/0 | Not started | - |
+| 178 OKXREWRITE | 0/0 | Not started | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
