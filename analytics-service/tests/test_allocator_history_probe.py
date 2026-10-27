@@ -1178,6 +1178,76 @@ async def test_a_truncated_read_is_told_apart_from_a_venue_rejection(
     assert (account["members_read"], account["members_failed"]) == (0, 1)
 
 
+def _bybit_only_book() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "api_keys": [_key_row(_KEY_BYBIT, _USER_ONE, "bybit", "2026-01-01T00:00:00Z")],
+        "allocator_equity_snapshots": [],
+    }
+
+
+_WINDOW_SINCE_DAYS_BACK = 400  # a window 400 days before the run date: bucket "365-546"
+
+
+def _bybit_window_pages(
+    calls: int, *, tag: str = "w", full_last: bool = True, cursor_prefix: str = "fake-cursor"
+) -> list[list[dict[str, Any]]]:
+    """``calls`` pages of ONE Bybit window, each a full page with fresh ids spread over several
+    milliseconds; the newest row carries a ``nextPageCursor`` that is new on every page."""
+    pages: list[list[dict[str, Any]]] = []
+    for k in range(calls):
+        page = _trade_page(f"{tag}{k}", 100, newest_ms=_ms(_TODAY) - 10**9 - k * 10_000, step_ms=7)
+        page[0]["info"] = {"nextPageCursor": f"{cursor_prefix}-{k}"}
+        pages.append(page)
+    return pages
+
+
+def _window_reader(services: "_Services", exc: BaseException) -> Any:
+    """A reader that drives ONE window the way the deployed Bybit loop does (the window start as
+    ``since`` and the window end as ``until`` on every call, the cursor from the second call on),
+    then raises ``exc`` as the deployed loop would."""
+
+    async def _reader(
+        exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_kw: Any
+    ) -> Any:
+        since = _ms(_TODAY - timedelta(days=_WINDOW_SINCE_DAYS_BACK))
+        until = since + 7 * 86_400_000 - 1
+        cursor: str | None = None
+        for _ in range(exchange.page_count):
+            params: dict[str, Any] = {"until": until}
+            if cursor:
+                params["cursor"] = cursor
+            page = await exchange.fetch_my_trades(None, since, 100, params)
+            cursor = page[0]["info"]["nextPageCursor"]
+        raise exc
+
+    return _reader
+
+
+async def test_a_truncated_bybit_read_names_the_window_ceiling_from_the_call_log(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ceiling = hp.er._BYBIT_WINDOW_PAGE_CEILING
+    venue = _StubVenue(_bybit_window_pages(ceiling))
+    services = _Services(_bybit_only_book(), [venue])
+    services.reader = _window_reader(services, er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE))
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+
+    captured = capsys.readouterr()
+    lines = [json.loads(line) for line in captured.out.splitlines() if line.strip()]
+    account, summary = lines
+    assert account["failure_class"] == "truncated"
+    assert account["truncated_site"] == "bybit_window_ceiling"
+    assert account["last_window_calls"] == ceiling
+    assert account["last_window_age_bucket"] == "365-546"
+    assert account["trade_calls"] == ceiling
+    assert isinstance(account["read_elapsed_s"], int) and account["read_elapsed_s"] >= 0
+    assert set(summary) == set(hp.SUMMARY_RECORD_KEYS)  # the summary schema is unchanged
+    for leak in ("fake-trade-", "fake-cursor"):
+        assert leak not in captured.out + captured.err, leak
+
+
 async def test_a_read_past_the_crawl_bound_is_recorded_as_a_timeout(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
