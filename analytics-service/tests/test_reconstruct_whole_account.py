@@ -2137,3 +2137,158 @@ async def test_each_member_reads_under_its_own_key_not_the_jobs(
     # key 2 would have asked the venue for the whole book again, one request per window at least.
     claim_two_calls = exchange_2.fetch_my_trades.await_count - claim_one_calls
     assert claim_two_calls < _WINDOWS - len(kept) + 5, (len(kept), claim_one_calls, claim_two_calls)
+
+
+# ------------------------------------------------------------------ deferral-last precedence
+#
+# Decision recorded for plan 171-09 (Rule 7): RESEARCH proposed deciding over ALL outcomes first
+# (refusal, then a settled MT5 result, then a deferral, then retryable, then permanent). This
+# phase keeps today's key-order loop for every EXISTING outcome and decides a deferral LAST. It
+# changes no existing outcome, a refusal and a permanent failure are deterministic (deferring on
+# them would only burn claims), and the stored windows survive a FAILED claim, so a sibling's
+# retryable fault ending the claim loses no read progress.
+
+_DEFERRAL = (7, 105, 300)  # windows done, windows total, trades kept: counts only
+
+
+def _defer_member(monkeypatch: pytest.MonkeyPatch, key_id: str) -> None:
+    """Make ONE member's crawl end the way a Bybit read does when its claim budget runs out.
+    Every other member runs the real ``_crawl_account_key``."""
+    real = er._crawl_account_key
+
+    async def _crawl(supabase: Any, key_row: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(key_row["id"]) == key_id:
+            raise store.TradeReadDeferred(*_DEFERRAL)
+        return await real(supabase, key_row, *args, **kwargs)
+
+    monkeypatch.setattr(er, "_crawl_account_key", _crawl)
+
+
+async def _run_forced_claim(
+    monkeypatch: pytest.MonkeyPatch, fake: Any, exchange_1: Any, exchange_2: Any
+) -> tuple[DispatchResult, Any, dict[str, list[dict[str, Any]]]]:
+    """Like ``_run_forced_two_account_job`` but the job arrives as a queue claim (id and claim
+    token), which is what a deferral is fenced on. Returns the result, the audit, the book."""
+    audit = _install_fake_audit(monkeypatch)
+    _install_account_preflight(monkeypatch, fake, {API_KEY_ID_1: exchange_1, API_KEY_ID_2: exchange_2})
+    _freeze_now(monkeypatch)
+    before = _book_state(fake)
+    result = await run_reconstruct_allocator_history_job(_forced_claim_job("T1"))
+    return result, audit, before
+
+
+_BOTH_KEY_ORDERS = pytest.mark.parametrize(
+    "deferring_key", [API_KEY_ID_1, API_KEY_ID_2], ids=["first_member_defers", "second_member_defers"]
+)
+
+
+async def _book_with_one_deferring_member(
+    monkeypatch: pytest.MonkeyPatch, deferring_key: str
+) -> tuple[Any, dict[str, Any], str, str]:
+    """The two-account book with one member deferring; returns the fake, the exchanges by key
+    id, the OTHER member's key id and the deferring member's."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    exchanges = {API_KEY_ID_1: await _bybit_exchange(), API_KEY_ID_2: await _sibling_bybit_exchange()}
+    other_key = API_KEY_ID_2 if deferring_key == API_KEY_ID_1 else API_KEY_ID_1
+    _defer_member(monkeypatch, deferring_key)
+    return fake, exchanges, other_key, deferring_key
+
+
+@pytest.mark.asyncio
+@_BOTH_KEY_ORDERS
+async def test_precedence_a_sibling_refusal_beats_a_bybit_deferral_in_either_key_order(
+    monkeypatch: pytest.MonkeyPatch, deferring_key: str
+) -> None:
+    """A member whose open positions cannot be read refuses the account for good
+    (``positions_unreadable``). If the deferral won, the job would defer on a deterministic
+    refusal, claim after claim, and never say why. The refusal decides, whichever member comes
+    first in key order: FAILED permanent with that token, no ``defer_compute_job`` call, the
+    book as it was."""
+    fake, exchanges, other_key, _ = await _book_with_one_deferring_member(monkeypatch, deferring_key)
+    exchanges[other_key].fetch_positions = AsyncMock(
+        side_effect=ccxt.NetworkError(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+
+    result, audit, before = await _run_forced_claim(
+        monkeypatch, fake, exchanges[API_KEY_ID_1], exchanges[API_KEY_ID_2]
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "positions_unreadable",
+        before=before, exchanges_crawled=(exchanges[other_key],), exchanges_untouched=(),
+    )
+    assert _defer_calls(fake) == [], "a refusal was deferred instead of refused"
+
+
+@pytest.mark.asyncio
+@_BOTH_KEY_ORDERS
+async def test_precedence_a_sibling_permanent_failure_beats_a_bybit_deferral(
+    monkeypatch: pytest.MonkeyPatch, deferring_key: str
+) -> None:
+    """A member whose read fails permanently (a rejected request) refuses the account
+    ``account_key_read_failed``; a deferral must not hide it behind endless retries."""
+    fake, exchanges, other_key, _ = await _book_with_one_deferring_member(monkeypatch, deferring_key)
+    exchanges[other_key].fetch_my_trades = AsyncMock(
+        side_effect=ccxt.BadRequest(f"fixture failure {LEAKED_SIGNATURE}")
+    )
+
+    result, audit, before = await _run_forced_claim(
+        monkeypatch, fake, exchanges[API_KEY_ID_1], exchanges[API_KEY_ID_2]
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_key_read_failed",
+        before=before, exchanges_crawled=(exchanges[other_key],), exchanges_untouched=(),
+    )
+    assert _defer_calls(fake) == []
+
+
+@pytest.mark.asyncio
+@_BOTH_KEY_ORDERS
+async def test_precedence_a_sibling_retryable_fault_beats_a_bybit_deferral(
+    monkeypatch: pytest.MonkeyPatch, deferring_key: str
+) -> None:
+    """A retryable fault on another member ends the claim FAILED transient, as it does without
+    any deferral (one attempt is used; the windows already stored survive, so no read progress
+    is lost). It is not turned into a deferral."""
+    fake, exchanges, other_key, _ = await _book_with_one_deferring_member(monkeypatch, deferring_key)
+    exchanges[other_key].fetch_my_trades = AsyncMock(
+        side_effect=ccxt.NetworkError("fixture: connection reset")
+    )
+
+    result, audit, before = await _run_forced_claim(
+        monkeypatch, fake, exchanges[API_KEY_ID_1], exchanges[API_KEY_ID_2]
+    )
+
+    _assert_account_rebuild_failed_transient(fake, result, audit, before=before)
+    assert _defer_calls(fake) == []
+
+
+@pytest.mark.asyncio
+async def test_precedence_a_deferral_is_not_an_unknown_fault(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the second member defers and the first completes. The outcome is DEFERRED through
+    ``defer_compute_job``: not ``_AccountCrawlRetryableError``, not a FAILED unknown (a plain
+    Exception reaching the loop's generic arm would be classified exactly that), and not a
+    failure audit. One counts-only WARNING names the deferring member's key and venue."""
+    fake, exchanges, _other, _ = await _book_with_one_deferring_member(monkeypatch, API_KEY_ID_2)
+
+    with caplog.at_level("WARNING", logger=_ER_LOGGER):
+        result, audit, before = await _run_forced_claim(
+            monkeypatch, fake, exchanges[API_KEY_ID_1], exchanges[API_KEY_ID_2]
+        )
+
+    assert result.outcome == DispatchOutcome.DEFERRED, result
+    assert result.error_kind is None, result
+    (defer,) = _defer_calls(fake)
+    assert defer["p_claim_token"] == "T1"
+    assert _book_state(fake) == before, "a deferred forced rebuild changed the stored state"
+    assert _audit_metadata(audit, FAILED_ACTION) == []
+    (line,) = _records_containing(caplog, "account crawl deferred")
+    assert f"key={API_KEY_ID_2}" in line, line
+    assert "venue=bybit" in line, line
+    assert "windows_done=7 windows_total=105" in line, line
+    assert _records_containing(caplog, "account crawl failed") == []
+    assert exchanges[API_KEY_ID_1].fetch_my_trades.await_count > 0, "the other member was not crawled"
