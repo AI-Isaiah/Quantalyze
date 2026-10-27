@@ -16,41 +16,18 @@ calls, the new one returns every trade.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from services import equity_reconstruction as er
 from services.job_worker import classify_exception
-from tests._trade_pages import DAY_MS, VenueTradeBook, trade_rows
-from tests.test_equity_reconstruction import _make_ohlcv_row
-from tests.test_trade_pages import _LOGGER, _venue_exchange, _warnings
+from tests._trade_pages import BYBIT_WINDOW_MS, DAY_MS, trade_rows
+from tests.test_trade_pages import _LOGGER, _falling_timestamps_exchange, _venue_exchange, _warnings
 
 _SINCE = 1_700_000_000_000  # a fixed instant; the reads below never look at the wall clock
-
-
-def falling_timestamps_exchange() -> tuple[Any, list[int]]:
-    """A Bybit exchange that never runs out and never repeats itself: every call answers a full
-    page of fresh ids whose timestamps all sit just below the ``until`` it was sent, with a fresh
-    cursor. Each segment therefore lowers the end bound by a hundred milliseconds, so only the
-    segment ceiling can stop it. Returns the exchange and its list of call ``until`` values."""
-    untils: list[int] = []
-
-    async def _fall(_symbol: Any, _since: Any, _limit: Any, params: dict[str, Any]) -> list[dict[str, Any]]:
-        untils.append(int(params["until"]))
-        call = len(untils)
-        rows = trade_rows(100, int(params["until"]) - 100, 1, id_prefix=f"f{call}-")
-        for row in rows:
-            row["info"] = {"note": "SIGNATURE-signed-url-secret"}
-        rows[-1]["info"]["nextPageCursor"] = f"cursor-{call}"
-        return rows
-
-    exchange = AsyncMock()
-    exchange.id = "bybit"
-    exchange.fetch_my_trades = AsyncMock(side_effect=_fall)
-    return exchange, untils
 
 
 async def test_an_over_ceiling_window_is_read_whole(caplog: pytest.LogCaptureFixture) -> None:
@@ -113,7 +90,7 @@ async def test_a_truncated_read_names_its_site(caplog: pytest.LogCaptureFixture)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(er, "_BYBIT_WINDOW_PAGE_CEILING", 2)
         patch.setattr(er, "_BYBIT_WINDOW_SEGMENT_CEILING", 3)
-        falling, _untils = falling_timestamps_exchange()
+        falling, _untils = _falling_timestamps_exchange()
         with pytest.raises(er.TruncatedTradeRead) as endless:
             await er._fetch_trades_with_pagination(falling, "bybit", _SINCE, _SINCE + 3 * DAY_MS)
     raised["endless"] = endless.value
@@ -127,3 +104,46 @@ async def test_a_truncated_read_names_its_site(caplog: pytest.LogCaptureFixture)
         assert exc.site in er.TRUNCATED_READ_SITES
         assert isinstance(exc, er.ccxt.BadRequest)
         assert classify_exception(exc)[0] == "permanent"
+
+
+async def test_an_a6_shaped_book_is_read_whole_and_replays_equal() -> None:
+    """SC-1, layer 1. The shape of the account that motivated this phase: a finite book over a
+    729-day range whose weeks are small (40 trades) except ONE that holds more than a segment
+    (10,500). The read returns every trade, and the equity replay over what was read equals the
+    replay over the book itself, field for field, so the continuation loses and duplicates
+    nothing. (Timestamps are unique, so the replay's order does not depend on read order.)"""
+    heavy_window = 40
+    book: list[dict[str, Any]] = []
+    for window in range(105):  # 729 days tile into 105 seven-day windows
+        first_ms = _SINCE + window * BYBIT_WINDOW_MS + 1000
+        if window == heavy_window:
+            book += trade_rows(10_500, first_ms, 50, id_prefix="big-")
+        else:
+            book += trade_rows(40, first_ms, 60_000, id_prefix=f"s{window:03d}-")
+    assert len(book) == 104 * 40 + 10_500
+    now_ms = _SINCE + 729 * DAY_MS
+    exchange = _venue_exchange("bybit", book)
+
+    read, _ = await er._fetch_trades_with_pagination(exchange, "bybit", _SINCE, now_ms)
+
+    assert len(read) == len(book)
+    assert len(exchange.book.calls) > 105 + er._BYBIT_WINDOW_PAGE_CEILING  # the heavy week took a second segment
+    assert {t["id"] for t in read} == {t["id"] for t in book}
+
+    def _day(ms: int) -> Any:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date()
+
+    start_date, end_date = _day(_SINCE), _day(now_ms)
+    days = (end_date - start_date).days + 1
+    ohlcv = {
+        "BTC": [(str(start_date.fromordinal(start_date.toordinal() + d)), 40_000.0 + 25.0 * d) for d in range(days)]
+    }
+    deposits = [{"timestamp": _SINCE, "currency": "USDT", "amount": 2_000_000.0}]
+
+    def _replay(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return er._compute_daily_equity(trades, deposits, [], ohlcv, {}, start_date, end_date)
+
+    replayed = _replay(read)
+    assert len(replayed) == days
+    assert replayed == _replay(book)
+    assert replayed[-1]["value_usd"] != replayed[0]["value_usd"]  # the replay is not trivially flat
