@@ -806,6 +806,54 @@ def test_the_probe_names_only_the_two_tables_it_reads() -> None:
     assert _PROBE_SRC.count(".table(") == len(literal) + 1
 
 
+def test_every_rebuild_name_the_probe_reads_is_declared() -> None:
+    """The names the probe reads off the rebuild module are exactly the declared list: a name
+    added to the code without the list would let an older deployed rebuild pass the guard."""
+    import ast
+
+    read = {
+        node.attr
+        for node in ast.walk(ast.parse(_PROBE_SRC))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "er"
+    }
+    assert read == set(hp.DEPLOYED_ER_NAMES)
+    assert list(hp.DEPLOYED_ER_NAMES) == sorted(hp.DEPLOYED_ER_NAMES)
+    assert hp.missing_deployed_names() == []  # control: this checkout defines every one of them
+
+
+async def test_a_rebuild_module_missing_a_declared_name_refuses_before_any_decrypt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    services = _Services(_two_account_book(), [_StubVenue(), _StubVenue()])
+    services.install(monkeypatch)
+    monkeypatch.delattr(er, "_BYBIT_WINDOW_PAGE_CEILING")
+
+    assert await hp.run() == hp.EXIT_REFUSED
+
+    captured = capsys.readouterr()
+    assert captured.out == ""  # no record: a misrecording is worse than none
+    assert captured.err.startswith("refused:") and "1 name(s)" in captured.err
+    assert "_BYBIT_WINDOW_PAGE_CEILING" not in captured.err  # a count, not the name
+    assert services.decrypt_calls == [] and services.built_for == []
+    assert services.supabase.log == []  # refused before the first read, not only before a decrypt
+
+
+def test_the_probe_never_touches_the_resumable_trade_read() -> None:
+    """The reading is counts-only and read-only: it must neither set the resume scope nor name
+    the store or its tables. ``TruncatedTradeRead`` is allowed, so the list is not ``TradeRead``."""
+    for forbidden in (
+        "trade_read_store",
+        "trade_read_scope",
+        "TradeReadScope",
+        "TradeReadDeferred",
+        "TradeReadStalled",
+        "allocator_trade_read",
+    ):
+        assert forbidden not in _PROBE_SRC, forbidden
+
+
 def test_every_database_handle_the_probe_passes_on_is_the_wrapper() -> None:
     import ast
 
