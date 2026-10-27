@@ -5033,9 +5033,15 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // sentinel-bearing files against the table's 23 (`expected [ ...(24) ] to deeply
     // equal [ ...(23) ]`) and `expected 24 to be 23` against the floor; 362 + 11 = 373 is the
     // table's own sum, which that test re-derives from the corpus.
+    // RAISED 2026-10-27 (Phase 171 READCEILING, plan 06), 24/373 -> 25/381.
+    // test_allocator_trade_reads.sql JOINED (an ordinary sql-tests gate: it posts nothing) and
+    // declares `ALL 8 ARMS EXECUTED`. MEASURED: ci-anti-skip-gate.contract.test.ts read 25
+    // sentinel-bearing files against the table's 24 (`expected [ ...(25) ] to deeply
+    // equal [ ...(24) ]`) and `expected 25 to be 24` against the floor; 373 + 8 = 381 is the
+    // table's own sum, which that test re-derives from the corpus.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=24", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=25", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5046,7 +5052,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=373", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=381", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
