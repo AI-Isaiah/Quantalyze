@@ -5033,6 +5033,12 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // sentinel-bearing files against the table's 23 (`expected [ ...(24) ] to deeply
     // equal [ ...(23) ]`) and `expected 24 to be 23` against the floor; 362 + 11 = 373 is the
     // table's own sum, which that test re-derives from the corpus.
+    // RAISED 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1), 24/377 -> 24/378: test_ledger_refresh_fanout.sql grew arm P5 and now declares `ALL 31 ARMS EXECUTED`.
+    // RAISED 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04), 24/376 -> 24/377: test_ledger_refresh_fanout.sql grew arm P4 and now declares `ALL 30 ARMS EXECUTED`.
+    // RAISED 2026-10-27 (Phase 174 MARKPAUSE, plan 01), 24/373 -> 24/376.
+    // test_ledger_refresh_fanout.sql grew arms P1, P2 and P3 and now declares `ALL 29 ARMS
+    // EXECUTED`, so the floor moves +3 and the sentinel-bearing file count stays 24. 373 + 3 = 376
+    // is the table's own sum, which ci-anti-skip-gate.contract.test.ts re-derives from the corpus.
     const res = spawnSync(
       "grep",
       ["-ac", "SENTINEL_FLOOR=24", ".github/workflows/ci.yml"],
@@ -5046,7 +5052,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=373", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=378", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

@@ -2,14 +2,15 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260924120000_ledger_fanout_failure_count.sql
+-- source migration: 20261030120000_ledger_fanout_marks_paused_weekly.sql
 -- --------------------------------------------------------------------------
--- STEP 1: the single-key fan-out, re-based with four edits
+-- STEP 1: the single-key fan-out, re-based with one edit
 -- --------------------------------------------------------------------------
--- Re-based on supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql
--- (source migration 20260917120000). The four edits enumerated in the RE-BASE
--- DISCIPLINE section above and nothing else; every other line of the body is
--- that snapshot's, byte for byte.
+-- Re-based on the single-key body of 20260924120000 (its first dollar-quoted block),
+-- which the committed snapshot supabase/schema/functions/
+-- enqueue_ledger_refresh_for_strategies.sql carries. The ONE edit enumerated in
+-- the RE-BASE DISCIPLINE section above and nothing else; every other line of the
+-- body is that body's, byte for byte.
 CREATE OR REPLACE FUNCTION public.enqueue_ledger_refresh_for_strategies()
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -354,7 +355,29 @@ BEGIN
                   FROM public.compute_jobs cj
                  WHERE cj.strategy_id = lrs.strategy_id
                    AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
-                   AND cj.created_at > now() - INTERVAL '20 hours'
+                   -- Phase 174 MARKPAUSE (D-01, "Re-admit weekly", refined by
+                   -- D-04): a strategy whose marks have been paused for 3 days
+                   -- or more keeps this cooldown for 7 days instead of 20
+                   -- hours, so a long-paused series is re-derived once a week
+                   -- and not once a day. The flag's value is the pause's first
+                   -- trailing day (an ISO date string), shape-tested and compared as
+                   -- TEXT so a malformed value can never raise inside the tick and
+                   -- keeps the 20 hours. A younger
+                   -- pause, or a missing value, keeps the 20 hours, so a one-day
+                   -- refusal that clears the next day is not frozen for a week.
+                   -- Still keyed on the ATTEMPT, never the success, and a
+                   -- throttle, never an exclusion: with no attempt in 7 days it
+                   -- is admitted again.
+                   AND cj.created_at > now() - CASE
+                         WHEN EXISTS (
+                           SELECT 1
+                             FROM public.strategy_analytics sa
+                            WHERE sa.strategy_id = lrs.strategy_id
+                              AND (sa.data_quality_flags ->> 'marks_trailing_since') ~ '^\d{4}-\d{2}-\d{2}$'
+                              AND sa.data_quality_flags ->> 'marks_trailing_since' <= to_char(CURRENT_DATE - 3, 'YYYY-MM-DD')
+                         ) THEN INTERVAL '7 days'
+                         ELSE INTERVAL '20 hours'
+                       END
               )
           -- Failed-attempt cooldown (164.6 review fix, HIGH-2). A candidate
           -- whose enqueue RAISED inserted no compute_jobs row, so the attempt

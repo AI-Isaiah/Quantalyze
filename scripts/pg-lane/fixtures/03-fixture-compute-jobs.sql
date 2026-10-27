@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS strategy_analytics (
   computing_started_at TIMESTAMPTZ,
   returns_series       JSONB
 );
+-- data_quality_flags: named by the Phase 174 MARKPAUSE fan-out body (20261030120000),
+-- whose attempt cooldown asks whether a strategy's analytics carry the
+-- marks-paused flag. Nullable, no default: every pre-existing gate seeds rows
+-- without it and reads them as "not paused".
+ALTER TABLE strategy_analytics ADD COLUMN IF NOT EXISTS data_quality_flags JSONB;
 
 -- Columns the ledger-refresh staleness view names on api_keys / strategies.
 -- Only the ones the view body and its gates read.

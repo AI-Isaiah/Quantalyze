@@ -273,6 +273,55 @@ convention above.
 7. **The cron set equals the manifest.** The next hourly prober run's `cron-drift` arm reports no
    defect.
 
+## Mark refusals (Phase 174)
+
+*Added 2026-10-27 (Phase 174 MARKPAUSE, D-02 and D-03).* When a derive's mark read is refused, the
+reason and the day it began are kept on one row per key, in `allocator_equity_derived`,
+`kind = 'nav_mark_refusal:<api_key_id>'`. The row is owner-SELECT and service-role write, so it is
+readable by the key's owner or by an admin through the service role, and it is **never** in the
+public `strategy_analytics.data_quality_flags`. The payload is `{token, first_seen_day,
+last_seen_day}` and nothing else: ISO UTC label days (a read at 00:10Z on the 8th labels the 7th)
+and a token from the closed set `MARK_REFUSAL_TOKENS` in `analytics-service/services/nav_marks.py`,
+which is where each token's meaning is written. A later refusal of the same key keeps
+`first_seen_day` and moves `last_seen_day`; the row is deleted when a derive of that key stores or
+finds the day's mark. A row therefore means "this key was last refused on `last_seen_day`", not "the
+key is paused now": a row can be stale if the clear failed (it logs a WARNING and is not retried), and
+a key that was disconnected, revoked, deactivated or deleted while refused never clears its row. The
+readout counts only keys that can still be derived, but even for those, compare `last_seen_day` with
+the key's latest derive before reading a row as a live pause.
+
+The readout is read-only, runs through the marker-first convention above, and names no owner id and
+no key id: it returns one row per token and day pair with a count.
+
+<!-- form: mark-refusals -->
+```sql
+WITH m AS (
+  SELECT coalesce((SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()) = __MARKER__, false)::int AS marker_is_prod
+)
+SELECT m.marker_is_prod, r.token, r.first_seen_day, r.last_seen_day, r.refused_keys
+  FROM m
+  LEFT JOIN (
+    SELECT aed.payload->>'token' AS token,
+           aed.payload->>'first_seen_day' AS first_seen_day,
+           aed.payload->>'last_seen_day' AS last_seen_day,
+           count(*) AS refused_keys
+      FROM public.allocator_equity_derived aed
+      JOIN public.api_keys ak
+        ON aed.kind = 'nav_mark_refusal:' || ak.id::text
+       AND ak.user_id = aed.allocator_id
+       AND ak.disconnected_at IS NULL
+       AND ak.sync_status IS DISTINCT FROM 'revoked'
+       AND ak.is_active
+     WHERE aed.kind LIKE 'nav_mark_refusal:%'
+     GROUP BY 1, 2, 3
+  ) r ON true
+ ORDER BY r.token, r.first_seen_day;
+```
+
+Render and run it with `node "$NM_SP/form.mjs" mark-refusals > "$NM_SP/mark-refusals.sql"` then
+`q "$NM_SP/mark-refusals.sql"`. Expect `marker_is_prod = 1` on every row. With no refused key the
+readout is one row with NULLs after the marker column.
+
 ## Merge and deploy hold
 
 From the move on, no merge to `main` from any phase between **00:00 UTC and 01:45 UTC**, and in any

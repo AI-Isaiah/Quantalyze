@@ -3289,7 +3289,22 @@ export const FILES_FLOOR = 80;
 // (migration 20261029120000). MEASURED by the same single run recorded under FILES_FLOOR: `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`;
 // per-file `test_api_key_nav_marks.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11`. The stale-low direction was observed first:
 // `The corpus declares 803 twin(s) of which 0 are waivers, so a green run bites 803. ARMS_FLOOR is 792.` WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 803;
+// RAISED 803 -> 806 2026-10-27 (Phase 174 MARKPAUSE plan 01): +3 biting arms, P1, P2 and P3 of test_ledger_refresh_fanout.sql (26 -> 29 arms, 32 ->
+// 35 twin sections; migration 20261030120000 re-creates the single-key fan-out body alone, so all 29 pre-existing edit-kind twins were re-pointed to it
+// and recounted). MEASURED per file first by a narrowed `node scripts/mutation-runner/run.mjs --file supabase/tests/test_ledger_refresh_fanout.sql`:
+// `arms: 35/35/0`, `biting: 35`, `lane-invocations: 35`, `test_ledger_refresh_fanout.sql: sections 35 / judged 35 / annotated 35 / waived 0 / biting 35`;
+// then ONE full `node scripts/mutation-runner/run.mjs` with this constant already at 806: `scope: FULL 80/80 annotated files`, `coverage: files 80/107`,
+// `arms: 806/806/0`, `biting: 806`, `lane-invocations: 806 ... plus 80 baseline / 80 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+// `unreachable: 27`, per-file `test_ledger_refresh_fanout.sql: sections 35 / judged 35 / annotated 35 / waived 0 / biting 35`. The stale-low direction was
+// observed first: `The corpus declares 806 twin(s) of which 0 are waivers, so a green run bites 806. ARMS_FLOOR is 803.` FILES_FLOOR stays 80 (no file joined).
+// WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 806 -> 807 2026-10-27 (Phase 174 MARKPAUSE fix round 1, MR-01 / SFH F1, founder decision D-04): +1 biting arm, P4 of test_ledger_refresh_fanout.sql
+// (29 -> 30 arms, 35 -> 36 twin sections; a pause under 3 days old keeps the 20-hour cooldown). MEASURED per file first by a narrowed
+// `node scripts/mutation-runner/run.mjs --file supabase/tests/test_ledger_refresh_fanout.sql`: `arms: 36/36/0`, `biting: 36`, `lane-invocations: 36`,
+// `test_ledger_refresh_fanout.sql: sections 36 / judged 36 / annotated 36 / waived 0 / biting 36`. FILES_FLOOR stays 80 (no file joined). WAIVED_CEILING stays 0.
+// RAISED 807 -> 808 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1, founder decision D-04): +1 biting arm, P5 of test_ledger_refresh_fanout.sql
+// (30 -> 31 arms, 36 -> 37 twin sections; a malformed marks_trailing_since value keeps the 20-hour cooldown). FILES_FLOOR stays 80 (no file joined). WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 808;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

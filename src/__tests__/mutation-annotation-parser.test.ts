@@ -1096,7 +1096,10 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): `armsSeen` 777 -> 788, +11 arms of the NEW gate test_replace_allocator_equity_snapshots_window.sql. MEASURED: this file's run read `expected 788 to be 777`, and ONE full lane run printed `arms: 788/788/0`.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): `armsSeen` 788 -> 792, +4 arms (12-15) of test_replace_allocator_equity_snapshots_window.sql. MEASURED: this pin read `expected 792 to be 788`.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): `armsSeen` 792 -> 803, the +11 arms of the NEW gate test_api_key_nav_marks.sql. MEASURED: this file's run read `expected 803 to be 792`, and ONE full lane run printed `arms: 803/803/0`, `biting: 803`.
-    expect(armsSeen).toBe(803);
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE, plan 01): `armsSeen` 803 -> 806, the +3 arms (P1, P2, P3) of test_ledger_refresh_fanout.sql.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04): `armsSeen` 806 -> 807, the +1 arm P4 of test_ledger_refresh_fanout.sql.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1): `armsSeen` 807 -> 808, the +1 arm P5 of test_ledger_refresh_fanout.sql.
+    expect(armsSeen).toBe(808);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1128,7 +1131,10 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): `stepsSeen` 893 -> 901, +8 file steps from the NEW gate test_replace_allocator_equity_snapshots_window.sql (its 11 arms carry 8 non-`sql` steps, MEASURED not derived). MEASURED: the 3c needle pin read `expected 901 to be 893`, the same count.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): `stepsSeen` 901 -> 905, +4 file steps (one `edit` step per new arm 12-15). MEASURED: the 3c needle pin read `expected 905 to be 901`.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): `stepsSeen` 905 -> 916, the +11 file steps of the NEW gate test_api_key_nav_marks.sql. MEASURED: this file's run read `expected 916 to be 905`.
-    expect(stepsSeen).toBe(916);
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE, plan 01): `stepsSeen` 916 -> 919, the +3 file steps of arms P1, P2 and P3 (one `edit` step each on migration 20261030120000). MEASURED: this file's run read `expected 919 to be 916`.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04): `stepsSeen` 919 -> 920, the +1 `edit` step of arm P4 on migration 20261030120000.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1): `stepsSeen` 920 -> 921, the +1 `edit` step of arm P5 on migration 20261030120000.
+    expect(stepsSeen).toBe(921);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2076,7 +2082,10 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 893 -> 901, the same +8 steps as `stepsSeen` above. MEASURED: this pin read `expected 901 to be 893`.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, review round 1 WR-01): 901 -> 905, the same +4 steps as `stepsSeen`. MEASURED: this pin read `expected 905 to be 901`.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 905 -> 916, the same +11 steps as `stepsSeen`. MEASURED: this file's run read `expected 916 to be 905`.
-    expect(needles.length).toBe(916);
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE, plan 01): 916 -> 919, the same +3 steps as `stepsSeen`. MEASURED: this file's run read `expected 919 to be 916`.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04): 919 -> 920, the +1 `find` of arm P4.
+    // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1): 920 -> 921, the +1 `find` of arm P5.
+    expect(needles.length).toBe(921);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

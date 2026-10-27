@@ -675,6 +675,49 @@ SELECT completed_at,
     the round-2 fix a deadlock is counted as a failure, named in the failure row and skipped for
     20 hours like any other.
 
+### A strategy whose marks paused is re-admitted weekly, not daily (Phase 174 MARKPAUSE)
+
+Since migration `20261030120000_ledger_fanout_marks_paused_weekly.sql` (founder decision D-01,
+2026-10-27, refined by D-04), the single-key fan-out gives a strategy whose
+`strategy_analytics.data_quality_flags` carries a `marks_trailing_since` date that is **3 or more
+days old** a **7-day** attempt cooldown instead of the 20-hour one. A younger pause (one transient
+refusal that clears the next day), a missing value and a malformed value keep the 20-hour
+cooldown, as does every other stale strategy.
+
+- **What it changes.** A strategy whose marks paused stays stale (its returns series stops
+  advancing), so it used to be re-derived about once a day for as long as the pause lasted. It is now
+  re-derived once a week. The pause throttles and never excludes: once no attempt is younger than 7
+  days the strategy is admitted again, and its derive either clears the flag (marks resumed, back
+  to the daily window) or stamps it again (still paused, next attempt a week away).
+- **What it does not change.** The staleness view, the composite fan-out, the per-venue cap, the
+  per-tick limit, the failed-attempt cooldown and the return value are untouched. Nothing is
+  scheduled or activated by the migration.
+- **How to see it.** Read-only. Attempts per paused strategy, newest first; a healthy paused
+  strategy paused for 3 or more days shows one derive chain (a `derive_broker_dailies` row and the
+  analytics job it chains to) per 7 days, not one per day:
+
+```sql
+SELECT sa.strategy_id,
+       sa.data_quality_flags ->> 'marks_trailing_since' AS paused_since,
+       count(*) FILTER (WHERE cj.kind = 'derive_broker_dailies'
+                          AND cj.created_at > now() - interval '7 days') AS derives_7d,
+       max(cj.created_at) AS last_attempt
+  FROM public.strategy_analytics sa
+  LEFT JOIN public.compute_jobs cj
+    ON cj.strategy_id = sa.strategy_id
+   AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
+ WHERE sa.data_quality_flags ? 'marks_trailing_since'
+ GROUP BY sa.strategy_id, sa.data_quality_flags
+ ORDER BY last_attempt DESC NULLS LAST;
+```
+
+- **Retention is not the limit.** `compute_jobs` keeps finished rows 30 days and failed rows 90
+  (cron manifest `retention_compute_jobs_done` / `_failed`), both longer than the 7-day window, so
+  the sweeper never erases the attempt that keeps a paused strategy out of the candidate list.
+- **Gate.** Arms P1 to P4 of `supabase/tests/test_ledger_refresh_fanout.sql`: a strategy paused 5
+  days with a 2-day-old attempt is not enqueued, the identical unpaused one is, one paused only
+  yesterday with the same attempt is, and one paused 12 days with an 8-day-old attempt is.
+
 ### Proving the kill switch — with the schedule still firing
 
 This is the property the rejected `SET app.… ; SELECT …` workaround would have destroyed: a caller
