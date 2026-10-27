@@ -710,9 +710,10 @@ async def _read_bybit_window(
     refused as ``bybit_no_advance`` when empty) or
     on a page with no cursor (a FULL page with none logs one WARNING and is not refused: a final
     page of exactly one page's rows has no cursor either). A page fetched WITH a cursor is
-    stalled, and ends its segment, when it returns the cursor it was sent or adds no new row
-    although it holds one OLDER than the oldest timestamp read before the segment began (in a
-    window's first segment: any row). The first pages of a later segment re-read the old
+    stalled when it returns the cursor it was sent or adds no new row although it holds one
+    OLDER than the oldest timestamp read before the segment began (in a window's first segment:
+    any row). A stalled SHORT page ends the window (TRADEPAGES D-02); a stalled FULL page ends
+    its segment only. The first pages of a later segment re-read the old
     boundary by design, so a page that adds nothing while every row sits at or above that
     boundary is not stalled.
 
@@ -787,7 +788,9 @@ async def _read_bybit_window(
                 nxt == cursor
                 or (added == 0 and (boundary is None or any(ts < boundary for ts in stamps)))
             ):
-                break  # a stalled page ends the segment; the window is continued by time below
+                if len(page) < _TRADE_PAGE_LIMIT:
+                    return  # TRADEPAGES D-02: a short page that does not advance is the window's end
+                break  # a FULL stalled page ends the segment; the window is continued by time below
             cursor = nxt
             await _rate_limit_sleep(exchange)
         if not empty_continuation and oldest is not None and oldest + 1 < end:
