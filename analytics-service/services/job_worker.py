@@ -3669,7 +3669,7 @@ async def _record_nav_mark_refusal(
         await db_execute(_persist)
     except Exception as exc:  # noqa: BLE001 - additive; the derive's outcome must not change
         logger.warning(
-            "derive_broker_dailies: nav mark refusal not recorded (api_key=%s, error=%s)",
+            "derive_broker_dailies: nav mark refusal not recorded (api_key_id=%s, error=%s)",
             api_key_id,
             type(exc).__name__,
         )
@@ -3691,7 +3691,7 @@ async def _clear_nav_mark_refusal(
         await db_execute(_delete)
     except Exception as exc:  # noqa: BLE001 - additive; the derive's outcome must not change
         logger.warning(
-            "derive_broker_dailies: nav mark refusal not cleared (api_key=%s, error=%s)",
+            "derive_broker_dailies: nav mark refusal not cleared (api_key_id=%s, error=%s)",
             api_key_id,
             type(exc).__name__,
         )
