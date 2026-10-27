@@ -26,6 +26,7 @@ from services.mt5_deals import (
     deal_utc_day,
     deal_utc_instant_ms,
 )
+from services.mt5_server_clock import server_clock_for_rule
 
 
 def _server_epoch(
@@ -175,6 +176,103 @@ def test_a_fractional_time_never_lands_on_a_different_day_than_the_day_rule() ->
     time_value = 86399.9999996
     assert deal_utc_day(time_value, 0) == "1970-01-02"
     assert deal_utc_instant_ms({"time": time_value}, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 175 - the seam under a DST rule clock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "wall", "day"),
+    [
+        # Repeated hour: the day comes from the first occurrence (UTC+3).
+        ("eu", _server_epoch(2026, 10, 25, 3, 30), "2026-10-25"),
+        ("us", _server_epoch(2026, 11, 1, 8, 30), "2026-11-01"),
+        # Skipped hour: the day comes from the pre-transition offset (UTC+2).
+        ("eu", _server_epoch(2027, 3, 28, 3, 30), "2027-03-28"),
+        ("us", _server_epoch(2027, 3, 14, 9, 30), "2027-03-14"),
+    ],
+)
+def test_a_repeated_or_skipped_broker_hour_has_a_day_and_no_instant(
+    rule_id: str, wall: int, day: str
+) -> None:
+    """D-07: the hour the broker clock repeats or skips has no trustworthy instant,
+    but the deal still has a day and nothing raises, so a derive that succeeds today
+    cannot fail on it. A time_msc that agrees with the second does not change that."""
+    clock = server_clock_for_rule(rule_id)
+    assert deal_utc_day(wall, clock) == day
+    assert deal_utc_instant_ms({"time": wall}, clock) is None
+    assert deal_utc_instant_ms({"time": wall, "time_msc": wall * 1000 + 7}, clock) is None
+
+
+@pytest.mark.parametrize("rule_id", ["eu", "us"])
+@pytest.mark.parametrize(
+    ("season", "midnight_utc", "broker_offset_s"),
+    [
+        ("winter", (2026, 12, 11), 7200),
+        ("summer", (2026, 7, 11), 10800),
+    ],
+)
+@pytest.mark.parametrize("delta_ms", [-1, 1])
+def test_instant_day_equals_deal_utc_day_around_a_utc_midnight_under_a_rule_clock(
+    rule_id: str, season: str, midnight_utc: tuple[int, int, int], broker_offset_s: int, delta_ms: int
+) -> None:
+    """The midnight agreement of the fixed form holds under a rule clock too, in
+    both seasons: the offset in force is the winter or the summer one, the instant
+    lands on the day ``deal_utc_day`` gives, and the two sides of midnight are two
+    different days."""
+    clock = server_clock_for_rule(rule_id)
+    midnight_s = _server_epoch(*midnight_utc)
+    server_ms = (midnight_s + broker_offset_s) * 1000 + delta_ms
+    deal = {"time": server_ms // 1000, "time_msc": server_ms}
+    instant = deal_utc_instant_ms(deal, clock)
+    assert instant == midnight_s * 1000 + delta_ms, season
+    assert instant is not None
+    assert _day_of_instant_ms(instant) == deal_utc_day(deal["time"], clock)
+    before = "%04d-%02d-%02d" % (midnight_utc[0], midnight_utc[1], midnight_utc[2] - 1)
+    after = "%04d-%02d-%02d" % midnight_utc
+    assert _day_of_instant_ms(instant) == (before if delta_ms < 0 else after)
+
+
+@pytest.mark.parametrize("rule_id", ["eu", "us"])
+@pytest.mark.parametrize("year", [2006, 2100])
+def test_a_deal_outside_the_rules_year_span_fails_loud_with_one_text(
+    rule_id: str, year: int
+) -> None:
+    """The statutory rule covers 2007-2099. Outside it the seam raises the same
+    existing out-of-range failure from both entry points, never a guessed offset."""
+    clock = server_clock_for_rule(rule_id)
+    wall = _server_epoch(year, 6, 1)
+    with pytest.raises(Mt5DealClassificationError) as day_err:
+        deal_utc_day(wall, clock)
+    with pytest.raises(Mt5DealClassificationError) as instant_err:
+        deal_utc_instant_ms({"time": wall}, clock)
+    assert str(day_err.value) == (
+        "MT5 deal time is outside the dates the broker server-clock rule covers (2007-2099) — fail loud"
+    )
+    assert str(instant_err.value) == str(day_err.value)
+
+
+@pytest.mark.parametrize("rule_id", ["eu", "us"])
+def test_an_undatable_epoch_raises_the_same_text_under_a_rule_clock(rule_id: str) -> None:
+    clock = server_clock_for_rule(rule_id)
+    with pytest.raises(Mt5DealClassificationError) as day_err:
+        deal_utc_day(1e30, clock)
+    with pytest.raises(Mt5DealClassificationError) as instant_err:
+        deal_utc_instant_ms({"time": 1e30}, clock)
+    assert str(instant_err.value) == str(day_err.value)
+    assert str(day_err.value) == (
+        "MT5 deal time is outside the dates the broker server-clock rule covers (2007-2099) — fail loud"
+    )
+
+
+def test_a_clock_and_an_int_are_both_accepted_as_the_offset() -> None:
+    """The widened offset argument accepts a clock beside the int; the rejection of
+    a bool, float, str and None is the unchanged parametrization above."""
+    wall = _server_epoch(2026, 12, 11, 12)
+    assert deal_utc_day(wall, server_clock_for_rule("us")) == "2026-12-11"
+    assert deal_utc_day(wall, 7200) == "2026-12-11"
 
 
 # ---------------------------------------------------------------------------

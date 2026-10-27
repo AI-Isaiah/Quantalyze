@@ -407,6 +407,21 @@ def _mt5_known_servers_admit_the_suites_synthetic_servers(monkeypatch):
     mt5_probe._reset_server_unknown_alerts_for_tests()
 
 
+# Phase 175 (MT5OFFSET): the MT5 broker clock is resolved by
+# ``services.mt5_server_clock.resolve_mt5_server_clock``, which FAILS LOUD when neither
+# ``MT5_SERVER_TIME_RULE`` nor ``MT5_SERVER_UTC_OFFSET_S`` is set. Before 175 every site
+# read ``int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0"))`` and a silent "0" was the default.
+# At least 54 tests drove the MT5 branch without setting the variable (measured by RESEARCH
+# with a simulated fail-loud), so this default reproduces their pre-175 arithmetic EXACTLY
+# (the fixed form 0). It is a suite default and nothing more: a test of a rule or of the
+# fail-loud table overrides it with its own monkeypatch calls (setenv / delenv), which run
+# later in the same test and so win over this fixture.
+@pytest.fixture(autouse=True)
+def _mt5_server_clock_defaults_to_the_fixed_zero_form(monkeypatch):
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    monkeypatch.delenv("MT5_SERVER_TIME_RULE", raising=False)
+
+
 # Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
 # behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
 # default OFF. The Phase 131-133 tests were written when the pass ran

@@ -4485,6 +4485,15 @@ _MT5_BACKFILL_MESSAGES: dict[str, str] = {
         "reconstruct_allocator_history: the MT5 deal history had not settled "
         "within its wait budget — retrying"
     ),
+    # Phase 175 / D-01 — the worker's MT5 server clock setting is missing, contradictory or
+    # invalid. An operator fault, not a verdict on the account, so it is TRANSIENT: the
+    # backfill is a one-time rebuild and must retry once the variable is fixed. Fixed text:
+    # it names no variable value (the resolver's own closed-set text goes to the audit
+    # event's `sanitized_message` and the warning log, never to this field).
+    "server_clock_config": (
+        "reconstruct_allocator_history: the worker's MT5 server clock setting is "
+        "missing or invalid — retrying"
+    ),
     # 164.6.6.2 / D-01 — the terminal did not report the account's currency. A read
     # fault, not a verdict on the account, so it retries and nothing is guessed (a
     # guessed USD is exactly the bug this phase removes). Fixed text, no broker text.
@@ -4724,6 +4733,10 @@ async def _mt5_fetch_window(
     from services.mt5_deals import Mt5DealClassificationError
     from services.mt5_handover import SITE_BACKFILL
     from services.mt5_read import Mt5HistoryUnsettledError, read_mt5_deal_ledger
+    from services.mt5_server_clock import (
+        Mt5ServerClockConfigError,
+        resolve_mt5_server_clock,
+    )
     from services.account_unit import (
         AccountCurrencyBlank,
         AccountCurrencyMalformed,
@@ -4777,6 +4790,21 @@ async def _mt5_fetch_window(
     # claim; `job_worker.py` already carries the correction of an earlier one.
     if not mt5_enabled_server():
         return _fail("kill_switch", "permanent")
+
+    # Phase 175 / D-01 — the broker clock, resolved ONCE per backfill, right after the
+    # go-dark gate and BEFORE the terminal lease: a configuration fault costs no lease
+    # and no terminal read, and persists nothing. TRANSIENT (see the message's comment):
+    # the one-time rebuild retries once the operator fixes the variable. It is not a
+    # `Mt5DealClassificationError`, so no user's strategy is blamed for it.
+    try:
+        mt5_clock = resolve_mt5_server_clock()
+    except Mt5ServerClockConfigError as exc:
+        logger.warning(
+            "reconstruct_allocator_history: mt5 server clock configuration fault "
+            "(allocator=%s key=%s arm=server_clock_config) — %s",
+            allocator_id, api_key_id, exc,
+        )
+        return _fail("server_clock_config", "transient", detail=str(exc))
 
     # venue == "mt5" ⇒ `_allocator_key_preflight` built an Mt5Session. The cast
     # narrows the ccxt.Exchange | SfoxClient | Mt5Session union for the
@@ -5030,7 +5058,7 @@ async def _mt5_fetch_window(
             deals,
             equity,
             balance,
-            server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+            server_utc_offset_s=mt5_clock,
             floors=_unit.floors,
         )
     except Mt5DealClassificationError as exc:

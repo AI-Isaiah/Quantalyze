@@ -1838,6 +1838,7 @@ async def _run_forced_mt5_member_job(
         ("non_finite", "permanent"),
         ("negative_nav", "permanent"),
         ("history_unsettled", "transient"),
+        ("server_clock_config", "transient"),
     ],
 )
 async def test_a_failed_mt5_member_is_named_in_one_warning(

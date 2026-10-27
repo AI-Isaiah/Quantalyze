@@ -179,10 +179,26 @@ Any item that does not return its expected answer is an ABORT: do not run Step B
   **Abort if** the version is below 1.3 or the function is absent from `pg_proc`.
 - **P5 — the working tree is clean.** `git status --short` prints nothing, so the manifest Step C
   produces is reviewable against a known-clean baseline.
+- **P6 — the broker server clock is measured and the worker setting matches it.** On a trading
+  day, while a liquid symbol is visibly ticking, read the server time MT5 Market Watch shows and
+  UTC at the same moment; the difference rounded to whole hours is server minus UTC. Then read
+  the MT5 clock setting on every Railway service that runs the analytics worker (at the time of
+  writing `quantalyze-analytics` and `quantalyze-analytics-backfill`): either
+  `MT5_SERVER_UTC_OFFSET_S` alone (the fixed form, whole seconds) or, once Phase 175 is live,
+  `MT5_SERVER_TIME_RULE` alone (`eu`: daylight saving from the last Sunday of March to the last
+  Sunday of October, at 01:00 UTC; `us`: from the second Sunday of March to the first Sunday of
+  November, at 02:00 New York time; both +2 h outside daylight saving and +3 h inside it). The
+  setting must give today's reading. Record the date, the whole-hour difference and the setting
+  (a rule id or a whole-hour count) in the SUMMARY of the plan being executed, never the server
+  name, a login or a balance. **Abort if** the setting is absent on any of those services, both
+  variables are set, or the setting disagrees with the reading, because a flow made in the hour
+  after a mark's read is then filed on the wrong side of it (Phase 167.2.1.1.1 REVIEW-3 WR-02,
+  Phase 175).
 
 ## Step B — the move
 
 Re-run P0, P2 and P3 immediately before it, and keep the merge hold (below) from now on.
+Re-run P6 too when the move happens on another day than the P6 reading.
 
 One statement moves both jobs, so both move or neither does. The guard first refuses unless the
 database names PRODUCTION AND both jobs are at their expected starting schedule and command (a

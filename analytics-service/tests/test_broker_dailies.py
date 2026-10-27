@@ -1085,7 +1085,7 @@ def test_mt5_combiner_stamps_ledger_complete():
     from services.broker_dailies import combine_mt5_deal_ledger
 
     _returns, meta = combine_mt5_deal_ledger(
-        _mt5_trading_deals(), account_equity=100_200.0, account_balance=100_200.0
+        _mt5_trading_deals(), account_equity=100_200.0, account_balance=100_200.0, server_utc_offset_s=0
     )
 
     assert meta["series_completeness"] == "ledger_complete"
@@ -1194,7 +1194,7 @@ def test_mt5_no_trading_deals_is_exempt_and_stays_inside_the_short_circuit():
          "time": int(datetime(2025, 6, 2, 12, tzinfo=timezone.utc).timestamp())},
     ]
     returns, meta = combine_mt5_deal_ledger(
-        deposit_only, account_equity=25_000.0, account_balance=25_000.0
+        deposit_only, account_equity=25_000.0, account_balance=25_000.0, server_utc_offset_s=0
     )
 
     assert "series_completeness" not in meta
