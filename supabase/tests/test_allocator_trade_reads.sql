@@ -88,7 +88,7 @@
 -- catalogue-only and asserts only that both tables resolve and both primary keys
 -- exist by name, so each edit below leaves those standing and the mutated
 -- migration applies clean; the gate, not the apply, is what speaks.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20261030120000_allocator_trade_reads.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","scripts/pg-lane/fixtures/41-fixture-api-keys-user-id-fk.sql","supabase/migrations/20261030120000_allocator_trade_reads.sql"]}
 -- ⚠️ 07-fixture-supabase-default-privileges.sql is what makes the REVOKE falsifiable:
 -- the tables are created by a migration IN this list, so Supabase's bootstrap default
 -- privileges hand anon, authenticated and service_role the ALL grant they hold in
@@ -250,6 +250,7 @@ BEGIN
   --            drift. FORCE RLS with zero policies still shows that role zero rows,
   --            so nothing in the migration notices and no row is ever returned;
   --            only the refusal itself sees the grant.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role;","replace":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role;\nGRANT SELECT ON public.allocator_trade_read_windows TO authenticated;","occurrences":1}]}
   v_a := pg_temp.tr_user();
   v_ka := pg_temp.tr_key(v_a);
   FOREACH v_role IN ARRAY ARRAY['authenticated', 'anon'] LOOP
@@ -295,6 +296,7 @@ BEGIN
   --            20261030120000, the "the worker only needs to append" drift copied
   --            from the write-once NAV table. The worker then cannot move a counter
   --            or purge an expired window.
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role","replace":"GRANT SELECT, INSERT ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role","occurrences":1}]}
   v_u := pg_temp.tr_user();
   v_k := pg_temp.tr_key(v_u);
   SET LOCAL ROLE service_role;
