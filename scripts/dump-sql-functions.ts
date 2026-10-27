@@ -392,20 +392,11 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-10-26: Phase 167.2.1.1.1 NAVMTM plan 01 adds one `snapshot-only` row
-  // for `enforce_api_key_nav_marks_owner_coherence`, the trigger function of the
-  // new api_key_nav_marks table. Its clearing condition is the re-dump taken
-  // after the migration has applied to PROD; that act turns the row into
-  // `ratchet-stale` and it is DELETED, as the rows below were.
-  {
-    name: "enforce_api_key_nav_marks_owner_coherence",
-    side: "snapshot-only",
-    capturedAt: "2026-10-26",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER 20261029120000_api_key_nav_marks.sql has applied to PROD",
-    reason:
-      "Phase 167.2.1.1.1 NAVMTM plan 01 defines the function in a forward migration (the owner-coherence trigger of api_key_nav_marks) while the committed PROD dump predates that migration, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-10-26: the Phase 167.2.1.1.1 NAVMTM row
+  // (`enforce_api_key_nav_marks_owner_coherence`, `snapshot-only`, captured
+  // 2026-10-26) is DELETED: its clearing condition, a re-dump taken after
+  // 20261029120000_api_key_nav_marks.sql applied to PROD, was met by the
+  // re-dump after the PROD apply of bc913db7.
   // ⭐ 2026-10-22: the Phase 167.2.1.1.2 ACCTREBUILD row
   // (`replace_allocator_equity_snapshots_window`, `snapshot-only`, captured
   // 2026-10-22) was DELETED on the re-dump taken after 20261028120000 applied

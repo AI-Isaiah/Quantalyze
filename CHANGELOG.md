@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.1.1] - 2026-10-26 — BASELINE: automated re-dump after the PROD apply of bc913db7
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `40418851201`, after the PROD apply of merge `bc913db7`: sha256 `086028e7…` → `82d513ee…`.
+- Shape, old → new: tables 63 → 64, policies 155 → 156, function statements 133 → 134, distinct function names 131 → 132, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261029120000_api_key_nav_marks.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.1.0 → 0.133.1.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=308 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+- `scripts/dump-sql-functions.ts`: the NAVMTM `NAME_SET_RATCHET` row for `enforce_api_key_nav_marks_owner_coherence` is deleted, its own clearing condition (a re-dump taken after `20261029120000` applied to PROD). `snapshot-drift` reads `ratchet-stale` until it goes.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `40418851201` succeeded, and this entry was composed by the `redump-pr` job. Run `40418851201` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.1.0] - 2026-10-27 — NAVMTM: every ingest stores the account's marked-to-market NAV and strategies follow it
 
 ### Added
