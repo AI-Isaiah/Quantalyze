@@ -1306,7 +1306,7 @@
 // sections 11 / judged 11 / annotated 11 / waived 0 / biting 11`, and `test_derive_allocator_keys_fanout.sql: sections 7 / judged 7 / annotated
 // 7 / waived 0 / biting 7` (plan 05 replaced the body of its ASSERTION 6; the arm count did not move). The stale-low direction was observed
 // first: `RATCHET STALE: 80 of 107 gate files are now annotated but FILES_FLOOR is still 79.` WAIVED_CEILING stays 0.
-// RAISED 80 -> 81 2026-10-27 (Phase 171 READCEILING plan 06): +1 file, test_allocator_trade_reads.sql (migration 20261030120000, eight arms),
+// RAISED 80 -> 81 2026-10-27 (Phase 171 READCEILING plan 06): +1 file, test_allocator_trade_reads.sql (migration 20261031120000, eight arms),
 // so 81 of 108 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file edited during it, exit 0: `scope: FULL 81/81
 // annotated files`, `lane-concurrency: 4`, `coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`, `lane-invocations: 811 ... plus 81 baseline /
 // 81 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane
@@ -3297,7 +3297,7 @@ export const FILES_FLOOR = 81;
 // per-file `test_api_key_nav_marks.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11`. The stale-low direction was observed first:
 // `The corpus declares 803 twin(s) of which 0 are waivers, so a green run bites 803. ARMS_FLOOR is 792.` WAIVED_CEILING stays 0 - no waiver was added.
 // RAISED 803 -> 811 2026-10-27 (Phase 171 READCEILING plan 06): +8 biting arms, the eight arms of the NEW gate test_allocator_trade_reads.sql
-// (migration 20261030120000). MEASURED by the same single run recorded under FILES_FLOOR: `arms: 811/811/0`, `biting: 811`, `lane-invocations: 811`;
+// (migration 20261031120000). MEASURED by the same single run recorded under FILES_FLOOR: `arms: 811/811/0`, `biting: 811`, `lane-invocations: 811`;
 // per-file `test_allocator_trade_reads.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`. The stale-low direction was observed first:
 // `The corpus declares 811 twin(s) of which 0 are waivers, so a green run bites 811. ARMS_FLOOR is 803.` WAIVED_CEILING stays 0 - no waiver was added.
 export const ARMS_FLOOR = 811;

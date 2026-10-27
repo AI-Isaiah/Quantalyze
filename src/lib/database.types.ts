@@ -335,7 +335,7 @@ export type Database = {
       }
       // 2026-10-30 (Phase 171 READCEILING plan 06): allocator_trade_read_windows
       // and allocator_trade_reads are hand-added from migration
-      // 20261030120000, which has NOT applied to PROD yet. A regen against the
+      // 20261031120000, which has NOT applied to PROD yet. A regen against the
       // linked PROD project drops them until it does; re-apply them then. Both
       // are service-role only (no browser code reads them). Only the api_keys
       // foreign key is listed on each.

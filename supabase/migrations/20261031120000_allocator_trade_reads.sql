@@ -80,7 +80,7 @@
 -- that wrap.
 --
 -- Rollback (manual, off the auto-apply path; it KEEPS every stored row):
--- supabase/migrations/down/20261030120000-rollback.sql
+-- supabase/migrations/down/20261031120000-rollback.sql
 -- ============================================================================
 
 SET LOCAL lock_timeout = '3s';
@@ -182,25 +182,25 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.all
 DO $verify$
 BEGIN
   IF to_regclass('public.allocator_trade_reads') IS NULL THEN
-    RAISE EXCEPTION 'Migration 20261030120000 failed: public.allocator_trade_reads is missing';
+    RAISE EXCEPTION 'Migration 20261031120000 failed: public.allocator_trade_reads is missing';
   END IF;
   IF to_regclass('public.allocator_trade_read_windows') IS NULL THEN
-    RAISE EXCEPTION 'Migration 20261030120000 failed: public.allocator_trade_read_windows is missing';
+    RAISE EXCEPTION 'Migration 20261031120000 failed: public.allocator_trade_read_windows is missing';
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
                   WHERE conname = 'allocator_trade_reads_pkey'
                     AND conrelid = 'public.allocator_trade_reads'::regclass
                     AND contype = 'p') THEN
-    RAISE EXCEPTION 'Migration 20261030120000 failed: the primary key allocator_trade_reads_pkey is missing';
+    RAISE EXCEPTION 'Migration 20261031120000 failed: the primary key allocator_trade_reads_pkey is missing';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
                   WHERE conname = 'allocator_trade_read_windows_pkey'
                     AND conrelid = 'public.allocator_trade_read_windows'::regclass
                     AND contype = 'p') THEN
-    RAISE EXCEPTION 'Migration 20261030120000 failed: the primary key allocator_trade_read_windows_pkey is missing';
+    RAISE EXCEPTION 'Migration 20261031120000 failed: the primary key allocator_trade_read_windows_pkey is missing';
   END IF;
 
-  RAISE NOTICE 'Migration 20261030120000: public.allocator_trade_reads and public.allocator_trade_read_windows exist, each with its named primary key.';
+  RAISE NOTICE 'Migration 20261031120000: public.allocator_trade_reads and public.allocator_trade_read_windows exist, each with its named primary key.';
 END
 $verify$;

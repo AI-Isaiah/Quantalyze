@@ -1,6 +1,6 @@
 -- Test: public.allocator_trade_reads and public.allocator_trade_read_windows
 -- (Phase 171 READCEILING, plan 03). Guards migration
--- 20261030120000_allocator_trade_reads.sql.
+-- 20261031120000_allocator_trade_reads.sql.
 --
 -- Background
 -- ----------
@@ -84,11 +84,11 @@
 -- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a throwaway
 -- pg-lane cluster to PROVE the arm reds on its own, then restores GREEN. Schema:
 -- scripts/mutation-runner/GRAMMAR.md. Every twin edits the migration that DEFINES
--- what it mutates, 20261030120000. The migration's own verify block is
+-- what it mutates, 20261031120000. The migration's own verify block is
 -- catalogue-only and asserts only that both tables resolve and both primary keys
 -- exist by name, so each edit below leaves those standing and the mutated
 -- migration applies clean; the gate, not the apply, is what speaks.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","scripts/pg-lane/fixtures/41-fixture-api-keys-user-id-fk.sql","supabase/migrations/20261030120000_allocator_trade_reads.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","scripts/pg-lane/fixtures/41-fixture-api-keys-user-id-fk.sql","supabase/migrations/20261031120000_allocator_trade_reads.sql"]}
 -- ⚠️ 07-fixture-supabase-default-privileges.sql is what makes the REVOKE falsifiable:
 -- the tables are created by a migration IN this list, so Supabase's bootstrap default
 -- privileges hand anon, authenticated and service_role the ALL grant they hold in
@@ -246,11 +246,11 @@ BEGIN
   -- a stray INSERT grant behind it. A SELECT cannot be hidden that way (no policy
   -- means zero rows, not an error), so a stray SELECT grant answers NO error.
   -- RED-UNDER: add a SELECT grant on the windows table for authenticated in
-  --            20261030120000, the "the dashboard could show a progress bar"
+  --            20261031120000, the "the dashboard could show a progress bar"
   --            drift. FORCE RLS with zero policies still shows that role zero rows,
   --            so nothing in the migration notices and no row is ever returned;
   --            only the refusal itself sees the grant.
-  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role;","replace":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role;\nGRANT SELECT ON public.allocator_trade_read_windows TO authenticated;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role;","replace":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role;\nGRANT SELECT ON public.allocator_trade_read_windows TO authenticated;","occurrences":1}]}
   v_a := pg_temp.tr_user();
   v_ka := pg_temp.tr_key(v_a);
   FOREACH v_role IN ARRAY ARRAY['authenticated', 'anon'] LOOP
@@ -293,10 +293,10 @@ BEGIN
   -- succeed with the right row count; a privilege refusal is reported as this arm's
   -- failure, not left to propagate.
   -- RED-UNDER: drop UPDATE and DELETE from the one service_role grant in
-  --            20261030120000, the "the worker only needs to append" drift copied
+  --            20261031120000, the "the worker only needs to append" drift copied
   --            from the write-once NAV table. The worker then cannot move a counter
   --            or purge an expired window.
-  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role","replace":"GRANT SELECT, INSERT ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"GRANT SELECT, INSERT, UPDATE, DELETE ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role","replace":"GRANT SELECT, INSERT ON public.allocator_trade_reads, public.allocator_trade_read_windows TO service_role","occurrences":1}]}
   v_u := pg_temp.tr_user();
   v_k := pg_temp.tr_key(v_u);
   SET LOCAL ROLE service_role;
@@ -364,11 +364,11 @@ BEGIN
   -- breaks the state table's cascade bites this arm before the windows arm. A is
   -- deleted through delete_allocator_api_key as the owning user, B through its auth
   -- user, and C's row must still be there afterwards.
-  -- RED-UNDER: change the state table's api_key_id foreign key in 20261030120000
+  -- RED-UNDER: change the state table's api_key_id foreign key in 20261031120000
   --            from ON DELETE CASCADE to ON DELETE RESTRICT. Deleting the key is
   --            then refused (23503) while a state row still names it, and the read
   --            position outlives its account.
-  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"api_key_id      UUID        PRIMARY KEY REFERENCES public.api_keys(id) ON DELETE CASCADE","replace":"api_key_id      UUID        PRIMARY KEY REFERENCES public.api_keys(id) ON DELETE RESTRICT","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"api_key_id      UUID        PRIMARY KEY REFERENCES public.api_keys(id) ON DELETE CASCADE","replace":"api_key_id      UUID        PRIMARY KEY REFERENCES public.api_keys(id) ON DELETE RESTRICT","occurrences":1}]}
   v_a := pg_temp.tr_user();
   v_b := pg_temp.tr_user();
   v_c := pg_temp.tr_user();
@@ -431,10 +431,10 @@ BEGIN
   -- ===== ARM 4 - window rows erase with their key and their account (T-171-09)
   -- The same two paths as arm 3, for the stored trades themselves, which are the
   -- rows that matter for erasure (per-fill data). ONLY window rows are seeded.
-  -- RED-UNDER: change the windows table's api_key_id foreign key in 20261030120000
+  -- RED-UNDER: change the windows table's api_key_id foreign key in 20261031120000
   --            from ON DELETE CASCADE to ON DELETE RESTRICT. The key delete is then
   --            refused (23503) and the trades outlive their key.
-  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"api_key_id      UUID        NOT NULL REFERENCES public.api_keys(id) ON DELETE CASCADE","replace":"api_key_id      UUID        NOT NULL REFERENCES public.api_keys(id) ON DELETE RESTRICT","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"api_key_id      UUID        NOT NULL REFERENCES public.api_keys(id) ON DELETE CASCADE","replace":"api_key_id      UUID        NOT NULL REFERENCES public.api_keys(id) ON DELETE RESTRICT","occurrences":1}]}
   v_a := pg_temp.tr_user();
   v_b := pg_temp.tr_user();
   v_c := pg_temp.tr_user();
@@ -497,10 +497,10 @@ BEGIN
   -- ===== ARM 5 - state value checks (TR-1, TR-5, TR-6) =======================
   -- Each refusal is a CHECK violation (23514) naming its own constraint. The
   -- legitimate row goes in first so the checks are shown not to be over-strict.
-  -- RED-UNDER: drop the venue CHECK from 20261030120000. A venue outside the closed
+  -- RED-UNDER: drop the venue CHECK from 20261031120000. A venue outside the closed
   --            set is then stored, and the day a second venue adopts the store it
   --            does so without anyone having decided that it may.
-  -- RED-UNDER-M: {"arm":"5","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"  CONSTRAINT allocator_trade_reads_venue_chk\n    CHECK (venue IN ('bybit')),\n","replace":"","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"5","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"  CONSTRAINT allocator_trade_reads_venue_chk\n    CHECK (venue IN ('bybit')),\n","replace":"","occurrences":1}]}
   v_u := pg_temp.tr_user();
   v_k := pg_temp.tr_key(v_u);
   v_b := pg_temp.tr_user();
@@ -538,11 +538,11 @@ BEGIN
   -- which can never equal an array's length and therefore reports _array_chk (its
   -- name sorts before _count_chk). The upper bound of _count_chk is proven by the
   -- 5001-trade case, whose array length matches its count.
-  -- RED-UNDER: drop the chunk-position CHECK from 20261030120000. A chunk whose
+  -- RED-UNDER: drop the chunk-position CHECK from 20261031120000. A chunk whose
   --            index is outside its chunk count (or a window of zero chunks) is then
   --            stored, so a half-written window can no longer be told from a whole
   --            one by its numbering.
-  -- RED-UNDER-M: {"arm":"6","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"  CONSTRAINT allocator_trade_read_windows_chunk_chk\n    CHECK (chunk_count >= 1 AND chunk_index >= 0 AND chunk_index < chunk_count),\n","replace":"","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"6","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"  CONSTRAINT allocator_trade_read_windows_chunk_chk\n    CHECK (chunk_count >= 1 AND chunk_index >= 0 AND chunk_index < chunk_count),\n","replace":"","occurrences":1}]}
   v_u := pg_temp.tr_user();
   v_k := pg_temp.tr_key(v_u);
   SET LOCAL ROLE service_role;
@@ -600,11 +600,11 @@ BEGIN
   -- ===== ARM 7 - keys (TR-1) =================================================
   -- One state row per key; one row per (key, window start, chunk). Chunk 1 of the
   -- same window is a different row and is accepted.
-  -- RED-UNDER: remove chunk_index from the windows primary key in 20261030120000,
+  -- RED-UNDER: remove chunk_index from the windows primary key in 20261031120000,
   --            leaving (api_key_id, window_start_ms). The constraint keeps its name,
   --            so the verify block still finds it, but a window can then hold only
   --            one chunk and every window of more than 5,000 trades is unstorable.
-  -- RED-UNDER-M: {"arm":"7","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"PRIMARY KEY (api_key_id, window_start_ms, chunk_index)","replace":"PRIMARY KEY (api_key_id, window_start_ms)","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"7","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"PRIMARY KEY (api_key_id, window_start_ms, chunk_index)","replace":"PRIMARY KEY (api_key_id, window_start_ms)","occurrences":1}]}
   v_u := pg_temp.tr_user();
   v_k := pg_temp.tr_key(v_u);
   SET LOCAL ROLE service_role;
@@ -640,10 +640,10 @@ BEGIN
 
   -- ===== ARM 8 - catalogue (TR-2) ============================================
   -- RED-UNDER: drop FORCE ROW LEVEL SECURITY from the state table in
-  --            20261030120000. Every role the other arms use is a non-owner or
+  --            20261031120000. Every role the other arms use is a non-owner or
   --            BYPASSRLS, so they all still pass; only the catalogue sees that the
   --            table owner is no longer bound by the (empty) policy set.
-  -- RED-UNDER-M: {"arm":"8","apply":[{"kind":"edit","file":"supabase/migrations/20261030120000_allocator_trade_reads.sql","find":"ALTER TABLE public.allocator_trade_reads FORCE ROW LEVEL SECURITY;\n","replace":"","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"8","apply":[{"kind":"edit","file":"supabase/migrations/20261031120000_allocator_trade_reads.sql","find":"ALTER TABLE public.allocator_trade_reads FORCE ROW LEVEL SECURITY;\n","replace":"","occurrences":1}]}
   IF NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = v_oid_s AND c.relrowsecurity AND c.relforcerowsecurity) THEN
     RAISE EXCEPTION 'TEST FAILED (8): row level security is not both enabled and forced on allocator_trade_reads';
   END IF;

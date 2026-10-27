@@ -2775,7 +2775,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_allocator_equity_pre_terminus_flag.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
       "test_allocator_holdings_per_key_unique.sql",
-      // ⭐ ADDED 2026-10-27 (Phase 171 READCEILING, plan 06): the trade-read store gate (8 arms) for migration 20261030120000.
+      // ⭐ ADDED 2026-10-27 (Phase 171 READCEILING, plan 06): the trade-read store gate (8 arms) for migration 20261031120000.
       "test_allocator_trade_reads.sql",
       // ⚠️ CURRENCY 2026-09-07 (phase 164.7 plan 02, pinned by plan 05): the
       // FORTY-SIXTH annotated file. Seven arms — the two RAISE paths of the

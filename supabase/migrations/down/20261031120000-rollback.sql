@@ -1,5 +1,5 @@
 -- ============================================================================
--- ROLLBACK for 20261030120000_allocator_trade_reads.sql
+-- ROLLBACK for 20261031120000_allocator_trade_reads.sql
 -- Phase 171 READCEILING, plan 03 (SC-1; D-02, TR-7).
 -- ============================================================================
 -- Manual, off the auto-apply path. Run it as ONE transaction, so it either happens
@@ -11,7 +11,7 @@
 --   1. Withdraws every table privilege from every role, service_role included, so
 --      nothing but the table owner can read or write the kept rows.
 --   2. RENAMES both tables, and the primary keys they own, aside to
---      *_rolled_back_20261030. The renames are what let the migration be applied
+--      *_rolled_back_20261031. The renames are what let the migration be applied
 --      again afterwards without a name collision.
 --
 -- Run it only AFTER the analytics worker that writes these tables has been rolled
@@ -22,18 +22,18 @@
 -- ⚠️ DATA IS KEPT (TR-7). This file never removes a table. The rows are transient
 -- (they expire after 7 days) and a plain removal would also be defensible, but it is a
 -- founder decision and no part of this file. The rows stay in
--- public.allocator_trade_reads_rolled_back_20261030 and
--- public.allocator_trade_read_windows_rolled_back_20261030 (table owner access only),
+-- public.allocator_trade_reads_rolled_back_20261031 and
+-- public.allocator_trade_read_windows_rolled_back_20261031 (table owner access only),
 -- and they still go when their key or their account is deleted, because both foreign
 -- keys and their ON DELETE CASCADE are untouched. To get them back after re-applying
 -- the migration, copy them across with an INSERT ... SELECT run by the table owner.
 --
 -- ⚠️ THE MIGRATION LEDGER ROW IS LEFT IN PLACE. This file does not touch
 -- supabase_migrations.schema_migrations, so after it runs the ledger still records
--- version 20261030120000 as applied while the schema no longer carries it, and
+-- version 20261031120000 as applied while the schema no longer carries it, and
 -- `supabase db push` will not re-apply the migration. To re-apply it, delete that
 -- ledger row in the same change (or mark it reverted with
--- `supabase migration repair --status reverted 20261030120000` against the intended
+-- `supabase migration repair --status reverted 20261031120000` against the intended
 -- database, after the marker query in CLAUDE.md names that database).
 --
 -- The DO block before the change is a catalogue-only PRECONDITION: it refuses, before
@@ -49,14 +49,14 @@ SET LOCAL lock_timeout = '3s';
 DO $precondition$
 BEGIN
   IF to_regclass('public.allocator_trade_reads') IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20261030120000 refused: public.allocator_trade_reads is not present, so this database does not carry 20261030120000. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
+    RAISE EXCEPTION 'Rollback 20261031120000 refused: public.allocator_trade_reads is not present, so this database does not carry 20261031120000. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
   END IF;
   IF to_regclass('public.allocator_trade_read_windows') IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20261030120000 refused: public.allocator_trade_read_windows is not present, so this database does not carry 20261030120000 whole. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
+    RAISE EXCEPTION 'Rollback 20261031120000 refused: public.allocator_trade_read_windows is not present, so this database does not carry 20261031120000 whole. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
   END IF;
-  IF to_regclass('public.allocator_trade_reads_rolled_back_20261030') IS NOT NULL
-     OR to_regclass('public.allocator_trade_read_windows_rolled_back_20261030') IS NOT NULL THEN
-    RAISE EXCEPTION 'Rollback 20261030120000 refused: a *_rolled_back_20261030 table already exists, so an earlier rollback already set a table aside. Nothing was changed. Decide what to do with the kept rows first.';
+  IF to_regclass('public.allocator_trade_reads_rolled_back_20261031') IS NOT NULL
+     OR to_regclass('public.allocator_trade_read_windows_rolled_back_20261031') IS NOT NULL THEN
+    RAISE EXCEPTION 'Rollback 20261031120000 refused: a *_rolled_back_20261031 table already exists, so an earlier rollback already set a table aside. Nothing was changed. Decide what to do with the kept rows first.';
   END IF;
 END
 $precondition$;
@@ -66,29 +66,29 @@ REVOKE ALL ON TABLE public.allocator_trade_reads, public.allocator_trade_read_wi
 
 -- 2. Set the tables, and the schema-level names they own, aside. Renaming a constraint
 --    renames the index behind it. Nothing is dropped.
-ALTER TABLE public.allocator_trade_reads RENAME TO allocator_trade_reads_rolled_back_20261030;
-ALTER TABLE public.allocator_trade_reads_rolled_back_20261030
-  RENAME CONSTRAINT allocator_trade_reads_pkey TO allocator_trade_reads_pkey_rolled_back_20261030;
-ALTER TABLE public.allocator_trade_read_windows RENAME TO allocator_trade_read_windows_rolled_back_20261030;
-ALTER TABLE public.allocator_trade_read_windows_rolled_back_20261030
-  RENAME CONSTRAINT allocator_trade_read_windows_pkey TO allocator_trade_read_windows_pkey_rolled_back_20261030;
+ALTER TABLE public.allocator_trade_reads RENAME TO allocator_trade_reads_rolled_back_20261031;
+ALTER TABLE public.allocator_trade_reads_rolled_back_20261031
+  RENAME CONSTRAINT allocator_trade_reads_pkey TO allocator_trade_reads_pkey_rolled_back_20261031;
+ALTER TABLE public.allocator_trade_read_windows RENAME TO allocator_trade_read_windows_rolled_back_20261031;
+ALTER TABLE public.allocator_trade_read_windows_rolled_back_20261031
+  RENAME CONSTRAINT allocator_trade_read_windows_pkey TO allocator_trade_read_windows_pkey_rolled_back_20261031;
 
 -- ───────────── verify — CATALOGUE ONLY, reads no row
 DO $verify$
 BEGIN
   IF to_regclass('public.allocator_trade_reads') IS NOT NULL THEN
-    RAISE EXCEPTION 'Rollback 20261030120000 failed: public.allocator_trade_reads still resolves';
+    RAISE EXCEPTION 'Rollback 20261031120000 failed: public.allocator_trade_reads still resolves';
   END IF;
   IF to_regclass('public.allocator_trade_read_windows') IS NOT NULL THEN
-    RAISE EXCEPTION 'Rollback 20261030120000 failed: public.allocator_trade_read_windows still resolves';
+    RAISE EXCEPTION 'Rollback 20261031120000 failed: public.allocator_trade_read_windows still resolves';
   END IF;
-  IF to_regclass('public.allocator_trade_reads_rolled_back_20261030') IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20261030120000 failed: public.allocator_trade_reads_rolled_back_20261030 is missing, so the kept rows are not where this file says they are';
+  IF to_regclass('public.allocator_trade_reads_rolled_back_20261031') IS NULL THEN
+    RAISE EXCEPTION 'Rollback 20261031120000 failed: public.allocator_trade_reads_rolled_back_20261031 is missing, so the kept rows are not where this file says they are';
   END IF;
-  IF to_regclass('public.allocator_trade_read_windows_rolled_back_20261030') IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20261030120000 failed: public.allocator_trade_read_windows_rolled_back_20261030 is missing, so the kept rows are not where this file says they are';
+  IF to_regclass('public.allocator_trade_read_windows_rolled_back_20261031') IS NULL THEN
+    RAISE EXCEPTION 'Rollback 20261031120000 failed: public.allocator_trade_read_windows_rolled_back_20261031 is missing, so the kept rows are not where this file says they are';
   END IF;
 
-  RAISE NOTICE 'Rollback 20261030120000: allocator_trade_reads and allocator_trade_read_windows are set aside as allocator_trade_reads_rolled_back_20261030 and allocator_trade_read_windows_rolled_back_20261030 with every stored row kept and access withdrawn from every role. The migration ledger row is left in place (see the header).';
+  RAISE NOTICE 'Rollback 20261031120000: allocator_trade_reads and allocator_trade_read_windows are set aside as allocator_trade_reads_rolled_back_20261031 and allocator_trade_read_windows_rolled_back_20261031 with every stored row kept and access withdrawn from every role. The migration ledger row is left in place (see the header).';
 END
 $verify$;
