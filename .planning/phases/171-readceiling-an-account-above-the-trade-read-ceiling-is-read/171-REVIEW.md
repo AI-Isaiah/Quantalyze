@@ -1,173 +1,124 @@
 ---
 phase: 171-readceiling-an-account-above-the-trade-read-ceiling-is-read
-reviewed: 2026-10-27T15:07:18Z
+round: 2
+reviewed: 2026-10-27T15:29:30Z
+reviewed_at_head: 490c56210
 depth: deep
-files_reviewed: 25
+files_reviewed: 3
 files_reviewed_list:
-  - .github/workflows/ci.yml
-  - analytics-service/main_worker.py
-  - analytics-service/scripts/allocator_history_probe.py
   - analytics-service/services/equity_reconstruction.py
-  - analytics-service/services/trade_read_store.py
-  - analytics-service/tests/test_allocator_history_probe.py
-  - analytics-service/tests/test_bybit_two_year_window.py
-  - analytics-service/tests/test_equity_reconstruction.py
-  - analytics-service/tests/test_reconstruct_force_rebuild.py
-  - analytics-service/tests/test_reconstruct_whole_account.py
   - analytics-service/tests/test_trade_pages.py
   - analytics-service/tests/test_trade_read_resume.py
-  - analytics-service/tests/test_trade_read_store.py
-  - analytics-service/tests/test_trade_read_store_live.py
-  - scripts/mutation-floors.mjs
-  - scripts/pg-lane/fixtures/41-fixture-api-keys-user-id-fk.sql
-  - src/__tests__/drift-check-scripts.test.ts
-  - src/__tests__/gate-family-meta.test.ts
-  - src/__tests__/lint-sql-gates.test.ts
-  - src/__tests__/mutation-annotation-parser.test.ts
-  - src/__tests__/mutation-runner-floors.test.ts
-  - src/lib/database.types.ts
-  - supabase/migrations/20261031120000_allocator_trade_reads.sql
-  - supabase/migrations/down/20261031120000-rollback.sql
-  - supabase/tests/test_allocator_trade_reads.sql
 findings:
   critical: 0
-  warning: 2
+  warning: 1
   info: 0
-  total: 2
+  total: 1
 status: issues_found
 ---
 
-# Phase 171: Code Review Report
+# Phase 171: Code Review Report (round 2)
 
-**Reviewed:** 2026-10-27T15:07:18Z
+**Reviewed:** 2026-10-27T15:29:30Z, head `490c56210`
 **Depth:** deep
-**Files Reviewed:** 25
+**Files Reviewed:** 3
 **Status:** issues_found
 
 ## Summary
 
-Scope: `git diff 53f25ac3e..HEAD -- . ':!.planning'` on `feat/171-readceiling`. The
-service code (`trade_read_store.py`, the Bybit read, the resumable read, the forced
-account crawl, the handler arms, `_defer_reconstruct`, the watchdog sweep), the migration,
-its rollback and the probe were read in full. The SQL gate, the CI census edit, the
-mutation floors, the TS pin tests and the Python tests were read for reliability only.
-Only MEDIUM and above is reported, as asked.
+Scope: the round-1 fixes, `git diff a91bb8cad..HEAD -- analytics-service/` (commits
+`ed613df1b`, `b373ffd50`, `b0d29b147`, `d4f021b81` and the two merges). I read the changed code
+in context: `_read_bybit_window`, `_read_bybit_range`, `_read_bybit_trades_resumable`, the forced
+account crawl's outcome loop, the unforced handler arms, `classify_exception`, and the
+probe's scope-less path. Only MEDIUM and above is reported, as asked.
 
-Traced and found sound:
-- The resumable read's money-math. Windows are tiled on a UTC-midnight grid, so a UTC day
-  never spans two windows and the replay's per-day stable sort sees each day's rows in the
-  order they were read. The window holding now, and any window ending within
-  `_STORE_SETTLE_MS`, is never stored. The straddle window is cut to `timestamp >= since_ms`.
-  Dropping `info` and `id` in the projection does not change a Bybit replay:
-  `_resolve_perp_amt_base` ignores `inst_type` when the venue is not OKX.
-- The store's atomicity and concurrency. A window is used only when every chunk is present
-  under one `chunk_count`, one `window_end_ms`, the current version and an unexpired
-  `expires_at`. Interleaved writers, a purge racing a save, and a cancelled save in a thread
-  all leave a window that is either whole or ignored. Two grids after an origin reset can
-  only match on identical bounds.
-- The handler arms. `TradeReadDeferred` and `TradeReadStalled` come before the generic
-  `except Exception`. Deferral returns DEFERRED before the persist half. `created_at` is
-  present on the claimed row (`RETURNS SETOF compute_jobs`). `last_job_id UUID` matches
-  `compute_jobs.id`.
-- The scope ContextVar propagates through `wait_for` and `gather`, and each member is
-  bound to its own key.
-- The migration is service-role only by grant, has a catalogue-only verify block and
-  cascades on api_key delete. The rollback keeps the data.
+### Round-1 findings: status
 
-Both findings are in the new layer-1 continuation, `_read_bybit_window`. I reproduced each
-one with a fake exchange against this branch's code. Scripts are in `<scratchpad>`.
+| Finding | Status | Evidence |
+|---|---|---|
+| WR-01 an empty first page of a continuation segment ends the window | **Fixed** | The round-1 repro (`<scratchpad>/probe_empty_seg.py`) now raises `TruncatedTradeRead` `bybit_no_advance` at `equity_reconstruction.py:820`, where it used to return 200 of 500 rows. `empty_continuation` skips both the `oldest + 1` lowering and the inclusive-end retry (`:802-811`), so it always reaches the `else` refusal. A cursor-fetched empty page in a continuation still ends the window cleanly (`:774`), which is correct because that walk has run out. |
+| WR-02 a short page that repeats its cursor refuses permanently | **Fixed** | The round-1 repro (`<scratchpad>/probe_repeat_cursor.py`) now returns all 150 rows after 2 calls. A short stalled page ends the window (`:797-798`). Only a full stalled page continues by time. |
+| S-1 a window that ended on an uncertain stop is stored | **Fixed** | `_read_bybit_window` returns False on a full page with no cursor (`:791`) and on a short stalled page (`:798`), and True on an empty page or a short page with no cursor. The save at `:1008` is gated on `storable and complete`. The bool matters only when `storable` is true. The window holding now and the straddle window were never stored, and they keep their rows and their `since_ms` cut. Layer 1 (`_read_bybit_range:893`) ignores the bool, which is right because it stores nothing. |
+| S-2 a store fault on a big book refuses permanently | **Fix is wrong: see WR-01 below** | The conversion catches the wrong failure, and it masks real refusals. |
+
+Other paths traced, no finding:
+- A storable window that always ends uncertain is never stored, so a claim re-reads it. If
+  Bybit answered every window's last page that way, a multi-claim book would store nothing
+  and stop by name (`TradeReadStalled`) after the stalled-claims limit. That fails closed and
+  writes nothing. At round-1 HEAD the same venue behaviour refused as `bybit_no_advance`, so
+  this is not a regression. Whether Bybit answers that way is still unmeasured.
+- The allocator history probe sets no scope, so it never reaches the `state is None` branch.
+  Its `TruncatedTradeRead` classification is unchanged.
+- The four affected test files at HEAD (`test_trade_pages.py`, `test_trade_read_resume.py`,
+  `test_bybit_two_year_window.py`, `test_reconstruct_force_rebuild.py`) all pass: 107 passed.
 
 ## Warnings
 
-### WR-01 (MEDIUM, data-integrity): an empty first page of a continuation segment silently ends the window as complete, and the partial window is then stored for reuse
+### WR-01 (MEDIUM, user-facing): the S-2 conversion relabels deterministic venue refusals as a transient store fault, and never reaches the case it was written for
 
-**File:** `analytics-service/services/equity_reconstruction.py:758-759` (reached from the continuation at `:784-794`, stored at `:979`)
+**File:** `analytics-service/services/equity_reconstruction.py:958-967` (and the S-2 test,
+`analytics-service/tests/test_trade_read_resume.py:661-682`)
 
-**Issue:** When a segment ends without the window ending, the read already holds rows at
-`oldest`, and the next segment asks for `[w_start, oldest + 1]` (or `[w_start, oldest]`
-after the inclusive-end proof). That range must return at least the rows at `oldest`. An
-empty answer can only come from a venue fault: a soft error returned as an empty list, or a
-`startTime`/`endTime` handling quirk. The loop treats it exactly like a legitimately empty
-window. `if not page: return` hands back only what the earlier segments read, with no
-warning.
+**Issue:** S-2's premise was that, with no resume, a big book makes layer 1 raise
+`TruncatedTradeRead`. That is not true in this branch. `_read_bybit_range` has no page budget
+and no claim budget. It reads every window whole, up to `_BYBIT_WINDOW_SEGMENT_CEILING` ×
+`_BYBIT_WINDOW_PAGE_CEILING` × `_TRADE_PAGE_LIMIT` (100 × 100 × 100) rows per 7-day window. A book
+too big for one run therefore ends on the wall clock: `asyncio.wait_for(...,
+_RECONSTRUCT_CRAWL_TIMEOUT_S)` at `:5924-5927` (forced) and `:6001-6003` (unforced) raises
+`asyncio.TimeoutError`. That error was ALREADY classified transient (`:6042-6067`, and
+`classify_exception` in the forced loop) before this fix.
 
-Reproduced: a 500-row window, page ceiling patched to 2, and an empty first page on
-segment 2. `_read_bybit_window` returns 200 of 500 rows after 3 calls and raises nothing.
-In the resumable path, `ws < now - 1h` makes that window storable, so the partial window
-goes through `save_window`. Every later claim and every later job for the key then reuses
-it for up to 7 days (`STORE_EXPIRY_S`). The final claim replays it and persists it as the
-whole history.
+Layer 1 raises `TruncatedTradeRead` from only three sites:
+- `bybit_no_advance`: a venue fault, including the empty continuation page added by this
+  round's own WR-01 fix.
+- `bybit_segment_ceiling`: one 7-day window holds more than one million rows.
+- `bybit_not_supported` after rows were read.
 
-This is a new silent-truncation path. It breaks the carried rule "Never write a partial read
-as the whole history" (TRADEPAGES REVIEW-2 WR-01). The pre-171 read had no continuation
-segment, so it had no equivalent case.
+All three are per-window and deterministic. The resumable path calls the same
+`_read_bybit_window` over the same window on a first claim (grid origin = `since_ms`), and it
+lets the same exception through as permanent. The store cannot change any of these outcomes.
+The S-2 test confirms it: it models "over one run's reach" by setting
+`_BYBIT_WINDOW_SEGMENT_CEILING = 1`, which is a per-window limit and not a per-run one.
 
-**Fix (minimal):** inside the segment loop, an empty page is a normal end only in a
-window's FIRST segment, or on a page fetched with a cursor. An empty cursor-less first page
-of a continuation segment contradicts rows already read, so it refuses loudly:
-```python
-if not page:
-    if cursor is None and boundary is not None:
-        # A continuation segment's range holds the rows at ``oldest``; an empty answer is a venue fault.
-        logger.warning(
-            "bybit trade window stopped on a page that did not advance "
-            "venue=bybit window_age_days=%d page_rows=%d rows=%d",
-            age_days, 0, len(trades),
-        )
-        raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_no_advance")
-    return
+Reproduced at HEAD: the S-2 test's book and settings, with the store UP and an unlimited
+budget, compared with the store DOWN (scratch test under `<scratchpad>`):
 ```
-Add a test with a fake whose second segment answers `[]` on its first call, and assert
-`TruncatedTradeRead` with `site == "bybit_no_advance"`. It goes RED at HEAD: the reproduction
-above returns 200 of 500 rows.
-
-### WR-02 (MEDIUM, user-facing regression): a short last page that repeats its cursor used to end a window normally, and now refuses the whole account permanently
-
-**File:** `analytics-service/services/equity_reconstruction.py:777-781` with `:784-801`
-
-**Issue:** The pre-171 read ended a window quietly when a page that was NOT full either
-added no new row or returned the cursor it was sent: `if added == 0 or nxt == cursor:` →
-`break`, refusing only when the page was full. That is TRADEPAGES D-02's
-"non-advancing cursor" stop, which CONTEXT carries forward. The new loop treats any such
-cursor page as a stalled segment, whatever its size, and continues by time:
-1. `end = oldest + 1` (case 1).
-2. If the venue repeats a cursor on short pages again, `end = oldest` (case 2's one retry,
-   because the boundary page held a row at `oldest + 1`).
-3. Then `TruncatedTradeRead(site="bybit_no_advance")`.
-
-`no_advance` is a `ccxt.BadRequest`, so it is permanent. An unforced reconstruct ends
-FAILED permanent. A forced rebuild refuses `account_key_read_failed`.
-
-Reproduced on this branch: a 150-row window whose last (short) page keeps a non-empty
-cursor that returns the same page. All 150 rows are read, then the read raises
-`TruncatedTradeRead bybit_no_advance` after 6 calls. The base code (`53f25ac3e`) returns the
-150 rows. No test pins a short repeating page as a normal end. The existing
-`test_a_venue_that_repeats_its_page_ends_the_read_with_one_warning` only covers a FULL
-repeated page, which correctly refuses both before and after this phase.
-
-Whether Bybit really answers this way is not measured. The pre-171 code tolerated it on
-purpose, and this phase removed that tolerance without a recorded decision. If it does
-happen, every reconstruct and forced rebuild of the affected account refuses, the same
-"refuses identically on every attempt" outcome this phase exists to remove.
-
-**Fix (minimal):** keep the pre-171 meaning for a short page in the stall test. A page
-fetched with a cursor that is shorter than `_TRADE_PAGE_LIMIT` and returns its own cursor,
-or adds nothing, ends the window. Only a FULL stalled page ends the segment and continues by
-time:
-```python
-if cursor is not None and (
-    nxt == cursor
-    or (added == 0 and (boundary is None or any(ts < boundary for ts in stamps)))
-):
-    if len(page) < _TRADE_PAGE_LIMIT:
-        return  # TRADEPAGES D-02: a short page that does not advance is the window's end
-    break  # a full stalled page ends the segment; the window is continued by time below
+STORE_UP= True  outcome=FAILED kind=permanent msg=the trade read was cut short before the venue ran out of trades; nothing was kept
+STORE_UP= False outcome=FAILED kind=transient msg=the trade store was unavailable and the trade read could not finish in one run
 ```
-Add a test with the short-repeating-cursor fake and assert all rows are returned with no
-raise. It goes RED at HEAD.
+The same window refuses permanently whenever the store answers. The conversion only affects
+claims where the store faulted, and on those it:
+1. **Masks a real refusal.** An unforced job ends `transient` and is retried up to
+   `max_attempts` (bounded, not forever). A forced rebuild becomes
+   `_AccountCrawlRetryableError("transient", "RequestTimeout")` in `_crawl_whole_account`
+   (`:5740-5746`). It never reaches `_forced_refusal_result(..., "account_key_read_failed")`,
+   so the refusal the forced-rebuild handoff reads is never recorded.
+2. **Records a false cause.** `last_error` and the `reconstruct_failed` audit say the store was
+   unavailable and the read "could not finish in one run". The real stop was a venue no-advance
+   or a window over the segment ceiling. The SFH's own complaint about S-2 was a misattributed
+   cause, and this fix produces the mirror image of it.
+3. **Is made repeatable by the store faults S-2 named.** These are the deploy-before-migration
+   window (tables absent) and a persistent defect inside `_begin_claim`, such as a `TypeError`
+   on a malformed state row swallowed by `begin_claim`'s `except Exception`. In both, every
+   attempt takes the `state is None` branch, so every retry gets the same false transient
+   until attempts run out.
+
+**Fix (minimal):** revert `d4f021b81`'s conversion. Restore
+`return await _read_bybit_range(exchange, since_ms, now_ms)` in the `state is None` branch and
+the matching docstring sentence. Then replace
+`test_a_store_fault_on_a_book_over_one_run_retries_instead_of_failing_permanent` with a pin of
+the real behaviour:
+- with the store down, a book over one run ends through the `asyncio.TimeoutError` arm as
+  `transient` (patch `_RECONSTRUCT_CRAWL_TIMEOUT_S` low and make the fake venue slow);
+- a `TruncatedTradeRead` keeps its permanent disposition whether the store is up or down.
+
+Record S-2 as resolved by measurement: the size-bound failure without the store was already
+transient, through FLIPRETRY-01. If a store fault should still be told apart from a venue
+rejection, that belongs in the store's own WARNING. It must not be done by reclassifying the
+venue's exception.
 
 ---
 
-_Reviewed: 2026-10-27T15:07:18Z_
+_Reviewed: 2026-10-27T15:29:30Z (round 2)_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
