@@ -12926,6 +12926,45 @@ COMMENT ON COLUMN "public"."allocator_trade_reads"."last_job_id" IS 'The compute
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."api_key_flow_prices" (
+    "api_key_id" "uuid" NOT NULL,
+    "instrument" "text" NOT NULL,
+    "minute_ms" bigint NOT NULL,
+    "price" numeric NOT NULL,
+    "source" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "api_key_flow_prices_instrument_chk" CHECK (("instrument" ~ '^[A-Z0-9]{2,10}_USDC-PERPETUAL$'::"text")),
+    CONSTRAINT "api_key_flow_prices_minute_chk" CHECK ((("minute_ms" > 0) AND (("minute_ms" % (60000)::bigint) = 0))),
+    CONSTRAINT "api_key_flow_prices_price_chk" CHECK ((("price" <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND ("price" > (0)::numeric))),
+    CONSTRAINT "api_key_flow_prices_source_chk" CHECK (("source" = 'deribit_perp_1m_open'::"text"))
+);
+
+ALTER TABLE ONLY "public"."api_key_flow_prices" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."api_key_flow_prices" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."api_key_flow_prices" IS 'Phase 177 DERIBITFLOWS (D-04, D-05, FP-1..FP-5). One row per API key, perpetual instrument and candle minute: the open of the 1-minute {CCY}_USDC-PERPETUAL candle that contained a Deribit deposit or withdrawal which moved the mark, stored once and reused so an old flow is never re-read from the exchange. The candle is the perpetual''s traded price, not Deribit''s index. WRITE-ONCE: service_role holds SELECT and INSERT only (no UPDATE, DELETE or TRUNCATE), and the worker writes ON CONFLICT DO NOTHING. SERVICE-ROLE ONLY by design: row level security is enabled and forced with no policy, anon and authenticated hold no privilege, and no UI reads the rows. Per key, because the stored minutes are the timing of a user''s flows: erased with the key and with the account through ON DELETE CASCADE. Nothing is backfilled and the table is not part of the GDPR export (a derived cache of a public price keyed by an api key only).';
+
+
+
+COMMENT ON COLUMN "public"."api_key_flow_prices"."api_key_id" IS 'The API key whose derive needed the price. ON DELETE CASCADE from api_keys (and from auth.users through profiles) IS the erasure path: do NOT add a delete-guard trigger. If one is ever added it MUST exempt current_setting(''quantalyze.sanitize_in_progress'', true) = ''on'' or it aborts account deletion.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_flow_prices"."minute_ms" IS 'The candle tick in epoch milliseconds: the START of the minute that contains the flow, always a multiple of 60000.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_flow_prices"."price" IS 'The candle OPEN, in the quote currency of the instrument (USDC), as read from the exchange. It is the perpetual''s traded price, not Deribit''s index.';
+
+
+
+COMMENT ON COLUMN "public"."api_key_flow_prices"."source" IS 'The rule the price was read under; a closed set, today deribit_perp_1m_open. A price read under a different rule needs a new value here AND a wider primary key that includes this column (and the worker''s conflict target with it), never a second value stored beside the current key.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."api_key_nav_marks" (
     "id" bigint NOT NULL,
     "api_key_id" "uuid" NOT NULL,
@@ -14953,6 +14992,11 @@ ALTER TABLE ONLY "public"."allocator_trade_reads"
 
 
 
+ALTER TABLE ONLY "public"."api_key_flow_prices"
+    ADD CONSTRAINT "api_key_flow_prices_pkey" PRIMARY KEY ("api_key_id", "instrument", "minute_ms");
+
+
+
 ALTER TABLE ONLY "public"."api_key_nav_marks"
     ADD CONSTRAINT "api_key_nav_marks_key_day_key" UNIQUE ("api_key_id", "mark_day");
 
@@ -16167,6 +16211,11 @@ ALTER TABLE ONLY "public"."allocator_trade_reads"
 
 
 
+ALTER TABLE ONLY "public"."api_key_flow_prices"
+    ADD CONSTRAINT "api_key_flow_prices_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."api_key_nav_marks"
     ADD CONSTRAINT "api_key_nav_marks_allocator_id_fkey" FOREIGN KEY ("allocator_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
@@ -16754,6 +16803,9 @@ CREATE POLICY "analytics_read" ON "public"."strategy_analytics" FOR SELECT USING
 
 CREATE POLICY "analytics_update_deny" ON "public"."strategy_analytics" FOR UPDATE USING (false);
 
+
+
+ALTER TABLE "public"."api_key_flow_prices" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."api_key_nav_marks" ENABLE ROW LEVEL SECURITY;
@@ -18559,6 +18611,10 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."allocator_trade_read_window
 
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."allocator_trade_reads" TO "service_role";
+
+
+
+GRANT SELECT,INSERT ON TABLE "public"."api_key_flow_prices" TO "service_role";
 
 
 
