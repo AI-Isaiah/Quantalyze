@@ -10,6 +10,7 @@ record. Every test below is RED-first + revert-proof against that failure.
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -2628,6 +2629,195 @@ async def test_perp_daily_transient_raises_retryable() -> None:
         )
     assert len(stub.calls) == 3  # initial + 2 retries
     assert spy.waits == [1.0, 2.0]  # exponential backoff
+
+
+# ---------------------------------------------------------------------------------------------
+# Phase 177 DERIBITFLOWS D-04, D-05: the 1-minute BTC_USDC-PERPETUAL open that prices a moved flow.
+# ---------------------------------------------------------------------------------------------
+
+_MIN_BASE = 1_773_187_200_000  # 2026-03-11T00:00:00Z in ms, typed by hand
+_MIN_04 = _MIN_BASE + 4 * 60_000
+_MIN_05 = _MIN_BASE + 5 * 60_000
+_MIN_06 = _MIN_BASE + 6 * 60_000
+
+
+def _chart_minutes(ticks: list[Any], opens: list[Any]) -> dict[str, Any]:
+    return {"result": {"status": "ok", "ticks": ticks, "open": opens}}
+
+
+async def test_minute_prices_params_and_open_map() -> None:
+    stub = _ChartDataStub(
+        [_chart_minutes([_MIN_04, _MIN_05, _MIN_06], [100_900.0, 101_000.0, 101_100.0])]
+    )
+    got = await di.fetch_deribit_perp_minute_prices(
+        stub, "btc", start_ms=_MIN_BASE, end_ms=_MIN_05 + 60_000, sleep=_SleepSpy()
+    )
+    assert got == {_MIN_04: 100_900.0, _MIN_05: 101_000.0, _MIN_06: 101_100.0}
+    assert stub.calls == [
+        {
+            "instrument_name": "BTC_USDC-PERPETUAL",
+            "start_timestamp": _MIN_BASE,
+            "end_timestamp": _MIN_05 + 60_000,
+            "resolution": "1",
+        }
+    ]
+
+
+async def test_minute_prices_transient_is_retried_then_raises() -> None:
+    stub = _ChartDataStub([ccxt.RequestTimeout("blip")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=spy, max_retries=2
+        )
+    assert len(stub.calls) == 3
+    assert spy.waits == [1.0, 2.0]
+
+
+async def test_minute_prices_flaky_200_shares_the_budget() -> None:
+    stub = _ChartDataStub(
+        [{"result": {"status": "error"}}, _chart_minutes([_MIN_05], [101_000.0])]
+    )
+    spy = _SleepSpy()
+    got = await di.fetch_deribit_perp_minute_prices(
+        stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=spy
+    )
+    assert got == {_MIN_05: 101_000.0}
+    assert spy.waits == [1.0]
+
+
+async def test_minute_prices_last_attempt_rate_limit_is_reraised() -> None:
+    """D-05: a 429 that outlasts the budget must reach the caller as itself so the derive can
+    stamp the key; the sibling readers wrap it in DeribitTransientReadError, which would hide it."""
+    stub = _ChartDataStub([ccxt.RateLimitExceeded("429")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(ccxt.RateLimitExceeded) as caught:
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=spy, max_retries=2
+        )
+    assert not isinstance(caught.value, DeribitTransientReadError)
+    assert len(stub.calls) == 3
+    assert spy.waits == [1.0, 2.0]
+
+
+async def test_minute_prices_last_attempt_ddos_protection_is_reraised() -> None:
+    """D-05: Deribit's real rate-limit reply (body code 10028) is ``ccxt.DDoSProtection``, not
+    ``RateLimitExceeded``. It must reach the caller as itself too, or the key is never stamped."""
+    stub = _ChartDataStub([ccxt.DDoSProtection("too_many_requests")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(ccxt.DDoSProtection) as caught:
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=spy, max_retries=2
+        )
+    assert not isinstance(caught.value, DeribitTransientReadError)
+    assert len(stub.calls) == 3
+    assert spy.waits == [1.0, 2.0]
+
+
+async def test_minute_prices_plain_exchange_error_is_transient_never_no_data() -> None:
+    """WR-03: an unmapped venue error (a plain ``ExchangeError``, which is also what ccxt makes of
+    a truncated aiohttp body) is not a structural answer. It is retried on the budget and ends as
+    ``DeribitTransientReadError``, never the permanent ``DeribitChartNoDataError``."""
+    stub = _ChartDataStub([ccxt.ExchangeError("unmapped venue error")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=spy, max_retries=2
+        )
+    assert len(stub.calls) == 3
+    assert spy.waits == [1.0, 2.0]
+
+
+async def test_minute_prices_exhausted_transient_logs_the_original_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Round-2 WR-01: the wrap is `from None`, so the original exception must be logged before it
+    is dropped, or an operator sees only 'budget exhausted' and never what Deribit answered."""
+    stub = _ChartDataStub([ccxt.ExchangeError("boom-13020")] * 3)
+    with caplog.at_level(logging.WARNING, logger=di.logger.name):
+        with pytest.raises(DeribitTransientReadError):
+            await di.fetch_deribit_perp_minute_prices(
+                stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=_SleepSpy(), max_retries=2
+            )
+    assert any(
+        r.levelno == logging.WARNING and "ExchangeError" in r.getMessage() for r in caplog.records
+    ), caplog.text
+
+
+async def test_minute_prices_bad_request_is_named() -> None:
+    stub = _ChartDataStub([ccxt.BadRequest("invalid params")])
+    spy = _SleepSpy()
+    with pytest.raises(di.DeribitChartNoDataError):
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=spy
+        )
+    assert len(stub.calls) == 1
+    assert spy.waits == []
+
+
+async def test_minute_prices_rate_limit_then_ok_is_retried() -> None:
+    stub = _ChartDataStub(
+        [ccxt.RateLimitExceeded("429"), _chart_minutes([_MIN_05], [101_000.0])]
+    )
+    got = await di.fetch_deribit_perp_minute_prices(
+        stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=_SleepSpy()
+    )
+    assert got == {_MIN_05: 101_000.0}
+
+
+async def test_minute_prices_no_data_status_is_named() -> None:
+    """The sibling readers answer ``status == "no_data"`` with ``{}``; this reader must not, or an
+    unpriceable flow would be counted at zero (D-05)."""
+    stub = _ChartDataStub([{"result": {"status": "no_data"}}])
+    with pytest.raises(di.DeribitChartNoDataError):
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=_SleepSpy()
+        )
+
+
+async def test_minute_prices_bad_symbol_is_named() -> None:
+    stub = _ChartDataStub([ccxt.BadSymbol("no such instrument")])
+    spy = _SleepSpy()
+    with pytest.raises(di.DeribitChartNoDataError):
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "DOGE", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=spy
+        )
+    assert len(stub.calls) == 1
+    assert spy.waits == []
+
+
+@pytest.mark.parametrize(
+    ("ticks", "opens"),
+    [
+        ([_MIN_05], [float("nan")]),
+        ([_MIN_05], [float("inf")]),
+        ([_MIN_05], [0.0]),
+        ([_MIN_05], [-1.0]),
+        ([_MIN_05], ["x"]),
+        ([_MIN_05], [None]),
+        (["x"], [101_000.0]),
+        ([_MIN_05, _MIN_05], [101_000.0, 101_100.0]),
+    ],
+    ids=["nan", "inf", "zero", "negative", "str", "none", "bad-tick", "repeated-tick"],
+)
+async def test_minute_prices_bad_price_is_structural(ticks: list[Any], opens: list[Any]) -> None:
+    """T-177-01: an unusable value is never skipped (a skipped row reads as 'no flow here')."""
+    stub = _ChartDataStub([_chart_minutes(ticks, opens)])
+    with pytest.raises(di.DeribitChartNoDataError):
+        await di.fetch_deribit_perp_minute_prices(
+            stub, "BTC", start_ms=_MIN_BASE, end_ms=_MIN_06, sleep=_SleepSpy()
+        )
+
+
+def test_minute_prices_candle_selection_table() -> None:
+    """The candle that CONTAINS the flow prices it: a flow at 00:05:20, exactly 00:05:00.000 or
+    00:05:59.999 takes the 00:05 open, never the 00:04 or 00:06 one, and a minute with no candle
+    has no price (no earlier open or close is borrowed)."""
+    opens = {_MIN_04: 100_900.0, _MIN_05: 101_000.0, _MIN_06: 101_100.0}
+    assert di.price_for_minute(opens, _MIN_05 + 20_000) == 101_000.0
+    assert di.price_for_minute(opens, _MIN_05) == 101_000.0
+    assert di.price_for_minute(opens, _MIN_05 + 59_999) == 101_000.0
+    assert di.price_for_minute(opens, _MIN_BASE + 7 * 60_000 + 10_000) is None
 
 
 def test_price_map_has_gap() -> None:

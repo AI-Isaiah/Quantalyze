@@ -746,7 +746,8 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    expect(totalAnchored).toBe(816);
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): totalAnchored 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(totalAnchored).toBe(829);
   });
 });
 
@@ -1810,7 +1811,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/78 -> 79/79, copied from the same full lane run (`scope: FULL 79/79 annotated files`).
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79/79 -> 80/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80/80 -> 81/81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    "scope: FULL 81/81 annotated files",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): scope 81/81 -> 82/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "scope: FULL 82/82 annotated files",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12): the runner prints exactly one
     // `scope-reason:` line directly after `scope:` on every corpus run, and the
     // count-recheck step MEASURE_FAILs without it.
@@ -1826,7 +1828,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73 target files, copied from the same full lane run.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79 -> 80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80 -> 81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 4 for this run's 81 target file(s); lanes within a file run in order)",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 81 -> 82 target files; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 4 for this run's 82 target file(s); lanes within a file run in order)",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -1865,7 +1868,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/105 -> 79/106, copied from the same full lane run (`coverage: files 79/106`), the arrival of test_replace_allocator_equity_snapshots_window.sql.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79/106 -> 80/107; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80/107 -> 81/108; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    "coverage: files 81/108",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): coverage 81/108 -> 82/109; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "coverage: files 82/109",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -2167,9 +2171,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792/792/0 -> 803/803/0, 792 -> 803, 79 -> 80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803/803/0 -> 811/811/0, 803 -> 811, 80 -> 81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    "arms: 816/816/0   (executed/annotated/waived)",
-    "biting: 816   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 816   (arm lanes actually spawned — tallied inside runLane, independent of the 816 the verdict loop counted; plus 81 baseline / 81 restore leg(s))",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "arms: 829/829/0   (executed/annotated/waived)",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "biting: 829   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829, 81 -> 82 legs; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "lane-invocations: 829   (arm lanes actually spawned — tallied inside runLane, independent of the 829 the verdict loop counted; plus 82 baseline / 82 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2212,6 +2219,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ ADDED 2026-10-27 (Phase 171 READCEILING, plan 06): the trade-read store gate, copied from the full run's own per-file line.
     "  file test_allocator_trade_reads.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8",
     "  file test_analytics_service_settings_and_vault_tick.sql: sections 14 / judged 14 / annotated 14 / waived 0 / biting 14",
+    // ⭐ ADDED 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): the moved-flow price store gate, copied from the full run's own per-file line.
+    "  file test_api_key_flow_prices.sql: sections 8 / judged 13 / annotated 13 / waived 0 / biting 13",
     // ⭐ ADDED 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): the nav-marks gate, copied from the full run's own per-file line.
     "  file test_api_key_nav_marks.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_api_keys_account_identity.sql: sections 41 / judged 41 / annotated 41 / waived 0 / biting 41",
@@ -2354,7 +2363,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 1.6 -> 1.7, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 1.7 -> 5.0, 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    "per-arm lane time: mean 2.4s over 816 arm run(s)",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 2.4s/816 -> 1.7s/829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "per-arm lane time: mean 1.7s over 829 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2394,7 +2404,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    expect(r.out).toContain("816 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(r.out).toContain("829 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2623,7 +2634,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 79/78 -> 80/79, one more real per-file row (test_replace_allocator_equity_snapshots_window.sql) beside the aggregate's +1; offset +1 kept.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 80 -> 81, 79 -> 80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 81 -> 82, 80 -> 81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(r.out).toContain("printed 82 per-file row(s) but reported 81 annotated file(s)");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 82/81 -> 83/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(r.out).toContain("printed 83 per-file row(s) but reported 82 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2701,8 +2713,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 791 -> 802, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 802 -> 810, 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    expect(r.out).toContain("rows sum to 815 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 816");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 815 -> 828; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(r.out).toContain("rows sum to 828 biting arm(s) but the aggregate");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(r.out).toContain("reports 829");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2749,7 +2763,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    const severed = GREEN_LOG.replace(/^lane-invocations: 816 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const severed = GREEN_LOG.replace(/^lane-invocations: 829 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
@@ -2761,7 +2776,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    expect(r.out).toContain("executed=816 lane-invocations=0 biting=816");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(r.out).toContain("executed=829 lane-invocations=0 biting=829");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2807,12 +2823,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 804 -> 812; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    const extra = GREEN_LOG.replace(/^lane-invocations: 816 /m, "lane-invocations: 817 ");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816/817 -> 829/830; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const extra = GREEN_LOG.replace(/^lane-invocations: 829 /m, "lane-invocations: 830 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 804 -> 812; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(r.out).toContain("executed=816 lane-invocations=817 biting=816");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816/817 -> 829/830; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(r.out).toContain("executed=829 lane-invocations=830 biting=829");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2836,7 +2854,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 816 /m, "lane-invocations: abc ");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 829 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2888,7 +2907,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 792/792 -> 803/803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 803/803 -> 811/811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    const waived = GREEN_LOG.replace(/^arms: 816\/816\/0 /m, `arms: 816/816/${WAIVED_CEILING + 1} `);
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const waived = GREEN_LOG.replace(/^arms: 829\/829\/0 /m, `arms: 829/829/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2964,7 +2984,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 0/792/0 -> 0/803/0; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 0/803/0 -> 0/811/0; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    const zero = GREEN_LOG.replace(/^arms: 816\/816\/0 /m, "arms: 0/816/0 ");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const zero = GREEN_LOG.replace(/^arms: 829\/829\/0 /m, "arms: 0/829/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
@@ -2972,12 +2993,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 804 -> 812; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-    const spliced = GREEN_LOG.replace(/^biting: 816 /m, "biting: 817 ");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816/817 -> 829/830; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const spliced = GREEN_LOG.replace(/^biting: 829 /m, "biting: 830 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 793 -> 804, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 804 -> 812, 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(s.out).toContain("biting (817) exceeds executed (816)");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 817/816 -> 830/829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(s.out).toContain("biting (830) exceeds executed (829)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -3016,7 +3039,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 2/78 -> 2/79, agreeing with the coverage line below.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 2/79 -> 2/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 2/80 -> 2/81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    "scope: SUBSET 2/81 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): SUBSET 2/81 -> 2/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "scope: SUBSET 2/82 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12), directly after `scope:` as the runner prints it.
     "scope-reason: 2 of 5 changed file(s) are gate files",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6.1 D-01, SS-5), directly after `scope-reason:` as the
@@ -3042,7 +3066,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/105 -> 79/106, copied from the same full lane run (`coverage: files 79/106`), the arrival of test_replace_allocator_equity_snapshots_window.sql.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79/106 -> 80/107; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80/107 -> 81/108; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    "coverage: files 81/108",
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): coverage 81/108 -> 82/109; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    "coverage: files 82/109",
     "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
     "lane-blocked: 2 file(s) probe pg_extension for pg_cron and are NOT yet annotated — d.sql e.sql (the lane hosts pg_cron since Phase 164.4.1, so a non-empty class here is STALE — see the lane-probe line)",
     "lane-probe: pg_cron absent — lane-blocked class is current",
@@ -3104,7 +3129,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77/77 -> 78/78, copied from the one full lane run.
       // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79/79 -> 80/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
       // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80/80 -> 81/81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-      expect(r.out).toContain("scope: FULL 81/81 annotated files");
+      // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): scope 81/81 -> 82/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+      expect(r.out).toContain("scope: FULL 82/82 annotated files");
       expect(r.out).toContain("both floors and the waiver ceiling hold");
       // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
       // The right-hand side is ARMS_FLOOR as the step re-reads it from run.mjs.
@@ -3141,7 +3167,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
       // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
       // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
-      expect(r.out).toContain("biting arms 816 >= 816");
+      // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): biting arms 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+      expect(r.out).toContain("biting arms 829 >= 829");
     }
   });
 
@@ -3202,7 +3229,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): the NEEDLE follows SUBSET_LOG scope line 2/72 -> 2/73; the lie stays one file more (3/73).
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 2/79 -> 2/80, 3/79 -> 3/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 2/80 -> 2/81, 3/80 -> 3/81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const lying = SUBSET_LOG.replace("scope: SUBSET 2/81 ", "scope: SUBSET 3/81 ");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): SUBSET 2/81 -> 2/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const lying = SUBSET_LOG.replace("scope: SUBSET 2/82 ", "scope: SUBSET 3/82 ");
     expect(lying).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(lying, PR);
     expect(r.status, r.out).toBe(1);
@@ -3289,7 +3317,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78/78 -> 79/79, copied from the one full lane run.
       // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79/79 -> 80/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
       // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80/80 -> 81/81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-      "scope: FULL 81/81 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
+      // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): scope 81/81 -> 82/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+      "scope: FULL 82/82 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
     );
     expect(mislabelled).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(mislabelled, PR);
@@ -3317,7 +3346,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78 -> 79, from SUBSET_LOG's coverage line, which carries the arrival of test_replace_allocator_equity_snapshots_window.sql.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79 -> 80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80 -> 81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    expect(r.out).toContain("printed 2 per-file row(s) but reported 81 annotated file(s)");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 81 -> 82 annotated files; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    expect(r.out).toContain("printed 2 per-file row(s) but reported 82 annotated file(s)");
   });
 
   // ── Phase 164.9.6 / D-12: every run says WHY it took its scope ─────────
@@ -3424,13 +3454,15 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the doubled scope line now doubles 67/67.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79/79 -> 80/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80/80 -> 81/81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const twice = GREEN_LOG.replace("scope: FULL 81/81 annotated files", "scope: FULL 81/81 annotated files\nscope: FULL 81/81 annotated files");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): scope 81/81 -> 82/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const twice = GREEN_LOG.replace("scope: FULL 82/82 annotated files", "scope: FULL 82/82 annotated files\nscope: FULL 82/82 annotated files");
     const t = runCountRecheck(twice, PUSH_MAIN);
     expect(t.status, t.out).toBe(1);
     expect(t.out).toContain("printed 2 'scope:' lines");
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79/79 -> 80/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80/80 -> 81/81; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
-    const diag = GREEN_LOG.replace("scope: FULL 81/81 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
+    // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): scope 81/81 -> 82/82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
+    const diag = GREEN_LOG.replace("scope: FULL 82/82 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
     const d = runCountRecheck(diag, PUSH_MAIN);
     expect(d.status, d.out).toBe(1);
     expect(d.out).toContain("is neither the FULL nor the SUBSET form");

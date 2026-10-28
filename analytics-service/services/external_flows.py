@@ -88,7 +88,12 @@ class FlowInstant(NamedTuple):
     ``amount_prior_day`` is the same flow valued at the close of the previous UTC day. It is set
     only where a mark of that day prices with a daily close (NAVMTM D-07), so a flow moved INTO
     that mark is valued by the mark's own rule rather than at the later close its own day carries
-    (REVIEW-3 IN-02, MARKSOURCE D-02). ``None`` means the flow is valued the same on both days."""
+    (REVIEW-3 IN-02, MARKSOURCE D-02). ``None`` means the flow is valued the same on both days.
+
+    It is also set for a Deribit flow that rule 10 moves into a mark day: the quantity valued at
+    the open of the ``{CCY}_USDC-PERPETUAL`` 1-minute candle that contains the flow (D-04,
+    Phase 177), while ``amount`` stays the own-day value that leaves the read day. It stays
+    ``None`` for a USD-family flow, which has one value on both days."""
 
     at_ms: int
     day: str

@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.133.8.0] - 2026-10-28 — DERIBITFLOWS: a Deribit deposit or withdrawal the marks move into the previous day is priced at its own minute
+
+### Root cause
+- `apply_marks` rule 10 moves a Deribit flow made after 00:00Z on D+1, and at or before the mark's read, into mark day D. The moved native amount was then valued at the ledger mark of its own day D+1, so a BTC deposit counted in day D carried a price from a different day. Every Deribit derive that moved a flow wrote a return built on that mismatch (Phase 177, SC-2).
+
+### Added
+- Migration `20261101120000_api_key_flow_prices.sql`: a new `public.api_key_flow_prices` table, one row per API key, `{CCY}_USDC-PERPETUAL` instrument and candle minute, holding the candle open and a closed `source` (`deribit_perp_1m_open`). Write-once: service_role holds SELECT and INSERT only and the worker writes `ON CONFLICT DO NOTHING`. Row level security is enabled and forced with no policy, and anon and authenticated hold nothing. The rows are erased with the key and the account through `ON DELETE CASCADE` from `api_keys`. CHECKs pin the instrument shape, a whole-minute `minute_ms`, a finite positive price and the source set. Its closing `DO` block checks the catalogue only (table and named primary key), never a row count, so it applies the same on an empty TEST. A keep-data rollback sits in `supabase/migrations/down/`, and `supabase/tests/test_api_key_flow_prices.sql` carries 8 sections with measured RED-UNDER twins (56102fe02, f9d40110e).
+- A moved Deribit flow is priced at the open of the `{CCY}_USDC-PERPETUAL` 1-minute candle that contains it, read from Deribit's public chart data (`services/deribit_flow_prices.py`, D-04): key mode first (8891ffb89, 4dfb0c0bf); a last-attempt 429 from the minute reader reaches the caller (d80cf9187, 57e4811fc).
+- Each resolved price is stored once and reused (`services/flow_price_store.py`, D-05). The stored price is the authority, and only missing minutes are read from the exchange (4c95f1382, b3f90ef08, 8c90f2d52, the last with a live PostgREST probe).
+- The failure vocabulary, with no fallback (D-05): a failed or slow price read keeps the day's mark and retries, bounded by the derive's remaining budget; a 429 is stamped once through `_stamp_429`; a structural no-data answer refuses as `mark_flow_index_unavailable`; a store fault retries. No chart is read unless a moved flow is in an indexed currency (475794693, 447c81e57, ac3975bb5, 193a0934a, 7411411ca).
+- Strategy-mode derives and the allocated NAV twin price a moved flow the same way, under the coverage check (e19317a54, f8d29fd49, 09a8ab1cf, 5c2c74ff0).
+- Composite Deribit members, plain and allocated, price a moved flow at its candle open, and a member's failure takes the composite's refusal arms (936be6736, 2557805c0, 513f68d13, 920d5f632).
+- D-01: one counts-only log line per derive, `deribit flows moved by marks (moved=… at_instant=… usd_family=… on_last_mark=…)`, from `derive_broker_dailies` and per member from `run_stitch_composite_job`. It carries counts only, no key ids and no amounts (472dcfbd1, 1c9f6893b, 03009f5c6, 79866bb19).
+
+### Fixed
+- Review round 1:
+  - A Deribit `DDoSProtection` rate limit reaches `_stamp_429` (WR-01, 04e0ac7c0).
+  - Only `BadSymbol` and `BadRequest` make the minute read structural (WR-03, 5ebe086f6).
+  - The budget floor bounds only the venue read; the stored-price read always happens (WR-02, d1918e833).
+  - Each price group is stored as soon as it is read, so a later failure does not lose earlier reads (SF-03, 1dc8b12bb).
+  - The `mark_flow_index_unavailable` refusal stamps its own copy, which says the returns are paused until support resolves it instead of "needs nothing from you" (SF-04, 58d7aad69).
+- Review round 2:
+  - The minute reader logs the original exception before wrapping a transient read (WR-01, 5b8dea8ff).
+  - The moved-flow store read is bounded below the budget floor (SF-N2, 6c758349a).
+- The SFH-R5-04 gate (`tests/test_stamp_io_exhaustive.py`) bounded only a literal or an f-string stamp message, so SF-04's conditional message failed it on the merged tree. Each branch of a conditional message is now bounded on its own, and an overlong else-branch was measured RED (b09c0337b).
+
+### Tests
+- `ci.yml`'s sql-tests sentinel census counts the new gate: SENTINEL_FLOOR 25 -> 26, ARMS_FLOOR 386 -> 394, re-derived by `ci-anti-skip-gate.contract.test.ts` (de9478e63).
+- `scripts/mutation-floors.mjs` raised by one full run for the new gate (122b1ded7). Re-measured on the tree merged with main 0.133.7.0: `coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`, `lane-invocations: 829`, no defects, so FILES_FLOOR 82 and ARMS_FLOOR 829 stand and WAIVED_CEILING stays 0.
+- `src/lib/database.types.ts` gains `api_key_flow_prices` by hand (4883198bb).
+- RED-first tests in `test_deribit_ingest.py`, `test_flow_price_store.py`, `test_flow_price_store_live.py` and the `test_nav_marks_*` family, including one that is RED on own-day pricing (D-03).
+
+### Notes
+- Founder decisions, 2026-10-28: D-01 SC-1 is the recorded SQL upper bound plus the counts-only derive log line. D-02 price a moved flow at its own moment, fetched from Deribit ("Fetch index at flow time"), **taken over the recommended "Day-D ledger mark"**. D-03 ship whatever the count, with a test RED on own-day pricing. D-04 the price is the open of the `{CCY}_USDC-PERPETUAL` 1-minute candle (the literal index is served at 1-minute steps for 48 h only). D-05 no fallback, and each resolved price is stored once ("Refuse + store prices"), **taken over the recommended "Refuse by name"**. Store scope ("Keep as built", recommended): not part of the Art. 15 data export, no retention limit, and a currency with no USDC perpetual refuses permanently.
+- Known limits:
+  - A flow whose minute has no candle refuses as `mark_flow_index_unavailable` on every derive until support acts; there is no fallback to the day's mark, by D-05.
+  - The stored prices are not in the Art. 15 data export, by founder decision.
+  - SC-1's real count is not known yet. PROD stores no per-flow Deribit data, so it is read off the new derive log line after deploy.
+- Planning records stay on the phase branch and land with the close: discuss context and D-01..D-03 (0819bb3f3), research and the public probe (928f687c8, 3e6331428), D-04 and D-05 (1cb2aeffe), validation, pattern map, the seven plans and their checker pass (0fdc46068, da3006940, d0c05d715), execution start (9b932ab4c); plan summaries and STATE/ROADMAP advances (5c1c42a6e, fac1cac34, c925608c0, e724a4b28, 38db5a020, 0b5c93a99, 54d6788d3, 42ae7e133, 594d33913, 8176c92c9, 4cd222610, 79e828314, 5ddb7d6d4, 6e8c3f457); three rounds of code review and silent-failure reports, round 3 with no MEDIUM+ open (e6922aee6, 1fca0f0aa, 8e25f31e9); the security audit, 33/33 threats closed (7710cfaf9); verification passed (660f04d13); the store-scope answer (131b3811a).
+
 ## [0.133.7.0] - 2026-10-28 — REBUILDGATES: the allocator history probe measures OKX fills ordering on a refused member and Bybit transfer depth per kind
 
 ### Root cause

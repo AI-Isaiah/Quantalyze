@@ -22,12 +22,14 @@ levels are rolled back from the realized terminal with the compose's convention
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import ExitStack
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import ccxt
 import pandas as pd
 import pytest
 
@@ -57,6 +59,7 @@ from tests.test_nav_marks_writer import (  # noqa: F401  (autouse: re-binds the 
     _real_marks_writer,
     route_marks,
 )
+from tests.test_flow_price_store import FlowPricesTable, route_flow_prices
 
 KEY = "key-k"
 USER = "user-1"
@@ -1097,14 +1100,52 @@ def realized_day_pnl(
     return out
 
 
+class _ScriptedChart:
+    """A scripted stand-in for ``exchange.public_get_get_tradingview_chart_data``. It records every
+    params dict, appends ``"chart"`` to ``events`` (the derive's close stand-in appends ``"close"``
+    to the same list, so a test can order a read against the exchange close), and answers the
+    scripted items in order: an exception instance is raised, anything else is returned. A call
+    past the script fails the test loudly (a bare ``AsyncMock`` exchange would otherwise sit in the
+    reader's real 1+2+...+128 s backoff)."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self.events: list[str] = []
+        self.script = list(script)
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, params: dict[str, Any]) -> Any:
+        self.events.append("chart")
+        self.calls.append(dict(params))
+        if not self.script:
+            raise AssertionError("unscripted get_tradingview_chart_data call")
+        item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
 async def derive_deribit_key(
     db: KeyDb, *, collapsed_equity: float, collapsed_upnl: float, now: datetime,
     apply_nothing: bool = False, returns: pd.Series | None = None,
     composed_flows: dict[str, float] | None = None, instants: tuple[FlowInstant, ...] = (),
+    ledger_marks: dict[str, pd.Series] | None = None, chart: _ScriptedChart | None = None,
+    flow_prices: FlowPricesTable | None = None, store_db_execute: Any = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Deribit key-mode derive on the NAV path. The ledger quantities (realized terminal 1000.0
     on 03-05, the day P&L, a +100 composed flow on the gap day) are what the ledger helpers return;
-    the day P&L is this module's own, rolled from the terminal, so the writer basis is coherent."""
+    the day P&L is this module's own, rolled from the terminal, so the writer basis is coherent.
+
+    ``ledger_marks`` (the stub ledger's per-currency day marks) is needed for any non-USD-family
+    instant, which ``native_flow_instants`` values at its own-day mark. ``chart`` is the scripted
+    ``get_tradingview_chart_data``; when given, the derive's exchange close is also recorded in
+    ``chart.events`` as ``"close"``.
+
+    ``store_db_execute`` replaces the inline ``db_execute`` the store reads go through (a test that
+    needs a store read that hangs awaits there; a blocking sync stub cannot be cancelled).
+
+    ``flow_prices`` is the in-memory ``api_key_flow_prices`` (Phase 177 plan 03). The store is
+    ALWAYS routed (the given table, else a fresh one): a derive that reaches it through the
+    harness's MagicMock would read nothing and then fail "no row after an insert"."""
     from dataclasses import replace
 
     from services.deribit_ingest import DeribitNativeAccountState
@@ -1119,7 +1160,11 @@ async def derive_deribit_key(
 
     ctx, capture = _ctx(strategy_row=None, key_mode=True)
     ctx.key_row = {"id": KEY_DRB, "user_id": USER, "exchange": "deribit"}
-    route_key_csv(route_marks(ctx, db), db)
+    if chart is not None:
+        ctx.exchange.public_get_get_tradingview_chart_data = chart
+    route_flow_prices(
+        route_key_csv(route_marks(ctx, db), db), flow_prices if flow_prices is not None else FlowPricesTable()
+    )
     state = DeribitNativeAccountState(
         native_equity={"BTC": 0.02}, native_upnl={"BTC": 0.001},
         collapsed_equity_usd=collapsed_equity, collapsed_upnl_usd=collapsed_upnl,
@@ -1133,7 +1178,10 @@ async def derive_deribit_key(
         ctx, key_mode=True,
         ledger_mock=AsyncMock(
             return_value=(
-                replace(_stub_native_ledger(), flow_instants=instants),
+                replace(
+                    _stub_native_ledger(), flow_instants=instants,
+                    **({"marks": ledger_marks} if ledger_marks is not None else {}),
+                ),
                 _report(has_option_activity=False),
             )
         ),
@@ -1159,6 +1207,19 @@ async def derive_deribit_key(
         ),
         *([patch("services.job_worker.read_key_marks", new=MagicMock(return_value=[]))]
           if apply_nothing else []),
+        # The store calls run in order on the test thread, like the stand-in _base_patches
+        # gives services.job_worker.db_execute.
+        patch(
+            "services.deribit_flow_prices.db_execute",
+            new=store_db_execute or AsyncMock(side_effect=lambda fn: fn()),
+        ),
+        # Placed AFTER the base patches so it replaces their no-op close: the close is recorded in
+        # the chart's own event list, which orders a read against the close (a mocked close would
+        # otherwise hide a read made on a closed exchange).
+        *([patch(
+            "services.job_worker.aclose_exchange",
+            new=AsyncMock(side_effect=lambda _ex: chart.events.append("close")),
+        )] if chart is not None else []),
     ]
     with _drb_apply(patches):
         result = await run_derive_broker_dailies_job(
@@ -1197,6 +1258,779 @@ async def test_deribit_key_mode_deposit_made_before_the_read_is_counted_in_the_m
     payload = await compose_curve(db, capture, key=KEY_DRB, venue="deribit")
     assert_levels(levels(payload), marks)
     assert_trustworthy(payload)
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_btc_flow_priced_at_the_instant_price() -> None:
+    """Phase 177 DERIBITFLOWS D-02 (revisited), D-03, D-04. A 0.0005 BTC deposit made at 00:05:20Z
+    on 03-11, before the 00:10Z read of the 03-10 mark, is inside that mark's wallet. The ledger's
+    own-day mark for 03-11 is 102_000.0 (what the day aggregate stored, so what leaves 03-11:
+    0.0005 x 102_000.0 = 51.0). The deposit is COUNTED in 03-10 at the open of the 1-minute
+    BTC_USDC-PERPETUAL candle that contains it, 00:05, whose open is 101_000.0 (the neighbours
+    00:04 and 00:06 open at 100_900.0 and 101_100.0, so an adjacent-candle rule is distinguishable):
+      counted in 03-10:  0.0005 x 101_000.0 = 50.5
+      base = level(03-07) 1071.0 + flow(03-08) 100.0 = 1171.0
+      r(03-10) = (1244.42 - 1171.0 - 50.5) / 1171.0 = 22.92 / 1171.0
+    The old own-day pricing counts 0.0005 x 102_000.0 = 51.0 and stores 22.42 / 1171.0. What
+    leaves 03-11 is the stored 51.0, so 03-11 nets to 0.0 and the compose lands on every mark.
+    The candle is read while the exchange is still open (the mocked close would otherwise hide a
+    read on a closed exchange)."""
+    marks = {**OKX_MARKS, "2026-03-10": 1244.42}
+    db = KeyDb()
+    seed_deribit_marks(db, marks)
+    at = int(datetime(2026, 3, 11, 0, 5, 20, tzinfo=timezone.utc).timestamp() * 1000)
+    minute = int(datetime(2026, 3, 11, 0, 5, tzinfo=timezone.utc).timestamp() * 1000)
+    chart = _ScriptedChart([{
+        "result": {
+            "status": "ok",
+            "ticks": [minute - 60_000, minute, minute + 60_000],
+            "open": [100_900.0, 101_000.0, 101_100.0],
+        }
+    }])
+    result, capture = await derive_deribit_key(
+        db, collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+        composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+        instants=(FlowInstant(at, "2026-03-11", 0.0005, "BTC"),),
+        ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+        chart=chart,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.92 / 1171.0, abs=1e-12)
+    ki = _key_inputs_payload(capture, KEY_DRB)
+    stored = {f["utc_day_iso"]: f["flow_usd"] for f in ki["composed_flows"]}
+    assert stored[OKX_FLOW_DAY] == pytest.approx(100.0, abs=1e-9)
+    assert stored["2026-03-10"] == pytest.approx(50.5, abs=1e-9)
+    assert stored.get("2026-03-11", 0.0) == pytest.approx(0.0, abs=1e-9)
+    payload = await compose_curve(db, capture, key=KEY_DRB, venue="deribit")
+    assert_levels(levels(payload), marks)
+    assert_trustworthy(payload)
+    assert len(chart.calls) == 1
+    assert chart.calls[0] == {
+        "instrument_name": "BTC_USDC-PERPETUAL",
+        "resolution": "1",
+        "start_timestamp": int(datetime(2026, 3, 11, tzinfo=timezone.utc).timestamp() * 1000),
+        "end_timestamp": at + 60_000,
+    }
+    assert chart.events.index("chart") < chart.events.index("close")
+
+
+def _ms(*args: int) -> int:
+    return int(datetime(*args, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _candles(*minutes_and_opens: tuple[int, float]) -> dict[str, Any]:
+    """A scripted ``get_tradingview_chart_data`` ``ok`` body from ``(minute_ms, open)`` pairs."""
+    return {"result": {
+        "status": "ok",
+        "ticks": [m for m, _ in minutes_and_opens],
+        "open": [o for _, o in minutes_and_opens],
+    }}
+
+
+@pytest.mark.asyncio
+async def test_flow_price_store_second_derive_reads_no_chart() -> None:
+    """Phase 177 DERIBITFLOWS D-05 (founder, "Refuse + store prices"): a resolved at-instant price is
+    stored once and reused, so an old moved flow is never re-read. The plan 01 scenario (0.0005 BTC
+    at 00:05:20Z on 03-11, candle open 101_000.0, own-day mark 102_000.0, r(03-10) = 22.92 / 1171.0)
+    is derived TWICE over the same marks and the same store. The first derive reads three candles
+    and stores the 00:05 one; the second has an EMPTY chart script (any call fails the test) and
+    stores the same 22.92 / 1171.0 from the stored row. Every write used the write-once form."""
+    marks = {**OKX_MARKS, "2026-03-10": 1244.42}
+    db = KeyDb()
+    seed_deribit_marks(db, marks)
+    table = FlowPricesTable()
+    at = _ms(2026, 3, 11, 0, 5, 20)
+    minute = _ms(2026, 3, 11, 0, 5)
+    kwargs: dict[str, Any] = dict(
+        collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+        composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+        instants=(FlowInstant(at, "2026-03-11", 0.0005, "BTC"),),
+        ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+        flow_prices=table,
+    )
+    first_chart = _ScriptedChart([
+        _candles((minute - 60_000, 100_900.0), (minute, 101_000.0), (minute + 60_000, 101_100.0))
+    ])
+    result, _ = await derive_deribit_key(db, chart=first_chart, **kwargs)
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.92 / 1171.0, abs=1e-12)
+    assert len(first_chart.calls) == 1
+    assert table.rows == {
+        (KEY_DRB, "BTC_USDC-PERPETUAL", minute): {
+            "api_key_id": KEY_DRB, "instrument": "BTC_USDC-PERPETUAL", "minute_ms": minute,
+            "price": 101_000.0, "source": "deribit_perp_1m_open",
+        }
+    }
+    assert table.upsert_calls == 1
+    assert all(
+        conflict == "api_key_id,instrument,minute_ms" and ignore is True
+        for _, conflict, ignore in table.upserts
+    )
+
+    second_chart = _ScriptedChart([])
+    db.csv.clear()
+    result, _ = await derive_deribit_key(db, chart=second_chart, **kwargs)
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.92 / 1171.0, abs=1e-12)
+    assert second_chart.calls == []
+    assert table.upsert_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_flow_price_store_seeded_price_wins_over_the_chart() -> None:
+    """D-05: the stored row is the authority (first writer wins), so a price already stored for the
+    flow's minute is used even where the chart would answer a different open, and the venue is not
+    read at all. The plan 01 scenario with the 00:05 minute pre-stored at 101_200.0 (the chart, were
+    it read, would say 101_000.0):
+      counted in 03-10:  0.0005 x 101_200.0 = 50.6
+      base = level(03-07) 1071.0 + flow(03-08) 100.0 = 1171.0
+      r(03-10) = (1244.42 - 1171.0 - 50.6) / 1171.0 = 22.82 / 1171.0
+    (the chart's open would give 22.92 / 1171.0, own-day pricing 22.42 / 1171.0)."""
+    marks = {**OKX_MARKS, "2026-03-10": 1244.42}
+    db = KeyDb()
+    seed_deribit_marks(db, marks)
+    table = FlowPricesTable()
+    at = _ms(2026, 3, 11, 0, 5, 20)
+    minute = _ms(2026, 3, 11, 0, 5)
+    table.seed(KEY_DRB, "BTC_USDC-PERPETUAL", minute, 101_200.0)
+    chart = _ScriptedChart([
+        _candles((minute - 60_000, 100_900.0), (minute, 101_000.0), (minute + 60_000, 101_100.0))
+    ])
+    result, capture = await derive_deribit_key(
+        db, collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+        composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+        instants=(FlowInstant(at, "2026-03-11", 0.0005, "BTC"),),
+        ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+        chart=chart, flow_prices=table,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.82 / 1171.0, abs=1e-12)
+    ki = _key_inputs_payload(capture, KEY_DRB)
+    stored = {f["utc_day_iso"]: f["flow_usd"] for f in ki["composed_flows"]}
+    assert stored["2026-03-10"] == pytest.approx(50.6, abs=1e-9)
+    assert chart.calls == []
+    assert table.upsert_calls == 0
+    assert table.prices(KEY_DRB) == {("BTC_USDC-PERPETUAL", minute): 101_200.0}
+
+
+@pytest.mark.asyncio
+async def test_flow_price_store_only_missing_minutes_are_read() -> None:
+    """D-05: only MISSING minutes go to the venue. Two BTC deposits dated 03-11, 0.0002 at 00:03:10Z
+    and 0.0005 at 00:05:20Z, inside the 03-10 mark (NAV 1264.58); the 00:03 minute is already stored
+    at 100_800.0 and the chart is scripted once, with 00:03 deliberately different (100_700.0), 00:04
+    (100_900.0), 00:05 (101_000.0) and 00:06 (101_100.0). Own-day mark 102_000.0, so 03-11 composes
+    0.0002 x 102_000.0 + 0.0005 x 102_000.0 = 71.4.
+      counted in 03-10:  0.0002 x 100_800.0 + 0.0005 x 101_000.0 = 20.16 + 50.5 = 70.66
+      base = 1071.0 + 100.0 = 1171.0
+      r(03-10) = (1264.58 - 1171.0 - 70.66) / 1171.0 = 22.92 / 1171.0
+    Own-day pricing would give 22.18 / 1171.0, and using the chart's 00:03 open instead of the stored
+    one 22.94 / 1171.0. One chart call, and the store gains exactly the 00:05 row."""
+    marks = {**OKX_MARKS, "2026-03-10": 1264.58}
+    db = KeyDb()
+    seed_deribit_marks(db, marks)
+    table = FlowPricesTable()
+    early = _ms(2026, 3, 11, 0, 3, 10)
+    late = _ms(2026, 3, 11, 0, 5, 20)
+    m3, m5 = _ms(2026, 3, 11, 0, 3), _ms(2026, 3, 11, 0, 5)
+    table.seed(KEY_DRB, "BTC_USDC-PERPETUAL", m3, 100_800.0)
+    chart = _ScriptedChart([_candles(
+        (m3, 100_700.0), (m3 + 60_000, 100_900.0), (m5, 101_000.0), (m5 + 60_000, 101_100.0)
+    )])
+    result, capture = await derive_deribit_key(
+        db, collapsed_equity=1264.58, collapsed_upnl=264.58, now=at_0010("2026-03-11"),
+        composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 71.4},
+        instants=(
+            FlowInstant(early, "2026-03-11", 0.0002, "BTC"),
+            FlowInstant(late, "2026-03-11", 0.0005, "BTC"),
+        ),
+        ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+        chart=chart, flow_prices=table,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.92 / 1171.0, abs=1e-12)
+    ki = _key_inputs_payload(capture, KEY_DRB)
+    stored = {f["utc_day_iso"]: f["flow_usd"] for f in ki["composed_flows"]}
+    assert stored["2026-03-10"] == pytest.approx(70.66, abs=1e-9)
+    assert len(chart.calls) == 1
+    assert chart.calls[0]["end_timestamp"] == late + 60_000
+    assert table.prices(KEY_DRB) == {
+        ("BTC_USDC-PERPETUAL", m3): 100_800.0, ("BTC_USDC-PERPETUAL", m5): 101_000.0,
+    }
+    assert table.upsert_calls == 1
+    assert [r["minute_ms"] for r in table.upserts[0][0]] == [m5]
+
+
+@pytest.mark.asyncio
+async def test_flow_price_store_a_concurrent_writer_wins_the_race() -> None:
+    """Pitfall 1: THE STORED ROW, NEVER THE LOCAL READ, IS THE AUTHORITY. The plan 01 scenario, but a
+    concurrent derive of the same key stores the 00:05 minute at 101_200.0 right after this derive
+    read the (still empty) store and before it writes. This derive read 101_000.0 from the chart; its
+    insert loses to the existing row, the re-select hands back 101_200.0, and the index is built from
+    that, so both derives value the flow identically:
+      counted in 03-10:  0.0005 x 101_200.0 = 50.6
+      r(03-10) = (1244.42 - 1171.0 - 50.6) / 1171.0 = 22.82 / 1171.0
+    (the local read would give 22.92 / 1171.0). The table keeps 101_200.0."""
+    marks = {**OKX_MARKS, "2026-03-10": 1244.42}
+    db = KeyDb()
+    seed_deribit_marks(db, marks)
+    table = FlowPricesTable()
+    at = _ms(2026, 3, 11, 0, 5, 20)
+    minute = _ms(2026, 3, 11, 0, 5)
+    table.after_first_read = lambda: table.seed(KEY_DRB, "BTC_USDC-PERPETUAL", minute, 101_200.0)
+    chart = _ScriptedChart([
+        _candles((minute - 60_000, 100_900.0), (minute, 101_000.0), (minute + 60_000, 101_100.0))
+    ])
+    result, capture = await derive_deribit_key(
+        db, collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+        composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+        instants=(FlowInstant(at, "2026-03-11", 0.0005, "BTC"),),
+        ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+        chart=chart, flow_prices=table,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert len(chart.calls) == 1
+    assert table.upsert_calls == 1
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.82 / 1171.0, abs=1e-12)
+    ki = _key_inputs_payload(capture, KEY_DRB)
+    stored = {f["utc_day_iso"]: f["flow_usd"] for f in ki["composed_flows"]}
+    assert stored["2026-03-10"] == pytest.approx(50.6, abs=1e-9)
+    assert table.prices(KEY_DRB) == {("BTC_USDC-PERPETUAL", minute): 101_200.0}
+
+
+@pytest.mark.asyncio
+async def test_flow_price_store_no_moved_indexed_flow_touches_nothing() -> None:
+    """A derive that moves no INDEXED Deribit flow makes zero calls to the store table and zero chart
+    calls, byte-identical to before the store. The 50.0 USDC deposit at 00:05Z on 03-11, inside the
+    03-10 mark, is moved but USD-family, so it needs no price (r(03-10) = 23.42 / 1171.0)."""
+    marks = {**OKX_MARKS, "2026-03-10": 1244.42}
+    db = KeyDb()
+    seed_deribit_marks(db, marks)
+    table = FlowPricesTable()
+    chart = _ScriptedChart([])
+    at = _ms(2026, 3, 11, 0, 5)
+    result, _ = await derive_deribit_key(
+        db, collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+        composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 50.0},
+        instants=(FlowInstant(at, "2026-03-11", 50.0, "USDC"),),
+        chart=chart, flow_prices=table,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(23.42 / 1171.0, abs=1e-12)
+    assert table.reads == 0 and table.upsert_calls == 0 and table.rows == {}
+    assert chart.calls == []
+
+
+# --------------------------------------------------------------------------------------
+# Phase 177 plan 04 (D-05): the failure vocabulary of the at-instant price read
+# --------------------------------------------------------------------------------------
+
+_OWN_DAY = "2026-03-10"
+_STORED_BEFORE = {"2026-03-06": 1050.0, "2026-03-07": 1071.0}
+
+
+async def derive_moved_btc_without_a_stored_mark(
+    db: KeyDb, *, chart: Any, table: FlowPricesTable | None = None, store_db_execute: Any = None,
+) -> tuple[Any, dict[str, Any], FlowPricesTable]:
+    """The plan 01 scenario with NO 03-10 mark stored, so THIS derive (clock 00:10:30Z on 03-11,
+    collapsed equity 1244.42) writes its own 03-10 mark and the 0.0005 BTC deposit made at
+    00:05:20Z on 03-11 is a moved INDEXED flow of that mark. Returns the store used."""
+    seed_deribit_marks(db, _STORED_BEFORE)
+    table = table if table is not None else FlowPricesTable()
+    result, capture = await derive_deribit_key(
+        db, collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+        composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+        instants=(FlowInstant(_ms(2026, 3, 11, 0, 5, 20), "2026-03-11", 0.0005, "BTC"),),
+        ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+        chart=chart, flow_prices=table, store_db_execute=store_db_execute,
+    )
+    return result, capture, table
+
+
+def assert_mark_kept_and_nothing_else_written(
+    db: KeyDb, capture: dict[str, Any], table: FlowPricesTable,
+) -> None:
+    """The day's mark IS stored (nav 1244.42) and no series, key_inputs or flow-price row was."""
+    assert db.marks[(KEY_DRB, _OWN_DAY)]["nav_usd"] == pytest.approx(1244.42, abs=1e-9)
+    assert db.csv_upserts == [] and db.csv_deletes == []
+    assert not any(
+        isinstance(payload, dict) and str(payload.get("kind", "")).startswith("key_inputs:")
+        for name, payload, _oc in capture["upserts"] if name == "allocator_equity_derived"
+    )
+    assert table.rows == {}
+
+
+def assert_transient_with_reason(result: Any, reason: str) -> None:
+    assert result.outcome == DispatchOutcome.FAILED, result.error_message
+    assert result.error_kind == "transient"
+    assert f"reason={reason}" in result.error_message
+
+
+def read_failure_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "moved-flow price read" in r.getMessage()
+    ]
+
+
+class _HungChart:
+    """A chart stand-in whose read never returns: it records the call and then waits on an event
+    nobody sets, like a Deribit request that hangs."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.calls: list[dict[str, Any]] = []
+        self._never = asyncio.Event()
+
+    async def __call__(self, params: dict[str, Any]) -> Any:
+        self.events.append("chart")
+        self.calls.append(dict(params))
+        await self._never.wait()
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_read_failure_is_named_and_keeps_the_mark(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-05 "a transient read retries", Pitfall 2. The chart times out on all nine attempts of the
+    reader's budget (backoff zeroed). The failure is captured INSIDE the crawl, so the exchange
+    closes, this derive's own 03-10 mark (nav 1244.42) is written, and the failure surfaces at the
+    apply seam as a transient retry that names the reason. Nothing else is written, and the log
+    line carries the reason and the exception class only (no key id, no amount)."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    db = KeyDb()
+    chart = _ScriptedChart([ccxt.RequestTimeout("slow") for _ in range(9)])
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result, capture, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart)
+    assert_transient_with_reason(result, "read_transient")
+    assert len(chart.calls) == 9
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+    lines = read_failure_warnings(caplog)
+    assert len(lines) == 1, caplog.text
+    assert "reason=read_transient" in lines[0] and "DeribitTransientReadError" in lines[0]
+    assert KEY_DRB not in caplog.text and "0.0005" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_timeout_below_the_floor_reads_nothing_and_keeps_the_mark(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """W2. With the derive budget set to the post-crawl reserve plus 1 s, at most 1 s remains for
+    the prefetch once the reserve is kept, below the 10 s floor. The prefetch makes no chart call
+    (the price is not stored), captures ``timeout``, and the day's mark is still written. The chart
+    script is EMPTY, but 'no chart call' is asserted on the RECORDED calls: the reader turns any
+    other exception, an over-run AssertionError included, into a structural no-data answer. The
+    STORE is still read (WR-02): the floor bounds the venue read only."""
+    import services.job_worker as jw
+
+    monkeypatch.setitem(
+        jw.TIMEOUT_PER_KIND, "derive_broker_dailies", jw._DERIVE_POST_CRAWL_RESERVE_S + 1.0
+    )
+    db = KeyDb()
+    chart = _ScriptedChart([])
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result, capture, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart)
+    assert_transient_with_reason(result, "timeout")
+    assert chart.calls == []
+    assert table.reads == 1 and table.upsert_calls == 0
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+    lines = read_failure_warnings(caplog)
+    assert len(lines) == 1 and "reason=timeout" in lines[0], caplog.text
+    assert KEY_DRB not in caplog.text and "0.0005" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_hung_store_read_below_the_floor_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SF-N2. Below the floor the venue is not read, but the store still is, and that read must be
+    bounded too: a hung store read may not hold the derive past its budget or cost the day's mark
+    (D-05). The floor is patched to 0.05 s and the budget is exactly the reserve, so the prefetch
+    runs with no venue read and a store read that blocks. It must end as ``timeout`` with the
+    mark kept. The 5 s guard makes an unbounded read fail this test instead of hanging it."""
+    import services.job_worker as jw
+
+    monkeypatch.setattr(jw, "_MOVED_FLOW_PRICE_MIN_SECONDS", 0.05)
+    monkeypatch.setitem(
+        jw.TIMEOUT_PER_KIND, "derive_broker_dailies", jw._DERIVE_POST_CRAWL_RESERVE_S
+    )
+    never = asyncio.Event()
+
+    async def _hung_store_read(_fn: Any) -> Any:
+        await never.wait()
+
+    db = KeyDb()
+    chart = _ScriptedChart([])
+    result, capture, table = await asyncio.wait_for(
+        derive_moved_btc_without_a_stored_mark(db, chart=chart, store_db_execute=_hung_store_read),
+        timeout=5.0,
+    )
+    assert_transient_with_reason(result, "timeout")
+    assert chart.calls == []
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_below_the_floor_completes_from_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-02. The budget floor bounds the VENUE read only. Every price the derive needs is already
+    stored (the 0.0005 BTC deposit's 00:05 minute at 101_000.0), so a derive with less than the
+    floor left is DONE from the stored price and makes no chart call. Before the fix the floor
+    skipped the store read too, and a key whose prices were all stored retried on every attempt:
+      counted in 03-10:  0.0005 x 101_000.0 = 50.5
+      r(03-10) = (1244.42 - 1171.0 - 50.5) / 1171.0 = 22.92 / 1171.0"""
+    import services.job_worker as jw
+
+    monkeypatch.setitem(
+        jw.TIMEOUT_PER_KIND, "derive_broker_dailies", jw._DERIVE_POST_CRAWL_RESERVE_S + 1.0
+    )
+    db = KeyDb()
+    table = FlowPricesTable()
+    table.seed(KEY_DRB, "BTC_USDC-PERPETUAL", _NO_DATA_MINUTE, 101_000.0)
+    chart = _ScriptedChart([])
+    result, _, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart, table=table)
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert chart.calls == []
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.92 / 1171.0, abs=1e-12)
+    assert table.upsert_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_timeout_is_bounded_by_the_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W2. The floor is lifted and the budget leaves 2 s above the reserve, and the chart hangs. A
+    prefetch bounded by the fixed 810 s ``_BROKER_CRAWL_TIMEOUT_S`` would sit on the hung read; the
+    remaining-budget bound cuts it after about 2 s, captures ``timeout``, and the day's mark is
+    still written. The 15 s guard makes a bound that ignores the remaining budget fail this test
+    instead of hanging it."""
+    import services.job_worker as jw
+
+    monkeypatch.setattr(jw, "_MOVED_FLOW_PRICE_MIN_SECONDS", 0.0)
+    monkeypatch.setitem(
+        jw.TIMEOUT_PER_KIND, "derive_broker_dailies", jw._DERIVE_POST_CRAWL_RESERVE_S + 2.0
+    )
+    db = KeyDb()
+    chart = _HungChart()
+    result, capture, table = await asyncio.wait_for(
+        derive_moved_btc_without_a_stored_mark(db, chart=chart), timeout=15.0
+    )
+    assert_transient_with_reason(result, "timeout")
+    assert len(chart.calls) == 1
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_rate_limited_is_stamped_once_and_keeps_the_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-05 "a 429 re-raises to ``_stamp_429``", T-177-19. The chart answers a 429 on all nine
+    attempts. The reader re-raises the LAST one as itself, the prefetch stamps the key through
+    ``_stamp_429`` exactly once with that very instance (the outer ``except`` arm then never sees
+    it, so the key is not stamped twice), and the derive keeps the day's mark and retries."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    stamp = AsyncMock()
+    monkeypatch.setattr("services.job_worker._stamp_429", stamp)
+    limits = [ccxt.RateLimitExceeded(f"429 attempt {n}") for n in range(9)]
+    db = KeyDb()
+    chart = _ScriptedChart(list(limits))
+    result, capture, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart)
+    assert_transient_with_reason(result, "rate_limited")
+    assert len(chart.calls) == 9
+    stamp.assert_awaited_once()
+    assert stamp.await_args.args[1]["id"] == KEY_DRB
+    assert stamp.await_args.args[2] is limits[8]
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_ddos_protection_is_stamped_once_and_keeps_the_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-05, WR-01. Deribit's real rate-limit reply is ``ccxt.DDoSProtection`` (body code 10028),
+    which is not a ``RateLimitExceeded``. On the last attempt it reaches ``_stamp_429`` exactly like
+    a 429 does, and the derive keeps the day's mark and retries."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    stamp = AsyncMock()
+    monkeypatch.setattr("services.job_worker._stamp_429", stamp)
+    limits = [ccxt.DDoSProtection(f"too_many_requests attempt {n}") for n in range(9)]
+    db = KeyDb()
+    chart = _ScriptedChart(list(limits))
+    result, capture, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart)
+    assert_transient_with_reason(result, "rate_limited")
+    assert len(chart.calls) == 9
+    stamp.assert_awaited_once()
+    assert stamp.await_args.args[1]["id"] == KEY_DRB
+    assert stamp.await_args.args[2] is limits[8]
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_index_plain_exchange_error_is_transient_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-03. A plain ``ExchangeError`` on every attempt is retried and ends as a transient read
+    failure. It must never take the permanent ``mark_flow_index_unavailable`` refusal."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    db = KeyDb()
+    chart = _ScriptedChart([ccxt.ExchangeError(f"unmapped {n}") for n in range(9)])
+    result, capture, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart)
+    assert_transient_with_reason(result, "read_transient")
+    assert len(chart.calls) == 9
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+
+
+_NO_DATA_MINUTE = _ms(2026, 3, 11, 0, 5)
+_NO_DATA_KINDS: dict[str, Any] = {
+    "no_data_status": {"result": {"status": "no_data"}},
+    "bad_symbol": ccxt.BadSymbol("no such instrument"),
+    "no_containing_candle": _candles(
+        (_NO_DATA_MINUTE - 60_000, 100_900.0), (_NO_DATA_MINUTE + 60_000, 101_100.0)
+    ),
+    "nan_open": _candles(
+        (_NO_DATA_MINUTE - 60_000, 100_900.0), (_NO_DATA_MINUTE, float("nan")),
+        (_NO_DATA_MINUTE + 60_000, 101_100.0),
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", list(_NO_DATA_KINDS))
+async def test_deribit_moved_flow_index_no_data_refuses_by_name(
+    kind: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-05 "a structural no-data read refuses as ``mark_flow_index_unavailable``", T-177-17. Four
+    structural answers for the moved BTC flow's minute: an explicit ``no_data`` body, a
+    ``BadSymbol``, an ok body with no candle for the containing minute (its neighbours only) and a
+    NaN open. None is retried (one chart call) and none falls back to the own-day or the day-D
+    price: the derive takes the existing nav-marks refusal road, FAILED permanent, with the static
+    text and the token only, the day's mark stored and nothing else written."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    db = KeyDb()
+    chart = _ScriptedChart([_NO_DATA_KINDS[kind]])
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result, capture, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart)
+    assert result.outcome == DispatchOutcome.FAILED, result.error_message
+    assert result.error_kind == "permanent"
+    assert result.error_message == (
+        "derive_broker_dailies: nav marks refused (mark_flow_index_unavailable)"
+    )
+    assert any(
+        r.levelname == "ERROR" and "reason=mark_flow_index_unavailable" in r.getMessage()
+        for r in caplog.records
+    ), caplog.text
+    assert len(chart.calls) == 1
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+    assert "0.0005" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side", ["write", "read"])
+async def test_deribit_moved_flow_index_store_fault_is_transient_and_keeps_the_mark(
+    side: str,
+) -> None:
+    """D-05 / SC-3, a store fault retries: the price table failing to answer a read (which is also
+    what an absent table, a worker deployed before its migration applied, looks like) or to take a
+    write is a transient retry and never a price used without the store. The day's mark is kept
+    and nothing else is written."""
+    table = FlowPricesTable()
+    if side == "write":
+        table.fail_inserts = RuntimeError("insert refused")
+    else:
+        table.fail_reads = RuntimeError("relation does not exist")
+    minute = _NO_DATA_MINUTE
+    db = KeyDb()
+    chart = _ScriptedChart([
+        _candles((minute - 60_000, 100_900.0), (minute, 101_000.0), (minute + 60_000, 101_100.0))
+    ])
+    result, capture, table = await derive_moved_btc_without_a_stored_mark(
+        db, chart=chart, table=table
+    )
+    assert_transient_with_reason(result, "store_fault")
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+
+
+@pytest.mark.asyncio
+async def test_deribit_moved_flow_uses_this_derives_own_mark() -> None:
+    """Pitfall 3, this derive's own mark is part of the prediction. No 03-10 mark is stored, so THIS
+    derive writes it (nav 1244.42, read at 00:10:30Z on 03-11) after its exchange has closed. The
+    0.0005 BTC deposit made at 00:05:20Z, before that read, is therefore a moved flow of a mark the
+    prefetch could only know from the derive's own clock. The chart is read for it and the deposit
+    is counted at its candle open, 101_000.0 (hand-typed as in plan 01):
+      counted in 03-10:  0.0005 x 101_000.0 = 50.5
+      r(03-10) = (1244.42 - 1171.0 - 50.5) / 1171.0 = 22.92 / 1171.0
+    Without the own mark in the prediction nothing would be read and the coverage check would turn
+    this into a ``prediction_miss`` retry on every derive of a fresh day."""
+    db = KeyDb()
+    minute = _NO_DATA_MINUTE
+    chart = _ScriptedChart([
+        _candles((minute - 60_000, 100_900.0), (minute, 101_000.0), (minute + 60_000, 101_100.0))
+    ])
+    result, _, table = await derive_moved_btc_without_a_stored_mark(db, chart=chart)
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.marks[(KEY_DRB, _OWN_DAY)]["nav_usd"] == pytest.approx(1244.42, abs=1e-9)
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(22.92 / 1171.0, abs=1e-12)
+    assert len(chart.calls) == 1
+    assert table.prices(KEY_DRB) == {("BTC_USDC-PERPETUAL", minute): 101_000.0}
+
+
+@pytest.mark.asyncio
+async def test_deribit_coverage_check_turns_a_prediction_miss_into_a_retry() -> None:
+    """Pitfall 3, T-177-16. A concurrent writer stored the 03-10 mark (read at 00:20:00Z on 03-11)
+    between the prefetch's read of the marks and this derive's mark write, so the prefetch saw only
+    03-06 and 03-07 and predicted THIS derive's own read at 00:10:30Z. That prediction does not
+    place the 00:15:00Z BTC deposit, so nothing was read. The write-once insert loses, the stored
+    00:20 row is the mark, and the FINAL marks do place the deposit. The coverage check on the
+    final marks turns that into a named ``prediction_miss`` retry with no chart call and nothing
+    written; the deposit is never counted at the own-day price (a DONE would be that bug)."""
+    from services.nav_marks import read_key_marks as real_read_key_marks
+
+    db = KeyDb()
+    seed_deribit_marks(db, _STORED_BEFORE)
+    seed_mark(db, _OWN_DAY, 1244.42, key=KEY_DRB, venue="deribit",
+              open_pnl=1244.42 - OKX_TERMINAL, native_unit=None)
+    db.marks[(KEY_DRB, _OWN_DAY)]["marked_at"] = "2026-03-11T00:20:00+00:00"
+    reads: list[int] = []
+
+    def first_read_misses_the_day(supabase: Any, key: str) -> Any:
+        reads.append(1)
+        stored = real_read_key_marks(supabase, key)
+        return [m for m in stored if m.mark_day != _OWN_DAY] if len(reads) == 1 else stored
+
+    chart = _ScriptedChart([])
+    table = FlowPricesTable()
+    with patch(
+        "services.job_worker.read_key_marks", new=MagicMock(side_effect=first_read_misses_the_day)
+    ):
+        result, capture = await derive_deribit_key(
+            db, collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+            composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+            instants=(FlowInstant(_ms(2026, 3, 11, 0, 15), "2026-03-11", 0.0005, "BTC"),),
+            ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+            chart=chart, flow_prices=table,
+        )
+    assert len(reads) >= 2, "the seam must read the marks again, on the final set"
+    assert_transient_with_reason(result, "prediction_miss")
+    assert chart.calls == [] and table.reads == 0 and table.upsert_calls == 0
+    assert_mark_kept_and_nothing_else_written(db, capture, table)
+    assert db.marks[(KEY_DRB, _OWN_DAY)]["marked_at"] == "2026-03-11T00:20:00+00:00"
+
+
+def moved_flows_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.INFO and r.getMessage().startswith(
+            "derive_broker_dailies: deribit flows moved by marks"
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deribit_flows_moved_log_key_mode(caplog: pytest.LogCaptureFixture) -> None:
+    """D-01, plan 01's scenario: one BTC deposit moved into the last (03-10) mark and priced at its
+    candle open. Exactly one counts line, and no record that carries its prefix names the key."""
+    marks = {**OKX_MARKS, "2026-03-10": 1244.42}
+    db = KeyDb()
+    seed_deribit_marks(db, marks)
+    minute = _ms(2026, 3, 11, 0, 5)
+    chart = _ScriptedChart([
+        _candles((minute - 60_000, 100_900.0), (minute, 101_000.0), (minute + 60_000, 101_100.0))
+    ])
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        result, _ = await derive_deribit_key(
+            db, collapsed_equity=1244.42, collapsed_upnl=244.42, now=at_0010("2026-03-11"),
+            composed_flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+            instants=(FlowInstant(_ms(2026, 3, 11, 0, 5, 20), "2026-03-11", 0.0005, "BTC"),),
+            ledger_marks={"BTC": series({"2026-03-10": 100_000.0, "2026-03-11": 102_000.0})},
+            chart=chart,
+        )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert moved_flows_lines(caplog) == [
+        "derive_broker_dailies: deribit flows moved by marks "
+        "(moved=1 at_instant=1 usd_family=0 on_last_mark=1 mode=key)"
+    ]
+    assert KEY_DRB not in moved_flows_lines(caplog)[0]
+
+
+@pytest.mark.asyncio
+async def test_deribit_flows_moved_log_at_zero(caplog: pytest.LogCaptureFixture) -> None:
+    """D-01: the line is emitted even when no flow was moved, so its absence is never read as zero."""
+    db = KeyDb()
+    seed_deribit_marks(db, OKX_MARKS)
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        result, _ = await derive_deribit_key(
+            db, collapsed_equity=1194.42, collapsed_upnl=194.42, now=at_0010("2026-03-11"),
+        )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert moved_flows_lines(caplog) == [
+        "derive_broker_dailies: deribit flows moved by marks "
+        "(moved=0 at_instant=0 usd_family=0 on_last_mark=0 mode=key)"
+    ]
+
+
+_AT_RISEN = _ms(2026, 3, 11, 0, 5, 20)
+_NO_READ_CASES: dict[str, dict[str, Any]] = {
+    # A USDC deposit made before the 00:10Z read of the stored 03-10 mark is moved, but it is
+    # USD-family and needs no price.
+    "usdc_in_window": dict(
+        marks={**OKX_MARKS, "2026-03-10": 1244.42}, equity=1244.42,
+        flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 50.0},
+        instants=(FlowInstant(_AT_RISEN, "2026-03-11", 50.0, "USDC"),),
+        expect=23.42 / 1171.0,
+    ),
+    # The same USDC deposit beside a BTC deposit made AFTER the read: the BTC one is not moved but
+    # is INDEXED, so the derive does enter the prefetch, and the wanted-flow filter alone must
+    # keep the USD-family one out.
+    "usdc_beside_an_unmoved_btc": dict(
+        marks={**OKX_MARKS, "2026-03-10": 1244.42}, equity=1244.42,
+        flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 101.0},
+        instants=(
+            FlowInstant(_AT_RISEN, "2026-03-11", 50.0, "USDC"),
+            FlowInstant(_ms(2026, 3, 11, 0, 20), "2026-03-11", 0.0005, "BTC"),
+        ),
+        expect=23.42 / 1171.0,
+    ),
+    # A BTC deposit at 00:20:00Z, after the 00:10Z read of the stored 03-10 mark, stays in 03-11
+    # at its own-day value, so the 03-10 mark holds no deposit: r(03-10) = (1194.42 - 1171.0) / 1171.0.
+    "btc_after_the_read": dict(
+        marks=OKX_MARKS, equity=1194.42, flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-11": 51.0},
+        instants=(FlowInstant(_ms(2026, 3, 11, 0, 20), "2026-03-11", 0.0005, "BTC"),),
+        expect=(1194.42 - 1171.0) / 1171.0,
+    ),
+    # 03-09 is not the read day of any stored mark (there is no 03-08 mark), so nothing moves it.
+    "btc_off_a_read_day": dict(
+        marks=OKX_MARKS, equity=1194.42, flows={OKX_FLOW_DAY: OKX_FLOW, "2026-03-09": 51.0},
+        instants=(FlowInstant(_ms(2026, 3, 9, 0, 5), "2026-03-09", 0.0005, "BTC"),),
+        expect=(1194.42 - 1171.0 - 51.0) / (1171.0 + 51.0),
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", list(_NO_READ_CASES))
+async def test_deribit_no_chart_read_without_a_moved_indexed_flow(case: str) -> None:
+    """A derive with no moved INDEXED flow reads neither the venue nor the store: a USD-family
+    deposit in the window, that same deposit beside an unmoved BTC one, a BTC deposit after the
+    read, and a BTC deposit on a day no stored mark was read. The chart script is EMPTY and the
+    check is on its RECORDED calls (the reader would turn an over-run AssertionError into a
+    structural no-data answer). The derive completes and the expected return is typed per case."""
+    spec = _NO_READ_CASES[case]
+    db = KeyDb()
+    seed_deribit_marks(db, spec["marks"])
+    table = FlowPricesTable()
+    chart = _ScriptedChart([])
+    result, _ = await derive_deribit_key(
+        db, collapsed_equity=spec["equity"], collapsed_upnl=spec["equity"] - OKX_TERMINAL,
+        now=at_0010("2026-03-11"), composed_flows=spec["flows"], instants=spec["instants"],
+        ledger_marks={"BTC": series({
+            "2026-03-09": 100_000.0, "2026-03-10": 100_000.0, "2026-03-11": 102_000.0,
+        })},
+        chart=chart, flow_prices=table,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert db.rows(KEY_DRB)["2026-03-10"] == pytest.approx(spec["expect"], abs=1e-12)
+    assert chart.calls == []
+    assert table.reads == 0 and table.upsert_calls == 0 and table.rows == {}
 
 
 @pytest.mark.asyncio

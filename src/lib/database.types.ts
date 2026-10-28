@@ -430,6 +430,46 @@ export type Database = {
           },
         ]
       }
+      // 2026-10-28 (Phase 177 DERIBITFLOWS plan 07): api_key_flow_prices is
+      // hand-added from migration 20261101120000, which has NOT applied to PROD
+      // yet. A regen against the linked PROD project drops it until it does;
+      // re-apply it then. Service-role only (no browser code reads it). Only the
+      // api_keys foreign key is listed.
+      api_key_flow_prices: {
+        Row: {
+          api_key_id: string
+          created_at: string
+          instrument: string
+          minute_ms: number
+          price: number
+          source: string
+        }
+        Insert: {
+          api_key_id: string
+          created_at?: string
+          instrument: string
+          minute_ms: number
+          price: number
+          source: string
+        }
+        Update: {
+          api_key_id?: string
+          created_at?: string
+          instrument?: string
+          minute_ms?: number
+          price?: number
+          source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_key_flow_prices_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       // 2026-10-26 (Phase 167.2.1.1.1 NAVMTM plan 02): api_key_nav_marks is
       // hand-added from migration 20261029120000, which has NOT applied to PROD
       // yet. A regen against the linked PROD project drops it until it does;

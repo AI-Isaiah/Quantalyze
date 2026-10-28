@@ -614,6 +614,56 @@ def test_rule_10_moves_the_prior_day_amount_in_and_the_own_day_amount_out() -> N
     assert plain.flow_moves_out == plain.flow_moves
 
 
+def test_placed_flow_instants_is_what_apply_marks_moves() -> None:
+    """Phase 177 DERIBITFLOWS. ``placed_flow_instants`` is the one statement of rule 10, shared by
+    ``apply_marks`` and by the prefetch and coverage check of a moved Deribit flow, so what it
+    selects must be exactly what ``apply_marks`` moves. Marks: 03-06 read 03-07 00:10Z, 03-07 read
+    03-08 00:10Z, 03-09 with no read. Instants, all hand-typed:
+      A 03-07 00:05  amount 660.0 prior 600.0  before mark 03-06's read   -> moved
+      B 03-07 00:10  amount 100.0 no prior     exactly at the read         -> moved (at or before)
+      C 03-07 00:10:00.001 amount 50.0         after the read              -> stays on 03-07
+      D 03-08 00:05  amount 70.0 prior 65.0    before mark 03-07's read    -> moved
+      E 03-10 00:05  amount 30.0               read day of mark 03-09, which has no read -> never moved
+    03-06 moves out 660.0 + 100.0 = 760.0 and in 600.0 + 100.0 = 700.0; 03-07 moves out 70.0 and in 65.0;
+    03-09 moves nothing."""
+    import services.nav_marks_apply as nma
+
+    utc = dt.timezone.utc
+    read_06 = dt.datetime(2026, 3, 7, 0, 10, tzinfo=utc)
+    read_07 = dt.datetime(2026, 3, 8, 0, 10, tzinfo=utc)
+    marks = [
+        nma.AppliedMark("2026-03-06", 3000.0, 0.0, read_06),
+        nma.AppliedMark("2026-03-07", 3100.0, 0.0, read_07),
+        nma.AppliedMark("2026-03-09", 3200.0, 0.0, None),
+    ]
+    instants = [
+        nma.FlowInstant(_ms(dt.datetime(2026, 3, 7, 0, 5, tzinfo=utc)), "2026-03-07", 660.0, "USD", 600.0),
+        nma.FlowInstant(_ms(read_06), "2026-03-07", 100.0),
+        nma.FlowInstant(_ms(read_06) + 1, "2026-03-07", 50.0),
+        nma.FlowInstant(_ms(dt.datetime(2026, 3, 8, 0, 5, tzinfo=utc)), "2026-03-08", 70.0, "USD", 65.0),
+        nma.FlowInstant(_ms(dt.datetime(2026, 3, 10, 0, 5, tzinfo=utc)), "2026-03-10", 30.0),
+    ]
+
+    out = nma.apply_marks(
+        _series(REALIZED_DAYS, [0.0] * 5),
+        {"2026-03-07": 810.0, "2026-03-08": 70.0, "2026-03-10": 30.0},
+        marks,
+        flow_instants=instants,
+    )
+
+    assert out.flow_moves == {"2026-03-06": 700.0, "2026-03-07": 65.0}
+    assert out.flow_moves_out == {"2026-03-06": 760.0, "2026-03-07": 70.0}
+    for mark in marks:
+        placed = nma.placed_flow_instants(instants, dt.date.fromisoformat(mark.day), mark.read_at)
+        moved_out = sum(fi.amount for fi in placed)
+        moved_in = sum(
+            fi.amount if fi.amount_prior_day is None else fi.amount_prior_day for fi in placed
+        )
+        assert out.flow_moves.get(mark.day, 0.0) == moved_in
+        assert out.flow_moves_out.get(mark.day, 0.0) == moved_out
+    assert nma.placed_flow_instants(instants, dt.date(2026, 3, 9), None) == []
+
+
 def test_covered_days_lists_quiet_and_gap_days() -> None:
     """Callers hand ``covered_days`` to ``derive_basis_series`` so the days a stored mark's
     return covers are neither refused as gaps nor filled with a flat 0.0. That is the quiet

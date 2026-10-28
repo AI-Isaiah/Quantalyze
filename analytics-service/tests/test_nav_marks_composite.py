@@ -19,19 +19,30 @@ Stored marks are served by a stand-in for ``read_key_marks`` keyed on the member
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
+import logging
 from contextlib import ExitStack
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import ccxt
 import pandas as pd
 import pytest
 
+from services.deribit_ingest import CompletenessReport
 from services.external_flows import ExternalFlow, FlowInstant
-from services.job_worker import DispatchOutcome, run_stitch_composite_job
+from services.flow_price_store import FlowPriceStoreError
+from services.job_worker import DispatchOutcome, classify_exception, run_stitch_composite_job
 from services.nav_marks import StoredMark
 from services.nav_marks_apply import MarkedSeries
 from services.stitch_composite import coverage_mask
+from tests.test_flow_price_store import FlowPricesTable, route_flow_prices
+from tests.test_nav_marks_derive_apply import (
+    assert_flow_index_refusal_copy,
+    candles,
+    scripted_chart,
+)
 from tests.test_stitch_composite_job import (
     _STRATEGY_ID,
     _FakeSupabase,
@@ -39,6 +50,7 @@ from tests.test_stitch_composite_job import (
     _deribit_patches,
     _member,
     _returns,
+    _stub_ledger,
 )
 
 #: The strategy row of an UNCONFIGURED composite (no returns_denominator_config).
@@ -423,20 +435,43 @@ async def run_deribit_composite(
     *,
     marks: dict[str, list[StoredMark]] | None = None,
     strategy_row: dict[str, Any] | None = None,
+    ledgers: dict[str, Any] | None = None,
+    composed: dict[str, dict[str, float]] | None = None,
+    charts: dict[str, Any] | None = None,
+    flow_prices: FlowPricesTable | None = None,
+    extra_patches: list[Any] | None = None,
+    fake_sink: list[_FakeSupabase] | None = None,
 ) -> tuple[Run, dict[str, MagicMock]]:
     """Run the real composite job over two perp-only Deribit members (key-1, key-2). The
     mark_to_market second pass runs (an all-Deribit perp book is MTM-admissible), so the call
     order of the faked combiner is: cash m1, cash m2, then mtm m1, mtm m2. The three NAV-path
-    ledger helpers answer literals: no flows, no P&L."""
+    ledger helpers answer literals: no flows, no P&L.
+
+    Phase 177 (DERIBITFLOWS plan 06) keywords, all defaulting to the harness as it was: ``ledgers``
+    maps a member's key id to the ledger its build returns (a member without an entry gets the
+    shared stub); ``composed`` maps a key id to its ledger's composed flows by day (the helper
+    answers by ledger identity, empty for any other); ``charts`` maps a key id to the scripted
+    ``get_tradingview_chart_data`` of that member's exchange, and every close of that exchange is
+    recorded in the chart's own ``events`` as ``"close"`` (a read on a closed exchange would
+    otherwise be hidden by the mocked close); ``flow_prices`` is the in-memory
+    ``api_key_flow_prices``, routed on every member; ``extra_patches`` apply last; ``fake_sink``
+    receives the faked store so a test that RAISES can still read what was written."""
     members = [_member(1, "2026-01-01", "2026-03-01"), _member(2, "2026-03-01", None)]
     fake = _FakeSupabase(
         members=members,
         strategy_row=strategy_row if strategy_row is not None else dict(_PLAIN_STRATEGY),
     )
+    if fake_sink is not None:
+        fake_sink.append(fake)
     ctxs: dict[str, MagicMock] = {}
     for m in members:
         c = _ctx("deribit")
         c.key_row = {"id": m["api_key_id"], "user_id": "owner-1", "exchange": "deribit"}
+        if charts and m["api_key_id"] in charts:
+            c.exchange.public_get_get_tradingview_chart_data = charts[m["api_key_id"]]
+        if flow_prices is not None:
+            c.supabase.table.side_effect = lambda _name: MagicMock()
+            route_flow_prices(c, flow_prices)
         ctxs[m["api_key_id"]] = c
 
     async def _preflight(member_job: dict[str, Any], _caller: str) -> MagicMock:
@@ -467,6 +502,38 @@ async def run_deribit_composite(
             new=MagicMock(return_value=pd.Series(dtype="float64")),
         ),
     ]
+    if ledgers is not None:
+        by_exchange = {id(c.exchange): kid for kid, c in ctxs.items()}
+        member_ledgers = {kid: ledgers.get(kid, _stub_ledger()) for kid in ctxs}
+        key_of_ledger = {id(led): kid for kid, led in member_ledgers.items()}
+        report = CompletenessReport(
+            total_return_rows=2, indexable_currencies=frozenset({"BTC"}), has_option_activity=False,
+        )
+
+        async def _build(exchange: Any, **_kw: Any) -> Any:
+            return member_ledgers[by_exchange[id(exchange)]], report
+
+        def _composed(ledger: Any, _indexable: Any) -> pd.Series:
+            values = (composed or {}).get(key_of_ledger.get(id(ledger), ""), {})
+            return day_series(values) if values else pd.Series(dtype="float64")
+
+        patches += [
+            patch("services.deribit_ingest.build_deribit_native_ledger", new=AsyncMock(side_effect=_build)),
+            patch("services.broker_dailies.native_ledger_composed_flows", new=MagicMock(side_effect=_composed)),
+        ]
+    if flow_prices is not None:
+        # The store calls run in order on the test thread, like the job_worker stand-in.
+        patches.append(patch(
+            "services.deribit_flow_prices.db_execute", new=AsyncMock(side_effect=lambda fn: fn()),
+        ))
+    if charts:
+        async def _close(exchange: Any) -> None:
+            for kid, chart in charts.items():
+                if ctxs[kid].exchange is exchange:
+                    chart.events.append("close")
+
+        patches.append(patch("services.job_worker.aclose_exchange", new=AsyncMock(side_effect=_close)))
+    patches += extra_patches or []
     with ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
@@ -734,3 +801,235 @@ async def test_a_composite_names_where_an_open_member_stops_getting_marks() -> N
     )
     assert closed.result.outcome == DispatchOutcome.DONE, closed.result.error_message
     assert "marks_trailing_since" not in closed.flags()
+
+
+# --------------------------------------------------------------------------------------
+# Phase 177 DERIBITFLOWS plan 06 - a Deribit member's moved flow is counted at its candle open
+# --------------------------------------------------------------------------------------
+
+
+def _ms(*args: int) -> int:
+    return int(dt.datetime(*args, tzinfo=dt.timezone.utc).timestamp() * 1000)
+
+
+#: Member 2's marks: 03-06 (1050.0), 03-07 (1071.0) and 03-09 (1132.62), each read 00:10Z the next
+#: day. The 03-09 mark is read at 00:10Z on 03-10, so a deposit made on 03-10 before that read is
+#: inside its wallet (D-23).
+MOVED_MARKS_KEY2 = [
+    stored("2026-03-06", 1050.0, open_pnl=50.0),
+    stored("2026-03-07", 1071.0, open_pnl=71.0),
+    stored("2026-03-09", 1132.62, open_pnl=132.62),
+]
+#: Member 2's ledger: one 0.0004 BTC deposit at 00:05:20Z on 03-10, day marks 100000.0 (03-09) and
+#: 105000.0 (03-10, the OWN-day mark the day aggregate stores: 0.0004 x 105000.0 = 42.0).
+_MOVED_AT = _ms(2026, 3, 10, 0, 5, 20)
+_MOVED_MINUTE = _ms(2026, 3, 10, 0, 5)
+_MOVED_LEDGER = dataclasses.replace(
+    _stub_ledger(),
+    flow_instants=(FlowInstant(_MOVED_AT, "2026-03-10", 0.0004, "BTC"),),
+    marks={"BTC": day_series({"2026-03-09": 100_000.0, "2026-03-10": 105_000.0})},
+)
+_MOVED_CANDLES = candles(
+    (_MOVED_MINUTE - 60_000, 100_400.0), (_MOVED_MINUTE, 100_500.0), (_MOVED_MINUTE + 60_000, 100_600.0),
+)
+_MOVED_PRICE_KEY = ("BTC_USDC-PERPETUAL", _MOVED_MINUTE)
+_MOVED_BTC_DEPOSIT = 0.0004
+
+
+async def run_moved_deribit_composite(chart: Any, table: FlowPricesTable, **kw: Any) -> tuple[Run, Any]:
+    """The plan 06 scenario: member 2 holds the moved BTC deposit above; ``chart`` is the scripted
+    answer of its exchange (None: the member's exchange is left unscripted)."""
+    charts = {"key-2": chart} if chart is not None else None
+    run, _ = await run_deribit_composite(
+        marks={"key-2": MOVED_MARKS_KEY2},
+        ledgers={"key-2": _MOVED_LEDGER},
+        composed={"key-2": {"2026-03-10": 42.0}},
+        charts=charts,
+        flow_prices=table,
+        **kw,
+    )
+    return run, chart
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_moved_btc_flow_priced_at_the_instant_price() -> None:
+    """Phase 177 D-04 on a plain Deribit composite member, with the member's EXACT marks. A 0.0004
+    BTC deposit made at 00:05:20Z on 03-10, before the 00:10Z read of the 03-09 mark (NAV 1132.62),
+    is inside that mark's wallet. The ledger's own-day mark for 03-10 is 105000.0 (0.0004 x 105000.0
+    = 42.0, the amount the day aggregate stores and the amount that leaves 03-10). It is COUNTED in
+    03-09 at the open of the 1-minute BTC_USDC-PERPETUAL candle that contains it (00:05, open
+    100500.0; 00:04 and 00:06 open 100400.0 and 100600.0, so an adjacent-candle rule is
+    distinguishable):
+      counted in 03-09:  0.0004 x 100500.0 = 40.2
+      base = level(03-07) 1071.0 (the 03-08 gap day carries no flow)
+      r(03-09) = (1132.62 - 1071.0 - 40.2) / 1071.0 = 21.42 / 1071.0
+    which equals R_0309: the deposit priced at its instant leaves the no-deposit return. The old
+    own-day pricing counts 42.0 and stores 19.62 / 1071.0. The read is made while the member's
+    exchange is open (the chart event precedes its close), once, and the price is stored."""
+    table = FlowPricesTable()
+    chart = scripted_chart(_MOVED_CANDLES)()
+    run, _ = await run_moved_deribit_composite(chart, table)
+    assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
+    rows = run.csv_rows()
+    assert rows["2026-03-09"] == pytest.approx(21.42 / 1071.0, abs=1e-12)
+    assert rows["2026-03-09"] == pytest.approx(R_0309, abs=1e-12)
+    assert rows["2026-03-06"] == pytest.approx(0.05, abs=1e-12)
+    assert rows["2026-03-07"] == pytest.approx(0.02, abs=1e-12)
+    assert {d: v for d, v in rows.items() if d <= "2026-02-28"} == M1_FULL, "member 1 is untouched"
+    assert len(chart.calls) == 1
+    assert chart.events.index("chart") < chart.events.index("close"), "read on an open exchange"
+    assert table.prices("key-2") == {_MOVED_PRICE_KEY: 100_500.0}
+
+
+def _nothing_persisted(fake: _FakeSupabase) -> bool:
+    """A run that RAISED left no csv row, no analytics row (not even a failed stamp) and no rpc."""
+    return not [t for t, _p, _c in fake.upserts if t in ("csv_daily_returns", "strategy_analytics")] and not fake.rpc_calls
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_moved_flow_no_data_refuses_the_composite() -> None:
+    """D-05. The oracle's scenario with the chart answering ``no_data``: the minute has no price,
+    so the member's moved BTC deposit is neither counted at the own-day mark nor at any fallback.
+    The composite refuses by name, permanent, on the same road as a nav-marks refusal: nothing is
+    persisted (no csv upsert, no headline), and the structural answer is not retried (one chart
+    call)."""
+    table = FlowPricesTable()
+    chart = scripted_chart({"result": {"status": "no_data"}})()
+    run, _ = await run_moved_deribit_composite(chart, table)
+    assert run.result.outcome == DispatchOutcome.FAILED
+    assert run.result.error_kind == "permanent"
+    assert "nav marks refused (seq=2, mark_flow_index_unavailable)" in run.result.error_message
+    assert not run.wrote_anything_but_a_failed_stamp()
+    assert run.headline() is None
+    stamps = [p for t, p, _c in run.fake.upserts if t == "strategy_analytics"]
+    assert len(stamps) == 1
+    assert_flow_index_refusal_copy(stamps[0]["computation_error"])
+    assert len(chart.calls) == 1
+    assert table.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_moved_flow_rate_limited_stamps_the_member_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-05, T-177-25. The chart answers a 429 on all nine attempts (backoff 0.0). The reader
+    re-raises the last one as itself; the composite's existing ``ccxt.RateLimitExceeded`` member arm
+    stamps the MEMBER key through ``_stamp_429`` once and returns a transient failure."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    stamp = AsyncMock()
+    monkeypatch.setattr("services.job_worker._stamp_429", stamp)
+    chart = scripted_chart(*[ccxt.RateLimitExceeded(f"429 attempt {n}") for n in range(9)])()
+    run, _ = await run_moved_deribit_composite(chart, FlowPricesTable())
+    assert run.result.outcome == DispatchOutcome.FAILED
+    assert run.result.error_kind == "transient"
+    assert len(chart.calls) == 9
+    stamp.assert_awaited_once()
+    assert stamp.await_args.args[1]["id"] == "key-2"
+    assert not run.wrote_anything_but_a_failed_stamp()
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_moved_flow_ddos_protection_stamps_the_member_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-05, WR-01. Deribit's real rate-limit reply is ``ccxt.DDoSProtection``. The reader re-raises
+    the last one as itself and the composite's member arm stamps the MEMBER key through
+    ``_stamp_429`` once and returns a transient failure."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    stamp = AsyncMock()
+    monkeypatch.setattr("services.job_worker._stamp_429", stamp)
+    chart = scripted_chart(*[ccxt.DDoSProtection(f"too_many_requests {n}") for n in range(9)])()
+    run, _ = await run_moved_deribit_composite(chart, FlowPricesTable())
+    assert run.result.outcome == DispatchOutcome.FAILED
+    assert run.result.error_kind == "transient"
+    assert len(chart.calls) == 9
+    stamp.assert_awaited_once()
+    assert stamp.await_args.args[1]["id"] == "key-2"
+    assert not run.wrote_anything_but_a_failed_stamp()
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_moved_flow_transient_read_is_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-N21b, T-177-32. The chart times out on all nine attempts (backoff 0.0), so the reader
+    raises ``DeribitTransientReadError``. The member arm's bare ``except Exception`` re-raises it
+    (it is not geo-blocked), exactly as a member's own ledger ``DeribitTransientReadError`` is today,
+    and the dispatcher files it ``unknown``: retried by default, never ``permanent``. A permanent
+    refusal here would stop a recoverable composite for good. Nothing is persisted."""
+    monkeypatch.setattr("services.deribit_ingest.PUBLIC_READ_BACKOFF_BASE_SECONDS", 0.0)
+    chart = scripted_chart(*[ccxt.RequestTimeout(f"timeout {n}") for n in range(9)])()
+    sink: list[_FakeSupabase] = []
+    from services.deribit_ingest import DeribitTransientReadError
+
+    with pytest.raises(DeribitTransientReadError) as exc_info:
+        await run_moved_deribit_composite(chart, FlowPricesTable(), fake_sink=sink)
+    assert classify_exception(exc_info.value)[0] == "unknown"
+    assert len(chart.calls) == 9
+    assert _nothing_persisted(sink[0])
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_moved_flow_store_fault_is_retryable() -> None:
+    """D-N21b, T-177-32. The flow-price table fails a read (which is also what an absent table, a
+    worker deployed before its migration applied, looks like). The store read runs before any
+    chart read, so the chart is never called. ``FlowPriceStoreError`` reaches the bare
+    ``except Exception`` arm, which re-raises it, and the dispatcher files it ``unknown`` (retried),
+    never ``permanent``. Nothing is persisted."""
+    table = FlowPricesTable()
+    table.fail_reads = RuntimeError("relation does not exist")
+    chart = scripted_chart(_MOVED_CANDLES)()
+    sink: list[_FakeSupabase] = []
+    with pytest.raises(FlowPriceStoreError) as exc_info:
+        await run_moved_deribit_composite(chart, table, fake_sink=sink)
+    assert classify_exception(exc_info.value)[0] == "unknown"
+    assert chart.calls == []
+    assert _nothing_persisted(sink[0])
+
+
+def _composite_moved_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Every INFO record the composite's D-01 counts line produced."""
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.INFO
+        and r.getMessage().startswith("run_stitch_composite_job: deribit flows moved by marks")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_flows_moved_log(caplog: pytest.LogCaptureFixture) -> None:
+    """D-01 (founder 2026-10-28), composites. Each Deribit member that applies marks logs ONE
+    counts-only INFO line, emitted even at zero so a missing line is never read as zero:
+    the oracle's scenario (one BTC deposit moved into the 03-09 mark, which is the last mark) says
+    moved=1 at_instant=1 usd_family=0 on_last_mark=1; marks with no flow instant at all say
+    moved=0. Only ``seq`` and counts: no key id, amount, minute or instrument. A ccxt member that
+    applies marks never logs it."""
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        run, _ = await run_moved_deribit_composite(
+            scripted_chart(_MOVED_CANDLES)(), FlowPricesTable()
+        )
+    assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
+    assert _composite_moved_lines(caplog) == [
+        "run_stitch_composite_job: deribit flows moved by marks "
+        "(seq=2 moved=1 at_instant=1 usd_family=0 on_last_mark=1)"
+    ]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        zero, _ = await run_deribit_composite(marks={"key-2": MARKS_KEY2})
+    assert zero.result.outcome == DispatchOutcome.DONE, zero.result.error_message
+    lines = _composite_moved_lines(caplog)
+    assert lines == [
+        "run_stitch_composite_job: deribit flows moved by marks "
+        "(seq=2 moved=0 at_instant=0 usd_family=0 on_last_mark=0)"
+    ]
+    for line in lines:
+        assert "key-1" not in line and "key-2" not in line
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        ccxt_run = await run_ccxt_composite(
+            windows=_TWO_MEMBERS, series=[M1_FULL, M2_FULL], marks={"key-2": MARKS_KEY2},
+        )
+    assert ccxt_run.result.outcome == DispatchOutcome.DONE, ccxt_run.result.error_message
+    assert _composite_moved_lines(caplog) == []
