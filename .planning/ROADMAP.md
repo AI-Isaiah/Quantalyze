@@ -204,13 +204,14 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — 4 plans, shipped v0.131.4.0 (#1023) (completed 2026-10-14); closed 2026-10-14 (records PR)
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 - [ ] **Phase 171: READCEILING — an account above the trade-read ceiling is read in full** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
-- [ ] **Phase 172: OKXANCHOR — an OKX account's history rebuild gets a plausible balance anchor** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
+- [x] **Phase 172: OKXANCHOR — an OKX account's history rebuild gets a plausible balance anchor** — complete 2026-10-28 (v0.133.4.0 #1136; booked 2026-10-27 from TRADEPAGES; data-integrity; SC-3: a4 still refused, bills chain does not close (`chain_break`), routed to Phase 179 by the founder)
 - [ ] **Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
-- [ ] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
+- [x] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — complete 2026-10-28 (v0.133.2.0 #1133, shipped 2026-10-27; booked 2026-10-27 from NAVMTM review)
 - [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
 - [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
 - [ ] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — booked 2026-10-27 from MARKSOURCE plan 03 (founder 2026-10-27 "Deribit moved-flow pricing"), not planned yet
 - [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
+- [ ] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — booked 2026-10-28 from OKXANCHOR plan 05 (founder 2026-10-28 "Record, route a follow-up"), not planned yet
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6420,7 +6421,7 @@ Plans:
 **Goal:** The history rebuild for an OKX-backed account finds why its balance anchor is judged implausible and either anchors correctly or refuses with the true reason.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.2.1
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 
 Booked 2026-10-27 from TRADEPAGES plan 06 (same founder decisions as Phase 171). Evidence: the 2026-10-26 probe read a4 (OKX, 90-day window) for 1282 trades over 22 calls and refused `anchor_skipped_implausible`; TODOS `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`. Data integrity.
 
@@ -6429,8 +6430,14 @@ Booked 2026-10-27 from TRADEPAGES plan 06 (same founder decisions as Phase 171).
 2. An OKX account with a correct balance anchors and rebuilds; a truly implausible anchor still refuses by name; tests go RED on the old behaviour.
 3. After deploy the probe re-reads a4 and the outcome is recorded.
 
+**SC-3 outcome 2026-10-28 (plan 05):** a4 stayed refused `anchor_skipped_implausible`; the complete bills walk (1489 bills) could not prove the opening (`chain_break`), against plan 03's expected anchoring. Founder 2026-10-28 "Record, route a follow-up (Recommended)": booked as Phase 179 OKXBILLSCHAIN; the 0.05 tolerance is kept and re-decided there ("Keep 0.05, re-decide later (Recommended)"). No rebuild enqueued.
+
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 172-01-PLAN.md — OKX bills-balance opening oracle (read-only, GET-only, fails closed by name) and a real-path replacement for the cannot-fail implausible-anchor test (wave 1)
+- [x] 172-02-PLAN.md — Probe anchor diagnostic for an OKX member refused `anchor_skipped_implausible`: D-01 readings and oracle verdict inputs within the redaction contract (wave 2)
+- [x] 172-03-PLAN.md — Operator: run the probe on a4 on the backfill worker, name the refusal's cause (SC-1), founder decision and tolerance (wave 3)
+- [x] 172-04-PLAN.md — Forced OKX anchor gets the oracle as a second opinion behind the 5x trigger, tests RED on the old gate; runs only if plan 03 chooses it (wave 4)
+- [x] 172-05-PLAN.md — Operator: post-deploy re-read of a4 and outcome recorded (SC-3) (wave 5)
 
 ### Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live
 
@@ -6454,17 +6461,18 @@ Plans:
 **Goal:** A strategy whose marks have paused no longer triggers the hourly ledger re-crawl, and the reason a mark was refused is kept where only the owner (or an admin) can read it, never in public flags.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.1
-**Plans:** 0 plans
+**Plans:** 2/2 plans complete
 
 Booked 2026-10-27 from NAVMTM 167.2.1.1.1 review (REVIEW-2 WR-03, SFH F3 / REVIEW-2 WR-04, routed after three fixer rounds). Not user-facing.
 
 **Success Criteria** (what must be TRUE):
-1. A series whose staleness is explained by `marks_trailing_since` is excluded from the hourly ledger re-crawl (needs a migration to the staleness view or fan-out).
+1. A series whose staleness is explained by `marks_trailing_since` is re-admitted by the ledger fan-out once every 7 days instead of daily once the pause is 3 or more days old, daily before that (founder 2026-10-27, CONTEXT D-01 "Re-admit weekly" refined by D-04 "Weekly only after 3 days paused"; the fan-out's 20-hour cooldown means today's cost is about one derive a day, not hourly), via a migration to the single-key fan-out only.
 2. A strategy-mode mark refusal token and its first-seen day are recorded in an owner-only or admin-only store; no public `data_quality_flags` field carries it.
 3. Tests go RED on the re-crawl and on a token reaching a public field.
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 174-01-PLAN.md — weekly re-admit of a paused marked strategy in the ledger fan-out (migration, SQL gate arms, censuses) (wave 1)
+- [x] 174-02-PLAN.md — owner-only refusal record with first-seen day, public-flag pins, runbook readout (wave 1)
 
 ### Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset
 
@@ -6529,6 +6537,23 @@ Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 CONTEXT D-09 (founder 2026-10-27
 1. The Phase 173 OKX ordering gate reading (`okx-order: ok`, 0 violations) is cited by run before any rewrite; any other reading stops the phase.
 2. The 90-day window is rebuilt through the product's forced-rebuild path, with a before/after census (counts only, marker query first) from MARKSOURCE's `docs/runbooks/marksource-okx-census/okx-snapshot-rows.sql` (on the MARKSOURCE branch, not yet on main at booking).
 3. Rows older than the 90-day window and `allocator_holdings` history are named as kept, with their counts.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named
+
+**Goal:** Find why the OKX bills-archive running balance does not close for a4 (`chain_break` over 1489 bills), fix the reading or name the break, then re-decide the 0.05 opening tolerance on a complete walk, before any OKX history rebuild.
+**Requirements**: TBD
+**Depends on:** Phase 172
+**Plans:** 0 plans
+
+Booked 2026-10-28 from OKXANCHOR 172 plan 05 (SC-3 mismatch: founder 2026-10-28 "Record, route a follow-up (Recommended)"; tolerance founder 2026-10-28 "Keep 0.05, re-decide later (Recommended)"). Evidence: the 2026-10-28 deployed probe refused a4 `anchor_skipped_implausible` with `opening_check=unavailable`, `opening_unavailable_reason=chain_break`, `bills_read=1489`, `bal_over_cashbal=1`; plan 03 had expected it to anchor. TODOS `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE` and `172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT`. Data integrity.
+
+**Success Criteria** (what must be TRUE):
+1. A read-only measurement (counts and tokens only) names which arm of `chain_break` fires for a4, a bill whose `bal` is not the previous `bal` plus its `balChg` or a newest `bal` that is not today's cash balance, and which currency and bill kind it falls on.
+2. The cause is fixed in the bills oracle with a test that goes RED on the old reading, or recorded as a real gap in OKX's archive with a named refusal; a4 never anchors on an unproven opening.
+3. After deploy the probe re-reads a4: `opening_check` is `measured` with a residual, or the refusal carries the named cause, and the 0.05 tolerance is kept or re-set by the founder on that reading.
 
 Plans:
 - [ ] TBD — plans not listed yet
@@ -6824,13 +6849,14 @@ kept verbatim.
 | 170.6.2 COPYPASS | 4/4 | Complete | 2026-10-14 |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 | 171 READCEILING | 0/0 | Not started | - |
-| 172 OKXANCHOR | 0/0 | Not started | - |
+| 172 OKXANCHOR | 5/5 | Complete — v0.133.4.0 #1136; SC-1 and SC-2 verified in code; SC-3 recorded post-deploy: a4 refused `anchor_skipped_implausible` (`chain_break` over 1489 bills), not the expected anchoring; routed to 179 OKXBILLSCHAIN (founder); 0.05 tolerance kept, re-decided there; no rebuild | 2026-10-28 |
 | 173 REBUILDGATES | 0/0 | Not started | - |
-| 174 MARKPAUSE | 0/0 | Not started | - |
+| 174 MARKPAUSE | 2/2 | Complete — v0.133.2.0 #1133 (re-dump #1134); weekly re-admit of a paused marked series after 3 days, mark refusals kept owner-only | 2026-10-28 |
 | 175 MT5OFFSET | 0/0 | Not started | - |
 | 176 LEGACYRETIRE | 0/0 | Not started | - |
 | 177 DERIBITFLOWS | 0/0 | Not started | - |
 | 178 OKXREWRITE | 0/0 | Not started | - |
+| 179 OKXBILLSCHAIN | 0/0 | Not started | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
