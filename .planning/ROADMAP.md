@@ -208,6 +208,9 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
 - [ ] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
 - [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
+- [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
+- [ ] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — booked 2026-10-27 from MARKSOURCE plan 03 (founder 2026-10-27 "Deribit moved-flow pricing"), not planned yet
+- [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6480,6 +6483,56 @@ Booked 2026-10-27 from NAVMTM 167.2.1.1.1 REVIEW-3 WR-02 (routed after three fix
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series
+
+**Goal:** The legacy allocator equity curve (the snapshot series written by the holdings poll and the daily refresh) is retired: every reader moves to the marked series, and the poll and refresh writers stop or are repurposed.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 by MARKSOURCE 167.2.1.1.1.1 CONTEXT D-01 ("Retiring the legacy curve is booked as its own phase"; founder 2026-10-27 "Retire legacy curve (Recommended)"). Until then MARKSOURCE keeps both curves and aligns them.
+
+**Success Criteria** (what must be TRUE):
+1. A census lists every reader of the legacy curve (MARKSOURCE CONTEXT names `src/lib/queries.ts` snapshot count, depth months and baseline flag, `compute_bridge_outcome_deltas`, the zero-snapshot bootstrap gate, `delete_allocator_api_key` and the ACCTREBUILD window replace as starting points), and each one is moved to the marked series or removed.
+2. The holdings poll and daily refresh writers stop writing the legacy curve, or are repurposed with the new job named; the cron manifest matches.
+3. The two TODOS entries MARKSOURCE plan 07 names as closed by the legacy curve's retirement, `167.2.1.1.1.1-MT5-BTC-MISSING-CLOSE-LEGACY-EXCLUSION` and `167.2.1.1.1.1-SFOX-NONSTABLE-LEGACY-EXCLUSION`, are closed.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close
+
+**Goal:** A Deribit deposit or withdrawal is valued at the close of the day it is marked on, the way MARKSOURCE plan 03 fixed the MT5 BTC moved-flow case, so a flow moved onto a neighbouring mark day is never priced at its own day's price.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 plan 03 (RESEARCH A5: Deribit's `native_flow_instants` values an instant at the mark of its own day; same shape as the MT5 case, unmeasured, left unchanged). Founder 2026-10-27 "Deribit moved-flow pricing (Recommended)". Data integrity.
+
+**Success Criteria** (what must be TRUE):
+1. Measured first: a read-only PROD count (marker query first, counts only) of Deribit flows whose pricing day differs from their mark day is recorded.
+2. If the count is non-zero, the flow is priced at the mark day's close, and a test goes RED on the current own-day pricing.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt
+
+**Goal:** The stored OKX snapshot rows that counted open profit twice are rebuilt inside the 90-day window, once Phase 173 has measured OKX trade ordering at 0 violations, so past OKX equity reads the same as the MARKSOURCE forward fix.
+**Requirements**: TBD
+**Depends on:** Phase 173, Phase 167.2.1.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 CONTEXT D-09 (founder 2026-10-27 "Measure gate first, then rewrite (Recommended)"): MARKSOURCE ships the forward fix of D-05 and records the stored-row rewrite as a deferral. MARKSOURCE census 2026-10-27: 248 suspect days over 3 accounts, 164 inside the 90-day window. Data integrity, user-facing.
+
+**Success Criteria** (what must be TRUE):
+1. The Phase 173 OKX ordering gate reading (`okx-order: ok`, 0 violations) is cited by run before any rewrite; any other reading stops the phase.
+2. The 90-day window is rebuilt through the product's forced-rebuild path, with a before/after census (counts only, marker query first) from MARKSOURCE's `docs/runbooks/marksource-okx-census/okx-snapshot-rows.sql` (on the MARKSOURCE branch, not yet on main at booking).
+3. Rows older than the 90-day window and `allocator_holdings` history are named as kept, with their counts.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -6775,6 +6828,9 @@ kept verbatim.
 | 173 REBUILDGATES | 0/0 | Not started | - |
 | 174 MARKPAUSE | 0/0 | Not started | - |
 | 175 MT5OFFSET | 0/0 | Not started | - |
+| 176 LEGACYRETIRE | 0/0 | Not started | - |
+| 177 DERIBITFLOWS | 0/0 | Not started | - |
+| 178 OKXREWRITE | 0/0 | Not started | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 

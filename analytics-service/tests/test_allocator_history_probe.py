@@ -1624,3 +1624,739 @@ def test_main_prints_the_exception_type_only_on_a_run_level_failure(
     assert captured.err.strip() == "failed: RuntimeError"
     assert "4321.5" not in captured.err and _KEY_BYBIT not in captured.err
     assert captured.out == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 172 OKXANCHOR plan 02: the anchor diagnostic (D-01 item 1 and item 2).
+#
+# A forced OKX rebuild refused ``anchor_skipped_implausible`` says only THAT the replay
+# ended far below today's equity, not WHY. The probe measures the cause, read-only and
+# inside its redaction contract, so that the decision to anchor (plan 04) rests on a
+# reading of the real account and not on a guess. These tests prove the probe can see
+# that cause on fakes, that the refusal and the forced pass's counters are unchanged by
+# looking, and that nothing but counts, booleans, tokens and 3-figure ratios is printed.
+# ---------------------------------------------------------------------------
+
+from services import okx_opening_balance as obal  # noqa: E402
+from tests._okx_bills import (  # noqa: E402 - grouped with the section that uses them
+    OkxBillsArchive,
+    okx_balance_payload,
+    okx_bill,
+    okx_bill_chain,
+    okx_detail,
+)
+
+# Distinctive synthetic amounts: a substring search for one of these in the output
+# cannot be confused with a count or a ratio's digits.
+_ANCHOR_TOTAL_EQ = "70000"
+_ANCHOR_OPENING_USDT = "60000"
+_OPENING_DAY = _TODAY - timedelta(days=7)
+_ANCHOR_WINDOW = (_TODAY - timedelta(days=20), 21)
+
+
+class _OkxAnchorVenue(_StubVenueWithTransfers):
+    """An OKX client that also answers the two raw GETs the diagnostic reads."""
+
+    def __init__(
+        self,
+        pages: list[list[dict[str, Any]]],
+        *,
+        balance: Any,
+        bills: OkxBillsArchive,
+        deposits: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(pages, deposits=deposits or [], withdrawals=[])
+        self._balance = balance
+        self.bills = bills
+        self.balance_calls = 0
+
+    async def private_get_account_balance(self) -> Any:
+        self.balance_calls += 1
+        return self._balance
+
+    async def private_get_account_bills_archive(self, params: dict[str, str]) -> Any:
+        return await self.bills(params)
+
+
+def _opening_bills(*, with_transfer: bool = False) -> OkxBillsArchive:
+    """One USDT bill before the opening day (so the archive reaches it) and, since 00:00 UTC
+    of the opening day, a USDT chain opening at 60000 that ends at 20000 and a BTC chain
+    opening at 0 that ends at 1."""
+    opening_ms = _ms(_OPENING_DAY)
+    before = okx_bill(1, opening_ms - 5 * 86_400_000, "USDT", "60000", "5")
+    if with_transfer:
+        usdt = [
+            okx_bill(10, opening_ms + 3_600_000, "USDT", "62500", "2500", bill_type="1"),
+            okx_bill(12, opening_ms + 9_000_000, "USDT", "20000", "-42500"),
+        ]
+    else:
+        usdt = okx_bill_chain(
+            "USDT", _ANCHOR_OPENING_USDT, ["-40000"], first_id=10, first_ts=opening_ms + 3_600_000
+        )
+    btc = okx_bill_chain("BTC", "0", ["1"], first_id=11, first_ts=opening_ms + 7_200_000)
+    return OkxBillsArchive([before, *usdt, *btc])
+
+
+def _anchor_balance(**kw: Any) -> Any:
+    return okx_balance_payload(
+        _ANCHOR_TOTAL_EQ,
+        [
+            okx_detail("USDT", "20000", eq_usd="20000"),
+            okx_detail("BTC", "1", eq_usd="50000"),
+        ],
+        **kw,
+    )
+
+
+def _advisory_rows() -> list[dict[str, Any]]:
+    """The unanchored replay the advisory pass returns: the opening day, then the end date."""
+    return [
+        {"asof": _OPENING_DAY.isoformat(), "value_usd": 9000.0, "breakdown": {"USDT": 9000.0}},
+        {
+            "asof": _TODAY.isoformat(),
+            "value_usd": 10000.0,
+            "breakdown": {"BTC": 50000.0, "USDT": -40000.0},
+        },
+    ]
+
+
+def _refusing_reader(
+    *,
+    pages_per_pass: int,
+    telemetry: dict[str, Any] | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    fills_per_pass: list[dict[str, Any]] | None = None,
+    deposits_per_pass: int = 0,
+) -> Any:
+    """The rebuild's read as the forced pass meets it on an implausible OKX anchor: it drives
+    the venue the way the real loop does, then refuses when the anchor is required. Called
+    without it (the diagnostic's advisory pass) it returns the unanchored replay."""
+    advisory_telemetry = (
+        {"anchor_offset_implausible": True, "skipped_symbols": []} if telemetry is None else telemetry
+    )
+
+    async def _read(
+        exchange: Any,
+        venue: str,
+        supabase: Any,
+        start: date,
+        end: date,
+        *,
+        require_anchor: bool = False,
+    ) -> Any:
+        for i in range(pages_per_pass):
+            page = await exchange.fetch_my_trades(None, _ms(start), 500, {"type": "swap"})
+            assert isinstance(page, list)
+        for _ in range(deposits_per_pass):
+            await exchange.fetch_deposits(None, _ms(start), 500, {})
+        if require_anchor:
+            raise er.ForcedRebuildRefusedError("anchor_skipped_implausible")
+        return (_advisory_rows() if rows is None else rows), False, advisory_telemetry
+
+    return _read
+
+
+async def test_an_implausible_okx_refusal_is_measured_and_still_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The forced pass reads two pages. The diagnostic's second pass reads two more through
+    # the very same wrapped client; the TRADEPAGES counters must still say two.
+    pages = [
+        _trade_page("fa", 3, newest_ms=_ms(_TODAY)),
+        _trade_page("fb", 2, newest_ms=_ms(_TODAY) - 10**9),
+        _trade_page("ga", 4, newest_ms=_ms(_TODAY)),
+        _trade_page("gb", 5, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    okx = _OkxAnchorVenue(pages, balance=_anchor_balance(), bills=_opening_bills())
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1  # the member stays refused, so the run still fails
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+
+    assert account["member_refusal"] == "anchor_skipped_implausible"
+    assert (account["members_read"], account["members_failed"]) == (0, 1)
+    assert account["failure_class"] == "none" and account["comparable"] is False
+
+    assert account["anchor_diagnostic"] == "run" and account["diagnostic_members"] == 1
+    assert account["diagnostic_failure_class"] == "none"
+    assert account["advisory_arm"] == "implausible"  # the second pass repeated the refusal's cause
+    assert account["replay_final_sign"] == "positive"
+    assert account["anchor_over_replay"] == 7.0  # 70000 / 10000
+    assert account["opening_check"] == "measured" and account["opening_unavailable_reason"] == "none"
+    assert account["implied_opening_over_anchor"] == 0.857  # (70000 - 10000) / 70000
+    assert account["bills_opening_over_anchor"] == 0.857  # 60000 / 70000, from the venue's own bills
+    assert account["opening_residual_over_anchor"] == 0.0
+
+    # Pitfall 8: the counters are the forced pass's, not doubled by the second pass.
+    assert account["trade_calls"] == 2
+    assert account["trades_read"] == 5
+    assert account["first_page_rows"] == 3  # one "swap" pass: its first call, the one without ``until``
+    assert [a.require_anchor for a in services.read_args] == [True, None]
+    assert [a.wrapped for a in services.read_args] == [True, True]
+    assert okx.balance_calls == 1
+    assert services.supabase.writes == []
+
+    everything = captured.out + captured.err
+    for leak in (_ANCHOR_TOTAL_EQ, _ANCHOR_OPENING_USDT, "19987", _KEY_OKX, "fake-trade"):
+        assert leak not in everything, leak
+
+
+def _anchoring_reader(*, agreed: bool) -> Any:
+    """The rebuild's read when the forced pass is NOT refused: with ``agreed`` the anchor passed
+    the 5x gate only through the bills check (``anchor_opening_agreed``); without it the anchor
+    never tripped the gate. The advisory (second) pass is the unanchored replay."""
+    forced_telemetry = (
+        {"anchor_opening_agreed": True, "anchor_opening_check": "agreed", "skipped_symbols": []}
+        if agreed
+        else {"anchor_opening_agreed": False, "anchor_opening_check": "not-run", "skipped_symbols": []}
+    )
+
+    async def _read(
+        exchange: Any,
+        venue: str,
+        supabase: Any,
+        start: date,
+        end: date,
+        *,
+        require_anchor: bool = False,
+    ) -> Any:
+        for _ in range(2):
+            await exchange.fetch_my_trades(None, _ms(start), 500, {"type": "swap"})
+        if require_anchor:
+            return _advisory_rows(), False, forced_telemetry
+        return _advisory_rows(), False, {"anchor_offset_implausible": True, "skipped_symbols": []}
+
+    return _read
+
+
+async def test_an_okx_anchor_that_passed_through_the_bills_check_prints_the_oracle_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review WR-02: the OKX tolerance is re-measured from the probe's record, and an anchored
+    # member is the very case that re-measures it. Its record must say the oracle ran, not
+    # print the default ``not-run`` beside a residual of ``field-absent``.
+    pages = [
+        _trade_page("fa", 3, newest_ms=_ms(_TODAY)),
+        _trade_page("fb", 2, newest_ms=_ms(_TODAY) - 10**9),
+        _trade_page("ga", 4, newest_ms=_ms(_TODAY)),
+        _trade_page("gb", 5, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    okx = _OkxAnchorVenue(pages, balance=_anchor_balance(), bills=_opening_bills())
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _anchoring_reader(agreed=True)
+    services.install(monkeypatch)
+
+    await hp.run()
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+
+    assert account["member_refusal"] == "none" and account["members_read"] == 1
+    assert account["anchor_diagnostic"] == "run" and account["diagnostic_members"] == 1
+    assert account["advisory_arm"] == "implausible"
+    assert account["opening_check"] == "measured" and account["opening_unavailable_reason"] == "none"
+    assert account["implied_opening_over_anchor"] == 0.857
+    assert account["bills_opening_over_anchor"] == 0.857
+    assert account["opening_residual_over_anchor"] == 0.0
+    assert account["bills_read"] == 2  # the USDT and BTC bills since the opening day
+    assert account["bal_over_cashbal"] == 1.0
+
+    # Pitfall 8: the second pass does not double the forced pass's counters.
+    assert account["trade_calls"] == 2
+    assert account["trades_read"] == 5
+    assert [a.require_anchor for a in services.read_args] == [True, None]
+    assert services.supabase.writes == []
+
+    everything = captured.out + captured.err
+    for leak in (_ANCHOR_TOTAL_EQ, _ANCHOR_OPENING_USDT, "19987", _KEY_OKX, "fake-trade"):
+        assert leak not in everything, leak
+
+
+async def test_an_okx_anchor_that_never_tripped_the_gate_pays_for_no_second_pass(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    okx = _OkxAnchorVenue(
+        [_trade_page("fa", 3, newest_ms=_ms(_TODAY)), _trade_page("fb", 2, newest_ms=_ms(_TODAY) - 10**9)],
+        balance=_anchor_balance(),
+        bills=_opening_bills(),
+    )
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _anchoring_reader(agreed=False)
+    services.install(monkeypatch)
+
+    await hp.run()
+    account, _summary = _stdout_records(capsys)
+    assert account["anchor_diagnostic"] == "not-run" and account["opening_check"] == "not-run"
+    assert account["diagnostic_members"] == 0
+    assert [a.require_anchor for a in services.read_args] == [True]
+    assert okx.balance_calls == 0
+
+
+async def test_no_diagnostic_for_another_refusal_or_another_venue(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An OKX member refused for another reason, and a Bybit member refused for the same
+    # reason, are not measured: the diagnostic exists for OKX's implausible anchor only.
+    unreadable = _OkxAnchorVenue([[]], balance=_anchor_balance(), bills=_opening_bills())
+    bybit = _OkxAnchorVenue([[]], balance=_anchor_balance(), bills=_opening_bills())
+    book = {
+        "api_keys": [
+            _key_row(_KEY_OKX, _USER_ONE, "okx", "2026-01-01T00:00:00Z"),
+            _key_row(_KEY_BYBIT, _USER_TWO, "bybit", "2026-02-01T00:00:00Z"),
+        ],
+        "allocator_equity_snapshots": [],
+    }
+    services = _Services(book, [unreadable, bybit], window=_ANCHOR_WINDOW)
+    reasons = iter(["anchor_unreadable", "anchor_skipped_implausible"])
+
+    async def _refuse(*_a: Any, **_k: Any) -> Any:
+        raise er.ForcedRebuildRefusedError(next(reasons))
+
+    services.reader = _refuse
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    a1, a2, _summary = _stdout_records(capsys)
+    assert (a1["member_refusal"], a2["member_refusal"]) == ("anchor_unreadable", "anchor_skipped_implausible")
+    for account in (a1, a2):
+        assert account["anchor_diagnostic"] == "not-run"
+        assert account["opening_check"] == "not-run"
+        assert account["diagnostic_members"] == 0
+        assert account["advisory_arm"] == "not-run"
+        for ratio in (
+            "anchor_over_replay",
+            "implied_opening_over_anchor",
+            "bills_opening_over_anchor",
+            "opening_residual_over_anchor",
+        ):
+            assert account[ratio] == "field-absent", ratio
+        for reading in (
+            "non_stable_share",
+            "upl_over_anchor",
+            "bot_equity_share",
+            "bal_over_cashbal",
+            "bills_transfer_net_over_anchor",
+            "flip_from_flat_closes",
+            "hedge_mode_fills",
+            "negative_qty_assets",
+            "flow_events_in_window",
+            "skipped_symbols_count",
+            "bills_read",
+            "blank_inst_type_bills",
+            "negative_stable_cash",
+            "breakdown_truncated",
+            "opening_day_is_window_start",
+        ):
+            assert account[reading] == "field-absent", reading  # not measured is never printed as 0
+    assert unreadable.balance_calls == 0 and bybit.balance_calls == 0
+    assert unreadable.bills.calls == [] and bybit.bills.calls == []
+
+
+# ---------------------------------------------------------------------------
+# The rest of D-01's readings (task 2): what each pure reader says on a hand-built input,
+# and that the whole reading reaches the record without costing the refusal.
+# ---------------------------------------------------------------------------
+
+
+def _balance_row(total_eq: str, details: list[dict[str, str]], *, upl: str = "0") -> Any:
+    return okx_balance_payload(total_eq, details, upl=upl)["data"][0]
+
+
+def test_balance_row_readings() -> None:
+    # Why: the 5x gate cannot tell a large pre-window balance from a lossy replay. A big
+    # non-stable share, a large uPnL share or a bot-held share each say where the replay's
+    # blind spot could sit; each must read right on a hand-checkable row.
+    row = _balance_row(
+        "1000",
+        [
+            okx_detail("USDT", "600", eq_usd="600"),
+            okx_detail("BTC", "0.01", eq_usd="400", stgy_eq="0.002"),
+        ],
+        upl="-50",
+    )
+    assert hp.balance_row_readings(row) == {
+        "non_stable_share": 0.4,
+        "upl_over_anchor": -0.05,
+        "bot_equity_share": 0.08,  # 0.002 / 0.01 of BTC's 400 is 80, over 1000
+    }
+
+    # A simple-mode account has no account-level uPnL: unread, never 0.
+    simple = hp.balance_row_readings(_balance_row("1000", row["details"], upl=""))
+    assert simple["upl_over_anchor"] == "field-absent" and simple["non_stable_share"] == 0.4
+
+    # An unreadable eqUsd on a non-stable currency makes the share unknown, not zero.
+    broken = [dict(d) for d in row["details"]]
+    broken[1]["eqUsd"] = "n/a"
+    assert hp.balance_row_readings(_balance_row("1000", broken, upl="-50"))["non_stable_share"] == "field-absent"
+
+    # No row, a non-positive total or a malformed details list: nothing is invented.
+    absent = {"non_stable_share": "field-absent", "upl_over_anchor": "field-absent", "bot_equity_share": "field-absent"}
+    assert hp.balance_row_readings(None) == absent
+    assert hp.balance_row_readings(_balance_row("0", row["details"])) == absent
+    assert hp.balance_row_readings({"totalEq": "1000", "upl": "0", "details": "nope"})["non_stable_share"] == "field-absent"
+
+
+def _fill(
+    fill_id: str,
+    ts: int,
+    side: str,
+    amount: float,
+    pnl: str | None,
+    *,
+    symbol: str = "BTC/USDT:USDT",
+    pos_side: str | None = None,
+) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    if pnl is not None:
+        info["fillPnl"] = pnl
+    if pos_side is not None:
+        info["posSide"] = pos_side
+    return {"id": fill_id, "timestamp": ts, "symbol": symbol, "side": side, "amount": amount, "info": info}
+
+
+def test_flip_from_flat_closes_counts_closes_of_positions_opened_before_the_window() -> None:
+    # Why: a position opened before the window and closed inside it realises a pnl with no
+    # opening fill in the replay, so the replay never held it - one way its level goes
+    # missing. A fill that realises pnl while the replay's own position is flat is that
+    # signature. It is a LOWER BOUND: a partial close of a pre-window position that follows
+    # an in-window open of the same instrument looks like an ordinary close and is missed.
+    fills = [
+        _fill("1", 1, "sell", 2, "15"),  # the replay is flat, yet this realises pnl: counted
+        _fill("2", 2, "buy", 1, "0"),  # opens in-window
+        _fill("3", 3, "sell", 1, "3"),  # closes the in-window open: not counted
+    ]
+    assert hp.flip_from_flat_closes(fills) == 1
+    # Arrival order does not matter: fills are read in time order.
+    assert hp.flip_from_flat_closes(list(reversed(fills))) == 1
+    # The same fill re-read on an overlapping page counts once.
+    assert hp.flip_from_flat_closes([*fills, dict(fills[0])]) == 1
+    # Another instrument keeps its own running size.
+    assert hp.flip_from_flat_closes([*fills, _fill("1", 4, "sell", 1, "4", symbol="ETH/USDT:USDT")]) == 2
+    # Nothing carrying a readable realised pnl: the reading is unknown, not zero.
+    assert hp.flip_from_flat_closes([_fill("1", 1, "sell", 2, None), _fill("2", 2, "buy", 1, "")]) == "field-absent"
+    assert hp.flip_from_flat_closes([]) == "field-absent"
+
+
+def test_hedge_mode_fills_counts_long_and_short_pos_sides() -> None:
+    # Why: hedge-mode legs net against each other in the replay's single running size per
+    # instrument, which misstates the level; the count sizes that exposure.
+    fills = [
+        _fill("1", 1, "buy", 1, None, pos_side="long"),
+        _fill("2", 2, "sell", 1, None, pos_side="short"),
+        _fill("3", 3, "buy", 1, None, pos_side="net"),
+        _fill("4", 4, "buy", 1, None),
+    ]
+    assert hp.hedge_mode_fills(fills) == 2
+    assert hp.hedge_mode_fills([fills[2]]) == 0  # posSide is readable and none is hedged
+    assert hp.hedge_mode_fills([fills[3]]) == "field-absent"  # no posSide at all: unknown
+    assert hp.hedge_mode_fills([]) == "field-absent"
+
+
+def test_breakdown_readings() -> None:
+    # Why: a negative quantity in the replay's last row (a sale with no recorded purchase)
+    # is the replay losing value by construction; negative stable cash is the unfunded buy.
+    last = {"BTC": 500.0, "ETH": -20.0, "USDT": -40000.0, "BTC:USDT:PERP": -3.0, "STARTING_BALANCE": 1.0}
+    assert hp.breakdown_readings(last) == {
+        "negative_qty_assets": 1,  # ETH only: a perp key, a protected key and a stable are not assets
+        "negative_stable_cash": True,
+        "breakdown_truncated": False,
+    }
+    assert hp.breakdown_readings({**last, "__truncated__": True})["breakdown_truncated"] is True
+    assert hp.breakdown_readings({"BTC": 5.0, "USDT": 3.0}) == {
+        "negative_qty_assets": 0,
+        "negative_stable_cash": False,
+        "breakdown_truncated": False,
+    }
+    assert hp.breakdown_readings(None) == {
+        "negative_qty_assets": "field-absent",
+        "negative_stable_cash": "field-absent",
+        "breakdown_truncated": "field-absent",
+    }
+
+
+async def test_the_full_reading_reaches_the_record(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    forced = [
+        _trade_page("fa", 2, newest_ms=_ms(_TODAY)),
+        _trade_page("fb", 1, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    advisory = [
+        [_fill("g1", _ms(_TODAY) - 3_000, "sell", 2, "15", pos_side="long")],
+        [_fill("g2", _ms(_TODAY) - 2_000, "buy", 1, "0", pos_side="short")],
+    ]
+    deposit = {"id": "fake-transfer-d1", "timestamp": _ms(_TODAY) - 86_400_000}
+    okx = _OkxAnchorVenue(
+        [*forced, *advisory],
+        balance=_anchor_balance(),
+        bills=_opening_bills(with_transfer=True),
+        deposits=[deposit],
+    )
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(
+        pages_per_pass=2,
+        telemetry={"anchor_offset_implausible": True, "skipped_symbols": ["FAKE-SKIPPED"]},
+        deposits_per_pass=1,
+    )
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+
+    assert account["member_refusal"] == "anchor_skipped_implausible"
+    assert account["anchor_diagnostic"] == "run"
+    assert account["non_stable_share"] == 0.714  # 50000 of 70000
+    assert account["upl_over_anchor"] == 0.0
+    assert account["bot_equity_share"] == 0.0
+    assert account["flip_from_flat_closes"] == 1  # the second pass's fills, not the forced pass's
+    assert account["hedge_mode_fills"] == 2
+    assert account["negative_qty_assets"] == 0
+    assert account["negative_stable_cash"] is True
+    assert account["breakdown_truncated"] is False
+    assert account["flow_events_in_window"] == 1
+    assert account["skipped_symbols_count"] == 1
+    assert account["opening_day_is_window_start"] is False
+    assert account["bills_read"] == 3
+    assert account["blank_inst_type_bills"] == 0
+    assert account["bal_over_cashbal"] == 1.0  # the newest USDT bill's bal over today's cash balance
+    assert account["bills_transfer_net_over_anchor"] == 0.0357  # +2500 of 70000
+    # The oracle still agrees with the gate here: the type-1 bill sits inside the curve.
+    assert account["opening_check"] == "measured"
+    assert account["implied_opening_over_anchor"] == account["bills_opening_over_anchor"] == 0.857
+    assert account["opening_residual_over_anchor"] == 0.0
+    assert account["trade_calls"] == 2  # still the forced pass only
+
+    everything = captured.out + captured.err
+    for leak in ("FAKE-SKIPPED", "fake-transfer", _ANCHOR_TOTAL_EQ, _ANCHOR_OPENING_USDT, "62500", "42500"):
+        assert leak not in everything, leak
+
+
+async def test_a_failed_bills_walk_keeps_the_ratios_already_measured(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review SFH-04. The bills walk is the LAST thing the diagnostic reads; an error from it
+    (here an authentication error, in the field a 429 that outlives the backoff) used to turn
+    the whole diagnostic into "failed" and discard every ratio measured before it. The probe's
+    purpose is to read an account the founder cannot otherwise inspect, so the oracle's failure
+    is recorded as the opening check being unavailable, by exception CLASS, beside the ratios."""
+    import ccxt
+
+    bills = _opening_bills()
+    bills.effect = ccxt.AuthenticationError(f"okx GET bills-archive 4321.5 {_KEY_OKX} signature=abc123")
+    okx = _OkxAnchorVenue([[], [], [], []], balance=_anchor_balance(), bills=bills)
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+    assert account["member_refusal"] == "anchor_skipped_implausible"
+    assert (account["members_read"], account["members_failed"]) == (0, 1)
+    assert account["anchor_diagnostic"] == "run"
+    assert account["diagnostic_failure_class"] == "AuthenticationError"
+    assert account["diagnostic_members"] == 1
+    assert account["failure_class"] == "none"  # the member's own failure class is the refusal's: none
+    # The ratios measured before the walk survive: 70000 of anchor over a 10000 replay.
+    assert account["anchor_over_replay"] == 7.0
+    assert account["advisory_arm"] == "implausible"
+    assert account["opening_check"] == "unavailable"
+    assert account["opening_unavailable_reason"] == "none"  # the oracle never answered
+    for leak in ("4321.5", _KEY_OKX, "signature", "abc123", "bills-archive"):
+        assert leak not in captured.out + captured.err, leak
+    assert services.closed == [okx]  # the client is closed on this path too
+
+
+async def test_a_walk_that_never_completed_reports_its_counters_as_field_absent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review SFH-R3-01. The oracle keeps ``bills_read``, ``blank_inst_type_bills`` and the
+    stablecoin transfer net at their 0 defaults when the walk itself raises (here an empty
+    second page: ``reach_unproven``). Copying them would print an empty archive for a walk
+    that never finished, where the record's contract says not measured is ``field-absent``."""
+    full = _opening_bills()
+    bills = OkxBillsArchive([r for r in full.rows if r["billId"] != "1"], empty_after_cursor=True)
+    okx = _OkxAnchorVenue([[], [], [], []], balance=_anchor_balance(), bills=bills)
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+    assert account["opening_check"] == "unavailable"
+    assert account["opening_unavailable_reason"] == "reach_unproven"
+    assert account["bills_read"] == "field-absent"
+    assert account["blank_inst_type_bills"] == "field-absent"
+    assert account["bills_transfer_net_over_anchor"] == "field-absent"
+
+
+async def test_a_completed_walk_keeps_its_counters_when_a_later_step_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The counterpart of the test above: a ``chain_break`` is raised after the walk finished,
+    so the counters are real readings and must survive."""
+    opening_ms = _ms(_OPENING_DAY)
+    rows = [
+        okx_bill(1, opening_ms - 5 * 86_400_000, "USDT", "60000", "5"),
+        okx_bill(10, opening_ms + 3_600_000, "USDT", "60000", "0"),
+        okx_bill(12, opening_ms + 9_000_000, "USDT", "1", "-40000"),  # 60000 - 40000 != 1
+    ]
+    okx = _OkxAnchorVenue([[], [], [], []], balance=_anchor_balance(), bills=OkxBillsArchive(rows))
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+    assert account["opening_check"] == "unavailable"
+    assert account["opening_unavailable_reason"] == "chain_break"
+    assert account["bills_read"] == 2
+    assert account["blank_inst_type_bills"] == 0
+
+
+async def test_a_diagnostic_that_fails_before_the_oracle_never_hides_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failure outside the oracle (the advisory pass itself) still loses the measurement:
+    there is nothing to keep, so the diagnostic is "failed" by class and the refusal stands."""
+    import ccxt
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise ccxt.AuthenticationError(f"okx GET balance 4321.5 {_KEY_OKX} signature=abc123")
+
+    okx = _OkxAnchorVenue([[], [], [], []], balance=_anchor_balance(), bills=_opening_bills())
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+    monkeypatch.setattr(hp.obal, "read_okx_balance_row", _boom)
+
+    assert await hp.run() == 1
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+    assert account["member_refusal"] == "anchor_skipped_implausible"
+    assert account["anchor_diagnostic"] == "failed"
+    assert account["diagnostic_failure_class"] == "AuthenticationError"
+    assert account["anchor_over_replay"] == "field-absent" and account["opening_check"] == "not-run"
+    for leak in ("4321.5", _KEY_OKX, "signature", "abc123"):
+        assert leak not in captured.out + captured.err, leak
+    assert services.closed == [okx]
+
+
+# ---------------------------------------------------------------------------
+# Redaction and read-only pins for the diagnostic's keys (task 3).
+# ---------------------------------------------------------------------------
+
+
+def _diagnostic_control() -> dict[str, Any]:
+    """An account record with every diagnostic key set to a valid value."""
+    return hp._account_record(
+        "a1",
+        "2026-10-27",
+        anchor_diagnostic="run",
+        diagnostic_failure_class="none",
+        diagnostic_members=1,
+        advisory_arm="implausible",
+        replay_final_sign="positive",
+        anchor_over_replay=7.0,
+        opening_check="measured",
+        opening_unavailable_reason="none",
+        implied_opening_over_anchor=0.857,
+        bills_opening_over_anchor=0.857,
+        opening_residual_over_anchor=0.0,
+        non_stable_share=0.714,
+        upl_over_anchor=-0.05,
+        bot_equity_share=0.0,
+        bal_over_cashbal=1.0,
+        bills_transfer_net_over_anchor=0.0357,
+        flip_from_flat_closes=1,
+        hedge_mode_fills=2,
+        negative_qty_assets=0,
+        flow_events_in_window=1,
+        skipped_symbols_count=1,
+        bills_read=3,
+        blank_inst_type_bills=0,
+        negative_stable_cash=True,
+        breakdown_truncated=False,
+        opening_day_is_window_start=False,
+    )
+
+
+def test_the_diagnostic_keys_refuse_values_outside_their_vocabulary() -> None:
+    # Why: the line is pasted into a public repo. A key that could carry an unrounded
+    # ratio, a bool where a count belongs, a free-text reason or an exception message is a
+    # place an amount can leak, and the emitter's refusal is the only thing standing there.
+    control = _diagnostic_control()
+    assert json.loads(hp.emit_record(control))["anchor_over_replay"] == 7.0  # the honest record prints
+
+    bad: list[tuple[str, Any]] = [
+        ("anchor_over_replay", 7.123456),  # not three figures
+        ("opening_residual_over_anchor", "non-finite"),
+        ("non_stable_share", float("inf")),
+        ("bills_read", True),  # True where a count is declared
+        ("bills_read", 3.0),
+        ("flip_from_flat_closes", -1),
+        ("skipped_symbols_count", "3"),
+        ("negative_stable_cash", "yes"),
+        ("opening_day_is_window_start", 0),
+        ("opening_check", "agree"),  # agreement is not the probe's to decide
+        ("opening_unavailable_reason", "timeout"),
+        ("advisory_arm", "anchored"),
+        ("replay_final_sign", "up"),
+        ("anchor_diagnostic", "ran"),
+        ("diagnostic_failure_class", "ExchangeError: 4321.5"),
+        ("diagnostic_members", -1),
+    ]
+    for key, value in bad:
+        with pytest.raises(ValueError) as exc:
+            hp.emit_record(dict(control, **{key: value}))
+        assert key in str(exc.value), key  # the refusal names the key...
+        assert "4321" not in str(exc.value) and "7.12" not in str(exc.value)  # ...never the value
+
+    # An extra key is refused too: nothing outside the whitelist can ride along.
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(control, anchor_usd=70000.0))
+
+    # The oracle's whole closed set, and "none", are printable; nothing else is.
+    for reason in ("none", *sorted(obal.OPENING_UNAVAILABLE_REASONS)):
+        hp.emit_record(dict(control, opening_unavailable_reason=reason))
+    assert set(hp._OPENING_REASON_TOKENS) == {"none", *obal.OPENING_UNAVAILABLE_REASONS}
+
+
+def test_ratio_or_absent_never_prints_a_non_finite_or_an_unrounded_value() -> None:
+    absent = "field-absent"
+    assert hp.ratio_or_absent(5.0, 0.0) == absent  # a zero denominator
+    assert hp.ratio_or_absent(None, 5.0) == absent
+    assert hp.ratio_or_absent(5.0, None) == absent
+    assert hp.ratio_or_absent(float("inf"), 2.0) == absent  # an infinite quotient
+    assert hp.ratio_or_absent(float("nan"), 2.0) == absent
+    assert hp.ratio_or_absent(1.0, float("nan")) == absent
+    assert hp.ratio_or_absent(6.0, 7.0) == 0.857  # three figures, not 0.857142...
+    shown = hp.ratio_or_absent(-0.0, 5.0)
+    assert shown == 0.0 and str(shown) == "0.0"  # never "-0.0"
+    for numerator, denominator in ((1.0, 3.0), (2.0, 3.0), (123456.0, 7.0), (-5.0, 9.0)):
+        value = hp.ratio_or_absent(numerator, denominator)
+        assert isinstance(value, float) and hp._is_ratio(value)
+
+
+def test_the_anchor_diagnostic_functions_take_the_read_only_wrapper() -> None:
+    # Why: `_measure_anchor` hands its database handle to the rebuild's own read, whose one
+    # write is the price cache. A function typed with the bare client could be handed one.
+    import ast
+
+    tree = ast.parse(_PROBE_SRC)
+    typed = {
+        node.name: arg.annotation.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in ("_anchor_diagnostic", "_measure_anchor")
+        for arg in node.args.args
+        if arg.arg == "supabase" and isinstance(arg.annotation, ast.Name)
+    }
+    assert typed == {"_anchor_diagnostic": "ReadOnlySupabase", "_measure_anchor": "ReadOnlySupabase"}
+    # The oracle is reached through its module attribute, and every call it makes is a GET.
+    assert "obal.read_okx_balance_row(" in _PROBE_SRC and "obal.read_okx_opening(" in _PROBE_SRC
+    assert "private_get_account_bills_archive" not in _PROBE_SRC  # the oracle owns that call

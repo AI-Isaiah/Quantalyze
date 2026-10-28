@@ -43,6 +43,7 @@ import pandas as pd
 import sentry_sdk
 from postgrest.exceptions import APIError
 
+from services import okx_opening_balance as obal
 from services import trade_read_store as store
 from services.account_identity import VENUES_WITH_ACCOUNT_ID
 from services.allocator_positions import read_native_unpriced_days
@@ -2521,8 +2522,20 @@ class ForcedRebuildRefusedError(RuntimeError):
     error text, amount or signature is ever attached.
     """
 
-    def __init__(self, reason: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        opening_check: str | None = None,
+        opening_ratios: tuple[float | None, float | None] = (None, None),
+    ) -> None:
         self.reason = reason
+        # Review SFH-R2-01: (residual, implied) opening ratios over the anchor, 3 significant
+        # figures, set only when the bills read cleanly and disagreed. Ratios only.
+        self.opening_ratios = opening_ratios
+        # Review SFH-03: the OKX bills check's outcome, set only on an
+        # ``anchor_skipped_implausible`` refusal. NOT a refusal token and not part of the
+        # message: ``_forced_refusal_result`` records it on the refusal's own audit.
+        self.opening_check = opening_check
         super().__init__(f"forced rebuild refused ({reason})")
 
 
@@ -2769,8 +2782,12 @@ def _merge_account_telemetry(parts: Sequence[Mapping[str, Any]]) -> dict[str, An
     ``.get``, so every key is always present. MT5's telemetry omits the anchor keys on
     purpose (``_mt5_telemetry``: it performs no anchor step), so every read here has a
     default. Symbol lists are sorted unions, ``ctval_drift_warnings`` (dicts) are
-    concatenated in part order, flags are ORed and the skipped anchor offset is summed to
-    2 dp.
+    concatenated in part order, flags are ORed (``anchor_opening_agreed`` among them: Phase
+    172, an anchor that passed the 5x gate only through the OKX bills check), the OKX bills
+    check's outcome (``anchor_opening_check``) is the first member's outcome that is not
+    ``not-run``, the two opening ratios (review SFH-R2-01) are the first member's that is not
+    None, and the skipped
+    anchor offset is summed to 2 dp.
     """
 
     def _union(name: str) -> list[str]:
@@ -2798,6 +2815,36 @@ def _merge_account_telemetry(parts: Sequence[Mapping[str, Any]]) -> dict[str, An
         ),
         "anchor_positions_unread": any(
             bool(part.get("anchor_positions_unread", False)) for part in parts
+        ),
+        "anchor_opening_agreed": any(
+            bool(part.get("anchor_opening_agreed", False)) for part in parts
+        ),
+        # Review SFH-03: one value; a member that consulted the bills outranks one that did not.
+        "anchor_opening_check": next(
+            (
+                str(part["anchor_opening_check"])
+                for part in parts
+                if part.get("anchor_opening_check", "not-run") != "not-run"
+            ),
+            "not-run",
+        ),
+        # Review SFH-R2-01: the check's ratios follow the check's own rule (first member that
+        # consulted the bills, so None for MT5 and for a check that never ran).
+        "anchor_opening_residual_ratio": next(
+            (
+                part["anchor_opening_residual_ratio"]
+                for part in parts
+                if part.get("anchor_opening_residual_ratio") is not None
+            ),
+            None,
+        ),
+        "anchor_opening_implied_ratio": next(
+            (
+                part["anchor_opening_implied_ratio"]
+                for part in parts
+                if part.get("anchor_opening_implied_ratio") is not None
+            ),
+            None,
         ),
     }
 
@@ -3710,6 +3757,82 @@ async def _polled_empty_since(
 # Shared fetch-and-price block used by both handlers
 # ---------------------------------------------------------------------------
 
+async def _okx_forced_opening_check(
+    exchange: Any,
+    venue: str,
+    supabase: Any,
+    rows: Sequence[Mapping[str, Any]],
+    anchor: float,
+    last_value: float,
+    *,
+    require_anchor: bool,
+) -> tuple[str, float | None, float | None]:
+    """Phase 172 D-01 item 2: the bills' second opinion behind the 5x trigger.
+
+    Only the FORCED OKX path asks (``require_anchor`` and an OKX venue), and only after the 5x
+    arm has flagged the offset: every other caller gets ``"not-run"`` at once and keeps its old
+    behaviour. ``"agreed"`` means the venue's own bill balances prove the opening the anchor
+    implies (``anchor - last_value``) within ``obal.OPENING_TOLERANCE_USD`` / ``_REL``, so the
+    anchor may be applied. ``"disagreed"`` means they read cleanly and say otherwise. Any
+    structural gap in the proof (a malformed reply, a broken chain, an archive that does not
+    reach the opening, an unpriced coin, the page ceiling) returns that gap's token from
+    ``obal.OPENING_UNAVAILABLE_REASONS``. Anything but ``"agreed"`` makes the caller refuse
+    ``anchor_skipped_implausible`` and write nothing, and the value (review SFH-03) rides the
+    refusal's audit so an operator can tell incomplete venue data from a wrong anchor.
+
+    The unforced path is excluded on purpose: its OKX window is 730 days, so the terminus arm
+    fires before the 5x arm is evaluated, the bills archive reaches three months and cannot
+    prove an opening two years back, and PD-B keeps the unforced anchor advisory.
+
+    A venue exception propagates unchanged (RESEARCH Pitfall 3): a 429 reaches the crawl's
+    own retry classification instead of becoming a permanent refusal that PD-I forbids
+    re-crawling. This reads its own balance row (one extra balance call, only when the 5x
+    arm fires on the forced OKX path) because the anchor reader is advisory and swallows
+    every exception.
+
+    Returns ``(outcome, residual_ratio, implied_ratio)``. Review SFH-R2-01: when the bills read
+    cleanly (``agreed`` or ``disagreed``) the two ratios say how close they came, both over the
+    anchor and to 3 significant figures: the residual (the opening the anchor implies minus the
+    bills' opening, the sign the allocator history probe prints as ``opening_residual_over_anchor``,
+    so a positive residual means the anchor implies more than the bills hold) and the implied
+    opening itself. Any other outcome has no residual, so both are None. Ratios only, never an
+    amount.
+    """
+    if not require_anchor or venue.lower() != "okx":
+        return "not-run", None, None
+    opening_day = date.fromisoformat(str(rows[0]["asof"]))
+    row = await obal.read_okx_balance_row(exchange)
+    if row is None:
+        logger.warning(
+            "anchor: OKX opening check unavailable (malformed_balance) — refusing the "
+            "implausible anchor",
+        )
+        return "malformed_balance", None, None
+    reading = await obal.read_okx_opening(exchange, supabase, opening_day, row)
+    if reading.opening_usd is None:
+        logger.warning(
+            "anchor: OKX opening check unavailable (%s) — refusing the implausible anchor",
+            reading.unavailable_reason,
+        )
+        return str(reading.unavailable_reason), None, None  # opening unavailable: fail closed
+    implied = anchor - last_value
+    residual_ratio = float(f"{(implied - reading.opening_usd) / anchor:.3g}") + 0.0  # + 0.0: no "-0.0"
+    implied_ratio = float(f"{implied / anchor:.3g}")
+    if obal.opening_agrees(anchor, last_value, reading.opening_usd):
+        logger.info(
+            "anchor: OKX bills agree with the opening the anchor implies "
+            "(residual_ratio=%s implied_ratio=%s)",
+            residual_ratio, implied_ratio,
+        )
+        return "agreed", residual_ratio, implied_ratio
+    logger.warning(
+        "anchor: OKX bills disagree with the opening the anchor implies — refusing the "
+        "implausible anchor (residual_ratio=%s implied_ratio=%s)",
+        residual_ratio, implied_ratio,
+    )
+    return "disagreed", residual_ratio, implied_ratio
+
+
 async def _fetch_and_price_window(
     exchange: Any,
     venue: str,
@@ -3869,6 +3992,13 @@ async def _fetch_and_price_window(
     # below when skipping fires; remain empty/False when anchor is not attempted).
     _anchor_skipped_partial_ticker: list[str] = []
     _anchor_skipped_implausible: bool = False
+    # Phase 172: True only when the 5x bound flagged the offset and the OKX bills check agreed.
+    _anchor_opening_agreed: bool = False
+    # Review SFH-03: the bills check's outcome, "not-run" unless the 5x arm flagged the offset
+    # on the forced OKX path (then "agreed", "disagreed" or the oracle's unavailable reason).
+    # Review SFH-R2-01: with the outcome, how close the bills came (residual and implied-opening
+    # ratios over the anchor, None unless the bills read cleanly).
+    _anchor_opening: tuple[str, float | None, float | None] = ("not-run", None, None)
     # E1/E2 (red-team HIGH7/MED8): initialise the "anchor skipped because the
     # replay's absolute level is untrustworthy" DQ fields + the audited offset
     # magnitude. ``_anchor_offset_skipped`` is the offset we WOULD have applied
@@ -3885,6 +4015,9 @@ async def _fetch_and_price_window(
         # implausible offsets caused by phantom perps or ticker outages.
         # Both conditions ship an unanchored series per the documented fallback
         # and stamp a DQ flag so operators can see why anchoring was skipped.
+        # Phase 172 D-01: the 5x bound is the cheap trigger. On the forced OKX path
+        # only, the bills check is the second opinion: it can show the missing money
+        # was held before the window, and then the anchor applies (below).
         _implausible_anchor = (
             last_value > 0
             and abs(offset) > 5.0 * abs(last_value)
@@ -3945,15 +4078,21 @@ async def _fetch_and_price_window(
             _anchor_skipped_implausible = False
             _anchor_skipped_unreliable_replay = True
             _anchor_offset_skipped = round(offset, 2)
-        elif _implausible_anchor:
+        elif _implausible_anchor and (
+            _anchor_opening := await _okx_forced_opening_check(
+                exchange, venue, supabase, rows, anchor, last_value,
+                require_anchor=require_anchor,
+            )
+        )[0] != "agreed":
             logger.warning(
                 "anchor: offset=%.2f exceeds 5× last_value=%.2f — "
-                "skipping anchor (anchor_offset_implausible)",
-                offset, last_value,
+                "skipping anchor (anchor_offset_implausible; OKX bills check: %s)",
+                offset, last_value, _anchor_opening[0],
             )
             _anchor_skipped_partial_ticker = []
             _anchor_skipped_implausible = True
         else:
+            _anchor_opening_agreed = _implausible_anchor
             _anchor_skipped_partial_ticker = []
             _anchor_skipped_implausible = False
             if abs(offset) > 0.005:
@@ -3983,7 +4122,16 @@ async def _fetch_and_price_window(
         elif _anchor_skipped_implausible:
             _refusal = "anchor_skipped_implausible"
         if _refusal is not None:
-            raise ForcedRebuildRefusedError(_refusal)
+            _implausible_refusal = _refusal == "anchor_skipped_implausible"
+            raise ForcedRebuildRefusedError(
+                _refusal,
+                opening_check=_anchor_opening[0] if _implausible_refusal else None,
+                opening_ratios=(
+                    (_anchor_opening[1], _anchor_opening[2])
+                    if _implausible_refusal
+                    else (None, None)
+                ),
+            )
 
     # NEW-C01-11: when hit_terminus, the replay starts from quantities={}
     # (zero cash) because the pre-terminus deposit that funds open perps
@@ -4034,6 +4182,12 @@ async def _fetch_and_price_window(
         "anchor_positions_unread": bool(
             getattr(anchor_partial_symbols, "positions_unread", False)
         ),
+        # Phase 172: the anchor applied past the 5x bound because the OKX bills agreed.
+        "anchor_opening_agreed": _anchor_opening_agreed,
+        "anchor_opening_check": _anchor_opening[0],
+        # Review SFH-R2-01: how close the bills came (None unless they read cleanly).
+        "anchor_opening_residual_ratio": _anchor_opening[1],
+        "anchor_opening_implied_ratio": _anchor_opening[2],
     }
     return rows, hit_terminus, telemetry
 
@@ -5447,7 +5601,12 @@ async def _mt5_fetch_window(
 
 
 def _forced_refusal_result(
-    allocator_id: str, api_key_id: str, venue: str, reason: str
+    allocator_id: str,
+    api_key_id: str,
+    venue: str,
+    reason: str,
+    opening_check: str | None = None,
+    opening_ratios: tuple[float | None, float | None] = (None, None),
 ) -> DispatchResult:
     """The ONE place a refused forced rebuild is recorded (Phase 167.2.1.1 PD-H / PD-I,
     unified for ACCTREBUILD): a WARNING naming allocator, key, venue and reason; one
@@ -5458,6 +5617,9 @@ def _forced_refusal_result(
     from inside the window call whose transaction rolled back), so the stored curve and the
     marker are as they were. Static text only: ``reason`` is one of
     ``FORCED_REBUILD_REFUSAL_REASONS`` and no venue error text, id or amount is attached.
+    ``opening_check`` (review SFH-03) is the OKX bills check's outcome when the refusal came
+    from the 5x arm on that path: one closed-vocabulary value (``agreed`` cannot occur here)
+    that tells an operator "venue data incomplete" from "the anchor is really wrong".
     """
     logger.warning(
         "reconstruct_allocator_history forced rebuild refused allocator=%s "
@@ -5472,7 +5634,20 @@ def _forced_refusal_result(
     _emit_audit(
         allocator_id, api_key_id,
         "allocator.equity.reconstruct_failed",
-        {"error_kind": "permanent", "sanitized_message": sanitized},
+        {
+            "error_kind": "permanent",
+            "sanitized_message": sanitized,
+            **({"anchor_opening_check": opening_check} if opening_check is not None else {}),
+            # Review SFH-R2-01: only when the bills read cleanly and disagreed.
+            **(
+                {
+                    "anchor_opening_residual_ratio": opening_ratios[0],
+                    "anchor_opening_implied_ratio": opening_ratios[1],
+                }
+                if opening_ratios[0] is not None
+                else {}
+            ),
+        },
     )
     return DispatchResult(
         outcome=DispatchOutcome.FAILED,
@@ -6034,7 +6209,9 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             # venue equity including open-position uPnL). Nothing has been persisted (this
             # is before the persist half and the marker writer), so fail loudly and leave
             # the stored curve and the marker as they were.
-            return _forced_refusal_result(allocator_id, api_key_id, venue, exc.reason)
+            return _forced_refusal_result(
+                allocator_id, api_key_id, venue, exc.reason, exc.opening_check, exc.opening_ratios
+            )
         except _AccountCrawlRetryableError as exc:
             # A sibling exchange account's retryable fault: the crawl already stamped a
             # sibling rate limit on the sibling's own key, so nothing is stamped on THIS
@@ -6394,6 +6571,16 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
         "anchor_replay_unreliable": telemetry.get("anchor_replay_unreliable", False),
         "anchor_offset_skipped_usd": telemetry.get("anchor_offset_skipped_usd", 0.0),
         "anchor_positions_unread": telemetry.get("anchor_positions_unread", False),
+        # Phase 172 D-01: this curve anchored although the 5x bound flagged it, because the
+        # OKX bills proved the opening the anchor implies (forced OKX path only).
+        "anchor_opening_agreed": telemetry.get("anchor_opening_agreed", False),
+        # Review SFH-03: the same fact as one closed-vocabulary value (a completion can only
+        # carry "agreed" or "not-run"; a refused rebuild carries it on its refusal audit).
+        "anchor_opening_check": telemetry.get("anchor_opening_check", "not-run"),
+        # Review SFH-R2-01: how close the bills came (ratios over the anchor, 3 significant
+        # figures; None when the check did not run). Never an amount.
+        "anchor_opening_residual_ratio": telemetry.get("anchor_opening_residual_ratio"),
+        "anchor_opening_implied_ratio": telemetry.get("anchor_opening_implied_ratio"),
         # Review SFH-1: a forced rebuild's completion says so, like its started audit.
         **({"forced_rebuild": True} if forced else {}),
         # ACCTREBUILD: counts and booleans only, never an id or an amount.

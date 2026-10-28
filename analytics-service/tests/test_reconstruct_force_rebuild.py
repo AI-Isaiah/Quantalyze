@@ -48,6 +48,7 @@ import pytest
 from services import equity_reconstruction as er
 from services.equity_reconstruction import run_reconstruct_allocator_history_job
 from services.job_worker import DispatchOutcome
+from tests._okx_bills import OkxBillsArchive, okx_balance_payload, okx_detail
 from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
@@ -722,6 +723,34 @@ async def test_forced_rebuild_refuses_an_implausible_anchor_offset(
         [_make_trade(_trade_ts(), "BTC/USDT", "buy", 40000.0, 1.0)]
     )
     await _assert_forced_rebuild_refused(monkeypatch, exchange, "anchor_skipped_implausible")
+
+
+@pytest.mark.asyncio
+async def test_forced_rebuild_refuses_an_implausible_okx_anchor_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``anchor_skipped_implausible`` for OKX, through the handler. The replay ends at 10000
+    (1 BTC bought at 40000, marked at 50000) and ``totalEq`` is 70000: a ratio of 7, above the
+    gate's 6, so the 5x arm refuses. The forced 89-day window is the first OKX path on which
+    that arm can run at all (the unforced 730-day window hits the terminus arm first), and
+    until now only a Bybit exchange exercised it. The bills archive answers empty, so once the
+    bills-based opening check exists this refusal stands on an unproven reach; today it stands
+    on the 5x arm alone. The job fails permanent and every sentinel row and the marker stay.
+    RED with the arm removed."""
+    exchange = await _bybit_exchange()
+    exchange.id = "okx"
+    exchange.fetch_my_trades = _first_call_trades(
+        [_make_trade(_trade_ts(), "BTC/USDT", "buy", 40000.0, 1.0)]
+    )
+    # Both raw OKX methods set explicitly with dict-shaped answers: an unset method on this
+    # AsyncMock-based exchange would answer with a MagicMock.
+    exchange.private_get_account_balance = AsyncMock(
+        return_value=okx_balance_payload("70000", [okx_detail("USDT", "70000")])
+    )
+    exchange.private_get_account_bills_archive = OkxBillsArchive([])
+    await _assert_forced_rebuild_refused(
+        monkeypatch, exchange, "anchor_skipped_implausible", venue="okx"
+    )
 
 
 def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:

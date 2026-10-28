@@ -31,7 +31,16 @@ pyarrow==26.0.0
 # caches these wheels instead of re-resolving them every run (CI speed audit
 # F4). Left unpinned to exactly preserve the prior install behavior; pin in a
 # later hardening pass if reproducibility drift becomes an issue.
-pytest
+#
+# pytest is capped below 9.2 (2026-10-28). pytest 9.2.0 stores a node's id as a
+# structured `Node._id` and reads `nodeid` from it. pytest-xdist 3.8.0 (still the
+# latest release) forms `--dist loadgroup` groups by writing `item._nodeid`, which
+# pytest 9.2.0 no longer reads, so no xdist_group forms and the shared-DB tests
+# run on several workers at once. Upstream: pytest-dev/pytest-xdist#1386, fixed by
+# #1388 on xdist main, not in a release yet. Lift the cap only together with an
+# xdist release that carries #1388; tests/test_xdist_group_is_real.py goes red if
+# the group stops forming.
+pytest<9.2
 pytest-cov
 pytest-asyncio
 pytest-mock
