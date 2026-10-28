@@ -13276,6 +13276,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Measured 2026-10-26 (post-deploy probe, counts only).** The trigger fired: account a6 (a Bybit member, 730-day window) read 127471 trades over 1378 calls and ended with failure class `truncated`; its probe record is not comparable and nothing was rebuilt (founder, "Rebuild none, book follow-ups"). Four of the probe's six accounts have no working key (`account_key_not_working`), so this ceiling is the only read problem seen on an account that has one working Bybit key.
 
+**Measured 2026-10-28 (Phase 171 SC-3, post-deploy probe, counts only).** a6 read-in-full, 203279 trades over 2158 calls in 1048 s, site none. Phase 171 (v0.133.4.0, #1138) continues a Bybit window past the 100-page ceiling inside one run and, for a book too big for one claim, resumes across claims; this probe read exercised the first layer only, and at 1048 s it is over the 900 s claim budget, so a real a6 job would resume across claims. Not closed: the OKX per-type ceiling and the one-millisecond group named in this entry are not changed by Phase 171.
+
 
 ### 167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE — an OKX allocator account's forced read is refused `anchor_skipped_implausible`, so its history cannot be rebuilt (booked 2026-10-26, 167.2.1.1.2.1 plan 06 probe, DATA INTEGRITY, user-facing)
 

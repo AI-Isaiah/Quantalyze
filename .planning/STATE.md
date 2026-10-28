@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 167.2.1.1.1
 current_phase_name: NAVMTM
 status: executing
-stopped_at: 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked; several shipped phases await their records
-last_updated: "2026-10-28T09:08:58.641Z"
+stopped_at: 171 READCEILING, 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked; several shipped phases await their records
+last_updated: "2026-10-28T09:20:20.328Z"
 last_activity: 2026-10-28
-last_activity_desc: 172 OKXANCHOR closed (SC-3 recorded, a4 refused chain_break, routed to 179) and 174 MARKPAUSE closed
+last_activity_desc: 171 READCEILING closed (a6 read in full), 172 OKXANCHOR closed (a4 refused chain_break, routed to 179), 174 MARKPAUSE closed
 state_head: b2daab890eb41e4037562418701660519c7d2026
 progress:
   total_phases: 134
-  completed_phases: 125
-  total_plans: 907
-  completed_plans: 900
-  percent: 93
+  completed_phases: 126
+  total_plans: 919
+  completed_plans: 912
+  percent: 94
 ---
 
 ## ⭐ STATE lineage
@@ -174,9 +174,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 167.2.1.1.1 (NAVMTM) — SHIPPED, NOT YET CLOSED
 Plan: post-ship records pending
-Status: Executing — several phases in parallel. Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 171 READCEILING (v0.133.4.0 #1138; plan 12 SC-3 recorded, verification passed, security audit pending), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 172 OKXANCHOR (v0.133.4.0 #1136; SC-3 a4 still refused `chain_break`, routed to 179 OKXBILLSCHAIN by the founder) and 174 MARKPAUSE (v0.133.2.0 #1133). Booked, not planned: 173, 176 to 179.
-Last activity: 2026-10-28 — 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked
-Progress: [█████████░] 93%
+Status: Executing — several phases in parallel. Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138; SC-3 a6 read in full post-deploy), 172 OKXANCHOR (v0.133.4.0 #1136; SC-3 a4 still refused `chain_break`, routed to 179 OKXBILLSCHAIN by the founder) and 174 MARKPAUSE (v0.133.2.0 #1133). Booked, not planned: 173, 176 to 179.
+Last activity: 2026-10-28 — 171 READCEILING, 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked
+Progress: [█████████░] 94%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1717,7 +1717,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked
+**Stopped At:** 171 READCEILING, 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z

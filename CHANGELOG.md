@@ -1,21 +1,26 @@
 # Changelog
 
-## [0.133.6.1] - 2026-10-28 — records: close OKXANCHOR 172 and MARKPAUSE 174; book OKXBILLSCHAIN 179
+## [0.133.6.1] - 2026-10-28 — records: close READCEILING 171, OKXANCHOR 172 and MARKPAUSE 174; book OKXBILLSCHAIN 179
 
 ### Notes
 - Phase 172 OKXANCHOR is closed, with verification passed. The code shipped as v0.133.4.0 (#1136); this entry lands plan 05's post-deploy record. SC-1 and SC-2 are verified in code. SC-3 ran on 2026-10-28: the deployed probe re-read a4 on the backfill worker, and a4 is still refused `anchor_skipped_implausible`. The complete bills walk (1489 bills, `bal_over_cashbal=1`) could not prove the opening balance: `opening_check=unavailable`, `opening_unavailable_reason=chain_break`. That means a per-currency running balance in OKX's bills archive does not close. Plan 03 had expected a4 to anchor (`rule-anchors`), so this was a STOP. Founder 2026-10-28: "Record, route a follow-up (Recommended)". The 0.05 opening tolerance stays as shipped ("Keep 0.05, re-decide later (Recommended)"); it can only fire on a measured opening. No rebuild was enqueued.
-- The probe run, 2026-10-28 08:39Z to 08:58Z, used the production backfill worker at main c9458d7b4, through a temporary start command applied with `railway redeploy --from-source`. One run served both 172 and Phase 171 (founder: "One run after #1138 deploys (Recommended)"); 171's record follows separately. The start command is restored, and the worker started normally. Recorded deviations:
+- The probe run, 2026-10-28 08:39Z to 08:58Z, used the production backfill worker at main c9458d7b4, through a temporary start command applied with `railway redeploy --from-source`. One run served both 172 and 171 (founder: "One run after #1138 deploys (Recommended)"). The start command is restored, and the worker started normally. Recorded deviations:
   - A first attempt at 07:46Z reused the old service config, so the probe never ran.
   - The import check printed `0 16 True 0.05 True` where plan 05 expected `0 15`. The 16th refusal token is the one Phase 171 added (`account_key_read_stalled`), deployed before the run. Plan 05's automated verify fails on that one check and passes on every other.
   - `deployed-commit:` names the head that ran, not the merge sha.
   - Railway prints the probe's JSON records as logfmt; the SUMMARY rebuilds each record into a JSON line with the values unchanged.
+- Phase 171 READCEILING is closed. Verification passed 3/3 (run on the phase branch after plan 12) and the security audit is SECURED (40/40 threats closed, 2 accepted). The code shipped as v0.133.4.0 (#1138); this entry lands plan 12's post-deploy record. SC-3: the deployed probe read a6 in full in one bounded claim, 203279 trades over 2158 calls in 1048 s, with no named stop. Its D-01 reading had been 101557 trades over 1114 calls, ending `truncated` at `bybit_window_ceiling`. The probe exercises layer 1 only. At 1048 s, over the 900 s claim budget, a real a6 job would resume across claims (layer 2, proven by plans 07 to 11). No a6 job ran after the deploy and none was enqueued. The PROD catalogue of the two trade-read store tables read as expected: 2 tables, RLS forced, 0 policies, 0 anon/authenticated privileges. Recorded deviations:
+  - Deploy order was worker-first: the backfill worker started 9 s before the PROD apply finished, a window plan 07's layer-1 fallback covers.
+  - The PROD marker query ran as its own file rather than at the head of each SQL file. Every file was SELECT-only.
+  - a6 resolves to one Bybit key plus five other keys in the SQL listing, while the probe counts `other_members=2`. Both are recorded.
 - Phase 174 MARKPAUSE is closed, with verification passed. The code shipped as v0.133.2.0 (#1133), with the baseline re-dump in #1134. Its phase directory (2 plans, three review and silent-failure rounds, security, verification) lands on `main`. ROADMAP carries SC-1 as refined at planning: weekly re-admit once a pause is 3 or more days old.
 - Phase 179 OKXBILLSCHAIN is booked (data integrity, depends on 172). It is to find why the bills chain does not close for a4, fix it or name it, and then re-decide the 0.05 tolerance on a complete walk, all before any OKX rebuild.
 - TODOS.md:
   - `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE` gets the dated Phase 172 reading. It stays OPEN and is now owned by Phase 179. This departs from plan 05's "Closed" sentence, because the refusal is not yet shown to be correct.
   - `167.2.1.1.2.1-OKX-ORDER-UNMEASURED` gets the dated SC-3 reading: 0 readings, because the ordering read did not run while a4 did not anchor. It stays open for Phase 173.
+  - `167.2.1.1.2.1-READ-CEILING-STRANDS-ACCOUNT` gets the dated 171 SC-3 reading. It stays open for the OKX per-type ceiling and the one-millisecond group.
   - A new `## Phase 172 (OKXANCHOR) — routed items` section books `172-OKX-NONPOSITIVE-REPLAY-UNGATED` and `172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT`, whose residual is field-absent (unmeasured).
-- ROADMAP lists both closed phases' plans and outcomes and adds 179. STATE records the closes, lists the phases shipped but not yet closed, and re-derives `progress:`.
+- ROADMAP lists the three closed phases' plans and outcomes and adds 179. STATE records the closes, lists the phases shipped but not yet closed, and re-derives `progress:`.
 
 ## [0.133.6.0] - 2026-10-28 — MARKSOURCE: open positions are valued by one stated price rule, and the legacy and marked allocator curves agree
 
