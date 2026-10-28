@@ -754,7 +754,7 @@ async def test_forced_rebuild_refuses_an_implausible_okx_anchor_offset(
 
 
 def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
-    """The post-deploy handoff matches the ``forced rebuild refused (`` prefix and these 15
+    """The post-deploy handoff matches the ``forced rebuild refused (`` prefix and these 16
     tokens to decide re-enqueue-once versus record-only (PD-I). An extra reason, or a
     renamed one, that the handoff does not know would be recorded as an unknown failure;
     the set is therefore pinned in both halves, and so is the message each token produces.
@@ -764,8 +764,14 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
     left the set with the unified whole-account path (decision AR-7), and their raise sites
     left the handler with them. The raise-site scan at the end pins that from the source:
     the double-quoted lower_snake literals the module passes to ``ForcedRebuildRefusedError(``
-    or assigns to ``_refusal =`` EQUAL the 15 tokens, so no token is without a raise site
+    or assigns to ``_refusal =`` EQUAL the 16 tokens, so no token is without a raise site
     and no raise site names a token outside the set.
+
+    Phase 171 READCEILING (plan 10, 2026-10-27): the set gained its 16th token,
+    ``account_key_read_stalled`` (a member's resumable read made no progress across claims, or
+    its job reached the 24 h backstop; the stored windows are kept, so a later run can clear
+    it). It moved with this pin, the two-year-window pin, the probe's derived vocabulary and
+    the post-deploy handoff, as the closed-vocabulary rule says.
     """
     anchor = frozenset(
         {
@@ -788,6 +794,7 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
             "account_sum_empty",
             "account_keys_changed",
             "history_days_unreproduced",
+            "account_key_read_stalled",
         }
     )
     assert er.FORCED_REBUILD_ANCHOR_REASONS == anchor, (
@@ -799,7 +806,7 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
         "tokens; change both together"
     )
     assert anchor.isdisjoint(account)
-    assert len(anchor) + len(account) == 15
+    assert len(anchor) + len(account) == 16
     assert er.FORCED_REBUILD_REFUSAL_REASONS == anchor | account, (
         "FORCED_REBUILD_REFUSAL_REASONS is no longer the union of its two halves"
     )

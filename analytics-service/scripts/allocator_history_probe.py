@@ -72,6 +72,24 @@ rebuild's own read are GETs: the fills-history ordering read (one per OKX member
 read), and, for an OKX member refused on its anchor, one ``GET /api/v5/account/balance``
 plus the bills-archive pages read through ``services.okx_opening_balance``.
 
+D-01 (Phase 171): WHICH LIMIT STOPPED A CUT-SHORT READ. For a member whose read was cut
+short (``failure_class`` "truncated") the account record also names ``truncated_site`` (the
+limit that stopped it), ``last_window_age_bucket`` (the age of the window it stopped in, in
+a closed set of day ranges), ``last_window_calls`` (how many calls that window took) and
+``read_elapsed_s`` (whole seconds the read ran, summed over the account's members), beside
+the existing ``trade_calls``. The site is read from a typed ``site`` attribute on the raised
+exception when one is present (a later plan of the phase adds it) and otherwise DERIVED from
+the probe's own in-memory call log, because the reading is taken on the code deployed BEFORE
+Phase 171 ships. Three derived tokens: ``bybit_window_ceiling`` (the last 7-day window took
+exactly the rebuild's per-window page ceiling of calls and every page advanced),
+``bybit_stalled_page`` (the last call was a full page that added no new fill, or returned the
+cursor it was sent) and ``bybit_stalled_one_ms`` (that stalled page held fills of a single
+millisecond). Anything else is ``unknown``. The stall is tested first because the deployed
+read tests it before its ceiling branch. Every ``er`` name the probe reads is listed in
+``DEPLOYED_ER_NAMES`` and ``run()`` refuses (exit 2, before any decrypt) when the rebuild
+module it runs against lacks one, so this file can be run against older deployed code without
+silently misrecording.
+
 USAGE (run once on the Railway backfill worker; it takes no arguments, so no identifier
 is ever typed). Railway's remote shell is broken (TRADEPAGES plan 06), so run it through a
 temporary start-command change that starts the probe in the background
@@ -103,6 +121,7 @@ import logging
 import math
 import re
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -137,6 +156,10 @@ _DIFF_THRESHOLD = 0.005
 # stopped with older rows unread.
 _OKX_PAGE_ROWS = 100
 
+# Bybit's execution-list page size (the rebuild sends it explicitly); a last call this full may
+# have stopped with more fills unread.
+_BYBIT_PAGE_ROWS = 100
+
 _LABEL_RE = re.compile(r"^a[0-9]{1,2}$")
 _DATE_RE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}$")
 
@@ -151,6 +174,58 @@ _OPENING_REASON_TOKENS: tuple[str, ...] = ("none", *sorted(obal.OPENING_UNAVAILA
 _WALK_NOT_COMPLETED_REASONS: frozenset[str] = frozenset(
     {"malformed_balance", "malformed_bills", "page_ceiling", "reach_unproven"}
 )
+
+# D-01: the limit that stopped a cut-short read. "none" is an untruncated member; the three derived
+# tokens are what the probe can tell from its own call log against the code deployed before this
+# phase; the nine typed tokens are the sites the rebuild names once it carries a typed ``site``.
+_TRUNCATED_SITES: tuple[str, ...] = (
+    "none",
+    "unknown",
+    "bybit_window_ceiling",
+    "bybit_stalled_page",
+    "bybit_stalled_one_ms",
+    "bybit_not_supported",
+    "bybit_no_advance",
+    "bybit_segment_ceiling",
+    "okx_not_supported",
+    "okx_no_advance",
+    "okx_page_ceiling",
+    "generic_not_supported",
+    "generic_no_advance",
+    "generic_page_ceiling",
+)
+
+# The age of a window's start at the run date, in whole days.
+_WINDOW_AGE_BUCKETS: tuple[str, ...] = (
+    "none",
+    "0-29",
+    "30-89",
+    "90-179",
+    "180-364",
+    "365-546",
+    "547-729",
+    "730+",
+)
+
+# Every attribute the probe reads off the rebuild module. ``run()`` refuses before any decrypt when
+# the module it runs against lacks one (see ``missing_deployed_names``).
+DEPLOYED_ER_NAMES: tuple[str, ...] = (
+    "FORCED_REBUILD_REFUSAL_REASONS",
+    "ForcedRebuildRefusedError",
+    "TruncatedTradeRead",
+    "_BREAKDOWN_PROTECTED_KEYS",
+    "_BYBIT_WINDOW_PAGE_CEILING",
+    "_RECONSTRUCT_CRAWL_TIMEOUT_S",
+    "_account_rebuild_window",
+    "_fetch_and_price_window",
+    "_key_venue",
+    "_read_account_keys",
+    "_select_account_crawl_keys",
+    "_sum_account_rows",
+)
+
+# The clock behind ``read_elapsed_s``; a seam so a test can set it.
+_monotonic = time.monotonic
 
 ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "record",
@@ -180,6 +255,10 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "max_rel_diff",
     "days_incomplete",
     "transfers_older_365d",
+    "truncated_site",
+    "last_window_age_bucket",
+    "last_window_calls",
+    "read_elapsed_s",
     "anchor_diagnostic",
     "diagnostic_failure_class",
     "diagnostic_members",
@@ -289,6 +368,10 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "max_rel_diff": _is_ratio,
     "days_incomplete": _is_count,
     "transfers_older_365d": _is_count,
+    "truncated_site": _is_one_of(_TRUNCATED_SITES),
+    "last_window_age_bucket": _is_one_of(_WINDOW_AGE_BUCKETS),
+    "last_window_calls": _is_count,
+    "read_elapsed_s": _is_count,
     "anchor_diagnostic": _is_one_of(("not-run", "run", "failed")),
     "diagnostic_failure_class": _is_one_of(_FAILURE_CLASSES),
     "diagnostic_members": _is_count,
@@ -421,6 +504,8 @@ class _Call:
     ids: tuple[tuple[Any, str], ...]
     rows_without_id: int
     oldest_ts: int | None
+    newest_ts: int | None = None
+    cursor_repeated: bool = False
 
 
 def _as_int(raw: Any) -> int | None:
@@ -433,12 +518,24 @@ def _as_int(raw: Any) -> int | None:
     return None
 
 
+def _page_cursor(rows: Sequence[Mapping[str, Any]]) -> str | None:
+    """The Bybit ``nextPageCursor`` left on a row's ``info``, read as the rebuild reads it. Only
+    compared with the cursor the call was sent; the text is never stored."""
+    for row in rows:
+        info = row.get("info")
+        if isinstance(info, Mapping) and info.get("nextPageCursor"):
+            return str(info["nextPageCursor"])
+    return None
+
+
 def _describe_call(args: tuple[Any, ...], kwargs: Mapping[str, Any], page: Any) -> _Call:
     since = args[1] if len(args) > 1 else kwargs.get("since")
     params = args[3] if len(args) > 3 else kwargs.get("params")
     rows = [t for t in (page or []) if isinstance(t, Mapping)]
     ids = tuple((t.get("symbol"), str(t["id"])) for t in rows if t.get("id") is not None)
     stamps = [s for s in (_as_int(t.get("timestamp")) for t in rows) if s is not None]
+    sent = params.get("cursor") if isinstance(params, Mapping) else None
+    returned = _page_cursor(rows)
     return _Call(
         since=_as_int(since),
         params=dict(params) if isinstance(params, Mapping) else {},
@@ -446,6 +543,8 @@ def _describe_call(args: tuple[Any, ...], kwargs: Mapping[str, Any], page: Any) 
         ids=ids,
         rows_without_id=sum(1 for t in rows if t.get("id") is None),
         oldest_ts=min(stamps) if stamps else None,
+        newest_ts=max(stamps) if stamps else None,
+        cursor_repeated=returned is not None and sent is not None and returned == str(sent),
     )
 
 
@@ -546,6 +645,73 @@ def okx_passes_ended_full(calls: Sequence[_Call]) -> int:
         ):
             count += 1
     return count
+
+
+def window_age_bucket(since_ms: int | None, run_day: date) -> str:
+    """The closed age bucket of a window start: whole days from ``since_ms`` to the run day's
+    UTC midnight. ``None`` (no start known) is "none"."""
+    if since_ms is None:
+        return "none"
+    days = max(0, (_day_ms(run_day) - since_ms) // 86_400_000)
+    for upper, token in ((30, "0-29"), (90, "30-89"), (180, "90-179"), (365, "180-364")):
+        if days < upper:
+            return token
+    if days < 547:
+        return "365-546"
+    return "547-729" if days < 730 else "730+"
+
+
+def last_window_calls(calls: Sequence[_Call]) -> int:
+    """How many trailing calls share the last call's ``since``: one Bybit window is read with
+    the same start on every call, so this is the call count of the window the read stopped in."""
+    if not calls:
+        return 0
+    count = 0
+    for call in reversed(calls):
+        if call.since != calls[-1].since:
+            break
+        count += 1
+    return count
+
+
+def derive_truncated_site(venue: str, calls: Sequence[_Call]) -> str:
+    """Which limit stopped a Bybit read, told from the call log alone (the code deployed before
+    Phase 171 carries no typed site). The stall is tested first because the deployed read tests
+    it before its page-ceiling branch, so a 100th call that stalls is the stall. A full last page
+    is a stall when it added no fill an earlier call had not already returned (the deployed
+    ``seen`` set spans the whole read) or returned the cursor it was sent. Anything the log
+    cannot tell is "unknown"."""
+    if venue != "bybit":
+        return "unknown"
+    window = list(calls)[len(calls) - last_window_calls(calls) :]
+    if not window:
+        return "unknown"
+    last = window[-1]
+    if last.rows >= _BYBIT_PAGE_ROWS:
+        earlier: set[tuple[Any, str]] = set()
+        for call in calls[:-1]:
+            earlier |= set(call.ids)
+        added = last.rows_without_id > 0 or any(i not in earlier for i in last.ids)
+        if not added or last.cursor_repeated:
+            return "bybit_stalled_one_ms" if last.oldest_ts == last.newest_ts else "bybit_stalled_page"
+    if len(window) == er._BYBIT_WINDOW_PAGE_CEILING:
+        return "bybit_window_ceiling"
+    return "unknown"
+
+
+def truncated_site_of(exc: BaseException, venue: str, calls: Sequence[_Call]) -> str:
+    """The typed ``site`` the rebuild put on the exception when it carries one, else the site
+    derived from the call log. A typed site outside the declared tokens is "unknown": vocabulary
+    drift must not be mapped onto a derived answer."""
+    typed = getattr(exc, "site", None)
+    if isinstance(typed, str):
+        return typed if typed in _TRUNCATED_SITES else "unknown"
+    return derive_truncated_site(venue, calls)
+
+
+def missing_deployed_names() -> list[str]:
+    """The ``DEPLOYED_ER_NAMES`` the rebuild module this probe runs against does not define."""
+    return [name for name in DEPLOYED_ER_NAMES if not hasattr(er, name)]
 
 
 def _busiest_inst_type(calls: Sequence[_Call]) -> str | None:
@@ -823,6 +989,10 @@ class _MemberResult:
     calls: list[_Call] = field(default_factory=list)
     transfers: list[tuple[str, Any, int | None]] = field(default_factory=list)
     order: bool | str | None = None  # None: no raw ordering read was made
+    truncated_site: str = "none"
+    last_window_age_bucket: str = "none"
+    last_window_calls: int = 0
+    elapsed_s: int = 0
     diagnostic: dict[str, Any] | None = None  # the anchor diagnostic's record keys, when run
 
 
@@ -965,12 +1135,18 @@ async def _probe_member(
 
     client: Any = None
     recorder: _TradeRecorder | None = None
+    started: float | None = None
+
+    def _elapsed() -> int:
+        return 0 if started is None else max(0, int(_monotonic() - started))
+
     try:
         if credentials_row is None:
             raise LookupError("selected member is not among the active keys read")
         api_key, api_secret, passphrase = decrypt_credentials(dict(credentials_row), kek)
         client = _make_exchange_client(venue, api_key, api_secret, passphrase)
         recorder = _TradeRecorder(client)
+        started = _monotonic()
         rows, order, agreed = await asyncio.wait_for(
             _read_member(client, venue, supabase, window_start, end_date, recorder),
             er._RECONSTRUCT_CRAWL_TIMEOUT_S,
@@ -980,11 +1156,18 @@ async def _probe_member(
         # (review WR-02), so it gets the same read-only diagnostic a refusal does.
         calls = list(recorder.calls)
         moved = list(recorder.transfers)
+        elapsed_s = _elapsed()
         diagnostic: dict[str, Any] | None = None
         if venue == "okx" and agreed:
             diagnostic = await _anchor_diagnostic(client, supabase, window_start, end_date)
         return _MemberResult(
-            read=True, rows=rows, calls=calls, transfers=moved, order=order, diagnostic=diagnostic
+            read=True,
+            rows=rows,
+            calls=calls,
+            transfers=moved,
+            order=order,
+            elapsed_s=elapsed_s,
+            diagnostic=diagnostic,
         )
     except er.ForcedRebuildRefusedError as exc:
         # Snapshot BEFORE the diagnostic: its second pass runs through the same wrapped
@@ -992,22 +1175,37 @@ async def _probe_member(
         # describe the forced pass only).
         calls = list(recorder.calls) if recorder is not None else []
         moved = list(recorder.transfers) if recorder is not None else []
+        elapsed_s = _elapsed()
         if exc.reason in er.FORCED_REBUILD_REFUSAL_REASONS:
             diagnostic = None
             if venue == "okx" and client is not None and exc.reason == "anchor_skipped_implausible":
                 diagnostic = await _anchor_diagnostic(client, supabase, window_start, end_date)
             return _MemberResult(
-                read=False, refusal=exc.reason, calls=calls, transfers=moved, diagnostic=diagnostic
+                read=False,
+                refusal=exc.reason,
+                calls=calls,
+                transfers=moved,
+                elapsed_s=elapsed_s,
+                diagnostic=diagnostic,
             )
-        return _MemberResult(read=False, failure_class="other", calls=calls, transfers=moved)
+        return _MemberResult(
+            read=False, failure_class="other", calls=calls, transfers=moved, elapsed_s=elapsed_s
+        )
     except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
         calls = recorder.calls if recorder is not None else []
         moved = recorder.transfers if recorder is not None else []
+        truncated = isinstance(exc, er.TruncatedTradeRead)
         return _MemberResult(
             read=False,
-            failure_class="truncated" if isinstance(exc, er.TruncatedTradeRead) else classify_failure(exc),
+            failure_class="truncated" if truncated else classify_failure(exc),
             calls=calls,
             transfers=moved,
+            truncated_site=truncated_site_of(exc, venue, calls) if truncated else "none",
+            last_window_age_bucket=(
+                window_age_bucket(calls[-1].since if calls else None, end_date) if truncated else "none"
+            ),
+            last_window_calls=last_window_calls(calls) if truncated else 0,
+            elapsed_s=_elapsed(),
         )
     finally:
         if client is not None:
@@ -1072,6 +1270,10 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "max_rel_diff": FIELD_ABSENT,
         "days_incomplete": 0,
         "transfers_older_365d": 0,
+        "truncated_site": "none",
+        "last_window_age_bucket": "none",
+        "last_window_calls": 0,
+        "read_elapsed_s": 0,
         "anchor_diagnostic": "not-run",
         "diagnostic_failure_class": "none",
         "diagnostic_members": 0,
@@ -1138,6 +1340,7 @@ async def _probe_account(
         venue_of.append(venue)
 
     failed = [r for r in results if not r.read]
+    first_failure = next((r for r in failed if r.failure_class != "none"), None)
     readings = [r.order for r in results if isinstance(r.order, bool)]
     diagnostics = [r.diagnostic for r in results if r.diagnostic is not None]
     # The FIRST measured member's keys go into the record; the count tells the reader when
@@ -1153,7 +1356,7 @@ async def _probe_account(
         window_days=window_days,
         members_read=len(results) - len(failed),
         members_failed=len(failed),
-        failure_class=next((r.failure_class for r in failed if r.failure_class != "none"), "none"),
+        failure_class=first_failure.failure_class if first_failure is not None else "none",
         member_refusal=next((r.refusal for r in failed if r.refusal != "none"), "none"),
         trade_calls=sum(len(r.calls) for r in results),
         trades_read=sum(trades_read(r.calls) for r in results),
@@ -1167,6 +1370,12 @@ async def _probe_account(
             transfers_older_than(r.transfers, _day_ms(end_date - timedelta(days=365)))
             for r in results
         ),
+        truncated_site=first_failure.truncated_site if first_failure is not None else "none",
+        last_window_age_bucket=(
+            first_failure.last_window_age_bucket if first_failure is not None else "none"
+        ),
+        last_window_calls=first_failure.last_window_calls if first_failure is not None else 0,
+        read_elapsed_s=sum(r.elapsed_s for r in results),
         diagnostic_members=len(diagnostics),
         **first_diagnostic,
     )
@@ -1219,6 +1428,14 @@ async def run() -> int:
     account in ``created_at`` order and print one JSON line per account and a summary."""
     from services.db import db_execute, get_supabase, rows
     from services.encryption import get_kek
+
+    missing = missing_deployed_names()
+    if missing:
+        print(
+            f"refused: the deployed rebuild lacks {len(missing)} name(s) this probe reads",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
 
     supabase = ReadOnlySupabase(get_supabase())
 

@@ -333,6 +333,103 @@ export type Database = {
           },
         ]
       }
+      // 2026-10-30 (Phase 171 READCEILING plan 06): allocator_trade_read_windows
+      // and allocator_trade_reads are hand-added from migration
+      // 20261031120000, which has NOT applied to PROD yet. A regen against the
+      // linked PROD project drops them until it does; re-apply them then. Both
+      // are service-role only (no browser code reads them). Only the api_keys
+      // foreign key is listed on each.
+      allocator_trade_read_windows: {
+        Row: {
+          api_key_id: string
+          chunk_count: number
+          chunk_index: number
+          created_at: string
+          expires_at: string
+          n_trades: number
+          read_version: number
+          trades: Json
+          window_end_ms: number
+          window_start_ms: number
+        }
+        Insert: {
+          api_key_id: string
+          chunk_count: number
+          chunk_index: number
+          created_at?: string
+          expires_at: string
+          n_trades: number
+          read_version: number
+          trades: Json
+          window_end_ms: number
+          window_start_ms: number
+        }
+        Update: {
+          api_key_id?: string
+          chunk_count?: number
+          chunk_index?: number
+          created_at?: string
+          expires_at?: string
+          n_trades?: number
+          read_version?: number
+          trades?: Json
+          window_end_ms?: number
+          window_start_ms?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "allocator_trade_read_windows_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      allocator_trade_reads: {
+        Row: {
+          api_key_id: string
+          claims: number
+          expires_at: string
+          grid_origin_ms: number
+          last_job_id: string | null
+          read_version: number
+          stalled_claims: number
+          updated_at: string
+          venue: string
+        }
+        Insert: {
+          api_key_id: string
+          claims?: number
+          expires_at: string
+          grid_origin_ms: number
+          last_job_id?: string | null
+          read_version: number
+          stalled_claims?: number
+          updated_at?: string
+          venue: string
+        }
+        Update: {
+          api_key_id?: string
+          claims?: number
+          expires_at?: string
+          grid_origin_ms?: number
+          last_job_id?: string | null
+          read_version?: number
+          stalled_claims?: number
+          updated_at?: string
+          venue?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "allocator_trade_reads_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: true
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       // 2026-10-26 (Phase 167.2.1.1.1 NAVMTM plan 02): api_key_nav_marks is
       // hand-added from migration 20261029120000, which has NOT applied to PROD
       // yet. A regen against the linked PROD project drops it until it does;

@@ -1099,7 +1099,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE, plan 01): `armsSeen` 803 -> 806, the +3 arms (P1, P2, P3) of test_ledger_refresh_fanout.sql.
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04): `armsSeen` 806 -> 807, the +1 arm P4 of test_ledger_refresh_fanout.sql.
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1): `armsSeen` 807 -> 808, the +1 arm P5 of test_ledger_refresh_fanout.sql.
-    expect(armsSeen).toBe(808);
+    // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): `armsSeen` 803 -> 811, the +8 arms of the NEW gate test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 811 to be 803`, and ONE full lane run printed `coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`.
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): both moves above started from the same base; the merged corpus is re-read by this file's run.
+    expect(armsSeen).toBe(816);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1134,7 +1136,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE, plan 01): `stepsSeen` 916 -> 919, the +3 file steps of arms P1, P2 and P3 (one `edit` step each on migration 20261030120000). MEASURED: this file's run read `expected 919 to be 916`.
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04): `stepsSeen` 919 -> 920, the +1 `edit` step of arm P4 on migration 20261030120000.
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1): `stepsSeen` 920 -> 921, the +1 `edit` step of arm P5 on migration 20261030120000.
-    expect(stepsSeen).toBe(921);
+    // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): `stepsSeen` 916 -> 924, the +8 file steps of the NEW gate test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 924 to be 916`.
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): both moves above started from the same base; the merged corpus is re-read by this file's run.
+    expect(stepsSeen).toBe(929);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2085,7 +2089,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE, plan 01): 916 -> 919, the same +3 steps as `stepsSeen`. MEASURED: this file's run read `expected 919 to be 916`.
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 1, D-04): 919 -> 920, the +1 `find` of arm P4.
     // ⭐ CURRENCY 2026-10-27 (Phase 174 MARKPAUSE fix round 2, SFH-2 N1): 920 -> 921, the +1 `find` of arm P5.
-    expect(needles.length).toBe(921);
+    // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 916 -> 924, the same +8 steps as `stepsSeen`. MEASURED: this file's run read `expected 924 to be 916`.
+    // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): both moves above started from the same base; the merged corpus is re-read by this file's run.
+    expect(needles.length).toBe(929);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2688,7 +2694,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 104 -> 105, the sameday_empty gate file (test_commit_scenario_batch_fingerprint_sameday_empty.sql). MEASURED: this file's run read `expected 105 to be 104`, and the full lane run printed `coverage: files 78/105`.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 105 -> 106, the window-replace gate file (test_replace_allocator_equity_snapshots_window.sql). MEASURED: this file's run read `expected 106 to be 105`, and the full lane run printed `coverage: files 79/106`.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 106 -> 107, the NEW gate file test_api_key_nav_marks.sql. MEASURED: this file's run read `expected 107 to be 106`, and the full lane run printed `coverage: files 80/107`.
-    expect(corpus.filesTotal).toBe(107);
+    // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 107 -> 108, the NEW gate file test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 108 to be 107`, and the full lane run printed `coverage: files 81/108`.
+    expect(corpus.filesTotal).toBe(108);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2773,12 +2780,15 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77 -> 78, moving WITH `filesTotal`; the by-name list below gained test_commit_scenario_batch_fingerprint_sameday_empty.sql. MEASURED: this file's run read `expected 78 to be 77`, and the full lane run printed `scope: FULL 78/78 annotated files`.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78 -> 79, moving WITH `filesTotal`; the by-name list below gained test_replace_allocator_equity_snapshots_window.sql.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79 -> 80, moving WITH `filesTotal`; the by-name list below gained test_api_key_nav_marks.sql. MEASURED: the full lane run printed `coverage: files 80/107`.
-    expect(corpus.filesAnnotated).toBe(80);
+    // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80 -> 81, moving WITH `filesTotal`; the by-name list below gained test_allocator_trade_reads.sql. MEASURED: the full lane run printed `coverage: files 81/108`.
+    expect(corpus.filesAnnotated).toBe(81);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
       "test_allocator_holdings_per_key_unique.sql",
+      // ⭐ ADDED 2026-10-27 (Phase 171 READCEILING, plan 06): the trade-read store gate (8 arms) for migration 20261031120000.
+      "test_allocator_trade_reads.sql",
       // ⚠️ CURRENCY 2026-09-07 (phase 164.7 plan 02, pinned by plan 05): the
       // FORTY-SIXTH annotated file. Seven arms — the two RAISE paths of the
       // Vault/system_settings tick asked for BY NAME, the discriminator that
@@ -3336,7 +3346,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 104 -> 105, the sameday_empty gate file (test_commit_scenario_batch_fingerprint_sameday_empty.sql). MEASURED: this file's run read `expected 105 to be 104`, and the full lane run printed `coverage: files 78/105`.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 105 -> 106, the window-replace gate file (test_replace_allocator_equity_snapshots_window.sql). MEASURED: this file's run read `expected 106 to be 105`, and the full lane run printed `coverage: files 79/106`.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 106 -> 107, the NEW gate file test_api_key_nav_marks.sql. MEASURED: this file's run read `expected 107 to be 106`, and the full lane run printed `coverage: files 80/107`.
-    expect(corpus.filesTotal).toBe(107);
+    // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 107 -> 108, the NEW gate file test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 108 to be 107`, and the full lane run printed `coverage: files 81/108`.
+    expect(corpus.filesTotal).toBe(108);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3377,7 +3388,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 77 -> 78, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(78) ] to have a length of 77 but got 78`.
     // ⭐ CURRENCY 2026-10-22 (Phase 167.2.1.1.2 ACCTREBUILD, plan 05): 78 -> 79, moving WITH `filesAnnotated`.
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79 -> 80, moving WITH `filesAnnotated`; the by-name list gained test_api_key_nav_marks.sql. MEASURED: the full lane run printed `coverage: files 80/107`.
-    expect(corpus.annotatedFiles).toHaveLength(80);
+    // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80 -> 81, moving WITH `filesAnnotated`; the by-name list gained test_allocator_trade_reads.sql. MEASURED: the full lane run printed `coverage: files 81/108`.
+    expect(corpus.annotatedFiles).toHaveLength(81);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

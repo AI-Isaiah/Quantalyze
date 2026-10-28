@@ -354,10 +354,14 @@ async def test_a_bybit_crawl_inside_the_day_is_not_refused(
 
 @pytest.mark.asyncio
 async def test_the_two_year_refusal_adds_no_token() -> None:
-    """D-01 'No new refusal token': the closed set of forced-rebuild refusal reasons keeps its
-    15 tokens, and the guard's own message is not one of them (it reaches the forced path as the
-    existing ``account_key_read_failed`` through the gather converter)."""
-    assert len(er.FORCED_REBUILD_REFUSAL_REASONS) == 15
+    """D-01 'No new refusal token': the two-year guard adds no token to the closed set of
+    forced-rebuild refusal reasons, and the guard's own message is not one of them (it reaches the
+    forced path as the existing ``account_key_read_failed`` through the gather converter).
+
+    2026-10-27 (Phase 171 READCEILING plan 10): the set is 16 tokens. The 16th,
+    ``account_key_read_stalled``, is Phase 171's (a forced read that makes no progress); the
+    two-year guard still adds none."""
+    assert len(er.FORCED_REBUILD_REFUSAL_REASONS) == 16
     exchange = AsyncMock()
     exchange.id = "bybit"
     now_ms = _ms(AFTER_MIDNIGHT)
