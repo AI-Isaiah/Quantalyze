@@ -566,6 +566,54 @@ def test_the_last_marks_read_day_flow_made_before_the_read_is_not_published_as_p
     assert after.held_out_flow_days == ("2026-03-07",)
 
 
+def test_rule_10_moves_the_prior_day_amount_in_and_the_own_day_amount_out() -> None:
+    """MARKSOURCE plan 03 (REVIEW-3 IN-02, D-02). A BTC deposit made at 00:05Z on 03-07, before
+    mark 03-06's 00:10Z read, is inside that mark's wallet, so it is valued at the close the mark
+    itself uses: 600.0 (the 03-06 close). Its own-day value, 660.0 (the 03-07 close), is what the
+    day aggregate stores on 03-07, so that is what leaves 03-07. Hand arithmetic:
+      base(03-06) = wallet 1500.0 - 600.0 = 900.0, r(03-06) = (1590 - 900 - 600) / 900 = 0.1
+      flows(03-07) = 660 - 660 = 0, r(03-07) = (1600 - 1590 - 0) / 1590
+    Taking 600.0 out of 03-07 instead would leave 60.0 there and publish (1600-1590-60)/1590."""
+    import services.nav_marks_apply as nma
+
+    realized = _series(REALIZED_DAYS, [0.0] * 5)
+    read = dt.datetime(2026, 3, 7, 0, 10, tzinfo=dt.timezone.utc)
+    read_next = dt.datetime(2026, 3, 8, 0, 10, tzinfo=dt.timezone.utc)
+    marks = [
+        nma.AppliedMark("2026-03-06", 1590.0, 90.0, read),
+        nma.AppliedMark("2026-03-07", 1600.0, 100.0, read_next),
+    ]
+    moved = nma.apply_marks(
+        realized,
+        {"2026-03-07": 660.0},
+        marks,
+        flow_instants=[
+            nma.FlowInstant(
+                _ms(dt.datetime(2026, 3, 7, 0, 5, tzinfo=dt.timezone.utc)),
+                "2026-03-07", 660.0, "USD", 600.0,
+            )
+        ],
+    )
+    assert moved.flow_moves == {"2026-03-06": 600.0}
+    assert moved.flow_moves_out == {"2026-03-06": 660.0}
+    assert _approx(moved.returns["2026-03-06"], 0.1)
+    assert _approx(moved.returns["2026-03-07"], 10.0 / 1590.0)
+
+    # An instant without a prior-day amount behaves exactly as before: in equals out.
+    plain = nma.apply_marks(
+        realized,
+        {"2026-03-07": 660.0},
+        marks,
+        flow_instants=[
+            nma.FlowInstant(
+                _ms(dt.datetime(2026, 3, 7, 0, 5, tzinfo=dt.timezone.utc)), "2026-03-07", 660.0
+            )
+        ],
+    )
+    assert plain.flow_moves == {"2026-03-06": 660.0}
+    assert plain.flow_moves_out == plain.flow_moves
+
+
 def test_covered_days_lists_quiet_and_gap_days() -> None:
     """Callers hand ``covered_days`` to ``derive_basis_series`` so the days a stored mark's
     return covers are neither refused as gaps nor filled with a flat 0.0. That is the quiet

@@ -91,6 +91,10 @@ function makeHolding(over: Partial<HoldingRow> = {}): HoldingRow {
     value_usd: 90_000,
     entry_price: 60_000,
     unrealized_pnl_usd: 1_200,
+    // 167.2.1.1.1.1 D-07: a spot row with no usable mark reads "No price".
+    // This builder is priced (1.5 x 60,000 = 90,000) so its assertions about a
+    // priced row keep their meaning.
+    mark_price_usd: 60_000,
     api_key_id: "key-1",
     source_key_sync_status: "complete",
     source_key_disconnected_at: null,

@@ -204,25 +204,21 @@ _ANALYTICS_ROOT = Path(__file__).resolve().parent.parent  # tests/ -> analytics-
 # The pinned inventory (relative posix paths from analytics-service/). Any NEW
 # file referencing a deletion target — or any listed file that unexpectedly stops
 # referencing one — fails this test loudly. POST-DELETE (plan 114-03): both
-# deletion targets are gone from production and from every migrated test; the
-# ONLY files that still carry the literal tokens are the two Phase-115 METHOD
-# exemptions. (The permanent delete-gate tests/test_e1_delete_gate.py and this
+# deletion targets are gone from production and from every migrated test. The
+# two files that used to carry the literal tokens as same-named
+# EquityCurveBuilder METHOD exemptions (Phase 115 scope) lost them in MARKSOURCE
+# D-03 (plan 167.2.1.1.1.1-02), which removed the last two carriers, so the pin
+# is empty. (The permanent delete-gate tests/test_e1_delete_gate.py and this
 # parity file carry the tokens ONLY as concatenated census constants, so they do
 # not appear here — the walk matches the contiguous literal, which concatenation
 # never forms.)
-_PINNED_INVENTORY = frozenset({
-    # EXEMPT: same-named METHOD on EquityCurveBuilder (Phase 115 / STITCH-02
-    # scope) — a different symbol that does not import portfolio_metrics.
-    "services/equity_reconstruction.py",
-    # EXEMPT: builder.compute_twr() METHOD calls only (Phase 115 scope).
-    "tests/test_equity_curve_builder.py",
-})
+_PINNED_INVENTORY: frozenset[str] = frozenset()
 
 
 def test_caller_census_matches_pinned_inventory():
     """Executable post-delete sweep: the set of analytics-service *.py files that
-    reference either deletion target MUST equal the pinned inventory exactly (the
-    two Phase-115 METHOD exemptions)."""
+    reference either deletion target MUST equal the pinned inventory exactly (now
+    empty: no file carries either token)."""
     self_path = Path(__file__).resolve()
     scanned = 0
     found: set[str] = set()

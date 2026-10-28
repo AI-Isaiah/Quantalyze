@@ -386,13 +386,21 @@ def test_curves_that_share_no_day_sum_to_no_row() -> None:
 
 
 def test_the_truncated_flag_survives_and_a_structured_entry_is_never_summed() -> None:
-    """``__truncated__`` is a flag, so it survives as True. ``__pnl_missing__`` is a dict
-    record, never a number: it is left out of the numeric sum and raises nothing."""
+    """``__truncated__`` is a flag, so it survives as True. ``__pnl_missing__`` and
+    ``__price_gap_left_out__`` are dict records, never numbers: they are left out of the
+    numeric sum and raise nothing."""
     a = [
         _row(
             "2026-04-14",
             10.0,
-            {"BTC": 10.0, "__truncated__": True, "__pnl_missing__": {"count": 1, "symbols": ["X"]}},
+            {
+                "BTC": 10.0,
+                "__truncated__": True,
+                "__pnl_missing__": {"count": 1, "symbols": ["X"]},
+                "__price_gap_left_out__": {
+                    "count": 1, "symbols": ["Y"], "dust": 1, "unsizable": 0,
+                },
+            },
         )
     ]
     b = [_row("2026-04-14", 5.0, {"BTC": 5.0})]
@@ -402,6 +410,7 @@ def test_the_truncated_flag_survives_and_a_structured_entry_is_never_summed() ->
     assert breakdown["__truncated__"] is True
     assert breakdown["BTC"] == 15.0
     assert "__pnl_missing__" not in breakdown
+    assert "__price_gap_left_out__" not in breakdown
 
 
 def test_a_single_account_comes_back_with_the_same_days() -> None:

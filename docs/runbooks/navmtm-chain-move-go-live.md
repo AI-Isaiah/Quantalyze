@@ -85,6 +85,7 @@ missing at read time a BTC-unit MT5 key refuses its mark with the token `native_
 feed the legacy snapshot curve, which belongs to the MARKSOURCE phase, and D-03 names "the daily
 chain" as sync, derive, compute. This is a decision, recorded here so the next reader does not
 take their old hours for an oversight.
+2026-10-27 note: MARKSOURCE (Phase 167.2.1.1.1.1) moves these two jobs next to the mark read; see [the legacy poll and refresh move](marksource-legacy-chain-move-go-live.md).
 
 ## Environment and rendering the SQL
 
@@ -346,6 +347,7 @@ service, which would cut a running `cron_sync` request, and a Railway redeploy o
 service kills a derive mid-run and strands its in-flight jobs for up to the per-kind watchdog
 threshold. This replaces the 04:00-05:45 hold the other runbooks state (each carries a dated note
 pointing here). Before Step B the old window still applies.
+2026-10-27 note: MARKSOURCE extends this hold to 45 minutes after the moved refresh slot; see [the legacy poll and refresh move](marksource-legacy-chain-move-go-live.md).
 
 ## Rollback
 

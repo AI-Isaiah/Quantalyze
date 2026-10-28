@@ -1029,16 +1029,30 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
     });
 
     it("a real-priced asset whose name merely contains a stablecoin stays ready (positive control)", async () => {
-      // USDE is a split suffix in the writer, deliberately NOT in STABLECOINS.
+      // USDX contains "USD" but is in neither STABLECOINS nor STABLECOIN_SPLIT_SUFFIXES,
+      // so the poll prices it from a ticker.
       const item = await fetchHoldingCompareItem({
         allocator_id: ALLOC,
-        holding_ref: "holding:binance:USDE:spot",
+        holding_ref: "holding:binance:USDX:spot",
         supabase: fakeSupabase(
-          Array.from({ length: 31 }, (_, i) => row(i + 1, 1 + i * 0.001, { symbol: "USDE" })),
+          Array.from({ length: 31 }, (_, i) => row(i + 1, 1 + i * 0.001, { symbol: "USDX" })),
         ),
       });
       expect(item!.historyState).toBe("ready");
       expect(item!.analytics!.priced_days).toBe(31);
+    });
+
+    it("a split-suffix stable-value asset (USDE) is withheld: the poll stamps its mark at 1.0", async () => {
+      // USDE is in STABLECOIN_SPLIT_SUFFIXES, which price_rule.is_stable_value includes.
+      const item = await fetchHoldingCompareItem({
+        allocator_id: ALLOC,
+        holding_ref: "holding:binance:USDE:spot",
+        supabase: fakeSupabase(
+          Array.from({ length: 31 }, (_, i) => row(i + 1, 1, { symbol: "USDE" })),
+        ),
+      });
+      expect(item!.historyState).toBe("withheld");
+      expect(item!.analytics).toBeNull();
     });
 
     it("the withheld branch reads no mark: a malformed mark on a stablecoin row is not a contract error", async () => {
@@ -1054,12 +1068,16 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
   describe("fixed-mark set parity with the analytics writer", () => {
     const py = (rel: string) => readFileSync(join(process.cwd(), "analytics-service", rel), "utf8");
 
-    it("FIXED_MARK_SET.stablecoinSymbols equals STABLECOINS in analytics-service/services/closed_sets.py, member for member", () => {
+    it("FIXED_MARK_SET.stablecoinSymbols equals STABLECOINS | STABLECOIN_SPLIT_SUFFIXES in analytics-service/services/closed_sets.py, member for member", () => {
       const src = py("services/closed_sets.py");
-      const m = /^STABLECOINS: frozenset\[str\] = frozenset\(\s*\{([^}]*)\}\s*\)/m.exec(src);
-      expect(m, "STABLECOINS literal not found in closed_sets.py").not.toBeNull();
-      const members = [...m![1].matchAll(/"([A-Z0-9]+)"/g)].map((x) => x[1]).sort();
-      expect(members.length).toBeGreaterThan(0);
+      const literal = (name: string): string[] => {
+        const m = new RegExp(`^${name}: frozenset\\[str\\] = frozenset\\(\\s*\\{([^}]*)\\}\\s*\\)`, "m").exec(src);
+        expect(m, `${name} literal not found in closed_sets.py`).not.toBeNull();
+        const members = [...m![1].matchAll(/"([A-Z0-9]+)"/g)].map((x) => x[1]);
+        expect(members.length).toBeGreaterThan(0);
+        return members;
+      };
+      const members = [...new Set([...literal("STABLECOINS"), ...literal("STABLECOIN_SPLIT_SUFFIXES")])].sort();
       expect([...FIXED_MARK_SET.stablecoinSymbols].sort()).toEqual(members);
     });
 
@@ -1067,7 +1085,7 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
       const src = py("services/allocator_positions.py");
       const sfox = src.slice(src.indexOf("async def _fetch_sfox_balance_rows"));
       expect(sfox).toMatch(/"mark_price":\s*1\.0/);
-      expect(src).toMatch(/if asset_upper in STABLECOINS:\s*\n\s*mark_price = 1\.0/);
+      expect(src).toMatch(/if is_stable_value\(asset\):\s*\n\s*mark_price = 1\.0/);
       expect([...FIXED_MARK_SET.venues]).toContain("sfox");
     });
 
@@ -1076,7 +1094,8 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
       expect(holdingMarkIsFixed("SFOX", "BTC")).toBe(true);
       expect(holdingMarkIsFixed("mt5", "ACCOUNT-abc12345")).toBe(true);
       expect(holdingMarkIsFixed("binance", "BTC")).toBe(false);
-      expect(holdingMarkIsFixed("okx", "USDE")).toBe(false);
+      expect(holdingMarkIsFixed("okx", "USDE")).toBe(true);
+      expect(holdingMarkIsFixed("okx", "USDX")).toBe(false);
     });
   });
 

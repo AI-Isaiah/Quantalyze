@@ -1450,6 +1450,9 @@ def _entry_read_ctx(entry_answers: list[Any]) -> tuple[MagicMock, dict[str, Any]
             def _execute() -> Any:
                 if name == "compute_jobs":
                     return MagicMock(data={"metadata": {"source": _MARKER}})
+                if name != "strategy_analytics":
+                    # The mark path's account-group read (api_keys) is not an entry read.
+                    return MagicMock(data=[])
                 capture["entry_reads"] += 1
                 answer = entry_answers.pop(0) if entry_answers else None
                 if isinstance(answer, BaseException):

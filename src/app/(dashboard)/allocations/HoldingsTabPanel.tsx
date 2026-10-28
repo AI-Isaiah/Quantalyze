@@ -60,6 +60,8 @@ import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 // disconnected), from the pure module the Exchanges page already uses.
 import { isLiveKey } from "@/lib/departed-history";
 import { apiKeyLabelById } from "@/lib/api-key-label";
+import { holdingIsPriceGap } from "@/lib/holding-equity";
+import { priceGapHoldingsNote } from "./lib/live-holdings-summary";
 
 /** Honest-empty optimizer state when the prop is absent (test harnesses). */
 /** A venue's display name. The exchange ids that need more than a capital. */
@@ -498,6 +500,14 @@ export function HoldingsTabPanel(
     [spotHoldings, holdingsSummary, apiKeys, today],
   );
 
+  // 167.2.1.1.1.1 D-07 (P3): how many spot rows have no usable stored price.
+  // Counted over ALL spot rows, per row, not the rows left after the
+  // show-revoked toggle, by the same rule as the read-day note above: hiding a
+  // row inside the table must not hide the fact that AUM leaves it out.
+  const priceGapCount = useMemo(
+    () => spotHoldings.filter(holdingIsPriceGap).length,
+    [spotHoldings],
+  );
   const partialPositionReads = useMemo(
     () => props.partialPositionReads ?? [],
     [props.partialPositionReads],
@@ -632,6 +642,14 @@ export function HoldingsTabPanel(
             {note}
           </p>
         ))}
+        {priceGapCount > 0 ? (
+          <p
+            data-testid="holdings-price-gap-note"
+            className="text-xs text-text-muted [overflow-wrap:anywhere]"
+          >
+            {priceGapHoldingsNote(priceGapCount)}
+          </p>
+        ) : null}
         <OpenPositionsTable rows={openPositionRows} />
         {partialReadNotes.map((note) => (
           <p

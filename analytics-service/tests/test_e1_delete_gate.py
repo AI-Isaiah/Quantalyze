@@ -32,24 +32,19 @@ Three parts, plus 111-04 self-invalidation-proofing:
      (whose L1018 lazy import of ``compute_period_returns`` must survive) must
      still import.
 
-METHOD EXEMPTION (allowed-but-not-required, pinned until Phase 115 / STITCH-02):
-    the same-named TWR METHOD on ``services.equity_reconstruction``'s
+METHOD EXEMPTION (ENDED by MARKSOURCE D-03, plan 167.2.1.1.1.1-02):
+    until then the same-named TWR METHOD on ``services.equity_reconstruction``'s
     ``EquityCurveBuilder`` and its ``tests/test_equity_curve_builder.py`` callers
-    are a DIFFERENT symbol — a METHOD that does NOT import ``portfolio_metrics``.
-    It is E2
-    (allocator equity reconstruction) territory, retired by Phase 115 /
-    STITCH-02. The exemption is allowed-but-NOT-required, so the Phase-115
-    deletion of that method will NOT break this gate (the walk uses ``<=``, not
-    ``==``, against the exemption set).
+    were exempt (a DIFFERENT symbol, a METHOD that did not import
+    ``portfolio_metrics``; Phase 115 / STITCH-02 territory). D-03 deleted that
+    method and its callers, so ``_EXEMPT_TWR`` is empty and Part A also asserts
+    the CLASS carries no twr attribute. The walk still uses ``<=``, so the empty
+    set stays the rule: the twr token appears in no file.
 
-    The exemption is SYMBOL-SHAPE-scoped, not file-scoped (round-2 finding 2):
-    within an exempted file the twr token is allowed ONLY as the bound METHOD.
-    Two guards close the false-GREEN hole where a re-implemented module-level free
-    ``def`` of the twr symbol inside the exempted file would otherwise pass every
-    part: (1) Part A asserts the equity_reconstruction MODULE exposes no twr
-    attribute (the method is a CLASS attribute, so a module-level free def/alias
-    flips hasattr True); (2) Part B flags any def of the twr symbol that is
-    un-indented (module-level) or whose first parameter is not ``self``.
+    The round-2 guards (finding 2) stay: (1) Part A asserts the
+    equity_reconstruction MODULE exposes no twr attribute (a module-level free
+    def/alias flips hasattr True); (2) Part B flags any def of the twr symbol
+    that is un-indented (module-level) or whose first parameter is not ``self``.
 
 INJECTION-PROVEN: this gate was proven to go RED under a live-token injection
 (a scratch ``services/*.py`` reintroducing the twr symbol), then reverted — the
@@ -89,13 +84,11 @@ _TWR_DEF_RE = re.compile(
 
 _GATE_ROOT = Path(__file__).resolve().parents[1]  # tests/ -> analytics-service/
 
-# The twr token is permitted ONLY here (same-named METHOD, Phase-115 scope).
-# allowed-but-not-required: the walk asserts ``found <= EXEMPT`` so a future
-# STITCH-02 deletion that empties this set stays GREEN.
-_EXEMPT_TWR = frozenset({
-    "services/equity_reconstruction.py",
-    "tests/test_equity_curve_builder.py",
-})
+# The twr token is permitted nowhere. The Phase-115 method exemption (the
+# same-named EquityCurveBuilder METHOD and its test callers) ended when MARKSOURCE
+# D-03 (plan 167.2.1.1.1.1-02) deleted that method; the walk still asserts
+# ``found <= EXEMPT`` so the set stays empty and any re-entry fails.
+_EXEMPT_TWR: frozenset[str] = frozenset()
 
 # Files that legitimately carry the deletion-target tokens ONLY as
 # concatenation-built census/gate constants (never as live symbols) and are
@@ -130,18 +123,21 @@ def test_deleted_symbols_are_not_live_attributes():
         f"{_TWR_SYMBOL} re-entered routers.portfolio as a live symbol/import"
     )
 
-    # The Phase-115 exemption covers ONLY the bound EquityCurveBuilder METHOD (a
-    # CLASS attribute), so the equity_reconstruction MODULE must expose NO twr
-    # attribute. A module-level free ``def`` or an alias would make this hasattr
-    # True — closing the false-GREEN hole where a re-implemented free function
-    # inside the exempted file passed every gate part (round-2 finding 2). This is
-    # symbol-level, immune to comment/formatting tricks.
+    # The Phase-115 method exemption ended with MARKSOURCE D-03: neither the
+    # equity_reconstruction MODULE nor the EquityCurveBuilder CLASS may expose a
+    # twr attribute. A module-level free ``def`` or an alias would make the first
+    # hasattr True, a re-added method the second (round-2 finding 2 closed the
+    # false-GREEN hole of a free function inside the formerly exempted file).
+    # This is symbol-level, immune to comment/formatting tricks.
     import services.equity_reconstruction as eqr_mod
 
     assert not hasattr(eqr_mod, _TWR_SYMBOL), (
         f"{_TWR_SYMBOL} re-entered services.equity_reconstruction as a MODULE-LEVEL "
-        "free function/alias — the exemption covers only the bound "
-        "EquityCurveBuilder METHOD, not a module-level symbol"
+        "free function/alias"
+    )
+    assert not hasattr(eqr_mod.EquityCurveBuilder, _TWR_SYMBOL), (
+        f"{_TWR_SYMBOL} re-entered as a METHOD of EquityCurveBuilder — the "
+        "Phase-115 method exemption ended with MARKSOURCE D-03"
     )
 
 

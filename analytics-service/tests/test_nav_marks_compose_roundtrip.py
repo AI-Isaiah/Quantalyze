@@ -498,12 +498,16 @@ async def test_stored_mark_anchor_carries_its_read_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_last_mark_does_not_anchor() -> None:
-    """Info 2. Today's mark was refused (``upnl_unreadable``: the open profit could not be read, so
-    no mark was stored for 03-10), and the series' last day is the 03-08 mark, two days older than
-    this derive's label. That stored value is not this derive's read: the live read (1215.0, a
-    healthy balance) and its ladder are the anchor, ``anchor_asof`` is this derive's own clock, and
-    the stale 1071.0 is not.
+async def test_stale_last_mark_is_the_anchor_when_the_live_read_is_sound() -> None:
+    """Info 2, MARKSOURCE 167.2.1.1.1.1 plan 03 (D-02, a gap is named, never carried). Today's mark
+    was refused (``upnl_unreadable``: the open profit could not be read, so no mark was stored for
+    03-10), and the series' last day is the 03-08 mark, two days older than this derive's label.
+    The live read (1215.0, a healthy balance) is a sound, material, positive read, so the ladder
+    stays silent, and the anchor is the last STORED mark: 1071.0, read at that mark's own
+    ``marked_at``. The live equity of 03-10 is never written onto mark day 03-08.
+
+    The oracle moved with the behaviour (it was the live 1215.0 and this derive's own clock): the
+    old rule booked the 144.0 between the mark and the live read as a one-day step on 03-08.
 
     The plan names a live read of 0.0 for this case. An OKX terminal is ``equity - upl``, which
     needs a usable equity (plan 07's rule: no realized terminal, no marked series, the derive
@@ -512,24 +516,42 @@ async def test_stale_last_mark_does_not_anchor() -> None:
     from the live read."""
     db = KeyDb()
     seed_okx_marks(db, {"2026-03-06": 1050.0, "2026-03-08": 1071.0})
-    before = datetime.now(timezone.utc)
     result, capture = await derive_key_ccxt(
         db, returns=series(REALIZED_THROUGH_0305), now=at_0010("2026-03-11"), equity=1215.0,
         upl=215.0, flows=[], upnl_unreadable=True,
     )
-    after = datetime.now(timezone.utc)
     assert result.outcome == DispatchOutcome.DONE, result.error_message
     assert (KEY, "2026-03-10") not in db.marks, "an unreadable open profit stores no mark"
     ki = _key_inputs_payload(capture, KEY)
     assert ki["nav_mark_refusal"] == "upnl_unreadable"
-    assert ki["anchor_usd"] == pytest.approx(1215.0, abs=1e-9), "the live read is the anchor"
+    assert ki["anchor_usd"] == pytest.approx(1071.0, abs=1e-9), "the stored mark is the anchor"
     assert ki["anchor_null_reason"] is None
-    assert before <= datetime.fromisoformat(ki["anchor_asof"]) <= after
+    assert ki["anchor_asof"] == db.marks[(KEY, "2026-03-08")]["marked_at"]
     # The marks still apply to the series: its last day is the older mark, and the terminal
-    # follows the series, not the anchor.
+    # follows the series.
     assert ki["realized_terminal_day"] == "2026-03-08"
     assert ki["realized_terminal_usd"] == pytest.approx(1071.0, abs=1e-9)
     assert ki["marks_since"] == "2026-03-06"
+
+
+@pytest.mark.asyncio
+async def test_stale_mark_has_no_residual_step() -> None:
+    """MARKSOURCE plan 03, the carried residual (NAVMTM D-05: no row, the next mark covers it).
+    Marks 03-06 (1050.0) and 03-08 (1071.0); the derive at 00:10Z on 03-11 reads equity 1215.0 with
+    an open profit of 215.0 it cannot read, so 03-10 stores no mark. Through the real compose, the
+    drawn curve ends on the 03-08 stored mark, 1071.0, and has no level dated after it: the 144.0
+    between that mark and the live read (1215.0 - 1071.0) is not booked as a step on 03-08."""
+    db = KeyDb()
+    seed_okx_marks(db, {"2026-03-06": 1050.0, "2026-03-08": 1071.0})
+    result, capture = await derive_key_ccxt(
+        db, returns=series(REALIZED_THROUGH_0305), now=at_0010("2026-03-11"), equity=1215.0,
+        upl=215.0, flows=[], upnl_unreadable=True,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    curve = levels(await compose_curve(db, capture))
+    assert curve["2026-03-06"] == pytest.approx(1050.0, rel=1e-9)
+    assert curve["2026-03-08"] == pytest.approx(1071.0, abs=1e-9), "no live step on the mark day"
+    assert max(curve) == "2026-03-08", f"a level after the last mark: {sorted(curve)[-3:]}"
 
 
 @pytest.mark.asyncio
@@ -726,6 +748,7 @@ def _mt5_deals_with(
 async def derive_mt5_key(
     monkeypatch: pytest.MonkeyPatch, db: KeyDb, *, account: dict[str, Any],
     deals: list[dict[str, Any]], closes: pd.Series | None = None, apply_nothing: bool = False,
+    now: datetime | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     from tests.test_mt5_derive_branch import _FROZEN_NOW, _FakeMt5Transport
     from tests.test_mt5_derive_branch import _build_ctx as _mt5_build_ctx
@@ -740,7 +763,7 @@ async def derive_mt5_key(
         patch("services.job_worker.aclose_exchange", new=AsyncMock()),
         patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
         patch("services.benchmark.read_btc_closes", new=AsyncMock(return_value=closes)),
-        patch("services.job_worker._utc_now", new=lambda: _FROZEN_NOW),
+        patch("services.job_worker._utc_now", new=lambda: now or _FROZEN_NOW),
         *([patch("services.job_worker.read_key_marks", new=MagicMock(return_value=[]))]
           if apply_nothing else []),
     ]
@@ -964,6 +987,95 @@ async def test_mt5_btc_key_deposit_made_before_the_read_is_priced_and_counted_in
     payload = await compose_curve(db, capture, key=KEY_MT5, venue="mt5")
     assert_levels(levels(payload), {d: n * BTC_CLOSE for d, n in marks_native.items()})
     assert_trustworthy(payload)
+
+
+def stepped_btc_closes(through: str) -> pd.Series:
+    """BTC closes of 60_000.0 through 10-05 and 66_000.0 from 10-06 on, stored through ``through``.
+    The mark day 10-05 and the day after it have different closes, which ``btc_closes`` (constant)
+    hides: a flow priced at the wrong one of the two leaves a residue in the mark day's return."""
+    idx = pd.date_range("2025-06-01", through, freq="D")
+    return pd.Series(
+        [60_000.0 if ts <= pd.Timestamp("2026-10-05") else 66_000.0 for ts in idx],
+        index=idx, dtype="float64",
+    )
+
+
+@pytest.mark.asyncio
+async def test_moved_btc_flow_priced_at_the_mark_day_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MARKSOURCE plan 03, REVIEW-3 IN-02 (D-02: one rule for a moved flow). A 0.002 BTC deposit
+    made at 00:00Z on 10-06, before the 00:10Z read of mark 10-05, is inside that mark's wallet.
+    The mark itself is priced at close(10-05) = 60_000, so the deposit counted in 10-05 is
+      0.002 x 60_000 = 120.0 USD        (the old code: 0.002 x close(10-06) = 0.002 x 66_000 = 132.0)
+    and the base the mark's return is measured against is
+      wallet 0.1105 x 60_000 = 6630.0, less 120.0 = 6510.0
+      r(10-05) = (6660.0 - 6510.0 - 120.0) / 6510.0 = 30.0 / 6510.0 = 0.0005 / 0.1085
+    (the old 132.0 leaves 12.0 of price residue: 30.0 / 6498.0). The flow the day aggregate stores
+    on 10-06 is its own-day value, 132.0, and that is what leaves 10-06, so 10-06 nets to 0.0 and
+    mark 10-08 (7359.0 = 0.1115 x 66_000) returns (7359.0 - 6660.0) / 6660.0 = 699.0 / 6660.0."""
+    marks_native = {"2026-10-05": (0.1110, 60_000.0), "2026-10-08": (0.1115, 66_000.0)}
+    wallet_native = {"2026-10-05": 0.1105, "2026-10-08": 0.1105}
+    db = KeyDb()
+    for day, (native, close) in marks_native.items():
+        seed_mark(
+            db, day, native * close, key=KEY_MT5, venue="mt5",
+            open_pnl=(native - wallet_native[day]) * close,
+            native_unit="BTC", nav_native=native, open_pnl_native=native - wallet_native[day],
+        )
+    deals = _mt5_deals_with({(2026, 10, 6, 0): 0.002}, scale=1e-6)
+    account = {"equity": 0.1115, "balance": 0.1105, "currency": "BTC", "login": 123456}
+    result, capture = await derive_mt5_key(
+        monkeypatch, db, account=account, deals=deals, closes=stepped_btc_closes("2026-10-08")
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    rows = db.rows(KEY_MT5)
+    assert rows["2026-10-05"] == pytest.approx(30.0 / 6510.0, abs=1e-9)
+    assert rows["2026-10-08"] == pytest.approx(699.0 / 6660.0, abs=1e-9)
+    ki = _key_inputs_payload(capture, KEY_MT5)
+    stored = {f["utc_day_iso"]: f["flow_usd"] for f in ki["composed_flows"]}
+    assert stored["2026-10-05"] == pytest.approx(120.0, abs=1e-6)
+    assert stored.get("2026-10-06", 0.0) == pytest.approx(0.0, abs=1e-6)
+    payload = await compose_curve(db, capture, key=KEY_MT5, venue="mt5")
+    curve = levels(payload)
+    assert curve["2026-10-05"] == pytest.approx(6660.0, rel=1e-9)
+    assert curve["2026-10-08"] == pytest.approx(7359.0, rel=1e-9)
+    assert_trustworthy(payload)
+
+
+@pytest.mark.asyncio
+async def test_moved_btc_flow_kept_before_its_own_close_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MARKSOURCE plan 03, REVIEW-3 IN-02. The same 0.002 BTC deposit, made at 00:00Z on 10-06,
+    and a derive at 00:10:30Z on 10-06, when the closes are stored through 10-05 only. Marks 10-04
+    (0.1085 BTC, flat) and 10-05 (0.1110 BTC, wallet 0.1105 BTC that already holds the deposit).
+    The deposit has no own-day close yet, so no stored flow carries it; it is still inside mark
+    10-05, valued at close(10-05) = 60_000: 0.002 x 60_000 = 120.0 USD.
+      r(10-05) = (6660.0 - 6510.0 - 120.0) / 6510.0 = 30.0 / 6510.0
+    Dropped (the old code), the deposit is read as profit: (6660.0 - 6510.0) / 6510.0 = 150.0 / 6510.0.
+    Nothing leaves 10-06, because nothing was stored there."""
+    marks_native = {"2026-10-04": (0.1085, 0.1085), "2026-10-05": (0.1110, 0.1105)}
+    db = KeyDb()
+    for day, (native, wallet) in marks_native.items():
+        seed_mark(
+            db, day, native * 60_000.0, key=KEY_MT5, venue="mt5",
+            open_pnl=(native - wallet) * 60_000.0,
+            native_unit="BTC", nav_native=native, open_pnl_native=native - wallet,
+        )
+    deals = _mt5_deals_with({(2026, 10, 6, 0): 0.002}, scale=1e-6)
+    account = {"equity": 0.1110, "balance": 0.1105, "currency": "BTC", "login": 123456}
+    result, capture = await derive_mt5_key(
+        monkeypatch, db, account=account, deals=deals, closes=stepped_btc_closes("2026-10-05"),
+        now=datetime(2026, 10, 6, 0, 10, 30, tzinfo=timezone.utc),
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    rows = db.rows(KEY_MT5)
+    assert rows["2026-10-05"] == pytest.approx(30.0 / 6510.0, abs=1e-9)
+    ki = _key_inputs_payload(capture, KEY_MT5)
+    stored = {f["utc_day_iso"]: f["flow_usd"] for f in ki["composed_flows"]}
+    assert stored["2026-10-05"] == pytest.approx(120.0, abs=1e-6)
+    assert stored.get("2026-10-06", 0.0) == pytest.approx(0.0, abs=1e-6)
 
 
 # ---- Deribit ---------------------------------------------------------------------------

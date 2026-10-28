@@ -50,7 +50,8 @@ async def test_full_enqueue_to_render_pipeline():
          poll_allocator_positions writes at 04:00 UTC).
       3. Invoke run_refresh_allocator_equity_daily_job directly.
       4. Assert SELECT on allocator_equity_snapshots returns rows for
-         (allocator_id, today) with value_usd > 0.
+         (allocator_id, the closed day) with value_usd > 0 (D-01: the refresh
+         labels its row the UTC day that closed).
       5. Mirror getMyAllocationDashboard's equity query shape (see
          src/lib/queries.ts — selects asof, value_usd, breakdown, source
          ordered by asof ascending).
@@ -72,6 +73,9 @@ async def test_full_enqueue_to_render_pipeline():
     supabase = get_supabase()
     today = datetime.now(timezone.utc).date()
     today_iso = today.isoformat()
+    # 167.2.1.1.1.1 D-01: holdings are dated by the poll day (today_iso), but the
+    # refresh labels its one snapshot row the UTC day that closed.
+    closed_iso = (today - timedelta(days=1)).isoformat()
 
     # --- Step 1/2: purge any prior today-row + seed holdings -----------------
 
@@ -80,7 +84,7 @@ async def test_full_enqueue_to_render_pipeline():
             supabase.table("allocator_equity_snapshots")
             .delete()
             .eq("allocator_id", allocator_id)
-            .eq("asof", today_iso)
+            .eq("asof", closed_iso)
             .execute()
         )
 
@@ -129,14 +133,14 @@ async def test_full_enqueue_to_render_pipeline():
             supabase.table("allocator_equity_snapshots")
             .select("value_usd", count="exact")
             .eq("allocator_id", allocator_id)
-            .eq("asof", today_iso)
+            .eq("asof", closed_iso)
             .execute()
         )
 
     res = await db_execute(_count_today)
     data = list(getattr(res, "data", None) or [])
     assert len(data) >= 1, (
-        f"expected >=1 snapshot row for ({allocator_id}, {today_iso}); got {data!r}"
+        f"expected >=1 snapshot row for ({allocator_id}, {closed_iso}); got {data!r}"
     )
     assert float(data[0]["value_usd"]) > 0, (
         f"expected value_usd > 0; got {data[0]!r}"
@@ -166,9 +170,9 @@ async def test_full_enqueue_to_render_pipeline():
         f"expected at least one equity snapshot with value_usd > 0 (proves charts "
         f"have non-zero series per Grok f3); got {equity_snapshots!r}"
     )
-    # Today's row must specifically be in the dashboard-shape output.
-    today_row = next((r for r in equity_snapshots if r["asof"] == today_iso), None)
+    # The closed day's row must specifically be in the dashboard-shape output.
+    today_row = next((r for r in equity_snapshots if r["asof"] == closed_iso), None)
     assert today_row is not None, (
-        f"today's row missing from dashboard-shape output: {equity_snapshots!r}"
+        f"closed day's row missing from dashboard-shape output: {equity_snapshots!r}"
     )
     assert float(today_row["value_usd"]) > 0

@@ -84,6 +84,7 @@ from services.mt5_client import (
 )
 from services.mt5_validation import classify_mt5_login_error, is_mt5_login_refusal
 from services.native_to_usd import latest_completed_close_day, price_live_balance
+from services.price_rule import is_stable_value, usable_price
 # MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
 # plan 151-01 extracted it into. NEVER re-declare a terminal-lock dict here: a
 # second registry hands out perfectly functional Locks while the derive job and
@@ -232,6 +233,12 @@ DERIVATIVE_FETCH_FAILED_NOTE = (
     "Couldn't read open positions from {venue} — spot balances synced and "
     "positions will retry automatically."
 )
+# Phase 167.2.1.1.1.1 (MARKSOURCE) D-02 / AUM-02 — the ccxt SPOT price-gap warning. A held
+# non-stable asset whose ticker gave no usable ``last`` is stored as a named gap row
+# (``mark_price`` 0.0, ``raw_payload["price_gap"]``), never as a measured $0, and the sync
+# says so. It names no symbol, amount or venue text: ``api_keys.sync_error`` is rendered
+# verbatim, and the asset codes come from the venue.
+SPOT_PRICE_GAP_NOTE = "Couldn't read a price for some {venue} balances."
 # 151 review E1 — the ccxt SPOT arm's end-user copy, the sibling
 # DERIVATIVE_FETCH_FAILED_NOTE above was given and this arm was not. The spot
 # fetch sat OUTSIDE any try: a malformed venue payload (KeyError('total'), a
@@ -434,6 +441,50 @@ def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, flo
         return {}
 
 
+def _extract_okx_cash_balances(info: dict[str, Any]) -> dict[str, float]:
+    """Extract per-currency wallet ``cashBal`` from an OKX ``/api/v5/account/balance``
+    payload (``info["data"][0]["details"][*]``).
+
+    MARKSOURCE R-1 / D-01 (167.2.1.1.1.1 plan 04). ccxt's ``okx.parse_trading_balance``
+    sets each currency's ``total`` to OKX's ``eq``, and ``eq = cashBal + upl`` (verified
+    in ``tests/cassettes/okx/happy.yaml``). The derivative rows already carry ``upl`` as
+    ``unrealized_pnl_usd``, so a spot quantity read from ``eq`` counted the open profit
+    twice in the Holdings USDT row and the AUM. ``cashBal`` is the wallet before open
+    profit, the same figure ``_extract_bybit_unified_walletbalances`` reads for Bybit.
+
+    Returns ``{}`` on any parse failure so the caller falls through to ccxt's parsed
+    ``total`` without crashing the whole sync. A currency whose ``cashBal`` is missing,
+    empty, unparseable or not finite is left out (the caller keeps ccxt's total for it).
+    Zero and negative balances ARE returned: a zero ``cashBal`` beside a positive ``eq``
+    means the whole figure is open profit, which the derivative row already carries.
+    """
+    try:
+        data = info.get("data") or []
+        if not data:
+            return {}
+        details = data[0].get("details") or []
+        out: dict[str, float] = {}
+        for entry in details:
+            ccy = entry.get("ccy")
+            raw = entry.get("cashBal")
+            if not ccy or raw in (None, ""):
+                continue
+            try:
+                qty = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(qty):
+                out[ccy] = qty
+        return out
+    except Exception as exc:  # noqa: BLE001
+        # Review SF-M3 — a parse failure must be told apart from a missing field.
+        logger.warning(
+            "_extract_okx_cash_balances: could not parse the okx balance payload (%s)",
+            type(exc).__name__,
+        )
+        return {}
+
+
 def _cap_raw_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Truncate a raw_payload JSON dict to fit the ~4KB JSONB cap.
 
@@ -599,7 +650,9 @@ def sync_error_copy(sync_status: str, venue: str) -> str:
     return template.format(venue=_venue_display(venue))
 
 
-async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, Any]]:
+async def _fetch_spot_rows(
+    exchange_name: str, exchange: Any, okx_cash_bal: bool = True
+) -> list[dict[str, Any]]:
     """Build spot allocator_holdings rows from fetch_balance() + bulk fetch_tickers().
 
     Deribit: spot is deferred (Phase 71). Return [] BEFORE any network call —
@@ -608,8 +661,21 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, 
     ingestion (Path A) is out of scope. The derivative side still syncs, so the
     allocator sees their Deribit positions.
 
-    Stablecoin optimization: USDT/USDC/BUSD/DAI/TUSD/USD get mark_price=1.0
-    without a ticker call.
+    Stable-value assets (``price_rule.is_stable_value``: STABLECOINS plus
+    STABLECOIN_SPLIT_SUFFIXES, the rule the reconstruct anchor applies) get
+    mark_price=1.0 without a ticker call.
+
+    Any other asset whose ticker gives no usable ``last`` is a NAMED GAP row
+    (MARKSOURCE D-02), never a measured $0: ``mark_price`` 0.0, ``value_usd`` 0.0 and
+    ``raw_payload["price_gap"] = True``. The columns are NOT NULL, and ``mark_price
+    <= 0`` is exactly the gap ``holding_marks`` already skips. Every gap is written
+    whatever its size (D-06): whether it is dust is decided in the refresh, which holds
+    one account's rows together (plan 12), and the Holdings tab labels it unpriced
+    (D-07, plans 09 and 11).
+
+    ``okx_cash_bal`` is False only when the OKX derivative read failed: the open profit is
+    then in no derivative row, so the spot rows keep ccxt's ``eq`` and carry it (review
+    WR-01).
     """
     # Deribit — spot deferred (no spot path). Skip gracefully; derivatives sync.
     if getattr(exchange, "id", None) == "deribit":
@@ -642,6 +708,33 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, 
                     merged[asset] = qty
             totals = merged
 
+    # OKX (MARKSOURCE R-1, D-01): ccxt's ``total`` is OKX's ``eq`` (= ``cashBal + upl``),
+    # so it already contains the open profit the derivative rows carry as
+    # ``unrealized_pnl_usd``. Take the wallet ``cashBal`` instead, as an OVERRIDE and not
+    # the Bybit-style fill: ``eq`` is non-zero, so a fill would never fire. The reconstruct
+    # anchor and the NAVMTM mark keep reading ``totalEq``, which is the venue's equity.
+    if getattr(exchange, "id", None) == "okx" and okx_cash_bal:
+        cash_balances = _extract_okx_cash_balances(balance.get("info") or {})
+        overridden = dict(totals)
+        # Review SF-M3 — only currencies ccxt already reports: OKX's raw ``ccy`` can differ
+        # from ccxt's common code (AE vs AET), and a raw code would add a phantom row.
+        overridden.update({a: q for a, q in cash_balances.items() if a in totals})
+        left_on_eq = sum(
+            1
+            for asset, qty in totals.items()
+            if asset not in cash_balances and qty is not None and float(qty) > 0
+        )
+        if left_on_eq:
+            # ERROR, not warning: a currency left on ``eq`` is the open-profit double count
+            # returning, and this module sends ERROR to Sentry (review SF-M3).
+            logger.error(
+                "fetch_allocator_holdings: %d okx currenc%s without a usable cashBal "
+                "kept on ccxt's total (eq)",
+                left_on_eq,
+                "y" if left_on_eq == 1 else "ies",
+            )
+        totals = overridden
+
     non_zero = {
         asset: float(qty)
         for asset, qty in totals.items()
@@ -653,31 +746,72 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, 
     # Bulk ticker fetch for non-stablecoin assets only.
     need_tickers = [
         f"{asset}/USDT" for asset in non_zero
-        if asset.upper() not in STABLECOINS
+        if not is_stable_value(asset)
     ]
     tickers: dict[str, dict[str, Any]] = {}
     if need_tickers:
         try:
             tickers = await exchange.fetch_tickers(need_tickers) or {}
-        except Exception:
+        except ccxt.RateLimitExceeded:
+            # Review SF-M4 — a 429 reaches the handler's rate-limit arm (cooldown stamp).
+            raise
+        except Exception as bulk_exc:
+            logger.warning(
+                "fetch_allocator_holdings: bulk fetch_tickers failed for %d symbols on "
+                "%s (%s) — falling back to per-symbol reads",
+                len(need_tickers),
+                exchange_name,
+                type(bulk_exc).__name__,
+            )
             # Per-symbol fallback if bulk fails (some exchanges don't
             # accept a symbol list). Best effort — if a single ticker
-            # still fails, we mark the price 0 rather than abort spot.
+            # still fails it has NO price (a named gap below), never a
+            # fabricated 0.0 that would read as a measured value.
             tickers = {}
+            failed = 0
+            last_failure = ""
             for sym in need_tickers:
                 try:
                     tickers[sym] = await exchange.fetch_ticker(sym)
-                except Exception:
-                    tickers[sym] = {"last": 0.0}
+                except ccxt.RateLimitExceeded:
+                    raise
+                except Exception as single_exc:
+                    failed += 1
+                    last_failure = type(single_exc).__name__
+            if failed:
+                logger.warning(
+                    "fetch_allocator_holdings: fetch_ticker failed for %d of %d symbols "
+                    "on %s (last: %s) — those balances are price gaps",
+                    failed,
+                    len(need_tickers),
+                    exchange_name,
+                    last_failure,
+                )
 
     rows: list[dict[str, Any]] = []
     for asset, qty in non_zero.items():
-        asset_upper = asset.upper()
-        if asset_upper in STABLECOINS:
+        price_gap = False
+        if is_stable_value(asset):
             mark_price = 1.0
         else:
             t = tickers.get(f"{asset}/USDT") or {}
-            mark_price = float(t.get("last") or 0.0)
+            usable = usable_price(t.get("last"))
+            if usable is None:
+                # D-02: a gap, never a measured $0. 0.0 is the stored encoding only
+                # because the columns are NOT NULL; ``price_gap`` is what tells it
+                # apart from a real zero, and ``mark_price <= 0`` is what
+                # ``holding_marks`` skips.
+                mark_price = 0.0
+                price_gap = True
+            else:
+                mark_price = usable
+        raw_payload: dict[str, Any] = {
+            "asset": asset,
+            "total": float(qty),
+            "mark_price": mark_price,
+        }
+        if price_gap:
+            raw_payload["price_gap"] = True
         rows.append({
             "venue": exchange_name,
             "symbol": asset,              # D-16: raw currency code, no suffix
@@ -689,11 +823,7 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, 
             "mark_price": mark_price,
             "unrealized_pnl_usd": None,
             "cost_basis_usd": None,
-            "raw_payload": _cap_raw_payload({
-                "asset": asset,
-                "total": float(qty),
-                "mark_price": mark_price,
-            }),
+            "raw_payload": _cap_raw_payload(raw_payload),
         })
     return rows
 
@@ -1630,6 +1760,27 @@ async def fetch_allocator_holdings(
         # rather than by re-opening the disposition.
         if _must_reach_handler_unwrapped(exc):
             raise
+        # Review WR-01 — an OKX book without its derivative rows has the open profit
+        # nowhere but in the spot ``eq``, so read the spot rows again WITHOUT the
+        # ``cashBal`` override. Same posture as the spot read above if that fails.
+        if getattr(exchange, "id", None) == "okx":
+            try:
+                spot_rows = await _fetch_spot_rows(
+                    exchange_name, exchange, okx_cash_bal=False
+                )
+            except Exception as spot_exc:  # noqa: BLE001
+                if _must_reach_handler_unwrapped(spot_exc):
+                    raise
+                logger.warning(
+                    "fetch_allocator_holdings: spot-side re-read failed for %s (%s) — "
+                    "surfacing end-user copy (AUM-02)",
+                    exchange_name,
+                    type(spot_exc).__name__,
+                    exc_info=True,
+                )
+                raise AllocatorHoldingsSyncTransientError(
+                    SPOT_FETCH_FAILED_NOTE.format(venue=_venue_display(exchange_name))
+                ) from spot_exc
         # Partial success: persist spot, surface the derivative-side failure as
         # sync_status='complete_with_warnings' via the handler.
         #
@@ -1649,6 +1800,12 @@ async def fetch_allocator_holdings(
         warning = DERIVATIVE_FETCH_FAILED_NOTE.format(
             venue=_venue_display(exchange_name)
         )
+
+    # MARKSOURCE D-02: a spot price gap is told to the user in fixed copy. When the
+    # derivative arm also failed, both sentences survive, the derivative note first.
+    if any(r.get("raw_payload", {}).get("price_gap") for r in spot_rows):
+        gap_note = SPOT_PRICE_GAP_NOTE.format(venue=_venue_display(exchange_name))
+        warning = gap_note if warning is None else f"{warning} {gap_note}"
 
     return (spot_rows + deriv_rows, warning)
 

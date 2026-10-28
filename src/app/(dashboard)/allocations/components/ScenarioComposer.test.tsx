@@ -16585,6 +16585,10 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     /** Phase 167.1.1 D-02. Defaults null (connected). A timestamp makes the
      *  key soft-disconnected, whatever its `status`. */
     disconnectedAt?: string | null;
+    /** Phase 167.2.1.1.1.1 D-07. The spot holding's stored mark. Left unset it
+     *  keeps `HOLDING_BTC`'s positive mark (a priced row); `0` or `null` makes
+     *  the row a price gap (a quantity of 1 with no usable mark). */
+    markPriceUsd?: number | null;
   }
 
   /** A book built from `AtKeySpec`s. Every spec carries its OWN
@@ -16620,6 +16624,9 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
               holding_type: "spot" as const,
               value_usd: s.spotUsd ?? 0,
               api_key_id: s.id,
+              ...(s.markPriceUsd !== undefined
+                ? { mark_price_usd: s.markPriceUsd }
+                : {}),
             },
       ),
       perKeyReturnsByApiKeyId: Object.fromEntries(
@@ -17616,6 +17623,226 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     renderAt(payload);
     expect(aumField().value).toBe("50000");
     expect(screen.queryByTestId(MISSING_ID)).toBeNull();
+  });
+
+  // ── 167.2.1.1.1.1 D-07 / UI-SPEC P2 — "N holdings without a price left out."
+  //    beside the live-holdings total ─────────────────────────────────────────
+  // Every expected string is typed literally from the UI-SPEC tables. A spot
+  // holding with `markPriceUsd: 0` (quantity 1, stored value 0) is a price gap.
+  const GAP_ID = "scenario-aum-price-gap-note";
+  const AT_KEY_G = "aumtrust-key-g";
+
+  /** trusted priced spot 50,000 + `gaps` price-gap spot holdings. The live
+   *  total stays 50,000: a gap row's equity was 0 and is left out. */
+  function atGapBook(gaps: 1 | 3): MyAllocationDashboardPayload {
+    return atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-GAP-C", markPriceUsd: 0 },
+      ...(gaps === 3
+        ? [
+            { id: AT_KEY_E, status: null, venue: "bybit", symbol: "AUMTRUST-GAP-E", markPriceUsd: null },
+            { id: AT_KEY_F, status: null, venue: "okx", symbol: "AUMTRUST-GAP-F", markPriceUsd: 0 },
+          ]
+        : []),
+    ]);
+  }
+
+  it("167.2.1.1.1.1 State A, one: a single price-gap holding renders the singular sentence after the input and before the modelled note, and the input's description names it", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-GAP-C", markPriceUsd: 0 },
+      { id: AT_KEY_G, status: null, venue: "okx", symbol: "AUMTRUST-G", spotUsd: 1_000, contributing: false },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("50000");
+    const notes = screen.getAllByTestId(GAP_ID);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe("1 holding without a price left out.");
+    expect(notes[0].id).toBe(GAP_ID);
+    expect(notes[0].className).toBe("text-xs text-text-muted");
+    expect(notes[0].hasAttribute("role")).toBe(false);
+    expect(notes[0].hasAttribute("aria-live")).toBe(false);
+    expect(
+      aumField().compareDocumentPosition(notes[0]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      notes[0].compareDocumentPosition(screen.getByTestId("scenario-aum-modelled-note")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(aumField().getAttribute("aria-describedby")).toContain(GAP_ID);
+    expect(aumField()).toHaveAccessibleDescription(
+      "Excludes $1,000 from connected keys with no return history yet. 1 holding without a price left out.",
+    );
+  });
+
+  it("167.2.1.1.1.1 State A with the derivative sentence: two flex items in order, '2 derivatives without reported P&L left out.' then '3 holdings without a price left out.'", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null },
+      { id: AT_KEY_E, status: null, venue: "bybit", symbol: "AUMTRUST-E-PERP", derivPnlUsd: null },
+      { id: AT_KEY_F, status: null, venue: "okx", symbol: "AUMTRUST-GAP-F", markPriceUsd: 0 },
+      { id: AT_KEY_G, status: null, venue: "kraken", symbol: "AUMTRUST-GAP-G", markPriceUsd: null },
+      { id: "aumtrust-key-h", status: null, venue: "coinbase", symbol: "AUMTRUST-GAP-H", markPriceUsd: 0 },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    const missing = screen.getByTestId(MISSING_ID);
+    const gap = screen.getByTestId(GAP_ID);
+    expect(missing.textContent).toBe("2 derivatives without reported P&L left out.");
+    expect(gap.textContent).toBe("3 holdings without a price left out.");
+    expect(missing.parentElement).toBe(gap.parentElement);
+    expect(
+      missing.compareDocumentPosition(gap) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(aumField().getAttribute("aria-describedby")).toBe(
+      "scenario-aum-pnl-missing-note scenario-aum-price-gap-note",
+    );
+    expect(aumField()).toHaveAccessibleDescription(
+      "2 derivatives without reported P&L left out. 3 holdings without a price left out.",
+    );
+  });
+
+  it("167.2.1.1.1.1 State A, many: three price-gap holdings render the plural sentence", () => {
+    const payload = atGapBook(3);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(aumField().value).toBe("50000");
+    expect(screen.getByTestId(GAP_ID).textContent).toBe("3 holdings without a price left out.");
+    expect(aumField().getAttribute("aria-describedby")).toBe(GAP_ID);
+  });
+
+  it("167.2.1.1.1.1 State B: a committed manual value moves the sentence INTO the override note after its period; one element carries the test id and it has no class or id", () => {
+    // Sized so the live total is exactly $39,963 (UI-SPEC rendered example).
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 39_963 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-GAP-C", markPriceUsd: 0 },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    commitAum("75000");
+    expect(atManualAumOnWire()).toBe(75_000);
+
+    const note = screen.getByTestId("scenario-aum-override-note");
+    expect(note.textContent).toBe(
+      "Overrides live-holdings total $39,963. 1 holding without a price left out.",
+    );
+    const nested = screen.getAllByTestId(GAP_ID);
+    expect(nested).toHaveLength(1);
+    expect(nested[0].closest('[data-testid="scenario-aum-override-note"]')).toBe(note);
+    expect(nested[0].hasAttribute("class")).toBe(false);
+    expect(nested[0].hasAttribute("id")).toBe(false);
+    expect(aumField().getAttribute("aria-describedby")).toBe("scenario-aum-override-note");
+    expect(aumField()).toHaveAccessibleDescription(
+      "Overrides live-holdings total $39,963. 1 holding without a price left out.",
+    );
+  });
+
+  it("167.2.1.1.1.1 State C: a live total of $0 produced only by price-gap holdings is explained, and the input is described by the hint with no marker and no derivative sentence", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-GAP-A", markPriceUsd: 0 },
+      { id: AT_KEY_C, status: null, venue: "okx", symbol: "AUMTRUST-GAP-C", markPriceUsd: null },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("");
+    const hint = screen.getByTestId("scenario-aum-required-note");
+    expect(hint.textContent).toBe(
+      "Required to size and commit. The live-holdings total is $0. 2 holdings without a price left out.",
+    );
+    const nested = screen.getAllByTestId(GAP_ID);
+    expect(nested).toHaveLength(1);
+    expect(nested[0].closest('[data-testid="scenario-aum-required-note"]')).toBe(hint);
+    expect(nested[0].hasAttribute("class")).toBe(false);
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+    expect(screen.queryByTestId(MISSING_ID)).toBeNull();
+    expect(aumField().getAttribute("aria-describedby")).toBe("scenario-aum-required-note");
+    expect(aumField()).toHaveAccessibleDescription(
+      "Required to size and commit. The live-holdings total is $0. 2 holdings without a price left out.",
+    );
+  });
+
+  it("167.2.1.1.1.1 count 0, blank slate and state 7: no sentence and no '0 holdings' text", () => {
+    renderAt(atStateBBook(null));
+    expect(screen.queryByTestId(GAP_ID)).toBeNull();
+    commitAum("75000");
+    expect(screen.queryByTestId(GAP_ID)).toBeNull();
+    expect(document.body.textContent).not.toContain("without a price");
+
+    cleanup();
+    renderAt(atGapBook(1));
+    // Non-vacuity: the same book in book mode carries the sentence.
+    expect(screen.getByTestId(GAP_ID).textContent).toBe("1 holding without a price left out.");
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(screen.queryByTestId(GAP_ID)).toBeNull();
+
+    cleanup();
+    // State 7: a manual value with a live total at or below 0 and a gap row.
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "deribit", symbol: "AUMTRUST-A-PERP", derivPnlUsd: -5_000 },
+      { id: AT_KEY_C, status: null, venue: "okx", symbol: "AUMTRUST-GAP-C", markPriceUsd: 0 },
+    ]);
+    renderAt(payload);
+    expect(screen.getByTestId(GAP_ID).textContent).toBe("1 holding without a price left out.");
+    commitAum("75000");
+    expect(screen.queryByTestId(GAP_ID)).toBeNull();
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+  });
+
+  it("167.2.1.1.1.1 a closed spot row (quantity 0, mark 0) and a derivative with mark 0 are never counted", () => {
+    const base = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "okx", symbol: "AUMTRUST-CLOSED", markPriceUsd: 0 },
+      { id: AT_KEY_E, status: null, venue: "deribit", symbol: "AUMTRUST-E-PERP", derivPnlUsd: 10 },
+    ]);
+    const payload: MyAllocationDashboardPayload = {
+      ...base,
+      holdingsSummary: base.holdingsSummary.map((h) =>
+        h.symbol === "AUMTRUST-CLOSED"
+          ? { ...h, quantity: 0 }
+          : h.symbol === "AUMTRUST-E-PERP"
+            ? { ...h, mark_price_usd: 0 }
+            : h,
+      ),
+    };
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(screen.queryByTestId(GAP_ID)).toBeNull();
+  });
+
+  it("167.2.1.1.1.1 a price-gap holding on a key needing attention is counted in the sentence only: the 'Includes ...' clause keeps its $12,345", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: AT_B_TRUSTED_USD },
+      { id: AT_KEY_SIGN_IN_FAILED, status: "sign_in_failed", venue: "okx", symbol: "AUMTRUST-B", spotUsd: AT_B_UNTRUSTED_USD },
+      { id: AT_KEY_C, status: "sign_in_failed", venue: "bybit", symbol: "AUMTRUST-GAP-C", markPriceUsd: 0 },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    expect(screen.getByTestId("scenario-aum-untrusted-note").textContent).toBe(
+      "Includes $12,345 from keys needing attention.",
+    );
+    expect(screen.getByTestId(GAP_ID).textContent).toBe("1 holding without a price left out.");
+  });
+
+  it("167.2.1.1.1.1 a price-gap holding on a key the modelled-book narrowing dropped is NOT counted in the sentence; its excluded part says the value is unavailable", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "okx", symbol: "AUMTRUST-GAP-C", markPriceUsd: 0, contributing: false },
+    ]);
+    expectDistinctTriples(payload);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_C);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("50000");
+    expect(screen.queryByTestId(GAP_ID)).toBeNull();
+    expect(screen.getByTestId("scenario-aum-untrusted-note").textContent).toBe(
+      "Excludes 1 holding from connected keys with no return history yet (value unavailable for 1 holding).",
+    );
   });
 
   it("AUMTRUST review WR-05: a missing-key holding alone (every listed key trusted) still renders the marker — the gate counts unknown-status holdings too", () => {

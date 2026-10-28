@@ -34,6 +34,9 @@ from tests.test_equity_reconstruction import (
 )
 
 TODAY = date(2026, 9, 20)
+# Phase 167.2.1.1.1.1 D-01: the legacy refresh labels its one row by the UTC day
+# that closed (``mark_day_for``), while holdings are still READ at the run day.
+CLOSED_DAY = TODAY - timedelta(days=1)
 API_KEY_ID_3 = "00000000-0000-0000-0000-000000000003"
 
 
@@ -63,15 +66,19 @@ def _seed_holding(
     *,
     holding_type: str = "spot",
     unrealized_pnl_usd: float | None = None,
+    quantity: float = 1.0,
+    mark_price: float | None = None,
 ) -> None:
+    """A stored holdings row. ``mark_price`` None means ``value_usd`` (the original
+    shape); a price-gap row is ``value_usd=0.0, mark_price=0.0`` (MARKSOURCE plan 04)."""
     fake.store[("allocator_holdings", (ALLOCATOR_ID, venue, symbol, asof.isoformat()))] = {
         "allocator_id": ALLOCATOR_ID,
         "api_key_id": key_id,
         "venue": venue,
         "symbol": symbol,
         "asof": asof.isoformat(),
-        "quantity": 1.0,
-        "mark_price": value_usd,
+        "quantity": quantity,
+        "mark_price": value_usd if mark_price is None else mark_price,
         "value_usd": value_usd,
         "unrealized_pnl_usd": unrealized_pnl_usd,
         "holding_type": holding_type,
@@ -85,8 +92,10 @@ async def _run_refresh(
     job_key: str,
     *,
     expect_failed: bool = False,
+    run_at: tuple[int, int] = (5, 0),
 ) -> Any:
-    """Run the job as ``job_key``'s refresh on TODAY. Returns the audit mock."""
+    """Run the job as ``job_key``'s refresh on TODAY at ``run_at`` (hour, minute)
+    UTC, 05:00Z by default. Returns the audit mock."""
     audit = _install_fake_audit(monkeypatch)
     exchange = AsyncMock()
     exchange.id = "okx"
@@ -95,7 +104,7 @@ async def _run_refresh(
 
     from services import equity_reconstruction as er
 
-    now = datetime(TODAY.year, TODAY.month, TODAY.day, 5, 0, tzinfo=timezone.utc)
+    now = datetime(TODAY.year, TODAY.month, TODAY.day, *run_at, tzinfo=timezone.utc)
 
     class _FakeDatetime(datetime):
         @classmethod
@@ -114,12 +123,13 @@ async def _run_refresh(
     return audit
 
 
-def _today_row(fake: FakeSupabaseClient) -> dict[str, Any]:
+def _snapshot_row(fake: FakeSupabaseClient) -> dict[str, Any]:
+    """The one legacy row the refresh wrote, labelled the day that closed (D-01)."""
     rows = [
         r for r in fake.rows_for("allocator_equity_snapshots")
-        if r["asof"] == TODAY.isoformat()
+        if r["asof"] == CLOSED_DAY.isoformat()
     ]
-    assert len(rows) == 1, f"expected exactly one snapshot row for today, got {len(rows)}"
+    assert len(rows) == 1, f"expected exactly one snapshot row for the closed day, got {len(rows)}"
     return rows[0]
 
 
@@ -131,6 +141,109 @@ def _refresh_complete_metadata(audit: Any) -> dict[str, Any]:
     assert len(calls) == 1, f"expected one refresh_complete audit, got {len(calls)}"
     metadata: dict[str, Any] = calls[0].kwargs["metadata"]
     return metadata
+
+
+# ---------------------------------------------------------------------------
+# Phase 167.2.1.1.1.1 plan 05 (D-01): the row is labelled the day that closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refresh_labels_the_closed_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-01 (founder 2026-10-27, "Keep both, align them"): legacy rows are
+    labelled by the UTC day that closed. A refresh run at 00:55Z on TODAY reads
+    the holdings polled on TODAY and writes exactly ONE row, labelled TODAY - 1
+    (``mark_day_for``, the label the stored NAV mark of that read carries), so
+    the legacy snapshot and the mark describe the same day. A row labelled the
+    run day would sit one day ahead of the mark it is compared with."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 1000.0)
+
+    await _run_refresh(monkeypatch, fake, API_KEY_ID_1, run_at=(0, 55))
+
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert [r["asof"] for r in rows] == [CLOSED_DAY.isoformat()], (
+        f"expected exactly one row labelled the closed day, got {[r['asof'] for r in rows]}"
+    )
+    assert rows[0]["value_usd"] == pytest.approx(1000.0)
+    assert not [r for r in rows if r["asof"] == TODAY.isoformat()]
+
+
+@pytest.mark.asyncio
+async def test_refresh_reads_the_run_day_holdings_and_carry_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-01 relabels the WRITE only. The READ stays on the run day: an account
+    whose latest holdings are dated TODAY - 3 is carried, and its carry age is
+    measured from the run day (3), not from the closed-day label (which would
+    read 2). ``allocator_holdings.asof`` is the poll day and is not relabelled."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY - timedelta(days=3), 700.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1, run_at=(0, 55))
+
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert [r["asof"] for r in rows] == [CLOSED_DAY.isoformat()]
+    assert rows[0]["value_usd"] == pytest.approx(700.0)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["carried_keys"] == 1
+    assert metadata["max_carry_age_days"] == 3
+
+
+@pytest.mark.asyncio
+async def test_refresh_at_the_old_clock_labels_the_closed_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-01 cut-over, outcome 2 (RESEARCH "Cut-over timing"): the label code is
+    live while the crons still run on the OLD clock (holdings poll 04:00Z,
+    refresh 05:00Z). The 05:00Z run on TODAY ALSO labels the closed day, reading
+    the holdings polled on TODAY, so the curve lags the book by one day and
+    loses none. Pinned by name because the operator's runbook (plan 07) relies
+    on it: deploying the label before moving the clock is safe."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 1000.0)
+
+    await _run_refresh(monkeypatch, fake, API_KEY_ID_1, run_at=(5, 0))
+
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert [r["asof"] for r in rows] == [CLOSED_DAY.isoformat()], (
+        f"the old-clock run must label the closed day, got {[r['asof'] for r in rows]}"
+    )
+    assert rows[0]["value_usd"] == pytest.approx(1000.0)
+    assert not [r for r in rows if r["asof"] == TODAY.isoformat()]
+
+
+@pytest.mark.asyncio
+async def test_refresh_keeps_a_row_already_stored_for_its_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-01 cut-over, outcome 1 (RESEARCH "Cut-over timing"): a snapshot already
+    stored for the label (the row a first-connect reconstruct, a forced rebuild
+    or an old-regime run left) is KEPT, never replaced: the row is
+    first-writer-wins on (allocator_id, asof). Seeded at 999.0; the 00:55Z run
+    over holdings worth 1000.0 leaves exactly one CLOSED_DAY row, still 999.0,
+    and the job ends DONE with its refresh_complete audit. Every label carries
+    one row, whichever regime wrote it first. Plan 07's runbook relies on this
+    for the seam day, so it is pinned by name."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 1000.0)
+    _seed_snapshot(fake, CLOSED_DAY, 999.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1, run_at=(0, 55))
+
+    rows = fake.rows_for("allocator_equity_snapshots")
+    assert [r["asof"] for r in rows] == [CLOSED_DAY.isoformat()], (
+        f"the label must carry exactly one row, got {[r['asof'] for r in rows]}"
+    )
+    assert rows[0]["value_usd"] == pytest.approx(999.0), (
+        f"a row already stored for its label was replaced: {rows[0]['value_usd']}"
+    )
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["days_written"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +269,7 @@ async def test_quiet_key_counts_at_its_latest_holdings_not_zero(monkeypatch: pyt
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(1500.0), (
         "the quiet key must be carried at its latest holdings (500), not read "
         f"as $0 and not at an older day; got {row['value_usd']}"
@@ -233,7 +346,7 @@ async def test_shared_account_is_read_by_group_not_by_the_holders_own_rows(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(TODAY_USD), (
         f"the account was read at the holder's stale own rows: {row['value_usd']}"
     )
@@ -259,7 +372,7 @@ async def test_shared_account_rows_split_across_both_keys_are_summed_once(
 
     await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(600.0)
     assert row["breakdown"] == {"USDT": 600.0}
 
@@ -296,7 +409,7 @@ async def test_account_behind_a_non_working_holder_is_counted_once_by_the_health
 
     await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(TODAY_USD), (
         f"expected the account once at today's rows (1000); got {row['value_usd']}"
     )
@@ -322,7 +435,7 @@ async def test_shared_account_with_no_working_key_is_carried_once_and_counted(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_3)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(300.0 + TODAY_USD)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["no_working_accounts"] == 1
@@ -379,7 +492,7 @@ async def test_unmarked_rotation_does_not_count_the_account_twice(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(TODAY_USD), (
         f"one account counted twice through an unstamped failing key: {row['value_usd']}"
     )
@@ -405,7 +518,7 @@ async def test_a_separate_account_behind_a_failing_unstamped_key_drops_out_on_a_
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert _refresh_complete_metadata(audit)["identity_unknown_not_carried"] == 1
 
 
@@ -434,7 +547,7 @@ async def test_the_identity_unknown_rule_leaves_other_carries_alone(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 700.0)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 700.0)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["identity_unknown_not_carried"] == 0
     assert metadata["carried_keys"] == 1
@@ -454,7 +567,7 @@ async def test_identity_unknown_not_working_key_still_counts_its_same_day_rows(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 400.0)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 400.0)
     assert _refresh_complete_metadata(audit)["identity_unknown_not_carried"] == 0
 
 
@@ -479,7 +592,7 @@ async def test_departed_key_contributes_nothing_even_with_holdings_today(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert _refresh_complete_metadata(audit)["eligible_keys"] == 1
 
 
@@ -512,7 +625,7 @@ async def test_write_order_does_not_change_the_persisted_row(monkeypatch: pytest
         _seed_book(fake)
         for key_id in order:
             await _run_refresh(monkeypatch, fake, key_id)
-        rows.append(_today_row(fake))
+        rows.append(_snapshot_row(fake))
 
     first, second = rows
     assert first["value_usd"] == second["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
@@ -544,7 +657,7 @@ async def test_carried_key_keeps_the_deribit_skip_and_the_upnl_rule(monkeypatch:
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(HOLDER_USD + 25.0)
     missing = [
         c for c in audit.call_args_list
@@ -691,7 +804,7 @@ async def test_account_polled_empty_after_its_last_row_contributes_zero(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(HOLDER_USD), (
         f"an emptied account was carried at its last balance: {row['value_usd']}"
     )
@@ -722,10 +835,10 @@ async def test_poll_outcome_of_another_user_is_not_proof_of_emptiness(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] != pytest.approx(HOLDER_USD), (
+    assert _snapshot_row(fake)["value_usd"] != pytest.approx(HOLDER_USD), (
         "a poll outcome owned by another user zeroed this allocator's account"
     )
-    assert "BTC" in _today_row(fake)["breakdown"]
+    assert "BTC" in _snapshot_row(fake)["breakdown"]
     assert _refresh_complete_metadata(audit)["emptied_accounts"] == 0
 
 
@@ -749,7 +862,7 @@ async def test_proven_empty_account_stays_zero_whatever_the_keys_current_status(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD), current_status
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD), current_status
     assert _refresh_complete_metadata(audit)["emptied_accounts"] == 1
 
 
@@ -780,7 +893,7 @@ async def test_a_poll_landing_between_the_two_reads_is_counted_not_zeroed(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(HOLDER_USD + 510.0), (
         f"rows persisted between the two reads were zeroed: {row['value_usd']}"
     )
@@ -884,7 +997,7 @@ async def test_account_without_proof_of_emptiness_is_carried(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["emptied_accounts"] == 0
@@ -926,13 +1039,13 @@ async def test_a_book_whose_every_account_is_proven_empty_writes_a_zero_row(
     fake = FakeSupabaseClient()
     _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
     _seed_holding(fake, API_KEY_ID_1, "okx", "BTC", TODAY - timedelta(days=3), 500.0)
-    _seed_snapshot(fake, TODAY - timedelta(days=1), 500.0)
+    _seed_snapshot(fake, CLOSED_DAY - timedelta(days=1), 500.0)
     _seed_empty_proof(fake, API_KEY_ID_1, _at(TODAY))
 
     with patch("services.equity_reconstruction.sentry_sdk") as sentry:
         audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == 0.0
     assert row["breakdown"] == {}
     metadata = _refresh_complete_metadata(audit)
@@ -980,7 +1093,7 @@ async def test_a_funded_account_whose_poll_reads_empty_keeps_its_carried_value(
         fake, API_KEY_ID_1, exchange="bybit", sync_status="complete", venue_account_id="b-1"
     )
     _seed_holding(fake, API_KEY_ID_1, "bybit", "USDT", TODAY - timedelta(days=2), 200_000.0)
-    _seed_snapshot(fake, TODAY - timedelta(days=1), 200_000.0)
+    _seed_snapshot(fake, CLOSED_DAY - timedelta(days=1), 200_000.0)
     yesterday_poll = _at(TODAY - timedelta(days=1))
     _seed_poll_outcome(fake, API_KEY_ID_1, yesterday_poll)
     _seed_key_inputs(
@@ -994,7 +1107,7 @@ async def test_a_funded_account_whose_poll_reads_empty_keeps_its_carried_value(
     with patch("services.equity_reconstruction.sentry_sdk") as sentry:
         audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(200_000.0), (
         f"a funded account read empty by its poll was zeroed: {row['value_usd']}"
     )
@@ -1027,9 +1140,10 @@ def _held_metadata(audit: Any) -> dict[str, Any]:
     return metadata
 
 
-def _no_today_row(fake: FakeSupabaseClient) -> None:
+def _no_snapshot_row(fake: FakeSupabaseClient) -> None:
     rows = [
-        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] == TODAY.isoformat()
+        r for r in fake.rows_for("allocator_equity_snapshots")
+        if r["asof"] == CLOSED_DAY.isoformat()
     ]
     assert rows == [], f"a held day must write no snapshot row, got {len(rows)}"
 
@@ -1052,7 +1166,7 @@ async def test_a_book_with_an_account_it_cannot_read_is_not_written_as_zero(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     metadata = _held_metadata(audit)
     assert metadata["reason"] == "never_polled_working"
     assert metadata["emptied_accounts"] == 1
@@ -1077,7 +1191,7 @@ async def test_eligible_key_that_never_polled_is_counted_not_silent(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     metadata = _held_metadata(audit)
     assert metadata["reason"] == "never_polled_working"
     assert metadata["never_polled_keys"] == 1
@@ -1102,7 +1216,7 @@ async def test_never_polled_working_account_holds_the_write(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     metadata = _held_metadata(audit)
     assert metadata["reason"] == "never_polled_working"
     assert metadata["never_polled_working_accounts"] == 1
@@ -1127,7 +1241,7 @@ async def test_polled_account_with_no_rows_does_not_hold(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert HELD_ACTION not in _audit_actions(audit)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["polled_no_rows_accounts"] == 1
@@ -1152,7 +1266,7 @@ async def test_a_foreign_owners_poll_event_does_not_release_the_hold(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     assert _held_metadata(audit)["reason"] == "never_polled_working"
 
 
@@ -1172,7 +1286,7 @@ async def test_deribit_only_never_polled_does_not_hold(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert HELD_ACTION not in _audit_actions(audit)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["never_polled_keys"] == 1
@@ -1211,7 +1325,7 @@ async def test_failed_polled_evidence_read_fails_the_job(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1, expect_failed=True)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     actions = _audit_actions(audit)
     assert "allocator.equity.refresh_failed" in actions
     assert HELD_ACTION not in actions
@@ -1308,12 +1422,12 @@ async def test_carry_age_cap_boundary(
     audit, sentry = await _run_with_sentry(monkeypatch, fake)
 
     if not held:
-        assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
+        assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
         assert HELD_ACTION not in _audit_actions(audit)
         assert _refresh_complete_metadata(audit)["max_carry_age_days"] == 7
         assert sentry.capture_message.call_count == 0
         return
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     metadata = _held_metadata(audit)
     assert metadata["reason"] == "carry_over_age"
     assert metadata["over_age_accounts"] == 1
@@ -1340,7 +1454,7 @@ async def test_over_age_account_with_only_failing_keys_is_left_out_not_held(
 
     audit, sentry = await _run_with_sentry(monkeypatch, fake)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert HELD_ACTION not in _audit_actions(audit)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["over_age_failing_accounts"] == 1
@@ -1369,7 +1483,7 @@ async def test_never_polled_failing_account_is_left_out_not_held(
 
     audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert HELD_ACTION not in _audit_actions(audit)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["never_polled_failing_accounts"] == 1
@@ -1430,7 +1544,7 @@ async def test_an_all_failing_book_still_raises_the_left_out_event(
 
     audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["reason"] == "no_holdings_today"
     assert metadata["never_polled_failing_accounts"] == 2
@@ -1480,7 +1594,7 @@ async def test_a_proven_empty_old_account_is_exempt_from_the_cap(
 
     audit, sentry = await _run_with_sentry(monkeypatch, fake)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert HELD_ACTION not in _audit_actions(audit)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["emptied_accounts"] == 1
@@ -1503,7 +1617,7 @@ async def test_deribit_only_over_age_account_does_not_hold(
 
     audit, sentry = await _run_with_sentry(monkeypatch, fake)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
     assert HELD_ACTION not in _audit_actions(audit)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["over_age_excluded_venue_accounts"] == 1
@@ -1545,7 +1659,7 @@ async def test_two_unstamped_working_keys_on_one_stamping_venue_hold_the_refresh
 
     audit, sentry = await _run_with_sentry(monkeypatch, fake)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     metadata = _held_metadata(audit)
     assert metadata["reason"] == "identity_pending"
     assert metadata["identity_pending_venues"] == 1
@@ -1586,7 +1700,8 @@ async def test_a_key_list_that_cannot_double_count_does_not_hold(
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
     assert len([
-        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] == TODAY.isoformat()
+        r for r in fake.rows_for("allocator_equity_snapshots")
+        if r["asof"] == CLOSED_DAY.isoformat()
     ]) == 1
     assert HELD_ACTION not in _audit_actions(audit)
     assert _refresh_complete_metadata(audit)["identity_pending_venues"] == 0
@@ -1634,7 +1749,7 @@ async def test_hold_reason_precedence_names_never_polled_first(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     metadata = _held_metadata(audit)
     assert metadata["reason"] == "never_polled_working"
     assert metadata["never_polled_working_accounts"] == 1
@@ -1664,7 +1779,7 @@ async def test_a_held_first_day_stays_zero_snapshot_and_enqueues_nothing(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    _no_today_row(fake)
+    _no_snapshot_row(fake)
     assert fake.rows_for("allocator_equity_snapshots") == []
     assert fake.rows_for("compute_jobs") == []
     assert fake.rpc_calls == []
@@ -1755,11 +1870,11 @@ async def test_a_second_key_on_the_account_that_finds_capital_vetoes_the_proof(
 
     metadata = _refresh_complete_metadata(audit)
     if member_finds_capital:
-        assert _today_row(fake)["value_usd"] == pytest.approx(500.0)
+        assert _snapshot_row(fake)["value_usd"] == pytest.approx(500.0)
         assert metadata["emptied_accounts"] == 0
         assert metadata["carried_keys"] == 1
     else:
-        assert _today_row(fake)["value_usd"] == 0.0
+        assert _snapshot_row(fake)["value_usd"] == 0.0
         assert metadata["reason"] == "book_emptied"
         assert metadata["emptied_accounts"] == 1
 
@@ -1806,7 +1921,7 @@ async def test_a_poll_that_ran_across_utc_midnight_does_not_veto_a_later_empty_p
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(HOLDER_USD), (
         f"a midnight-straddling poll vetoed the emptiness proof: {row['value_usd']}"
     )
@@ -1847,7 +1962,7 @@ async def test_events_without_asof_keep_the_created_at_rule(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
     assert _refresh_complete_metadata(audit)["emptied_accounts"] == 0
 
 
@@ -1898,7 +2013,7 @@ async def test_a_marker_dated_after_the_priced_row_leaves_the_account_out_of_the
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    row = _today_row(fake)
+    row = _snapshot_row(fake)
     assert row["value_usd"] == pytest.approx(1000.0), (
         "the account unpriced today was carried at yesterday's close-priced row: "
         f"{row['value_usd']}"
@@ -1938,7 +2053,7 @@ async def test_a_marker_that_does_not_postdate_the_rows_hides_nothing(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert _today_row(fake)["value_usd"] == pytest.approx(1000.0 + MT5_BTC_USD)
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(1000.0 + MT5_BTC_USD)
     assert _refresh_complete_metadata(audit)["native_unpriced_accounts"] == 0
 
 
@@ -1992,3 +2107,534 @@ async def test_a_failed_marker_read_fails_the_job_instead_of_pinning_a_short_tot
     assert fake.rows_for("allocator_equity_snapshots") == []
     actions = [c.kwargs.get("action") for c in audit.call_args_list]
     assert "allocator.equity.refresh_failed" in actions
+
+
+# ---------------------------------------------------------------------------
+# Phase 167.2.1.1.1.1 plan 12 (D-04, D-06): a sizable price gap holds the day
+# ---------------------------------------------------------------------------
+
+
+def _seed_gap_book(
+    fake: FakeSupabaseClient,
+    key_id: str = API_KEY_ID_1,
+    *,
+    read_day: date = TODAY,
+    usdt: float = 500.0,
+    symbol: str = "BTC",
+    gap_quantity: float = 1.0,
+    priced_mark: float | None = 60000.0,
+    priced_age_days: int = 2,
+    venue: str = "okx",
+) -> None:
+    """One account's read day: a USDT row, and ``symbol`` held at quantity
+    ``gap_quantity`` with NO price (a gap row: value 0.0, mark 0.0, plan 04's shape).
+    ``priced_mark`` (None for never) is that symbol's mark on a row ``priced_age_days``
+    before the read day, the price the sizing read finds."""
+    _seed_holding(fake, key_id, venue, "USDT", read_day, usdt)
+    _seed_holding(
+        fake, key_id, venue, symbol, read_day, 0.0, quantity=gap_quantity, mark_price=0.0
+    )
+    if priced_mark is not None:
+        _seed_holding(
+            fake, key_id, venue, symbol, read_day - timedelta(days=priced_age_days),
+            gap_quantity * priced_mark, quantity=gap_quantity, mark_price=priced_mark,
+        )
+
+
+@pytest.mark.asyncio
+async def test_refresh_holds_on_a_sizable_price_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-04 / D-N6. The read day holds 500.0 of USDT and 1.0 BTC with no price. The newest
+    priced BTC row, two days earlier, says 60000.0, so the unpriced balance is
+    1.0 x 60000.0 = 60000.0 against a floor of 0.001 x 500.0 = 0.50: far above it. Writing
+    the day would store 500.0 for a book worth ~60500.0, and the snapshot is
+    first-writer-wins, so the day is HELD by name (167.1.2.1.1 D-01) and nothing is written."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_gap_book(fake)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_snapshot_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "price_gap"
+    assert metadata["price_gap_accounts"] == 1
+    assert "allocator.equity.refresh_complete" not in _audit_actions(audit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_key", "raises"), [(API_KEY_ID_1, True), (API_KEY_ID_2, False)]
+)
+async def test_price_gap_hold_sentry_is_leader_only(
+    monkeypatch: pytest.MonkeyPatch, job_key: str, raises: bool
+) -> None:
+    """D-14 (167.1.2.1.1) for the new reason: one hold, one Sentry event, from the leader
+    (smallest working eligible key). An integer ``price_gap_accounts`` tag and a closed
+    outcome token; no id, venue id, symbol or USD figure in the message or any tag."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_gap_book(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_2, "bybit", "USDT", TODAY, 700.0)
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
+
+    assert _held_metadata(audit)["reason"] == "price_gap"
+    calls = _sentry_calls(sentry)
+    assert len(calls) == (1 if raises else 0), calls
+    if raises:
+        message, tags = calls[0]
+        assert sentry.capture_message.call_args.kwargs.get("level") == "warning"
+        assert tags.get("refresh_outcome") == "held_price_gap"
+        assert tags.get("price_gap_accounts") == 1
+        assert isinstance(tags.get("price_gap_accounts"), int)
+        for secret in (
+            API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "o-1", "b-1", "okx", "bybit",
+            "BTC", "60000", "500", "700",
+        ):
+            assert secret not in message
+            assert secret not in [str(v) for v in tags.values()]
+
+
+@pytest.mark.asyncio
+async def test_price_gap_is_not_a_stable_value_derivative_or_deribit_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PATTERNS trap 9. `is_price_gap_holding` is row-level and pure; the refresh adds the
+    two exclusions it owns. A stable-value spot row (USDE is valued 1.0), a derivative row
+    and a Deribit spot row, each at mark 0.0, leave the day WRITTEN: none of them is an
+    unpriced balance the refresh counts, so no hold and no sizing read is needed."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 1000.0)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDE", TODAY, 0.0, quantity=5.0, mark_price=0.0)
+    _seed_holding(
+        fake, API_KEY_ID_1, "okx", "BTCUSDTSWAP", TODAY, 0.0,
+        holding_type="derivative", unrealized_pnl_usd=7.0, quantity=2.0, mark_price=0.0,
+    )
+    _seed_holding(fake, API_KEY_ID_1, "deribit", "ETH", TODAY, 0.0, quantity=3.0, mark_price=0.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    # 1000.0 USDT + 7.0 derivative P&L (USDE and the Deribit spot row add 0.0).
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(1007.0)
+    assert HELD_ACTION not in _audit_actions(audit)
+    assert _refresh_complete_metadata(audit)["price_gap_accounts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_hold_reason_precedence_puts_price_gap_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason is the first in never_polled_working, carry_over_age, identity_pending,
+    price_gap; every count rides in the audit so the lower cause is not lost. The gap
+    alone gives price_gap."""
+    both = FakeSupabaseClient()
+    _seed_key(both, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(both, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_gap_book(both, API_KEY_ID_1)
+    audit = await _run_refresh(monkeypatch, both, API_KEY_ID_1)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "never_polled_working"
+    assert metadata["never_polled_working_accounts"] == 1
+    assert metadata["price_gap_accounts"] == 1
+
+    alone = FakeSupabaseClient()
+    _seed_key(alone, API_KEY_ID_1)
+    _seed_gap_book(alone, API_KEY_ID_1)
+    audit = await _run_refresh(monkeypatch, alone, API_KEY_ID_1)
+    assert _held_metadata(audit)["reason"] == "price_gap"
+
+
+@pytest.mark.asyncio
+async def test_carried_account_with_a_gap_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A working account last read two days ago is carried (age 2, inside the cap of 7).
+    Its rows carry a gap whose size is read against ITS read day: 1.0 ETH x 2000.0 =
+    2000.0, priced on a row 2 days before that read day (TODAY - 4), against a floor of
+    0.001 x 300.0 = 0.30. The carried account holds the day like a fresh one."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_gap_book(
+        fake, API_KEY_ID_2, read_day=TODAY - timedelta(days=2), usdt=300.0,
+        symbol="ETH", priced_mark=2000.0, venue="bybit",
+    )
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_snapshot_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "price_gap"
+    assert metadata["price_gap_accounts"] == 1
+    assert metadata["carried_keys"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Plan 12 (D-06, F2, D-12): a dust or unsizable gap is left out and named
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refresh_leaves_out_a_dust_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-06 / D-N14. USDT 100000.0 and 1.0 XYZ with no price; the newest priced XYZ row
+    says 50.0, so the unpriced balance is 1.0 x 50.0 = 50.00 against a floor of
+    0.001 x 100000.0 = 100.00: below it. Holding the day for a balance that small would
+    freeze the store for a rounding error, so the day is WRITTEN at 100000.0 without an
+    XYZ key and the audit counts the left-out row. A hold is a Sentry event, a leave-out is
+    not."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_gap_book(fake, usdt=100000.0, symbol="XYZ", priced_mark=50.0)
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake)
+
+    row = _snapshot_row(fake)
+    assert row["value_usd"] == pytest.approx(100000.0)
+    assert "XYZ" not in row["breakdown"]
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["price_gap_dust_rows"] == 1
+    assert metadata["price_gap_accounts"] == 0
+    assert HELD_ACTION not in _audit_actions(audit)
+    assert sentry.capture_message.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_dust_left_out_is_named_on_the_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-06 / D-N15. The dust book of the test above (USDT 100000.0 and 1.0 XYZ at no price,
+    the XYZ row two days earlier at 50.0: 50.00 against a floor of 100.00) writes the day
+    WITHOUT the balance, and the stored row itself says what was left out: one record,
+    ``{count: 1, symbols: ["XYZ"], dust: 1, unsizable: 0}``, not only the audit. A book
+    with no left-out gap carries no such key."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_gap_book(fake, usdt=100000.0, symbol="XYZ", priced_mark=50.0)
+
+    await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    breakdown = _snapshot_row(fake)["breakdown"]
+    assert breakdown["__price_gap_left_out__"] == {
+        "count": 1,
+        "symbols": ["XYZ"],
+        "dust": 1,
+        "unsizable": 0,
+    }
+    assert breakdown["USDT"] == pytest.approx(100000.0)
+
+    clean = FakeSupabaseClient()
+    _seed_key(clean, API_KEY_ID_1)
+    _seed_holding(clean, API_KEY_ID_1, "okx", "USDT", TODAY, 100000.0)
+    await _run_refresh(monkeypatch, clean, API_KEY_ID_1)
+    assert "__price_gap_left_out__" not in _snapshot_row(clean)["breakdown"]
+
+
+@pytest.mark.asyncio
+async def test_unsizable_left_out_is_named_on_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-06. A book with a priced USDT row and one XYZ gap that was never priced is
+    unsizable; the recorded choice leaves it out, and the record counts it under
+    ``unsizable`` (not ``dust``) next to the priced balance that was written."""
+    from services import price_rule
+
+    monkeypatch.setattr(price_rule, "UNSIZABLE_GAP_HOLDS", False)
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_gap_book(fake, usdt=1000.0, symbol="XYZ", priced_mark=None)
+
+    await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _snapshot_row(fake)["breakdown"]["__price_gap_left_out__"] == {
+        "count": 1,
+        "symbols": ["XYZ"],
+        "dust": 0,
+        "unsizable": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_price_gap_left_out_only_book_writes_no_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-06 / D-N26. A book whose ONLY row is an unsizable gap (XYZ held, never priced) has
+    nothing left to write once the gap is left out: no snapshot, and the
+    ``refresh_complete`` audit says why, ``price_gap_left_out``, so a later reader does not
+    take the missing day for "no holdings". With a derivative that reports no P&L in the
+    same book the older reason ``derivative_pnl_unreported`` wins (checked first); a book
+    with nothing at all keeps ``no_holdings_today``."""
+    from services import price_rule
+
+    monkeypatch.setattr(price_rule, "UNSIZABLE_GAP_HOLDS", False)
+
+    only_gap = FakeSupabaseClient()
+    _seed_key(only_gap, API_KEY_ID_1)
+    _seed_holding(only_gap, API_KEY_ID_1, "okx", "XYZ", TODAY, 0.0, mark_price=0.0)
+    audit = await _run_refresh(monkeypatch, only_gap, API_KEY_ID_1)
+    _no_snapshot_row(only_gap)
+    assert _refresh_complete_metadata(audit)["reason"] == "price_gap_left_out"
+    assert _refresh_complete_metadata(audit)["price_gap_unsizable_rows"] == 1
+
+    with_derivative = FakeSupabaseClient()
+    _seed_key(with_derivative, API_KEY_ID_1)
+    _seed_holding(with_derivative, API_KEY_ID_1, "okx", "XYZ", TODAY, 0.0, mark_price=0.0)
+    _seed_holding(
+        with_derivative, API_KEY_ID_1, "okx", "BTCUSDT", TODAY, 1000.0,
+        holding_type="derivative", unrealized_pnl_usd=None,
+    )
+    audit = await _run_refresh(monkeypatch, with_derivative, API_KEY_ID_1)
+    _no_snapshot_row(with_derivative)
+    assert _refresh_complete_metadata(audit)["reason"] == "derivative_pnl_unreported"
+
+    # No holdings at all (the only key never polled and failing, the shape of
+    # test_an_all_failing_book_still_raises_the_left_out_event): no gap to name.
+    empty = FakeSupabaseClient()
+    _seed_key(empty, API_KEY_ID_1, exchange="okx", sync_status="error", venue_account_id="o-1")
+    audit = await _run_refresh(monkeypatch, empty, API_KEY_ID_1)
+    _no_snapshot_row(empty)
+    assert _refresh_complete_metadata(audit)["reason"] == "no_holdings_today"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("priced_age_days", "unsizable_holds", "held"),
+    [
+        (None, False, False),  # never priced, recorded choice: left out
+        (None, True, True),  # never priced, flag flipped: holds
+        (8, False, True),  # WR-02: sized from its newest priced row at ANY age, so it holds
+        (8, True, True),
+        (30, False, True),  # D-04: a gap past N days still holds the day
+        (7, False, True),  # a price 7 days back: 1.0 x 100.0 >= 0.001 x 1000.0
+    ],
+)
+async def test_refresh_unsizable_gap_follows_the_recorded_decision(
+    monkeypatch: pytest.MonkeyPatch,
+    priced_age_days: int | None,
+    unsizable_holds: bool,
+    held: bool,
+) -> None:
+    """F2 (decided in plan 10, founder 2026-10-27 "unsizable left out"). USDT 1000.0 and
+    1.0 XYZ with no price on the read day. A balance that was NEVER priced cannot be sized:
+    the recorded choice (UNSIZABLE_GAP_HOLDS False) writes the day at 1000.0 and counts the
+    row; the flag flipped holds it. A balance priced at ANY age (7, 8 or 30 days back;
+    review WR-02) sizes from its newest priced row (1.0 x 100.0 = 100.0 against
+    0.001 x 1000.0 = 1.0) and holds whatever the flag: D-04 holds a gap past N days and
+    D-06 leaves out only what is below the floor."""
+    from services import price_rule
+
+    monkeypatch.setattr(price_rule, "UNSIZABLE_GAP_HOLDS", unsizable_holds)
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_gap_book(
+        fake, usdt=1000.0, symbol="XYZ",
+        priced_mark=None if priced_age_days is None else 100.0,
+        priced_age_days=priced_age_days or 0,
+    )
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    if held:
+        _no_snapshot_row(fake)
+        assert _held_metadata(audit)["reason"] == "price_gap"
+        return
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(1000.0)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["price_gap_unsizable_rows"] == 1
+    assert metadata["price_gap_dust_rows"] == 0
+    assert metadata["price_gap_accounts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_long_stuck_balance_is_sized_past_the_response_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-05. PostgREST answers at most ``max_rows`` rows (1000 in supabase/config.toml), and a
+    gap row is stored with ``mark_price`` 0, so a balance stuck for a long time buries its own
+    last priced row under newer gap rows. A sizing read that returns every row newest-first is
+    cut off before that row, the balance reads as never priced, and a material holding is left
+    out of a first-writer-wins row. Six newer gap rows sit above the one priced row here, against
+    a response cap of five: the read must ask for the newest PRICED row alone, so the balance is
+    still sized (1.0 x 100.0 against 0.001 x 1000.0) and the day is held by name."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_gap_book(fake, usdt=1000.0, symbol="XYZ", priced_mark=100.0, priced_age_days=30)
+    for age in range(1, 7):
+        _seed_holding(
+            fake, API_KEY_ID_1, "okx", "XYZ", TODAY - timedelta(days=age), 0.0, mark_price=0.0
+        )
+    monkeypatch.setattr(_FakeTable, "max_rows", 5)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_snapshot_row(fake)
+    assert _held_metadata(audit)["reason"] == "price_gap"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("dust_rows", "held"), [(2, False), (3, True)])
+async def test_many_dust_rows_that_add_up_past_the_floor_hold_the_day(
+    monkeypatch: pytest.MonkeyPatch, dust_rows: int, held: bool
+) -> None:
+    """SF-M2. Level 100000.0, floor 0.001 x 100000.0 = 100.0. Each unpriced balance is
+    1.0 x 40.0 = 40.0, dust on its own. Two of them add up to 80.0 (still below the floor):
+    the day is written and both are named. Three add up to 120.0, at or past it, so the
+    sum of the rows judged dust is judged like one balance and the day is held (judging each
+    row alone would let any number of dust rows leave out an unbounded share)."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 100000.0)
+    for name in ("AAA", "BBB", "CCC")[:dust_rows]:
+        _seed_holding(fake, API_KEY_ID_1, "okx", name, TODAY, 0.0, mark_price=0.0)
+        _seed_holding(fake, API_KEY_ID_1, "okx", name, TODAY - timedelta(days=2), 40.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    if held:
+        _no_snapshot_row(fake)
+        metadata = _held_metadata(audit)
+        assert metadata["reason"] == "price_gap"
+        assert metadata["price_gap_dust_rows"] == 0
+        return
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(100000.0)
+    assert _refresh_complete_metadata(audit)["price_gap_dust_rows"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("job_key", "raises"), [(API_KEY_ID_1, True), (API_KEY_ID_2, False)])
+async def test_unsizable_leave_out_raises_the_leader_event(
+    monkeypatch: pytest.MonkeyPatch, job_key: str, raises: bool
+) -> None:
+    """SF-M1. A balance never priced is left out by the recorded choice, and the day is
+    written short by it. That is as silent as the failing-account leave-out, so the leader
+    raises the same kind of static event (no id, no symbol, no USD), once. Dust stays quiet
+    (test_refresh_leaves_out_a_dust_gap)."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_gap_book(
+        fake, API_KEY_ID_2, usdt=400.0, symbol="XYZ", priced_mark=None, venue="bybit"
+    )
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
+
+    assert _refresh_complete_metadata(audit)["price_gap_unsizable_rows"] == 1
+    calls = _sentry_calls(sentry)
+    assert len(calls) == (1 if raises else 0), calls
+    if raises:
+        message, tags = calls[0]
+        assert tags["refresh_outcome"] == "left_out_price_gap_unsizable"
+        for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "b-1", "bybit", "XYZ"):
+            assert secret not in message
+
+
+@pytest.mark.asyncio
+async def test_refresh_reads_the_floor_from_the_rule_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-N16. The refresh never names a share. A gap sized at 10% of its account's level
+    (900.0 USDT, XYZ priced at 90.0: 90.0 / 900.0) holds under the recorded floor of
+    0.001. With the rule module's floor patched to 0.5 (a size must reach 0.5 x 900.0 =
+    450.0 to hold) the SAME book is dust and the day is written, so the disposition
+    follows the one constant."""
+    from services import price_rule
+
+    def _book() -> FakeSupabaseClient:
+        fake = FakeSupabaseClient()
+        _seed_key(fake, API_KEY_ID_1)
+        _seed_gap_book(fake, usdt=900.0, symbol="XYZ", priced_mark=90.0)
+        return fake
+
+    held_fake = _book()
+    audit = await _run_refresh(monkeypatch, held_fake, API_KEY_ID_1)
+    _no_snapshot_row(held_fake)
+    assert _held_metadata(audit)["reason"] == "price_gap"
+
+    monkeypatch.setattr(price_rule, "DUST_FLOOR_SHARE", 0.5)
+    written_fake = _book()
+    audit = await _run_refresh(monkeypatch, written_fake, API_KEY_ID_1)
+    assert _snapshot_row(written_fake)["value_usd"] == pytest.approx(900.0)
+    assert _refresh_complete_metadata(audit)["price_gap_dust_rows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sizable_gap_wins_over_a_dust_gap_of_the_same_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hold wins. Level 100000.0, floor 0.001 x 100000.0 = 100.0. BIG is 1.0 x 5000.0 =
+    5000.0 (sizable), SMALL is 1.0 x 5.0 = 5.0 (dust). The day is held, and the dust row is
+    NOT counted: nothing is written, so there is nothing to name as left out."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_gap_book(fake, usdt=100000.0, symbol="BIG", priced_mark=5000.0)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "SMALL", TODAY, 0.0, mark_price=0.0)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "SMALL", TODAY - timedelta(days=2), 5.0)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_snapshot_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "price_gap"
+    assert metadata["price_gap_accounts"] == 1
+    assert metadata["price_gap_dust_rows"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("job_key", "raises"), [(API_KEY_ID_1, True), (API_KEY_ID_2, False)])
+async def test_price_gap_failing_account_is_left_out(
+    monkeypatch: pytest.MonkeyPatch, job_key: str, raises: bool
+) -> None:
+    """D-12 "Same split" (167.1.2.1.1) for the gap. Account B has a sizable gap (1.0 ETH x
+    2000.0 against a floor of 0.001 x 400.0 = 0.40) but its only eligible key FAILS, so no
+    later poll fixes it by waiting: holding the day would freeze the owner's store for a
+    dead key (T-11). The day is written at 1000.0 WITHOUT B, the audit counts it, and the
+    leader raises one static event."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="error", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_gap_book(
+        fake, API_KEY_ID_2, usdt=400.0, symbol="ETH", priced_mark=2000.0, venue="bybit"
+    )
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
+
+    assert _snapshot_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert HELD_ACTION not in _audit_actions(audit)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["price_gap_failing_accounts"] == 1
+    assert metadata["price_gap_accounts"] == 0
+    calls = _sentry_calls(sentry)
+    assert len(calls) == (1 if raises else 0), calls
+    if raises:
+        message, tags = calls[0]
+        assert tags["refresh_outcome"] == "left_out_price_gap_failing"
+        for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "b-1", "bybit", "ETH", "2000"):
+            assert secret not in message
+
+
+@pytest.mark.asyncio
+async def test_left_out_gap_symbols_are_collected_sorted_and_capped_at_fifty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named, never silent: plan 15 stamps ``price_gap_left_out_symbols`` on the stored row.
+    60 dust rows (each 1.0 x 1.0 = 1.0 against 0.001 x 10000000.0 = 10000.0) are all counted,
+    and the names collected are sorted and capped at 50 (the same bound as the
+    perp-P&L-missing list), so the first 50 in sort order survive."""
+    from services.equity_reconstruction import _fetch_latest_holdings_per_eligible_key
+
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 10_000_000.0)
+    names = [f"S{i:02d}" for i in range(60)]
+    for name in names:
+        _seed_holding(fake, API_KEY_ID_1, "okx", name, TODAY, 0.0, mark_price=0.0)
+        _seed_holding(fake, API_KEY_ID_1, "okx", name, TODAY - timedelta(days=1), 1.0)
+
+    latest = await _fetch_latest_holdings_per_eligible_key(
+        fake, ALLOCATOR_ID, TODAY.isoformat(), job_api_key_id=API_KEY_ID_1
+    )
+
+    assert latest.price_gap_dust_rows == 60
+    assert latest.price_gap_unsizable_rows == 0
+    assert latest.price_gap_left_out_symbols == tuple(names[:50])
+    assert [r["symbol"] for r in latest.rows] == ["USDT"]

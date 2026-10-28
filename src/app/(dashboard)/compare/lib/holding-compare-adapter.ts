@@ -101,7 +101,7 @@ export const HOLDING_COMPARE_MAX_PAGES = 50;
  * Why a holding that was FOUND (rows exist, the owner is known) carries no
  * metrics. One reason per cause, because each reads differently to the owner:
  * - `fixed_price`: its recorded price is a writer constant (`FIXED_MARK_SET`:
- *   a stablecoin symbol, sFOX).
+ *   a stable-value symbol, sFOX).
  * - `account_balance` (M-R2-01): the row is an account balance on a venue that is
  *   not a crypto exchange (MT5 `ACCOUNT-<hex>`), not a traded asset. Its mark can
  *   be the unit's daily close and so varies, which is why it is NOT "fixed".
@@ -163,10 +163,11 @@ export type HoldingCompareItem = {
  * return over a constant 1.0 prints a confident 0.00% return, drawdown and vol,
  * which is an invented number, so these holdings get no metrics.
  *
- * - `stablecoinSymbols` MIRRORS `STABLECOINS` in
- *   analytics-service/services/closed_sets.py (`_fetch_spot_rows` sets
+ * - `stablecoinSymbols` MIRRORS the set `price_rule.is_stable_value` tests:
+ *   `STABLECOINS | STABLECOIN_SPLIT_SUFFIXES` in
+ *   analytics-service/services/closed_sets.py (the holdings poll sets
  *   `mark_price = 1.0` for any asset in it, without a ticker call). A parity
- *   test reads that Python literal and fails when the two drift.
+ *   test reads both Python literals and fails when either drifts.
  * - `venues`: sFOX's balance builder (`_fetch_sfox_balance_rows`) writes
  *   `"mark_price": 1.0` for every row it keeps. The same parity test pins that
  *   premise in the Python source.
@@ -175,7 +176,10 @@ export type HoldingCompareItem = {
  *   `holdingWithheldReason`.
  */
 export const FIXED_MARK_SET = {
-  stablecoinSymbols: new Set(["USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USD"]),
+  stablecoinSymbols: new Set([
+    "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USD",
+    "USDE", "PYUSD", "USDB",
+  ]),
   venues: new Set(["sfox"]),
 } as const;
 

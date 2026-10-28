@@ -36,6 +36,8 @@ import {
   keyStateMapsOf,
   managerSideKeyIds,
   pnlMissingSentence,
+  priceGapHoldingsNote,
+  priceGapSentence,
   summarizeLiveHoldings,
 } from "./live-holdings-summary";
 
@@ -113,7 +115,9 @@ function buildHolding(
     holding_type: "spot",
     value_usd: 0,
     quantity: 1,
-    mark_price_usd: 0,
+    // 167.2.1.1.1.1 D-07: a positive mark, so a default spot row is PRICED. A mark
+    // of 0 on a held spot row is a price gap and is counted in `priceGap`.
+    mark_price_usd: 1,
     api_key_id: KEY_TRUSTED,
     side: null,
     entry_price: null,
@@ -676,6 +680,136 @@ describe("pnlMissingSentence — [167.1.1.2 D-06, UI-SPEC P0] the sentence both 
 });
 
 // ---------------------------------------------------------------------------
+// 167.2.1.1.1.1 D-07 — priceGap: a held spot row with no usable price, counted per row
+// ---------------------------------------------------------------------------
+
+describe("summarizeLiveHoldings — [167.2.1.1.1.1 D-07] priceGap", () => {
+  const pricedSpot = (key: string) =>
+    buildHolding({
+      venue: "venue-g1",
+      symbol: "BTC",
+      value_usd: 500,
+      mark_price_usd: 500,
+      api_key_id: key,
+    });
+  const gapSpot = (key: string, venue = "venue-g2") =>
+    buildHolding({
+      venue,
+      symbol: "XYZ",
+      value_usd: 0,
+      quantity: 1,
+      mark_price_usd: 0,
+      api_key_id: key,
+    });
+
+  it("a toggled-on gap row beside a priced 500 on a trusted key: priceGap 1, total 500, the gap row is in no includes part", () => {
+    const s = summarize({
+      holdings: [pricedSpot(KEY_TRUSTED), gapSpot(KEY_TRUSTED)],
+      contributing: [KEY_TRUSTED],
+    });
+    expect(s.priceGap).toBe(1);
+    expect(s.total).toBe(500);
+    expect(s.untrusted.count).toBe(0);
+    expect(s.unknownStatus.count).toBe(0);
+    expect(s.pnlMissing).toBe(0);
+  });
+
+  it("the same gap row on a key needing attention is counted in priceGap only: the untrusted part does not count it", () => {
+    const s = summarize({
+      holdings: [pricedSpot(KEY_SIGN_IN_FAILED), gapSpot(KEY_SIGN_IN_FAILED)],
+      contributing: [KEY_SIGN_IN_FAILED],
+    });
+    expect(s.priceGap).toBe(1);
+    expect(s.total).toBe(500);
+    expect(s.untrusted).toEqual({ amount: 500, count: 1, unavailable: 0 });
+  });
+
+  it("a gap row the modelled-book narrowing drops stays in its excluded part as unavailable and is NOT counted in priceGap", () => {
+    const s = summarize({
+      holdings: [pricedSpot(KEY_SIGN_IN_FAILED), gapSpot(KEY_TRUSTED)],
+      contributing: [KEY_SIGN_IN_FAILED],
+    });
+    expect(s.total).toBe(500);
+    expect(s.priceGap).toBe(0);
+    expect(s.excludedTrusted).toEqual({ amount: 0, count: 1, unavailable: 1 });
+  });
+
+  it("a toggled-OFF gap row is not counted", () => {
+    const gap = gapSpot(KEY_TRUSTED);
+    const s = summarize({
+      holdings: [gap],
+      contributing: [KEY_TRUSTED],
+      toggles: { [ref(gap)]: false },
+    });
+    expect(s.priceGap).toBe(0);
+  });
+
+  it("a derivative with mark 0 and a reported P&L is never a gap", () => {
+    const perp = buildHolding({
+      venue: "venue-g3",
+      symbol: "ETH-PERP",
+      holding_type: "derivative",
+      value_usd: 600_000,
+      mark_price_usd: 0,
+      unrealized_pnl_usd: 250,
+      side: "long",
+      api_key_id: KEY_TRUSTED,
+    });
+    const s = summarize({ holdings: [perp], contributing: [KEY_TRUSTED] });
+    expect(s.priceGap).toBe(0);
+    expect(s.total).toBe(250);
+  });
+
+  it("a spot row with quantity 0 and mark 0 holds nothing and is not a gap", () => {
+    const empty = buildHolding({
+      venue: "venue-g4",
+      symbol: "NIL",
+      quantity: 0,
+      value_usd: 0,
+      mark_price_usd: 0,
+      api_key_id: KEY_TRUSTED,
+    });
+    const s = summarize({ holdings: [empty], contributing: [KEY_TRUSTED] });
+    expect(s.priceGap).toBe(0);
+  });
+
+  it("counts per ROW: two gap rows give priceGap 2", () => {
+    const s = summarize({
+      holdings: [gapSpot(KEY_TRUSTED, "venue-g5"), gapSpot(KEY_TRUSTED, "venue-g6")],
+      contributing: [KEY_TRUSTED],
+    });
+    expect(s.priceGap).toBe(2);
+    expect(s.total).toBe(0);
+  });
+});
+
+describe("priceGapSentence and priceGapHoldingsNote — [167.2.1.1.1.1 D-07, UI-SPEC P0] the sentences the surfaces render", () => {
+  // Every expected string is typed literally, never produced by the builder.
+  it("priceGapSentence: 1 singular, 2 plural, raw integer", () => {
+    expect(priceGapSentence(1)).toBe("1 holding without a price left out.");
+    expect(priceGapSentence(2)).toBe("2 holdings without a price left out.");
+    expect(priceGapSentence(1_234)).toBe("1234 holdings without a price left out.");
+  });
+
+  it("priceGapSentence: below 1 and non-integer or NaN counts are the empty string", () => {
+    expect(priceGapSentence(0)).toBe("");
+    expect(priceGapSentence(0.5)).toBe("");
+    expect(priceGapSentence(Number.NaN)).toBe("");
+    expect(priceGapSentence(-1)).toBe("");
+  });
+
+  it("priceGapHoldingsNote: 1 singular, 3 plural", () => {
+    expect(priceGapHoldingsNote(1)).toBe("1 holding has no price, so portfolio AUM leaves it out.");
+    expect(priceGapHoldingsNote(3)).toBe("3 holdings have no price, so portfolio AUM leaves them out.");
+  });
+
+  it("priceGapHoldingsNote: 0 and NaN are the empty string", () => {
+    expect(priceGapHoldingsNote(0)).toBe("");
+    expect(priceGapHoldingsNote(Number.NaN)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // D-06 (b) — the "excludes" clause (founder answer 2026-09-24)
 // ---------------------------------------------------------------------------
 
@@ -977,18 +1111,27 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
     let casesWithTrustedExclusion = 0;
     let casesWithNotConnectedExclusion = 0;
     let casesWithPnlMissing = 0;
+    let casesWithPriceGap = 0;
     for (let c = 0; c < 256; c += 1) {
       const nHoldings = 1 + Math.floor(rand() * 8);
       const holdings: DashboardHolding[] = [];
       for (let i = 0; i < nHoldings; i += 1) {
         const deriv = rand() < 0.4;
         const missing = rand() < 0.15;
+        // 167.2.1.1.1.1 D-07: a held spot row with no usable price. Its stored
+        // value is 0 (quantity x a mark of 0), as the writers store it.
+        const gap = !deriv && !missing && rand() < 0.2;
         holdings.push(
           buildHolding({
             venue: `gen-venue-${c}-${i}`,
             symbol: `GEN-${i}`,
             holding_type: deriv ? "derivative" : "spot",
-            value_usd: missing && !deriv ? Number.NaN : Math.round(rand() * 100_000),
+            mark_price_usd: gap ? 0 : 1,
+            value_usd: gap
+              ? 0
+              : missing && !deriv
+                ? Number.NaN
+                : Math.round(rand() * 100_000),
             unrealized_pnl_usd: deriv
               ? missing
                 ? null
@@ -1039,9 +1182,17 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
         }
         return Number.isFinite(h.value_usd) ? h.value_usd : 0;
       };
+      // Independent inline gap rule (not the code under test): a held spot row
+      // whose mark is not a finite number above 0.
+      const isGap = (h: DashboardHolding): boolean =>
+        h.holding_type === "spot" &&
+        Number.isFinite(h.quantity) &&
+        (h.quantity as number) > 0 &&
+        !(Number.isFinite(h.mark_price_usd) && (h.mark_price_usd as number) > 0);
       let expectedTotal = 0;
       let expectedExcluded = 0;
       let expectedMissing = 0;
+      let expectedGap = 0;
       let totalRows = 0;
       let excludedRows = 0;
       let toggledOnRows = 0;
@@ -1054,6 +1205,8 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
           expectedExcluded += v ?? 0;
         } else if (v === null) {
           expectedMissing += 1;
+        } else if (isGap(h)) {
+          expectedGap += 1;
         } else {
           totalRows += 1;
           expectedTotal += v;
@@ -1075,11 +1228,13 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
       expect(s.total, label).toBeCloseTo(expectedTotal, 6);
       expect(excludedAmount, label).toBeCloseTo(expectedExcluded, 6);
       expect(s.pnlMissing, label).toBe(expectedMissing);
+      expect(s.priceGap, label).toBe(expectedGap);
       // Row conservation: every toggled-on row is in exactly one of the total,
-      // an excluded part, or pnlMissing.
+      // an excluded part, pnlMissing or priceGap.
       expect(excludedCount, label).toBe(excludedRows);
-      expect(totalRows + excludedCount + s.pnlMissing, label).toBe(toggledOnRows);
+      expect(totalRows + excludedCount + s.pnlMissing + s.priceGap, label).toBe(toggledOnRows);
       if (expectedMissing > 0) casesWithPnlMissing += 1;
+      if (expectedGap > 0) casesWithPriceGap += 1;
       if (
         holdings.some(
           (h) =>
@@ -1100,6 +1255,8 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
     expect(casesWithNotConnectedExclusion).toBeGreaterThan(20);
     // ...and the left-out derivative 167.1.1.2 D-06 counts.
     expect(casesWithPnlMissing).toBeGreaterThan(20);
+    // ...and the held spot row with no price 167.2.1.1.1.1 D-07 counts.
+    expect(casesWithPriceGap).toBeGreaterThan(20);
   });
 });
 

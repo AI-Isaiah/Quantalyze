@@ -66,6 +66,7 @@ import {
   UNTRUSTED_KEY_SET_NOUN,
   UNKNOWN_KEY_STATUS_ROW_LABEL,
 } from "@/lib/closed-sets";
+import { holdingIsPriceGap } from "@/lib/holding-equity";
 import { OWN_CAPITAL } from "@/lib/capital-ownership";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { Button } from "@/components/ui/Button";
@@ -710,7 +711,12 @@ function LegacyHoldingsTable({
               const isExpanded = expandedNoteRowId === h.id;
               // Phase 164.6.6.2.1 plan 17: the stored unit only, parsed.
               const nativeUnit = parseReturnsUnit(h.quantity_unit);
-              const valueBasis = nativeValueBasis(h, nativeUnit);
+              // Phase 167.2.1.1.1.1 D-07 (founder 2026-10-27, "Show no price"): a
+              // spot row with no usable stored price reads "No price", never a
+              // measured $0. The basis is suppressed with it: `nativeValueBasis`
+              // would print "x $0.00" for a stored 0 mark, a price nobody quoted.
+              const isPriceGap = holdingIsPriceGap(h);
+              const valueBasis = isPriceGap ? null : nativeValueBasis(h, nativeUnit);
               return (
                 <Fragment key={h.id}>
                   <tr
@@ -762,12 +768,27 @@ function LegacyHoldingsTable({
                         : formatQuantity(h.quantity)}
                     </td>
                     <td className={numericCell}>{formatUsdPrice(h.entry_price)}</td>
-                    <td className={numericCell} title={valueBasis ?? undefined}>
-                      {formatUsd(h.value_usd)}
-                      {valueBasis !== null ? (
-                        <span className="sr-only"> ({valueBasis})</span>
-                      ) : null}
-                    </td>
+                    {isPriceGap ? (
+                      // DESIGN.md Numbers Contract: a missing figure is the
+                      // em-dash (`formatUsd(null)`), never 0. The dash is
+                      // aria-hidden so the cell's accessible text is the words.
+                      <td className={numericCell}>
+                        <span aria-hidden="true">{formatUsd(null)}</span>
+                        <span
+                          data-testid="holding-price-gap-label"
+                          className="block font-sans text-caption text-text-muted"
+                        >
+                          No price
+                        </span>
+                      </td>
+                    ) : (
+                      <td className={numericCell} title={valueBasis ?? undefined}>
+                        {formatUsd(h.value_usd)}
+                        {valueBasis !== null ? (
+                          <span className="sr-only"> ({valueBasis})</span>
+                        ) : null}
+                      </td>
+                    )}
                     <td className={numericCell}>
                       {formatUsdSigned(h.unrealized_pnl_usd)}
                     </td>
