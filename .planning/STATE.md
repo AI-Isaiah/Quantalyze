@@ -174,7 +174,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 167.2.1.1.1 (NAVMTM) — SHIPPED, NOT YET CLOSED
 Plan: post-ship records pending
-Status: Executing — several phases in parallel. Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 171 READCEILING (v0.133.4.0 #1138; plan 12 SC-3 recorded, verification pending), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 172 OKXANCHOR (v0.133.4.0 #1136; SC-3 a4 still refused `chain_break`, routed to 179 OKXBILLSCHAIN by the founder) and 174 MARKPAUSE (v0.133.2.0 #1133). Booked, not planned: 173, 176 to 179.
+Status: Executing — several phases in parallel. Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 171 READCEILING (v0.133.4.0 #1138; plan 12 SC-3 recorded, verification passed, security audit pending), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 172 OKXANCHOR (v0.133.4.0 #1136; SC-3 a4 still refused `chain_break`, routed to 179 OKXBILLSCHAIN by the founder) and 174 MARKPAUSE (v0.133.2.0 #1133). Booked, not planned: 173, 176 to 179.
 Last activity: 2026-10-28 — 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked
 Progress: [█████████░] 93%
 
