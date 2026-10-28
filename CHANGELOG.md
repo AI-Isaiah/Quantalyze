@@ -45,6 +45,19 @@
 - Known limit: this ship only adds the measurement. Plan 03 (the post-deploy read-only probe run on a4, founder-approved) is still to run, and which fix lands is chosen from its reading at a founder checkpoint (D-03), not here. SC-1 is delivered by this ship; the break itself is not yet fixed and a4 still refuses `chain_break` until then.
 - No migration, no SQL test, no CI workflow change: the SQL mutation census is unaffected.
 
+## [0.133.8.1] - 2026-10-28 — BASELINE: automated re-dump after the PROD apply of d9b69ca7
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `40722154656`, after the PROD apply of merge `d9b69ca7`: sha256 `b2b6bba2…` → `7f82cb20…`.
+- Shape, old → new: tables 66 → 67, policies 156 → 156, function statements 134 → 134, distinct function names 132 → 132, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261101120000_api_key_flow_prices.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-28` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.8.0 → 0.133.8.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=311 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `40722154656` succeeded, and this entry was composed by the `redump-pr` job. Run `40722154656` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.8.0] - 2026-10-28 — DERIBITFLOWS: a Deribit deposit or withdrawal the marks move into the previous day is priced at its own minute
 
 ### Root cause
