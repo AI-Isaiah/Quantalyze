@@ -10825,6 +10825,11 @@ were NOT, and all four are now pushed to `origin` so they are no longer local-on
   - The `shared_test_db` xdist group never formed. The conftest grouping hook ran after xdist's own hook
     had read the markers, so no nodeid received the group suffix until the hook got `tryfirst=True`
     (gate: `analytics-service/tests/test_xdist_group_is_real.py`, seen RED without the decorator).
+  - ⭐ 2026-10-28: the group stopped forming again under pytest 9.2.0, for a different reason. pytest
+    9.2.0 keeps a node's id in `Node._id` and xdist 3.8.0 still writes the suffix to `item._nodeid`,
+    which nothing reads any more, so hook order is not involved. Upstream pytest-dev/pytest-xdist#1386,
+    fixed by #1388 on xdist main and not released. `requirements-dev.txt` caps `pytest<9.2` until an
+    xdist release carries it; the same gate went RED on 9.2.0 and is GREEN under the cap.
   - The limiter-identity flake was `routers.*` module pollution: fixtures that evicted a module without
     restoring it. Fixed in the polluters through `tests/limiter_stub.py` (`restoring` / `evicted`); the
     victim test is byte-identical. Exhaustive bisect after the fix: 316 of 316 file-level and 452 of 452
