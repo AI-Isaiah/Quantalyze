@@ -149,6 +149,8 @@ class OkxOpeningReading:
     blank_inst_type_bills: int
     stable_transfer_net_usd: float
     newest_usdt_bal: float | None
+    # The bills the walk kept, in walk order; read by the Phase 179 chain diagnostic, never by the verdict.
+    walked: tuple[Mapping[str, str], ...] = ()
 
 
 def _decimal(value: Any, reason: str) -> Decimal:
@@ -237,6 +239,10 @@ def _parse_bill(row: Any) -> dict[str, str]:
         "balChg": str(bal_chg),
         "type": str(row.get("type") or ""),
         "instType": str(row.get("instType") or ""),
+        # Diagnostic only (Phase 179): no verdict reads these three.
+        "subType": str(row.get("subType") or ""),
+        "mgnMode": str(row.get("mgnMode") or ""),
+        "posBalChg": str(row.get("posBalChg") or ""),
     }
 
 
@@ -416,6 +422,7 @@ async def read_okx_opening(
         * 1000
     )
     bills_read = 0
+    bills: list[dict[str, str]] = []
     blank_inst_type = 0
     transfer_net = Decimal(0)
     newest_usdt_bal: float | None = None
@@ -451,6 +458,7 @@ async def read_okx_opening(
             blank_inst_type_bills=blank_inst_type,
             stable_transfer_net_usd=float(transfer_net),
             newest_usdt_bal=newest_usdt_bal,
+            walked=tuple(bills),
         )
     except OpeningUnavailable as exc:
         logger.info("okx opening unavailable: reason=%s", exc.reason)
@@ -461,6 +469,7 @@ async def read_okx_opening(
             blank_inst_type_bills=blank_inst_type,
             stable_transfer_net_usd=float(transfer_net),
             newest_usdt_bal=newest_usdt_bal,
+            walked=tuple(bills),
         )
 
 
