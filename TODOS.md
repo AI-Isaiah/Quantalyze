@@ -13276,6 +13276,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Measured 2026-10-26 (post-deploy probe, counts only).** The trigger fired: account a6 (a Bybit member, 730-day window) read 127471 trades over 1378 calls and ended with failure class `truncated`; its probe record is not comparable and nothing was rebuilt (founder, "Rebuild none, book follow-ups"). Four of the probe's six accounts have no working key (`account_key_not_working`), so this ceiling is the only read problem seen on an account that has one working Bybit key.
 
+**Measured 2026-10-28 (Phase 171 SC-3, post-deploy probe, counts only).** a6 read-in-full, 203279 trades over 2158 calls in 1048 s, site none. Phase 171 (v0.133.4.0, #1138) continues a Bybit window past the 100-page ceiling inside one run and, for a book too big for one claim, resumes across claims; this probe read exercised the first layer only, and at 1048 s it is over the 900 s claim budget, so a real a6 job would resume across claims. Not closed: the OKX per-type ceiling and the one-millisecond group named in this entry are not changed by Phase 171.
+
 
 ### 167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE — an OKX allocator account's forced read is refused `anchor_skipped_implausible`, so its history cannot be rebuilt (booked 2026-10-26, 167.2.1.1.2.1 plan 06 probe, DATA INTEGRITY, user-facing)
 
@@ -13283,11 +13285,15 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Owner / Trigger:** unowned. Trigger: a founder request to rebuild a4's history, or a read-only look at a4's anchor inputs. Closed when the cause is measured and either fixed with a test or recorded as a correct refusal.
 
+**Measured 2026-10-27 to 2026-10-28 (Phase 172 OKXANCHOR, counts only).** Plan 03 (2026-10-27) named the 5x gate's cause `money_before_window`: `anchor_over_replay=11.2`, the replay ends positive, every replay-defect reading is zero or negligible, and the opening the anchor implies is 0.911 of the anchor, so the gate compares today's balance with an in-window result that leaves out money held before the window. Plan 03's bills residual (`opening_residual_over_anchor=-0.0147`) came from a partial walk (`bills_read=100`, one page) that the shipped oracle refuses, so it is superseded and is not a measurement. The founder chose `rule-anchors` with a 0.05 tolerance ("Anchor, 5% tolerance (Recommended)"); Phase 172 shipped it as v0.133.4.0 (#1136). SC-3, the deployed probe on 2026-10-28: `sc3: a4 refused anchor_skipped_implausible (chain_break)`, with `anchor_over_replay=14.1`, `implied_opening_over_anchor=0.929`, `bills_read=1489`, `bal_over_cashbal=1`, `opening_check=unavailable`, `opening_unavailable_reason=chain_break` and no residual. The complete walk could not prove the opening because a per-currency running balance in OKX's bills archive does not close, so the forced path fails closed. That does not match the branch, which expected a4 to anchor. Founder 2026-10-28: "Record, route a follow-up (Recommended)"; tolerance "Keep 0.05, re-decide later (Recommended)". **Not closed:** the refusal is not yet shown to be correct, because why the chain does not close is unknown. Owner from 2026-10-28: Phase 179 OKXBILLSCHAIN. Closed by that phase under this entry's own condition. No rebuild was enqueued.
+
 ### 167.2.1.1.2.1-OKX-ORDER-UNMEASURED — the live OKX fills ordering (newest first) has no reading on a multi-page read (booked 2026-10-26, 167.2.1.1.2.1 plan 06 probe, DATA INTEGRITY, gates any OKX rebuild)
 
 **Reading.** The backward OKX walk rests on fills-history answering newest first (RESEARCH A1). The 2026-10-26 probe read an OKX account past one page (1282 trades, 22 calls) but carried 0 ordering readings, with 0 violations and 0 passes ended on a full page. Absence of a reading is not a reading, so the gate reads `okx-order: unmeasured`. Until it is measured, no OKX-holding account may be rebuilt.
 
 **Owner / Trigger:** unowned. Trigger: an OKX account whose probe record carries an ordering reading (this needs a4's anchor refusal, `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`, cleared or the ordering read made independent of it), or any plan to rebuild an OKX-holding account. Closed when `okx_order_readings` equals the number of OKX members that read trades and violations are 0, or the walk is changed to not rely on it.
+
+**Measured 2026-10-28 (Phase 172 SC-3 run).** a4: `okx_order_readings=0`, `okx_order_violations=0`, `okx_passes_ended_full=0`. a4 stayed refused (`chain_break`, see `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`), so its forced read did not finish and the ordering read did not run: still `unmeasured`. Phase 173 decides the gate. Not closed.
 
 ### 167.2.1.1.2.1-BYBIT-TRANSFER-DEPTH-UNMEASURED — whether Bybit serves deposits and withdrawals older than a year is unmeasured, which gates any 730-day Bybit rebuild (booked 2026-10-26, 167.2.1.1.2.1 plan 06 probe, DATA INTEGRITY)
 
@@ -13326,3 +13332,17 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 **Reading.** MARKSOURCE re-raises `ccxt.RateLimitExceeded` on the other NAV-mark reads (Binance positions, Bybit balance and account info, Binance options) so a 429 reaches `_stamp_429` in `job_worker._read_marked_equity_once_per_day`. The OKX option-positions read was outside that fix: the broad `except Exception` in `equity_reconstruction.read_okx_option_exposure` and the matching one in `job_worker._read_okx_option_refusal_once_per_day` turn a 429 into the refusal `option_value_unreadable`, logged by exception class only, and no per-exchange cooldown is recorded. The mark refuses either way, so no stored figure is wrong; the cost is a misnamed refusal and sibling jobs not parked behind the circuit breaker. Minimal fix: an `except ccxt.RateLimitExceeded: raise` arm ahead of the broad arm in `read_okx_option_exposure`, and an `except ccxt.RateLimitExceeded` arm in `_read_okx_option_refusal_once_per_day` that calls `_stamp_429` and returns `option_value_unreadable`, mirroring the 429 arm in `_read_marked_equity_once_per_day`.
 
 **Owner / Trigger:** no phase (orchestrator decision 2026-10-28: the mark refuses either way). Trigger: the first `option_value_unreadable` on an OKX key that coincides with a 429. Closed when both arms exist with a test that a 429 on the OKX option read stamps the cooldown.
+
+## Phase 172 (OKXANCHOR) — routed items (logged 2026-10-28)
+
+### 172-OKX-NONPOSITIVE-REPLAY-UNGATED — a forced OKX rebuild whose replay ends at or below zero is anchored with any offset, ungated (booked 2026-10-28, Phase 172 RESEARCH Open Question 2, DATA INTEGRITY)
+
+**Reading.** The 5x implausibility arm only fires when the replay ends positive. So a forced OKX rebuild whose replay ends at or below zero takes the anchor's offset whatever its size, and the bills check behind the 5x arm never runs for it. Phase 172 left this as it was and pinned it as pre-existing behaviour with `test_a_non_positive_replay_anchors_without_the_bills_check`. a4's replay ends positive, so a4 does not reach this case.
+
+**Owner / Trigger:** unowned. Trigger: a forced OKX rebuild whose replay ends at or below zero, or any plan to rebuild an OKX account. Closed when that case runs the bills check or is refused by name, with a test.
+
+### 172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT — the OKX opening tolerance rests on one measured account (booked 2026-10-28, Phase 172 plan 03, DATA INTEGRITY)
+
+**Reading.** `OPENING_TOLERANCE_REL = 0.05` was chosen at plan 03 from a single account, a4, on a partial bills walk the shipped oracle refuses. Phase 172's post-deploy complete walk recorded `tolerance-basis: opening_check=unavailable reason=chain_break residual=field-absent bills_read=1489 bal_over_cashbal=1`, so no account has a measured residual yet: the residual is field-absent (unmeasured). Founder 2026-10-28: "Keep 0.05, re-decide later (Recommended)". The constant can only fire on a measured opening, so it has not decided any rebuild yet.
+
+**Owner / Trigger:** unowned; Phase 179 OKXBILLSCHAIN re-decides it on a4 once a4's chain closes. Trigger: the next OKX account a probe can read with `opening_check=measured`. Closed when a second account's `opening_residual_over_anchor` is recorded and the tolerance re-decided or confirmed.

@@ -4,18 +4,18 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 167.2.1.1.1
 current_phase_name: NAVMTM
-status: planning
-stopped_at: 167.2.1.1.2.1 TRADEPAGES closed (rebuild none, founder 2026-10-26); NAVMTM in plan revision
-last_updated: "2026-10-26T22:00:46.986Z"
-last_activity: 2026-10-27
-last_activity_desc: 167.2.1.1.2.1 TRADEPAGES closed (probe recorded, no rebuilds, 4 follow-ups booked)
-state_head: 35222ac70c5dfc3124f1417605997027f66ab452
+status: executing
+stopped_at: 171 READCEILING, 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked; several shipped phases await their records
+last_updated: "2026-10-28T09:20:20.328Z"
+last_activity: 2026-10-28
+last_activity_desc: 171 READCEILING closed (a6 read in full), 172 OKXANCHOR closed (a4 refused chain_break, routed to 179), 174 MARKPAUSE closed
+state_head: b2daab890eb41e4037562418701660519c7d2026
 progress:
-  total_phases: 125
-  completed_phases: 123
-  total_plans: 900
-  completed_plans: 893
-  percent: 98
+  total_phases: 134
+  completed_phases: 126
+  total_plans: 919
+  completed_plans: 912
+  percent: 94
 ---
 
 ## ⭐ STATE lineage
@@ -172,11 +172,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 167.2.1.1.1 (NAVMTM) — PLAN REVISION
-Plan: 14 plans in revision round 2 (D-14 to D-16 added 2026-10-26)
-Status: Planning — several phases in parallel. NAVMTM is in plan review. 167.2.1.1.2.1 TRADEPAGES closed 2026-10-27 (v0.133.0.6 #1125; plan 06 probe recorded, no account rebuilt by founder decision 2026-10-26, four follow-ups booked). 170.1.3 NARROWCHARTS closed 2026-10-26 (v0.133.0.7 #1126). 167.2.1.1.1.1 MARKSOURCE is booked, not planned, and depends on NAVMTM.
-Last activity: 2026-10-27 — 167.2.1.1.2.1 TRADEPAGES closed
-Progress: [█████████░] 98%
+Phase: 167.2.1.1.1 (NAVMTM) — SHIPPED, NOT YET CLOSED
+Plan: post-ship records pending
+Status: Executing — several phases in parallel. Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138; SC-3 a6 read in full post-deploy), 172 OKXANCHOR (v0.133.4.0 #1136; SC-3 a4 still refused `chain_break`, routed to 179 OKXBILLSCHAIN by the founder) and 174 MARKPAUSE (v0.133.2.0 #1133). Booked, not planned: 173, 176 to 179.
+Last activity: 2026-10-28 — 171 READCEILING, 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked
+Progress: [█████████░] 94%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -447,6 +447,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 176 added (2026-10-27, /gsd-phase add, founder "You can use add"): LEGACYRETIRE, from MARKSOURCE CONTEXT D-01 (retire the legacy allocator equity curve)
 - Phase 177 added (2026-10-27, /gsd-phase add, founder "You can use add"): DERIBITFLOWS, from MARKSOURCE plan 03 RESEARCH A5 (Deribit moved-flow pricing)
 - Phase 178 added (2026-10-27, /gsd-phase add, founder "You can use add"): OKXREWRITE, from MARKSOURCE CONTEXT D-09 (rebuild the double-counted OKX rows after the Phase 173 gate)
+- Phase 179 added (2026-10-28, /gsd-phase add, founder "You can use add"): OKXBILLSCHAIN, from OKXANCHOR 172 plan 05 (a4 bills chain does not close, `chain_break`; re-decide the 0.05 tolerance after)
 - Phase 164.6.6.3.6 inserted after Phase 164.6.6.3: MT5SERVERLEARN: measure headless resolution of an unknown MT5 server, then learn servers on successful validation (founder 2026-10-06, AskUserQuestion 'Ship static, book the dynamic phase')
 - Phase 164.6.6.3.5 inserted after Phase 164.6.6.3: DOMAINONE: rho redirects to quantalyze.xyz; the 18 quantalyze.com mentions are checked and fixed (founder 2026-10-06, AskUserQuestion 'Book it')
 - Phase 164.6.6.3 UATFIXES **edited 2026-10-05 (/gsd-phase --edit, hand-written)**: items 9 (`MT5-UNKNOWN-BROKER-SERVER-HANG-01`, a key on a broker server the terminals do not know hangs 45.6 s and fails) and 10 (`MT5-SCRUB-OWED-COPY-01`, the owed-scrub 424 reads as a network timeout) added from Phase 164.6.6.1's 2026-10-05 live checks. Founder: book the follow-ups into 164.6.6.3.
@@ -1716,7 +1717,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 167.2.1.1.2.1 TRADEPAGES closed; NAVMTM plan revision
+**Stopped At:** 171 READCEILING, 172 OKXANCHOR and 174 MARKPAUSE closed; 179 OKXBILLSCHAIN booked
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
