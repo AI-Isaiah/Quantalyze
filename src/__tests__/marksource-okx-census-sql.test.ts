@@ -10,6 +10,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) throw new Error(`ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject text.`);
+  return at;
+}
+
 /**
  * Phase 167.2.1.1.1.1 MARKSOURCE plan 10 (D-05, D-06): the read-only PROD
  * census lives as committed files under `docs/runbooks/marksource-okx-census/`
@@ -157,7 +164,7 @@ describe.each(["unpriced-balances-census.sql", "unpriced-balances-current.sql"])
       ).toBe(true);
       expect(
         /count\(\*\)[\s\S]*FROM public\.allocator_holdings[\s\S]*holding_type = 'spot'/.test(
-          text.slice(text.indexOf("UNION ALL")),
+          text.slice(anchorIndex(text, "UNION ALL")),
         ),
         `${name}: the examined row must count public.allocator_holdings spot rows`,
       ).toBe(true);
@@ -334,7 +341,7 @@ describe("marksource history-correction runbook", () => {
 
     it("starts with a DO guard that raises unless the marker names PRODUCTION", () => {
       expect(sql.startsWith("DO $guard$\n"), "the first statement must be the guard").toBe(true);
-      const guard = sql.slice(0, sql.indexOf("$guard$;", 10));
+      const guard = sql.slice(0, anchorIndex(sql, "$guard$;", 10));
       expect(guard.includes("RAISE EXCEPTION"), "the guard must raise").toBe(true);
       expect(
         guard.includes("IS DISTINCT FROM __MARKER__"),
@@ -549,7 +556,7 @@ describe("marksource legacy-chain-move runbook", () => {
         sql.startsWith("DO $guard$\n"),
         `${name}: the first statement must be the DO $guard$ block`,
       ).toBe(true);
-      const guard = sql.slice(0, sql.indexOf("$guard$;", 10));
+      const guard = sql.slice(0, anchorIndex(sql, "$guard$;", 10));
       expect(guard.includes("RAISE EXCEPTION"), `${name}: the guard must raise`).toBe(true);
       expect(
         guard.includes("IS DISTINCT FROM __MARKER__"),
