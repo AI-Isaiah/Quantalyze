@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.133.9.0] - 2026-10-28 — OKXBILLSCHAIN: a refused OKX `chain_break` now explains itself, so the break can be fixed from a reading instead of a guess
+
+### Added
+- When the bills oracle refuses an OKX member with `chain_break`, the allocator history probe's account record now names the break: which arm failed over every currency (none, interior, close, both), how many currencies break each arm, and the worst currency as a closed class (D-04, founder, AskUserQuestion 2026-10-28: "Fixed class (Recommended)" - STABLECOINS, BTC, ETH, OKB or `other`, never a ticker). It also names the bill kinds, margin modes and position-level changes around each interior break, the relative residual bucket and the residual signature (25fe230c3, eea9314df, 710e449f9).
+- A close that fails only against the pre-walk cash is counted separately (`chain_close_matches_after`), beside the currencies whose cash moved during the walk, by re-reading the balance after the walk (25fe230c3).
+- Plan 02 separates the remaining candidate causes in one operator run: ordering and ties, the order-independent trail, break ages, the balance's own clock, a second walk (transient or structural, `chain_repeat_reason`), in-window bills below the walk's stop point, the 7-day `/account/bills` overlap and a bill-type and instType presence sweep for hidden kinds, all under the 120-call ceiling (8ad4a7c62, a41cb7457, 58e210076).
+- New modules: `services/okx_bills_chain.py` (pure analysis plus a GET-only counted venue wrapper, `BudgetedExchange`) and `scripts/okx_chain_record.py` (owns every printing decision, closed-grammar tokens, six-digit count caps). `tests/_okx_bills.py` gains additive, default-off venue-reply fakes (25fe230c3, 8ad4a7c62).
+
+### Changed
+- The oracle (`services/okx_opening_balance.py`) and the probe change by added lines only. The forced path is unchanged: the member still refuses `anchor_skipped_implausible` and the oracle's own token is still printed. Nothing is written to any table; the diagnostic is read-only and GET-only.
+- A spent call budget in any group, the close group included, is now `chain_ceiling_hit` True with the group's keys at their defaults and no failed step. Plan 01 recorded a spent budget in the close group as failed step `close`; plan 02's rule (a ceiling is the diagnostic stopping itself, not a venue failure) replaces it (58e210076).
+- The residual signature `reorder` replaces the researched `swapped_pair` (eea9314df).
+
+### Fixed
+- Review round 1 (silent-failure and code review):
+  - A sweep that probed no bill type is not complete (CR-01 SFH-179-03, 5efd0e29e).
+  - A refused sweep filter or 7-day page keeps the probes already measured (SFH-179-02, f8fcec244).
+  - A bill above the walk's largest id is classified by the walk's start, not by `billId` (WR-01, 41befd1c0), and archive lag is measured only over bills stamped before the walk began (WR-02, 2abfce9d0).
+  - A cut or empty 7-day or below-stop read prints field-absent, not 0 (SFH-179-04, 698f8c0a2).
+  - A malformed venue row is its own failure class and no longer stops the later groups (SFH-179-01, 15b0292a7).
+  - A re-fold that holds beside a `chain_break` refusal is recorded as diverged, not as a clean chain (SFH-179-05, fe4fdbadd).
+  - The chain diagnostic has its own deadline and cannot raise, so a hang or defect keeps the first reading (SFH-179-06, bea63c13c).
+  - A failed chain step logs its exception class and step, never the message (SFH-179-07, c284a48c5).
+- Review round 2:
+  - The probe hands `measure_chain` the walk's real start, stamped just before the oracle's read (WR-01 WR-02, 6cdd9dfcc).
+  - `chain_ceiling_hit` stays field-absent after any group failure (CR-01 SFH-R2-02, c0ef32f51).
+  - The failure that stops the chain run is the one the record names (WR-01 SFH-R2-03, 6a0b2875f).
+  - A malformed sweep filter or 7-day page keeps what was measured and marks the group incomplete (WR-02 SFH-R2-05, 026642ca7).
+  - The record counts refused sweep filters and 7-day pages (`chain_recent_refused`, `chain_sweep_refused`) (WR-03 SFH-R2-04, 935d16d31).
+  - The chain deadline is clamped to what remains of the probe's outer bound (WR-04 SFH-R2-06, 6f0b0efdd).
+- Review round 3:
+  - A full unfiltered sweep page that stops above the walk leaves the sweep incomplete (WR-01, 58921c425).
+  - The sweep does not count an above-walk bill the archive now serves unfiltered as a hidden kind (WR-05, e21d92111).
+  - A venue fault no longer overwrites a diverged re-fold's analysis failure (WR-02, 92219bfd2).
+
+### Tests
+- `tests/test_okx_bills_chain.py` (1450 lines) and `tests/test_okx_chain_record.py` (1146 lines) pin the diagnostic GET-only, bounded, redacted and failure-tolerant (710e449f9, 8ad4a7c62, a41cb7457, 58e210076); `tests/test_allocator_history_probe.py` proves the arm and currency end to end through `hp.run()`, with the refusal standing (25fe230c3).
+- Full `analytics-service` suite at the merge with main: 13746 passed, 102 skipped. `mypy --strict` clean over 130 source files.
+
+### Notes
+- Planning records for the phase: smart-discuss context (17698a4de), research (1fb78975f), pattern map (a572c9c5b), plans and their check revision (31a139f73, f4bb9a43d, 727f7863d), validation strategy (d8571d43a), plan summaries and wave tracking (f7d5923d6, cd2c7163f, 09b34b8a7, 7d24fc2eb), the three review rounds (7f872ccac, a6e149c3f, 448bfd26f) and the D-04 and D-05 decisions (9794a43d2).
+- D-05 (founder-scoped, 179-CONTEXT.md): "173's post-deploy probe already ran on 2026-10-28 (173 plan 03), so 179's measurement run is its own run; it still needs the founder's approval when due."
+- Known limit: this ship only adds the measurement. Plan 03 (the post-deploy read-only probe run on a4, founder-approved) is still to run, and which fix lands is chosen from its reading at a founder checkpoint (D-03), not here. SC-1 is delivered by this ship; the break itself is not yet fixed and a4 still refuses `chain_break` until then.
+- No migration, no SQL test, no CI workflow change: the SQL mutation census is unaffected.
+
 ## [0.133.8.1] - 2026-10-28 — BASELINE: automated re-dump after the PROD apply of d9b69ca7
 
 ### Changed

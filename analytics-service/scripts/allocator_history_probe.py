@@ -69,6 +69,11 @@ a1..aN by the account's earliest such key:
      symbols, and whether the oracle ``measured`` an opening or was ``unavailable`` (with
      its closed reason). Whether the measured opening AGREES with the implied one is NOT
      decided here: the tolerance is chosen from this reading, afterwards.
+  6. when that oracle refuses with chain_break, names why (which arm broke, over how many
+     currencies, on which currency class and which bill kinds), read-only, through
+     scripts/okx_chain_record.py. Its venue calls are GETs only, made through
+     services.okx_bills_chain.BudgetedExchange under CHAIN_CALL_CEILING, and it prints the
+     chain_* keys that module declares. The refusal and every key above are unchanged.
 
 REDACTION CONTRACT (the output is pasted into a tracked file in a public repo): labels,
 counts, booleans, closed-vocabulary tokens and 3-significant-figure ratios, and no
@@ -154,6 +159,7 @@ from services import equity_reconstruction as er
 from services import okx_opening_balance as obal
 from services.allocator_equity_derive import working_holder_predicate
 from services.closed_sets import STABLECOINS
+from scripts import okx_chain_record
 
 # The failure classes this probe may print: the shared allow-list plus "truncated", a trade read
 # cut short (er.TruncatedTradeRead), told apart from a venue rejection and from the two-year guard.
@@ -325,6 +331,7 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "negative_stable_cash",
     "breakdown_truncated",
     "opening_day_is_window_start",
+    *okx_chain_record.CHAIN_KEYS,
 )
 SUMMARY_RECORD_KEYS: tuple[str, ...] = (
     "record",
@@ -459,6 +466,7 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "negative_stable_cash": _is_bool_or_absent,
     "breakdown_truncated": _is_bool_or_absent,
     "opening_day_is_window_start": _is_bool_or_absent,
+    **okx_chain_record.CHAIN_VALIDATORS,
 }
 
 _SUMMARY_VALIDATORS: dict[str, Callable[[Any], bool]] = {
@@ -1234,6 +1242,7 @@ async def _measure_anchor(
     opening day. One raw balance row gives the anchor ``A`` (``totalEq``), which stays in
     memory: only ratios against it are returned. The bills oracle then reads the account's
     balance at the opening day's start. Agreement is NOT decided here."""
+    started = asyncio.get_running_loop().time()  # Phase 179: the chain tail's share of the outer bound
     fresh = _TradeRecorder(client)
     rows, _terminus, telemetry = await er._fetch_and_price_window(
         client, "okx", supabase, window_start, end_date
@@ -1274,6 +1283,7 @@ async def _measure_anchor(
         if row is None:
             out["opening_check"], out["opening_unavailable_reason"] = "unavailable", "malformed_balance"
         else:
+            walk_started_ms = int(time.time() * 1000)  # Phase 179: the walk's real start, for the archive-lag split
             try:
                 reading = await obal.read_okx_opening(client, supabase, opening_day, row)
             except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
@@ -1296,6 +1306,17 @@ async def _measure_anchor(
                 out["bills_read"] = reading.bills_read
                 out["blank_inst_type_bills"] = reading.blank_inst_type_bills
                 out["bills_transfer_net_over_anchor"] = ratio_or_absent(reading.stable_transfer_net_usd, anchor)
+            # Phase 179: name the arm, currency and kind of a chain_break (read-only, GETs only).
+            if reading.unavailable_reason == "chain_break":
+                # The chain's deadline never outlasts what is left of the outer bound (less a margin
+                # to return), or the outer bound would cancel the whole first reading.
+                left_s = er._RECONSTRUCT_CRAWL_TIMEOUT_S - (asyncio.get_running_loop().time() - started) - 30.0
+                out = {
+                    **out,
+                    **await okx_chain_record.measure_chain(
+                        client, reading, row, opening_day, walk_started_ms, budget_s=max(0.0, left_s)
+                    ),
+                }
     return out
 
 
@@ -1540,6 +1561,7 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "negative_stable_cash": FIELD_ABSENT,
         "breakdown_truncated": FIELD_ABSENT,
         "opening_day_is_window_start": FIELD_ABSENT,
+        **okx_chain_record.chain_defaults(),
     }
     return {**record, **values}
 

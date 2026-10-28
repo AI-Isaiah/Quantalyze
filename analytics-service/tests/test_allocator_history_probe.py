@@ -3126,3 +3126,313 @@ def test_the_anchor_diagnostic_functions_take_the_read_only_wrapper() -> None:
     # The oracle is reached through its module attribute, and every call it makes is a GET.
     assert "obal.read_okx_balance_row(" in _PROBE_SRC and "obal.read_okx_opening(" in _PROBE_SRC
     assert "private_get_account_bills_archive" not in _PROBE_SRC  # the oracle owns that call
+
+
+# ---------------------------------------------------------------------------
+# Phase 179 OKXBILLSCHAIN: a chain_break names its arm, currency and kind.
+#
+# APPENDED at the very end of the file, and nothing above is edited: Phase 173 REBUILDGATES
+# edits the fakes above (``_OkxAnchorVenue``, ``_refusing_reader``, ``_anchoring_reader``) in
+# parallel, so a subclass and a builder placed after them merge without a conflict.
+# ---------------------------------------------------------------------------
+
+
+from typing import NamedTuple  # noqa: E402 - grouped with the section that uses them
+
+from scripts import okx_chain_record  # noqa: E402
+from tests._okx_bills import okx_subtypes_payload  # noqa: E402
+
+
+class _ChainVenue(_OkxAnchorVenue):
+    """An anchor venue whose i-th balance read answers the i-th payload (the last repeats).
+
+    The diagnostic reads the balance once before the bills walk and once after it; the two
+    reads differ here, which is what tells a cash balance that MOVED during the walk apart from
+    a close that is structurally broken."""
+
+    def __init__(
+        self,
+        pages: list[list[dict[str, Any]]],
+        *,
+        balances: list[Any],
+        bills: OkxBillsArchive,
+        healed: OkxBillsArchive | None = None,
+        recent: OkxBillsArchive | None = None,
+        subtypes: Any = None,
+    ) -> None:
+        super().__init__(pages, balance=balances[0], bills=bills)
+        self.balances = balances
+        self.healed = healed
+        self.recent = recent
+        self.subtypes = subtypes
+
+    async def private_get_account_balance(self) -> Any:
+        payload = self.balances[min(self.balance_calls, len(self.balances) - 1)]
+        self.balance_calls += 1
+        return payload
+
+    async def private_get_account_bills_archive(self, params: dict[str, str]) -> Any:
+        # The second walk reads a FRESH balance row first (the third balance read), so an archive
+        # that has healed by then answers it: a break that was transient reads "none" on repeat.
+        if self.healed is not None and self.balance_calls >= 3:
+            return await self.healed(params)
+        return await self.bills(params)
+
+    async def private_get_account_bills(self, params: dict[str, str]) -> Any:
+        """The 7-day ``/account/bills`` store."""
+        assert self.recent is not None
+        return await self.recent(params)
+
+    async def private_get_account_subtypes(self, params: dict[str, str]) -> Any:
+        return self.subtypes
+
+
+class _ChainWorld(NamedTuple):
+    archive: OkxBillsArchive
+    healed: OkxBillsArchive
+    balances: list[Any]
+    recent: OkxBillsArchive
+    subtypes: Any
+
+
+def _chain_break_world() -> _ChainWorld:
+    """The a4 shape on the test's own constants: USDT is first in walk order and breaks an
+    INTERIOR link (61234 - 41237 is 19997, not 20000); BTC breaks the CLOSE against the cash
+    balance read before the walk (0.9) and holds against the one read after it (1).
+
+    ``healed`` differs from the archive only in bill 4444444012's change (61234 - 41234 is
+    20000: the chain holds), so a second walk that reads it is a transient break. The pre-walk
+    balance carries each currency's own clock: USDT's is a minute AFTER its newest bill, BTC's a
+    minute BEFORE its newest bill. ``recent`` is the 7-day store: the three walked bills with
+    their original values plus one newer USDT bill (4444444013) the walk never saw."""
+    opening_ms = _ms(_OPENING_DAY)
+    rows = [
+        okx_bill(4444444001, opening_ms - 5 * 86_400_000, "USDT", "61234", "5"),
+        okx_bill(4444444010, opening_ms + 3_600_000, "USDT", "61234", "0"),
+        okx_bill(4444444011, opening_ms + 7_200_000, "BTC", "1", "1"),
+        okx_bill(4444444012, opening_ms + 9_000_000, "USDT", "20000", "-41237"),
+    ]
+    archive = OkxBillsArchive(rows)
+    healed = OkxBillsArchive([*rows[:3], {**rows[3], "balChg": "-41234"}])
+    recent = OkxBillsArchive([*rows[1:], okx_bill(4444444013, opening_ms + 10_800_000, "USDT", "20007", "7")])
+
+    def _payload(btc_cash: str, *, clocks: bool = False) -> Any:
+        usdt_clock = str(opening_ms + 9_000_000 + 60_000) if clocks else None
+        btc_clock = str(opening_ms + 7_200_000 - 60_000) if clocks else None
+        return okx_balance_payload(
+            "70000",
+            [
+                okx_detail("USDT", "20000", eq_usd="20000", u_time=usdt_clock),
+                okx_detail("BTC", btc_cash, eq_usd="50000", u_time=btc_clock),
+            ],
+        )
+
+    return _ChainWorld(
+        archive,
+        healed,
+        [_payload("0.9", clocks=True), _payload("1"), _payload("1")],
+        recent,
+        okx_subtypes_payload({"2": ["1"], "8": ["173"]}),
+    )
+
+
+async def test_a_chain_break_is_named_by_arm_and_currency_and_the_refusal_stands(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Why: the oracle's token ``chain_break`` is one string for two conditions and stops at the
+    # first failing currency (USDT, first in walk order), so only the diagnostic can see that
+    # BTC's CLOSE breaks too. The read after the walk tells a cash balance that moved during
+    # the walk apart from a close that is broken for good. Neither may change the verdict.
+    world = _chain_break_world()
+    venue = _ChainVenue(
+        [[], [], [], []],
+        balances=world.balances,
+        bills=world.archive,
+        healed=world.healed,
+        recent=world.recent,
+        subtypes=world.subtypes,
+    )
+    services = _Services(_okx_only_book(), [venue], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+    # The probe stamps the wall clock just before the oracle's walk and hands it to measure_chain
+    # (fix round 1, WR-01/WR-02). Pin that clock between the newest walked bill (+9_000_000 ms) and
+    # bill 4444444013 (+10_800_000 ms): the latter is the one "stamped after the walk began". If the
+    # probe stopped passing the stamp, measure_chain would fall back to the real clock, long after
+    # every bill here, and the 7-day keys below would change.
+    monkeypatch.setattr(hp, "time", SimpleNamespace(time=lambda: (_ms(_OPENING_DAY) + 10_000_000) / 1000))
+
+    assert await hp.run() == 1  # the member stays refused
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+
+    # The refusal, the oracle's own token and the forced pass's counters are unchanged.
+    assert account["member_refusal"] == "anchor_skipped_implausible"
+    assert account["opening_check"] == "unavailable"
+    assert account["opening_unavailable_reason"] == "chain_break"
+    assert account["bills_read"] == 3
+    assert account["trade_calls"] == 2
+    assert [a.require_anchor for a in services.read_args] == [True, None]
+    assert services.supabase.writes == []
+
+    # EVERY chain key, on values derived by hand from the world's constants. The loop is over the
+    # expected dict, whose key set must equal CHAIN_KEYS: a key added later without an expectation
+    # fails here instead of going unasserted.
+    expected: dict[str, Any] = {
+        # The arm, over EVERY currency, and the worst currency's closed class.
+        "chain_diagnostic": "run",
+        "chain_diagnostic_failure_class": "none",
+        "chain_failed_step": "none",
+        "chain_arm": "both",
+        "chain_ccys_checked": 2,
+        "chain_ccys_interior_broken": 1,
+        "chain_ccys_close_broken": 1,
+        "chain_interior_links": 1,
+        "chain_interior_breaks": 1,
+        "chain_worst_ccy": "USDT",
+        "chain_worst_ccy_is_stable": True,
+        # BTC's close broke against the pre-walk cash and holds against the post-walk cash.
+        "chain_close_cash_moved": 1,
+        "chain_close_matches_after": 1,
+        # close 1 + second walk 2 (a balance read and one archive page) + below-stop 1 + 7-day 1
+        # + subtypes 1 + the sweep's unfiltered page 1 + two type probes + six instType probes. Plan 179-01 asserted 1 here and 2
+        # balance reads; the repeat adds a fresh balance read (three: before the walk, after it,
+        # and the second walk's own).
+        "chain_calls": 15,
+        "chain_break_kinds": "2.x.SPOT:1",
+        "chain_break_prev_kinds": "2.x.SPOT:1",
+        "chain_break_mgn_modes": "blank:1",
+        "chain_break_pos_level": 0,
+        "chain_residual_bucket": "lt_1e-3",  # 3 over 61234
+        "chain_close_residual_bucket": "ge_1e-1",  # 0.1 over 1
+        "chain_sig_bal_unchanged": 0,
+        "chain_sig_double_count": 0,
+        "chain_sig_reorder": 0,
+        "chain_sig_other": 1,
+        # Ordering: no tie, no inversion, nothing to re-sort, nothing missing, one break at age 0.
+        "chain_billid_ts_inversions": 0,
+        "chain_same_ts_links": 0,
+        "chain_same_ts_breaks": 0,
+        "chain_trail_ccys": 2,
+        "chain_closes_by_ts_id": 0,
+        "chain_closes_by_ts_id_desc": 0,
+        "chain_gap_estimate": 0,
+        "chain_first_break_age": "lt_1h",
+        "chain_last_break_age": "lt_1h",
+        "chain_breaks_in_recent_7d": 1,
+        # The balance clock: BTC's newest bill is after its clock, USDT's clock after its bill.
+        "chain_close_bill_after_utime": 1,
+        "chain_close_utime_after_bill": 1,
+        # The second walk heals: transient on repeat, while the first reading stays chain_break.
+        "chain_repeat_reason": "none",
+        "chain_below_stop": 0,
+        "chain_below_stop_ccys": 0,
+        "chain_below_stop_complete": True,
+        "chain_ceiling_hit": False,
+        # The 7-day store: the three walked bills in both, one newer bill after the walk, the
+        # store 30 minutes ahead of the walk.
+        "chain_recent_read": 4,
+        "chain_recent_complete": True,
+        "chain_recent_both": 3,
+        "chain_recent_only_bills": 0,
+        "chain_recent_after_walk": 1,
+        "chain_recent_only_archive": 0,
+        "chain_recent_field_mismatch": 0,
+        "chain_recent_only_bills_kinds": "none",
+        "chain_archive_behind": "none",  # bill 4444444013 was stamped after the walk began: not archive lag (WR-02)
+        # The sweep: two types (2 and 8) and six instTypes, nothing hidden, no full page.
+        "chain_types_probed": 2,
+        "chain_types_hidden": 0,
+        "chain_inst_types_probed": 6,
+        "chain_inst_types_hidden": 0,
+        "chain_hidden_kinds": "none",
+        "chain_sweep_partial": 0,
+        "chain_sweep_complete": True,
+        "chain_recent_refused": 0,
+        "chain_sweep_refused": 0,
+    }
+    assert set(expected) == set(okx_chain_record.CHAIN_KEYS)
+    for key, value in expected.items():
+        assert account[key] == value, key
+        assert type(account[key]) is type(value), key  # True is not 1
+    assert venue.balance_calls == 3
+
+    everything = captured.out + captured.err
+    for leak in ("4444444", "61234", "41237", "19997", "20007", _KEY_OKX, "fake-trade"):
+        assert leak not in everything, leak
+
+
+async def test_a_chain_diagnostic_timeout_keeps_the_first_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Why (SFH-179-06): the chain tail runs inside the probe's one crawl bound. A group that hangs
+    # there must end by the chain's own deadline and be recorded as a Timeout at its step, so the
+    # first reading's keys (the oracle's token, the counters, the ratios) are not discarded with it.
+    world = _chain_break_world()
+    venue = _ChainVenue(
+        [[], [], [], []],
+        balances=world.balances,
+        bills=world.archive,
+        healed=world.healed,
+        recent=world.recent,
+        subtypes=world.subtypes,
+    )
+    services = _Services(_okx_only_book(), [venue], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+
+    async def _hangs(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(okx_chain_record, "CHAIN_TIMEOUT_S", 0.05, raising=False)
+    monkeypatch.setattr(okx_chain_record.chain, "read_below_stop", _hangs)
+
+    assert await hp.run() == 1
+    account, _summary = (json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip())
+
+    assert account["anchor_diagnostic"] == "run"
+    assert account["opening_check"] == "unavailable"
+    assert account["opening_unavailable_reason"] == "chain_break"
+    assert account["bills_read"] == 3
+    assert account["chain_diagnostic_failure_class"] == "Timeout"
+    assert account["chain_failed_step"] == "below_stop"
+    assert account["chain_arm"] == "both"  # the analysis and the close group stay
+    assert account["chain_close_matches_after"] == 1
+
+
+async def test_a_chain_diagnostic_never_outlasts_what_is_left_of_the_outer_bound(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Why (review WR-04, SFH-R2-06): the chain's own 300 s deadline starts late in the probe's one
+    # crawl bound. When the crawl and the walk have used most of that bound, a group that hangs would
+    # be cancelled by the OUTER bound, which discards the whole first reading. The chain's deadline
+    # must be what is left of the outer one, so the hang ends as a recorded Timeout and the first
+    # reading (the oracle's token, the counters, the ratios) survives.
+    world = _chain_break_world()
+    venue = _ChainVenue(
+        [[], [], [], []],
+        balances=world.balances,
+        bills=world.archive,
+        healed=world.healed,
+        recent=world.recent,
+        subtypes=world.subtypes,
+    )
+    services = _Services(_okx_only_book(), [venue], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+
+    async def _hangs(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(5)
+
+    # The outer bound is already inside the chain's margin, and the chain's own deadline stays 300 s.
+    monkeypatch.setattr(hp.er, "_RECONSTRUCT_CRAWL_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(okx_chain_record.chain, "read_below_stop", _hangs)
+
+    assert await hp.run() == 1
+    account, _summary = (json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip())
+
+    assert account["anchor_diagnostic"] == "run"  # not "failed": the outer bound did not cancel the reading
+    assert account["opening_unavailable_reason"] == "chain_break"
+    assert account["bills_read"] == 3
+    assert account["chain_diagnostic_failure_class"] == "Timeout"
+    assert account["chain_failed_step"] == "close"  # no budget was left, so the first group already timed out
