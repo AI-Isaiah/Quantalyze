@@ -22,8 +22,11 @@ What it reads
   prove that bill is the first one since the opening and that none is missing: the walk ends
   only when the archive serves a bill from BEFORE the opening instant (an empty page is not
   an end); each currency's chain (``bal`` equals the previous ``bal`` plus ``balChg``, in
-  ``billId`` order) holds; and its newest bill's ``bal`` equals today's ``cashBal``. The
-  last two do not depend on the order the archive replies in.
+  ``billId`` order, EXACTLY) holds; and its newest bill's ``bal`` agrees with today's
+  ``cashBal`` exactly or within 1e-12 of the larger of the two (Phase 179 D-07: the two
+  endpoints can print one balance at different decimal places, a gap that small is
+  rounding and nothing larger is forgiven). The last two do not
+  depend on the order the archive replies in.
 
 It is GET-only and writes nothing: no database write, no price-cache write, no order, no
 withdrawal, no transfer. NOTHING IN PRODUCTION CALLS IT in plan 01; plan 02 measures it on
@@ -55,7 +58,8 @@ hedge-mode netting) sit in ``anchor - replay_final``, not here.
 Failure semantics
 -----------------
 Only STRUCTURAL gaps are "unavailable": a malformed balance row or bills page, a broken
-per-currency chain or one that does not end at today's cash balance (``chain_break``), a walk
+per-currency chain or one that does not end at today's cash balance, exactly or within 1e-12
+of the larger balance (``chain_break``, Phase 179 D-07), a walk
 that did not reach a bill from before the opening instant or read no bill since it
 (``reach_unproven``: the opening day is the replay's first row, so the account was active on
 or after it), a currency that no price source has a price for, or a walk past the page ceiling. Each returns ``opening_usd`` None
@@ -125,6 +129,13 @@ BILLS_ARCHIVE_PAGE_CEILING: Final[int] = 500
 #: account is the only basis and a second OKX account is unmeasured.
 OPENING_TOLERANCE_USD: Final[float] = 1.0
 OPENING_TOLERANCE_REL: Final[float] = 0.05
+
+#: The relative bound of the close arm in ``close_agrees`` (Phase 179 D-07, founder 2026-10-28,
+#: "Trillionth bound only"; it supersedes the decimal-places half of D-06): the newest bill's
+#: ``bal`` and today's ``cashBal`` agree when they are equal or differ by no more than this
+#: fraction of the larger of the two. Like the opening
+#: tolerance above it is a decided value: a change is a founder decision recorded first.
+CLOSE_RESIDUAL_REL_BOUND: Final[Decimal] = Decimal("1e-12")
 
 _BILLS_METHOD: Final[str] = "private_get_account_bills_archive"
 _BILL_TYPE_TRANSFER: Final[str] = "1"
@@ -288,16 +299,29 @@ async def walk_okx_bills_archive(exchange: Any, opening_ms: int) -> list[dict[st
     raise OpeningUnavailable("page_ceiling")
 
 
+def close_agrees(newest_bal: Decimal, cash: Decimal) -> bool:
+    """True when a currency's newest bill ``bal`` and today's cash balance agree (D-07).
+
+    Either they are equal, or they differ by at most ``CLOSE_RESIDUAL_REL_BOUND`` of the larger
+    of the two (inclusive, by multiplication). No decimal-places allowance: a gap that is large
+    against the balance (0.5 against 0.54) is never forgiven. This only decides whether the
+    chain is proven; it never enters an opening's value.
+    """
+    residual = abs(newest_bal - cash)
+    return residual == 0 or residual <= CLOSE_RESIDUAL_REL_BOUND * max(abs(newest_bal), abs(cash))
+
+
 def per_ccy_opening(
     bills: Sequence[Mapping[str, str]], cash_by_ccy: Mapping[str, Decimal]
 ) -> dict[str, Decimal]:
     """Each currency's balance at the opening instant.
 
     A currency with bills opens at its oldest bill's ``bal - balChg``, after the chain check
-    proves no bill is missing and its newest bill's ``bal`` equals today's cash balance (a
-    currency absent from ``cash_by_ccy`` holds 0); a currency in ``cash_by_ccy`` with no bill
-    keeps its cash balance (every balance change creates a bill, so it held that balance
-    unchanged).
+    proves no bill is missing: every interior link holds exactly, and the newest bill's ``bal``
+    agrees with today's cash balance exactly or within 1e-12 of the larger of the two
+    (``close_agrees``, Phase 179 D-07; a currency absent from ``cash_by_ccy`` holds 0). A
+    currency in ``cash_by_ccy`` with no bill keeps its cash balance (every balance change
+    creates a bill, so it held that balance unchanged).
     """
     by_ccy: dict[str, list[Mapping[str, str]]] = {}
     for bill in bills:
@@ -314,7 +338,7 @@ def per_ccy_opening(
             if bal != prev_bal + bal_chg:
                 raise OpeningUnavailable("chain_break")
             prev_bal = bal
-        if prev_bal != cash_by_ccy.get(ccy, Decimal(0)):
+        if not close_agrees(prev_bal, cash_by_ccy.get(ccy, Decimal(0))):
             raise OpeningUnavailable("chain_break")
     return openings
 

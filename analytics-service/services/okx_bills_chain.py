@@ -5,8 +5,9 @@ Why this exists
 ``services.okx_opening_balance`` refuses an account with the token ``chain_break`` when a
 currency's running balance does not close, and that one string stands for TWO conditions: an
 interior link (a bill's ``bal`` differs from the previous ``bal`` plus its ``balChg``) or the
-close (the newest bill's ``bal`` differs from today's ``cashBal``). It also stops at the first
-currency that fails, in dict order, so it cannot say how many currencies break or which one
+close (the newest bill's ``bal`` does not agree with today's ``cashBal`` under the oracle's
+``close_agrees``: equal, or within 1e-12 of the larger balance, Phase 179 D-07). It also stops
+at the first currency that fails, in dict order, so it cannot say how many currencies break or which one
 matters. This module re-folds the bills the oracle ALREADY walked and names the arm over EVERY
 currency. It never edits the oracle's verdict (the forced rebuild still fails closed on
 ``chain_break``) and it holds nothing the oracle reads.
@@ -88,7 +89,8 @@ class ChainReport:
     #: Each currency's newest bill's ``bal`` and ``ts`` (newest by ``billId``, the oracle's key).
     newest_bal: Mapping[str, Decimal]
     newest_ts: Mapping[str, int]
-    #: The currencies whose newest ``bal`` differs from today's cash balance.
+    #: The currencies whose newest ``bal`` does not agree with today's cash balance under the
+    #: oracle's ``close_agrees``.
     close_broken: frozenset[str]
     #: Over every interior break: the raw (type, subType, instType) of the breaking bill and of
     #: the bill before it, and the breaking bill's raw mgnMode, each with a count.
@@ -222,9 +224,10 @@ def analyse_chain(
 ) -> ChainReport:
     """Re-fold the walked bills per currency with the oracle's own arithmetic.
 
-    Exact ``Decimal`` equality, ``billId`` order and a currency absent from the cash map
-    reading 0, as ``per_ccy_opening`` does, but counting over EVERY currency instead of
-    stopping at the first failure. The walked values are strings ``_parse_bill`` already
+    Exact ``Decimal`` equality on the interior links, the oracle's own ``close_agrees`` on the
+    close, ``billId`` order and a currency absent from the cash map reading 0, as
+    ``per_ccy_opening`` does, but counting over EVERY currency instead of stopping at the first
+    failure. The walked values are strings ``_parse_bill`` already
     validated, so ``Decimal(text)`` is safe on them.
     """
     by_ccy: dict[str, list[Mapping[str, str]]] = {}
@@ -288,7 +291,7 @@ def analyse_chain(
         newest_bal[ccy] = prev_bal
         newest_ts[ccy] = int(ordered[-1]["ts"])
         cash = cash_by_ccy.get(ccy, Decimal(0))
-        if prev_bal != cash:
+        if not obal.close_agrees(prev_bal, cash):
             close_broken.add(ccy)
             close_residuals.append(abs(prev_bal - cash) / max(abs(prev_bal), abs(cash)))
 
@@ -338,7 +341,8 @@ class CloseRace:
 
     #: Currencies whose cash balance differs between the read before and the read after the walk.
     cash_moved: int
-    #: Close-broken currencies whose newest ``bal`` equals the cash balance read AFTER the walk.
+    #: Close-broken currencies whose newest ``bal`` agrees (``close_agrees``) with the cash
+    #: balance read AFTER the walk.
     matches_after: int
 
 
@@ -365,7 +369,9 @@ def close_race(
         1 for ccy in report.newest_bal if cash_before.get(ccy, zero) != cash_after.get(ccy, zero)
     )
     matches = sum(
-        1 for ccy in report.close_broken if report.newest_bal[ccy] == cash_after.get(ccy, zero)
+        1
+        for ccy in report.close_broken
+        if obal.close_agrees(report.newest_bal[ccy], cash_after.get(ccy, zero))
     )
     return CloseRace(cash_moved=moved, matches_after=matches)
 

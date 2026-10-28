@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.9.1] - 2026-10-28 — OKXBILLSCHAIN: the bills oracle's close passes at OKX precision, within 1e-12 of the larger balance, so a stable account stops refusing `chain_break` over rounding
+
+### Why
+- The first ship (0.133.9.0) made a refused OKX `chain_break` name its arm. The reading on the account that motivated the phase (e51e3a7e4) was: arm `close`, `chain_close_residual_bucket=lt_1e-12`, `chain_close_cash_moved=0`, `chain_close_matches_after=0`, `chain_interior_breaks=0` over 1489 interior links, worst currency stable. Every interior link held exactly; the newest bill's `bal` and today's `cashBal` printed the same balance at different decimal places. That is rounding, not missing money, and exact `Decimal` equality on the close refused it.
+- Founder decision D-06 (2026-10-28, AskUserQuestion): "Compare at OKX precision (Recommended)". It departs from plan 179-03 Task 2's literal precedence, which would have yielded `second-run`, because a second run would not change a stable currency's rounding.
+- Founder decision D-07 (2026-10-28, on review finding SFH-179-04-01): "Trillionth bound only (Recommended)". The close arm passes only when the newest bill's `bal` equals today's `cashBal` or differs by at most 1e-12 of the larger of the two; anything larger refuses `chain_break`. It supersedes the decimal-places half of D-06. The rest of D-06 stands: the interior arm stays exact, no new reason token, `OPENING_TOLERANCE_REL` stays 0.05 until SC-3.
+
+### Fixed
+- The oracle's close arm (`close_agrees` in `services/okx_opening_balance.py`, `CLOSE_RESIDUAL_REL_BOUND = 1e-12`) replaces exact equality in `per_ccy_opening` (ce4139f28 introduced the close check at OKX precision as D-06; d546be063 narrowed it to the trillionth bound as D-07). Review finding SFH-179-04-01: the D-06 decimal-places rule forgave 0.5 against 0.54 on a bill that printed one place. That rule is deleted, so a visible gap can no longer anchor a forced rebuild that replaces stored history.
+- The chain diagnostic classifies the close with the oracle's own `close_agrees` (`analyse_chain` and `close_race` in `services/okx_bills_chain.py`, f4750c74d, D-06 and D-03), so a reading names the arm the oracle actually fired.
+
+### Tests
+- New `tests/test_okx_close_precision.py` (82400fa0e, d546be063): the oracle and the forced rebuild pass on the reading's shape (RED on exact equality); the close bound at its edges, inclusive at 1e-12 and refusing one step beyond; the interior arm still exact however small the residual; the one-place 0.5 against 0.54 case refuses and the diagnostic names the close arm; the diagnostic and the oracle agree on every close world; the bound, `OPENING_TOLERANCE_REL` and the reason-token set pinned as the decided values. Every expected opening is the test's own constant, never the cash balance.
+- No existing test file changed.
+
+### Notes
+- Planning and records: the 179-04 plan and the SC-3 re-read plan (571847fa1), the plan summary (9ec2ceb9a), the code review and silent-failure hunt of the close fix (c9421d7d1), verification and security audit (b285f8b70), the D-07 decision record (ac83de404), the round-2 review of the D-07 fix (35d38de51), the re-verification (14d71e24a). The a4 reading and D-06 record is e51e3a7e4. These touch only `.planning`, which this ship excludes.
+- The earlier 179 commits on the branch were shipped in 0.133.9.0 (#1147) as one squash.
+- No migration, no schema change, no write to any table; the diagnostic stays read-only and GET-only.
+- Known limit: plan 179-05 is still to run: a founder-approved post-deploy re-read of a4, then the tolerance decision. `OPENING_TOLERANCE_REL` stays 0.05.
+- Known limit: a4 may still be refused `anchor_skipped_implausible` after this fix (a separate TODOS entry); the close fix removes the `chain_break` refusal, not that one.
+
 ## [0.133.9.0] - 2026-10-28 — OKXBILLSCHAIN: a refused OKX `chain_break` now explains itself, so the break can be fixed from a reading instead of a guess
 
 ### Added
