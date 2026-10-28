@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.4.1] - 2026-10-28 — book three follow-up phases (176-178)
+
+### Notes
+- Books three follow-up phases from MARKSOURCE 167.2.1.1.1.1 with `/gsd-phase` add (founder 2026-10-27, "You can use add"), each with goal and success criteria in ROADMAP:
+  - 176 LEGACYRETIRE: the legacy allocator equity curve (the holdings poll and daily refresh series) is retired and every reader moves to the marked series (MARKSOURCE CONTEXT D-01; founder "Retire legacy curve"). It closes the two legacy-exclusion TODOS entries MARKSOURCE plan 07 adds.
+  - 177 DERIBITFLOWS: Deribit flow instants are valued at the mark day's close, as MARKSOURCE plan 03 did for MT5 BTC; a read-only PROD count comes first (founder "Deribit moved-flow pricing").
+  - 178 OKXREWRITE: the stored OKX snapshot rows that counted open profit twice (MARKSOURCE census: 248 suspect days over 3 accounts, 164 inside the 90-day window) are rebuilt through the forced-rebuild path once Phase 173 reads 0 OKX ordering violations; older rows and `allocator_holdings` history are kept (MARKSOURCE CONTEXT D-09; founder "Measure gate first, then rewrite").
+- STATE's Roadmap Evolution lists the three additions; Current Position is unchanged. No code change.
+
 ## [0.133.4.0] - 2026-10-27 — OKXANCHOR: a forced OKX history rebuild asks the bills archive before refusing a large opening
 
 ### Root cause
