@@ -62,43 +62,53 @@ def test_c01_02_no_false_positives_when_ticker_succeeds():
     assert len(partial) == 0
 
 
-def test_c01_03_implausible_offset_skips_anchor(monkeypatch):
-    """NEW-C01-03: when offset exceeds 5× last_value the anchor is skipped
-    (implausible anchor guard) and the curve rows are not mutated.
+async def test_c01_03_implausible_offset_skips_anchor(monkeypatch):
+    """NEW-C01-03: when the anchor offset exceeds 5x the replay's last value the anchor is
+    skipped (implausible anchor guard) and the curve rows are not mutated.
+
+    This used to replace ``_fetch_and_price_window`` (the function under test) with a fake
+    and assert a local copy of the gate formula, so no production line ran and it stayed
+    green whatever the gate did. It now drives the REAL window call with an OKX-shaped
+    exchange. The replay is one BTC buy of 1.0 at 40000 marked at the fixture's 50000 close,
+    so it ends at 10000; the venue reports ``totalEq`` 70000, a ratio of 7 and over the gate's
+    6. The unforced path then ships the replay unanchored with the flag set, and it must read
+    no bills: the bills-based opening check belongs to the forced path only.
     """
-    from services.equity_reconstruction import _fetch_and_price_window
+    from datetime import timedelta
 
-    # Fabricate a one-row curve with last value $1000
-    fake_rows = [{"asof": "2026-01-01", "value_usd": 1000.0, "breakdown": {}}]
+    from services import equity_reconstruction as er
+    from tests._okx_bills import OkxBillsArchive, okx_balance_payload, okx_detail
+    from tests.test_equity_reconstruction import _make_trade
+    from tests.test_reconstruct_force_rebuild import (
+        _bybit_exchange,
+        _first_call_trades,
+        _freeze_now_at,
+        _trade_ts,
+    )
+    from tests.test_reconstruct_marker_writer import END_DATE, _MarkerFake
 
-    async def fake_fetch_and_price(exchange, venue, start_ms, now_ms,
-                                    supabase=None, strategy_id=None):
-        return fake_rows.copy(), False, {}
+    exchange = await _bybit_exchange()
+    exchange.id = "okx"
+    exchange.fetch_my_trades = _first_call_trades(
+        [_make_trade(_trade_ts(), "BTC/USDT", "buy", 40000.0, 1.0)]
+    )
+    exchange.private_get_account_balance = AsyncMock(
+        return_value=okx_balance_payload("70000", [okx_detail("USDT", "70000")])
+    )
+    archive = OkxBillsArchive([])
+    exchange.private_get_account_bills_archive = archive
+    # 06:00 UTC so the 89-day window is inside OKX's 90-day reach at any time of day.
+    _freeze_now_at(monkeypatch, END_DATE + timedelta(hours=6))
+    end = END_DATE.date()
 
-    monkeypatch.setattr(
-        "services.equity_reconstruction._fetch_and_price_window",
-        fake_fetch_and_price,
+    rows, _hit_terminus, telemetry = await er._fetch_and_price_window(
+        exchange, "okx", _MarkerFake(), end - timedelta(days=89), end
     )
 
-    # Anchor returns $50000 (50× last value → implausible)
-    async def fake_anchor(exchange, venue):
-        return 50000.0, set()  # empty partial set so we reach the offset check
-
-    monkeypatch.setattr(
-        "services.equity_reconstruction._fetch_current_equity",
-        fake_anchor,
-    )
-
-    # The offset check must reject this anchor
-    # We call _fetch_and_price_window + the anchor logic directly by testing
-    # the branch: offset=49000, last_value=1000 → 49000 > 5*1000 → skip
-    last_value = 1000.0
-    anchor = 50000.0
-    offset = anchor - last_value
-    implausible = last_value > 0 and abs(offset) > 5.0 * abs(last_value)
-    assert implausible, (
-        "offset 49000 must be flagged implausible vs last_value 1000"
-    )
+    assert rows[-1]["value_usd"] == 10000.0, "the replay's own end, not an anchored 70000"
+    assert telemetry["anchor_offset_implausible"] is True
+    assert "STARTING_BALANCE" not in rows[-1]["breakdown"]
+    assert archive.calls == []
 
 
 # ---------------------------------------------------------------------------

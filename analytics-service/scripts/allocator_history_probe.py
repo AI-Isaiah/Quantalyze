@@ -34,7 +34,20 @@ a1..aN by the account's earliest such key:
   4. for each OKX member that read a row, makes ONE raw fills-history read on the
      instrument type that returned the most rows, to learn whether OKX answers newest
      first; and counts the OKX passes that ended on a full page without reaching their
-     window start.
+     window start;
+  5. for an OKX member REFUSED ``anchor_skipped_implausible`` (the replay ended far below
+     today's venue equity), or whose anchor passed the 5x gate only through the bills check
+     (``anchor_opening_agreed``; its record then has ``member_refusal`` ``none``), measures
+     why, read-only. The refusal itself is unchanged and
+     the TRADEPAGES counters above describe the forced pass only. The diagnostic makes a
+     second, advisory pass of the rebuild's own read to recover the unanchored replay, reads
+     one raw balance row, and asks the bills oracle (services.okx_opening_balance) what the
+     account held at the start of the replay's first day. It prints ratios against the
+     anchor (never the anchor), the replay's sign, the non-stable and bot-held shares, the
+     uPnL share, flip-from-flat closes, negative quantities, in-window transfers and skipped
+     symbols, and whether the oracle ``measured`` an opening or was ``unavailable`` (with
+     its closed reason). Whether the measured opening AGREES with the implied one is NOT
+     decided here: the tolerance is chosen from this reading, afterwards.
 
 REDACTION CONTRACT (the output is pasted into a tracked file in a public repo): labels,
 counts, booleans, closed-vocabulary tokens and 3-significant-figure ratios, and no
@@ -54,12 +67,17 @@ cache write that runs on a BadSymbol fallback. The probe never calls the account
 whose circuit-breaker arm can write), the 429 stamp (_stamp_429) or any persist path
 (replace_equity_snapshots, replace_equity_snapshots_window, persist_equity_snapshots),
 and it names no venue write endpoint. A static pin in the tests proves it. Keys are
-decrypted inside the worker process and nowhere else; one raw GET per OKX member is the
-only venue call outside the rebuild's own read.
+decrypted inside the worker process and nowhere else. The venue calls outside the
+rebuild's own read are GETs: the fills-history ordering read (one per OKX member that
+read), and, for an OKX member refused on its anchor, one ``GET /api/v5/account/balance``
+plus the bills-archive pages read through ``services.okx_opening_balance``.
 
-USAGE (run once on the worker after the deploy; it takes no arguments, so no identifier
-is ever typed):
-  railway ssh "cd /app && python -m scripts.allocator_history_probe"
+USAGE (run once on the Railway backfill worker; it takes no arguments, so no identifier
+is ever typed). Railway's remote shell is broken (TRADEPAGES plan 06), so run it through a
+temporary start-command change that starts the probe in the background
+(``python -m scripts.allocator_history_probe``), read its lines from the service log, and
+restore the service's start command afterwards. The probe exits 1 whenever a member is
+refused, so nothing around it may depend on an exit code of 0.
 Paste only the lines that start with ``{"`` (one per account, then one summary).
 
 EXIT CODES
@@ -93,7 +111,9 @@ from typing import Any
 from scripts.bybit_upnl_probe import FAILURE_CLASSES, FIELD_ABSENT, classify_failure, sig3
 from scripts.deribit_ground_truth import assert_sanitized
 from services import equity_reconstruction as er
+from services import okx_opening_balance as obal
 from services.allocator_equity_derive import working_holder_predicate
+from services.closed_sets import STABLECOINS
 
 # The failure classes this probe may print: the shared allow-list plus "truncated", a trade read
 # cut short (er.TruncatedTradeRead), told apart from a venue rejection and from the two-year guard.
@@ -122,6 +142,15 @@ _DATE_RE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}$")
 
 _SELECTION_TOKENS: tuple[str, ...] = ("ok", *sorted(er.FORCED_REBUILD_REFUSAL_REASONS))
 _REFUSAL_TOKENS: tuple[str, ...] = ("none", *sorted(er.FORCED_REBUILD_REFUSAL_REASONS))
+# Why the bills oracle could not supply an opening balance: its own closed set, or "none".
+_OPENING_REASON_TOKENS: tuple[str, ...] = ("none", *sorted(obal.OPENING_UNAVAILABLE_REASONS))
+# The reasons the oracle raises before or inside its bills walk, so its walk counters were never
+# set. A completed walk that then fails (chain_break, unpriced_ccy) keeps its real counters.
+# reach_unproven is also raised after a completed walk that served no bill since the opening;
+# that case is reported absent too, the token carrying what the counters would have said.
+_WALK_NOT_COMPLETED_REASONS: frozenset[str] = frozenset(
+    {"malformed_balance", "malformed_bills", "page_ceiling", "reach_unproven"}
+)
 
 ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "record",
@@ -151,6 +180,32 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "max_rel_diff",
     "days_incomplete",
     "transfers_older_365d",
+    "anchor_diagnostic",
+    "diagnostic_failure_class",
+    "diagnostic_members",
+    "advisory_arm",
+    "replay_final_sign",
+    "anchor_over_replay",
+    "opening_check",
+    "opening_unavailable_reason",
+    "implied_opening_over_anchor",
+    "bills_opening_over_anchor",
+    "opening_residual_over_anchor",
+    "non_stable_share",
+    "upl_over_anchor",
+    "bot_equity_share",
+    "bal_over_cashbal",
+    "bills_transfer_net_over_anchor",
+    "flip_from_flat_closes",
+    "hedge_mode_fills",
+    "negative_qty_assets",
+    "flow_events_in_window",
+    "skipped_symbols_count",
+    "bills_read",
+    "blank_inst_type_bills",
+    "negative_stable_cash",
+    "breakdown_truncated",
+    "opening_day_is_window_start",
 )
 SUMMARY_RECORD_KEYS: tuple[str, ...] = (
     "record",
@@ -174,6 +229,10 @@ SUMMARY_RECORD_KEYS: tuple[str, ...] = (
 
 def _is_bool(x: Any) -> bool:
     return isinstance(x, bool)
+
+
+def _is_bool_or_absent(x: Any) -> bool:
+    return _is_bool(x) or (isinstance(x, str) and x == FIELD_ABSENT)
 
 
 def _is_count(x: Any) -> bool:
@@ -230,6 +289,36 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "max_rel_diff": _is_ratio,
     "days_incomplete": _is_count,
     "transfers_older_365d": _is_count,
+    "anchor_diagnostic": _is_one_of(("not-run", "run", "failed")),
+    "diagnostic_failure_class": _is_one_of(_FAILURE_CLASSES),
+    "diagnostic_members": _is_count,
+    "advisory_arm": _is_one_of(("not-run", "implausible", "not-implausible")),
+    "replay_final_sign": _is_one_of(("absent", "positive", "zero", "negative")),
+    "anchor_over_replay": _is_ratio,
+    # The probe reports that the oracle measured an opening or could not; whether the
+    # measurement AGREES with the implied opening is decided later, against a tolerance
+    # chosen from this very reading, so "agree" is deliberately not a token here.
+    "opening_check": _is_one_of(("not-run", "measured", "unavailable")),
+    "opening_unavailable_reason": _is_one_of(_OPENING_REASON_TOKENS),
+    "implied_opening_over_anchor": _is_ratio,
+    "bills_opening_over_anchor": _is_ratio,
+    "opening_residual_over_anchor": _is_ratio,
+    # "Not measured" is `field-absent` for every reading below, never 0 or False.
+    "non_stable_share": _is_ratio,
+    "upl_over_anchor": _is_ratio,
+    "bot_equity_share": _is_ratio,
+    "bal_over_cashbal": _is_ratio,
+    "bills_transfer_net_over_anchor": _is_ratio,
+    "flip_from_flat_closes": _is_count_or_absent,
+    "hedge_mode_fills": _is_count_or_absent,
+    "negative_qty_assets": _is_count_or_absent,
+    "flow_events_in_window": _is_count_or_absent,
+    "skipped_symbols_count": _is_count_or_absent,
+    "bills_read": _is_count_or_absent,
+    "blank_inst_type_bills": _is_count_or_absent,
+    "negative_stable_cash": _is_bool_or_absent,
+    "breakdown_truncated": _is_bool_or_absent,
+    "opening_day_is_window_start": _is_bool_or_absent,
 }
 
 _SUMMARY_VALIDATORS: dict[str, Callable[[Any], bool]] = {
@@ -366,11 +455,15 @@ class _TradeRecorder:
 
     def __init__(self, client: Any) -> None:
         self.calls: list[_Call] = []
+        # The fills themselves, in memory only: the anchor diagnostic reads fill-level facts
+        # (sides, realised pnl) that the per-call summary above deliberately drops.
+        self.trades: list[Mapping[str, Any]] = []
         original = client.fetch_my_trades
 
         async def _recorded(*args: Any, **kwargs: Any) -> Any:
             page = await original(*args, **kwargs)
             self.calls.append(_describe_call(args, kwargs, page))
+            self.trades.extend(t for t in (page or []) if isinstance(t, Mapping))
             return page
 
         client.fetch_my_trades = _recorded
@@ -517,6 +610,197 @@ def compare_days(
     return len(common), differing, ratio
 
 
+def _num(raw: Any) -> float | None:
+    """A finite float from a venue number (a str, int or float), else None. A bool, NaN,
+    inf, an empty string and any other type are not numbers here."""
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def ratio_or_absent(numerator: float | None, denominator: float | None) -> float | str:
+    """``numerator / denominator`` to three significant figures, or ``field-absent``.
+
+    Absent when either side is unread, the denominator is 0, or the quotient is not finite
+    (``sig3`` says ``non-finite`` for inf and NaN, which ``_is_ratio`` rejects). Every
+    ratio the anchor diagnostic prints goes through here, so a ratio against a zero
+    anchor can never reach stdout as an unrounded or non-finite figure."""
+    if numerator is None or denominator is None or denominator == 0:
+        return FIELD_ABSENT
+    shown = sig3(numerator / denominator)
+    return shown + 0.0 if isinstance(shown, float) else FIELD_ABSENT  # + 0.0: never "-0.0"
+
+
+def replay_sign(value: float | None) -> str:
+    """The sign of the replay's final value; ``absent`` when it was not recovered."""
+    if value is None:
+        return "absent"
+    if value > 0:
+        return "positive"
+    return "negative" if value < 0 else "zero"
+
+
+def balance_row_readings(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Three ratios against today's equity, read off one raw OKX balance row.
+
+    * ``non_stable_share``: the ``eqUsd`` of every currency outside ``STABLECOINS``, over
+      ``totalEq``. Assumes ``eqUsd`` is the currency's whole equity in USD (RESEARCH A1).
+    * ``upl_over_anchor``: the account-level ``upl`` over ``totalEq``. A simple-mode account
+      carries no account ``upl`` (an empty string), which reads as unknown, not 0.
+    * ``bot_equity_share``: the strategy-bot part of each currency, ``stgyEq / eq`` of its
+      ``eqUsd``, summed over ``totalEq``. A bot's equity leaves the cash balance the bills
+      oracle reads, so this sizes one thing the oracle cannot see (RESEARCH A5).
+
+    Any field a reading needs that is not a finite number makes THAT reading
+    ``field-absent``; none is ever filled with 0. A non-positive ``totalEq`` reads all three
+    as absent."""
+    absent: dict[str, Any] = {
+        name: FIELD_ABSENT for name in ("non_stable_share", "upl_over_anchor", "bot_equity_share")
+    }
+    if row is None:
+        return absent
+    total = _num(row.get("totalEq"))
+    if total is None or total <= 0:
+        return absent
+    out = dict(absent)
+    out["upl_over_anchor"] = ratio_or_absent(_num(row.get("upl")), total)
+    details = row.get("details")
+    if not isinstance(details, list) or not all(isinstance(d, Mapping) for d in details):
+        return out
+    non_stable_usd = 0.0
+    non_stable_read = True
+    for detail in details:
+        ccy = detail.get("ccy")
+        usd = _num(detail.get("eqUsd"))
+        if not isinstance(ccy, str) or (ccy not in STABLECOINS and usd is None):
+            non_stable_read = False
+            break
+        if ccy not in STABLECOINS and usd is not None:
+            non_stable_usd += usd
+    out["non_stable_share"] = ratio_or_absent(non_stable_usd if non_stable_read else None, total)
+    bot_usd = 0.0
+    bot_read = True
+    for detail in details:
+        eq, stgy, usd = _num(detail.get("eq")), _num(detail.get("stgyEq")), _num(detail.get("eqUsd"))
+        if eq is None or stgy is None or usd is None:
+            bot_read = False
+            break
+        if eq != 0:
+            bot_usd += stgy * usd / eq
+    out["bot_equity_share"] = ratio_or_absent(bot_usd if bot_read else None, total)
+    return out
+
+
+def _usdt_cash_balance(row: Mapping[str, Any] | None) -> float | None:
+    """Today's USDT ``cashBal`` from a balance row, else None."""
+    details = row.get("details") if row is not None else None
+    for detail in details if isinstance(details, list) else []:
+        if isinstance(detail, Mapping) and detail.get("ccy") == "USDT":
+            return _num(detail.get("cashBal"))
+    return None
+
+
+def _unique_fills(trades: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The fills once each, in time order. A fill is keyed on (symbol, id), as ``trades_read``
+    does, so an overlapping page cannot count a fill twice; a fill with no id is kept as is."""
+    seen: set[tuple[Any, str]] = set()
+    kept: list[Mapping[str, Any]] = []
+    for trade in trades:
+        if trade.get("id") is not None:
+            key = (trade.get("symbol"), str(trade["id"]))
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(trade)
+    return sorted(kept, key=lambda t: (_as_int(t.get("timestamp")) or 0, str(t.get("id"))))
+
+
+def _info(trade: Mapping[str, Any]) -> Mapping[str, Any]:
+    info = trade.get("info")
+    return info if isinstance(info, Mapping) else {}
+
+
+def flip_from_flat_closes(trades: Sequence[Mapping[str, Any]]) -> int | str:
+    """Fills that realise pnl while the replay's own position in that instrument is flat.
+
+    The replay keeps one signed size per instrument from the fills it reads. A fill that
+    realises a nonzero ``info.fillPnl`` while that size is flat closes a position opened
+    BEFORE the window, which the replay never held: one way its level goes missing. Such a
+    fill is counted and leaves the in-window size flat (it closed something the replay never
+    opened); every other fill moves the size by its signed amount.
+
+    A LOWER BOUND: a pre-window position closed after an in-window fill of the same
+    instrument has already moved the size looks like an ordinary close and is missed, and a
+    hedge-mode account's two legs share one size here. ``field-absent`` when no fill carries
+    a readable ``info.fillPnl`` (OKX's field name is RESEARCH A6), never 0."""
+    fills = _unique_fills(trades)
+    if not any(_num(_info(t).get("fillPnl")) is not None for t in fills):
+        return FIELD_ABSENT
+    sizes: dict[Any, float] = {}
+    count = 0
+    for trade in fills:
+        symbol = trade.get("symbol")
+        size = sizes.get(symbol, 0.0)
+        pnl = _num(_info(trade).get("fillPnl"))
+        if pnl is not None and pnl != 0 and abs(size) <= 1e-12:
+            count += 1
+            continue
+        amount = _num(trade.get("amount"))
+        if amount is None:
+            continue
+        if trade.get("side") == "buy":
+            sizes[symbol] = size + amount
+        elif trade.get("side") == "sell":
+            sizes[symbol] = size - amount
+    return count
+
+
+def hedge_mode_fills(trades: Sequence[Mapping[str, Any]]) -> int | str:
+    """Fills on a hedge-mode leg (``info.posSide`` long or short). ``field-absent`` when no
+    fill carries a ``posSide`` at all, so a venue that does not say is not read as one-way."""
+    sides = [_info(t).get("posSide") for t in _unique_fills(trades)]
+    if not any(isinstance(side, str) and side for side in sides):
+        return FIELD_ABSENT
+    return sum(1 for side in sides if side in ("long", "short"))
+
+
+def breakdown_readings(breakdown: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Facts about the replay's last row, read from its per-asset breakdown.
+
+    ``negative_qty_assets``: assets outside ``STABLECOINS`` with a negative value (a sale the
+    replay holds no purchase for). Perp keys (``...:PERP``) and the protected keys
+    (``STARTING_BALANCE`` and the like) are not assets. ``negative_stable_cash``: any
+    stablecoin negative (an unfunded buy). ``breakdown_truncated``: the breakdown was capped,
+    so the count above is a lower bound. All ``field-absent`` for a missing breakdown."""
+    if not isinstance(breakdown, Mapping):
+        return {
+            "negative_qty_assets": FIELD_ABSENT,
+            "negative_stable_cash": FIELD_ABSENT,
+            "breakdown_truncated": FIELD_ABSENT,
+        }
+    negative_assets = 0
+    negative_stable = False
+    for key, value in breakdown.items():
+        if not isinstance(key, str) or key.endswith(":PERP") or key in er._BREAKDOWN_PROTECTED_KEYS:
+            continue
+        amount = _num(value)
+        if amount is None or amount >= 0:
+            continue
+        if key in STABLECOINS:
+            negative_stable = True
+        else:
+            negative_assets += 1
+    return {
+        "negative_qty_assets": negative_assets,
+        "negative_stable_cash": negative_stable,
+        "breakdown_truncated": breakdown.get("__truncated__") is True,
+    }
+
+
 def _utc_today() -> date:
     return datetime.now(timezone.utc).date()
 
@@ -539,6 +823,7 @@ class _MemberResult:
     calls: list[_Call] = field(default_factory=list)
     transfers: list[tuple[str, Any, int | None]] = field(default_factory=list)
     order: bool | str | None = None  # None: no raw ordering read was made
+    diagnostic: dict[str, Any] | None = None  # the anchor diagnostic's record keys, when run
 
 
 async def _read_member(
@@ -548,9 +833,10 @@ async def _read_member(
     window_start: date,
     end_date: date,
     recorder: _TradeRecorder,
-) -> tuple[list[dict[str, Any]], bool | str | None]:
-    """The rebuild's own read, then (OKX only) one raw ordering read."""
-    rows, _hit_terminus, _telemetry = await er._fetch_and_price_window(
+) -> tuple[list[dict[str, Any]], bool | str | None, bool]:
+    """The rebuild's own read, then (OKX only) one raw ordering read. The third value is
+    whether the anchor passed the 5x gate only through the bills check."""
+    rows, _hit_terminus, telemetry = await er._fetch_and_price_window(
         client, venue, supabase, window_start, end_date, require_anchor=True
     )
     order: bool | str | None = None
@@ -565,7 +851,102 @@ async def _read_member(
             }
         )
         order = okx_newest_first(raw)
-    return rows, order
+    return rows, order, telemetry.get("anchor_opening_agreed") is True
+
+
+async def _measure_anchor(
+    client: Any, supabase: ReadOnlySupabase, window_start: date, end_date: date
+) -> dict[str, Any]:
+    """Measure, read-only, why an OKX member's anchor was refused as implausible.
+
+    A SECOND, advisory pass of the rebuild's own read (no ``require_anchor``) recovers the
+    unanchored replay: its last value is ``replay_final`` and its first row's day is the
+    opening day. One raw balance row gives the anchor ``A`` (``totalEq``), which stays in
+    memory: only ratios against it are returned. The bills oracle then reads the account's
+    balance at the opening day's start. Agreement is NOT decided here."""
+    fresh = _TradeRecorder(client)
+    rows, _terminus, telemetry = await er._fetch_and_price_window(
+        client, "okx", supabase, window_start, end_date
+    )
+    repeated = telemetry.get("anchor_offset_implausible") is True
+    out: dict[str, Any] = {
+        "anchor_diagnostic": "run",
+        "advisory_arm": "implausible" if repeated else "not-implausible",
+    }
+    replay_final: float | None = None
+    opening_day: date | None = None
+    if repeated and rows:
+        replay_final = _num(rows[-1].get("value_usd"))
+        opening_day = date.fromisoformat(str(rows[0]["asof"]))
+    out["replay_final_sign"] = replay_sign(replay_final)
+
+    row = await obal.read_okx_balance_row(client)
+    anchor = _num(row.get("totalEq")) if row is not None else None
+    if anchor is not None and anchor <= 0:
+        anchor = None
+    out["anchor_over_replay"] = ratio_or_absent(anchor, replay_final)
+    out = {**out, **balance_row_readings(row)}
+
+    # What the advisory pass itself read, from its OWN recorder (the forced pass's is
+    # untouched): fill-level facts, the transfers it saw and the symbols it could not price.
+    out["flip_from_flat_closes"] = flip_from_flat_closes(fresh.trades)
+    out["hedge_mode_fills"] = hedge_mode_fills(fresh.trades)
+    out["flow_events_in_window"] = transfers_older_than(
+        fresh.transfers, _day_ms(end_date + timedelta(days=1))
+    )
+    out["skipped_symbols_count"] = len(telemetry.get("skipped_symbols") or [])
+    if rows:
+        out = {**out, **breakdown_readings(rows[-1].get("breakdown"))}
+        out["opening_day_is_window_start"] = str(rows[0].get("asof")) == window_start.isoformat()
+
+    out["opening_check"] = "not-run"
+    if replay_final is not None and opening_day is not None:
+        if row is None:
+            out["opening_check"], out["opening_unavailable_reason"] = "unavailable", "malformed_balance"
+        else:
+            try:
+                reading = await obal.read_okx_opening(client, supabase, opening_day, row)
+            except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
+                # Review SFH-04: the walk is the last read, so its failure (a 429 that outlives
+                # the backoff) must not discard the ratios already in ``out``.
+                out["opening_check"] = "unavailable"
+                out["diagnostic_failure_class"] = classify_failure(exc)
+                return out
+            out["opening_check"] = "measured" if reading.opening_usd is not None else "unavailable"
+            out["opening_unavailable_reason"] = reading.unavailable_reason
+            implied = None if anchor is None else anchor - replay_final
+            out["implied_opening_over_anchor"] = ratio_or_absent(implied, anchor)
+            out["bills_opening_over_anchor"] = ratio_or_absent(reading.opening_usd, anchor)
+            residual = None if implied is None or reading.opening_usd is None else implied - reading.opening_usd
+            out["opening_residual_over_anchor"] = ratio_or_absent(residual, anchor)
+            out["bal_over_cashbal"] = ratio_or_absent(reading.newest_usdt_bal, _usdt_cash_balance(row))
+            # Review SFH-R3-01: when the walk itself raised, the oracle's counters are still
+            # their 0 defaults, which would read as an empty archive. Not measured is absent.
+            if reading.unavailable_reason not in _WALK_NOT_COMPLETED_REASONS:
+                out["bills_read"] = reading.bills_read
+                out["blank_inst_type_bills"] = reading.blank_inst_type_bills
+                out["bills_transfer_net_over_anchor"] = ratio_or_absent(reading.stable_transfer_net_usd, anchor)
+    return out
+
+
+async def _anchor_diagnostic(
+    client: Any, supabase: ReadOnlySupabase, window_start: date, end_date: date
+) -> dict[str, Any]:
+    """``_measure_anchor`` under the crawl bound. It never raises: a failed measurement is
+    recorded by exception CLASS (a ccxt message can carry an amount or an id) and the
+    member's refusal stands."""
+    try:
+        return await asyncio.wait_for(
+            _measure_anchor(client, supabase, window_start, end_date),
+            er._RECONSTRUCT_CRAWL_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
+        return {
+            "anchor_diagnostic": "failed",
+            "diagnostic_failure_class": (
+                "truncated" if isinstance(exc, er.TruncatedTradeRead) else classify_failure(exc)
+            ),
+        }
 
 
 async def _probe_member(
@@ -590,18 +971,34 @@ async def _probe_member(
         api_key, api_secret, passphrase = decrypt_credentials(dict(credentials_row), kek)
         client = _make_exchange_client(venue, api_key, api_secret, passphrase)
         recorder = _TradeRecorder(client)
-        rows, order = await asyncio.wait_for(
+        rows, order, agreed = await asyncio.wait_for(
             _read_member(client, venue, supabase, window_start, end_date, recorder),
             er._RECONSTRUCT_CRAWL_TIMEOUT_S,
         )
+        # Snapshot BEFORE the diagnostic, as in the refusal arm below. An anchor that passed
+        # only through the bills check is the reading the OKX tolerance is re-measured from
+        # (review WR-02), so it gets the same read-only diagnostic a refusal does.
+        calls = list(recorder.calls)
+        moved = list(recorder.transfers)
+        diagnostic: dict[str, Any] | None = None
+        if venue == "okx" and agreed:
+            diagnostic = await _anchor_diagnostic(client, supabase, window_start, end_date)
         return _MemberResult(
-            read=True, rows=rows, calls=recorder.calls, transfers=recorder.transfers, order=order
+            read=True, rows=rows, calls=calls, transfers=moved, order=order, diagnostic=diagnostic
         )
     except er.ForcedRebuildRefusedError as exc:
-        calls = recorder.calls if recorder is not None else []
-        moved = recorder.transfers if recorder is not None else []
+        # Snapshot BEFORE the diagnostic: its second pass runs through the same wrapped
+        # client, so the live lists would otherwise count it (the TRADEPAGES counters
+        # describe the forced pass only).
+        calls = list(recorder.calls) if recorder is not None else []
+        moved = list(recorder.transfers) if recorder is not None else []
         if exc.reason in er.FORCED_REBUILD_REFUSAL_REASONS:
-            return _MemberResult(read=False, refusal=exc.reason, calls=calls, transfers=moved)
+            diagnostic = None
+            if venue == "okx" and client is not None and exc.reason == "anchor_skipped_implausible":
+                diagnostic = await _anchor_diagnostic(client, supabase, window_start, end_date)
+            return _MemberResult(
+                read=False, refusal=exc.reason, calls=calls, transfers=moved, diagnostic=diagnostic
+            )
         return _MemberResult(read=False, failure_class="other", calls=calls, transfers=moved)
     except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
         calls = recorder.calls if recorder is not None else []
@@ -675,6 +1072,32 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "max_rel_diff": FIELD_ABSENT,
         "days_incomplete": 0,
         "transfers_older_365d": 0,
+        "anchor_diagnostic": "not-run",
+        "diagnostic_failure_class": "none",
+        "diagnostic_members": 0,
+        "advisory_arm": "not-run",
+        "replay_final_sign": "absent",
+        "anchor_over_replay": FIELD_ABSENT,
+        "opening_check": "not-run",
+        "opening_unavailable_reason": "none",
+        "implied_opening_over_anchor": FIELD_ABSENT,
+        "bills_opening_over_anchor": FIELD_ABSENT,
+        "opening_residual_over_anchor": FIELD_ABSENT,
+        "non_stable_share": FIELD_ABSENT,
+        "upl_over_anchor": FIELD_ABSENT,
+        "bot_equity_share": FIELD_ABSENT,
+        "bal_over_cashbal": FIELD_ABSENT,
+        "bills_transfer_net_over_anchor": FIELD_ABSENT,
+        "flip_from_flat_closes": FIELD_ABSENT,
+        "hedge_mode_fills": FIELD_ABSENT,
+        "negative_qty_assets": FIELD_ABSENT,
+        "flow_events_in_window": FIELD_ABSENT,
+        "skipped_symbols_count": FIELD_ABSENT,
+        "bills_read": FIELD_ABSENT,
+        "blank_inst_type_bills": FIELD_ABSENT,
+        "negative_stable_cash": FIELD_ABSENT,
+        "breakdown_truncated": FIELD_ABSENT,
+        "opening_day_is_window_start": FIELD_ABSENT,
     }
     return {**record, **values}
 
@@ -716,6 +1139,10 @@ async def _probe_account(
 
     failed = [r for r in results if not r.read]
     readings = [r.order for r in results if isinstance(r.order, bool)]
+    diagnostics = [r.diagnostic for r in results if r.diagnostic is not None]
+    # The FIRST measured member's keys go into the record; the count tells the reader when
+    # more than one member was measured.
+    first_diagnostic: dict[str, Any] = dict(diagnostics[0]) if diagnostics else {}
     record = _account_record(
         label,
         run_date,
@@ -740,6 +1167,8 @@ async def _probe_account(
             transfers_older_than(r.transfers, _day_ms(end_date - timedelta(days=365)))
             for r in results
         ),
+        diagnostic_members=len(diagnostics),
+        **first_diagnostic,
     )
 
     comparable = bool(results) and not failed and len(results) == len(selected)
