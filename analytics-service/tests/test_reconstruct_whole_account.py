@@ -424,6 +424,10 @@ def test_merge_account_telemetry_unions_lists_ors_flags_and_reads_mt5_defaults()
         "anchor_replay_unreliable": True,
         "anchor_offset_skipped_usd": 10.01,
         "anchor_positions_unread": False,
+        "anchor_opening_agreed": True,
+        "anchor_opening_check": "agreed",
+        "anchor_opening_residual_ratio": -0.0143,
+        "anchor_opening_implied_ratio": 0.857,
     }
     other_ccxt: dict[str, Any] = {
         "skipped_symbols": ["A", "C"],
@@ -436,6 +440,10 @@ def test_merge_account_telemetry_unions_lists_ors_flags_and_reads_mt5_defaults()
         "anchor_replay_unreliable": False,
         "anchor_offset_skipped_usd": 5.5,
         "anchor_positions_unread": True,
+        "anchor_opening_agreed": False,
+        "anchor_opening_check": "not-run",
+        "anchor_opening_residual_ratio": None,
+        "anchor_opening_implied_ratio": None,
     }
     merged = er._merge_account_telemetry([ccxt_part, other_ccxt, er._mt5_telemetry()])
     assert merged["skipped_symbols"] == ["A", "B", "C"]
@@ -447,6 +455,19 @@ def test_merge_account_telemetry_unions_lists_ors_flags_and_reads_mt5_defaults()
     assert merged["anchor_offset_implausible"] is True
     assert merged["anchor_replay_unreliable"] is True
     assert merged["anchor_positions_unread"] is True
+    assert merged["anchor_opening_agreed"] is True
+    # SFH-03: the oracle outcome is one closed-vocabulary value; a member that consulted the
+    # bills outranks one that did not, and MT5 (no anchor step) reads as "not-run".
+    assert merged["anchor_opening_check"] == "agreed"
+    assert er._merge_account_telemetry([other_ccxt, er._mt5_telemetry()])[
+        "anchor_opening_check"
+    ] == "not-run"
+    # SFH-R2-01: the ratios follow the check's rule: the first member that consulted the bills.
+    assert merged["anchor_opening_residual_ratio"] == -0.0143
+    assert merged["anchor_opening_implied_ratio"] == 0.857
+    assert er._merge_account_telemetry([other_ccxt, er._mt5_telemetry()])[
+        "anchor_opening_residual_ratio"
+    ] is None
     assert merged["anchor_offset_skipped_usd"] == 15.51
 
 
@@ -458,6 +479,10 @@ def test_merge_account_telemetry_of_mt5_alone_is_the_honest_default() -> None:
     assert merged["anchor_offset_implausible"] is False
     assert merged["anchor_replay_unreliable"] is False
     assert merged["anchor_positions_unread"] is False
+    assert merged["anchor_opening_agreed"] is False
+    assert merged["anchor_opening_check"] == "not-run"
+    assert merged["anchor_opening_residual_ratio"] is None
+    assert merged["anchor_opening_implied_ratio"] is None
     assert merged["anchor_offset_skipped_usd"] == 0.0
     assert merged["anchor_partial_ticker_symbols"] == []
 
