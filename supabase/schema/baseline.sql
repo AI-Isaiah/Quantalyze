@@ -12853,6 +12853,79 @@ COMMENT ON CONSTRAINT "allocator_preferences_scoring_weight_overrides_shape" ON 
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."allocator_trade_read_windows" (
+    "api_key_id" "uuid" NOT NULL,
+    "window_start_ms" bigint NOT NULL,
+    "chunk_index" integer NOT NULL,
+    "chunk_count" integer NOT NULL,
+    "window_end_ms" bigint NOT NULL,
+    "read_version" smallint NOT NULL,
+    "n_trades" integer NOT NULL,
+    "trades" "jsonb" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "expires_at" timestamp with time zone NOT NULL,
+    CONSTRAINT "allocator_trade_read_windows_array_chk" CHECK (
+CASE
+    WHEN ("jsonb_typeof"("trades") = 'array'::"text") THEN ("jsonb_array_length"("trades") = "n_trades")
+    ELSE false
+END),
+    CONSTRAINT "allocator_trade_read_windows_chunk_chk" CHECK ((("chunk_count" >= 1) AND ("chunk_index" >= 0) AND ("chunk_index" < "chunk_count"))),
+    CONSTRAINT "allocator_trade_read_windows_count_chk" CHECK ((("n_trades" >= 0) AND ("n_trades" <= 5000))),
+    CONSTRAINT "allocator_trade_read_windows_span_chk" CHECK (("window_end_ms" > "window_start_ms")),
+    CONSTRAINT "allocator_trade_read_windows_version_chk" CHECK (("read_version" > 0))
+);
+
+ALTER TABLE ONLY "public"."allocator_trade_read_windows" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."allocator_trade_read_windows" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."allocator_trade_read_windows" IS 'Phase 171 READCEILING (D-02, TR-1..TR-7). The compact trades of each COMPLETE 7-day window of a resumable trade read, as numbered chunks of at most 5,000 trades (primary key api_key_id, window_start_ms, chunk_index; chunk_count says how many chunks the window has, so a half-written window is detectable). Each chunk carries its own expiry and the read version that wrote it; a stored window is reused only by the same read version. SERVICE-ROLE ONLY by design: row level security is enabled and forced with no policy, anon and authenticated hold no privilege, service_role holds SELECT, INSERT, UPDATE and DELETE. Erased with the key and with the account through ON DELETE CASCADE.';
+
+
+
+COMMENT ON COLUMN "public"."allocator_trade_read_windows"."api_key_id" IS 'The API key the window was read for. ON DELETE CASCADE from api_keys (and from auth.users through profiles) IS the erasure path: do NOT add a delete-guard trigger. If one is ever added it MUST exempt current_setting(''quantalyze.sanitize_in_progress'', true) = ''on'' or it aborts account deletion.';
+
+
+
+COMMENT ON COLUMN "public"."allocator_trade_read_windows"."trades" IS 'A JSON array of positional arrays [timestamp_ms, symbol, side, amount, price, cost, fee_cost] in read order, exactly n_trades of them (allocator_trade_read_windows_array_chk). The positional order is part of read_version: changing it requires a new version, never a silent reinterpretation of stored rows.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."allocator_trade_reads" (
+    "api_key_id" "uuid" NOT NULL,
+    "venue" "text" NOT NULL,
+    "grid_origin_ms" bigint NOT NULL,
+    "read_version" smallint NOT NULL,
+    "claims" integer DEFAULT 0 NOT NULL,
+    "stalled_claims" integer DEFAULT 0 NOT NULL,
+    "last_job_id" "uuid",
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "expires_at" timestamp with time zone NOT NULL,
+    CONSTRAINT "allocator_trade_reads_counts_chk" CHECK ((("claims" >= 0) AND ("stalled_claims" >= 0))),
+    CONSTRAINT "allocator_trade_reads_venue_chk" CHECK (("venue" = 'bybit'::"text")),
+    CONSTRAINT "allocator_trade_reads_version_chk" CHECK (("read_version" > 0))
+);
+
+ALTER TABLE ONLY "public"."allocator_trade_reads" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."allocator_trade_reads" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."allocator_trade_reads" IS 'Phase 171 READCEILING (D-02, TR-1..TR-7). One STATE row per API key for a resumable trade read: the grid origin, the read version, how many claims have run and how many of them stalled, the last job id (an opaque marker, no foreign key, so a new job can start with a fresh stalled-claims count while reusing the stored windows) and an expiry. SERVICE-ROLE ONLY by design: row level security is enabled and forced with no policy, anon and authenticated hold no privilege, service_role holds SELECT, INSERT, UPDATE and DELETE. Rows expire after 7 days (expires_at, written by the worker) and are purged by the worker at claim start, on a successful rebuild and by an hourly sweep; no database-scheduled job. Erased with the key and with the account through ON DELETE CASCADE.';
+
+
+
+COMMENT ON COLUMN "public"."allocator_trade_reads"."api_key_id" IS 'The API key whose trade history is being read. ON DELETE CASCADE from api_keys (and from auth.users through profiles) IS the erasure path: do NOT add a delete-guard trigger. If one is ever added it MUST exempt current_setting(''quantalyze.sanitize_in_progress'', true) = ''on'' or it aborts account deletion.';
+
+
+
+COMMENT ON COLUMN "public"."allocator_trade_reads"."last_job_id" IS 'The compute job that last claimed this read. Opaque marker, deliberately NO foreign key: a job row may be purged while the stored windows are still wanted, and a different id here is what lets a new job start with a fresh stalled-claims count (TR-6).';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."api_key_nav_marks" (
     "id" bigint NOT NULL,
     "api_key_id" "uuid" NOT NULL,
@@ -14870,6 +14943,16 @@ ALTER TABLE ONLY "public"."allocator_preferences"
 
 
 
+ALTER TABLE ONLY "public"."allocator_trade_read_windows"
+    ADD CONSTRAINT "allocator_trade_read_windows_pkey" PRIMARY KEY ("api_key_id", "window_start_ms", "chunk_index");
+
+
+
+ALTER TABLE ONLY "public"."allocator_trade_reads"
+    ADD CONSTRAINT "allocator_trade_reads_pkey" PRIMARY KEY ("api_key_id");
+
+
+
 ALTER TABLE ONLY "public"."api_key_nav_marks"
     ADD CONSTRAINT "api_key_nav_marks_key_day_key" UNIQUE ("api_key_id", "mark_day");
 
@@ -16074,6 +16157,16 @@ ALTER TABLE ONLY "public"."allocator_preferences"
 
 
 
+ALTER TABLE ONLY "public"."allocator_trade_read_windows"
+    ADD CONSTRAINT "allocator_trade_read_windows_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."allocator_trade_reads"
+    ADD CONSTRAINT "allocator_trade_reads_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."api_key_nav_marks"
     ADD CONSTRAINT "api_key_nav_marks_allocator_id_fkey" FOREIGN KEY ("allocator_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
@@ -16641,6 +16734,12 @@ CREATE POLICY "allocator_prefs_self_read" ON "public"."allocator_preferences" FO
 
 CREATE POLICY "allocator_prefs_service_all" ON "public"."allocator_preferences" USING (("auth"."role"() = 'service_role'::"text")) WITH CHECK (("auth"."role"() = 'service_role'::"text"));
 
+
+
+ALTER TABLE "public"."allocator_trade_read_windows" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."allocator_trade_reads" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "analytics_insert_deny" ON "public"."strategy_analytics" FOR INSERT WITH CHECK (false);
@@ -18452,6 +18551,14 @@ GRANT ALL ON TABLE "public"."allocator_holdings" TO "service_role";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_preferences" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_preferences" TO "authenticated";
 GRANT ALL ON TABLE "public"."allocator_preferences" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."allocator_trade_read_windows" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."allocator_trade_reads" TO "service_role";
 
 
 
