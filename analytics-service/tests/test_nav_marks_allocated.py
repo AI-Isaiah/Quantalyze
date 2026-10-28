@@ -32,6 +32,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import logging
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any
@@ -48,6 +49,7 @@ from services.broker_dailies import (
     native_ledger_realized_terminal as REAL_TERMINAL,
 )
 from services.deribit_ingest import DeribitNativeAccountState
+from services.external_flows import FlowInstant
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
 from tests.test_derive_broker_dailies_dualmode import _cash_series_payload  # noqa: F401
 from tests.test_deribit_ingest import _NativeAnchorStub, _patch_pipeline
@@ -59,16 +61,21 @@ from tests.test_mtm_single_key import (
     _report,
     _stub_native_ledger,
 )
+from tests.test_flow_price_store import FlowPricesTable, route_flow_prices
 from tests.test_nav_marks_derive_apply import (  # noqa: F401  (route_csv wraps route_marks)
     KEY,
     STRATEGY,
     USER,
     StrategyDb,
+    _ms as utc_ms,
     assert_refusal_cost_nothing,
     at_0010,
+    candles,
+    concurrent_writer_marks,
     failed_stamps,
     prestamp,
     route_csv,
+    scripted_chart,
     seed_mark,
     series,
 )
@@ -141,6 +148,9 @@ class Run:
     db: StrategyDb
     #: one entry per ``build_deribit_native_ledger`` call: the ``nav_twin`` it was given
     builds: list[dict[str, Any]] = field(default_factory=list)
+    #: The scripted chart and the flow-price store the derive used (Phase 177), when given.
+    chart: Any = None
+    table: FlowPricesTable | None = None
 
     @property
     def rows(self) -> dict[str, float]:
@@ -182,19 +192,37 @@ async def derive_allocated(
     twin_error: str | None = None,
     extra_patches: list[Any] | None = None,
     balance_error: bool = False,
+    twin_instants: tuple[FlowInstant, ...] | None = None,
+    ledger_marks: dict[str, pd.Series] | None = None,
+    chart: Callable[[], Any] | None = None,
+    flow_prices: FlowPricesTable | None = None,
 ) -> Run:
     """Run the real strategy-mode derive for an allocated-capital Deribit strategy.
 
     ``twin`` are the NAV twin's levels (``None``: no twin is attached, as when the build failed
     and ``twin_error`` names the class). ``now_day`` is the day the derive runs on (00:10:30Z), so
-    it labels the day before."""
+    it labels the day before.
+
+    Phase 177 (DERIBITFLOWS plan 05): ``twin_instants`` and ``ledger_marks`` give the twin its raw
+    per-row flow instants and its per-currency day marks (what ``native_flow_instants`` values a
+    non-USD instant at on its own day); ``chart`` is a factory of the scripted
+    ``get_tradingview_chart_data``; ``flow_prices`` is the price store (a fresh one when omitted).
+    All default to the behaviour before the phase."""
     ctx, capture = _ctx(strategy_row={
         "id": STRATEGY, "user_id": USER, "asset_class": "crypto", "returns_denominator_config": cfg,
     })
     ctx.key_row = {"id": KEY, "user_id": USER, "exchange": "deribit"}
-    route_csv(route_marks(ctx, db), db)
+    scripted = chart() if chart is not None else None
+    if scripted is not None:
+        ctx.exchange.public_get_get_tradingview_chart_data = scripted
+    table = flow_prices if flow_prices is not None else FlowPricesTable()
+    route_flow_prices(route_csv(route_marks(ctx, db), db), table)
     alloc_ledger = _stub_native_ledger()
-    twin_ledger = dataclasses.replace(alloc_ledger)
+    twin_ledger = dataclasses.replace(
+        alloc_ledger,
+        **({"flow_instants": twin_instants} if twin_instants is not None else {}),
+        **({"marks": ledger_marks} if ledger_marks is not None else {}),
+    )
     builds: list[dict[str, Any]] = []
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
@@ -220,6 +248,10 @@ async def derive_allocated(
         state_spy=AsyncMock(return_value=state),
     ) + [
         patch("services.job_worker._utc_now", new=MagicMock(return_value=at_0010(now_day))),
+        patch(
+            "services.deribit_flow_prices.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
         *_levels_patches(alloc_ledger, twin_ledger, alloc, twin if twin is not None else TWIN),
         *(extra_patches or []),
     ]
@@ -227,7 +259,7 @@ async def derive_allocated(
         result = await run_derive_broker_dailies_job(
             {"id": "j-alloc", "kind": "derive_broker_dailies", "strategy_id": STRATEGY}
         )
-    return Run(result, capture, db, builds)
+    return Run(result, capture, db, builds, chart=scripted, table=table)
 
 
 #: The wallet each stored mark carries: the twin's realized level on that day (terminal 2000.0 on
@@ -276,6 +308,91 @@ async def test_allocated_strategy_follows_marked_nav_from_the_first_mark() -> No
     assert flags["marks_covered_from"] == "2026-03-06"
     assert [b["nav_twin"] for b in run.builds] == [True], "the cash pass asked for the twin"
     assert run.builds[0]["exclude_spot_extraction"] is True
+
+
+#: Phase 177 plan 05. The twin carries one 0.0002 BTC deposit made at 00:05:20Z on 03-08, the read
+#: day of the 03-07 mark (the derive's clock is 00:10:30Z on 03-08, the seeded mark's read is
+#: 00:10Z). The twin's composed flow on 03-08 is its own-day value, 0.0002 x 105000.0 = 21.0.
+ALLOC_BTC_LEDGER = {"BTC": series({"2026-03-07": 100_000.0, "2026-03-08": 105_000.0})}
+ALLOC_BTC_TWIN = Levels(
+    ("2026-03-07", 2000.0), {"2026-03-06": 20.0, "2026-03-07": 5.0},
+    {"2026-03-06": 100.0, "2026-03-08": 21.0},
+)
+ALLOC_BTC_MARKS = {"2026-03-06": 1900.0, "2026-03-07": 1930.1}
+_ALLOC_MINUTE = utc_ms(2026, 3, 8, 0, 5)
+ALLOC_BTC_CANDLES = candles(
+    (_ALLOC_MINUTE - 60_000, 100_400.0), (_ALLOC_MINUTE, 100_500.0), (_ALLOC_MINUTE + 60_000, 100_600.0),
+)
+
+
+@pytest.mark.asyncio
+async def test_allocated_moved_btc_flow_priced_at_the_instant_price() -> None:
+    """Phase 177 D-04 on the allocated-capital NAV twin. The deposit made at 00:05:20Z on 03-08 is
+    inside the 03-07 mark (NAV 1930.1). Its own-day value, what leaves 03-08, is 0.0002 x 105000.0
+    = 21.0; it is COUNTED in 03-07 at the open of the 00:05 BTC_USDC-PERPETUAL candle (100500.0;
+    00:04 and 00:06 open 100400.0 and 100600.0):
+      counted in 03-07:  0.0002 x 100500.0 = 20.1
+      r(03-07) = (1930.1 - 1900.0 - 20.1) / 1900.0 = 10.0 / 1900.0
+    The old own-day pricing counts 21.0 and stores 9.1 / 1900.0. r(03-06) is unchanged:
+    (1900.0 - 1875.0 - 100.0) / 1875.0 = -0.04."""
+    run = await derive_allocated(
+        seeded(ALLOC_BTC_MARKS), cfg=config(), now_day="2026-03-08", twin=ALLOC_BTC_TWIN,
+        twin_instants=(FlowInstant(utc_ms(2026, 3, 8, 0, 5, 20), "2026-03-08", 0.0002, "BTC"),),
+        ledger_marks=ALLOC_BTC_LEDGER, chart=scripted_chart(ALLOC_BTC_CANDLES),
+    )
+    assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
+    assert run.rows["2026-03-06"] == pytest.approx(-0.04, abs=1e-12)
+    assert run.rows["2026-03-07"] == pytest.approx(10.0 / 1900.0, abs=1e-12)
+    assert len(run.chart.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_allocated_moved_flow_no_data_refuses_by_name(caplog: pytest.LogCaptureFixture) -> None:
+    """D-05 on the allocated seam. The oracle's scenario with the chart answering ``no_data``, and
+    the csv pre-seeded so that "nothing written" is checked against a non-empty table. FAILED
+    permanent on the nav-marks refusal road, one chart call (not retried), nothing written."""
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    db = seeded(ALLOC_BTC_MARKS)
+    for day, value in ALLOCATED.items():
+        db.csv[(STRATEGY, day)] = value
+    before = dict(db.csv)
+    run = await derive_allocated(
+        db, cfg=config(), now_day="2026-03-08", twin=ALLOC_BTC_TWIN,
+        twin_instants=(FlowInstant(utc_ms(2026, 3, 8, 0, 5, 20), "2026-03-08", 0.0002, "BTC"),),
+        ledger_marks=ALLOC_BTC_LEDGER, chart=scripted_chart({"result": {"status": "no_data"}}),
+    )
+    assert run.result.outcome == DispatchOutcome.FAILED, run.result.error_message
+    assert run.result.error_kind == "permanent"
+    assert run.result.error_message == (
+        "derive_broker_dailies: nav marks refused (mark_flow_index_unavailable)"
+    )
+    assert len(run.chart.calls) == 1
+    assert run.table is not None and run.table.rows == {}
+    assert_refusal_cost_nothing(db, run.capture, before, "mark_flow_index_unavailable", caplog)
+
+
+@pytest.mark.asyncio
+async def test_allocated_moved_flow_prediction_miss_is_a_retry() -> None:
+    """D-05 on the allocated seam, Pitfall 3. A concurrent writer stored the 03-07 mark (read at
+    00:20:00Z on 03-08) after the early twin-request read and the prefetch looked at the marks, so
+    both saw only 03-06. The prefetch predicted this derive's own read at 00:10:30Z, which does not
+    place the 00:15:00Z deposit, so nothing was read. The final 03-07 mark (read 00:20) does place
+    it: a named ``prediction_miss`` retry, no chart call, nothing written (a DONE would be the
+    own-day price bug)."""
+    db = seeded(ALLOC_BTC_MARKS)
+    db.marks[(KEY, "2026-03-07")]["marked_at"] = "2026-03-08T00:20:00+00:00"
+    run = await derive_allocated(
+        db, cfg=config(), now_day="2026-03-08", twin=ALLOC_BTC_TWIN,
+        twin_instants=(FlowInstant(utc_ms(2026, 3, 8, 0, 15), "2026-03-08", 0.0002, "BTC"),),
+        ledger_marks=ALLOC_BTC_LEDGER, chart=scripted_chart(),
+        extra_patches=concurrent_writer_marks("2026-03-07"),
+    )
+    assert run.result.outcome == DispatchOutcome.FAILED, run.result.error_message
+    assert run.result.error_kind == "transient"
+    assert "reason=prediction_miss" in run.result.error_message
+    assert run.chart.calls == []
+    assert db.csv_upserts == [] and db.csv_deletes == []
+    assert not [p for n, p, _ in run.capture["upserts"] if n == "strategy_analytics"]
 
 
 @pytest.mark.asyncio

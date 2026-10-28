@@ -883,6 +883,191 @@ async def fetch_deribit_option_daily_marks(
     return marks
 
 
+# Phase 177 DERIBITFLOWS (D-04): the 1-MINUTE candle of the same linear USDC perpetual. The price a
+# moved Deribit flow is counted at is the ``open`` of the candle that contains the flow: the
+# perpetual's TRADED price at that minute. It is not Deribit's index, and nothing in this module
+# or its callers calls it that.
+_PERP_MINUTE_RESOLUTION = "1"
+_MINUTE_MS = 60_000
+
+
+class DeribitChartNoDataError(RuntimeError):
+    """The exchange RESPONDED and there is no usable price for the requested window: a
+    ``BadSymbol`` or ``BadRequest``, an explicit ``status == "no_data"`` body,
+    a malformed or repeated tick, or an ``open`` that is not a finite positive number.
+
+    STRUCTURAL: retrying the same request cannot help, so it is never retried and never read as
+    "no flow" (D-05: no fallback). The text names the instrument only, never a price, an amount or
+    a key."""
+
+
+def perp_minute_instrument(currency: str) -> str:
+    """``{CCY}_USDC-PERPETUAL`` for ``currency``: the linear USDC perpetual whose 1-minute candle
+    prices a moved flow (D-04). Never the bare coin-margined ``{CCY}-PERPETUAL``."""
+    return f"{currency.upper()}{_PERP_DAILY_INSTRUMENT_SUFFIX}"
+
+
+def _validate_chart_ok_open_arrays(
+    resp: Any,
+) -> tuple[Sequence[Any], Sequence[Any]] | None:
+    """Classify a ``get_tradingview_chart_data`` 200 body for the minute-price reader.
+
+    A sibling of :func:`_validate_chart_ok_arrays` under the same flaky / no_data / ok rules, but
+    it reads ``ticks`` and ``open`` instead of ``ticks`` and ``close``: an explicit
+    ``status == "no_data"`` returns ``None``, a clean ``ok`` body with equal-length sequences
+    returns ``(ticks, open)``, and any other 200 raises :class:`_FlakyChartResponse` so the reader
+    retries it on the transient budget."""
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else None
+    if not isinstance(result, Mapping):
+        raise _FlakyChartResponse("result missing or not a mapping")
+    status = result.get("status")
+    if status == _CHART_NO_DATA_STATUS:
+        return None
+    if status != "ok":
+        raise _FlakyChartResponse(f"unexpected status={status!r}")
+    ticks = result.get("ticks", [])
+    opens = result.get("open", [])
+    if (
+        not isinstance(ticks, Sequence)
+        or isinstance(ticks, (str, bytes))
+        or not isinstance(opens, Sequence)
+        or isinstance(opens, (str, bytes))
+        or len(ticks) != len(opens)
+    ):
+        raise _FlakyChartResponse("malformed ok body (ticks/open shape mismatch)")
+    return ticks, opens
+
+
+async def fetch_deribit_perp_minute_prices(
+    exchange: Any,
+    currency: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> dict[int, float]:
+    """``{candle start ms: open}`` for ``currency``'s ``{CCY}_USDC-PERPETUAL`` 1-minute candles
+    over ``[start_ms, end_ms]``, from the PUBLIC ``get_tradingview_chart_data`` endpoint
+    (``resolution=1``).
+
+    Phase 177 DERIBITFLOWS D-04: a Deribit flow that a mark moves into its mark day is counted at
+    the ``open`` of the 1-minute candle that contains it. That is the perpetual's traded price,
+    NOT Deribit's index. Probe facts: a tick is the candle START, the end bound is inclusive, and
+    the endpoint retains at least 730 days of 1-minute candles.
+
+    D-05, no fallback. This reader never answers a structural case with an empty map:
+
+    * the exchange responded with ``BadSymbol`` or ``BadRequest``, an explicit
+      ``status == "no_data"``, a malformed or repeated tick, or an ``open`` that is not a finite
+      positive number: :class:`DeribitChartNoDataError`;
+    * ANY OTHER exception from the venue call (a ``ccxt.NetworkError``, an unmapped
+      ``ExchangeError``, a transport fault) or a flaky 200 body is TRANSIENT and is retried on ONE
+      shared budget of ``max_retries`` with a ``PUBLIC_READ_BACKOFF_BASE_SECONDS`` doubling wait, then
+      raises :class:`DeribitTransientReadError`. A ``ccxt.RateLimitExceeded`` or
+      ``ccxt.DDoSProtection`` (Deribit's real rate-limit reply) on the last attempt
+      is re-raised as itself instead: this is a deliberate deviation from the sibling readers,
+      which wrap a 429 and so never reach the caller's ``_stamp_429`` (D-05).
+
+    Unlike the three sibling chart readers, which return ``{}`` for a structural answer and skip a
+    bad row, a bad value here is never skipped: one unusable open would be priced as no flow.
+    Every ccxt error is scrubbed before logging."""
+    instrument = perp_minute_instrument(currency)
+    params: dict[str, Any] = {
+        "instrument_name": instrument,
+        "start_timestamp": start_ms,
+        "end_timestamp": end_ms,
+        "resolution": _PERP_MINUTE_RESOLUTION,
+    }
+    retries = 0
+    while True:
+        try:
+            resp = await exchange.public_get_get_tradingview_chart_data(params)
+            arrays = _validate_chart_ok_open_arrays(resp)
+            break
+        except _FlakyChartResponse as exc:
+            retries += 1
+            if retries > max_retries:
+                raise DeribitTransientReadError(
+                    "deribit get_tradingview_chart_data returned a flaky/unexpected "
+                    f"200 body across {max_retries} retries for "
+                    f"instrument={instrument} ({exc}) — refusing a silently-empty "
+                    "minute-price map (retryable)"
+                ) from None
+            await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+            continue
+        except Exception as exc:  # noqa: BLE001
+            # Only BadSymbol / BadRequest are structural. Every other venue-call exception is
+            # transient: a network error, a rate limit, an unmapped error code, or a transport
+            # fault ccxt wraps as a plain ExchangeError.
+            if not isinstance(exc, (ccxt.BadSymbol, ccxt.BadRequest)):
+                retries += 1
+                if retries > max_retries:
+                    if isinstance(exc, (ccxt.RateLimitExceeded, ccxt.DDoSProtection)):
+                        # Deliberately NOT wrapped: the sibling readers wrap a 429 in
+                        # DeribitTransientReadError, so the caller never sees it and cannot
+                        # stamp the key (D-05). Deribit's real rate-limit reply (body code
+                        # 10028) is DDoSProtection, so the caller catches both classes.
+                        raise
+                    # `from None` below drops the original, so log it first.
+                    logger.warning(
+                        "deribit get_tradingview_chart_data transient read budget exhausted "
+                        "for instrument=%s (%s: %s)",
+                        instrument,
+                        type(exc).__name__,
+                        scrub_freeform_string(str(exc)),
+                    )
+                    raise DeribitTransientReadError(
+                        "deribit get_tradingview_chart_data transient read budget "
+                        f"({max_retries}) exhausted for instrument={instrument} — "
+                        "refusing a silently-partial minute-price map (retryable)"
+                    ) from None
+                await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+                continue
+            logger.warning(
+                "deribit get_tradingview_chart_data structural no-data for "
+                "instrument=%s (%s)",
+                instrument,
+                scrub_freeform_string(str(exc)),
+            )
+            raise DeribitChartNoDataError(
+                f"deribit get_tradingview_chart_data has no usable data for instrument={instrument}"
+            ) from None
+    if arrays is None:
+        raise DeribitChartNoDataError(
+            f"deribit get_tradingview_chart_data returned no_data for instrument={instrument}"
+        )
+    ticks, opens = arrays
+    prices: dict[int, float] = {}
+    for raw_ts, raw_open in zip(ticks, opens):
+        if isinstance(raw_ts, bool) or isinstance(raw_open, bool):
+            raise DeribitChartNoDataError(
+                "deribit get_tradingview_chart_data returned a malformed tick for "
+                f"instrument={instrument}"
+            )
+        try:
+            ts_ms = int(raw_ts)
+            price = float(raw_open)
+        except (TypeError, ValueError, OverflowError):
+            raise DeribitChartNoDataError(
+                "deribit get_tradingview_chart_data returned a malformed tick for "
+                f"instrument={instrument}"
+            ) from None
+        if not math.isfinite(price) or price <= 0.0 or ts_ms in prices:
+            raise DeribitChartNoDataError(
+                "deribit get_tradingview_chart_data returned an unusable tick for "
+                f"instrument={instrument}"
+            )
+        prices[ts_ms] = price
+    return prices
+
+
+def price_for_minute(opens: Mapping[int, float], at_ms: int) -> float | None:
+    """The ``open`` of the 1-minute candle that contains ``at_ms``, or ``None`` when that minute
+    has no candle. Never an earlier candle's open or close (D-05: no fallback)."""
+    return opens.get(at_ms - at_ms % _MINUTE_MS)
+
+
 def _price_map_has_gap(
     price_map: Mapping[str, float], oldest_day: str, newest_day: str
 ) -> bool:

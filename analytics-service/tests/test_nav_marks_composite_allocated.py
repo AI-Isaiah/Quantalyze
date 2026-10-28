@@ -32,6 +32,7 @@ import pandas as pd
 import pytest
 
 from services.deribit_ingest import CompletenessReport
+from services.external_flows import FlowInstant
 from services.job_worker import DispatchOutcome, run_stitch_composite_job
 from services.nav_marks import StoredMark
 from tests.test_nav_marks_composite import (
@@ -41,7 +42,13 @@ from tests.test_nav_marks_composite import (
     day_series,
     stored,
 )
-from tests.test_nav_marks_derive_apply import at_0010
+from tests.test_flow_price_store import FlowPricesTable, route_flow_prices
+from tests.test_nav_marks_derive_apply import (
+    assert_flow_index_refusal_copy,
+    at_0010,
+    candles,
+    scripted_chart,
+)
 from tests.test_stitch_composite_job import (
     _STRATEGY_ID,
     _FakeSupabase,
@@ -136,13 +143,24 @@ async def run_allocated_composite(
     twin_error_seq: int = 2,
     helper_raises: Exception | None = None,
     extra_patches: list[Any] | None = None,
+    twin_instants: tuple[FlowInstant, ...] = (),
+    ledger_marks: dict[str, pd.Series] | None = None,
+    chart: Any = None,
+    flow_prices: FlowPricesTable | None = None,
 ) -> AllocatedRun:
     """Run the real composite job over two Deribit members of a composite WITH a config.
 
     ``twin`` is the NAV twin's levels, attached to every member's report except member
     ``twin_error_seq``'s when ``twin_error`` is set: that member's build failed, its report carries
     no twin and ``twin_error`` names the class (``twin=None``: no member gets a twin). The faked combiner yields
-    each member's allocated series in call order: cash m1, cash m2, then mtm m1, mtm m2."""
+    each member's allocated series in call order: cash m1, cash m2, then mtm m1, mtm m2.
+
+    Phase 177 (DERIBITFLOWS plan 06) keywords, all defaulting to the harness as it was:
+    ``twin_instants`` and ``ledger_marks`` are the NAV twin's raw flow instants and per-currency
+    day marks (what ``native_flow_instants`` values a non-USD instant at on its own day);
+    ``chart`` is the scripted ``get_tradingview_chart_data`` of member 2's exchange, and member 2's
+    exchange close is recorded in its ``events`` as ``"close"``; ``flow_prices`` is the in-memory
+    ``api_key_flow_prices``, routed on every member."""
     members = [_member(i + 1, ws, we) for i, (ws, we) in enumerate(WINDOWS)]
     strategy_row = {
         "id": _STRATEGY_ID, "asset_class": "crypto",
@@ -154,6 +172,11 @@ async def run_allocated_composite(
     for m in members:
         c = _ctx("deribit")
         c.key_row = {"id": m["api_key_id"], "user_id": "owner-1", "exchange": "deribit"}
+        if chart is not None and m["api_key_id"] == "key-2":
+            c.exchange.public_get_get_tradingview_chart_data = chart
+        if flow_prices is not None:
+            c.supabase.table.side_effect = lambda _name: MagicMock()
+            route_flow_prices(c, flow_prices)
         ctxs[m["api_key_id"]] = c
         seq_by_exchange[id(c.exchange)] = int(m["seq"])
 
@@ -176,7 +199,11 @@ async def run_allocated_composite(
             if seq_by_exchange.get(id(exchange)) == twin_error_seq and twin_error is not None:
                 report.nav_twin_error = twin_error
             elif twin is not None:
-                twin_ledger = dataclasses.replace(alloc_ledger)
+                twin_ledger = dataclasses.replace(
+                    alloc_ledger,
+                    **({"flow_instants": twin_instants} if twin_instants else {}),
+                    **({"marks": ledger_marks} if ledger_marks is not None else {}),
+                )
                 twin_ledgers.append(twin_ledger)
                 report.nav_twin_ledger = twin_ledger
         return alloc_ledger, report
@@ -215,6 +242,19 @@ async def run_allocated_composite(
         patch("services.job_worker._utc_now", new=MagicMock(return_value=at_0010(now_day))),
         patch("services.broker_dailies.native_ledger_day_pnl", new=MagicMock(side_effect=_pnl)),
         patch("services.broker_dailies.native_ledger_composed_flows", new=MagicMock(side_effect=_flows)),
+        *(
+            [patch(
+                "services.deribit_flow_prices.db_execute",
+                new=AsyncMock(side_effect=lambda fn: fn()),
+            )] if flow_prices is not None else []
+        ),
+        *(
+            [patch(
+                "services.job_worker.aclose_exchange",
+                new=AsyncMock(side_effect=lambda ex: chart.events.append("close")
+                              if ex is ctxs["key-2"].exchange else None),
+            )] if chart is not None else []
+        ),
         *(extra_patches or []),
     ]
     with ExitStack() as stack:
@@ -492,3 +532,110 @@ async def test_a_member_rotated_out_under_an_open_mandate_keeps_its_tail_to_its_
     rows = out.run.csv_rows()
     assert rows["2026-02-27"] == pytest.approx(0.996 * 950.0 / 1000.0 - 1.0)
     assert rows["2026-02-28"] == pytest.approx(0.006)
+
+
+# --------------------------------------------------------------------------------------
+# Phase 177 DERIBITFLOWS plan 06 - the allocated member's NAV twin counts a moved flow at its candle open
+# --------------------------------------------------------------------------------------
+
+
+def _ms(*args: int) -> int:
+    import datetime as dt
+
+    return int(dt.datetime(*args, tzinfo=dt.timezone.utc).timestamp() * 1000)
+
+
+#: The twin's levels as TWIN, plus a 0.0002 BTC deposit on 03-08 (own-day amount 21.0).
+TWIN_MOVED = Levels(
+    ("2026-03-07", 2000.0), {"2026-03-06": 20.0, "2026-03-07": 5.0},
+    {"2026-03-06": 100.0, "2026-03-08": 21.0},
+)
+_MOVED_MARKS = [
+    stored("2026-03-06", 1900.0, venue="deribit", open_pnl=-95.0),
+    stored("2026-03-07", 1930.1, venue="deribit", open_pnl=-69.9),
+]
+_MOVED_MINUTE = _ms(2026, 3, 8, 0, 5)
+_MOVED_INSTANTS = (FlowInstant(_ms(2026, 3, 8, 0, 5, 20), "2026-03-08", 0.0002, "BTC"),)
+_MOVED_LEDGER_MARKS = {"BTC": day_series({"2026-03-07": 100_000.0, "2026-03-08": 105_000.0})}
+_MOVED_CANDLES = candles(
+    (_MOVED_MINUTE - 60_000, 100_400.0), (_MOVED_MINUTE, 100_500.0), (_MOVED_MINUTE + 60_000, 100_600.0),
+)
+
+
+async def run_allocated_moved(chart: Any, table: FlowPricesTable, **kw: Any) -> AllocatedRun:
+    return await run_allocated_composite(
+        marks={"key-2": _MOVED_MARKS}, twin=TWIN_MOVED, twin_instants=_MOVED_INSTANTS,
+        ledger_marks=_MOVED_LEDGER_MARKS, chart=chart, flow_prices=table, **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_allocated_member_moved_btc_flow_priced_at_the_instant_price() -> None:
+    """Phase 177 D-04 on an allocated composite member, with the member's EXACT marks. The NAV
+    twin of key-2 carries a 0.0002 BTC deposit at 00:05:20Z on 03-08, before the 00:10Z read of the
+    03-07 mark (NAV 1930.1), so it is inside that mark's wallet. The twin's own-day mark for 03-08
+    is 105000.0 (0.0002 x 105000.0 = 21.0, the composed flow of 03-08). It is COUNTED in 03-07 at the
+    open of the 1-minute BTC_USDC-PERPETUAL candle that contains it (00:05, open 100500.0; 00:04
+    and 00:06 open 100400.0 and 100600.0):
+      counted in 03-07:  0.0002 x 100500.0 = 20.1
+      r(03-07) = (1930.1 - 1900.0 - 20.1) / 1900.0 = 10.0 / 1900.0
+    where own-day pricing counts 21.0 and stores 9.1 / 1900.0. r(03-06) = (1900.0 - 1875.0 - 100.0)
+    / 1875.0 = -0.04 is unchanged. The read is made while the member's exchange is open."""
+    table = FlowPricesTable()
+    chart = scripted_chart(_MOVED_CANDLES)()
+    out = await run_allocated_moved(chart, table)
+    run = out.run
+    assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
+    rows = run.csv_rows()
+    assert rows["2026-03-07"] == pytest.approx(10.0 / 1900.0, abs=1e-12)
+    assert rows["2026-03-06"] == pytest.approx(-0.04, abs=1e-12)
+    assert len(chart.calls) == 1
+    assert chart.events.index("chart") < chart.events.index("close"), "read on an open exchange"
+    assert table.prices("key-2") == {("BTC_USDC-PERPETUAL", _MOVED_MINUTE): 100_500.0}
+
+
+@pytest.mark.asyncio
+async def test_allocated_member_moved_flow_no_data_refuses_the_composite() -> None:
+    """D-05, T-177-24. The oracle's scenario with the chart answering ``no_data``. The allocated
+    member's moved BTC deposit has no price, so it is NOT counted at the own-day 21.0 (the composite
+    would be DONE with 9.1 / 1900.0): the composite refuses by name, permanent, and persists nothing
+    but the failed stamp. One chart call (a structural answer is not retried). The shared
+    ``_assert_refused_and_wrote_nothing`` pins the other token, so the same shape is stated here."""
+    table = FlowPricesTable()
+    chart = scripted_chart({"result": {"status": "no_data"}})()
+    out = await run_allocated_moved(chart, table)
+    run = out.run
+    assert run.result.outcome == DispatchOutcome.FAILED
+    assert run.result.error_kind == "permanent"
+    assert run.result.error_message == (
+        "run_stitch_composite_job: nav marks refused (seq=2, mark_flow_index_unavailable)"
+    )
+    assert not run.wrote_anything_but_a_failed_stamp()
+    assert run.headline() is None
+    stamps = [p for t, p, _c in run.fake.upserts if t == "strategy_analytics"]
+    assert len(stamps) == 1 and stamps[0]["computation_status"] == "failed"
+    assert_flow_index_refusal_copy(stamps[0]["computation_error"])
+    assert len(chart.calls) == 1
+    assert table.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_allocated_member_flows_moved_log(caplog: pytest.LogCaptureFixture) -> None:
+    """D-01, composites, the allocated member. The oracle's scenario (one BTC deposit moved into
+    the 03-07 mark, the last) logs one counts-only INFO line beside the member's applied line:
+    moved=1 at_instant=1 usd_family=0 on_last_mark=1. A member with no flow instant logs the same
+    line at zero. No key id, amount, minute or instrument."""
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        out = await run_allocated_moved(scripted_chart(_MOVED_CANDLES)(), FlowPricesTable())
+    assert out.run.result.outcome == DispatchOutcome.DONE, out.run.result.error_message
+    prefix = "run_stitch_composite_job: deribit flows moved by marks"
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith(prefix)]
+    assert lines == [f"{prefix} (seq=2 moved=1 at_instant=1 usd_family=0 on_last_mark=1)"]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        zero = await run_allocated_composite(marks={"key-2": MARKS})
+    assert zero.run.result.outcome == DispatchOutcome.DONE, zero.run.result.error_message
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith(prefix)]
+    assert lines == [f"{prefix} (seq=2 moved=0 at_instant=0 usd_family=0 on_last_mark=0)"]
+    assert not any("key-" in line for line in lines)

@@ -216,8 +216,17 @@ from services.nav_marks import (
     read_stored_mark,
     write_nav_mark,
 )
+from services.deribit_flow_prices import (
+    MarkReadAt,
+    MovedFlowPrices,
+    moved_flow_counts,
+    resolve_moved_flow_prices,
+    unpriced_moved_flows,
+    wanted_moved_flows,
+)
 from services.external_flows import FlowInstant
-from services.native_nav import native_flow_instants
+from services.flow_price_store import FlowPriceStoreError
+from services.native_nav import MarkBranch, classify_currency, native_flow_instants
 from services.nav_marks_apply import (
     AppliedMark,
     MarkApplyRefusal,
@@ -383,6 +392,13 @@ _MARK_UNIT_MISMATCH: Final[str] = "mark_unit_mismatch"
 # cannot be valued (a NavReconstructionError from the twin's three helpers, section 5 included).
 # Same road as ``mark_unit_mismatch``: a named refusal that writes nothing.
 _MARK_ALLOCATED_NAV_UNRECONCILED: Final[str] = "mark_allocated_nav_unreconciled"
+# Phase 177 DERIBITFLOWS plan 04 (D-05): the derive-level refusal token of a key-mode Deribit derive
+# whose moved INDEXED flow has a STRUCTURAL no-data answer for the minute it is priced at (a no_data
+# body, BadSymbol, no candle in the containing minute, a non-finite or non-positive open). Same road
+# as ``mark_unit_mismatch``: a named refusal that writes nothing, never the day-D or the own-day
+# price. Accepted known limit: a minute where the perpetual printed no candle refuses on EVERY derive,
+# because such a minute has no price to store; there is no override or fallback in this phase.
+_MARK_FLOW_INDEX_UNAVAILABLE: Final[str] = "mark_flow_index_unavailable"
 
 
 class _MemberNavUnreconciled(Exception):
@@ -392,6 +408,17 @@ class _MemberNavUnreconciled(Exception):
     the same whole-composite refusal road (``token`` is the plan 16 constant, never an amount)."""
 
     token: Final[str] = _MARK_ALLOCATED_NAV_UNRECONCILED
+
+
+class _MemberFlowIndexUnavailable(Exception):
+    """Phase 177 D-05 (composites): a composite's Deribit member has a moved INDEXED flow whose
+    at-instant price read answered with a STRUCTURAL no-data (a no_data body, BadSymbol, no candle
+    in the containing minute, a non-finite open). The member's marks are exact, so there is no
+    prediction to miss and no own-day fallback: the composite refuses as a whole on the same road
+    as ``_MemberNavUnreconciled`` (permanent, nothing persisted). A transient read, a 429 and a
+    store fault are NOT this class; they keep the composite's existing arms."""
+
+    token: Final[str] = _MARK_FLOW_INDEX_UNAVAILABLE
 
 
 # Phase 164.6.6.3 / D-13 — the FIXED message of an expired MT5 deal-history wait.
@@ -600,6 +627,53 @@ def _composite_mark_summary(
         marks_since=min(starts) if starts else None,
         mark_gap_days=tuple(sorted(gaps)),
     )
+
+
+def _deribit_moved_flow_gate(
+    raw_instants: Sequence[FlowInstant],
+    marks_in: Sequence[AppliedMark],
+    indexable_currencies: frozenset[str],
+    prices: MovedFlowPrices,
+    price_failure: str | None,
+    mode: str,
+) -> "str | DispatchResult | None":
+    """Phase 177 coverage check, run on the FINAL marks (the prefetch ran on a prediction), at
+    every Deribit seam that values flow instants: the key writer basis, the strategy-mode branch
+    and the allocated NAV twin all call this one implementation, each with the raw instants of the
+    ledger that branch is about to value. A moved INDEXED instant with no at-instant price is
+    never counted at the own-day amount (the bug this phase removes) and never at any fallback
+    price (D-05).
+
+    Returns ``None`` when every moved INDEXED flow is priced; the refusal token
+    ``_MARK_FLOW_INDEX_UNAVAILABLE`` for a STRUCTURAL no-data answer (the caller takes the
+    nav-marks refusal road, permanent); otherwise a transient ``DispatchResult`` whose reason is
+    the captured read failure, or ``prediction_miss`` when the read ran clean and a mark it did
+    not predict moves a flow. ``mode`` is the closed word ``key`` or ``strategy``."""
+    unpriced = unpriced_moved_flows(
+        raw_instants,
+        [(mk.day, mk.read_at) for mk in marks_in],
+        indexable_currencies,
+        prices,
+    )
+    if unpriced.no_data > 0:
+        return _MARK_FLOW_INDEX_UNAVAILABLE
+    if unpriced.missing > 0:
+        reason = price_failure or "prediction_miss"
+        logger.warning(
+            "derive_broker_dailies: deribit moved flows without an "
+            "at-instant price (reason=%s unpriced=%d mode=%s)",
+            reason, unpriced.missing, mode,
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_broker_dailies: deribit moved-flow price "
+                f"unavailable (reason={reason} unpriced="
+                f"{unpriced.missing}) - retrying"
+            ),
+            error_kind="transient",
+        )
+    return None
 
 
 def _iso_day_amounts(values: "pd.Series | None") -> dict[str, float]:
@@ -974,6 +1048,15 @@ _DERIVE_BUDGET_DEFAULT_S = 15 * 60
 # plausibly finish, the pass is skipped and DEGRADED loudly. Options books only.
 _MTM_SECOND_PASS_BUDGET_FRACTION = 0.7
 _MTM_SECOND_PASS_MIN_SECONDS = 60.0
+
+# Phase 177 DERIBITFLOWS plan 04 (D-05, W2): the at-instant price prefetch of a key-mode Deribit
+# derive runs AFTER the full-history crawl, inside the same outer budget, and the day's mark is
+# written after it. Its bound is the derive's REMAINING budget less the post-crawl reserve (the
+# way the MTM second pass bounds itself), capped at the per-crawl bound. Below this floor the read
+# is not started: it could not finish one attempt. The floor is not a latency measurement and
+# correctness does not rest on it: a read the bound cuts off is captured as ``timeout`` and the
+# day's mark is kept either way. It only avoids starting a read that cannot finish.
+_MOVED_FLOW_PRICE_MIN_SECONDS: Final[float] = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -4938,6 +5021,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # All three are defined before the venue branches so the key-mode epilogue (its additive
         # ``nav_mark`` / ``nav_mark_refusal`` fields) and plan 07 read them on every path.
         _mark_read_at: datetime | None = None
+        # Phase 177 DERIBITFLOWS (D-02, D-04): the at-instant prices of the Deribit flows the marks
+        # move into their mark day, read in the deribit branch while the exchange is still open and
+        # consumed at the apply seam (``native_flow_instants(at_instant_index=...)``). Empty unless
+        # the derive holds an INDEXED instant a mark moves.
+        _moved_flow_prices: MovedFlowPrices = MovedFlowPrices({}, frozenset())
+        # Why the prefetch above could not price a moved flow: a CLOSED reason token
+        # (``read_transient``, ``timeout``, and from this plan's second task ``rate_limited`` and
+        # ``store_fault``), captured inside the crawl so the failure never costs the day's mark and
+        # surfaced at the apply seam. ``None`` unless a read failed.
+        _moved_flow_price_failure: str | None = None
         _stored_nav_mark: StoredMark | None = None
         _nav_mark_refusal: str | None = None
         # Plan 15 (L4, D-16): Bybit/Binance only. ``read_marked_equity_usd``'s result, a tuple
@@ -5802,6 +5895,105 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # they are surfaced here for the DQ-02 terminus evidence gate (a no-op
             # for deribit — full_history has no retention cap → terminus is None).
             external_flows = _completeness.dated_external_flows
+            # ── Phase 177 DERIBITFLOWS (D-02, D-04): THE AT-INSTANT PRICE PREFETCH. ──────────
+            # A Deribit flow that a mark moves into its mark day is counted at the open of the
+            # 1-minute perpetual candle that contains it. The read needs the derive's own exchange
+            # client, which the ``finally`` below closes, so it is made here against the PREDICTED
+            # marks: the key's stored marks plus the mark this derive is about to write (its
+            # ``_mark_read_at`` day, unless an earlier row of that day already wins write-once).
+            # The apply seam re-checks coverage on the FINAL marks, so a prediction miss is a loud
+            # failure there, never the own-day amount. Every Deribit seam runs it. An expected
+            # read failure is captured below (``_moved_flow_price_failure``) so the day's mark is
+            # still written, and surfaces at the apply seam.
+            _raw_instants: list[FlowInstant] = list(native_ledger.flow_instants)
+            if _completeness.nav_twin_ledger is not None:
+                _raw_instants += list(_completeness.nav_twin_ledger.flow_instants)
+            if any(
+                classify_currency(
+                    _fi.currency, indexable=_completeness.indexable_currencies
+                ) is MarkBranch.INDEXED
+                for _fi in _raw_instants
+            ):
+                _pre_marks = await db_execute(
+                    lambda: read_key_marks(ctx.supabase, ctx.key_row["id"])
+                )
+                _predicted: list[tuple[str, datetime | None]] = [
+                    (_pm.mark_day, datetime.fromisoformat(_pm.marked_at)) for _pm in _pre_marks
+                ]
+                if _mark_read_at is not None:
+                    _own_day = mark_day_for(_mark_read_at).isoformat()
+                    if all(_pm.mark_day != _own_day for _pm in _pre_marks):
+                        _predicted.append((_own_day, _mark_read_at))
+                if wanted_moved_flows(
+                    _raw_instants, _predicted, _completeness.indexable_currencies
+                ):
+                    # W2: bounded by what is LEFT of the derive's budget, less the reserve that
+                    # keeps the mark write, the apply and the persist inside it. Never the fixed
+                    # per-crawl bound alone: this read runs after the full-history crawl.
+                    _prefetch_remaining = (
+                        float(TIMEOUT_PER_KIND.get(
+                            "derive_broker_dailies", _DERIVE_BUDGET_DEFAULT_S
+                        ))
+                        - (asyncio.get_running_loop().time() - _derive_start)
+                        - _DERIVE_POST_CRAWL_RESERVE_S
+                    )
+                    _prefetch_bound = min(_BROKER_CRAWL_TIMEOUT_S, _prefetch_remaining)
+                    # WR-02: the floor bounds the VENUE read only. The store is always read, so a
+                    # key whose moved-flow prices are all stored completes with zero chart calls; a
+                    # price still missing under the floor stays "timeout" at the coverage check.
+                    _read_venue = _prefetch_bound >= _MOVED_FLOW_PRICE_MIN_SECONDS
+                    if not _read_venue:
+                        _moved_flow_price_failure = "timeout"
+                        logger.warning(
+                            "derive_broker_dailies: deribit moved-flow price read not started "
+                            "(reason=timeout remaining_s=%.0f floor_s=%.0f)",
+                            _prefetch_remaining, _MOVED_FLOW_PRICE_MIN_SECONDS,
+                        )
+                    # D-05, Pitfall 2: an expected price failure is CAPTURED here, never
+                    # raised before the mark write. The apply seam surfaces it.
+                    try:
+                        _resolving = resolve_moved_flow_prices(
+                            ctx.exchange,
+                            ctx.supabase,
+                            ctx.key_row["id"],
+                            _raw_instants,
+                            _predicted,
+                            _completeness.indexable_currencies,
+                            read_venue=_read_venue,
+                        )
+                        # Below the floor the venue is not read, but the store still is, so that
+                        # read gets the floor as its bound: a hung store read must not hold the
+                        # derive past its budget or cost the day's mark.
+                        _moved_flow_prices = await asyncio.wait_for(
+                            _resolving,
+                            timeout=(
+                                _prefetch_bound if _read_venue
+                                else _MOVED_FLOW_PRICE_MIN_SECONDS
+                            ),
+                        )
+                    except (
+                        DeribitTransientReadError,
+                        asyncio.TimeoutError,
+                        ccxt.RateLimitExceeded,
+                        ccxt.DDoSProtection,
+                        FlowPriceStoreError,
+                    ) as _price_exc:
+                        if isinstance(_price_exc, (ccxt.RateLimitExceeded, ccxt.DDoSProtection)):
+                            # D-05: a last-attempt 429 reaches ``_stamp_429`` here, ONCE; the
+                            # outer ``except ccxt.RateLimitExceeded`` never sees it.
+                            await _stamp_429(ctx.supabase, ctx.key_row, _price_exc)
+                            _moved_flow_price_failure = "rate_limited"
+                        elif isinstance(_price_exc, FlowPriceStoreError):
+                            _moved_flow_price_failure = "store_fault"
+                        elif isinstance(_price_exc, asyncio.TimeoutError):
+                            _moved_flow_price_failure = "timeout"
+                        else:
+                            _moved_flow_price_failure = "read_transient"
+                        logger.warning(
+                            "derive_broker_dailies: deribit moved-flow price read failed "
+                            "(reason=%s error=%s)",
+                            _moved_flow_price_failure, type(_price_exc).__name__,
+                        )
             # Funding is inside the ledger settlement cash delta — count-once
             # (D-08). The native path has no flat realized-records list; realized/
             # funding are retained (empty) only for the downstream log lines.
@@ -7659,10 +7851,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     and not _key_writer_basis_pnl.empty
                 ):
                     _apply_flows = _iso_day_amounts(_composed_flows_usd)
+                    if venue == "deribit":
+                        _gate = _deribit_moved_flow_gate(
+                            native_ledger.flow_instants, _marks_in,
+                            _completeness.indexable_currencies,
+                            _moved_flow_prices, _moved_flow_price_failure, "key",
+                        )
+                        if isinstance(_gate, DispatchResult):
+                            return _gate
+                        # D-05: a STRUCTURAL no-data answer is a named permanent refusal on the
+                        # existing nav-marks road below, never a retry and never a price.
+                        _marks_refusal = _gate
                     _apply_instants = (
                         native_flow_instants(
                             native_ledger,
                             indexable_currencies=_completeness.indexable_currencies,
+                            at_instant_index=_moved_flow_prices.index,
                         )
                         if venue == "deribit"
                         else _event_flow_instants
@@ -7710,11 +7914,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         )
                         _marks_refusal = _MARK_ALLOCATED_NAV_UNRECONCILED
                     else:
+                        _gate = _deribit_moved_flow_gate(
+                            _twin_ledger.flow_instants, _marks_in,
+                            _completeness.indexable_currencies,
+                            _moved_flow_prices, _moved_flow_price_failure, "strategy",
+                        )
+                        if isinstance(_gate, DispatchResult):
+                            return _gate
+                        _marks_refusal = _gate
                         _apply_day_pnl = _iso_day_amounts(_twin_day_pnl)
                         _apply_flows = _iso_day_amounts(_twin_flows)
                         _apply_instants = native_flow_instants(
                             _twin_ledger,
                             indexable_currencies=_completeness.indexable_currencies,
+                            at_instant_index=_moved_flow_prices.index,
                         )
                         _apply_roll = "day_pnl"
             elif venue == "deribit":
@@ -7729,8 +7942,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         native_ledger, _completeness.indexable_currencies
                     )
                 )
+                _gate = _deribit_moved_flow_gate(
+                    native_ledger.flow_instants, _marks_in,
+                    _completeness.indexable_currencies,
+                    _moved_flow_prices, _moved_flow_price_failure, "strategy",
+                )
+                if isinstance(_gate, DispatchResult):
+                    return _gate
+                _marks_refusal = _gate
                 _apply_instants = native_flow_instants(
-                    native_ledger, indexable_currencies=_completeness.indexable_currencies
+                    native_ledger,
+                    indexable_currencies=_completeness.indexable_currencies,
+                    at_instant_index=_moved_flow_prices.index,
                 )
             else:
                 if venue == "mt5":
@@ -7782,9 +8005,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 _marks_refusal, venue, funding_label,
             )
             await _stamp_strategy_analytics_failed(
-                "This strategy's marked-to-market values could not be applied to its "
-                "return series, so its performance figures were not updated. The issue "
-                "has been reported to us and needs nothing from you.",
+                # SF-04: this refusal recurs on every derive until support acts, so it must not
+                # say the issue "needs nothing from you".
+                (
+                    "A deposit or withdrawal on this account could not be priced at its "
+                    "minute, so its daily returns are paused until support resolves it."
+                    if _marks_refusal == _MARK_FLOW_INDEX_UNAVAILABLE
+                    else "This strategy's marked-to-market values could not be applied to "
+                    "its return series, so its performance figures were not updated. The "
+                    "issue has been reported to us and needs nothing from you."
+                ),
                 detail=f"nav marks refused ({_marks_refusal})",
                 heal_series=False,
             )
@@ -7947,6 +8177,25 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             len(_applied_marks.mark_gap_days), "key" if is_key_mode else "strategy",
             funding_label,
         )
+        if venue == "deribit":
+            # D-01 (founder 2026-10-28): how many Deribit flows the marks moved, counts only. What
+            # a reader of this line needs: it is logged even at ``moved=0`` so a missing line is
+            # never read as zero; ``moved`` is CUMULATIVE over the key's mark history (every
+            # derive re-applies every mark) and ``on_last_mark`` is the nightly increment; a key
+            # is logged by its key-mode derive and again by the strategy-mode derive of any
+            # strategy on it, so read ``mode=key`` lines for a per-key count; a derive retry logs
+            # again; ``moved`` always equals ``at_instant + usd_family``, because the coverage
+            # check fails the derive first otherwise. No id, amount, minute or instrument, and
+            # not ``funding_label`` (it is the key or strategy id).
+            assert _marks_in is not None  # marks were applied, so they were all unit-matched
+            _moved_counts = moved_flow_counts(
+                _apply_instants, [(_mk.day, _mk.read_at) for _mk in _marks_in]
+            )
+            logger.info(
+                "derive_broker_dailies: deribit flows moved by marks (moved=%d at_instant=%d usd_family=%d on_last_mark=%d mode=%s)",
+                _moved_counts.moved, _moved_counts.at_instant, _moved_counts.usd_family,
+                _moved_counts.on_last_mark, "key" if is_key_mode else "strategy",
+            )
 
     async def _run_key_mode_compose_epilogue() -> None:
         # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
@@ -9539,6 +9788,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     )
     from services.deribit_ingest import (
         CurrencyEnumerationError,
+        DeribitTransientReadError,
         LedgerCompletenessError,
         LedgerTruncatedError,
         ScopeAuthError,
@@ -10036,6 +10286,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         if not closed and since <= label_day:
             member_trailing[seq] = since
 
+    def _log_member_flows_moved(
+        seq: int, valued_instants: Sequence[FlowInstant], marks_in: Sequence[MarkReadAt]
+    ) -> None:
+        """D-01 (founder 2026-10-28), composites: how many Deribit flows a member's marks moved,
+        counts only (``seq`` is the member's position, never an id), emitted even at zero so a
+        missing line is never read as zero. ``valued_instants`` are the instants handed to
+        ``apply_marks``; ``amount_prior_day`` is what tells an at-instant price from a USD-family
+        flow once every currency reads USD."""
+        counts = moved_flow_counts(valued_instants, marks_in)
+        logger.info(
+            "run_stitch_composite_job: deribit flows moved by marks (seq=%d moved=%d at_instant=%d usd_family=%d on_last_mark=%d)",
+            seq, counts.moved, counts.at_instant, counts.usd_family, counts.on_last_mark,
+        )
+
     async def _apply_member_marks(
         ctx: Any,
         seq: int,
@@ -10043,11 +10307,18 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         build_inputs: Callable[
             [], tuple[dict[str, float], dict[str, float] | None, Sequence[FlowInstant]]
         ],
+        *,
+        price_flows: Callable[[list[MarkReadAt]], Awaitable[None]] | None = None,
     ) -> pd.Series:
         """Return ``returns`` with this member key's stored marks applied, or unchanged when it
         has none that matter. ``build_inputs`` yields ``(flows by day, day P&L, flow instants)``
         and is called only when there is a mark to apply, so a member without marks makes no new
-        call and stays byte-identical. Raises ``MarkApplyRefusal`` (L3)."""
+        call and stays byte-identical. Raises ``MarkApplyRefusal`` (L3).
+
+        ``price_flows`` (Phase 177, Deribit members only) is awaited with the member's EXACT marks,
+        ``(mark day, read instant)``, after they are known and before ``build_inputs`` values the
+        flow instants, while the member's exchange is still open. Every ccxt member leaves it
+        ``None`` and is byte-identical."""
         key_id = ctx.key_row["id"]
         stored_marks = await db_execute(lambda: read_key_marks(ctx.supabase, key_id))
         window_end = _window_by_seq[seq][1]
@@ -10056,6 +10327,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         ]
         if not relevant:
             return returns
+        if price_flows is not None:
+            await price_flows(
+                [(mk.mark_day, datetime.fromisoformat(mk.marked_at)) for mk in relevant]
+            )
         flows_by_day, day_pnl, flow_instants = await asyncio.to_thread(build_inputs)
         marked = apply_marks(
             returns,
@@ -10130,6 +10405,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         completeness: Any,
         want_twin: bool,
         config: "ReturnsDenominatorConfig",
+        *,
+        at_instant_index: Mapping[tuple[str, int], float] | None = None,
     ) -> pd.Series:
         """Apply an ALLOCATED Deribit member's in-window marks (NAVMTM plan 17; D-14, Bug B, W1,
         W2, L3), the composite sibling of plan 16's single-strategy seam. ``returns`` is the
@@ -10165,7 +10442,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             return (
                 _iso_day_amounts(native_ledger_composed_flows(twin, indexable)),
                 _iso_day_amounts(native_ledger_day_pnl(twin, indexable)),
-                native_flow_instants(twin, indexable_currencies=indexable),
+                native_flow_instants(
+                    twin, indexable_currencies=indexable, at_instant_index=at_instant_index
+                ),
             )
 
         try:
@@ -10226,6 +10505,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             "(seq=%d marks=%d since=%s gaps=%d)",
             seq, len(marks), marked.marks_since, len(marked.mark_gap_days),
         )
+        _log_member_flows_moved(
+            seq, flow_instants, [(mk.mark_day, datetime.fromisoformat(mk.marked_at)) for mk in marks]
+        )
         return out
 
     async def _refuse_member_marks(seq: int, reason: str) -> DispatchResult:
@@ -10235,9 +10517,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         detail = f"nav marks refused (seq={seq}, {reason})"
         logger.error("run_stitch_composite_job: %s", detail)
         await _stamp_failed(
-            "This composite's marked-to-market values could not be applied to its return "
-            "series, so its performance figures were not updated. The issue has been "
-            "reported to us and needs nothing from you.",
+            # SF-04: this refusal recurs on every derive until support acts, so it must not say
+            # the issue "needs nothing from you".
+            (
+                "A deposit or withdrawal on one of this composite's accounts could not be "
+                "priced at its minute, so its daily returns are paused until support "
+                "resolves it."
+                if reason == _MARK_FLOW_INDEX_UNAVAILABLE
+                else "This composite's marked-to-market values could not be applied to its "
+                "return series, so its performance figures were not updated. The issue has "
+                "been reported to us and needs nothing from you."
+            ),
             detail=detail,
         )
         return DispatchResult(
@@ -10245,6 +10535,35 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             error_message=f"run_stitch_composite_job: {detail}",
             error_kind="permanent",
         )
+
+    async def _member_moved_flow_index(
+        ctx: Any,
+        raw_instants: Sequence[FlowInstant],
+        marks_in: list[MarkReadAt],
+        indexable: frozenset[str],
+    ) -> dict[tuple[str, int], float]:
+        """Phase 177 (D-04, D-05): the at-instant price index of every flow ``marks_in`` moves into
+        its mark day, for ONE composite Deribit member (plain or allocated), read on the member's
+        exchange while it is still open. ``marks_in`` are the member's EXACT marks, so no prediction
+        can miss. A structural no-data answer raises ``_MemberFlowIndexUnavailable`` (the composite
+        refuses by name). A 429, a transient read (``DeribitTransientReadError``), a store fault
+        (``FlowPriceStoreError``) and the per-crawl timeout are NOT caught: they take the arms the
+        composite already has (stamp and transient / re-raise and filed ``unknown`` / transient).
+        Never an own-day or fallback price."""
+        prices = await asyncio.wait_for(
+            resolve_moved_flow_prices(
+                ctx.exchange, ctx.supabase, ctx.key_row["id"], raw_instants, marks_in, indexable,
+            ),
+            timeout=_BROKER_CRAWL_TIMEOUT_S,
+        )
+        unpriced = unpriced_moved_flows(raw_instants, marks_in, indexable, prices)
+        if unpriced.no_data > 0:
+            raise _MemberFlowIndexUnavailable()
+        if unpriced.missing > 0:
+            raise DeribitTransientReadError(
+                "run_stitch_composite_job: member moved-flow price missing"
+            )
+        return prices.index
 
     async def _reconstruct_deribit(
         ctx: Any,
@@ -10318,21 +10637,52 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             # Deribit strategy. A NavReconstructionError here is the member's structural ledger
             # failure and takes the existing permanent arm.
             _indexable = completeness.indexable_currencies
+            # Phase 177 (D-04, D-05): the at-instant price of every flow a mark moves into its mark
+            # day. The member's marks are EXACT here (``_apply_member_marks`` hands them over with
+            # this exchange still open; the caller's ``finally`` closes it later), so there is no
+            # prediction to miss. The index is held for ``_deribit_apply_inputs``.
+            _member_flow_index: dict[tuple[str, int], float] = {}
+            _member_marks_in: list[MarkReadAt] = []
+            _member_valued: list[FlowInstant] = []
+
+            async def _price_member_flows(marks_in: list[MarkReadAt]) -> None:
+                _member_marks_in.extend(marks_in)
+                _member_flow_index.update(
+                    await _member_moved_flow_index(ctx, ledger.flow_instants, marks_in, _indexable)
+                )
 
             def _deribit_apply_inputs() -> tuple[
                 dict[str, float], dict[str, float] | None, list[FlowInstant]
             ]:
-                return (
-                    _iso_day_amounts(native_ledger_composed_flows(ledger, _indexable)),
-                    _iso_day_amounts(native_ledger_day_pnl(ledger, _indexable)),
-                    native_flow_instants(ledger, indexable_currencies=_indexable),
+                # Order matters: the instants are valued after the composed flows have passed the
+                # density contract on the same ledger (``native_flow_instants``' contract).
+                _flows = _iso_day_amounts(native_ledger_composed_flows(ledger, _indexable))
+                _pnl = _iso_day_amounts(native_ledger_day_pnl(ledger, _indexable))
+                _member_valued[:] = native_flow_instants(
+                    ledger, indexable_currencies=_indexable, at_instant_index=_member_flow_index
                 )
+                return (_flows, _pnl, _member_valued)
 
-            returns = await _apply_member_marks(ctx, mark_seq, returns, _deribit_apply_inputs)
+            returns = await _apply_member_marks(
+                ctx, mark_seq, returns, _deribit_apply_inputs, price_flows=_price_member_flows
+            )
+            if _member_marks_in:
+                # The hook ran, so this member applied marks (a member with none applies none).
+                _log_member_flows_moved(mark_seq, _member_valued, _member_marks_in)
         if allocated_mark_seq is not None and denominator_config is not None:
+            # Phase 177 (D-04, D-05): the NAV twin's moved flows are priced here, with the member's
+            # exact marks and its exchange still open, before the twin's instants are valued.
+            _twin_flow_index: dict[tuple[str, int], float] | None = None
+            if _alloc_marks and completeness.nav_twin_ledger is not None:
+                _twin_flow_index = await _member_moved_flow_index(
+                    ctx,
+                    completeness.nav_twin_ledger.flow_instants,
+                    [(mk.mark_day, datetime.fromisoformat(mk.marked_at)) for mk in _alloc_marks],
+                    completeness.indexable_currencies,
+                )
             returns = await _apply_allocated_member_marks(
                 allocated_mark_seq, returns, _alloc_marks, completeness, _member_wants_nav_twin,
-                denominator_config,
+                denominator_config, at_instant_index=_twin_flow_index,
             )
         _member_meta_out = dict(member_meta)
         # MED-01 (132 review): bridge the SMOOTHED-pass completeness's pre-retention
@@ -10915,9 +11265,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     mark_seq=_member_mark_seq,
                     allocated_mark_seq=_member_allocated_mark_seq,
                 )
-            except (MarkApplyRefusal, _MemberNavUnreconciled) as _mark_exc:
+            except (MarkApplyRefusal, _MemberNavUnreconciled, _MemberFlowIndexUnavailable) as _mark_exc:
                 # L3 (NAVMTM plan 09): see the ccxt arm. Only the cash pass applies marks, so the
-                # smoothed pass's structural re-raise below never meets this.
+                # smoothed pass's structural re-raise below never meets this. Phase 177 D-05: a
+                # member moved flow with no at-instant price refuses the composite by name too.
                 return await _refuse_member_marks(seq, _mark_exc.token)
             except asyncio.TimeoutError:
                 # WEDGE-01: a member crawl blew its per-crawl wait_for bound
@@ -10961,7 +11312,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     ),
                     error_kind="permanent",
                 )
-            except ccxt.RateLimitExceeded as exc:
+            except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as exc:
                 # M-1: every other exchange-touching handler stamps last_429_at on
                 # a 429 so the circuit breaker defers sibling jobs for this api_key
                 # during the exchange cooldown; the member crawl was the one

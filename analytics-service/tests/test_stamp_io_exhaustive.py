@@ -981,6 +981,16 @@ def _string_bound(node: Any) -> str:
     )
 
 
+def _string_bounds(node: Any) -> list[str]:
+    """Phase 177 (SF-04): a conditional message (``a if cond else b``) can hand either
+    branch to the stamp, so each branch is bounded on its own."""
+    import ast
+
+    if isinstance(node, ast.IfExp):
+        return _string_bounds(node.body) + _string_bounds(node.orelse)
+    return [_string_bound(node)]
+
+
 def _stamp_messages() -> tuple[list[str], int]:
     """Every message a terminal stamp can be handed, from the AST of
     ``services/job_worker.py``, plus the number of stamp call sites seen."""
@@ -999,7 +1009,7 @@ def _stamp_messages() -> tuple[list[str], int]:
         sites += 1
         arg = call.args[0]
         if not isinstance(arg, ast.Name):
-            messages.append(_string_bound(arg))
+            messages.extend(_string_bounds(arg))
             continue
         assert arg.id in _STAMP_NAME_SOURCES, (
             f"stamp call at line {call.lineno} passes the unlisted name {arg.id!r}; "
@@ -1030,7 +1040,7 @@ def _stamp_messages() -> tuple[list[str], int]:
                 and n.target.id == owner
             ]
         assert values, f"no value found for {arg.id!r} ({how} of {owner})"
-        messages.extend(_string_bound(v) for v in values)
+        messages.extend(m for v in values for m in _string_bounds(v))
     return messages, sites
 
 

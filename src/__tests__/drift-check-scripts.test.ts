@@ -5048,9 +5048,16 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // MERGE 2026-10-27 (Phase 171 READCEILING merged with origin/main 04f5568a9): both raises above moved from 24/373,
     // so the merged floor is 25/386 (the 171 file joined at 8 arms, the fan-out file is at 31), re-derived by
     // ci-anti-skip-gate.contract.test.ts on the merged tree.
+    // RAISED 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07), 25/386 -> 26/394.
+    // test_api_key_flow_prices.sql JOINED (an ordinary sql-tests gate: it posts nothing) and
+    // declares `ALL 8 ARMS EXECUTED`. MEASURED: ci-anti-skip-gate.contract.test.ts read 26
+    // sentinel-bearing files against the table's 25 (`expected [ ...(26) ] to deeply
+    // equal [ ...(25) ]`) and `expected 26 to be 25` against the floor; this pin read
+    // `expected 1 to be +0` once ci.yml carried SENTINEL_FLOOR=26. 386 + 8 = 394 is the
+    // table's own sum, which that test re-derives from the corpus.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=25", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=26", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5061,7 +5068,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=386", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=394", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

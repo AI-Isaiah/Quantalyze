@@ -1127,12 +1127,23 @@ def native_flow_instants(
     ledger: NativeLedger,
     *,
     indexable_currencies: frozenset[str],
+    at_instant_index: Mapping[tuple[str, int], float] | None = None,
 ) -> list[FlowInstant]:
     """The ledger's per-row flow instants valued the way ``native_composed_flows`` values a day,
     ``flowqty x same-day mark`` (USD family at 1.0), so a day's instants sum to that day's
     composed flow (NAVMTM D-23). Call it after ``native_composed_flows`` has succeeded on the
     same ledger: every day it values already passed the density contract there. A currency the
-    core skips as zero-value UNMARKABLE has no entry."""
+    core skips as zero-value UNMARKABLE has no entry.
+
+    ``at_instant_index`` (Phase 177 DERIBITFLOWS D-02, D-04) maps ``(CURRENCY, at_ms)`` to the
+    price a moved INDEXED flow is COUNTED at in the mark day it moves into: the open of the
+    ``{CCY}_USDC-PERPETUAL`` 1-minute candle that contains the flow. That is the perpetual's
+    traded price, not Deribit's index. An INDEXED instant with a key gets
+    ``amount_prior_day = qty x price``; ``amount`` stays ``qty x`` the own-day ledger mark, the
+    amount the day aggregate stored and so the amount that leaves the read day. A USD-family
+    instant never gets one, and a call without the keyword is unchanged. This function does not
+    check that every moved instant has a price: that coverage check is the caller's, because only
+    the caller knows the marks that decide which instants move."""
     out: list[FlowInstant] = []
     for fi in ledger.flow_instants:
         branch = classify_currency(fi.currency, indexable=indexable_currencies)
@@ -1140,5 +1151,10 @@ def native_flow_instants(
             out.append(fi._replace(currency="USD"))
         elif branch is MarkBranch.INDEXED:
             mark = ledger.marks[fi.currency].loc[pd.Timestamp(fi.day)]
-            out.append(fi._replace(amount=fi.amount * float(mark), currency="USD"))
+            valued = fi._replace(amount=fi.amount * float(mark), currency="USD")
+            if at_instant_index is not None:
+                price = at_instant_index.get((fi.currency.upper(), fi.at_ms))
+                if price is not None:
+                    valued = valued._replace(amount_prior_day=fi.amount * price)
+            out.append(valued)
     return out

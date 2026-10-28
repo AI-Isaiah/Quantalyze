@@ -66,6 +66,9 @@ Further rules
     as ``flow_moves_out``. For a USD flow the two are equal. A mark with no ``read_at``, or a
     flow with no instant, is not moved.
     This replaces the round-1 rule that skipped such a mark (review round 2 CR-01, CR-02, WR-01).
+    ``placed_flow_instants`` is the one statement of which flows a mark moves: ``apply_marks``
+    calls it, and so do the prefetch and the coverage check that price a moved Deribit flow at its
+    own instant (Phase 177), so the three can never disagree about what moved.
 11. ``marked_levels`` maps every USED mark day to its stored NAV; ``terminal`` is the last mark
     day and its NAV.
 12. An input that is not a well-formed mark or flow (a non-finite amount, marks out of
@@ -222,6 +225,21 @@ def _days_inclusive(first: date, last: date) -> list[date]:
     return [first + timedelta(days=k) for k in range((last - first).days + 1)]
 
 
+def placed_flow_instants(
+    flow_instants: Sequence[FlowInstant], mark_day: date, read_at: datetime | None
+) -> list[FlowInstant]:
+    """The instants rule 10 moves into ``mark_day``: those dated the read day (``mark_day + 1``)
+    and made at or before the mark's ``read_at``. A mark with no ``read_at`` moves nothing.
+
+    The one statement of the rule, shared by ``apply_marks`` and by the callers that must know
+    which flows a mark moves before it is applied (Phase 177)."""
+    if read_at is None:
+        return []
+    read_s = read_at.timestamp()
+    read_day = (mark_day + timedelta(days=1)).isoformat()
+    return [fi for fi in flow_instants if fi.day == read_day and fi.at_ms / 1000.0 <= read_s]
+
+
 def apply_marks(
     returns: pd.Series,
     flows_by_day: Mapping[str, float],
@@ -263,13 +281,7 @@ def apply_marks(
     moves: dict[date, float] = {}
     moves_out: dict[date, float] = {}
     for mark, md in zip(marks, mark_days):
-        if mark.read_at is None:
-            continue
-        read_s = mark.read_at.timestamp()
-        read_day = (md + timedelta(days=1)).isoformat()
-        placed = [
-            fi for fi in flow_instants if fi.day == read_day and fi.at_ms / 1000.0 <= read_s
-        ]
+        placed = placed_flow_instants(flow_instants, md, mark.read_at)
         moved_out = sum(_finite(fi.amount) for fi in placed)
         moved_in = sum(
             _finite(fi.amount if fi.amount_prior_day is None else fi.amount_prior_day)
@@ -367,4 +379,5 @@ __all__ = [
     "MarkApplyRefusal",
     "MarkedSeries",
     "apply_marks",
+    "placed_flow_instants",
 ]

@@ -1313,7 +1313,14 @@
 // time: mean 5.0s over 811 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_allocator_trade_reads.sql:
 // sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`. The stale-low direction was observed first: `RATCHET STALE: 81 of 108 gate files
 // are now annotated but FILES_FLOOR is still 80.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 81;
+// RAISED 81 -> 82 2026-10-28 (Phase 177 DERIBITFLOWS plan 07): +1 file, test_api_key_flow_prices.sql (migration 20261101120000, eight sections,
+// thirteen annotated arms: arms 5 and 7 carry sub-identities 5a/5b and 7a-7e), so 82 of 109 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`,
+// no file edited during it, exit 0: `scope: FULL 82/82 annotated files`, `lane-concurrency: 4`, `coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`,
+// `lane-invocations: 829 ... plus 82 baseline / 82 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+// `per-arm lane time: mean 1.7s over 829 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_api_key_flow_prices.sql:
+// sections 8 / judged 13 / annotated 13 / waived 0 / biting 13`. The stale-low direction was observed first: `RATCHET STALE: 82 of 109 gate files
+// are now annotated but FILES_FLOOR is still 81. Raise FILES_FLOOR in scripts/mutation-floors.mjs to 82.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 82;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3320,7 +3327,12 @@ export const FILES_FLOOR = 81;
 // `node scripts/mutation-runner/run.mjs` on the merged tree: `scope: FULL 81/81 annotated files`, `coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`,
 // `lane-invocations: 816 ... plus 81 baseline / 81 restore leg(s)` (the two tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0; per-file
 // `test_allocator_trade_reads.sql: ... biting 8` and `test_ledger_refresh_fanout.sql: ... biting 37`. FILES_FLOOR stays 81. WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 816;
+// RAISED 816 -> 829 2026-10-28 (Phase 177 DERIBITFLOWS plan 07): +13 biting arms, the thirteen annotated arms of the NEW gate test_api_key_flow_prices.sql
+// (migration 20261101120000; its sentinel counts eight sections, the runner counts thirteen twins). MEASURED by the same single run recorded under
+// FILES_FLOOR: `arms: 829/829/0`, `biting: 829`, `lane-invocations: 829`; per-file `test_api_key_flow_prices.sql: sections 8 / judged 13 / annotated 13 / waived 0 /
+// biting 13`. The stale-low direction was observed first: `The corpus declares 829 twin(s) of which 0 are waivers, so a green run bites 829. ARMS_FLOOR is 816.`
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 829;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

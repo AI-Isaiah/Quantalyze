@@ -91,6 +91,54 @@ def test_a_days_deribit_instants_add_up_to_the_days_composed_flow() -> None:
     assert {fi.currency for fi in valued} == {"USD"}
 
 
+def test_at_instant_index_prices_only_a_moved_indexed_instant() -> None:
+    """Phase 177 DERIBITFLOWS D-02, D-04. ``at_instant_index`` is keyed ``(CCY, at_ms)`` and sets
+    ``amount_prior_day`` on an INDEXED instant only; ``amount`` stays qty x the own-day ledger
+    mark (what leaves the read day). Hand arithmetic, own-day mark 52_000.0, candle open 51_000.0:
+      0.5 BTC with a key     -> amount 0.5 x 52_000.0 = 26_000.0, amount_prior_day 0.5 x 51_000.0 = 25_500.0
+      0.2 BTC with no key    -> amount 0.2 x 52_000.0 = 10_400.0, amount_prior_day None
+      100.0 USDC with a key  -> amount 100.0, amount_prior_day None (a USD-family flow is never repriced)"""
+    from services.native_nav import NativeLedger, native_flow_instants
+
+    days = pd.date_range("2026-03-01", "2026-03-05", freq="D")
+    keyed = _ms(2026, 3, 3, 0, 5)
+    unkeyed = _ms(2026, 3, 3, 9, 0)
+    usdc = _ms(2026, 3, 3, 0, 2)
+    ledger = NativeLedger(
+        native_pnl={"BTC": pd.Series([0.001] * 5, index=days)},
+        terminal_native_equity={"BTC": 1.0},
+        marks={"BTC": pd.Series([50_000.0, 51_000.0, 52_000.0, 53_000.0, 54_000.0], index=days)},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+        flow_instants=(
+            FlowInstant(keyed, "2026-03-03", 0.5, "BTC"),
+            FlowInstant(unkeyed, "2026-03-03", 0.2, "BTC"),
+            FlowInstant(usdc, "2026-03-03", 100.0, "USDC"),
+        ),
+    )
+    indexable = frozenset({"BTC"})
+
+    got = native_flow_instants(
+        ledger,
+        indexable_currencies=indexable,
+        at_instant_index={("BTC", keyed): 51_000.0, ("USDC", usdc): 99_999.0},
+    )
+
+    assert [(fi.at_ms, fi.currency) for fi in got] == [
+        (keyed, "USD"), (unkeyed, "USD"), (usdc, "USD"),
+    ]
+    assert got[0].amount == pytest.approx(26_000.0)
+    assert got[0].amount_prior_day == pytest.approx(25_500.0)
+    assert got[1].amount == pytest.approx(10_400.0)
+    assert got[1].amount_prior_day is None
+    assert got[2].amount == pytest.approx(100.0)
+    assert got[2].amount_prior_day is None
+    assert native_flow_instants(ledger, indexable_currencies=indexable) == native_flow_instants(
+        ledger, indexable_currencies=indexable, at_instant_index=None
+    )
+
+
 def test_ccxt_instants_add_up_to_the_day_and_change_nothing_else() -> None:
     """One instant per surviving row, valued as the row enters its day (a withdrawal's fee
     included), and the returned flows are identical with or without the out-list."""

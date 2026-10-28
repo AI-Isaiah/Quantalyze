@@ -21,7 +21,8 @@ one (D-06) and the test controls every mark the apply sees.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+import logging
+from collections.abc import Callable, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -47,6 +48,7 @@ from tests.test_mt5_derive_branch import (
     _scaled_deals,
 )
 from tests.test_mt5_derive_branch import _build_ctx as _mt5_build_ctx
+from tests.test_flow_price_store import FlowPricesTable, route_flow_prices
 from tests.test_nav_marks_writer import (  # noqa: F401  (autouse: re-binds the real writer)
     FakeDb,
     _Exec,
@@ -439,6 +441,9 @@ class Run:
     flows: dict[str, float]
     marks: dict[str, float]
     strategy_id: str = STRATEGY
+    #: The marked run's scripted chart and flow-price store (Phase 177), when the scenario has them.
+    chart: Any = None
+    table: FlowPricesTable | None = None
 
 
 def rolled_back_levels(
@@ -716,6 +721,9 @@ async def test_mt5_deposit_made_before_the_read_is_counted_in_the_mark_day(
 async def run_deribit(
     *, marks: dict[str, float] | None = None, flows: dict[str, float] | None = None,
     dense_flows: bool = False, instants: tuple[FlowInstant, ...] = (),
+    ledger_marks: dict[str, pd.Series] | None = None, chart: Callable[[], Any] | None = None,
+    flow_prices: FlowPricesTable | None = None, marked_run_patches: list[Any] | None = None,
+    mark_read_at: dict[str, str] | None = None,
 ) -> Run:
     """Deribit on the NAV path (no returns_denominator_config, so not ``_returns_are_allocated``).
     The realized terminal, the day P&L and the composed flows come from the cash-pass ledger,
@@ -728,7 +736,16 @@ async def run_deribit(
 
     ``dense_flows`` hands the apply a composed-flow series with a 0.0 on every NAV day, which is
     the shape ``native_ledger_composed_flows`` really returns; ``instants`` are the ledger's
-    per-row flow instants (D-23)."""
+    per-row flow instants (D-23).
+
+    Phase 177 (DERIBITFLOWS plan 05) keywords, all defaulting to today's behaviour: ``ledger_marks``
+    is the stub ledger's per-currency day marks (what ``native_flow_instants`` values a non-USD
+    instant at on its own day); ``chart`` is a FACTORY of the scripted
+    ``get_tradingview_chart_data``, called once per derive run (the unmarked baseline run also
+    predicts its own mark and may read the chart, so each run needs its own script); ``flow_prices``
+    is the marked run's price store (the baseline run gets a fresh one); ``marked_run_patches``
+    apply to the marked run only, after the base patches; ``mark_read_at`` maps a mark day to the
+    ISO ``marked_at`` that replaces the seeded 00:10Z one."""
     from dataclasses import replace
 
     from tests.test_mtm_single_key import (
@@ -748,13 +765,21 @@ async def run_deribit(
     )
     composed.update(use_flows)
 
-    async def _once(db: StrategyDb, *, apply_nothing: bool) -> tuple[Any, dict[str, Any]]:
+    async def _once(
+        db: StrategyDb, *, apply_nothing: bool, table: FlowPricesTable,
+        extra_patches: list[Any],
+    ) -> tuple[Any, dict[str, Any], Any]:
         ctx, capture = _ctx(strategy_row={"id": STRATEGY, "user_id": USER, "asset_class": "crypto"})
         ctx.key_row = {"id": KEY, "user_id": USER, "exchange": "deribit"}
-        route_csv(route_marks(ctx, db), db)
+        scripted = chart() if chart is not None else None
+        if scripted is not None:
+            ctx.exchange.public_get_get_tradingview_chart_data = scripted
+        route_flow_prices(route_csv(route_marks(ctx, db), db), table)
         if not apply_nothing:
             for day, nav in use_marks.items():
                 seed_mark(db, day, nav, venue="deribit", open_pnl=nav - 1000.0, native_unit=None)
+                if mark_read_at and day in mark_read_at:
+                    db.marks[(KEY, day)]["marked_at"] = mark_read_at[day]
         state = DeribitNativeAccountState(
             native_equity={"BTC": 0.02}, native_upnl={"BTC": 0.001},
             collapsed_equity_usd=1120.0, collapsed_upnl_usd=120.0,
@@ -767,7 +792,10 @@ async def run_deribit(
             ctx, key_mode=False,
             ledger_mock=AsyncMock(
                 return_value=(
-                    replace(_stub_native_ledger(), flow_instants=instants),
+                    replace(
+                        _stub_native_ledger(), flow_instants=instants,
+                        **({"marks": ledger_marks} if ledger_marks is not None else {}),
+                    ),
                     _report(has_option_activity=False),
                 )
             ),
@@ -777,6 +805,12 @@ async def run_deribit(
             state_spy=AsyncMock(return_value=state),
         ) + [
             patch("services.job_worker._utc_now", new=MagicMock(return_value=at_0010("2026-03-09"))),
+            # The store calls run in order on the test thread, like the stand-in _base_patches
+            # gives services.job_worker.db_execute.
+            patch(
+                "services.deribit_flow_prices.db_execute",
+                new=AsyncMock(side_effect=lambda fn: fn()),
+            ),
             patch(
                 "services.broker_dailies.native_ledger_realized_terminal",
                 new=MagicMock(return_value=(pd.Timestamp("2026-03-05"), 1000.0)),
@@ -792,18 +826,25 @@ async def run_deribit(
                 new=MagicMock(return_value=series(composed)),
             ),
             *_no_marks_read(apply_nothing),
+            *extra_patches,
         ]
         with _drb_apply(patches):
             result = await run_derive_broker_dailies_job(
                 {"id": "j-drb", "kind": "derive_broker_dailies", "strategy_id": STRATEGY}
             )
-        return result, capture
+        return result, capture, scripted
 
     db = StrategyDb()
-    result, capture = await _once(db, apply_nothing=False)
+    table = flow_prices if flow_prices is not None else FlowPricesTable()
+    result, capture, marked_chart = await _once(
+        db, apply_nothing=False, table=table, extra_patches=marked_run_patches or []
+    )
     base_db = StrategyDb()
-    await _once(base_db, apply_nothing=True)
-    return Run(result, capture, db, db.rows(), base_db.rows(), use_flows, use_marks)
+    await _once(base_db, apply_nothing=True, table=FlowPricesTable(), extra_patches=[])
+    return Run(
+        result, capture, db, db.rows(), base_db.rows(), use_flows, use_marks,
+        chart=marked_chart, table=table,
+    )
 
 
 @pytest.mark.asyncio
@@ -846,6 +887,192 @@ async def test_deribit_deposit_made_before_the_read_is_counted_in_the_mark_day()
     )
     assert_marks_were_applied(run, "2026-03-06")
     assert run.rows["2026-03-08"] == pytest.approx(20.0 / 1100.0, abs=1e-12)
+
+
+# ---- Deribit moved flows (Phase 177 DERIBITFLOWS plan 05) ------------------------------
+
+def _ms(*args: int) -> int:
+    return int(datetime(*args, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def scripted_chart(*items: Any) -> Callable[[], Any]:
+    """A factory of a scripted ``get_tradingview_chart_data`` (``run_deribit`` calls it once per
+    derive run). Imported at call time: the roundtrip module imports this one."""
+    from tests.test_nav_marks_compose_roundtrip import _ScriptedChart
+
+    return lambda: _ScriptedChart(list(items))
+
+
+def candles(*minutes_and_opens: tuple[int, float]) -> dict[str, Any]:
+    return {"result": {
+        "status": "ok",
+        "ticks": [m for m, _ in minutes_and_opens],
+        "open": [o for _, o in minutes_and_opens],
+    }}
+
+
+def concurrent_writer_marks(hidden_day: str) -> list[Any]:
+    """A concurrent writer stored ``hidden_day``'s mark after the prefetch read the marks and
+    before the apply seam reads them: ``services.job_worker.read_key_marks`` hides that day until
+    the derive's exchange has closed (the exchange closes after the prefetch and before the seam's
+    read), then delegates to the real reader. Keyed on the close, not on a call count, because the
+    allocated path also reads the marks early. Patch these AFTER ``_base_patches`` so the close
+    stand-in here replaces the base one."""
+    from services.nav_marks import read_key_marks as real_read_key_marks
+
+    closed: list[bool] = []
+
+    def _read(supabase: Any, key: str) -> Any:
+        stored = real_read_key_marks(supabase, key)
+        return stored if closed else [m for m in stored if m.mark_day != hidden_day]
+
+    async def _close(_exchange: Any) -> None:
+        closed.append(True)
+
+    return [
+        patch("services.job_worker.read_key_marks", new=MagicMock(side_effect=_read)),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock(side_effect=_close)),
+    ]
+
+
+_STRATEGY_BTC_LEDGER = {"BTC": series({"2026-03-08": 100_000.0, "2026-03-09": 105_000.0})}
+_STRATEGY_BTC_MINUTE = _ms(2026, 3, 9, 0, 5)
+_STRATEGY_BTC_CANDLES = candles(
+    (_STRATEGY_BTC_MINUTE - 60_000, 100_400.0), (_STRATEGY_BTC_MINUTE, 100_500.0),
+    (_STRATEGY_BTC_MINUTE + 60_000, 100_600.0),
+)
+_STRATEGY_MOVED_MARKS = {"2026-03-06": 1050.0, "2026-03-08": 1140.0}
+_STRATEGY_MOVED_FLOWS = {"2026-03-07": 50.0, "2026-03-09": 21.0}
+
+
+@pytest.mark.asyncio
+async def test_deribit_strategy_moved_btc_flow_priced_at_the_instant_price() -> None:
+    """Phase 177 D-04 on the strategy-mode derive. A 0.0002 BTC deposit made at 00:05:20Z on 03-09,
+    before the 00:10Z read of the 03-08 mark, is inside that mark's wallet. The ledger's own-day
+    mark for 03-09 is 105000.0 (what the day aggregate stores, 0.0002 x 105000.0 = 21.0, and what
+    leaves 03-09). The deposit is COUNTED in 03-08 at the open of the 1-minute BTC_USDC-PERPETUAL
+    candle that contains it (00:05, open 100500.0; 00:04 and 00:06 open 100400.0 and 100600.0, so
+    an adjacent-candle rule is distinguishable):
+      counted in 03-08:  0.0002 x 100500.0 = 20.1
+      base = level(03-06) 1050.0 + flow(03-07) 50.0 = 1100.0
+      r(03-08) = (1140.0 - 1100.0 - 20.1) / 1100.0 = 19.9 / 1100.0
+    The old own-day pricing counts 0.0002 x 105000.0 = 21.0 and stores 19.0 / 1100.0."""
+    run = await run_deribit(
+        marks=_STRATEGY_MOVED_MARKS, flows=_STRATEGY_MOVED_FLOWS, dense_flows=True,
+        instants=(FlowInstant(_ms(2026, 3, 9, 0, 5, 20), "2026-03-09", 0.0002, "BTC"),),
+        ledger_marks=_STRATEGY_BTC_LEDGER, chart=scripted_chart(_STRATEGY_BTC_CANDLES),
+    )
+    assert_marks_were_applied(run, "2026-03-06")
+    assert run.rows["2026-03-08"] == pytest.approx(19.9 / 1100.0, abs=1e-12)
+    assert len(run.chart.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_deribit_strategy_moved_flow_no_data_refuses_by_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-05 on the strategy-mode seam. The oracle's scenario with the chart answering ``no_data`` in
+    both runs. The unmarked baseline run applies no mark, so no coverage check runs there and it
+    stays DONE. The marked run takes the nav-marks refusal road with the token and nothing else:
+    FAILED permanent, one chart call (a structural answer is not retried), no csv write, no
+    flow-price row."""
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        run = await run_deribit(
+            marks=_STRATEGY_MOVED_MARKS, flows=_STRATEGY_MOVED_FLOWS, dense_flows=True,
+            instants=(FlowInstant(_ms(2026, 3, 9, 0, 5, 20), "2026-03-09", 0.0002, "BTC"),),
+            ledger_marks=_STRATEGY_BTC_LEDGER,
+            chart=scripted_chart({"result": {"status": "no_data"}}),
+        )
+    assert run.result.outcome == DispatchOutcome.FAILED, run.result.error_message
+    assert run.result.error_kind == "permanent"
+    assert run.result.error_message == (
+        "derive_broker_dailies: nav marks refused (mark_flow_index_unavailable)"
+    )
+    assert len(run.chart.calls) == 1
+    assert run.table is not None and run.table.rows == {}
+    assert_refusal_cost_nothing(run.db, run.capture, {}, "mark_flow_index_unavailable", caplog)
+    assert_flow_index_refusal_copy(failed_stamps(run.capture)[0]["computation_error"])
+
+
+@pytest.mark.asyncio
+async def test_deribit_strategy_moved_flow_prediction_miss_is_a_retry() -> None:
+    """D-05 on the strategy-mode seam, Pitfall 3. A concurrent writer stored the 03-08 mark (read at
+    00:20:00Z on 03-09) after the prefetch read the marks. The prefetch saw only 03-06 and predicted
+    THIS derive's own read at 00:10:30Z, which does not place the 00:15:00Z BTC deposit, so nothing
+    was read. The write-once insert loses, the stored 00:20 row is the mark, and the FINAL marks do
+    place the deposit: the coverage check turns that into a named ``prediction_miss`` retry with no
+    chart call and nothing written. A DONE would be the own-day price bug."""
+    run = await run_deribit(
+        marks=_STRATEGY_MOVED_MARKS, flows=_STRATEGY_MOVED_FLOWS, dense_flows=True,
+        instants=(FlowInstant(_ms(2026, 3, 9, 0, 15), "2026-03-09", 0.0002, "BTC"),),
+        ledger_marks=_STRATEGY_BTC_LEDGER, chart=scripted_chart(),
+        mark_read_at={"2026-03-08": "2026-03-09T00:20:00+00:00"},
+        marked_run_patches=concurrent_writer_marks("2026-03-08"),
+    )
+    assert run.result.outcome == DispatchOutcome.FAILED, run.result.error_message
+    assert run.result.error_kind == "transient"
+    assert "reason=prediction_miss" in run.result.error_message
+    assert run.chart.calls == []
+    assert run.db.csv_upserts == [] and run.db.csv_deletes == []
+    assert not [p for n, p, _ in run.capture["upserts"] if n == "strategy_analytics"]
+
+
+def moved_flows_log_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Every INFO record the D-01 counts line produced."""
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.INFO and r.getMessage().startswith(
+            "derive_broker_dailies: deribit flows moved by marks"
+        )
+    ]
+
+
+def test_moved_flow_counts_splits_the_flows_each_mark_moves() -> None:
+    """D-01. Two marks, 03-08 (read 00:10Z on 03-09) and 03-10 (read 00:10Z on 03-11). The VALUED
+    instants (every Deribit currency reads USD after valuation, so ``amount_prior_day`` is the one
+    marker of an at-instant price): a USD-family deposit at 00:05Z on 03-09 (moved by the 03-08
+    mark), a BTC deposit valued at its candle open at 00:05:20Z on 03-11 (moved by the 03-10 mark,
+    the last), and a deposit at 00:20Z on 03-11, after that read, which no mark moves.
+    Expected: moved 2, at_instant 1, usd_family 1, on_last_mark 1."""
+    from services.deribit_flow_prices import MovedFlowCounts, moved_flow_counts
+
+    instants = [
+        FlowInstant(_ms(2026, 3, 9, 0, 5), "2026-03-09", 20.0),
+        FlowInstant(_ms(2026, 3, 11, 0, 5, 20), "2026-03-11", 51.0, amount_prior_day=50.5),
+        FlowInstant(_ms(2026, 3, 11, 0, 20), "2026-03-11", 30.0),
+    ]
+    marks = [
+        ("2026-03-08", datetime(2026, 3, 9, 0, 10, tzinfo=timezone.utc)),
+        ("2026-03-10", datetime(2026, 3, 11, 0, 10, tzinfo=timezone.utc)),
+    ]
+    assert moved_flow_counts(instants, marks) == MovedFlowCounts(2, 1, 1, 1)
+
+
+def test_moved_flow_counts_is_all_zero_without_marks() -> None:
+    from services.deribit_flow_prices import MovedFlowCounts, moved_flow_counts
+
+    instants = [FlowInstant(_ms(2026, 3, 9, 0, 5), "2026-03-09", 20.0)]
+    assert moved_flow_counts(instants, []) == MovedFlowCounts(0, 0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_deribit_flows_moved_log_strategy_mode(caplog: pytest.LogCaptureFixture) -> None:
+    """D-01 on the strategy-mode derive, the oracle scenario of
+    ``test_deribit_strategy_moved_btc_flow_priced_at_the_instant_price``: one BTC deposit moved by
+    the last (03-08) mark, priced at its candle open. The one line carries counts and the closed
+    mode word only, never the strategy id or the key id."""
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        await run_deribit(
+            marks=_STRATEGY_MOVED_MARKS, flows=_STRATEGY_MOVED_FLOWS, dense_flows=True,
+            instants=(FlowInstant(_ms(2026, 3, 9, 0, 5, 20), "2026-03-09", 0.0002, "BTC"),),
+            ledger_marks=_STRATEGY_BTC_LEDGER, chart=scripted_chart(_STRATEGY_BTC_CANDLES),
+        )
+    assert moved_flows_log_lines(caplog) == [
+        "derive_broker_dailies: deribit flows moved by marks "
+        "(moved=1 at_instant=1 usd_family=0 on_last_mark=1 mode=strategy)"
+    ]
+    assert STRATEGY not in moved_flows_log_lines(caplog)[0]
+    assert KEY not in moved_flows_log_lines(caplog)[0]
 
 
 # ---- sFOX -------------------------------------------------------------------------------
@@ -1097,6 +1324,15 @@ def assert_refusal_cost_nothing(
     assert any(
         r.levelname == "ERROR" and f"reason={token}" in r.getMessage() for r in caplog.records
     )
+
+
+def assert_flow_index_refusal_copy(text: str) -> None:
+    """SF-04. This refusal recurs on every derive until support acts, so its stamped copy must not
+    tell the account holder the issue "needs nothing from you"; it says what happened and that the
+    daily returns are paused until support resolves it."""
+    assert "needs nothing from you" not in text
+    assert "could not be priced at its minute" in text
+    assert "paused until support resolves it" in text
 
 
 @pytest.mark.asyncio
