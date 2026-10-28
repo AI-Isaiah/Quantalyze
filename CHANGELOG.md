@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.7.1] - 2026-10-28 — records: close REBUILDGATES 173; book BYBITFUNDING 180
+
+### Notes
+- Phase 173 REBUILDGATES is closed, with verification passed and SC-2 routed. The code shipped as v0.133.7.0 (#1143); this entry lands plan 03's post-deploy record. The full deployed probe ran once on the production backfill worker on 2026-10-28, about 12:15Z to 13:38Z, at main 17bfd004c, through a temporary start command applied with `railway redeploy --from-source` (founder: "Yes, after deploy (Recommended)"). The start command is restored to `python -m main_worker` and that deployment reached SUCCESS. `import-check: 0 16 True True True True`, `probe-exit: 1` (expected while a4 is refused). Read-only: nothing was enqueued and nothing was written to any database.
+- Main CI on 17bfd004c first went red on `frontend-local-stack` with an edge-runtime 502 while the local stack booted. That is infrastructure, not the phase's code; the re-run was green, and the deploy followed it.
+- SC-1 is met. `okx-order: ok` with `readings=1 members_with_trades=1 violations=0 passes_ended_full=0 failure_class=none`. The reading came from a4's refusal arm, the phase's root-cause fix, while a4 itself stays refused `anchor_skipped_implausible` (`chain_break`, Phase 179).
+- SC-2 is NOT met, and the founder routed it. a6's read completed (203467 trades in 1050 s) and its transfer read found 0 deposits and 0 withdrawals at every age, inside the window and older than 365 days, while its oldest fill is 180 to 364 days old. A per-kind 0 is not a depth finding: the rebuild's Bybit transfer read is on-chain only, and a6 was evidently funded another way. The probe's gate reads `bybit-transfers: unmeasured (a6)`; a1, a2, a3 and a5 were refused at selection and are named on `bybit-transfers-unread:`. Founder 2026-10-28: "Record, book follow-up (Recommended)". Plan 03's step-8 rule would have printed `sc2-met: yes` because the read reached the transfer fetch; the stricter `no` was kept and the SUMMARY records it as a deviation.
+- SC-3 is met. Founder 2026-10-28: "None now (Recommended)". `rebuilds-enqueued: 0`. a4 waits on Phase 179 OKXBILLSCHAIN (then 178 OKXREWRITE), a6 on Phase 180.
+- Why `passed` with SC-2 routed: Phase 172 closed the same way when its SC-3 outcome did not match the plan. The verification report states the difference plainly (172's criterion asked only for the outcome to be recorded; this one asks for the depth to be measured) and rests `passed` on the measuring code having shipped and run to a complete read, the gap being a missing data source, and the founder's explicit routing to a booked phase. Nothing reads the Bybit gate as open.
+- Plan 03's GATES_OK verify was tightened before the SUMMARY was written, for the four surviving review findings (R4-SFH-1, R4-SFH-2, R4 WR-01, R4 WR-02). It now pins the pasted record count to the summary's `accounts` with no repeated label, pins the unread labels to exactly the not-ok-selection records with no duplicate, matches the a4 and a6 labels to their record shapes, matches every `okx-order-reading:` field to the records, refuses `sc2-met: yes` over an incomplete a6 read, and requires every evidence line to name an applicable label. Each new check was shown RED on a planted defect. The evidence values are still operator-copied and shape-checked only. GATES_OK and DECISION_OK both print.
+- Phase 180 BYBITFUNDING is booked (data integrity, depends on 173): read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured, then let the founder decide a6's rebuild on that reading.
+- TODOS.md:
+  - `167.2.1.1.2.1-OKX-ORDER-UNMEASURED` is CLOSED 2026-10-28 on its own condition: readings (1) equal the OKX members that read trades (1), with 0 violations.
+  - `167.2.1.1.2.1-BYBIT-TRANSFER-DEPTH-UNMEASURED` gets the dated reading and stays OPEN, now owned by Phase 180; under D-02 a 0 keeps the gate shut.
+  - `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE` gets the dated `a4-anchor:` reading; Phase 179 still owns it.
+  - A new `## Phase 173 (REBUILDGATES) — routed items` section books `173-BYBIT-TRANSFERS-ON-CHAIN-ONLY` (the on-chain-only, single-page transfer read, owned by 180) and `173-BYBIT-HISTORY-REBUILD-HELD` (a6 is not rebuilt).
+- ROADMAP lists 173's three plans and outcome, ticks it complete, and adds 180. STATE records the close, keeps NAVMTM, MARKSOURCE and 175 as shipped but not closed and 177 and 179 as in progress, and re-derives `progress:`. 173's UAT items are closed.
+
 ## [0.133.7.0] - 2026-10-28 — REBUILDGATES: the allocator history probe measures OKX fills ordering on a refused member and Bybit transfer depth per kind
 
 ### Root cause
