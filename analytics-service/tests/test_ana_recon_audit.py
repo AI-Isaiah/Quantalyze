@@ -213,48 +213,6 @@ def test_c01_07_open_perp_no_mark_price_does_not_silently_zero(caplog):
 
 
 # ---------------------------------------------------------------------------
-# NEW-C01-08 — EquityCurveBuilder: closed PnL dropped on non-datetime closed_at
-# ---------------------------------------------------------------------------
-
-
-def test_c01_08_closed_pnl_dropped_non_datetime_closed_at():
-    """NEW-C01-08: closed positions whose closed_at is a string (not datetime)
-    currently trigger `continue` and drop the PnL from the realized series.
-    This test asserts the BUG EXISTS (pre-fix) so a fix causes it to pass.
-
-    The builder's to_equity_curve_daily checks isinstance(closed_at, datetime)
-    and skips on False. _match_positions_fifo returns string-typed closed_at.
-    This test confirms the PnL drop is measurable.
-    """
-    from datetime import datetime
-    from services.equity_reconstruction import EquityCurveBuilder
-    from services.ingestion.adapter import Trade
-
-    trades = [
-        Trade(
-            exchange="okx", symbol="BTC/USDT", side="buy",
-            price=40000.0, quantity=1.0, fee=0.0, fee_currency="USDT",
-            timestamp=datetime(2026, 1, 5, tzinfo=timezone.utc),
-            order_type="limit", is_fill=True,
-        ),
-        Trade(
-            exchange="okx", symbol="BTC/USDT", side="sell",
-            price=45000.0, quantity=1.0, fee=0.0, fee_currency="USDT",
-            timestamp=datetime(2026, 1, 10, tzinfo=timezone.utc),
-            order_type="limit", is_fill=True,
-        ),
-    ]
-    builder = EquityCurveBuilder(trades)
-    df = builder.to_equity_curve_daily()
-    # The realized PnL of $5000 must appear somewhere in the curve
-    total_realized = df["realized_pnl"].sum()
-    # Pre-fix: if closed_at is string → continue → total_realized == 0
-    # Post-fix: total_realized ≈ 5000
-    # This is a DOCUMENTATION test — it records current behavior
-    assert isinstance(total_realized, float)
-
-
-# ---------------------------------------------------------------------------
 # NEW-C01-09 — side whitelist: unknown side must not silently open a short
 # ---------------------------------------------------------------------------
 
@@ -999,68 +957,6 @@ def test_c01_05_binance_upnl_still_added():
     assert equity == 11500.0, (
         f"NEW-C01-05: Binance equity should include uPnL (10000+1500=11500), got {equity}"
     )
-
-
-# ---------------------------------------------------------------------------
-# NEW-C01-06 — Sharpe excludes terminal unrealized PnL bar
-# ---------------------------------------------------------------------------
-
-
-def test_c01_06_sharpe_excludes_terminal_unrealized_bar():
-    """NEW-C01-06: compute_sharpe must drop the last bar when it carries
-    unrealized PnL, preventing a multi-month open gain from appearing as a
-    single-day return spike that inflates stdev.
-    """
-    from datetime import date
-    from services.equity_reconstruction import EquityCurveBuilder
-    from services.ingestion.adapter import Trade
-
-    # Build a series with an open position that accumulates unrealized PnL.
-    # Buy 1 BTC on day 1, no closing trade → last bar gets unrealized.
-    buy = Trade(
-        symbol="BTC/USDT:USDT", side="buy",
-        price=40000.0, quantity=1.0,
-        fee=0.0, fee_currency="USDT",
-        timestamp=datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc),
-        exchange="okx", order_type="limit", is_fill=True,
-    )
-    sell = Trade(
-        symbol="BTC/USDT:USDT", side="sell",
-        price=41000.0, quantity=0.1,
-        fee=0.0, fee_currency="USDT",
-        timestamp=datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc),
-        exchange="okx", order_type="limit", is_fill=True,
-    )
-    # mark_prices gives the open position an unrealized PnL on the last bar
-    builder = EquityCurveBuilder(
-        trades=[buy, sell],
-        mark_prices={"BTC/USDT:USDT": 42000.0},
-    )
-    df = builder.to_equity_curve_daily()
-    last_unrealized = float(df["unrealized_pnl"].iloc[-1])
-    assert last_unrealized != 0.0, "Fixture must have non-zero last-bar unrealized"
-
-    sharpe_with_fix = builder.compute_sharpe()
-    # Now manually compute Sharpe INCLUDING last bar (old behaviour) to confirm
-    # they differ — the fix always excludes the terminal lump.
-    import math
-    all_returns = df["daily_return"]
-    # drop day-0 zero (C01-14 also applies)
-    if len(all_returns) > 1 and all_returns.iloc[0] == 0.0:
-        all_returns = all_returns.iloc[1:]
-    # include last bar (pre-fix behaviour). Annualize at 252 to match the
-    # converged compute_sharpe basis (Phase 34, ANNUAL-05) so this comparison
-    # isolates the terminal-bar effect, not the annualization factor.
-    excess_old = all_returns - 0.0
-    std_old = excess_old.std()
-    sharpe_old = (float((excess_old.mean() / std_old) * (252 ** 0.5))
-                  if std_old > 0 and not math.isnan(std_old) else None)
-
-    if sharpe_old is not None and sharpe_with_fix is not None:
-        assert abs(sharpe_with_fix - sharpe_old) > 1e-9, (
-            "NEW-C01-06: compute_sharpe must differ from the all-rows version "
-            "when last bar has unrealized PnL"
-        )
 
 
 # ---------------------------------------------------------------------------

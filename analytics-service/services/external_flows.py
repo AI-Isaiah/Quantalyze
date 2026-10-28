@@ -83,12 +83,18 @@ class FlowInstant(NamedTuple):
     fell on, so a producer that already walks the raw rows also states one ``FlowInstant`` per
     row. ``day`` is the UTC day key the day aggregate files the row under, and ``amount`` is in
     the unit of that aggregate (``currency`` names it only for a Deribit native quantity, where
-    the caller values it at the day mark)."""
+    the caller values it at the day mark).
+
+    ``amount_prior_day`` is the same flow valued at the close of the previous UTC day. It is set
+    only where a mark of that day prices with a daily close (NAVMTM D-07), so a flow moved INTO
+    that mark is valued by the mark's own rule rather than at the later close its own day carries
+    (REVIEW-3 IN-02, MARKSOURCE D-02). ``None`` means the flow is valued the same on both days."""
 
     at_ms: int
     day: str
     amount: float
     currency: str = "USD"
+    amount_prior_day: float | None = None
 
 
 def validate_flow_shape(flow: ExternalFlow) -> ExternalFlow:

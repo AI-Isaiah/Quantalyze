@@ -1,5 +1,93 @@
 # Changelog
 
+## [0.133.6.0] - 2026-10-28 — MARKSOURCE: open positions are valued by one stated price rule, and the legacy and marked allocator curves agree
+
+### Root cause
+- Spot was valued differently on every path. The history replay, the CoinGecko fallback (which kept the first point of each UTC date, an open, not a close), the flow valuer, the reconstruct anchor and the holdings poll each had their own price, and a missing ticker became `$0` in the poll. OKX spot was read from the wallet `eq`, which already carries the account's open profit, so an OKX book counted open profit twice in the Holdings USDT row and in AUM. `EquityCurveBuilder` booked open profit as a return on the last bar, through return scalars that no screen reads. When a day's NAV mark was refused, `replay_key_equity` anchored on that day's live equity, so the curve showed a one-day step no day earned. An MT5 BTC flow moved into the mark of the day before was valued at close(D+1) beside a mark valued at close(D) (NAVMTM REVIEW-3 IN-02). The legacy daily refresh labelled its row with the run day while the mark is labelled with the UTC day that closed, so the two curves could not be compared day for day.
+
+### Added
+- `analytics-service/services/price_rule.py` (plan 01, D-02, D-04): one documented rule. Spot is valued at the venue's UTC-day close. A close 1-7 days old is carried and named (`carried_symbols` in the reconstruct telemetry, the whole-account merge and the completion audit). An older close is a named gap and is skipped, never `$0`. Derivatives keep the venue mark, and Deribit inverse keeps the index. It holds the dust floor `DUST_FLOOR_SHARE = 0.001` of the account's USD level, set from the read-only PROD census (plan 10, D-06, D-09).
+- One stored price-gap rule in both runtimes (plan 09, D-07): `holdingIsPriceGap` in `src/lib/holding-equity.ts` and `is_price_gap_holding` in `services/holding_equity.py`, both driven by one 16-case fixture (`tests/fixtures/holding_price_gap_cases.json`). The live-holdings summary counts each gap row once and builds the two D-07 sentences.
+- Holdings UI (plan 11, D-07; DESIGN.md tokens only): a spot row with no usable price shows a dash and a muted "No price" in the Value cell instead of `$0`. The Holdings tab says under the spot table how many holdings have no price and that portfolio AUM leaves them out. The composer's PORTFOLIO AUM row says "{N} holding(s) without a price left out." No figure changes.
+- The legacy refresh names what it leaves out for want of a price (plan 15, D-06). The stored snapshot carries `__price_gap_left_out__ = {count, symbols, dust, unsizable}` in its breakdown, protected from truncation and never added to a level. A book left out entirely writes no snapshot, and its audit says `price_gap_left_out`.
+- Runbooks:
+  - `docs/runbooks/marksource-legacy-chain-move-go-live.md` (plan 07, D-01, D-08). It moves the legacy holdings poll and daily refresh next to the mark read behind the marker guard and a compare-and-set, with pre-flight, cut-over timing, the first-night readings as tracked read-only SQL, a hold and a rollback. It names the nine days and balances the legacy curve leaves out.
+  - `docs/runbooks/marksource-okx-history-correction.md` (plan 13, D-05, D-09). It corrects OKX's double-counted 90-day snapshot window through the product's own forced whole-account rebuild. Its write step stops on the OKX ordering gate, and it keeps and names what no product path reaches.
+  - `docs/runbooks/navmtm-chain-move-go-live.md` gains the pointer to the new move.
+- `docs/runbooks/marksource-okx-census/` (plan 10): the read-only PROD census as committed SQL forms (marker, OKX holdings and snapshot census, rebuild feasibility, unpriced balances) with a README. `src/__tests__/marksource-okx-census-sql.test.ts` guards every census and runbook form (read-only, marker first, no home path), and each form was shown able to fail.
+
+### Changed
+- `services/equity_reconstruction.py`, the history paths (plan 01):
+  - The replay, the ccxt flow valuer and the live anchor go through the price rule.
+  - The CoinGecko fallback reads daily closes. The price cache serves only close-labelled rows.
+  - The anchor names an unpriced asset instead of counting it at `$0`.
+- Last-bar spike removed (plan 02, D-03). A reader census proved that no screen reads a long-fetch `twr` or `sharpe`. `EquityCurveBuilder` therefore computes no return scalar, and every adapter snapshot carries `twr`, `sharpe`, `ytd` and `max_drawdown` as null. The four golden equity-curve fixtures that no test loads any more are deleted.
+- A refused or absent mark no longer leaks a live price into the curve (plan 03, D-02). When today's mark is refused and the live read is sound, the derive anchors on the last stored mark and its `marked_at`, never on this day's live equity. The gap between the two is still named by `mark_gap_days` / `marks_trailing_since`.
+- A BTC flow moved into mark day D is valued at close(D), the mark's own close, on both stored-flow paths. `FlowInstant.amount_prior_day` (`services/external_flows.py`) and `flow_moves_out` (`services/nav_marks_apply.py`) report separately the amount that leaves the read day.
+- The holdings poll follows the price rule (plan 04, `services/allocator_positions.py`):
+  - OKX spot is read from the wallet `cashBal`, so open profit is counted once from now on (D-05, forward half).
+  - A missing ticker price is written as a named gap row with fixed warning copy.
+  - USDE, PYUSD and USDB are stable-value assets at 1.0, by the anchor's rule. The compare adapter's fixed-mark set follows the same rule (`holding-compare-adapter.ts`).
+- The legacy refresh labels its one `allocator_equity_snapshots` row with the UTC day that closed (`mark_day_for(now)`, plan 05, D-01). Holdings are still read, and carry age still measured, at the run day. Tests pin both cut-over outcomes: the old clock also labels the closed day, and a stored label is never replaced.
+- The legacy refresh decides on price gaps (plan 12, D-04, D-06):
+  - A gap sized at or above the dust floor holds the day by name (`price_gap`, Sentry `held_price_gap`, leader only).
+  - A dust gap, and an unsizable one (the recorded choice), are left out and counted.
+  - A dead account's gap does not freeze the store.
+- ⚠️ **Behaviour change (ce809349d).** On the reconstruct path, a `ccxt.RateLimitExceeded` from `fetch_positions` in `_fetch_current_equity` is re-raised. It now reaches the crawl's 429 arm, which stamps the key's cooldown and fails the job retryable. Before, an unforced reconstruct anchored at the wallet figure with `anchor_positions_unread`, and a forced one refused `positions_unreadable`. The same commit re-raises a 429 from the Bybit balance/account-info read and the Binance options read on the NAV-mark path.
+- NAV mark (D-10, `services/job_worker.py` `_read_marked_equity_once_per_day`):
+  - A 429 on the mark read stamps the cooldown through `_stamp_429` and refuses as `balance_error`. The derive keeps running.
+  - A Binance coin with no usable ticker is sized from its newest priced `allocator_holdings` row across the key's whole account group, as the refresh does (WR-06, WR-07). Dust under the floor no longer refuses the mark.
+  - When the account group cannot be read, or does not contain the key, the dust check is skipped and the mark refuses `wallet_unpriced`. It is never sized from this key alone.
+  - The poll's price-gap note no longer promises a retry: "Couldn't read a price for some {venue} balances." (WR-04).
+
+### Fixed
+- Review round 1:
+  - The OKX `cashBal` override applies only when the derivative read succeeded (WR-01).
+  - An OKX `cashBal` parse failure, and a balance left on `eq`, are logged, and only known currencies are overridden (SF-M3).
+  - Ticker failures are logged, and a 429 reaches the rate-limit backoff (SF-M4).
+  - A gap is sized from its newest priced row at any age. An unsizable leave-out raises the leader event (WR-02/SF-M1).
+  - An account's dust rows are judged as a sum against the floor (SF-M2).
+  - The history rebuild fetches CoinGecko whenever an expected close day is not cached (WR-03).
+  - A Bybit coin below the dust floor by its own `usdValue` no longer refuses the mark or skips the anchor (WR-04).
+  - A CoinGecko point stamped an hour or more after midnight is not taken as a close (SF-M7).
+  - The unpriced-balance readouts state how many spot rows they examined (SF-M5).
+  - Reading C states its population and reads a missing closed-day row as not agreeing (SF-M6).
+- Review round 2:
+  - The gap-sizing read asks for the newest priced row per symbol, so the response cap cannot hide it (WR-05), and it is typed for `mypy --strict`.
+  - The wallet pricer logs a failed ticker and lets a 429 reach the rate-limit handlers (F3).
+  - Clearing the unpriced set as dust, and an unreadable balance entry, each log a warning (F2).
+  - The unpriced-balance readouts size a gap from its newest priced row at any age, as the refresh does (F1).
+- Review round 3 and silent-failure hunt:
+  - A failing holdings read keeps the Binance coin named and refuses `wallet_unpriced`, not `balance_error` (SFH-MEDIUM-1).
+  - The Binance dust check logs why a coin stays named and never sizes an absent coin as zero. The mark reads the owner by `key_row["user_id"]` (SFH-MEDIUM-low).
+  - The T-13 dust and unpriced warnings log counts only, never coin symbols or amounts (security).
+  - An unreadable account group skips the Binance dust check instead of sizing from this key alone.
+
+### Tests
+- `tests/test_price_rule.py` (new): the rule's history, carry, CoinGecko-close and anchor paths, one pin per conforming path.
+- `tests/test_marksource_cross_curve.py` (new, plans 06 and 16). One hand-typed venue state per marked day runs through the real poll and refresh (the legacy curve) and through the venue's real equity reader, key derive and compose (the derived curve). OKX with an open perp, Bybit, Binance, MT5 USD, MT5 BTC and sFOX agree on every marked day within `max($1, 0.5% of level)`. The sFOX case judges its poll warning after the curves, so a skipped stablecoin is caught as a level gap. Nine `test_excluded_*` tests assert every stated exclusion by name, and their names equal the runbook's set.
+- `tests/test_holding_price_gap.py` and `src/lib/holding-price-gap.parity.test.ts` (new): the shared 16-case fixture in both runtimes.
+- `tests/test_nav_marks_l4_read.py`, `test_nav_marks_bybit_uta.py`, `test_nav_marks_apply.py`, `test_nav_marks_compose_roundtrip.py`, `test_allocator_positions.py`, `test_refresh_allocator_equity_carry_forward.py`, `test_equity_reconstruction.py`, `test_reconstruct_whole_account.py`, `test_equity_curve_builder.py`: the 429 arms, the account-group sizing, the refused-mark anchor, the moved-flow pricing, the OKX `cashBal` read, the gap hold and leave-out, and the closed-day label.
+- `tests/test_ledger_refresh_reuse_collision.py`: the entry-read fake counts `strategy_analytics` reads only, so the mark path's account-group read is not counted as an entry read (closes the verifier's one red full-suite test).
+- Vitest: `HoldingsTable`, `HoldingsTabPanel.key-read-notes`, `ScenarioComposer`, `live-holdings-summary`, `holding-compare-adapter` and the untrusted-key surface tests pin the "No price" copy and counts.
+- Merged with main at 0.133.5.1 (174 MARKPAUSE, 175 MT5OFFSET, 172 OKXANCHOR, 171 READCEILING). The one conflict was the `_FakeTable` test double in `test_equity_reconstruction.py`. It keeps main's `lt` and shared `_row_matches` predicate, plus this phase's recording `order`/`limit` and the `gt` operator. Full analytics suite: 13389 passed, 99 skipped. CI's `mypy --strict` line is clean.
+- `src/__tests__/marksource-okx-census-sql.test.ts`: its three narrowing slices take a checked `anchorIndex` instead of a raw `indexOf`, which the repo-wide scan in `test-restore-workflow-wiring.test.ts` refuses (a missed anchor returns -1 and the pin passes vacuously).
+
+### Notes
+- **No migration, no cron change in this release.** Plans 08 and 14 are post-land operator steps:
+  - Plan 08 moves the legacy chain on PROD with the runbook: holdings poll at 01:00Z, daily refresh at 01:30Z, merge hold 00:00-02:15Z on the cut-over night (D-10). It then re-captures the cron manifest and reads the first night (counts, ratios and ages only).
+  - Plan 14 is the operator half of D-05. It either corrects OKX's double-counted rows through the forced rebuild or records the deferral, with the census of record either way. Under D-09 its write step waits on the gate below.
+- **Known limit, D-09: the rewrite of stored OKX history is deferred.** This release ships the forward fix only. Rebuilding the double-counted 90-day snapshot window waits on the OKX ordering gate (`167.2.1.1.2.1-OKX-ORDER-UNMEASURED`) and is booked as Phase 178 OKXREWRITE. Rows older than the window and `allocator_holdings` history are kept and named in `167.2.1.1.1.1-OKX-DOUBLE-COUNT-BEYOND-REBUILD-WINDOW`.
+- **Named legacy exclusions (D-08), each with a TODOS entry and a by-name test:**
+  - `167.2.1.1.1.1-MT5-BTC-MISSING-CLOSE-LEGACY-EXCLUSION`: a BTC-unit MT5 account with a missing close is left out of the legacy row.
+  - `167.2.1.1.1.1-SFOX-NONSTABLE-LEGACY-EXCLUSION`: sFOX non-stable balances are left out of the legacy row.
+  - Retiring the legacy curve is Phase 176 LEGACYRETIRE.
+- **Routed, not fixed:**
+  - `167.2.1.1.1.1-BINANCE-ANCHOR-UNPRICED-REFUSES` (data integrity). The D-10 dust sizing covers the NAV mark only. A Binance coin with no usable ticker still refuses the reconstruct anchor with `anchor_skipped_partial_ticker`, whatever its size. A strategy-manager key's unpriced coins fail closed on both paths.
+  - `167.2.1.1.1.1-OKX-OPTION-READ-429-MASKED` (observability). A 429 on the OKX option-positions read is still reported as `option_value_unreadable`, with no cooldown stamp. The mark refuses either way, so no stored figure is wrong.
+- Review: three code-review rounds plus a silent-failure hunt; the final re-review has no MEDIUM+ findings. Security audit SECURED. Verifier status `human_needed`, for plans 08 and 14 only.
+- Planning record: the context with founder decisions D-01..D-10, research, pattern map, UI-SPEC, validation strategy, 16 plans with their summaries, the review, security and verification reports. All of it is on the phase branch under `.planning/` and is filtered out of this ship branch.
+
 ## [0.133.5.1] - 2026-10-28 — BASELINE: automated re-dump after the PROD apply of dae62ece
 
 ### Changed

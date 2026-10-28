@@ -65,3 +65,26 @@ def holding_equity_contribution(row: Mapping[str, Any]) -> float | None:
         return finite if finite is not None else 0.0
     finite = _finite_number(row.get("value_usd"))
     return finite if finite is not None else 0.0
+
+
+def is_price_gap_holding(row: Mapping[str, Any]) -> bool:
+    """Whether a stored holdings row is a PRICE GAP (Phase 167.2.1.1.1.1 D-07).
+
+    True iff ``holding_type`` is ``spot``, ``quantity`` is a finite number above 0, and
+    ``mark_price`` is NOT a finite number above 0. It is the ``holding_marks`` gap rule
+    applied to a stored row. A null, absent, zero, negative, NaN, infinite, bool or string
+    mark is a gap; a quantity that is zero, negative, non-finite or absent is not (nothing
+    is held); a derivative is never a gap.
+
+    The TypeScript twin is ``holdingIsPriceGap`` in ``src/lib/holding-equity.ts`` and the
+    fixture ``tests/fixtures/holding_price_gap_cases.json`` pins both. The predicate is
+    row-level and pure: the stable-value and Deribit exclusions belong to the refresh, not
+    here. It does not touch ``holding_equity_contribution``.
+    """
+    if row.get("holding_type") != "spot":
+        return False
+    quantity = _finite_number(row.get("quantity"))
+    if quantity is None or quantity <= 0:
+        return False
+    mark = _finite_number(row.get("mark_price"))
+    return mark is None or mark <= 0

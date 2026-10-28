@@ -59,8 +59,12 @@ Further rules
     instant each raw venue row holds; a flow dated ``d + 1`` made at or before mark ``d``'s
     ``read_at`` is counted in day ``d``, and one made after it stays in ``d + 1``. The flows
     this function reads in rules 3 and 5 are those placed flows, and ``flow_moves`` names what
-    moved (mark day -> amount, taken from ``d + 1``), so a caller that stores the flows states
-    the same placement. A mark with no ``read_at``, or a flow with no instant, is not moved.
+    moved (mark day -> amount counted in ``d``), so a caller that stores the flows states the
+    same placement. The amount counted in ``d`` is the instant's ``amount_prior_day`` when it has
+    one (a BTC flow valued at the close the mark itself uses) and its ``amount`` otherwise; the
+    amount that leaves ``d + 1`` is always the ``amount`` the day aggregate stored there, reported
+    as ``flow_moves_out``. For a USD flow the two are equal. A mark with no ``read_at``, or a
+    flow with no instant, is not moved.
     This replaces the round-1 rule that skipped such a mark (review round 2 CR-01, CR-02, WR-01).
 11. ``marked_levels`` maps every USED mark day to its stored NAV; ``terminal`` is the last mark
     day and its NAV.
@@ -151,6 +155,7 @@ class MarkedSeries(NamedTuple):
     terminal: tuple[str, float] | None
     covered_from: str | None
     covered_days: tuple[str, ...]
+    flow_moves_out: dict[str, float]
 
 
 def _input_days(returns: pd.Series) -> list[tuple[date, float]]:
@@ -236,7 +241,7 @@ def apply_marks(
     if roll_basis not in ("returns", "day_pnl"):
         raise ValueError("apply_marks: unknown roll_basis")
     if not marks:
-        return MarkedSeries(returns.copy(), None, (), {}, (), {}, {}, None, None, ())
+        return MarkedSeries(returns.copy(), None, (), {}, (), {}, {}, None, None, (), {})
 
     mark_days = [_parse_day(m.day, "mark_days_not_ascending") for m in marks]
     if any(a >= b for a, b in zip(mark_days, mark_days[1:])):
@@ -253,23 +258,29 @@ def apply_marks(
     open_pnls = [_finite(m.open_pnl) for m in marks]
 
     # Rule 10: a flow dated the read day (``md + 1``) and made at or before the mark's read is
-    # inside the mark, so it is counted in ``md``.
+    # inside the mark, so it is counted in ``md`` (at ``amount_prior_day`` when the instant has
+    # one) and the ``amount`` the day aggregate stored on ``md + 1`` is what leaves it.
     moves: dict[date, float] = {}
+    moves_out: dict[date, float] = {}
     for mark, md in zip(marks, mark_days):
         if mark.read_at is None:
             continue
         read_s = mark.read_at.timestamp()
         read_day = (md + timedelta(days=1)).isoformat()
-        before = sum(
-            _finite(fi.amount)
-            for fi in flow_instants
-            if fi.day == read_day and fi.at_ms / 1000.0 <= read_s
+        placed = [
+            fi for fi in flow_instants if fi.day == read_day and fi.at_ms / 1000.0 <= read_s
+        ]
+        moved_out = sum(_finite(fi.amount) for fi in placed)
+        moved_in = sum(
+            _finite(fi.amount if fi.amount_prior_day is None else fi.amount_prior_day)
+            for fi in placed
         )
-        if before != 0.0:
-            moves[md] = before
+        if moved_in != 0.0 or moved_out != 0.0:
+            moves[md] = moved_in
+            moves_out[md] = moved_out
     for md, amount in moves.items():
         flows[md] = flows.get(md, 0.0) + amount
-        flows[md + timedelta(days=1)] = flows.get(md + timedelta(days=1), 0.0) - amount
+        flows[md + timedelta(days=1)] = flows.get(md + timedelta(days=1), 0.0) - moves_out[md]
 
     start = mark_days[0]
     last_mark = mark_days[-1]
@@ -345,6 +356,7 @@ def apply_marks(
         terminal=(last_mark.isoformat(), navs[-1]),
         covered_from=covered_from.isoformat(),
         covered_days=covered_days,
+        flow_moves_out={d.isoformat(): amount for d, amount in moves_out.items()},
     )
 
 

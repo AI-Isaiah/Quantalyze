@@ -37,7 +37,7 @@ tests use, so the assertion is on the persisted snapshot row, not on a helper.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -56,6 +56,8 @@ from tests.test_equity_reconstruction import (
 )
 
 TODAY = date(2026, 9, 27)
+# 167.2.1.1.1.1 D-01: the refresh labels its one row the UTC day that closed.
+CLOSED_DAY = TODAY - timedelta(days=1)
 HELD_ACTION = "allocator.equity.refresh_held_for_reconstruct"
 IN_FLIGHT_STATUSES = ("pending", "running", "done_pending_children", "failed_retry")
 
@@ -216,7 +218,7 @@ async def _run(monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient) -> tup
 def _today_rows(fake: FakeSupabaseClient) -> list[dict[str, Any]]:
     return [
         r for r in fake.rows_for("allocator_equity_snapshots")
-        if r["asof"] == TODAY.isoformat()
+        if r["asof"] == CLOSED_DAY.isoformat()
     ]
 
 

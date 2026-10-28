@@ -3046,3 +3046,466 @@ def test_every_status_this_module_can_write_has_its_own_copy_row():
         "SYNC_ERROR_COPY_BY_STATUS row, so sync_error_copy answers them with "
         f"the generic 'error' sentence, silently: {missing}"
     )
+
+
+# ===========================================================================
+# Phase 167.2.1.1.1.1 (MARKSOURCE) plan 04 — D-01 / D-05 / RESEARCH R-1: an OKX
+# account's open profit reaches the legacy book ONCE.
+#
+# WHY (Rule 9 — intent): ccxt's `okx.parse_trading_balance` sets each currency's
+# `total` to OKX's `eq`, and `eq = cashBal + upl`. The derivative rows already
+# carry `upl` as `unrealized_pnl_usd`, which `holding_equity_contribution` adds
+# to the allocator's AUM, so reading spot from `eq` counted the open profit twice
+# (once in the USDT row, once in the derivative row). The oracle is the VENUE'S
+# OWN EQUITY, typed by hand below: wallet + spot value + open profit, not a
+# number copied off the code under test. The payload is hand-typed in the SHAPE
+# of a recorded OKX balance with invented round numbers, and it goes through
+# ccxt's REAL parser, so a parser change moves this test rather than a mock.
+# ===========================================================================
+
+
+def _okx_detail(ccy: str, cash_bal: str, upl: str, eq: str) -> dict:
+    """One `data[0].details[*]` entry of OKX's /api/v5/account/balance."""
+    return {
+        "ccy": ccy,
+        "cashBal": cash_bal,
+        "upl": upl,
+        "eq": eq,
+        "availEq": eq,
+        "availBal": cash_bal,
+        "frozenBal": "0",
+    }
+
+
+def _okx_balance_payload(details: list[dict]) -> dict:
+    return {"code": "0", "msg": "", "data": [{"uTime": "1777638170357", "details": details}]}
+
+
+async def real_okx_parse_balance(payload: dict) -> dict:
+    """ccxt's REAL ``okx.parse_trading_balance`` on ``payload``. No credentials,
+    no network; the instance is closed in ``finally``."""
+    import copy as _copy
+
+    ex = ccxt.okx({})
+    try:
+        return ex.parse_trading_balance(_copy.deepcopy(payload))
+    finally:
+        await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_okx_spot_rows_take_the_cash_balance(monkeypatch):
+    """R-1 / D-01: the OKX spot quantity is the wallet `cashBal`, not ccxt's
+    `eq`; spot value plus the derivative's open profit is the venue's equity
+    ONCE (134000 typed: 100000 + 0.5 x 60000 + 4000), where the `eq` read gave
+    138000."""
+    from services import allocator_positions as ap
+    from services.holding_equity import holding_equity_contribution
+
+    parsed = await real_okx_parse_balance(
+        _okx_balance_payload([
+            _okx_detail("USDT", cash_bal="100000", upl="4000", eq="104000"),
+            _okx_detail("BTC", cash_bal="0.5", upl="0", eq="0.5"),
+        ])
+    )
+    # The premise of the override: ccxt really does read `eq`.
+    assert parsed["total"]["USDT"] == 104000.0
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.fetch_balance = AsyncMock(return_value=parsed)
+    mock_exchange.fetch_tickers = AsyncMock(return_value={"BTC/USDT": {"last": 60000.0}})
+
+    async def _one_perp(*_a, **_kw):
+        return [
+            {
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_base": 0.1,
+                "size_usd": 6000.0,
+                "entry_price": 20000.0,
+                "mark_price": 60000.0,
+                "unrealized_pnl": 4000.0,
+                "exchange": "okx",
+            }
+        ]
+
+    monkeypatch.setattr(ap, "fetch_positions", _one_perp)
+
+    rows, warning = await fetch_allocator_holdings("okx", mock_exchange)
+    assert warning is None
+
+    spot = {r["symbol"]: r for r in rows if r["holding_type"] == "spot"}
+    deriv = [r for r in rows if r["holding_type"] == "derivative"]
+    assert spot["USDT"]["quantity"] == 100000.0
+    assert spot["USDT"]["value_usd"] == 100000.0
+    assert spot["BTC"]["value_usd"] == pytest.approx(30000.0)
+    assert len(deriv) == 1 and deriv[0]["unrealized_pnl_usd"] == 4000.0
+
+    contributions = [holding_equity_contribution(r) for r in rows]
+    assert None not in contributions
+    assert sum(c for c in contributions if c is not None) == pytest.approx(134000.0)
+
+
+@pytest.mark.asyncio
+async def test_okx_without_cash_balances_keeps_ccxt_totals(monkeypatch, caplog):
+    """A balance with no parseable `cashBal` keeps ccxt's totals (the bare-dict
+    behaviour every earlier test relies on) and says so in ONE warning log line
+    that carries a count and no figure."""
+    import logging
+
+    from services import allocator_positions as ap
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.fetch_balance = AsyncMock(
+        return_value={"total": {"USDT": 4321.0, "BTC": 0.25}}
+    )
+    mock_exchange.fetch_tickers = AsyncMock(return_value={"BTC/USDT": {"last": 60000.0}})
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    with caplog.at_level(logging.WARNING, logger=ap.logger.name):
+        rows, warning = await fetch_allocator_holdings("okx", mock_exchange)
+
+    assert warning is None
+    qty = {r["symbol"]: r["quantity"] for r in rows if r["holding_type"] == "spot"}
+    assert qty == {"USDT": 4321.0, "BTC": 0.25}
+
+    lines = [r.getMessage() for r in caplog.records if "cashBal" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "2" in lines[0]
+    for figure in ("4321", "0.25"):
+        assert figure not in lines[0]
+
+
+# ===========================================================================
+# Phase 167.2.1.1.1.1 (MARKSOURCE) plan 04 — D-02 for the holdings poll
+# (RESEARCH inventory row 5): a missing price is a NAMED GAP, never a measured
+# $0; stable-value assets are 1.0 by the one rule the reconstruct anchor uses.
+#
+# WHY (Rule 9 — intent): `allocator_holdings.value_usd` feeds the allocator's AUM
+# and the legacy curve. A balance whose ticker answered nothing used to be stored
+# as `mark_price` 0.0 with no flag, indistinguishable from "this holds nothing", so
+# the day silently under-reported the book. The gap encoding is `mark_price <= 0`
+# (what `holding_marks` skips) plus `price_gap` in `raw_payload`, so a reader can
+# tell a gap from a measured zero, and the user is told in fixed copy.
+# ===========================================================================
+
+
+def _gap_exchange(*, tickers=None, bulk_raises=False, single_raises=False) -> AsyncMock:
+    """A binance-shaped mock holding 0.5 BTC and 1000 USDT whose ticker side is
+    controlled. `single_raises` makes the per-symbol fallback fail too."""
+    ex = AsyncMock()
+    ex.id = "binance"
+    ex.fetch_balance = AsyncMock(return_value={"total": {"BTC": 0.5, "USDT": 1000.0}})
+    if bulk_raises:
+        ex.fetch_tickers = AsyncMock(side_effect=ccxt.ExchangeError("bulk not supported"))
+    else:
+        ex.fetch_tickers = AsyncMock(return_value=tickers if tickers is not None else {})
+    if single_raises:
+        ex.fetch_ticker = AsyncMock(side_effect=ccxt.ExchangeError("no such market"))
+    else:
+        ex.fetch_ticker = AsyncMock(return_value={})
+    return ex
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exchange_kwargs",
+    [
+        pytest.param({"tickers": {}}, id="bulk-omitted-the-symbol"),
+        pytest.param({"tickers": {"BTC/USDT": {"last": None}}}, id="last-none"),
+        pytest.param({"tickers": {"BTC/USDT": {"last": 0}}}, id="last-zero"),
+        pytest.param({"tickers": {"BTC/USDT": {"last": -1.0}}}, id="last-negative"),
+        pytest.param({"tickers": {"BTC/USDT": {"last": float("nan")}}}, id="last-nan"),
+        pytest.param({"bulk_raises": True, "single_raises": True}, id="bulk-and-single-raised"),
+    ],
+)
+async def test_price_rule_poll_gap_is_not_zero(monkeypatch, exchange_kwargs):
+    """D-02: an asset whose ticker gives no usable `last` is a gap row, never a
+    measured $0, and the user is told in fixed copy naming no symbol."""
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, warning = await fetch_allocator_holdings("binance", _gap_exchange(**exchange_kwargs))
+
+    by_symbol = {r["symbol"]: r for r in rows}
+    btc = by_symbol["BTC"]
+    assert btc["quantity"] == 0.5
+    assert btc["mark_price"] == 0.0
+    assert btc["value_usd"] == 0.0
+    assert btc["raw_payload"]["price_gap"] is True
+
+    usdt = by_symbol["USDT"]
+    assert usdt["mark_price"] == 1.0 and usdt["value_usd"] == 1000.0
+    assert "price_gap" not in usdt["raw_payload"]
+
+    assert warning == ap.SPOT_PRICE_GAP_NOTE.format(venue="Binance")
+    assert "BTC" not in warning
+    assert "bulk not supported" not in warning and "no such market" not in warning
+
+
+@pytest.mark.asyncio
+async def test_price_rule_poll_priced_asset_is_not_a_gap(monkeypatch):
+    """The other direction: a usable `last` is a priced row with no gap flag and
+    no warning, so the gap path cannot be reached by every asset."""
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, warning = await fetch_allocator_holdings(
+        "binance", _gap_exchange(tickers={"BTC/USDT": {"last": 50000.0}})
+    )
+    btc = next(r for r in rows if r["symbol"] == "BTC")
+    assert btc["mark_price"] == 50000.0
+    assert btc["value_usd"] == pytest.approx(25000.0)
+    assert "price_gap" not in btc["raw_payload"]
+    assert warning is None
+
+
+@pytest.mark.asyncio
+async def test_poll_gap_and_derivative_failure_both_survive(monkeypatch):
+    """When the derivative arm also failed, both sentences reach the user: the
+    derivative note first, one space, then the gap note."""
+    from services import allocator_positions as ap
+
+    async def _down(*_a, **_kw):
+        raise ccxt.ExchangeNotAvailable("down")
+
+    monkeypatch.setattr(ap, "fetch_positions", _down)
+
+    _rows, warning = await fetch_allocator_holdings("binance", _gap_exchange(tickers={}))
+    assert warning == (
+        ap.DERIVATIVE_FETCH_FAILED_NOTE.format(venue="Binance")
+        + " "
+        + ap.SPOT_PRICE_GAP_NOTE.format(venue="Binance")
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_stable_value_assets_are_one(monkeypatch):
+    """D-02 'one documented rule': USDE, PYUSD and USDB are valued at 1.0 with no
+    ticker call, the rule the reconstruct anchor already applies. Without it a
+    USDE balance with no USDE/USDT market would become a gap row every day."""
+    from services import allocator_positions as ap
+
+    ex = AsyncMock()
+    ex.id = "binance"
+    ex.fetch_balance = AsyncMock(
+        return_value={"total": {"USDE": 50.0, "PYUSD": 25.0, "USDB": 5.0}}
+    )
+
+    def _fail(*_a, **_kw):
+        raise AssertionError("no ticker call is allowed for a stable-value asset")
+
+    ex.fetch_tickers = AsyncMock(side_effect=_fail)
+    ex.fetch_ticker = AsyncMock(side_effect=_fail)
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, warning = await fetch_allocator_holdings("binance", ex)
+    assert warning is None
+    assert {r["symbol"]: (r["mark_price"], r["value_usd"]) for r in rows} == {
+        "USDE": (1.0, 50.0),
+        "PYUSD": (1.0, 25.0),
+        "USDB": (1.0, 5.0),
+    }
+    ex.fetch_tickers.assert_not_called()
+    ex.fetch_ticker.assert_not_called()
+
+
+def test_spot_price_gap_note_is_product_copy():
+    """Copy-class gate (151-UI-SPEC) for the new warning: one sentence, venue in
+    product casing, no jargon, and no retry promise (CONTEXT D-10): a poll that
+    finds no price gives no promise a later poll will. It is rendered verbatim
+    in the browser."""
+    from services.allocator_positions import SPOT_PRICE_GAP_NOTE
+
+    text = SPOT_PRICE_GAP_NOTE.format(venue="OKX")
+    assert text == "Couldn't read a price for some OKX balances."
+    assert "retry" not in text
+    assert " -- " not in text and " - " not in text
+    assert text.endswith(".")
+    assert text.count(".") == 1
+    assert "{" not in text and "}" not in text
+    for jargon in ("Error", "Exception", "None", "()", "_"):
+        assert jargon not in text, f"leaks jargon {jargon!r}"
+
+
+# ===========================================================================
+# Phase 167.2.1.1.1.1 review round 1 — topic A (the holdings poll).
+# WR-01 (OKX cashBal only when the derivative read succeeded), SF-M3 (the OKX
+# cashBal extractor and the left-on-eq count are loud; only ccxt's own keys are
+# overridden), SF-M4 (ticker failures are logged; a 429 propagates).
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_okx_derivative_failure_keeps_eq_so_open_profit_is_counted_once(monkeypatch):
+    """WR-01: when the OKX positions read fails, the spot rows are the ONLY place
+    the open profit can live, so they keep ccxt's `eq` (104000 = 100000 + 4000 upl).
+    The `cashBal` override (100000) would sum the book short by the whole upl."""
+    from services import allocator_positions as ap
+
+    parsed = await real_okx_parse_balance(
+        _okx_balance_payload([_okx_detail("USDT", cash_bal="100000", upl="4000", eq="104000")])
+    )
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.fetch_balance = AsyncMock(return_value=parsed)
+    mock_exchange.fetch_tickers = AsyncMock(return_value={})
+
+    async def _down(*_a, **_kw):
+        raise ccxt.ExchangeNotAvailable("down")
+
+    monkeypatch.setattr(ap, "fetch_positions", _down)
+
+    rows, warning = await fetch_allocator_holdings("okx", mock_exchange)
+
+    assert warning == ap.DERIVATIVE_FETCH_FAILED_NOTE.format(venue="OKX")
+    assert [(r["symbol"], r["quantity"], r["value_usd"]) for r in rows] == [
+        ("USDT", 104000.0, 104000.0)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_okx_cash_balance_override_ignores_a_currency_ccxt_does_not_know(monkeypatch):
+    """SF-M3: OKX's raw `ccy` can differ from ccxt's common code (AE -> AET). A
+    cashBal for a code absent from ccxt's totals must NOT add a phantom row."""
+    from services import allocator_positions as ap
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.fetch_balance = AsyncMock(
+        return_value={
+            "total": {"USDT": 104000.0, "AET": 5.0},
+            "info": _okx_balance_payload([
+                _okx_detail("USDT", cash_bal="100000", upl="4000", eq="104000"),
+                _okx_detail("AE", cash_bal="5", upl="0", eq="5"),
+            ]),
+        }
+    )
+    mock_exchange.fetch_tickers = AsyncMock(return_value={"AET/USDT": {"last": 2.0}})
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    rows, _warning = await fetch_allocator_holdings("okx", mock_exchange)
+    assert {r["symbol"]: r["quantity"] for r in rows} == {"USDT": 100000.0, "AET": 5.0}
+
+
+def test_okx_cash_balance_parse_failure_names_the_exception_class(caplog):
+    """SF-M3: a parse failure must not be indistinguishable from a missing field."""
+    import logging
+
+    from services import allocator_positions as ap
+
+    with caplog.at_level(logging.WARNING, logger=ap.logger.name):
+        assert ap._extract_okx_cash_balances({"data": ["not a dict"]}) == {}
+    assert any("AttributeError" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+@pytest.mark.asyncio
+async def test_okx_left_on_eq_is_logged_at_error(monkeypatch, caplog):
+    """SF-M3: a currency left on `eq` means the double count can be back, so it
+    is an ERROR (the level this module sends to Sentry), not a warning."""
+    import logging
+
+    from services import allocator_positions as ap
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 4321.0}})
+    mock_exchange.fetch_tickers = AsyncMock(return_value={})
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    with caplog.at_level(logging.WARNING, logger=ap.logger.name):
+        await fetch_allocator_holdings("okx", mock_exchange)
+    levels = [r.levelno for r in caplog.records if "cashBal" in r.getMessage()]
+    assert levels == [logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_bulk_ticker_failure_is_logged_with_the_exception_class(monkeypatch, caplog):
+    """SF-M4: the bulk fetch_tickers fallback was silent."""
+    import logging
+
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    ex = _gap_exchange(bulk_raises=True)
+    ex.fetch_ticker = AsyncMock(return_value={"last": 50000.0})
+    with caplog.at_level(logging.WARNING, logger=ap.logger.name):
+        rows, _ = await fetch_allocator_holdings("binance", ex)
+    assert next(r for r in rows if r["symbol"] == "BTC")["mark_price"] == 50000.0
+    assert any("ExchangeError" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+@pytest.mark.asyncio
+async def test_per_symbol_ticker_failures_are_logged_once_with_count(monkeypatch, caplog):
+    """SF-M4: the per-symbol `except: continue` was silent."""
+    import logging
+
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    with caplog.at_level(logging.WARNING, logger=ap.logger.name):
+        await fetch_allocator_holdings(
+            "binance", _gap_exchange(bulk_raises=True, single_raises=True)
+        )
+    lines = [r.getMessage() for r in caplog.records if "fetch_ticker " in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "1" in lines[0] and "ExchangeError" in lines[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("where", ["bulk", "single"])
+async def test_ticker_rate_limit_propagates_to_the_429_backoff(monkeypatch, where):
+    """SF-M4: a 429 on a ticker read must reach the handler's RateLimitExceeded arm
+    (which stamps the per-exchange cooldown), not be swallowed into a price gap."""
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    ex = _gap_exchange(bulk_raises=True)
+    if where == "bulk":
+        ex.fetch_tickers = AsyncMock(side_effect=ccxt.RateLimitExceeded("429"))
+    else:
+        ex.fetch_ticker = AsyncMock(side_effect=ccxt.RateLimitExceeded("429"))
+    with pytest.raises(ccxt.RateLimitExceeded):
+        await fetch_allocator_holdings("binance", ex)

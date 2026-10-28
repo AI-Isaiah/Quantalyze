@@ -81,6 +81,10 @@ class _FakeTable:
         self._select_neq_filters: list[tuple[str, Any]] = []
         self._select_is_null_cols: list[str] = []
         self._select_ranges: list[tuple[str, str, str]] = []  # (col, op, val)
+        # PostgREST `.order(col, desc=...)` and `.limit(n)`: applied before the response cap, as
+        # the server does (review WR-05: a newest-first limit-1 read must return the newest row).
+        self._select_order: list[tuple[str, bool]] = []
+        self._select_limit: int | None = None
         # PostgREST `.in_(col, values)`: col IN (values). Added for the daily
         # refresh's reconstruct-hold probe (Phase 167.1.2 plan 12, SFH-R2-01).
         self._select_in_filters: list[tuple[str, frozenset]] = []
@@ -157,6 +161,10 @@ class _FakeTable:
         self._select_in_filters.append((col, frozenset(values)))
         return self
 
+    def gt(self, col: str, val):
+        self._select_ranges.append((col, "gt", val))
+        return self
+
     def gte(self, col: str, val):
         self._select_ranges.append((col, "gte", val))
         return self
@@ -169,7 +177,9 @@ class _FakeTable:
         self._select_ranges.append((col, "lt", val))
         return self
 
-    def order(self, *_args, **_kwargs):
+    def order(self, *args, **kwargs):
+        if args:
+            self._select_order.append((args[0], bool(kwargs.get("desc", False))))
         return self
 
     # PostgREST `.range(start, end)` (inclusive) and its per-response row ceiling.
@@ -181,7 +191,9 @@ class _FakeTable:
         self._range = (start, end)
         return self
 
-    def limit(self, *_args, **_kwargs):
+    def limit(self, *args, **_kwargs):
+        if args:
+            self._select_limit = int(args[0])
         return self
 
     def maybe_single(self):
@@ -203,6 +215,8 @@ class _FakeTable:
         for col, op, val in self._select_ranges:
             rv = row.get(col)
             if rv is None:
+                return False
+            if op == "gt" and not (rv > val):
                 return False
             if op == "gte" and not (rv >= val):
                 return False
@@ -289,6 +303,10 @@ class _FakeTable:
                 matched.append(dict(row))
 
             total_matched = len(matched)
+            for col, desc in reversed(self._select_order):
+                matched.sort(key=lambda r, c=col: (r.get(c) is None, r.get(c)), reverse=desc)
+            if self._select_limit is not None:
+                matched = matched[:self._select_limit]
             if self._range is not None:
                 matched = matched[self._range[0]:self._range[1] + 1]
             if _FakeTable.max_rows is not None:
@@ -555,6 +573,13 @@ def _install_fake_preflight(monkeypatch, venue: str, fake_supabase: FakeSupabase
     from services import db as db_module
     monkeypatch.setattr(db_module, "get_supabase", lambda: fake_supabase)
     monkeypatch.setattr(er, "get_supabase", lambda: fake_supabase, raising=False)
+
+
+def _closed_day_iso(run_day: date) -> str:
+    """The label of the one row the legacy refresh writes on ``run_day``: the UTC
+    day that closed (167.2.1.1.1.1 D-01, ``mark_day_for``). Holdings stay dated
+    by the poll day, so only snapshot lookups go through this."""
+    return (run_day - timedelta(days=1)).isoformat()
 
 
 def _seed_eligible_keys_for_holdings(fake_supabase: FakeSupabaseClient) -> None:
@@ -907,10 +932,15 @@ async def test_reconstruct_okx_terminus_multikey_upsert_path_flags_rows(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_reconstruct_coingecko_fallback(monkeypatch):
+@pytest.mark.parametrize("partial_cache", [False, True])
+async def test_reconstruct_coingecko_fallback(monkeypatch, partial_cache):
     """A deposit of symbol SYMX that the exchange cannot price via fetch_ohlcv
     must trigger a CoinGecko fallback. The handler writes to token_price_history
-    and the resulting rows have source in {'coingecko_fallback', 'mixed'}."""
+    and the resulting rows have source in {'coingecko_fallback', 'mixed'}.
+
+    WR-03: a cache holding only SOME of the window's close days is not complete. With the
+    7-day carry cap a missing day drops the symbol, so the rebuild fetches whenever any
+    expected close day is missing, and ends with the same cached days as an empty cache."""
     fake_supabase = FakeSupabaseClient()
     _install_fake_audit(monkeypatch)
 
@@ -918,6 +948,12 @@ async def test_reconstruct_coingecko_fallback(monkeypatch):
     start_date = end_date - timedelta(days=4)
     ts = int(start_date.timestamp() * 1000)
     day_ms = 24 * 60 * 60 * 1000
+    if partial_cache:
+        # One close-tagged day only (the flow pricer caches just the days it needed).
+        fake_supabase.store[("token_price_history", ("SYMX", "2026-04-11"))] = {
+            "symbol": "SYMX", "asof": "2026-04-11", "price_usd": 1.5,
+            "source": "coingecko_close",
+        }
 
     # One deposit of SYMX that the exchange doesn't list
     deposits = [{
@@ -1000,6 +1036,10 @@ async def test_reconstruct_coingecko_fallback(monkeypatch):
     assert any(r.get("symbol") == "SYMX" for r in price_rows), (
         f"expected SYMX rows in token_price_history; got {price_rows!r}"
     )
+    # Every expected close day of the window (start .. end - 1) is cached, whether the cache
+    # started empty or held one day.
+    cached_days = {r["asof"] for r in price_rows if r.get("symbol") == "SYMX"}
+    assert {"2026-04-11", "2026-04-12", "2026-04-13", "2026-04-14"} <= cached_days, cached_days
 
     # Snapshot rows exist with source reflecting the fallback
     snap_rows = fake_supabase.rows_for("allocator_equity_snapshots")
@@ -1027,7 +1067,8 @@ async def test_refresh_daily_appends_one_row(monkeypatch):
     today = date(2026, 4, 15)
 
     # Pre-populate history ending yesterday so warm-up is satisfied
-    for day in range(1, 31):
+    # (history ends the day BEFORE the closed day the refresh labels, D-01)
+    for day in range(2, 32):
         d = today - timedelta(days=day)
         fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, d.isoformat()))] = {
             "allocator_id": ALLOCATOR_ID,
@@ -1087,7 +1128,7 @@ async def test_refresh_daily_appends_one_row(monkeypatch):
     assert result.outcome == DispatchOutcome.DONE, result
 
     rows = fake_supabase.rows_for("allocator_equity_snapshots")
-    today_rows = [r for r in rows if r["asof"] == today.isoformat()]
+    today_rows = [r for r in rows if r["asof"] == _closed_day_iso(today)]
     assert len(today_rows) == 1, (
         f"expected exactly one row for today; got {len(today_rows)}: {today_rows!r}"
     )
@@ -1196,7 +1237,8 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
 
     # Pre-populate history so warm-up is satisfied (daily refresh expects
     # at least one existing snapshot row per the SQL fan-out gate).
-    for day in range(1, 15):
+    # (history ends the day BEFORE the closed day the refresh labels, D-01)
+    for day in range(2, 16):
         d = today - timedelta(days=day)
         fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, d.isoformat()))] = {
             "allocator_id": ALLOCATOR_ID,
@@ -1267,7 +1309,7 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
     assert result2.outcome == DispatchOutcome.DONE, result2
 
     rows = fake_supabase.rows_for("allocator_equity_snapshots")
-    today_rows = [r for r in rows if r["asof"] == today.isoformat()]
+    today_rows = [r for r in rows if r["asof"] == _closed_day_iso(today)]
     assert len(today_rows) == 1, (
         f"expected exactly ONE snapshot row for (allocator_id, today) across "
         f"both keys; got {len(today_rows)}: {today_rows!r}"
@@ -2925,8 +2967,9 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
 
     today = date(2026, 4, 23)
 
-    # Seed yesterday so refresh doesn't short-circuit on empty history.
-    y = today - timedelta(days=1)
+    # Seed the day before the closed day (the refresh labels the closed day,
+    # D-01) so refresh doesn't short-circuit on empty history.
+    y = today - timedelta(days=2)
     fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, y.isoformat()))] = {
         "allocator_id": ALLOCATOR_ID,
         "asof": y.isoformat(),
@@ -2994,7 +3037,7 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
 
     written = [
         r for r in fake_supabase.rows_for("allocator_equity_snapshots")
-        if r["asof"] == today.isoformat()
+        if r["asof"] == _closed_day_iso(today)
     ]
     assert len(written) == 1, f"expected one row for today; got {written!r}"
     row = written[0]
@@ -3040,7 +3083,8 @@ async def test_refresh_daily_excludes_deribit_derivatives(monkeypatch):
     _install_fake_audit(monkeypatch)
 
     today = date(2026, 7, 5)
-    y = today - timedelta(days=1)
+    # The day before the closed day the refresh labels (D-01).
+    y = today - timedelta(days=2)
     fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, y.isoformat()))] = {
         "allocator_id": ALLOCATOR_ID,
         "asof": y.isoformat(),
@@ -3101,7 +3145,7 @@ async def test_refresh_daily_excludes_deribit_derivatives(monkeypatch):
 
     written = [
         r for r in fake_supabase.rows_for("allocator_equity_snapshots")
-        if r["asof"] == today.isoformat()
+        if r["asof"] == _closed_day_iso(today)
     ]
     assert len(written) == 1, written
     row = written[0]
@@ -4060,7 +4104,7 @@ async def test_h1161_refresh_keeps_perp_breakdown_entry_when_upnl_is_zero(monkey
 
     written = [
         r for r in fake_supabase.rows_for("allocator_equity_snapshots")
-        if r["asof"] == today.isoformat()
+        if r["asof"] == _closed_day_iso(today)
     ]
     assert len(written) == 1
     brk = written[0]["breakdown"]
@@ -5620,7 +5664,7 @@ def _upnl_missing_events(audit_mock):
 def _snapshot_rows_for_day(fake_supabase):
     return [
         r for r in fake_supabase.rows_for("allocator_equity_snapshots")
-        if r["asof"] == "2026-04-15"
+        if r["asof"] == _closed_day_iso(date(2026, 4, 15))
     ]
 
 
@@ -5681,6 +5725,32 @@ def test_pnl_missing_record_survives_cap_breakdown_truncation():
     numeric = {
         k: v for k, v in capped.items()
         if k not in ("__pnl_missing__", "__truncated__")
+    }
+    assert len(numeric) == _BREAKDOWN_TOP_N
+    assert all(isinstance(v, float) for v in numeric.values()), numeric
+
+
+def test_price_gap_left_out_record_survives_cap_breakdown_truncation():
+    """MARKSOURCE plan 15 / D-06: the record naming the balances the refresh left out for
+    want of a price is a STRUCTURED dict, like ``__pnl_missing__``. Unprotected it would
+    reach ``float(...)`` in the top-N sort and raise TypeError (failing the refresh for
+    exactly the large books that need the record), or be evicted by the sort. Protected,
+    it comes through byte-equal and every other kept key stays numeric."""
+    from services.equity_reconstruction import _cap_breakdown, _BREAKDOWN_TOP_N
+
+    record = {"count": 3, "symbols": ["A", "B", "C"], "dust": 2, "unsizable": 1}
+    breakdown: dict[str, Any] = {
+        f"LONGSYMBOLNAME{i:04d}/USDT:USDT": float(100000 + i) for i in range(150)
+    }
+    breakdown["__price_gap_left_out__"] = dict(record)
+
+    capped = _cap_breakdown(breakdown)
+
+    assert "__truncated__" in capped, "expected truncation to fire on >cap breakdown"
+    assert capped["__price_gap_left_out__"] == record, capped.get("__price_gap_left_out__")
+    numeric = {
+        k: v for k, v in capped.items()
+        if k not in ("__price_gap_left_out__", "__truncated__")
     }
     assert len(numeric) == _BREAKDOWN_TOP_N
     assert all(isinstance(v, float) for v in numeric.values()), numeric

@@ -34,6 +34,8 @@ plan 06's mirror (``FakeDb``): the SQL gate and the lane probe are the authority
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from typing import Any
@@ -218,6 +220,7 @@ async def _derive(
     now: datetime = T_0010,
     key_mode: bool = True,
     extra_patches: list[Any] | None = None,
+    owner_tables: Any = None,
 ) -> tuple[Any, dict[str, Any], MagicMock]:
     """Run ``run_derive_broker_dailies_job`` for one ccxt key. The derive's OWN equity read is
     patched to ``derive_usdt`` (its realized USDT wallet figure, wedge 0.0); everything the
@@ -227,6 +230,13 @@ async def _derive(
         strategy_id=None if key_mode else "strat-1",
     )
     ctx.exchange = exchange
+    if owner_tables is not None:
+        # The owner's ``api_keys`` and ``allocator_holdings`` come from a FakeSupabaseClient; every
+        # other table keeps the harness's routing.
+        inner = ctx.supabase.table.side_effect
+        ctx.supabase.table.side_effect = lambda name: (
+            owner_tables.table(name) if name in ("api_keys", "allocator_holdings") else inner(name)
+        )
     preflight = (
         "services.job_worker._allocator_key_preflight"
         if key_mode else "services.job_worker._exchange_preflight"
@@ -486,6 +496,90 @@ async def test_an_exception_the_wrapper_did_not_turn_into_a_token_is_a_refusal()
     assert db.marks == {}
     assert _key_inputs(capture)["nav_mark_refusal"] == "positions_unreadable"
     assert "abc123" not in repr(capture["upserts"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("venue_name", ["bybit", "binance"])
+async def test_a_429_on_the_mark_read_stamps_the_cooldown_and_refuses_as_balance_error(
+    venue_name: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D-10: a 429 on the mark read is the venue asking this key to back off, so it stamps
+    ``last_429_at`` (the circuit breaker the sibling jobs read) like every other handler's 429
+    arm, refuses as ``balance_error`` (not ``positions_unreadable``: nothing about positions was
+    learned) and still finishes the derive. The WARNING names the venue only: no key id."""
+    db = FakeDb()
+    exc = ccxt.RateLimitExceeded("venue text that must not leak: sig=abc123")
+    boom = AsyncMock(side_effect=exc)
+    stamp = AsyncMock()
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result, capture, _combine = await _derive(
+            db, _MAKE[venue_name](), venue=venue_name,
+            extra_patches=[
+                patch("services.equity_reconstruction.read_marked_equity_usd", new=boom),
+                patch("services.job_worker._stamp_429", new=stamp),
+            ],
+        )
+    assert result.outcome == DispatchOutcome.DONE
+    assert db.marks == {}
+    assert _key_inputs(capture)["nav_mark_refusal"] == "balance_error"
+    stamp.assert_awaited_once()
+    assert stamp.await_args.args[1]["id"] == KEY and stamp.await_args.args[2] is exc
+    lines = [r.getMessage() for r in caplog.records if "rate limited" in r.getMessage()]
+    assert len(lines) == 1 and venue_name in lines[0], caplog.text
+    assert KEY not in lines[0] and "api_key=" not in lines[0] and "abc123" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "venue_name,method",
+    [
+        ("binance", "fetch_positions"),
+        ("bybit", "fetch_balance"),
+        ("bybit", "privateGetV5AccountInfo"),
+        ("binance", "eapiPrivateGetMarginAccount"),
+        ("binance", "eapiPrivateGetPosition"),
+    ],
+)
+async def test_a_429_from_every_mark_read_reaches_the_cooldown_stamp(
+    venue_name: str, method: str
+) -> None:
+    """SFH MEDIUM-2 (D-10): the 429 arm only helps if a 429 from EACH venue read on the mark path
+    survives ``read_marked_equity_usd``. Binance ``fetch_positions``, Bybit ``fetch_balance`` and
+    ``/v5/account/info`` and both Binance options reads each used to turn it into a plain refusal
+    (``positions_unreadable``, ``balance_error``, ``option_value_unreadable``) with no stamp."""
+    venue = _MAKE[venue_name]()
+    exc = ccxt.RateLimitExceeded("venue text that must not leak: sig=abc123")
+    setattr(venue, method, AsyncMock(side_effect=exc))
+    stamp = AsyncMock()
+    db = FakeDb()
+    result, capture, _combine = await _derive(
+        db, venue, venue=venue_name,
+        extra_patches=[patch("services.job_worker._stamp_429", new=stamp)],
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    assert db.marks == {}
+    assert _key_inputs(capture)["nav_mark_refusal"] == "balance_error"
+    stamp.assert_awaited_once()
+    assert stamp.await_args.args[2] is exc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refuse_unread_positions", [True, False], ids=["forced", "advisory"])
+async def test_a_429_from_the_anchors_positions_read_reaches_the_reconstruct_crawl(
+    refuse_unread_positions: bool,
+) -> None:
+    """The reconstruct path calls the same ``_fetch_current_equity``; its callers
+    (``_fetch_and_price_window``'s two callers) both have a ``ccxt.RateLimitExceeded`` arm that
+    stamps the cooldown, so the 429 must reach them in the forced and the advisory call, as the
+    pricer's already does (review F3), not be logged away as an unreadable position book."""
+    from services.equity_reconstruction import _fetch_current_equity
+
+    venue = _binance()
+    venue.fetch_positions = AsyncMock(side_effect=ccxt.RateLimitExceeded("429"))
+    with pytest.raises(ccxt.RateLimitExceeded):
+        await _fetch_current_equity(
+            venue, "binance", refuse_unread_positions=refuse_unread_positions
+        )
 
 
 @pytest.mark.asyncio
@@ -826,3 +920,347 @@ async def test_the_dry_run_sequence_reaches_the_verdict_the_derive_stores(
     else:
         assert dry == token and db.marks == {}
         assert _key_inputs(capture)["nav_mark_refusal"] == token
+
+
+# --------------------------------------------------------------------------------------
+# Review WR-06 / D-10: a Binance coin with no ticker is sized from its newest priced holdings row
+# --------------------------------------------------------------------------------------
+
+ALLOC = "alloc-1"
+
+
+def _holdings(*rows: tuple[str, str, float, float], api_key: str = KEY) -> Any:
+    """A supabase fake whose ``allocator_holdings`` holds ``(symbol, asof, quantity, mark_price)``
+    rows of ``api_key`` (this key by default). ``mark_price`` 0 is the stored shape of a poll that
+    could not price the coin."""
+    from tests.test_equity_reconstruction import FakeSupabaseClient
+
+    fake = FakeSupabaseClient()
+    for symbol, asof, quantity, mark in rows:
+        fake.store[("allocator_holdings", (ALLOC, "binance", symbol, asof))] = {
+            "allocator_id": ALLOC, "api_key_id": api_key, "venue": "binance", "symbol": symbol,
+            "asof": asof, "holding_type": "spot", "quantity": quantity, "mark_price": mark,
+            "value_usd": quantity * mark,
+        }
+    return fake
+
+
+async def _binance_mark(
+    wallet: dict[str, float], fake: Any, api_key_ids: list[str] | None = None
+) -> Any:
+    from services.equity_reconstruction import read_marked_equity_usd
+
+    return await read_marked_equity_usd(
+        _binance(wallet=wallet, ticker_fails=frozenset(a for a in wallet if a != "USDT")),
+        "binance", supabase=fake, allocator_id=ALLOC, api_key_ids=api_key_ids or [KEY],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dust_coin_with_no_ticker_does_not_refuse_the_mark() -> None:
+    """WR-06 (founder D-10): DUST has no ticker, but its newest priced holdings row sizes it:
+    5.0 x 0.01 = 0.05 USD, under DUST_FLOOR_SHARE (0.001) x the 1000.0 wallet = 1.0. The mark is
+    the anchor's own reading of the priced wallet (1000.0) plus the 25.0 position profit."""
+    fake = _holdings(("DUST", "2026-02-20", 5.0, 0.01), ("DUST", "2026-02-28", 5.0, 0.0))
+    assert await _binance_mark({"USDT": 1000.0, "DUST": 5.0}, fake) == (1025.0, 25.0, 1000.0)
+
+
+@pytest.mark.asyncio
+async def test_a_coin_over_the_dust_floor_still_refuses_the_mark() -> None:
+    """5000.0 x 0.01 = 50.0 USD against a 1.0 floor: a material balance is never dropped."""
+    fake = _holdings(("DUST", "2026-02-20", 5000.0, 0.01))
+    assert await _binance_mark({"USDT": 1000.0, "DUST": 5000.0}, fake) == "wallet_unpriced"
+
+
+@pytest.mark.asyncio
+async def test_a_never_priced_coin_still_refuses_the_mark() -> None:
+    """Only a stored mark_price of 0 exists for DUST: it was never priced, so it cannot be sized."""
+    fake = _holdings(("DUST", "2026-02-28", 5.0, 0.0))
+    assert await _binance_mark({"USDT": 1000.0, "DUST": 5.0}, fake) == "wallet_unpriced"
+
+
+@pytest.mark.asyncio
+async def test_one_unsizable_coin_keeps_the_refusal_for_the_sized_one_too() -> None:
+    """The set clears only when EVERY unpriced coin is sized: DUST is dust, GHOST was never priced."""
+    fake = _holdings(("DUST", "2026-02-20", 5.0, 0.01))
+    wallet = {"USDT": 1000.0, "DUST": 5.0, "GHOST": 1.0}
+    assert await _binance_mark(wallet, fake) == "wallet_unpriced"
+
+
+@pytest.mark.asyncio
+async def test_the_summed_dust_is_judged_not_each_coin(caplog: pytest.LogCaptureFixture) -> None:
+    """Two coins at 0.6 USD each are each under the 1.0 floor but 1.2 together are not."""
+    fake = _holdings(("AAA", "2026-02-20", 6.0, 0.1), ("BBB", "2026-02-20", 6.0, 0.1))
+    assert await _binance_mark({"USDT": 1000.0, "AAA": 6.0, "BBB": 6.0}, fake) == "wallet_unpriced"
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_unpriced_set_is_logged_without_a_key_label(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    fake = _holdings(("DUST", "2026-02-20", 5.0, 0.01))
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.equity_reconstruction"):
+        await _binance_mark({"USDT": 1000.0, "DUST": 5.0}, fake)
+    lines = [r for r in caplog.records if "leave the unpriced set" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelno == logging.WARNING
+    text = lines[0].getMessage()
+    # T-13 (plan 15: never in a log line): the count of coins, no symbol and no USD size (0.05).
+    assert "1 unpriced coin" in text
+    assert "DUST" not in text and "0.05" not in text
+    assert "api_key" not in text and KEY not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rows,wallet,phrase",
+    [
+        # Only a stored mark_price of 0 exists for DUST: never priced.
+        ([("DUST", "2026-02-28", 5.0, 0.0)], {"USDT": 1000.0, "DUST": 5.0}, "never priced"),
+        # 5000.0 x 0.01 = 50.0 USD against a 1.0 floor.
+        ([("DUST", "2026-02-20", 5000.0, 0.01)], {"USDT": 1000.0, "DUST": 5000.0}, "above dust floor"),
+    ],
+    ids=["never-priced", "above-floor"],
+)
+async def test_a_coin_that_stays_named_says_why_in_one_warning(
+    rows: list[tuple[str, str, float, float]], wallet: dict[str, float], phrase: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SFH MEDIUM-low: the two silent refusals of the dust check each leave one WARNING that gives
+    the count of unpriced coins and the reason, and no key. T-13 (plan 15: never in a log line):
+    no coin symbol and no USD figure (50.0, 1000.0) in either."""
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.equity_reconstruction"):
+        assert await _binance_mark(wallet, _holdings(*rows)) == "wallet_unpriced"
+    lines = [r.getMessage() for r in caplog.records if "_drop_binance_dust_unpriced" in r.getMessage()]
+    assert len(lines) == 1 and phrase in lines[0] and "1 unpriced coin" in lines[0], caplog.text
+    assert "DUST" not in lines[0] and not re.search(r"\d+\.\d", lines[0]), lines[0]
+    assert KEY not in lines[0] and "api_key" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_a_coin_absent_from_the_held_quantities_is_not_sized_as_zero() -> None:
+    """``held.get(symbol, 0.0)`` sized a coin the wallet does not list as 0.0 USD, which is dust,
+    and cleared it. A coin with no quantity cannot be sized: the set is left as it was."""
+    from services.equity_reconstruction import _drop_binance_dust_unpriced
+
+    partial = {"GHOST"}
+    await _drop_binance_dust_unpriced(
+        partial, {"USDT": 1000.0}, 1000.0, _holdings(("GHOST", "2026-02-20", 1.0, 0.01)), ALLOC, [KEY],
+    )
+    assert partial == {"GHOST"}
+
+
+@pytest.mark.asyncio
+async def test_a_key_row_without_an_owner_is_refused_not_sized_from_no_allocator() -> None:
+    """The derive reads ``key_row["user_id"]`` (the owner-coherence rule); the mark read does the
+    same. ``.get`` handed ``None`` on to the read, which silently skipped the sizing."""
+    import services.job_worker as jw
+
+    ctx = MagicMock()
+    ctx.key_row = {"id": KEY, "exchange": "binance"}
+    spy = AsyncMock(return_value=(1.0, 0.0, 1.0))
+    with (
+        patch("services.job_worker.read_stored_mark", new=MagicMock(return_value=None)),
+        patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
+        patch("services.equity_reconstruction.read_marked_equity_usd", new=spy),
+    ):
+        _stored, read, _at = await jw._read_marked_equity_once_per_day(ctx, "binance")
+    assert read == "positions_unreadable"
+    spy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_holdings_read_keeps_the_coin_named_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SFH MEDIUM-1: a database error in the sizing read is not a venue balance failure. It must
+    not reach ``_fetch_current_equity``'s catch-all (which would refuse the mark as
+    ``balance_error``): the coins stay named, so the mark refuses ``wallet_unpriced``, and one
+    WARNING names the exception class and the count of coins, never a key or a coin symbol
+    (T-13, plan 15)."""
+    fake = _holdings(("DUST", "2026-02-20", 5.0, 0.01))
+
+    def _table(name: str) -> Any:
+        raise RuntimeError("holdings read failed: key-1")
+
+    fake.table = _table  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.equity_reconstruction"):
+        assert await _binance_mark({"USDT": 1000.0, "DUST": 5.0}, fake) == "wallet_unpriced"
+    lines = [r.getMessage() for r in caplog.records if "holdings read failed" in r.getMessage()]
+    assert len(lines) == 1 and "RuntimeError" in lines[0], caplog.text
+    assert "1 unpriced coin" in lines[0] and "DUST" not in lines[0], lines[0]
+    assert KEY not in lines[0] and "api_key" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_the_derive_hands_its_database_and_key_to_the_mark_read() -> None:
+    """The call site: without the client, the allocator and the key id the read cannot size."""
+    spy = AsyncMock(return_value="wallet_unpriced")
+    owner = _owner_keys(
+        {"id": KEY, "account_share_kind": None, "account_shared_with_api_key_id": None},
+    )
+    result, _capture, _combine = await _derive(
+        FakeDb(), _binance(), venue="binance", owner_tables=owner,
+        extra_patches=[patch("services.equity_reconstruction.read_marked_equity_usd", new=spy)],
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    kwargs = spy.await_args.kwargs
+    assert kwargs["allocator_id"] == "alloc-1" and kwargs["api_key_ids"] == [KEY]
+    assert kwargs["supabase"] is not None
+
+
+SIBLING = "key-0"
+
+
+def _owner_keys(*rows: dict[str, Any], holdings: Any = None) -> Any:
+    """A FakeSupabaseClient holding the owner's ``api_keys`` rows (plus ``holdings``' rows)."""
+    fake = holdings if holdings is not None else _holdings()
+    for row in rows:
+        fake.store[("api_keys", (row["id"],))] = {"user_id": ALLOC, **row}
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_a_rotated_keys_dust_is_sized_through_its_account_groups_sibling_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WR-07 (D-10 "the refresh's source"): the refresh sizes a balance across the whole account
+    group, so a key re-added to an account whose coin lost its ticker before the new key's first
+    poll must size it through the sibling key's priced row, as the refresh does. DUST is held
+    through the sibling (5.0 x 0.01 = 0.05 USD, under the 1.0 floor): the mark is the anchor's
+    reading, and the log line names no key."""
+    owner = _owner_keys(
+        {"id": KEY, "account_share_kind": "duplicate", "account_shared_with_api_key_id": SIBLING},
+        {"id": SIBLING, "account_share_kind": None, "account_shared_with_api_key_id": None},
+        holdings=_holdings(("DUST", "2026-02-20", 5.0, 0.01), api_key=SIBLING),
+    )
+    db = FakeDb()
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.equity_reconstruction"):
+        result, _capture, _combine = await _derive(
+            db, _binance(wallet={"USDT": 1000.0, "DUST": 5.0}, ticker_fails=frozenset({"DUST"})),
+            venue="binance", owner_tables=owner,
+        )
+    assert result.outcome == DispatchOutcome.DONE
+    row = db.marks[(KEY, CLOSED_DAY)]
+    assert row["nav_usd"] == 1025.0 and row["open_pnl_usd"] == 25.0
+    cleared = [r.getMessage() for r in caplog.records if "leave the unpriced set" in r.getMessage()]
+    assert len(cleared) == 1 and SIBLING not in cleared[0] and KEY not in cleared[0]
+
+
+@pytest.mark.asyncio
+async def test_a_key_outside_the_account_group_does_not_size_the_coin() -> None:
+    """The group is the account, not the allocator: a priced row held through an UNRELATED key of
+    the same owner (no share marker) sizes nothing, so DUST stays unpriced and the mark refuses."""
+    owner = _owner_keys(
+        {"id": KEY, "account_share_kind": None, "account_shared_with_api_key_id": None},
+        {"id": SIBLING, "account_share_kind": None, "account_shared_with_api_key_id": None},
+        holdings=_holdings(("DUST", "2026-02-20", 5.0, 0.01), api_key=SIBLING),
+    )
+    db = FakeDb()
+    result, capture, _combine = await _derive(
+        db, _binance(wallet={"USDT": 1000.0, "DUST": 5.0}, ticker_fails=frozenset({"DUST"})),
+        venue="binance", owner_tables=owner,
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    assert db.marks == {}
+    assert _key_inputs(capture)["nav_mark_refusal"] == "wallet_unpriced"
+
+
+def _stale_here_fresh_at_the_sibling() -> Any:
+    """DUST is priced at 0.01 in THIS key's old row (5.0 x 0.01 = 0.05, under the 1.0 floor) and at
+    1.0 in the SIBLING's newer row (5.0 x 1.0 = 5.0, over it). Sized from this key alone the coin
+    reads as dust and is dropped from a write-once mark; sized across the account group it does
+    not."""
+    fake = _holdings(("DUST", "2026-02-10", 5.0, 0.01))
+    fake.store[("allocator_holdings", (ALLOC, "binance", "DUST", "2026-02-20"))] = {
+        "allocator_id": ALLOC, "api_key_id": SIBLING, "venue": "binance", "symbol": "DUST",
+        "asof": "2026-02-20", "holding_type": "spot", "quantity": 5.0, "mark_price": 1.0,
+        "value_usd": 5.0,
+    }
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_account_group_skips_the_dust_check_instead_of_sizing_from_this_key(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Final fixer round, SFH MEDIUM-1: when the owner's keys cannot be read the group is UNKNOWN,
+    not narrowed to this key. The mark is write-once, so sizing DUST from this key's stale 0.01
+    row would store a mark with an unpriced coin dropped. The dust check is skipped, the mark
+    refuses ``wallet_unpriced``, and one WARNING says so with the exception class and the venue,
+    no key id."""
+    owner = _owner_keys(
+        {"id": KEY, "account_share_kind": "duplicate", "account_shared_with_api_key_id": SIBLING},
+        {"id": SIBLING, "account_share_kind": None, "account_shared_with_api_key_id": None},
+        holdings=_stale_here_fresh_at_the_sibling(),
+    )
+    real_table = owner.table
+
+    def _table(name: str) -> Any:
+        if name == "api_keys":
+            raise RuntimeError("api_keys read failed: key-1")
+        return real_table(name)
+
+    owner.table = _table  # type: ignore[method-assign]
+    db = FakeDb()
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result, capture, _combine = await _derive(
+            db, _binance(wallet={"USDT": 1000.0, "DUST": 5.0}, ticker_fails=frozenset({"DUST"})),
+            venue="binance", owner_tables=owner,
+        )
+    assert result.outcome == DispatchOutcome.DONE
+    assert db.marks == {}
+    assert _key_inputs(capture)["nav_mark_refusal"] == "wallet_unpriced"
+    lines = [r.getMessage() for r in caplog.records if "account group" in r.getMessage()]
+    assert len(lines) == 1 and "RuntimeError" in lines[0] and "binance" in lines[0], caplog.text
+    assert KEY not in lines[0] and "api_key=" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_a_key_in_no_account_group_skips_the_dust_check_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Final fixer round, SFH MEDIUM-1: the owner's keys read fine but none of the groups holds this
+    key (a deleted or foreign row). That is an unknown group too, not this key alone: the dust
+    check is skipped, the mark refuses ``wallet_unpriced``, and one WARNING names the venue only."""
+    owner = _owner_keys(
+        {"id": SIBLING, "account_share_kind": None, "account_shared_with_api_key_id": None},
+        holdings=_stale_here_fresh_at_the_sibling(),
+    )
+    db = FakeDb()
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        result, capture, _combine = await _derive(
+            db, _binance(wallet={"USDT": 1000.0, "DUST": 5.0}, ticker_fails=frozenset({"DUST"})),
+            venue="binance", owner_tables=owner,
+        )
+    assert result.outcome == DispatchOutcome.DONE
+    assert db.marks == {}
+    assert _key_inputs(capture)["nav_mark_refusal"] == "wallet_unpriced"
+    lines = [r.getMessage() for r in caplog.records if "no account group" in r.getMessage()]
+    assert len(lines) == 1 and "binance" in lines[0], caplog.text
+    assert KEY not in lines[0] and "api_key=" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_bybit_does_not_read_the_account_group() -> None:
+    """Final fixer round, SFH MEDIUM-1: only Binance sizes a coin across the group (Bybit's mark is
+    the UTA's own totals), so a Bybit derive neither reads ``api_keys`` for it nor hands the read a
+    group."""
+    owner = _owner_keys()
+    touched: list[str] = []
+    real_table = owner.table
+
+    def _table(name: str) -> Any:
+        touched.append(name)
+        return real_table(name)
+
+    owner.table = _table  # type: ignore[method-assign]
+    spy = AsyncMock(return_value="wallet_unpriced")
+    result, _capture, _combine = await _derive(
+        FakeDb(), _bybit(), venue="bybit", owner_tables=owner,
+        extra_patches=[patch("services.equity_reconstruction.read_marked_equity_usd", new=spy)],
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    assert "api_keys" not in touched
+    assert spy.await_args.kwargs["api_key_ids"] is None

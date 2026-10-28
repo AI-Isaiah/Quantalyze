@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -107,6 +107,8 @@ def test_input_order_is_kept_and_the_input_is_not_mutated() -> None:
 # ---------------------------------------------------------------------------
 
 TODAY = date(2026, 10, 11)
+# 167.2.1.1.1.1 D-01: the refresh labels its one row the UTC day that closed.
+CLOSED_DAY = TODAY - timedelta(days=1)
 
 
 def _seed_key(fake: FakeSupabaseClient, key_id: str, **overrides: Any) -> None:
@@ -179,9 +181,10 @@ async def _run_refresh(monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient
 
 def _today_total(fake: FakeSupabaseClient) -> float:
     rows = [
-        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] == TODAY.isoformat()
+        r for r in fake.rows_for("allocator_equity_snapshots")
+        if r["asof"] == CLOSED_DAY.isoformat()
     ]
-    assert len(rows) == 1, f"expected exactly one snapshot row for today, got {len(rows)}"
+    assert len(rows) == 1, f"expected exactly one snapshot row for the closed day, got {len(rows)}"
     return float(rows[0]["value_usd"])
 
 

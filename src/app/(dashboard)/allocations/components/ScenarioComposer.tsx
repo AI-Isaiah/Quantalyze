@@ -166,6 +166,7 @@ import {
   keyStateMapsOf,
   managerSideKeyIds,
   pnlMissingSentence,
+  priceGapSentence,
   summarizeLiveHoldings,
   type LiveHoldingsSummary,
 } from "../lib/live-holdings-summary";
@@ -5019,6 +5020,14 @@ export function ScenarioComposer({
   // total there, so the sentence would qualify the allocator's own number.
   const pnlMissingCount =
     entryMode === "book" ? liveHoldingsSummary.pnlMissing : 0;
+  // Phase 167.2.1.1.1.1 D-07 (UI-SPEC P2) — how many spot holdings the total
+  // LEFT OUT because the book stores no usable price for them. Same pass as
+  // the total and same placement as `pnlMissingCount` above: book mode only,
+  // and the sentence follows the committed `sanitizedManualAum` through the
+  // three flags, so state 7 shows nothing. The total does not move: a gap
+  // row's equity was 0.
+  const priceGapCount =
+    entryMode === "book" ? liveHoldingsSummary.priceGap : 0;
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
   // qualification with the number and not only in linear reading order.
@@ -5042,8 +5051,12 @@ export function ScenarioComposer({
       pnlMissingCount > 0 && fieldShowsLive
         ? "scenario-aum-pnl-missing-note"
         : null,
+      priceGapCount > 0 && fieldShowsLive
+        ? "scenario-aum-price-gap-note"
+        : null,
       overrideNoteShowsLive ? "scenario-aum-override-note" : null,
-      (showUntrustedMarker || pnlMissingCount > 0) && fieldBlankHintShows
+      (showUntrustedMarker || pnlMissingCount > 0 || priceGapCount > 0) &&
+      fieldBlankHintShows
         ? "scenario-aum-required-note"
         : null,
     ]
@@ -5326,6 +5339,22 @@ export function ScenarioComposer({
             {pnlMissingSentence(pnlMissingCount)}
           </span>
         )}
+        {/* Phase 167.2.1.1.1.1 D-07 (UI-SPEC P2) — State A twin of the sentence
+            above: holdings the book stores no price for, left out of the live
+            total. The wording comes from `priceGapSentence`. Sits after the
+            derivative sentence when both render, before the modelled note.
+            Muted like its siblings: no role, no aria-live, no glyph, no link
+            (nothing the allocator does makes a venue quote a price). A count
+            of 0 renders nothing. */}
+        {priceGapCount > 0 && fieldShowsLive && (
+          <span
+            id="scenario-aum-price-gap-note"
+            data-testid="scenario-aum-price-gap-note"
+            className="text-xs text-text-muted"
+          >
+            {priceGapSentence(priceGapCount)}
+          </span>
+        )}
         {/* Phase 167.1 AUMTRUST — State C (D-18 REOPENED 2026-09-24, review
             WR-04): the field is blank because the live total is <= 0. Before
             the reopen the marker vanished here, so a non-positive total driven
@@ -5347,7 +5376,7 @@ export function ScenarioComposer({
             className="text-xs text-text-muted"
           >
             Required to size and commit.
-            {(showUntrustedMarker || pnlMissingCount > 0) && (
+            {(showUntrustedMarker || pnlMissingCount > 0 || priceGapCount > 0) && (
               <>
                 {" "}The live-holdings total is {formatUsd(liveHoldingsSum)}
                 {showUntrustedMarker && (
@@ -5366,6 +5395,14 @@ export function ScenarioComposer({
                 {" "}
                 <span data-testid="scenario-aum-pnl-missing-note">
                   {pnlMissingSentence(pnlMissingCount)}
+                </span>
+              </>
+            )}
+            {priceGapCount > 0 && (
+              <>
+                {" "}
+                <span data-testid="scenario-aum-price-gap-note">
+                  {priceGapSentence(priceGapCount)}
                 </span>
               </>
             )}
@@ -5407,6 +5444,14 @@ export function ScenarioComposer({
                 {" "}
                 <span data-testid="scenario-aum-pnl-missing-note">
                   {pnlMissingSentence(pnlMissingCount)}
+                </span>
+              </>
+            )}
+            {priceGapCount > 0 && (
+              <>
+                {" "}
+                <span data-testid="scenario-aum-price-gap-note">
+                  {priceGapSentence(priceGapCount)}
                 </span>
               </>
             )}

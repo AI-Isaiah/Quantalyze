@@ -45,6 +45,10 @@ function makeHolding(overrides: Partial<HoldingRow> = {}): HoldingRow {
     value_usd: 90_000,
     entry_price: 60_000,
     unrealized_pnl_usd: 1_200,
+    // 167.2.1.1.1.1 D-07: a spot row with a quantity and no usable mark is a
+    // price gap and renders "No price". The default row is priced (1.5 x 60,000
+    // = 90,000) so every pre-existing assertion about a priced row holds.
+    mark_price_usd: 60_000,
     api_key_id: "key-1",
     source_key_sync_status: "complete",
     ...overrides,
@@ -678,13 +682,14 @@ describe("HoldingsTable — native-unit account row (164.6.6.2.1 / D-01, D-17, D
     },
   );
 
-  it("a stored unit with no mark prints no invented price: the unit shows, the conversion sentence does not", () => {
+  it("a stored unit with no mark prints no invented price: the unit shows, the conversion sentence does not, and the value reads as unpriced (167.2.1.1.1.1 D-07)", () => {
     const { container } = renderRow(accountRow({ mark_price_usd: null }));
     const cells = cellsOf(container);
     expect(cells[QTY].textContent).toBe("0.4213 BTC");
     expect(cells[VALUE].hasAttribute("title")).toBe(false);
     expect(cells[VALUE].querySelector("span.sr-only")).toBeNull();
-    expect(cells[VALUE].textContent).toBe("$26,100");
+    // Moved oracle: this was "$26,100", the stored value read as if measured.
+    expect(cells[VALUE].textContent).toBe("—No price");
   });
 
   it("a USD-family row is untouched by the unit path", () => {
@@ -723,5 +728,114 @@ describe("HoldingsTable — venue reads its display name (170.1.2 / D-01)", () =
   it("a holding on a venue outside the closed set reads 'Other venue · BTC'", () => {
     renderOne("kraken");
     expect(screen.getByText("Other venue · BTC")).toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 167.2.1.1.1.1 plan 11 (D-07, UI-SPEC P1) — a spot row with no usable
+ * stored price reads "—" and "No price" in the Value (USD) cell, never "$0".
+ * Every expected string is typed literally.
+ */
+describe("HoldingsTable — price-gap Value cell (167.2.1.1.1.1 / D-07, P1)", () => {
+  const VALUE = 4;
+
+  function valueCell(container: HTMLElement): HTMLTableCellElement {
+    return container.querySelector("tbody")!.querySelectorAll("tr")[0].querySelectorAll("td")[VALUE];
+  }
+
+  function renderOne(row: HoldingRow) {
+    return render(
+      <HoldingsTable holdings={[row]} showRevoked={true} onShowRevokedChange={() => {}} />,
+    );
+  }
+
+  function expectGapCell(container: HTMLElement) {
+    const cell = valueCell(container);
+    expect(cell.textContent).toBe("—No price");
+    const label = cell.querySelector('[data-testid="holding-price-gap-label"]');
+    expect(label).not.toBeNull();
+    expect(label!.textContent).toBe("No price");
+    for (const token of ["block", "font-sans", "text-caption", "text-text-muted"]) {
+      expect(label!.classList.contains(token), token).toBe(true);
+    }
+    const dash = cell.querySelector('span[aria-hidden="true"]');
+    expect(dash).not.toBeNull();
+    expect(dash!.textContent).toBe("—");
+    expect(cell.hasAttribute("title")).toBe(false);
+    expect(cell.querySelector("span.sr-only")).toBeNull();
+    expect(container.textContent).not.toContain("$0");
+  }
+
+  it("a stored zero mark renders the dash and No price, never $0", () => {
+    const { container } = renderOne(
+      makeHolding({ quantity: 0.5, mark_price_usd: 0, value_usd: 0 }),
+    );
+    expectGapCell(container);
+  });
+
+  it("a null mark is the same gap", () => {
+    const { container } = renderOne(
+      makeHolding({ quantity: 0.5, mark_price_usd: null, value_usd: 0 }),
+    );
+    expectGapCell(container);
+  });
+
+  it("an absent mark field (a legacy fixture) is the same gap", () => {
+    const row = makeHolding({ quantity: 0.5, value_usd: 0 });
+    delete row.mark_price_usd;
+    const { container } = renderOne(row);
+    expectGapCell(container);
+  });
+
+  it("a gap row in a native unit prints no fabricated basis: no title, no sr-only conversion", () => {
+    const { container } = renderOne(
+      makeHolding({
+        quantity: 0.5,
+        quantity_unit: "BTC",
+        mark_price_usd: 0,
+        value_usd: 0,
+      }),
+    );
+    expectGapCell(container);
+    expect(container.textContent).not.toContain("converted from");
+  });
+
+  it("a priced spot row renders its value with no gap label", () => {
+    const { container } = renderOne(
+      makeHolding({ quantity: 0.5, mark_price_usd: 60_000, value_usd: 30_000 }),
+    );
+    expect(valueCell(container).textContent).toBe("$30,000");
+    expect(container.querySelector('[data-testid="holding-price-gap-label"]')).toBeNull();
+  });
+
+  it("a stable USDT row at mark 1.0 renders unchanged", () => {
+    const { container } = renderOne(
+      makeHolding({ symbol: "USDT", quantity: 1_000, mark_price_usd: 1, value_usd: 1_000 }),
+    );
+    expect(valueCell(container).textContent).toBe("$1,000");
+    expect(container.querySelector('[data-testid="holding-price-gap-label"]')).toBeNull();
+  });
+
+  it("a spot row with quantity 0 and mark 0 is not a gap: today's cell", () => {
+    const { container } = renderOne(
+      makeHolding({ quantity: 0, mark_price_usd: 0, value_usd: 0 }),
+    );
+    expect(valueCell(container).textContent).toBe("$0");
+    expect(container.querySelector('[data-testid="holding-price-gap-label"]')).toBeNull();
+  });
+
+  it("a gap row on a key needing attention keeps the strike-through and the caption sits inside it", () => {
+    const { container } = renderOne(
+      makeHolding({
+        quantity: 0.5,
+        mark_price_usd: 0,
+        value_usd: 0,
+        source_key_sync_status: "revoked",
+      }),
+    );
+    const cell = valueCell(container);
+    expect(cell.classList.contains("line-through")).toBe(true);
+    expect(cell.querySelector('[data-testid="holding-price-gap-label"]')).not.toBeNull();
+    expect(cell.textContent).toBe("—No price");
   });
 });

@@ -13,6 +13,12 @@
 // ONE hand-typed `expected` per case, replayed by vitest
 // (`src/lib/holding-equity-contribution.parity.test.ts`) and by pytest.
 //
+// Phase 167.2.1.1.1.1 D-07 adds `holdingIsPriceGap` here. Its Python twin is
+// `is_price_gap_holding` in the same module and its fixture is
+// `analytics-service/tests/fixtures/holding_price_gap_cases.json` (vitest:
+// `src/lib/holding-price-gap.parity.test.ts`). It decides what the screen SAYS
+// about a stored 0 and never changes the AUM sum above.
+//
 // Pure functions, no imports — safe in server, client, and test contexts.
 // ============================================================================
 
@@ -77,4 +83,40 @@ export function holdingEquityIsReported(h: HoldingEquityInput): boolean {
     return h.unrealized_pnl_usd != null && Number.isFinite(h.unrealized_pnl_usd);
   }
   return Number.isFinite(h.value_usd);
+}
+
+/**
+ * The fields the price-gap rule reads. Structural, so the dashboard holding and
+ * `HoldingRow` both fit; `HoldingEquityInput` is deliberately not widened.
+ */
+export type HoldingPriceGapInput = {
+  holding_type: string;
+  quantity?: number | null;
+  mark_price_usd?: number | null;
+};
+
+/**
+ * Phase 167.2.1.1.1.1 D-07: a stored holdings row is a PRICE GAP iff it is a
+ * spot holding of a finite, positive `quantity` whose `mark_price_usd` is NOT a
+ * finite number above 0. It is the `holding_marks` gap rule (a finite mark at or
+ * below 0 is a gap) applied to a stored row, so no new notion of a gap exists.
+ * Null, absent, 0, negative, NaN, Infinity, boolean and string marks are gaps;
+ * a quantity of 0 (or one that is non-finite or negative) is not (nothing is
+ * held); a derivative is never a gap.
+ *
+ * The surfaces read this to say "no price" where they would otherwise show a
+ * stored 0 as a measured figure. It never changes `holdingEquityContribution`.
+ *
+ * It is row-level and pure: it carries no stable-value set and no venue rule.
+ * The refresh adds its stable-value and Deribit exclusions locally (plan 12).
+ *
+ * The Python twin is `is_price_gap_holding`; the fixture
+ * `holding_price_gap_cases.json` pins both.
+ */
+export function holdingIsPriceGap(h: HoldingPriceGapInput): boolean {
+  if (h.holding_type !== "spot") return false;
+  const quantity = h.quantity;
+  if (typeof quantity !== "number" || !Number.isFinite(quantity) || quantity <= 0) return false;
+  const mark = h.mark_price_usd;
+  return !(typeof mark === "number" && Number.isFinite(mark) && mark > 0);
 }

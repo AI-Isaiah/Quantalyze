@@ -1,0 +1,124 @@
+{
+  "_comment": "Phase 167.2.1.1.1.1 plan 09 (D-07, UI-SPEC U-06) created this oracle. Shared oracle for the stored price-gap rule: a stored holdings row is a PRICE GAP iff holding_type is spot AND quantity is finite and > 0 AND NOT (mark_price finite and > 0). Both runners read this whole file: vitest (src/lib/holding-price-gap.parity.test.ts) replays it against holdingIsPriceGap (src/lib/holding-equity.ts), whose mark_price_usd field carries this file mark_price; pytest (analytics-service/tests/test_holding_price_gap.py) replays it against is_price_gap_holding (analytics-service/services/holding_equity.py). Every figure is hand-typed and invented; nothing is derived from the code under test. A case with no mark_price key is the ABSENT mark. JSON cannot carry NaN or Infinity, so a field holding one is written {\"nonfinite\": \"NaN\" | \"Infinity\" | \"-Infinity\"} and decoded identically by both runners.",
+  "cases": [
+    {
+      "name": "priced_spot",
+      "holding_type": "spot",
+      "quantity": 0.5,
+      "mark_price": 60000,
+      "expected_gap": false
+    },
+    {
+      "name": "spot_mark_zero",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": 0,
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_negative",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": -1,
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_nan",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": {
+        "nonfinite": "NaN"
+      },
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_infinity",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": {
+        "nonfinite": "Infinity"
+      },
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_negative_infinity",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": {
+        "nonfinite": "-Infinity"
+      },
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_null",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": null,
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_absent",
+      "holding_type": "spot",
+      "quantity": 1,
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_bool",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": true,
+      "expected_gap": true
+    },
+    {
+      "name": "spot_mark_string",
+      "holding_type": "spot",
+      "quantity": 1,
+      "mark_price": "60000",
+      "expected_gap": true
+    },
+    {
+      "name": "zero_quantity_zero_mark_is_not_a_gap",
+      "holding_type": "spot",
+      "quantity": 0,
+      "mark_price": 0,
+      "expected_gap": false
+    },
+    {
+      "name": "null_quantity_zero_mark_is_not_a_gap",
+      "holding_type": "spot",
+      "quantity": null,
+      "mark_price": 0,
+      "expected_gap": false
+    },
+    {
+      "name": "negative_quantity_zero_mark_is_not_a_gap",
+      "holding_type": "spot",
+      "quantity": -1,
+      "mark_price": 0,
+      "expected_gap": false
+    },
+    {
+      "name": "nan_quantity_zero_mark_is_not_a_gap",
+      "holding_type": "spot",
+      "quantity": {
+        "nonfinite": "NaN"
+      },
+      "mark_price": 0,
+      "expected_gap": false
+    },
+    {
+      "name": "derivative_mark_zero_is_never_a_gap",
+      "holding_type": "derivative",
+      "quantity": 1,
+      "mark_price": 0,
+      "expected_gap": false
+    },
+    {
+      "name": "stable_usdt_spot_at_one_is_priced",
+      "holding_type": "spot",
+      "quantity": 250,
+      "mark_price": 1,
+      "expected_gap": false
+    }
+  ]
+}

@@ -27,6 +27,7 @@ import { buildHoldingRef } from "./holding-outcome-adapter";
 import {
   holdingEquityContribution,
   holdingEquityIsReported,
+  holdingIsPriceGap,
 } from "@/lib/holding-equity";
 import {
   keyNeedsAttention,
@@ -155,6 +156,17 @@ export interface LiveHoldingsSummary {
    *  narrowing already dropped stays in its `excluded*` part, with
    *  `unavailable` incremented, and is not counted here (UI-SPEC rule 5). */
   pnlMissing: number;
+  /** 167.2.1.1.1.1 D-07 (UI-SPEC P0 / 167.1 D-04). Toggled-on rows that would have
+   *  entered `total` but are held SPOT rows with no usable price
+   *  (`holdingIsPriceGap`: a finite quantity above 0 and a mark that is not a
+   *  finite number above 0). Counted per ROW, in the same pass as `total`. Such a
+   *  row is in neither `total` nor any includes part (`untrusted`,
+   *  `unknownStatus`), exactly as `pnlMissing`, so a disclosure can never
+   *  present its stored 0 as a known figure. The total does not move: a gap
+   *  row's equity was 0. Derivatives are never counted here. A row the narrowing
+   *  already dropped stays in its `excluded*` part, with `unavailable`
+   *  incremented, and is not counted here. */
+  priceGap: number;
   /** The part of `total` from holdings whose key needs attention
    *  (`keyNeedsAttention`: an untrusted sync status, or since 167.1.1 D-02 a
    *  soft-disconnected key whatever its status).
@@ -346,6 +358,7 @@ export function summarizeLiveHoldings(args: {
   const out: LiveHoldingsSummary = {
     total: 0,
     pnlMissing: 0,
+    priceGap: 0,
     untrusted: { amount: 0, count: 0, unavailable: 0 },
     unknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
@@ -357,7 +370,8 @@ export function summarizeLiveHoldings(args: {
   const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
     part.amount += equity;
     part.count += 1;
-    if (!holdingEquityIsReported(h)) part.unavailable += 1;
+    // 167.2.1.1.1.1 D-07: a price-gap row's stored 0 is not a known figure either.
+    if (!holdingEquityIsReported(h) || holdingIsPriceGap(h)) part.unavailable += 1;
   };
   for (const [scopeRef, on] of Object.entries(args.toggleByScopeRef)) {
     if (!on) continue;
@@ -414,6 +428,13 @@ export function summarizeLiveHoldings(args: {
         (h.holding_type === "derivative" && !holdingEquityIsReported(h))
       ) {
         out.pnlMissing += 1;
+        continue;
+      }
+      // 167.2.1.1.1.1 D-07: a held spot row with no usable price is counted and
+      // left out of the total AND of every includes part, beside pnlMissing. Its
+      // equity was 0, so the total does not move. A derivative is never a gap.
+      if (holdingIsPriceGap(h)) {
+        out.priceGap += 1;
         continue;
       }
       out.total += equity;
@@ -593,6 +614,35 @@ export function buildKeyTrustClause(
 export function pnlMissingSentence(count: number): string {
   if (!(count >= 1)) return "";
   return `${count} ${count === 1 ? "derivative" : "derivatives"} without reported P&L left out.`;
+}
+
+/**
+ * Phase 167.2.1.1.1.1 D-07 (UI-SPEC P0, approved 2026-10-27): the sentence that
+ * says how many held spot rows without a price a figure left out, e.g.
+ * `2 holdings without a price left out.`
+ *
+ * Same contract as `pnlMissingSentence`: the count is interpolated RAW, singular
+ * for 1, the empty string below 1 (so a 0-count sentence can never render), and
+ * it carries no symbol, venue, key label or amount. Client-safe.
+ */
+export function priceGapSentence(count: number): string {
+  if (!(count >= 1)) return "";
+  return `${count} ${count === 1 ? "holding" : "holdings"} without a price left out.`;
+}
+
+/**
+ * Phase 167.2.1.1.1.1 D-07 (UI-SPEC P0): the Holdings tab's note that portfolio
+ * AUM excludes the rows with no price, e.g.
+ * `3 holdings have no price, so portfolio AUM leaves them out.`
+ *
+ * Same contract as `priceGapSentence`: raw count, singular for 1, empty below 1,
+ * no symbol, venue or amount.
+ */
+export function priceGapHoldingsNote(count: number): string {
+  if (!(count >= 1)) return "";
+  return count === 1
+    ? `${count} holding has no price, so portfolio AUM leaves it out.`
+    : `${count} holdings have no price, so portfolio AUM leaves them out.`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */

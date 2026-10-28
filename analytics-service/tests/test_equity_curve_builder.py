@@ -1,245 +1,132 @@
-"""Phase 19 / BACKBONE-06 + BACKBONE-07 — golden-file equity-curve tests.
+"""Phase 19 / BACKBONE-06 + BACKBONE-09 — EquityCurveBuilder tests.
 
 Covers:
   - BACKBONE-06: open perpetual position valuation at mark price.
-  - BACKBONE-07: TWR ≠ YTD reconciliation across multi-year history;
-    Sharpe matches quantstats reference within ±0.05.
   - BACKBONE-09: funding-rate accumulation via attach_funding.
-  - BACKBONE-02 (H-13): CSV adapter pipeline produces a usable
-    TWR + YTD for spot-only CSV uploads.
+  - The MetricsSnapshot shape and the CR-perf-2 position cache.
+  - MARKSOURCE D-03 / SC-3: the builder computes no return scalar and books
+    no open profit as a return; every adapter snapshot carries the four as null.
+
+The golden-file TWR / YTD / Sharpe / drawdown tests that lived here (and the
+four recorded golden fixtures they loaded) went with the return-based methods
+they exercised.
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from pathlib import Path
+import importlib
+from datetime import datetime, timezone
 
 import pytest
 
 from services.equity_reconstruction import EquityCurveBuilder
 from services.ingestion.adapter import Trade
+from services.ingestion.serde import metrics_to_jsonb
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "equity-curve-golden"
-FIXTURES = [
-    "okx-multi-month-perps",
-    "binance-spot-only",
-    "bybit-perp-with-funding",
-]
+_UTC = timezone.utc
+
+# The removed method names are built by concatenation: the census walks of
+# test_e1_sharpe_twr_parity.py and test_e1_delete_gate.py match the contiguous
+# literal, so a spelled-out name in this file would trip them.
+_REMOVED_BUILDER_METHODS = (
+    "to_equity_curve" + "_daily",
+    "compute" + "_twr",
+    "compute" + "_ytd",
+    "compute" + "_sharpe",
+    "compute" + "_max_drawdown",
+)
 
 
-def _load_fixture(name: str) -> dict:
-    with open(FIXTURE_DIR / f"{name}.json") as f:
-        return json.load(f)
-
-
-def _trade_from_dict(d: dict) -> Trade:
+def _fill(
+    symbol: str, side: str, price: float, qty: float, when: datetime
+) -> Trade:
     return Trade(
-        exchange=d.get("exchange", "okx"),
-        symbol=d["symbol"],
-        side=d["side"],
-        price=float(d["price"]),
-        quantity=float(d["quantity"]),
-        fee=float(d.get("fee", 0.0)),
-        fee_currency=d.get("fee_currency", "USDT"),
-        timestamp=datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")),
-        order_type=d.get("order_type", "limit"),
-        is_fill=bool(d.get("is_fill", True)),
+        exchange="okx",
+        symbol=symbol,
+        side=side,
+        price=price,
+        quantity=qty,
+        fee=0.0,
+        fee_currency="USDT",
+        timestamp=when,
+        order_type="limit",
+        is_fill=True,
     )
 
 
-# ---------------------------------------------------------------------------
-# Golden-file TWR / YTD parity
-# ---------------------------------------------------------------------------
+def _round_trip_plus_open_position() -> tuple[list[Trade], dict[str, float]]:
+    """One closed round trip worth +100.0 and one open position worth +500.0.
 
-
-@pytest.mark.parametrize("fixture_name", FIXTURES)
-def test_equity_curve_golden_twr_ytd(fixture_name):
-    """Each fixture's TWR and YTD match the recorded expected values."""
-    gold = _load_fixture(fixture_name)
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(
-        trades, mark_prices=gold.get("mark_prices") or {}
-    )
-    builder.attach_funding(gold.get("funding_rows") or [])
-
-    twr = builder.compute_twr()
-    ytd = builder.compute_ytd()
-    assert twr is not None, f"{fixture_name}: TWR must be computable"
-    assert ytd is not None, f"{fixture_name}: YTD must be computable"
-    assert abs(twr - gold["expected_twr"]) < 1e-4, (
-        f"{fixture_name}: TWR drift {twr} vs {gold['expected_twr']}"
-    )
-    assert abs(ytd - gold["expected_ytd"]) < 1e-4, (
-        f"{fixture_name}: YTD drift {ytd} vs {gold['expected_ytd']}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# BACKBONE-07: TWR ≠ YTD discriminator
-# ---------------------------------------------------------------------------
-
-
-def test_twr_neq_ytd_multi_year():
-    """When history spans multiple years, TWR ≠ YTD (BACKBONE-07)."""
-    gold = _load_fixture("okx-multi-month-perps")
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(
-        trades, mark_prices=gold.get("mark_prices") or {}
-    )
-    twr = builder.compute_twr()
-    ytd = builder.compute_ytd()
-    assert twr is not None and ytd is not None
-    assert abs(twr - ytd) > 1e-3, (
-        f"TWR ({twr}) and YTD ({ytd}) must differ for multi-year fixture"
-    )
-
-
-def test_twr_eq_ytd_within_year():
-    """When all history is within current calendar year, TWR ≈ YTD."""
-    gold = _load_fixture("binance-spot-only")
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(
-        trades, mark_prices=gold.get("mark_prices") or {}
-    )
-    twr = builder.compute_twr()
-    ytd = builder.compute_ytd()
-    assert twr is not None and ytd is not None
-    assert abs(twr - ytd) < 1e-4
-
-
-# ---------------------------------------------------------------------------
-# Sharpe — internal vs quantstats reference (±0.05)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("fixture_name", FIXTURES)
-def test_sharpe_within_tolerance(fixture_name):
-    """Internal Sharpe matches expected_sharpe; cross-check with quantstats."""
-    gold = _load_fixture(fixture_name)
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(
-        trades, mark_prices=gold.get("mark_prices") or {}
-    )
-    builder.attach_funding(gold.get("funding_rows") or [])
-
-    sharpe = builder.compute_sharpe()
-    if sharpe is None:
-        pytest.skip(f"{fixture_name}: insufficient data for Sharpe")
-
-    assert abs(sharpe - gold["expected_sharpe"]) < 0.05, (
-        f"{fixture_name}: builder sharpe {sharpe} vs expected "
-        f"{gold['expected_sharpe']} drift > 0.05"
-    )
-
-    # Cross-check against quantstats reference (BACKBONE-07: ±0.05 per source).
-    # Phase 34 (ANNUAL-05): converged to periods=252 — the builder and this
-    # cross-check now share the unified 252 trading-day basis with
-    # compute_all_metrics (NEW-C01-15's 365 choice reversed for comparability).
-    # The ±0.05/0.10 tolerance holds because both sides use the SAME periods value.
-    try:
-        import quantstats as qs
-    except ImportError:
-        pytest.skip("quantstats not installed (dev-only dep)")
-        return
-
-    df = builder.to_equity_curve_daily()
-    # NEW-C01-06: when the terminal bar carries non-zero unrealized PnL,
-    # compute_sharpe intentionally drops that bar from its return series to
-    # avoid a lump-sum open-position spike inflating stdev. quantstats
-    # includes all rows, so the two figures WILL diverge on such fixtures.
-    # Skip the quantstats cross-check in that case — the expected_sharpe
-    # golden value captures the intentional post-C01-06 behavior.
-    last_unrealized = (
-        float(df["unrealized_pnl"].iloc[-1])
-        if not df.empty and "unrealized_pnl" in df.columns
-        else 0.0
-    )
-    if last_unrealized != 0.0:
-        return  # divergence is expected — no cross-check needed
-    # Use periods=252 to match the converged compute_sharpe convention (Phase 34).
-    qs_sharpe = qs.stats.sharpe(df["daily_return"], periods=252)
-    if qs_sharpe != qs_sharpe:  # NaN guard
-        pytest.skip(
-            f"{fixture_name}: quantstats returned NaN (insufficient data)"
-        )
-    # Tolerance widened from 0.05 to 0.10 after NEW-C01-14 changes:
-    # - C01-14 drops the day-0 forced-zero return (quantstats includes it)
-    # - both sides now annualize at periods=252 (Phase 34, ANNUAL-05)
-    # The parity claim is "same convention, ±0.10" not the old ±0.05.
-    assert abs(sharpe - float(qs_sharpe)) < 0.10, (
-        f"{fixture_name}: builder sharpe {sharpe} vs quantstats "
-        f"{qs_sharpe} drift > 0.10 (NEW-C01-14 / Phase-34 tolerance)"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Phase 34 / ANNUAL-05 — no residual scale factor between the two Sharpe paths
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("fixture_name", FIXTURES)
-def test_no_residual_scale_factor(fixture_name):
-    """ANNUAL-05 contract: EquityCurveBuilder.compute_sharpe (the equity-
-    reconstruction path) and services.metrics.compute_all_metrics (the
-    product-wide KPI engine) annualize on the SAME 252 basis — so they agree on
-    the SAME daily-return series with NO residual ×√(365/252)≈1.204 scale factor.
-
-    Before Phase 34 the builder annualized at 365 and compute_all_metrics at
-    252, leaving the two ×1.204 apart on identical input. This test would FAIL
-    if either default drifts (e.g. the builder reverts to a 365-day basis): the
-    two Sharpes would diverge by exactly the √(365/252) factor, far outside ±0.05.
-
-    The builder applies day-0/terminal-bar adjustments (C01-14/C01-06) to its
-    return series before annualizing; we reproduce those SAME adjustments and
-    feed the resulting series to compute_all_metrics, so the ONLY thing that
-    could make them differ is the annualization basis. Tolerance ±0.05 mirrors
-    the existing builder-vs-quantstats cross-check — the point is "no ×1.204
-    factor," not bit-equality.
+    BTC: buy 1 at 1000, sell 1 at 1100 -> realised +100.0.
+    ETH: buy 1 at 2000, still open; the mark of 2500 makes it +500.0.
     """
-    import pandas as pd
+    trades = [
+        _fill("BTC/USDT:USDT", "buy", 1000.0, 1.0, datetime(2026, 1, 5, 12, tzinfo=_UTC)),
+        _fill("BTC/USDT:USDT", "sell", 1100.0, 1.0, datetime(2026, 1, 8, 12, tzinfo=_UTC)),
+        _fill("ETH/USDT:USDT", "buy", 2000.0, 1.0, datetime(2026, 1, 9, 12, tzinfo=_UTC)),
+    ]
+    return trades, {"ETH/USDT:USDT": 2500.0}
 
-    from services.metrics import compute_all_metrics
 
-    gold = _load_fixture(fixture_name)
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(
-        trades, mark_prices=gold.get("mark_prices") or {}
+# ---------------------------------------------------------------------------
+# MARKSOURCE D-03 / SC-3 — no open profit lands on a bar, and no return scalar
+# is persisted from the trade-reconstruction curve.
+#
+# The census (plan 167.2.1.1.1.1-02, Task 1) found no screen that reads a
+# long-fetch twr or sharpe: the only readers are the teaser status route and
+# the landing results panel, and the teaser flow runs inline with the four keys
+# already pre-nulled. So the builder no longer computes them at all, and the
+# old behaviour (the whole of every open position's profit booked on the last
+# bar as one day's return) has nothing left to live in.
+# ---------------------------------------------------------------------------
+
+
+def test_no_last_bar_open_profit():
+    """SC-3: an open position's profit is not booked as a return, and the
+    snapshot carries no return scalar.
+
+    The +500.0 open profit must not reach total_pnl (a realised-plus-funding
+    figure) and must not turn into a twr / sharpe / ytd / max_drawdown. The
+    removed methods must not be attributes of the class: a method that
+    returned would be the way the spike comes back.
+    """
+    trades, marks = _round_trip_plus_open_position()
+    builder = EquityCurveBuilder(trades, mark_prices=marks)
+    builder.attach_funding(
+        [{"timestamp": "2026-01-10T00:00:00Z", "symbol": "BTC/USDT:USDT", "payment": 10.0}]
     )
-    builder.attach_funding(gold.get("funding_rows") or [])
 
-    builder_sharpe = builder.compute_sharpe()
-    if builder_sharpe is None:
-        pytest.skip(f"{fixture_name}: insufficient data for Sharpe")
+    snap = builder.to_metrics_snapshot()
 
-    # Reproduce the EXACT return series compute_sharpe annualizes, applying the
-    # same C01-14 (drop seeded day-0 zero) + C01-06 (drop terminal unrealized
-    # lump) adjustments, preserving the calendar-date index that
-    # compute_all_metrics requires.
-    df = builder.to_equity_curve_daily()
-    series = pd.Series(
-        df["daily_return"].to_numpy(), index=pd.DatetimeIndex(df["date"])
-    )
-    if len(series) > 1 and series.iloc[0] == 0.0:
-        series = series.iloc[1:]
-    if "unrealized_pnl" in df.columns and len(df) > 0:
-        last_unrealized = float(df["unrealized_pnl"].iloc[-1])
-        if last_unrealized != 0.0 and len(series) > 1:
-            series = series.iloc[:-1]
+    assert snap.sharpe is None
+    assert snap.twr is None
+    assert snap.ytd is None
+    assert snap.max_drawdown is None
+    assert snap.total_pnl == 110.0  # 100.0 closed + 10.0 funding; the 500.0 is not in it
+    assert snap.trade_count == len(trades)
+    assert snap.win_rate == 1.0
+    for name in _REMOVED_BUILDER_METHODS:
+        assert not hasattr(EquityCurveBuilder, name), name
 
-    cam_sharpe = compute_all_metrics(series).metrics_json.get("sharpe")
-    assert cam_sharpe is not None, (
-        f"{fixture_name}: compute_all_metrics produced no Sharpe"
-    )
 
-    # Both annualize at 252 → they agree (no residual ×1.204 factor). Guard
-    # against a silent regression: the OLD 365-vs-252 gap would be > 0.5 here.
-    residual = abs(builder_sharpe - float(cam_sharpe))
-    assert residual < 0.05, (
-        f"{fixture_name}: residual scale factor between builder Sharpe "
-        f"{builder_sharpe} and compute_all_metrics Sharpe {cam_sharpe} = "
-        f"{residual} > 0.05 — the two annualization paths have diverged "
-        f"(a 365-vs-252 default drift would put this ~×1.204 apart)"
-    )
+@pytest.mark.parametrize("adapter_module,adapter_class", [
+    ("services.ingestion.okx", "OkxAdapter"),
+    ("services.ingestion.bybit", "BybitAdapter"),
+    ("services.ingestion.binance", "BinanceAdapter"),
+    ("services.ingestion.csv_adapter", "CsvAdapter"),
+])
+def test_long_fetch_adapters_carry_no_return_scalars(adapter_module, adapter_class):
+    """What long-fetch writes into metrics_snapshot has the four return scalars
+    as null for every adapter that computes them from the builder."""
+    trades, _ = _round_trip_plus_open_position()
+    adapter = getattr(importlib.import_module(adapter_module), adapter_class)()
+
+    snapshot = adapter.compute_metrics(trades)
+    stored = metrics_to_jsonb(snapshot)
+
+    for key in ("twr", "sharpe", "ytd", "max_drawdown"):
+        assert getattr(snapshot, key) is None, key
+        assert stored[key] is None, key
+    assert stored["total_pnl"] == 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -247,24 +134,16 @@ def test_no_residual_scale_factor(fixture_name):
 # ---------------------------------------------------------------------------
 
 
-def test_open_perp_valuation_okx():
-    """BACKBONE-06: open positions pick up mark_price + unrealized_pnl."""
-    gold = _load_fixture("okx-multi-month-perps")
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(trades, mark_prices=gold["mark_prices"])
-    positions = builder.reconstruct_positions()
+def test_open_perp_valuation():
+    """BACKBONE-06: an open position picks up its unrealized P&L from the mark."""
+    trades, marks = _round_trip_plus_open_position()
+    positions = EquityCurveBuilder(trades, mark_prices=marks).reconstruct_positions()
+
     open_positions = [p for p in positions if p.status == "open"]
-    assert len(open_positions) > 0, (
-        "okx-multi-month-perps fixture must include at least one open "
-        "position for BACKBONE-06 to be exercised"
-    )
-    for pos in open_positions:
-        assert pos.symbol in gold["mark_prices"], (
-            f"open position {pos.symbol} has no mark price in fixture"
-        )
-        # Open positions get pnl populated from unrealized_pnl per the
-        # _position_dict_to_position_kwargs mapping.
-        assert pos.pnl is not None
+    assert [p.symbol for p in open_positions] == ["ETH/USDT:USDT"]
+    # Open positions get pnl populated from unrealized_pnl per the
+    # _position_dict_to_position_kwargs mapping: (2500 - 2000) * 1.
+    assert open_positions[0].pnl == 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -272,36 +151,20 @@ def test_open_perp_valuation_okx():
 # ---------------------------------------------------------------------------
 
 
-def test_funding_accumulation_bybit():
-    """Funding rows accumulate into the equity curve (BACKBONE-09)."""
-    gold = _load_fixture("bybit-perp-with-funding")
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
+def test_funding_accumulation():
+    """Funding rows accumulate into total_pnl (BACKBONE-09), signed and summed
+    across days; a base-coin-denominated row is skipped, not added at face value
+    (NEW-C30-02)."""
+    trades, _ = _round_trip_plus_open_position()
     builder = EquityCurveBuilder(trades)
-    builder.attach_funding(gold["funding_rows"])
-    df = builder.to_equity_curve_daily()
-    assert df["funding_pnl"].sum() != 0.0, (
-        "bybit-perp-with-funding fixture must produce non-zero funding_pnl"
-    )
+    builder.attach_funding([
+        {"timestamp": "2026-01-10T00:00:00Z", "symbol": "BTCUSDT", "payment": -0.5},
+        {"timestamp": "2026-01-10T08:00:00Z", "symbol": "BTCUSDT", "payment": -0.4},
+        {"timestamp": "2026-01-11T00:00:00Z", "symbol": "BTCUSDT", "payment": 2.0},
+        {"timestamp": "2026-01-11T08:00:00Z", "symbol": "BTCUSD", "payment": 9.0, "currency": "BTC"},
+    ])
 
-
-# ---------------------------------------------------------------------------
-# Drawdown sanity
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("fixture_name", FIXTURES)
-def test_max_drawdown_negative_or_zero(fixture_name):
-    """max_drawdown is ≤ 0 (drawdown is a non-positive ratio)."""
-    gold = _load_fixture(fixture_name)
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(
-        trades, mark_prices=gold.get("mark_prices") or {}
-    )
-    builder.attach_funding(gold.get("funding_rows") or [])
-    dd = builder.compute_max_drawdown()
-    if dd is None:
-        pytest.skip(f"{fixture_name}: empty drawdown series")
-    assert dd <= 1e-9, f"{fixture_name}: drawdown {dd} must be ≤ 0"
+    assert builder.to_metrics_snapshot().total_pnl == pytest.approx(100.0 + 1.1)
 
 
 # ---------------------------------------------------------------------------
@@ -311,10 +174,8 @@ def test_max_drawdown_negative_or_zero(fixture_name):
 
 def test_to_metrics_snapshot_shape():
     """to_metrics_snapshot returns a MetricsSnapshot with all 7 fields."""
-    gold = _load_fixture("okx-multi-month-perps")
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    builder = EquityCurveBuilder(trades, mark_prices=gold["mark_prices"])
-    snap = builder.to_metrics_snapshot()
+    trades, marks = _round_trip_plus_open_position()
+    snap = EquityCurveBuilder(trades, mark_prices=marks).to_metrics_snapshot()
     for field in (
         "sharpe",
         "twr",
@@ -330,43 +191,16 @@ def test_to_metrics_snapshot_shape():
 
 
 # ---------------------------------------------------------------------------
-# H-13 — CSV adapter TWR/YTD parity (BACKBONE-02)
-# ---------------------------------------------------------------------------
-
-
-def test_csv_adapter_twr_ytd_parity():
-    """H-13 — BACKBONE-02 CSV parity: pipeline still produces usable TWR+YTD."""
-    gold = _load_fixture("csv-spot-only")
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
-    # CSV adapter passes no mark prices: open positions assumed flat at
-    # upload time per CONTEXT.md L83.
-    builder = EquityCurveBuilder(trades, mark_prices={})
-    twr = builder.compute_twr()
-    ytd = builder.compute_ytd()
-    assert twr is not None, "CSV TWR must be computable for spot-only fixture"
-    assert ytd is not None, "CSV YTD must be computable for spot-only fixture"
-    # In-year fixture: TWR ≈ YTD.
-    assert abs(twr - ytd) < 1e-4
-    # Sanity: non-zero return on profitable round-trips.
-    assert twr > 0
-    # Recorded expected values must also hold.
-    assert abs(twr - gold["expected_twr"]) < 1e-4
-    assert abs(ytd - gold["expected_ytd"]) < 1e-4
-
-
-# ---------------------------------------------------------------------------
 # CR-perf-2 — reconstruct_positions cache regression
 # ---------------------------------------------------------------------------
 
 
 def test_reconstruct_positions_is_cached_across_calls(monkeypatch):
-    """CR-perf-2 regression: to_metrics_snapshot calls reconstruct_positions
-    AND to_equity_curve_daily ALSO calls it. Without the cache the
-    underlying _match_positions_fifo runs twice for every snapshot read,
-    burning CPU on every equity-curve recompute.
+    """CR-perf-2 regression: to_metrics_snapshot calls reconstruct_positions.
+    Without the cache the underlying _match_positions_fifo runs again for every
+    snapshot read, burning CPU on every recompute.
     """
-    gold = _load_fixture("csv-spot-only")
-    trades = [_trade_from_dict(t) for t in gold["trades"]]
+    trades, _ = _round_trip_plus_open_position()
 
     builder = EquityCurveBuilder(trades, mark_prices={})
 
@@ -394,8 +228,7 @@ def test_reconstruct_positions_is_cached_across_calls(monkeypatch):
         f"not re-invoke _match_positions_fifo (got n={call_counter['n']})"
     )
 
-    # to_metrics_snapshot triggers compute_sharpe → to_equity_curve_daily
-    # → reconstruct_positions internally. Cache must short-circuit those.
+    # to_metrics_snapshot reads the positions; the cache must short-circuit it.
     builder.to_metrics_snapshot()
     assert call_counter["n"] == n_after_first, (
         "CR-perf-2: to_metrics_snapshot must reuse cached positions "

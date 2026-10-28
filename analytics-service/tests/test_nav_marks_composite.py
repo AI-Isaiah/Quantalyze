@@ -643,7 +643,7 @@ def test_composite_mark_summary_reads_each_member_inside_its_window() -> None:
     def marked(levels: list[str], covered: list[str], gaps: list[str]) -> MarkedSeries:
         return MarkedSeries(
             returns=pd.Series(dtype="float64"), marks_since=levels[0],
-            mark_gap_days=tuple(gaps), flow_moves={}, held_out_flow_days=(),
+            mark_gap_days=tuple(gaps), flow_moves={}, flow_moves_out={}, held_out_flow_days=(),
             marked_levels={d: 1.0 for d in levels}, writer_day_pnl={}, terminal=(levels[-1], 1.0),
             covered_from=covered[0] if covered else None, covered_days=tuple(covered),
         )

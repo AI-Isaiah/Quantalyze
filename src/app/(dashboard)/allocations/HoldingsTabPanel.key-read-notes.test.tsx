@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 
 /**
  * Review C4 SFH-C4-08 and WR-01. Open Positions keeps each key's rows at that
@@ -12,7 +12,20 @@ import { render, screen, within } from "@testing-library/react";
  */
 
 vi.mock("./components/HoldingsTable", () => ({
-  HoldingsTable: () => <div data-testid="holdings-table-stub" />,
+  // The stub carries the panel's show-revoked toggle so a test can turn it off.
+  HoldingsTable: ({
+    onShowRevokedChange,
+  }: {
+    onShowRevokedChange: (next: boolean) => void;
+  }) => (
+    <div data-testid="holdings-table-stub">
+      <button
+        type="button"
+        data-testid="stub-hide-revoked"
+        onClick={() => onShowRevokedChange(false)}
+      />
+    </div>
+  ),
 }));
 vi.mock("./components/OpenPositionsTable", () => ({
   OpenPositionsTable: () => <div data-testid="open-positions-table-stub" />,
@@ -432,6 +445,94 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
       "Spot holdings from the Binance key Old are as last read on 2026-09-01: BTC.",
+    ]);
+  });
+});
+
+describe("HoldingsTabPanel: a spot row with no price is named under the spot table (167.2.1.1.1.1 D-07, P3)", () => {
+  // A gap row: a positive quantity with no usable mark. Its stored value is 0.
+  const gapRow = (api_key_id: string, symbol: string, mark: number | null = 0) => ({
+    ...spotRow(api_key_id, symbol),
+    mark_price_usd: mark,
+    value_usd: 0,
+  });
+  const note = () => screen.queryAllByTestId("holdings-price-gap-note");
+
+  it("one gap row beside a priced one reads the singular sentence, in the muted wrapping class", () => {
+    // WHY (D-07): the tab shows no AUM figure, so the line is where the
+    // allocator learns the unpriced row is not in portfolio AUM.
+    renderPanel(
+      [gapRow("key-a", "ZZZ"), spotRow("key-a", "BTC")],
+      [apiKey("key-a", "A")],
+    );
+    expect(note().map((n) => n.textContent)).toEqual([
+      "1 holding has no price, so portfolio AUM leaves it out.",
+    ]);
+    const el = note()[0];
+    const tokens = el.className.split(/\s+/);
+    expect(tokens.sort()).toEqual(["[overflow-wrap:anywhere]", "text-text-muted", "text-xs"]);
+    expect(el.hasAttribute("role")).toBe(false);
+    expect(el.hasAttribute("aria-live")).toBe(false);
+  });
+
+  it("sits after the spot table and the read-day notes and before Open Positions", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-29T12:00:00Z"));
+    try {
+      renderPanel(
+        [{ ...gapRow("key-a", "ZZZ"), asof: "2026-09-20" }, perp("key-b", "ETH-PERP", "2026-09-29")],
+        [apiKey("key-a", "A"), apiKey("key-b", "B")],
+      );
+      const gap = screen.getByTestId("holdings-price-gap-note");
+      const readDay = screen.getByTestId("holdings-read-day-note");
+      const section = gap.parentElement as HTMLElement;
+      const spotTable = within(section).getByTestId("holdings-table-stub");
+      const openTable = within(section).getByTestId("open-positions-table-stub");
+      expect(spotTable.compareDocumentPosition(gap) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(readDay.compareDocumentPosition(gap) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(gap.compareDocumentPosition(openTable) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("three gap rows read the plural sentence with the count", () => {
+    renderPanel(
+      [gapRow("key-a", "AAA"), gapRow("key-a", "BBB", null), gapRow("key-a", "CCC", -1)],
+      [apiKey("key-a", "A")],
+    );
+    expect(note().map((n) => n.textContent)).toEqual([
+      "3 holdings have no price, so portfolio AUM leaves them out.",
+    ]);
+  });
+
+  it("says nothing for priced rows, a quantity-0 mark-0 row, or a derivative with mark 0", () => {
+    // WHY: only a spot row the book holds without a price is a gap; a closed
+    // row and a derivative (valued by its P&L) are not.
+    renderPanel(
+      [
+        spotRow("key-a", "BTC"),
+        { ...spotRow("key-a", "DUST"), quantity: 0, mark_price_usd: 0, value_usd: 0 },
+        { ...perp("key-a", "ETH-PERP"), mark_price_usd: 0 },
+      ],
+      [apiKey("key-a", "A")],
+    );
+    expect(note()).toHaveLength(0);
+  });
+
+  it("still counts a gap row on a revoked key after the show-revoked toggle is turned off", () => {
+    // WHY: the toggle hides rows inside the table; the note counts all spot
+    // rows, as the read-day note does, so hiding a row does not hide the fact.
+    renderPanel(
+      [gapRow("key-old", "ZZZ")],
+      [apiKey("key-old", "Old", { sync_status: "revoked", disconnected_at: "2026-09-02T00:00:00Z" })],
+    );
+    // The Overview section renders a HoldingsTable stub too; the Exchange
+    // Positions table is the one in the note's own section.
+    const section = screen.getByTestId("holdings-price-gap-note").parentElement as HTMLElement;
+    fireEvent.click(within(section).getByTestId("stub-hide-revoked"));
+    expect(note().map((n) => n.textContent)).toEqual([
+      "1 holding has no price, so portfolio AUM leaves it out.",
     ]);
   });
 });

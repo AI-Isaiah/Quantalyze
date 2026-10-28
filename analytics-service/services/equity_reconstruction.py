@@ -64,14 +64,12 @@ from services.closed_sets import (
     MT5_DISABLED_DETAIL,
     NON_CCXT_VENUES,
     STABLECOINS,
-    STABLECOIN_SPLIT_SUFFIXES as _EXTRA_STABLECOIN_SUFFIXES,
     STABLECOINS_LONGEST_FIRST as _STABLECOINS_LONGEST_FIRST,
     TRADE_SIDES,
     mt5_enabled_server,
     perp_quote,
 )
 from services.dateday import epoch_ms_to_iso_day, sort_events_stable
-from services.dispersion import dispersion_is_residue
 from services.db import db_execute, get_supabase
 from services.job_worker import (
     AllocatorEquityAction,
@@ -86,8 +84,17 @@ from services.job_worker import (
     classify_exception,
 )
 from services.exchange import aclose_exchange
+from services.holding_equity import holding_equity_contribution, is_price_gap_holding
 from services.metrics import DEFAULT_PERIODS_PER_YEAR
+from services.nav_marks import mark_day_for
 from services.native_to_usd import convert_native_levels_to_usd
+from services.price_rule import (
+    close_on_or_before,
+    gap_disposition,
+    gap_holds_the_day,
+    is_stable_value,
+    usable_price,
+)
 from services.redact import scrub_freeform_string
 
 if TYPE_CHECKING:
@@ -101,11 +108,13 @@ logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 # ---------------------------------------------------------------------------
 
 # B8b: STABLECOINS (the "treat as cash / skip price fetch" set),
-# _EXTRA_STABLECOIN_SUFFIXES (splitter-only extras — NEW-C01-12: USDe / PYUSD /
+# STABLECOIN_SPLIT_SUFFIXES (splitter-only extras — NEW-C01-12: USDe / PYUSD /
 # USDB, deliberately NOT in STABLECOINS so a token like PYUSDETH isn't skipped
 # as cash), and the longest-first suffix tuple are single-sourced from
 # services.closed_sets (imported above) so they can't fork from the allocator
-# spot-valuation copy.
+# spot-valuation copy. (The splitter-only extras are no longer imported here: the
+# wallet pricer asks ``services.price_rule.is_stable_value``, which is STABLECOINS plus
+# STABLECOIN_SPLIT_SUFFIXES from the same place.)
 RAW_PAYLOAD_CAP_BYTES: int = 4096
 OKX_TRADE_TERMINUS_DAYS: int = 90          # documented OKX cap (RESEARCH.md §1B, A3)
 # Bybit rejects a trade query starting more than two years back (retCode 10001), measured on
@@ -205,6 +214,10 @@ _TRADE_READ_DEFER_S: Final[int] = 120
 _STORE_SETTLE_MS: Final[int] = 3_600_000
 COINGECKO_BASE: str = "https://api.coingecko.com/api/v3"
 COINGECKO_MIN_SLEEP_SECS: float = 2.0       # stay below 30 RPM free tier
+# MARKSOURCE D-02: the ``token_price_history.source`` tag of a CLOSE-labelled CoinGecko price.
+# Rows written before this tag existed are tagged 'coingecko' and carry the price at the START
+# of their date (the previous day's close) under that date. They are never read again.
+COINGECKO_CLOSE_SOURCE: Final[str] = "coingecko_close"
 
 # OKX's /api/v5/trade/fills-history endpoint is partitioned by instType
 # (SPOT, MARGIN, SWAP, FUTURES, OPTION). A vanilla fetch_my_trades(None)
@@ -610,7 +623,18 @@ _BREAKDOWN_TOP_N: int = 20
 # the derivatives the daily refresh left out because their unrealized P&L is
 # NULL. It must never enter the numeric top-N sort below (a dict value raises
 # TypeError in `float(...)`) and must never be evicted by it.
-_BREAKDOWN_PROTECTED_KEYS: tuple[str, ...] = ("STARTING_BALANCE", "__truncated__", "__pnl_missing__")
+#
+# 167.2.1.1.1.1 D-06: "__price_gap_left_out__" is the same kind of record
+# ({count, symbols, dust, unsizable}) for the balances the daily refresh left
+# out because they have no price and fall below the dust floor or cannot be
+# sized. Never sorted as a number, never evicted, so the stored row keeps
+# naming what it does not hold.
+_BREAKDOWN_PROTECTED_KEYS: tuple[str, ...] = (
+    "STARTING_BALANCE",
+    "__truncated__",
+    "__pnl_missing__",
+    "__price_gap_left_out__",
+)
 
 
 def _cap_breakdown(breakdown: dict[str, Any]) -> dict[str, Any]:
@@ -1291,7 +1315,20 @@ def _coingecko_id_for(symbol: str) -> str:
 async def _fetch_coingecko_daily_closes(
     symbol: str, start_ts_secs: int, end_ts_secs: int
 ) -> list[tuple[str, float]]:
-    """Hit /coins/{id}/market_chart/range. Returns [(isodate, price_usd), ...].
+    """Hit /coins/{id}/market_chart/range. Returns [(isodate, close_usd), ...].
+
+    CLOSE semantics (MARKSOURCE D-02, the rule of ``services.price_rule``): a point
+    stamped ``D 00:00 UTC`` is the price at the START of day D, which is the close of
+    day D-1. So the FIRST point stamped on UTC date D+1 is returned as the close of D.
+    This is the rule ``services.benchmark._fetch_from_coingecko`` already applies
+    (Phase 170.2, measured 2026-10-09: same-date pairing off by up to 2.6 percent,
+    shifted pairing about 0.05 percent). The range endpoint is hourly for ranges of 2-90
+    days and daily beyond, so the first point of a date is its 00:00 one; later points
+    of the same date are ignored, and when that first point is not a usable price
+    (not finite, or <= 0) or is stamped an hour or more after midnight (the final point of the
+    range is the live price, not a close) the day is a gap rather than being filled from a later hour.
+    The close of the day before ``start_ts_secs`` was not asked for and is dropped, and
+    the last day's own close is not published until the next 00:00, so it is absent.
 
     Budget-aware: sleeps COINGECKO_MIN_SLEEP_SECS between calls to stay below
     30 RPM. Never logs the response body (threat T-07-V6) — only symbol +
@@ -1332,6 +1369,7 @@ async def _fetch_coingecko_daily_closes(
     prices = data.get("prices") or []
     out: list[tuple[str, float]] = []
     seen_dates: set[str] = set()
+    first_close_day = epoch_ms_to_iso_day(start_ts_secs * 1000)
     for row in prices:
         try:
             ts_ms, price = row[0], row[1]
@@ -1341,7 +1379,17 @@ async def _fetch_coingecko_daily_closes(
         if iso in seen_dates:
             continue
         seen_dates.add(iso)
-        out.append((iso, float(price)))
+        if ts_ms % 86_400_000 >= 3_600_000:
+            # SF-M7: the first point of the date is not a midnight one (the range's final point is
+            # the live intraday price), so the previous day's close is not there: a gap.
+            continue
+        usable = usable_price(price)
+        if usable is None:
+            continue  # D-02: a zero, negative or non-finite price is a gap, never a close
+        close_day = (date.fromisoformat(iso) - timedelta(days=1)).isoformat()
+        if close_day < first_close_day:
+            continue  # the close of the day before the window: not asked for
+        out.append((close_day, usable))
     logger.info(
         "coingecko fetched symbol=%s days=%d",
         symbol, len(out),
@@ -1352,7 +1400,14 @@ async def _fetch_coingecko_daily_closes(
 async def _cache_coingecko_prices(
     supabase: Any, symbol: str, prices: list[tuple[str, float]]
 ) -> None:
-    """Batch-INSERT into token_price_history ON CONFLICT (symbol, asof) DO NOTHING."""
+    """Batch-UPSERT close-labelled prices into token_price_history, updating on (symbol, asof).
+
+    MARKSOURCE D-02: rows are tagged ``COINGECKO_CLOSE_SOURCE`` and the upsert UPDATES on
+    conflict. The old rows (tag 'coingecko') carry the price at the start of their date
+    under that date; they are overwritten day by day as the days are re-fetched and are
+    never read (``_read_cached_prices`` filters on the close tag). A do-nothing-on-conflict
+    insert would have kept them beside the corrected price.
+    """
     if not prices:
         return
     rows = [
@@ -1360,7 +1415,7 @@ async def _cache_coingecko_prices(
             "symbol": symbol,
             "asof": iso,
             "price_usd": price,
-            "source": "coingecko",
+            "source": COINGECKO_CLOSE_SOURCE,
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
         for iso, price in prices
@@ -1370,7 +1425,6 @@ async def _cache_coingecko_prices(
         return supabase.table("token_price_history").upsert(
             rows,
             on_conflict="symbol,asof",
-            ignore_duplicates=True,
         ).execute()
 
     try:
@@ -1382,12 +1436,17 @@ async def _cache_coingecko_prices(
 async def _read_cached_prices(
     supabase: Any, symbol: str, start_iso: str, end_iso: str
 ) -> dict[str, float]:
-    """SELECT from token_price_history; return {asof_iso: price_usd}."""
+    """SELECT close-labelled prices from token_price_history; return {asof_iso: price_usd}.
+
+    Only rows tagged ``COINGECKO_CLOSE_SOURCE`` are read: older rows carry the price at the
+    START of their date and would be an open read as a close (MARKSOURCE D-02).
+    """
     def _sel() -> Any:
         return (
             supabase.table("token_price_history")
             .select("asof, price_usd")
             .eq("symbol", symbol)
+            .eq("source", COINGECKO_CLOSE_SOURCE)
             .gte("asof", start_iso)
             .lte("asof", end_iso)
             .execute()
@@ -1419,6 +1478,7 @@ def _compute_daily_equity(
     unknown_perp_symbols: set[str] | None = None,
     inverse_perp_symbols: set[str] | None = None,
     ctval_drift_warnings: list[dict[str, Any]] | None = None,
+    carried_symbols: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Replay trades + transfers forward; mark each day by close × quantity.
 
@@ -1429,10 +1489,18 @@ def _compute_daily_equity(
 
     Optional out-parameter sets/lists (``skipped_symbols``,
     ``unknown_perp_symbols``, ``inverse_perp_symbols``,
-    ``ctval_drift_warnings``) collect observability signals across the
-    replay so the caller can surface them in ``reconstruct_complete``
-    audit metadata — closing the silent-skip gaps C-0330, C-0329,
-    C-0326, and M-1024.
+    ``ctval_drift_warnings``, ``carried_symbols``) collect observability
+    signals across the replay so the caller can surface them in
+    ``reconstruct_complete`` audit metadata — closing the silent-skip gaps
+    C-0330, C-0329, C-0326, and M-1024.
+
+    Price rule (MARKSOURCE D-02, D-04; the rule is the docstring of
+    ``services.price_rule``): a symbol is valued on day D at the usable close
+    on or before D that is no older than ``PRICE_GAP_MAX_DAYS`` (7) days. A
+    close 1-7 days old is used AND the symbol is added to ``carried_symbols``;
+    an older or absent close skips the symbol for that day and adds it to
+    ``skipped_symbols``. A close that is not finite or is <= 0 is a gap, never
+    a price.
 
     Perpetual vs spot replay (M078):
         Spot trades mutate base/quote quantities the classical way — buying
@@ -1506,31 +1574,38 @@ def _compute_daily_equity(
     ohlcv_keys: dict[str, list[str]] = {}
     ohlcv_closes: dict[str, list[float]] = {}
     for sym, series in ohlcv_by_symbol.items():
-        ordered = sorted(series, key=lambda p: p[0])
+        # D-02: an unusable close (not finite, or <= 0) is a gap, so it never enters the lookup.
+        ordered = sorted(
+            ((iso, c) for iso, c in series if usable_price(c) is not None),
+            key=lambda p: p[0],
+        )
         ohlcv_keys[sym] = [iso for iso, _ in ordered]
         ohlcv_closes[sym] = [c for _, c in ordered]
 
     cg_keys: dict[str, list[str]] = {
-        sym: sorted(series.keys()) for sym, series in coingecko_by_symbol.items()
+        sym: sorted(day for day, price in series.items() if usable_price(price) is not None)
+        for sym, series in coingecko_by_symbol.items()
+    }
+    cg_closes: dict[str, list[float]] = {
+        sym: [coingecko_by_symbol[sym][day] for day in days] for sym, days in cg_keys.items()
     }
 
-    def _price_on(sym: str, iso_date: str) -> tuple[float | None, str | None]:
-        """Return (price, source) for `sym` on `iso_date` using on-or-before
-        lookup. Source is 'exchange_primary' / 'coingecko_fallback' / None."""
+    def _price_on(sym: str, iso_date: str) -> tuple[float | None, str | None, int]:
+        """Return (price, source, age_days) for `sym` on `iso_date` using the rule of
+        ``services.price_rule``: the usable close on or before the day, no older than
+        ``PRICE_GAP_MAX_DAYS``. Source is 'exchange_primary' / 'coingecko_fallback' / None;
+        ``age_days`` is 0 for the day's own close and 1-7 for a carried one."""
         keys = ohlcv_keys.get(sym)
         if keys:
-            idx = bisect_right(keys, iso_date) - 1
-            if idx >= 0:
-                return ohlcv_closes[sym][idx], "exchange_primary"
-        cg_series = coingecko_by_symbol.get(sym)
-        if cg_series:
-            if iso_date in cg_series:
-                return cg_series[iso_date], "coingecko_fallback"
-            cg_sorted = cg_keys.get(sym, [])
-            idx = bisect_right(cg_sorted, iso_date) - 1
-            if idx >= 0:
-                return cg_series[cg_sorted[idx]], "coingecko_fallback"
-        return None, None
+            hit = close_on_or_before(keys, ohlcv_closes[sym], iso_date)
+            if hit is not None:
+                return hit[0], "exchange_primary", hit[1]
+        cg_sorted = cg_keys.get(sym)
+        if cg_sorted:
+            hit = close_on_or_before(cg_sorted, cg_closes[sym], iso_date)
+            if hit is not None:
+                return hit[0], "coingecko_fallback", hit[1]
+        return None, None, 0
 
     rows: list[dict[str, Any]] = []
     cur = start_date
@@ -1761,7 +1836,7 @@ def _compute_daily_equity(
                 px = 1.0
                 src: str | None = "exchange_primary"
             else:
-                maybe_px, src = _price_on(sym, iso)
+                maybe_px, src, age = _price_on(sym, iso)
                 if maybe_px is None:
                     # C-0330: skipping a symbol because of an OHLCV gap is
                     # NOT the same as the symbol having no position. Surface
@@ -1773,6 +1848,9 @@ def _compute_daily_equity(
                         skipped_symbols.add(sym)
                     continue
                 px = maybe_px
+                if age > 0 and carried_symbols is not None:
+                    # D-02/D-04: a close 1-7 days old is used AND named.
+                    carried_symbols.add(sym)
             usd = qty * px
             breakdown[sym] = round(usd, 2)
             total += usd
@@ -1795,13 +1873,15 @@ def _compute_daily_equity(
                 continue
             base = perp_sym.split("/")[0].upper()
             quote_sym = perp_quote(perp_sym)
-            maybe_px, src = _price_on(base, iso)
+            maybe_px, src, age = _price_on(base, iso)
             if maybe_px is None:
                 # C-0330: same symbol-skip surfacing applies to perp marks.
                 if skipped_symbols is not None:
                     skipped_symbols.add(base)
                 continue
             px = maybe_px
+            if age > 0 and carried_symbols is not None:
+                carried_symbols.add(base)
             unrealized = pos.mark(px)
             if unrealized == 0.0:
                 continue
@@ -2704,7 +2784,8 @@ def _sum_breakdowns(breakdowns: Sequence[Any]) -> dict[str, Any] | None:
     """Add the NUMERIC entries of the dict breakdowns, to 2 dp; None when none is a dict.
 
     ``__truncated__`` survives as True when any part carries it. A structured entry such
-    as ``__pnl_missing__`` (a ``{count, symbols}`` record, never a number) is not added and
+    as ``__pnl_missing__`` (a ``{count, symbols}`` record, never a number) or
+    ``__price_gap_left_out__`` (a ``{count, symbols, dust, unsizable}`` record) is not added and
     does not survive: it is a per-snapshot record of the daily refresh, which a
     reconstructed row never carries, and adding two of them numerically would be wrong.
     Re-capped through ``_cap_breakdown`` so the merged dict honours the stored-size cap.
@@ -2778,8 +2859,8 @@ def _merge_account_telemetry(parts: Sequence[Mapping[str, Any]]) -> dict[str, An
     """Merge the per-exchange-account telemetry into the one dict the handler's audit reads.
 
     The audit INDEXES the four lists (``skipped_symbols``, ``unknown_perp_symbols``,
-    ``inverse_perp_symbols``, ``ctval_drift_warnings``) and reads the anchor flags with
-    ``.get``, so every key is always present. MT5's telemetry omits the anchor keys on
+    ``inverse_perp_symbols``, ``ctval_drift_warnings``) and reads the anchor flags and
+    ``carried_symbols`` with ``.get``, so every key is always present. MT5's telemetry omits the anchor keys on
     purpose (``_mt5_telemetry``: it performs no anchor step), so every read here has a
     default. Symbol lists are sorted unions, ``ctval_drift_warnings`` (dicts) are
     concatenated in part order, flags are ORed (``anchor_opening_agreed`` among them: Phase
@@ -2795,6 +2876,7 @@ def _merge_account_telemetry(parts: Sequence[Mapping[str, Any]]) -> dict[str, An
 
     return {
         "skipped_symbols": _union("skipped_symbols"),
+        "carried_symbols": _union("carried_symbols"),
         "unknown_perp_symbols": _union("unknown_perp_symbols"),
         "inverse_perp_symbols": _union("inverse_perp_symbols"),
         "ctval_drift_warnings": [
@@ -3163,6 +3245,19 @@ class _LatestHoldings:
     # $0 to the refresh total). Two such keys may read one account, which the
     # grouping below would count twice, so the caller holds the day.
     identity_pending_venues: int = 0
+    # Phase 167.2.1.1.1.1 D-04 / D-06: balances with no price on the read day.
+    # ``price_gap_accounts`` are WORKING accounts with a gap that holds the day
+    # (``price_rule.gap_holds_the_day``); ``price_gap_failing_accounts`` are
+    # accounts with such a gap whose eligible keys all fail (left out with a
+    # count); ``price_gap_dust_rows`` / ``price_gap_unsizable_rows`` count the gap
+    # rows dropped from the day as too small (below the floor) or not sizable
+    # (per the recorded F2 choice), and ``price_gap_left_out_symbols`` names them
+    # (sorted, at most 50) so the stored row can say what it left out.
+    price_gap_accounts: int = 0
+    price_gap_failing_accounts: int = 0
+    price_gap_dust_rows: int = 0
+    price_gap_unsizable_rows: int = 0
+    price_gap_left_out_symbols: tuple[str, ...] = ()
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -3269,6 +3364,19 @@ async def _fetch_latest_holdings_per_eligible_key(
     here: the snapshot is first-writer-wins, so a day written without the marker
     would pin the stale-close value for good.
 
+    A PRICE-GAP account (167.2.1.1.1.1 D-04 / D-06) has a spot balance on its
+    read day with no usable mark (``is_price_gap_holding``; a stable-value asset
+    and a Deribit row are not gaps here, they add 1.0 or $0 by their own rules).
+    Each gap is sized (quantity x the newest priced row of the account and symbol
+    within ``PRICE_GAP_MAX_DAYS`` before the read day) against the account level
+    and judged by ``price_rule.gap_disposition``. A gap that
+    ``price_rule.gap_holds_the_day`` makes the account ``price_gap_accounts`` when
+    a key works (the caller holds the day: a total missing a material balance is
+    short, and the snapshot is first-writer-wins), or ``price_gap_failing_accounts``
+    when none does (left out with a count, the over-age split). A dust gap, and an
+    unsizable one the recorded choice leaves out, is dropped from the day and
+    named in ``price_gap_left_out_symbols``.
+
     The latest ``asof`` is reduced with ``max()`` in Python, so correctness
     never rests on the order a read returns.
 
@@ -3349,6 +3457,11 @@ async def _fetch_latest_holdings_per_eligible_key(
     over_age_failing = 0
     oldest_over_age = 0
     over_age_excluded_venue = 0
+    price_gap = 0
+    price_gap_failing = 0
+    price_gap_dust = 0
+    price_gap_unsizable = 0
+    price_gap_symbols: set[str] = set()
     today_date = date.fromisoformat(today_iso)
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
@@ -3474,9 +3587,39 @@ async def _fetch_latest_holdings_per_eligible_key(
         # D-10: several keys of one account may hold rows on this day (plan 09's
         # per-key index); the account is counted once per holding type, through
         # the key whose poll of that type wrote last (WR-01).
-        rows.extend(
-            one_key_per_account_day(getattr(await db_execute(_sel_rows), "data", None) or [])
+        group_rows = one_key_per_account_day(
+            getattr(await db_execute(_sel_rows), "data", None) or []
         )
+        # 167.2.1.1.1.1 D-04 / D-06: a balance with no price is sized and judged
+        # before the account's rows are added.
+        gap_judgements = await _judge_price_gaps(
+            supabase, allocator_id, group_ids, latest, group_rows
+        )
+        if any(gap_holds_the_day(d) for _, d in gap_judgements):
+            if any(working_holder_predicate(r) for r in eligible):
+                # A working account with a material unpriced balance: the caller
+                # holds the day, so these rows are never summed.
+                price_gap += 1
+            else:
+                # D-12 "Same split": no key anyone can fix by waiting. Left out
+                # with a count (and a leader event), as the over-age failing
+                # account is, so a dead key cannot freeze the snapshot store.
+                price_gap_failing += 1
+                continue
+        else:
+            # No gap holds the day: every gap row of the account is dust or an
+            # unsizable balance the recorded choice leaves out. Drop it from the
+            # day and name it. A leave-out is NOT a Sentry event (a hold already
+            # is one, and RESEARCH D-06 asks for the name on the stored row).
+            for gap_row, disposition in gap_judgements:
+                if disposition == "dust":
+                    price_gap_dust += 1
+                else:
+                    price_gap_unsizable += 1
+                price_gap_symbols.add(str(gap_row["symbol"]).upper())
+            left_out_ids = {id(gap_row) for gap_row, _ in gap_judgements}
+            group_rows = [r for r in group_rows if id(r) not in left_out_ids]
+        rows.extend(group_rows)
         if latest < today_iso:
             carried += 1
             max_carry_age = max(
@@ -3507,7 +3650,120 @@ async def _fetch_latest_holdings_per_eligible_key(
         oldest_over_age_days=oldest_over_age,
         over_age_excluded_venue_accounts=over_age_excluded_venue,
         identity_pending_venues=pending_venues,
+        price_gap_accounts=price_gap,
+        price_gap_failing_accounts=price_gap_failing,
+        price_gap_dust_rows=price_gap_dust,
+        price_gap_unsizable_rows=price_gap_unsizable,
+        # Sorted, then capped at 50 (the bound the perp-P&L-missing list uses).
+        price_gap_left_out_symbols=tuple(sorted(price_gap_symbols)[:50]),
     )
+
+
+def _is_refresh_price_gap(row: Mapping[str, Any]) -> bool:
+    """A stored row the refresh treats as an unpriced balance (167.2.1.1.1.1 D-04).
+
+    ``is_price_gap_holding`` is row-level and pure and shared with the UI; two exclusions are
+    the refresh's own (PATTERNS trap 9): a Deribit row (the refresh skips the venue, its rows add
+    $0) and a stable-value asset (valued 1.0 whatever the poll stored as its mark). A row with no
+    symbol is skipped by the sum, so it is no gap either. Detected by the predicate on the
+    columns the refresh reads, never by the poll's ``raw_payload`` flag (not selected here)."""
+    if not is_price_gap_holding(row):
+        return False
+    if str(row.get("venue") or "").lower() == "deribit":
+        return False
+    symbol = str(row.get("symbol") or "")
+    return bool(symbol) and not is_stable_value(symbol)
+
+
+async def _read_newest_priced(
+    supabase: Any,
+    allocator_id: str,
+    api_key_ids: Sequence[str],
+    symbol: str,
+    window_end: str,
+) -> tuple[str, float] | None:
+    """``(asof, mark_price)`` of the newest priced spot row of ``symbol`` held through
+    ``api_key_ids`` on or before ``window_end``, or ``None`` when it was never priced.
+
+    The one sizing source of a balance with no price: the refresh's ``_judge_price_gaps`` and the
+    Binance mark's dust check (review WR-06) both read it here. NOT wrapped: a failed read raises.
+    ``_judge_price_gaps`` lets it raise (T-13); ``_drop_binance_dust_unpriced`` catches it, logs,
+    and keeps the unpriced coins named.
+    """
+
+    def _sel_newest_priced() -> Any:
+        # WR-05: the newest PRICED row of one symbol, not every row. PostgREST answers at
+        # most ``max_rows`` (1000) rows and a gap row is stored with ``mark_price`` 0, so a
+        # long-stuck balance's last priced row sits at the end of a newest-first read and
+        # is cut off.
+        return (
+            supabase.table("allocator_holdings")
+            .select("symbol, mark_price, asof, holding_type")
+            .eq("allocator_id", allocator_id)
+            .in_("api_key_id", list(api_key_ids))
+            .eq("symbol", symbol)
+            .eq("holding_type", "spot")
+            .gt("mark_price", 0)
+            .lte("asof", window_end)
+            .order("asof", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+    result = await db_execute(_sel_newest_priced)
+    for r in getattr(result, "data", None) or []:
+        mark = usable_price(r.get("mark_price"))
+        asof = str(r.get("asof") or "")
+        if mark is not None and asof:
+            return asof, mark
+    return None
+
+
+async def _judge_price_gaps(
+    supabase: Any,
+    allocator_id: str,
+    group_ids: Sequence[str],
+    latest: str,
+    group_rows: Sequence[Mapping[str, Any]],
+) -> list[tuple[Mapping[str, Any], str]]:
+    """Each price-gap row of one account's read day with its ``gap_disposition`` (D-06).
+
+    A gap row's size is its quantity times the newest priced row (``usable_price``) of the same
+    account and symbol before the read day ``latest``, at ANY age (review WR-02: a balance that
+    was ever priced keeps its size, so D-04 holds a gap past ``PRICE_GAP_MAX_DAYS`` and only a
+    never-priced balance is ``unsizable``); the account level is the sum of ``holding_equity_contribution`` over the account's rows (a withheld P&L
+    counts 0), and the rows judged dust are judged again as one summed balance (SF-M2). One sizing
+    read per gap symbol (the newest priced row, WR-05), and only when the account has a gap. NOT
+    wrapped: a failed read raises (T-13), like every other read here.
+    """
+    gaps = [r for r in group_rows if _is_refresh_price_gap(r)]
+    if not gaps:
+        return []
+    level = sum(holding_equity_contribution(r) or 0.0 for r in group_rows)
+    read_day = date.fromisoformat(latest)
+    window_end = (read_day - timedelta(days=1)).isoformat()
+    symbols = sorted({str(r["symbol"]) for r in gaps})
+    ids = list(group_ids)
+
+    newest: dict[str, tuple[str, float]] = {}
+    for symbol in symbols:
+        found = await _read_newest_priced(supabase, allocator_id, ids, symbol, window_end)
+        if found is not None:
+            newest[symbol] = found
+    judged: list[tuple[Mapping[str, Any], str]] = []
+    dust_total = 0.0
+    for r in gaps:
+        priced = newest.get(str(r["symbol"]))
+        estimated = float(r["quantity"]) * priced[1] if priced else None
+        disposition = gap_disposition(estimated, level)
+        if disposition == "dust":
+            dust_total += estimated or 0.0
+        judged.append((r, disposition))
+    # SF-M2: dust is judged per row, so many dust rows could add up past the floor. The rows
+    # judged dust are judged once more as one balance; at or past the floor they hold.
+    if dust_total > 0 and gap_disposition(dust_total, level) == "hold":
+        judged = [(r, "hold" if d == "dust" else d) for r, d in judged]
+    return judged
 
 
 def _over_age_account_holds(eligible: Sequence[Mapping[str, Any]]) -> bool:
@@ -3857,6 +4113,8 @@ async def _fetch_and_price_window(
 
     - ``skipped_symbols``: list[str] — symbols dropped from at least one
       day because their price lookup returned None.
+    - ``carried_symbols``: list[str] — symbols valued on at least one day at
+      a close 1-7 days old (MARKSOURCE D-02, D-04: a carry is named).
     - ``unknown_perp_symbols``: list[str] — OKX SWAP/FUTURES symbols not
       covered by the defensive ctVal table (silent-inflation risk).
     - ``inverse_perp_symbols``: list[str] — inverse perps that landed
@@ -3940,7 +4198,14 @@ async def _fetch_and_price_window(
             continue
         cached = await _read_cached_prices(supabase, sym, start_date.isoformat(), end_date.isoformat())
         needed = cached
-        if not cached:
+        # WR-03: a partial cache is not complete. Every close day the window can have
+        # (start .. end - 1; end's own close is not published yet) must be cached, else fetch,
+        # as the flow pricer does (job_worker ``_resolve_ccxt_flow_price_index``).
+        expected_days = {
+            (start_date + timedelta(days=i)).isoformat()
+            for i in range((end_date - start_date).days)
+        }
+        if expected_days - set(cached):
             closes = await _fetch_coingecko_daily_closes(
                 sym,
                 int(datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).timestamp()),
@@ -3948,10 +4213,11 @@ async def _fetch_and_price_window(
             )
             if closes:
                 await _cache_coingecko_prices(supabase, sym, closes)
-                needed = {iso: price for iso, price in closes}
+                needed = {**cached, **{iso: price for iso, price in closes}}
         coingecko_by_symbol[sym] = needed
 
     skipped_symbols: set[str] = set()
+    carried_symbols: set[str] = set()
     unknown_perp_symbols: set[str] = set()
     inverse_perp_symbols: set[str] = set()
     ctval_drift_warnings: list[dict[str, Any]] = []
@@ -3961,6 +4227,7 @@ async def _fetch_and_price_window(
         start_date, end_date,
         venue=venue,
         skipped_symbols=skipped_symbols,
+        carried_symbols=carried_symbols,
         unknown_perp_symbols=unknown_perp_symbols,
         inverse_perp_symbols=inverse_perp_symbols,
         ctval_drift_warnings=ctval_drift_warnings,
@@ -4160,6 +4427,7 @@ async def _fetch_and_price_window(
         _r["pre_terminus_balance_unknown"] = hit_terminus
     telemetry = {
         "skipped_symbols": sorted(skipped_symbols),
+        "carried_symbols": sorted(carried_symbols),
         "unknown_perp_symbols": sorted(unknown_perp_symbols),
         "inverse_perp_symbols": sorted(inverse_perp_symbols),
         "ctval_drift_warnings": ctval_drift_warnings,
@@ -4234,9 +4502,13 @@ async def _price_wallet_totals(
 
     Extracted unchanged from ``_fetch_current_equity`` (Phase 167.2.1.1.1 plan 18) so the forced
     rebuild path and the Bybit UTA mark read (``_read_bybit_uta_mark``) price a wallet with ONE
-    rule: stablecoins and ``_EXTRA_STABLECOIN_SUFFIXES`` at 1.0, every other asset with
+    rule: stablecoins and ``STABLECOIN_SPLIT_SUFFIXES`` at 1.0, every other asset with
     ``fetch_ticker("<ASSET>/USDT")`` in the order ``totals`` lists them, a failed ticker read
     recorded in the returned partial set (the total is then an undercount).
+
+    MARKSOURCE D-02: a ticker that ANSWERS without a usable ``last`` (missing, ``None``, not a
+    finite number, or <= 0) is a gap exactly like a raised read: the asset joins the partial
+    set and adds nothing to the total, never a measured $0.
     """
     partial_unpriced = _AnchorPartialSet()
     total = 0.0
@@ -4250,17 +4522,15 @@ async def _price_wallet_totals(
         if q <= 0:
             continue
         asset_upper = str(asset).upper()
-        if asset_upper in STABLECOINS:
-            total += q
-            continue
-        # red-team/H-2: _EXTRA_STABLECOIN_SUFFIXES (USDE, PYUSD, USDB)
+        # red-team/H-2: STABLECOIN_SPLIT_SUFFIXES (USDE, PYUSD, USDB)
         # are NOT in STABLECOINS (by design — they drive symbol-suffix
         # logic not price-skip logic). But they ARE stable-value assets.
         # Without this guard, fetch_ticker("USDE/USDT") is attempted; on
         # venues without a liquid pair it fails → partial_unpriced.add →
         # anchor unconditionally skipped for every OKX account holding
         # USDe collateral (extremely common). Treat them as $1 per unit.
-        if any(asset_upper == suf for suf in _EXTRA_STABLECOIN_SUFFIXES):
+        # ``is_stable_value`` is STABLECOINS plus those suffixes (price_rule).
+        if is_stable_value(asset_upper):
             total += q
             continue
         # Price non-stablecoin spot via a single ticker call. Best-
@@ -4270,25 +4540,150 @@ async def _price_wallet_totals(
         _ticker_fetch_failed = False
         try:
             t = await exchange.fetch_ticker(f"{asset_upper}/USDT")
-            px = float((t or {}).get("last") or 0.0) if isinstance(t, dict) else 0.0
-        except Exception:  # noqa: BLE001
+            _last = usable_price(t.get("last")) if isinstance(t, dict) else None
+            if _last is None:
+                # D-02: the ticker answered but gave no usable last. That is a hole.
+                _ticker_fetch_failed = True
+            else:
+                px = _last
+        except ccxt.RateLimitExceeded:
+            # Review F3: a 429 is the venue asking us to back off, not "this asset has no
+            # price". It reaches the caller's rate-limit handling instead of joining the
+            # partial set.
+            raise
+        except Exception as ticker_exc:  # noqa: BLE001
+            # The class only: ccxt error text can carry a request signature, and the asset is
+            # one owner's holding (T-13: never a coin symbol or an amount in a log line).
+            logger.warning(
+                "_price_wallet_totals: fetch_ticker failed (%s); the asset is unpriced",
+                type(ticker_exc).__name__,
+            )
             px = 0.0
             _ticker_fetch_failed = True
         # NEW-C01-02 (silent-failure/F-06 fix): track assets that priced
-        # to zero because of a FETCH FAILURE (auth error, network error,
+        # to zero because the price is UNKNOWN (auth error, network error,
         # missing ticker) — those represent unknown equity that could cause
-        # the anchor to understate the true total. A genuine zero (delisted
-        # token, or exchange returns 0.0 as last price) contributes 0 to
-        # the anchor regardless, so skipping the anchor for it is wrong.
-        # Only mark as partial_unpriced when the ticker fetch failed.
+        # the anchor to understate the true total. MARKSOURCE D-02 REVERSES
+        # this comment's earlier premise that a ticker answering ``None`` or 0
+        # was "a genuine zero": a ticker that answers without a usable last is
+        # a hole, not a measured zero, and counting the asset at $0 is exactly
+        # the undercount the partial set exists to name. The red-team/H-2
+        # rationale above stands: stable-value assets never reach this read.
         if _ticker_fetch_failed:
             partial_unpriced.add(asset_upper)
         total += q * px
     return total, partial_unpriced
 
 
+def _drop_bybit_dust_unpriced(partial: set[str], balance: Any) -> None:
+    """Review WR-04 (D-06 on the mark and anchor path): forget unpriced coins that are dust.
+
+    Bybit reports a per-coin ``usdValue`` beside ``totalEquity`` in the wallet-balance entry. When
+    EVERY coin we could not price is sized by it, and together they are below the dust floor
+    (``price_rule.gap_disposition`` answers ``dust`` against ``totalEquity``), they leave the
+    unpriced set: one worthless token with no usable ticker must not refuse every daily mark. A
+    coin with no usable ``usdValue`` is not sized, so it stays named and the account stays refused.
+    """
+    try:
+        entry = balance["info"]["result"]["list"][0]
+        equity = _finite_float(entry["totalEquity"])
+        coins = entry["coin"]
+        sizes = {
+            str(c["coin"]).upper(): _finite_float(c.get("usdValue")) for c in coins
+        }
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        # Review F2: the unpriced set stays as it is, and the log says why no coin was sized.
+        logger.warning(
+            "_drop_bybit_dust_unpriced: wallet-balance entry unreadable (%s); "
+            "unpriced coins stay named",
+            type(exc).__name__,
+        )
+        return
+    if not partial or equity is None:
+        return
+    unpriced = [sizes.get(sym) for sym in partial]
+    if any(u is None or u < 0 for u in unpriced):
+        return
+    unpriced_usd = sum(u for u in unpriced if u is not None)
+    if gap_disposition(unpriced_usd, equity) == "dust":
+        # Review F2: clearing the set turns a refusal into a mark, so it leaves a record.
+        # T-13: the count only, never a coin symbol or a USD figure.
+        logger.warning(
+            "_drop_bybit_dust_unpriced: %d unpriced coin(s) sized by Bybit's usdValue "
+            "are below the dust floor of totalEquity; they leave the unpriced set",
+            len(partial),
+        )
+        partial.clear()
+
+
+async def _drop_binance_dust_unpriced(
+    partial: set[str],
+    totals: dict[Any, Any],
+    wallet_usd: float,
+    supabase: Any,
+    allocator_id: str,
+    api_key_ids: Sequence[str],
+) -> None:
+    """Review WR-06 (founder D-10): the Bybit rule for Binance, which reports no per-coin USD.
+
+    Each unpriced coin is sized as its held quantity times its newest priced ``allocator_holdings``
+    row (``_read_newest_priced``, the refresh's own source). Only when EVERY unpriced coin is sized,
+    and together they are below the dust floor against the priced wallet (``gap_disposition``), do
+    they leave the unpriced set. A coin that was never priced stays named and the mark stays refused.
+    """
+    if not partial:
+        return
+    held: dict[str, float] = {}
+    for asset, qty in totals.items():
+        quantity = _finite_float(qty)
+        if quantity is not None:
+            held[str(asset).upper()] = quantity
+    window_end = datetime.now(timezone.utc).date().isoformat()
+    unpriced_usd = 0.0
+    for symbol in sorted(partial):
+        quantity = held.get(symbol)
+        if quantity is None:
+            return
+        try:
+            newest = await _read_newest_priced(supabase, allocator_id, api_key_ids, symbol, window_end)
+        except Exception as exc:  # noqa: BLE001 - a database error is not a venue balance failure
+            logger.warning(
+                "_drop_binance_dust_unpriced: the holdings read failed (%s); the %d unpriced "
+                "coin(s) stay named",
+                type(exc).__name__, len(partial),
+            )
+            return
+        if newest is None:
+            logger.warning(
+                "_drop_binance_dust_unpriced: %d unpriced coin(s) stay named, one was never priced",
+                len(partial),
+            )
+            return
+        unpriced_usd += quantity * newest[1]
+    if gap_disposition(unpriced_usd, wallet_usd) == "dust":
+        logger.warning(
+            "_drop_binance_dust_unpriced: %d unpriced coin(s) sized by their newest priced "
+            "holdings rows are below the dust floor of the priced wallet; they leave the "
+            "unpriced set",
+            len(partial),
+        )
+        partial.clear()
+    else:
+        logger.warning(
+            "_drop_binance_dust_unpriced: %d unpriced coin(s) stay named, sized by their "
+            "newest priced holdings rows, above dust floor of the priced wallet",
+            len(partial),
+        )
+
+
 async def _fetch_current_equity(
-    exchange: Any, venue: str, *, refuse_unread_positions: bool = False,
+    exchange: Any,
+    venue: str,
+    *,
+    refuse_unread_positions: bool = False,
+    supabase: Any = None,
+    allocator_id: str | None = None,
+    api_key_ids: Sequence[str] | None = None,
 ) -> tuple[float | None, set[str]]:
     """Return (equity_usd, partial_unpriced_symbols).
 
@@ -4314,8 +4709,9 @@ async def _fetch_current_equity(
     top double-counts.
 
     Wrapped in a blanket try/except: the anchor is advisory, not load-
-    bearing. Any exchange error — including mocked exchanges in tests
-    that don't stub fetch_balance/fetch_positions — returns (None, set())
+    bearing. Any exchange error — except ``ccxt.RateLimitExceeded``, which
+    propagates to the crawl's rate-limit arm (review F3) — including mocked
+    exchanges in tests that don't stub fetch_balance/fetch_positions — returns (None, set())
     so the reconstruction still ships an unanchored series rather than
     failing the whole job.
     """
@@ -4343,6 +4739,19 @@ async def _fetch_current_equity(
         if not isinstance(totals, dict):
             return None, partial_unpriced
         total, partial_unpriced = await _price_wallet_totals(exchange, totals)
+        if venue.lower() == "bybit":
+            _drop_bybit_dust_unpriced(partial_unpriced, balance)
+        elif (
+            venue.lower() == "binance"
+            and supabase is not None
+            and allocator_id is not None
+            and api_key_ids is not None
+        ):
+            # Review WR-06: only the NAV mark passes the database and the key (the anchor does
+            # not), so the anchor keeps refusing on an unpriced coin.
+            await _drop_binance_dust_unpriced(
+                partial_unpriced, totals, total, supabase, allocator_id, api_key_ids,
+            )
 
         # NEW-C01-05, reversed for Bybit by Phase 167.2.1.1 (the earlier text
         # claimed Bybit V5 reports fetch_balance['total'] equity-inclusive; it
@@ -4364,6 +4773,10 @@ async def _fetch_current_equity(
 
         try:
             positions = await exchange.fetch_positions()
+        except ccxt.RateLimitExceeded:
+            # D-10: a 429 is the venue asking this key to back off, not an unreadable position
+            # book. It reaches the caller's rate-limit arm (cooldown stamp) like the pricer's.
+            raise
         except Exception as _pos_exc:  # noqa: BLE001
             # silent-failure/F-03: bare except silently dropped the error,
             # leaving positions=[] with no log entry. The venues that ADD
@@ -4434,6 +4847,10 @@ async def _fetch_current_equity(
     except ForcedRebuildRefusedError:
         # PD-H: a forced-path refusal must reach the handler, not be swallowed by the
         # blanket arm below into `(None, ...)` and misreported as anchor_unreadable.
+        raise
+    except ccxt.RateLimitExceeded:
+        # Review F3: a 429 from the wallet pricer reaches the crawl's rate-limit arm
+        # (cooldown stamp); the blanket arm below would turn it into an unanchored series.
         raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("anchor: _fetch_current_equity failed venue=%s: %s", venue, exc)
@@ -4536,6 +4953,9 @@ async def _read_bybit_uta_mark(exchange: Any) -> tuple[float, float, float] | st
     try:
         balance = await exchange.fetch_balance()
         account = await exchange.privateGetV5AccountInfo()
+    except ccxt.RateLimitExceeded:
+        # D-10: reaches the derive's rate-limit arm (cooldown stamp), not a plain refusal.
+        raise
     except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
         # ccxt error text can carry a request signature: the class name only.
         logger.warning(
@@ -4588,6 +5008,7 @@ async def _read_bybit_uta_mark(exchange: Any) -> tuple[float, float, float] | st
         return "uta_totals_unreadable"
 
     our_wallet, partial = await _price_wallet_totals(exchange, wallet_balances)
+    _drop_bybit_dust_unpriced(partial, balance)
     if partial:
         return "wallet_unpriced"
     if abs(total_wallet - our_wallet) > max(
@@ -4632,6 +5053,9 @@ async def _binance_options_call(exchange: Any, method: str, endpoint: str) -> tu
     """
     try:
         body = await getattr(exchange, method)()
+    except ccxt.RateLimitExceeded:
+        # D-10: reaches the derive's rate-limit arm (cooldown stamp), not a plain refusal.
+        raise
     except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
         code = _binance_error_code(exc)
         outcome = "no_access" if code in _BINANCE_OPTIONS_NO_ACCESS_CODES else "unreadable"
@@ -4768,7 +5192,14 @@ async def read_okx_option_exposure(exchange: Any) -> str | None:
     return None
 
 
-async def read_marked_equity_usd(exchange: Any, venue: str) -> tuple[float, float, float] | str:
+async def read_marked_equity_usd(
+    exchange: Any,
+    venue: str,
+    *,
+    supabase: Any = None,
+    allocator_id: str | None = None,
+    api_key_ids: Sequence[str] | None = None,
+) -> tuple[float, float, float] | str:
     """The NAVMTM mark's Bybit/Binance read (Phase 167.2.1.1.1 plans 15 and 18, L4, D-04, D-16, D-17).
 
     Returns ``(nav_usd, open_pnl_usd, wallet_usd)`` or ONE refusal token from
@@ -4794,8 +5225,12 @@ async def read_marked_equity_usd(exchange: Any, venue: str) -> tuple[float, floa
     Binance tokens: a ``ForcedRebuildRefusedError`` (a raised, non-list or page-limit positions
     read, an unreadable open position) is ``positions_unreadable``; no total, or no wallet total,
     is ``balance_error``; a held asset whose ticker read failed (the anchor's partial-unpriced set)
-    is ``wallet_unpriced``. Venue error text never leaves this function: the anchor logs the
-    scrubbed text, the token carries none.
+    is ``wallet_unpriced``, unless (review WR-06, founder D-10) the caller passes ``supabase``,
+    ``allocator_id`` and ``api_key_ids`` (the key's account group, as the refresh sizes it, WR-07)
+    and every such asset is sized from its newest priced
+    ``allocator_holdings`` row to a sum under the dust floor (``_drop_binance_dust_unpriced``); an
+    asset never priced still refuses. Venue error text never leaves this function: the anchor logs
+    the scrubbed text, the token carries none.
 
     Binance calls per key per UTC day (D-16, accepted by the founder): ``fetch_balance()`` once,
     ``fetch_positions()`` once, and ``fetch_ticker("<ASSET>/USDT")`` once per held asset that is
@@ -4842,6 +5277,7 @@ async def read_marked_equity_usd(exchange: Any, venue: str) -> tuple[float, floa
     try:
         total, partial = await _fetch_current_equity(
             exchange, venue, refuse_unread_positions=True,
+            supabase=supabase, allocator_id=allocator_id, api_key_ids=api_key_ids,
         )
     except ForcedRebuildRefusedError:
         return "positions_unreadable"
@@ -6555,6 +6991,9 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
         # each at 50 entries; the sets only ever grow per-symbol so
         # 50 is sufficient even for a noisy account.
         "skipped_symbols": telemetry["skipped_symbols"][:50],
+        # MARKSOURCE D-02/D-04: a symbol valued at a 1-7 day old close is named.
+        # ``.get`` because ``_mt5_telemetry`` has no such key.
+        "carried_symbols": telemetry.get("carried_symbols", [])[:50],
         "unknown_perp_symbols": telemetry["unknown_perp_symbols"][:50],
         "inverse_perp_symbols": telemetry["inverse_perp_symbols"][:50],
         "ctval_drift_warnings": telemetry["ctval_drift_warnings"][:50],
@@ -6742,6 +7181,8 @@ _HOLD_SENTRY_OUTCOME: Final[dict[str, str]] = {
     "never_polled_working": "held_never_polled",
     "carry_over_age": "held_carry_over_age",
     "identity_pending": "held_identity_pending",
+    # 167.2.1.1.1.1 D-04 / D-06: a balance with no price, sized at or above the floor.
+    "price_gap": "held_price_gap",
 }
 
 
@@ -6754,6 +7195,9 @@ def _refresh_hold_reason(latest: _LatestHoldings) -> str | None:
         return "carry_over_age"
     if latest.identity_pending_venues > 0:
         return "identity_pending"
+    # Last: a gap is a stated price problem, the three above are unread books.
+    if latest.price_gap_accounts > 0:
+        return "price_gap"
     return None
 
 
@@ -6779,6 +7223,10 @@ def _refresh_audit_counts(latest: _LatestHoldings) -> dict[str, int]:
         "oldest_over_age_days": latest.oldest_over_age_days,
         "over_age_excluded_venue_accounts": latest.over_age_excluded_venue_accounts,
         "identity_pending_venues": latest.identity_pending_venues,
+        "price_gap_accounts": latest.price_gap_accounts,
+        "price_gap_failing_accounts": latest.price_gap_failing_accounts,
+        "price_gap_dust_rows": latest.price_gap_dust_rows,
+        "price_gap_unsizable_rows": latest.price_gap_unsizable_rows,
     }
 
 
@@ -6786,9 +7234,15 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
     """Incremental one-day delta. KEY-SCOPED per VOICES-ACCEPTED f1.
 
     Reads job['api_key_id'] via _allocator_key_preflight; derives allocator_id
-    from ctx.key_row['user_id']. Persists ONE row for today via UPSERT ON
-    CONFLICT (allocator_id, asof) DO NOTHING — multiple keys for the same
-    allocator coalesce at this layer (threat T-07-V5b mitigation).
+    from ctx.key_row['user_id']. Persists ONE row via UPSERT ON CONFLICT
+    (allocator_id, asof) DO NOTHING — multiple keys for the same allocator
+    coalesce at this layer (threat T-07-V5b mitigation).
+
+    Phase 167.2.1.1.1.1 D-01: the row is labelled the UTC day that closed
+    (``mark_day_for``, the label the stored NAV mark of the same read carries),
+    while holdings are still READ at the run day (``today_iso``) and the carry
+    age is measured from it. A row already stored for the label (an old-regime
+    run, a first-connect or a forced-rebuild row) is kept, never replaced.
     """
     ctx = await _allocator_key_preflight(job, "run_refresh_allocator_equity_daily_job")
     if isinstance(ctx, DispatchResult):
@@ -6797,8 +7251,11 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
     api_key_id = job["api_key_id"]
     allocator_id = ctx.key_row["user_id"]
     venue = (ctx.key_row.get("exchange") or "").lower()
-    today = datetime.now(timezone.utc).date()
-    today_iso = today.isoformat()
+    now = datetime.now(timezone.utc)
+    # The READ day: holdings are dated by the poll day and stay that way.
+    today_iso = now.date().isoformat()
+    # The LABEL of the one row written (D-01): the UTC day that closed.
+    row_asof = mark_day_for(now).isoformat()
 
     try:
         # Phase 167.1.2 D-07: every eligible key at its own latest holdings
@@ -6828,10 +7285,10 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             logger.warning(
                 "refresh_allocator_equity_daily: held for allocator=%s reason=%s "
                 "(never_polled_working_accounts=%d, over_age_accounts=%d, "
-                "identity_pending_venues=%d, eligible_keys=%d)",
+                "identity_pending_venues=%d, price_gap_accounts=%d, eligible_keys=%d)",
                 allocator_id, hold_reason, latest.never_polled_working_accounts,
                 latest.over_age_accounts, latest.identity_pending_venues,
-                latest.eligible_keys,
+                latest.price_gap_accounts, latest.eligible_keys,
             )
             _emit_audit(
                 allocator_id, api_key_id,
@@ -6850,6 +7307,9 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                         # D-02: the count and the age, as integer tags only.
                         scope.set_tag("over_age_accounts", latest.over_age_accounts)
                         scope.set_tag("oldest_over_age_days", latest.oldest_over_age_days)
+                    if hold_reason == "price_gap":
+                        # D-04: the count, as an integer tag only (no symbol, no USD).
+                        scope.set_tag("price_gap_accounts", latest.price_gap_accounts)
                     sentry_sdk.capture_message(
                         f"refresh_allocator_equity_daily: {outcome}, the day's "
                         "legacy snapshot write was held",
@@ -6866,6 +7326,8 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             for left_out, outcome in (
                 (latest.never_polled_failing_accounts, "left_out_never_polled_failing"),
                 (latest.over_age_failing_accounts, "left_out_carry_over_age_failing"),
+                (latest.price_gap_failing_accounts, "left_out_price_gap_failing"),
+                (latest.price_gap_unsizable_rows, "left_out_price_gap_unsizable"),
             ):
                 if left_out > 0:
                     with sentry_sdk.new_scope() as scope:
@@ -6873,7 +7335,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                         scope.set_tag("refresh_outcome", outcome)
                         sentry_sdk.capture_message(
                             f"refresh_allocator_equity_daily: {outcome}, an "
-                            "account whose keys all fail was left out of today's "
+                            "account or balance was left out of today's "
                             "legacy snapshot",
                             level="warning",
                         )
@@ -7011,10 +7473,13 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "allocator.equity.refresh_complete",
                 {
                     # SFH M-1: derivatives that all report no P&L are holdings,
-                    # not "no holdings".
+                    # not "no holdings". 167.2.1.1.1.1 D-06: so are balances left
+                    # out for want of a price (checked after the P&L case).
                     "reason": (
                         "derivative_pnl_unreported"
                         if perp_upnl_missing_total > 0
+                        else "price_gap_left_out"
+                        if latest.price_gap_dust_rows + latest.price_gap_unsizable_rows > 0
                         else "no_holdings_today"
                     ),
                     "venue": venue,
@@ -7076,9 +7541,22 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "count": perp_upnl_missing_total,
                 "symbols": list(perp_upnl_missing_symbols),
             }
+        # 167.2.1.1.1.1 D-06: the balances left out because they have no price
+        # (dust below the floor, or unsizable) are named on the stored row the
+        # same way. Symbols are the sorted, capped list plan 12 collected.
+        price_gap_left_out = (
+            latest.price_gap_dust_rows + latest.price_gap_unsizable_rows
+        )
+        if price_gap_left_out > 0:
+            breakdown_to_store["__price_gap_left_out__"] = {
+                "count": price_gap_left_out,
+                "symbols": list(latest.price_gap_left_out_symbols),
+                "dust": latest.price_gap_dust_rows,
+                "unsizable": latest.price_gap_unsizable_rows,
+            }
         capped_bd = _cap_breakdown(breakdown_to_store)
         row = {
-            "asof": today_iso,
+            "asof": row_asof,
             "value_usd": round(total, 2),
             "breakdown": capped_bd,
             "source": "exchange_primary",
@@ -7100,7 +7578,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             # loud. Counts only (no key id, no USD).
             logger.warning(
                 "refresh_allocator_equity_daily: allocator=%s every counted "
-                "account (%d) is proven empty; wrote a $0 row for today "
+                "account (%d) is proven empty; wrote a $0 row for the closed day "
                 "(days_written=%d)",
                 allocator_id, latest.counted_accounts, count,
             )
@@ -7191,9 +7669,9 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
 # ---------------------------------------------------------------------------
 #
 # Wraps existing primitives (position_reconstruction.py, funding_fetch.py)
-# per ROADMAP REUSE flag. Open perps valued at mark-price; YTD = window-
-# filtered TWR; Sharpe matches an independently-computed quantstats
-# reference within ±0.05 per source.
+# per ROADMAP REUSE flag. Open perps valued at mark-price. The return-based
+# scalars (TWR, YTD, Sharpe, max drawdown) this builder used to compute were
+# removed by MARKSOURCE D-03; see the class docstring.
 #
 # Design notes (verified against the actual primitives 2026-05-08):
 # - services.position_reconstruction._match_positions_fifo returns dicts
@@ -7214,9 +7692,9 @@ from collections import defaultdict
 class EquityCurveBuilder:
     """Phase 19 / BACKBONE-06 + BACKBONE-07.
 
-    Builds an equity curve from raw trades, with mark-price valuation for
-    open perpetual positions and funding-rate accumulation. YTD = window-
-    filtered TWR; TWR = full-history.
+    Reconstructs positions from raw trades, with mark-price valuation for
+    open perpetual positions and funding-rate accumulation, and composes the
+    closed-trade totals into a MetricsSnapshot.
 
     Wraps existing primitives (RESEARCH gotcha L1720 — Option B chosen):
       - position_reconstruction._match_positions_fifo (private; imported
@@ -7225,12 +7703,10 @@ class EquityCurveBuilder:
       - services.exchange.fetch_mark_prices(instruments) (60s in-process
         cache)
 
-    Sharpe annualizes on the unified `DEFAULT_PERIODS_PER_YEAR` (252) basis,
-    shared with `compute_all_metrics` (Phase 34, ANNUAL-05) — no residual scale
-    factor between the two paths. Matches
-    `qs.stats.sharpe(returns, periods=252)` within ±0.10 (tolerance widened
-    from ±0.05 after C01-14; see test_equity_curve_builder.py). The equity-curve
-    row density stays calendar-daily; only the annualization multiplier is 252.
+    MARKSOURCE D-03: the return scalars (TWR, YTD, Sharpe, max drawdown) were
+    removed because no reader exists and the backbone owns those metrics. The
+    snapshot carries them as None. They also booked every open position's whole
+    profit on the last bar as one day's return, which this class no longer does.
     """
 
     # Synthetic starting NAV used when the caller does not supply one.
@@ -7254,10 +7730,8 @@ class EquityCurveBuilder:
             starting_nav if starting_nav is not None else self.DEFAULT_STARTING_NAV
         )
         self._funding_pnl_by_day: dict[date, float] = {}
-        self._curve_cache: pd.DataFrame | None = None
-        # CR-perf-2 — cache reconstruct_positions output. to_metrics_snapshot
-        # and to_equity_curve_daily both call reconstruct_positions; pre-fix
-        # this fired _match_positions_fifo twice for every snapshot read.
+        # CR-perf-2 — cache reconstruct_positions output, so a second read of
+        # the positions does not fire _match_positions_fifo again.
         self._positions_cache: list[Any] | None = None
 
     # ------------------------------------------------------------------
@@ -7269,8 +7743,7 @@ class EquityCurveBuilder:
 
         Calls existing services.position_reconstruction._match_positions_fifo
         (private — Phase 19 / MC-2 Option B). CR-perf-2 — result cached on
-        self._positions_cache; the cache is invalidated by attach_funding
-        the same way self._curve_cache is.
+        self._positions_cache.
         """
         if self._positions_cache is not None:
             return self._positions_cache
@@ -7394,214 +7867,17 @@ class EquityCurveBuilder:
             self._funding_pnl_by_day[d] = (
                 self._funding_pnl_by_day.get(d, 0.0) + amount
             )
-        self._curve_cache = None  # invalidate
-
-    # ------------------------------------------------------------------
-    # Daily equity DataFrame
-    # ------------------------------------------------------------------
-
-    def to_equity_curve_daily(self) -> "pd.DataFrame":
-        """Return a daily equity DataFrame.
-
-        Columns: ``[date, realized_pnl, unrealized_pnl, funding_pnl,
-        equity, daily_return]``.
-        """
-        if self._curve_cache is not None:
-            return self._curve_cache
-
-        if not self.trades:
-            self._curve_cache = pd.DataFrame(
-                columns=[
-                    "date",
-                    "realized_pnl",
-                    "unrealized_pnl",
-                    "funding_pnl",
-                    "equity",
-                    "daily_return",
-                ]
-            )
-            return self._curve_cache
-
-        positions = self.reconstruct_positions()
-
-        # Compute the date window first so the string-closed_at fallback
-        # can book unparseable positions on last_d (NEW-C01-08).
-        first = min(t.timestamp for t in self.trades)
-        last = max(t.timestamp for t in self.trades)
-        if first.tzinfo is None:
-            first = first.replace(tzinfo=timezone.utc)
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        first_d = first.astimezone(timezone.utc).date()
-        last_d = last.astimezone(timezone.utc).date()
-
-        realized_by_date: dict[date, float] = defaultdict(float)
-        for pos in positions:
-            if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
-                closed_at = pos.closed_at
-                if isinstance(closed_at, datetime):
-                    if closed_at.tzinfo is None:
-                        closed_at = closed_at.replace(tzinfo=timezone.utc)
-                    d = closed_at.astimezone(timezone.utc).date()
-                elif isinstance(closed_at, str):
-                    # NEW-C01-08: _match_positions_fifo emits ISO string
-                    # closed_at values; silently continuing (pre-fix) dropped
-                    # all PnL for such positions, diverging the curve from
-                    # to_metrics_snapshot (which counts them). Parse instead
-                    # and fall back to the last day on parse failure.
-                    try:
-                        closed_dt = datetime.fromisoformat(
-                            closed_at.replace("Z", "+00:00")
-                        )
-                        if closed_dt.tzinfo is None:
-                            closed_dt = closed_dt.replace(tzinfo=timezone.utc)
-                        d = closed_dt.astimezone(timezone.utc).date()
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            "EquityCurveBuilder: closed_at %r unparseable — "
-                            "booking PnL %.6f on last bar (NEW-C01-08)",
-                            closed_at, float(pos.pnl),
-                        )
-                        d = last_d
-                else:
-                    continue
-                realized_by_date[d] += float(pos.pnl)
-        idx = pd.date_range(first_d, last_d, freq="D")
-
-        df = pd.DataFrame({"date": idx})
-        df["realized_pnl"] = df["date"].map(
-            lambda d: realized_by_date.get(d.date(), 0.0)
-        )
-        df["funding_pnl"] = df["date"].map(
-            lambda d: self._funding_pnl_by_day.get(d.date(), 0.0)
-        )
-        df["unrealized_pnl"] = 0.0
-        # Open-position unrealized pnl is realised on the last bar (BACKBONE-06).
-        if not df.empty:
-            open_unrealized = sum(
-                float(getattr(p, "pnl", None) or 0.0)
-                for p in positions
-                if p.status == "open"
-            )
-            df.loc[df.index[-1], "unrealized_pnl"] = open_unrealized
-
-        df["daily_pnl"] = (
-            df["realized_pnl"] + df["funding_pnl"] + df["unrealized_pnl"]
-        )
-        df["equity"] = self.starting_nav + df["daily_pnl"].cumsum()
-        # Daily return = daily_pnl / nav_yesterday. Day 1 returns 0.0.
-        prev_equity = df["equity"].shift(1).fillna(self.starting_nav)
-        # prev_equity is guaranteed > 0 because starting_nav > 0 and the
-        # cumulative PnL would have to exceed -starting_nav for it to flip
-        # negative — unrealistic for a synthetic seed but guarded with a
-        # mask.
-        prev_equity = prev_equity.where(prev_equity > 0, other=self.starting_nav)
-        df["daily_return"] = (df["daily_pnl"] / prev_equity).fillna(0.0)
-        df = df.drop(columns=["daily_pnl"])
-        self._curve_cache = df
-        return df
-
-    # ------------------------------------------------------------------
-    # Metrics (TWR / YTD / Sharpe / max drawdown)
-    # ------------------------------------------------------------------
-
-    def compute_twr(self) -> float | None:
-        """Time-Weighted Return over the full history."""
-        df = self.to_equity_curve_daily()
-        if df.empty:
-            return None
-        return float((1 + df["daily_return"]).prod() - 1)
-
-    def compute_ytd(self) -> float | None:
-        """YTD = TWR computed over the year-to-date window.
-
-        BACKBONE-07: differs from full-history TWR when the strategy has
-        history outside the current calendar year.
-        """
-        df = self.to_equity_curve_daily()
-        if df.empty:
-            return None
-        year_start = pd.Timestamp(date(date.today().year, 1, 1))
-        ytd_df = df[df["date"] >= year_start]
-        if ytd_df.empty:
-            return None
-        return float((1 + ytd_df["daily_return"]).prod() - 1)
-
-    def compute_sharpe(
-        self, risk_free_rate: float = 0.0, periods: int = DEFAULT_PERIODS_PER_YEAR
-    ) -> float | None:
-        """Annualized Sharpe ratio.
-
-        Phase 34 (ANNUAL-05): default is ``DEFAULT_PERIODS_PER_YEAR`` (252),
-        unified with ``compute_all_metrics`` — both paths now annualize on the
-        SAME 252 trading-day basis, so there is no residual scale factor between
-        the equity-reconstruction Sharpe and the product-wide KPI engine. This
-        reverses the prior NEW-C01-15 252→365 change: comparability across every
-        displayed/ranking metric (user decision 2026-06-24) takes priority over
-        the per-asset calendar-density argument. The equity curve's row DENSITY
-        stays calendar-daily (~365 rows/yr on 24/7 crypto); only the
-        annualization MULTIPLIER is 252. Callers may still pass an explicit
-        ``periods`` to override.
-
-        NEW-C01-14: The forced day-0 zero return biases the ratio on sparse
-        series. Dropped the first row's zero if it is the seeded day-0 entry
-        (i.e., the first row has daily_return==0 and is an artefact of the
-        `.fillna(0.0)` seed). Calendar-gap filler zeros are intentionally
-        KEPT here because dropping ALL zeros would reduce an exchange-halt
-        month to zero observations, producing an infinite/NaN Sharpe — the
-        opposite distortion. (The annualization basis is now 252, unified with
-        ``compute_all_metrics`` — Phase 34; the prior C01-15 365 rationale that
-        leaned on annualization to offset filler-zero bias is no longer in play.)
-        """
-        df = self.to_equity_curve_daily()
-        if df.empty or len(df) < 2:
-            return None
-        returns = df["daily_return"]
-        # NEW-C01-14: drop the day-0 forced-zero (first row only — seeded
-        # by `prev_equity.fillna(starting_nav)` → daily_pnl/starting_nav
-        # with daily_pnl=0 → return=0). Dropping only the FIRST zero avoids
-        # destabilizing the Sharpe on sparse fixtures with many gap-filler zeros.
-        if len(returns) > 1 and returns.iloc[0] == 0.0:
-            returns = returns.iloc[1:]
-        # NEW-C01-06: the terminal bar carries the sum of ALL open-position
-        # unrealized PnL as a one-day spike (set by to_equity_curve_daily
-        # line: ``df.loc[df.index[-1], "unrealized_pnl"] = open_unrealized``).
-        # Including a multi-month unrealized gain as a single-day return
-        # inflates stdev and corrupts the Sharpe ratio. Exclude the final bar
-        # from the Sharpe input when it carries non-zero unrealized PnL.
-        # TWR/drawdown are NOT affected because they read all rows.
-        if "unrealized_pnl" in df.columns and len(returns) > 0:
-            last_unrealized = float(df["unrealized_pnl"].iloc[-1])
-            if last_unrealized != 0.0 and len(returns) > 1:
-                returns = returns.iloc[:-1]
-        if len(returns) < 2:
-            return None
-        excess = returns - (risk_free_rate / periods)
-        std = excess.std()
-        # Phase 166.1 (S5): residue dispersion (a constant yield taken from a
-        # compounding NAV has a ~1e-16 std, never exactly 0) means no Sharpe.
-        if math.isnan(std) or dispersion_is_residue(float(std), float(excess.mean())):
-            return None
-        return float((excess.mean() / std) * (periods ** 0.5))
-
-    def compute_max_drawdown(self) -> float | None:
-        df = self.to_equity_curve_daily()
-        if df.empty:
-            return None
-        equity = df["equity"]
-        running_max = equity.cummax()
-        # equity is ``starting_nav + cum(daily_pnl)`` so running_max ≥
-        # starting_nav > 0 — safe denominator.
-        denom = running_max.where(running_max != 0, other=self.starting_nav)
-        dd = (equity - running_max) / denom
-        return float(dd.min())
 
     # ------------------------------------------------------------------
     # MetricsSnapshot composition
     # ------------------------------------------------------------------
 
     def to_metrics_snapshot(self) -> "MetricsSnapshot":
-        """Compose into a services.ingestion.adapter.MetricsSnapshot."""
+        """Compose into a services.ingestion.adapter.MetricsSnapshot.
+
+        The four return scalars are None (MARKSOURCE D-03); total_pnl is the
+        closed positions' P&L plus funding, and open profit is not in it.
+        """
         from services.ingestion.adapter import MetricsSnapshot
 
         positions = self.reconstruct_positions()
@@ -7615,10 +7891,10 @@ class EquityCurveBuilder:
         ) + sum(self._funding_pnl_by_day.values())
 
         return MetricsSnapshot(
-            sharpe=self.compute_sharpe(),
-            twr=self.compute_twr(),
-            ytd=self.compute_ytd(),
-            max_drawdown=self.compute_max_drawdown(),
+            sharpe=None,
+            twr=None,
+            ytd=None,
+            max_drawdown=None,
             total_pnl=float(total_pnl),
             trade_count=len(self.trades),
             win_rate=win_rate,

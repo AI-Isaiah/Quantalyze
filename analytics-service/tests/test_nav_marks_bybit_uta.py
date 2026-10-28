@@ -34,6 +34,7 @@ import pytest
 
 from services.equity_reconstruction import (
     ForcedRebuildRefusedError,
+    _drop_bybit_dust_unpriced,
     _fetch_current_equity,
     read_marked_equity_usd,
 )
@@ -485,3 +486,149 @@ async def test_the_dry_run_sequence_for_a_uta_key() -> None:
             assert got == expect
         else:
             assert not isinstance(got, str) and got.nav_usd == expect
+
+
+# --------------------------------------------------------------------------------------
+# Review WR-04 (mark-path half): a dust coin with no usable ticker must not refuse the mark
+# --------------------------------------------------------------------------------------
+
+
+def _dust_coins(usd_value: Any) -> list[dict[str, Any]]:
+    """USDT, BTC and a DUST coin of 5.0 units whose ticker answers ``last`` 0.0. Bybit's own
+    per-coin ``usdValue`` (a string; ``ABSENT`` leaves it out) is the size the dust floor judges."""
+    return [
+        {"coin": "USDT", "walletBalance": "1000", "borrowAmount": "0"},
+        {"coin": "BTC", "walletBalance": "0.01", "borrowAmount": "0"},
+        _with(
+            {"coin": "DUST", "walletBalance": "5", "borrowAmount": "0", "usdValue": usd_value}, {}
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "usd_value,refused",
+    [("0.5", False), ("5.0", True), (ABSENT, True)],
+    ids=["below-the-floor", "above-the-floor", "no-usd-value-reported"],
+)
+async def test_an_unpriced_dust_coin_does_not_refuse_the_mark(usd_value: Any, refused: bool) -> None:
+    """Floor = DUST_FLOOR_SHARE 0.001 x totalEquity 1700.9 = 1.7009. DUST's ticker answers a
+    last of 0.0, so we cannot price it. Bybit reports it as 0.5 of USD value: below the floor,
+    so the mark is read from Bybit's totals (nav 1700.9, open 100.0, wallet 1600.9; our wallet
+    1600.0 is 0.9 from Bybit's, inside the 8.0 tolerance). At 5.0 it is above the floor, and
+    with no usdValue at all we cannot size it: both still refuse wallet_unpriced."""
+    ex = UtaVenue(
+        wallet={"USDT": 1000.0, "BTC": 0.01, "DUST": 5.0},
+        tickers={"BTC": 60000.0, "DUST": 0.0},
+        item=_item(
+            totalWalletBalance="1600.9", totalMarginBalance="1650.9", totalEquity="1700.9",
+            coin=_dust_coins(usd_value),
+        ),
+    )
+    out = await read_marked_equity_usd(ex, "bybit")
+    if refused:
+        assert out == "wallet_unpriced"
+    else:
+        assert isinstance(out, tuple)
+        assert out == (pytest.approx(1700.9), pytest.approx(100.0), pytest.approx(1600.9))
+
+
+@pytest.mark.asyncio
+async def test_an_unpriced_dust_coin_does_not_skip_the_anchor() -> None:
+    """The reconstruct anchor prices the wallet through the same rule: the dust coin (0.5 against
+    a floor of 0.001 x 1700.9) is left out of the unpriced set, so the anchor is not skipped; a
+    coin Bybit sizes above the floor stays named."""
+    for usd_value, named in (("0.5", set()), ("5.0", {"DUST"})):
+        ex = _bybit(
+            wallet={"USDT": 1000.0, "BTC": 0.01, "DUST": 5.0},
+            tickers={"BTC": 60000.0, "DUST": 0.0},
+            uta_totals={
+                "totalWalletBalance": "1600.9", "totalMarginBalance": "1650.9",
+                "totalEquity": "1700.9", "coin": _dust_coins(usd_value),
+            },
+        )
+        _total, partial = await _fetch_current_equity(ex, "bybit")
+        assert set(partial) == named
+
+
+# --------------------------------------------------------------------------------------
+# Review F3 (SF-M4 applied to the wallet pricer): a ticker failure is logged, a 429 propagates
+# --------------------------------------------------------------------------------------
+
+
+class _RateLimitedTickerVenue(UtaVenue):
+    async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
+        self.ticker_calls.append(symbol)
+        raise ccxt.RateLimitExceeded("ticker rate limited sig=abc123")
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_ticker_reaches_the_callers_handlers() -> None:
+    """A 429 on the BTC ticker is the venue asking us to back off, not "BTC has no price": it
+    propagates from the Bybit mark read (the derive's handler stamps the cooldown and refuses as
+    ``balance_error``, D-10) and from the anchor read (``_fetch_and_price_window``'s caller stamps the
+    cooldown) instead of becoming a partial-set entry that reads as an unpriced coin."""
+    with pytest.raises(ccxt.RateLimitExceeded):
+        await read_marked_equity_usd(_RateLimitedTickerVenue(), "bybit")
+    with pytest.raises(ccxt.RateLimitExceeded):
+        await _fetch_current_equity(_RateLimitedTickerVenue(), "bybit")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ticker_read_logs_the_exception_class_and_no_coin_symbol(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ticker that raises something other than a 429 still leaves the coin unpriced (the mark
+    is refused by name), and the log says what kind of failure it was. The class only: ccxt error
+    text can carry a request signature, and a coin symbol is one owner's holding (T-13, plan 15:
+    never in a log line)."""
+    ex = UtaVenue(ticker_fails=frozenset({"BTC"}))
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.equity_reconstruction"):
+        out = await read_marked_equity_usd(ex, "bybit")
+    assert out == "wallet_unpriced"
+    messages = [r.getMessage() for r in caplog.records]
+    lines = [m for m in messages if "fetch_ticker failed" in m]
+    assert len(lines) == 1 and "NetworkError" in lines[0], caplog.text
+    assert not any("BTC" in m for m in messages), messages
+    assert not any("sig=abc123" in m or "ticker read failed" in m for m in messages)
+
+
+# --------------------------------------------------------------------------------------
+# Review F2: the dust clear and its unreadable-balance exit leave a record
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_unpriced_set_as_dust_is_logged_as_a_count_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dropping an unpriced coin from the set changes a refusal into a mark, so it leaves one
+    record. T-13 (plan 15: never in a log line): the record is the COUNT of coins dropped, with
+    no coin symbol, no USD size (0.5) and no equity figure (1700.9)."""
+    ex = UtaVenue(
+        wallet={"USDT": 1000.0, "BTC": 0.01, "DUST": 5.0},
+        tickers={"BTC": 60000.0, "DUST": 0.0},
+        item=_item(
+            totalWalletBalance="1600.9", totalMarginBalance="1650.9", totalEquity="1700.9",
+            coin=_dust_coins("0.5"),
+        ),
+    )
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.equity_reconstruction"):
+        out = await read_marked_equity_usd(ex, "bybit")
+    assert isinstance(out, tuple)
+    lines = [r.getMessage() for r in caplog.records if "dust floor" in r.getMessage()]
+    assert len(lines) == 1, caplog.text
+    assert "1 unpriced coin" in lines[0], lines[0]
+    assert "DUST" not in lines[0] and "0.5" not in lines[0] and "1700.9" not in lines[0], lines[0]
+
+
+def test_an_unreadable_balance_entry_is_logged_with_its_exception_class(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A balance without the wallet-balance entry cannot size any coin, so the unpriced set is
+    left as it is; the log says the read failed and which exception class it was."""
+    partial = {"DUST"}
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.equity_reconstruction"):
+        _drop_bybit_dust_unpriced(partial, {"info": {}})
+    assert partial == {"DUST"}
+    assert any("KeyError" in r.getMessage() for r in caplog.records), caplog.text

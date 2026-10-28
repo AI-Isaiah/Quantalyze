@@ -3977,6 +3977,8 @@ async def _read_marked_equity_once_per_day(
     The read is bounded by the derive's per-crawl bound, and a timeout or any exception the
     wrapper did not already turn into a token is ``positions_unreadable``: a refused optional
     read must never fail the derive or take its timeout arm (which would retry the whole derive).
+    A ``ccxt.RateLimitExceeded`` is the exception: it stamps the key's 429 cooldown and refuses as
+    ``balance_error`` (D-10).
     Venue error text is never logged here: the class name only. A database error from the
     stored-mark read bubbles like every other derive write (the job retries).
     """
@@ -3990,12 +3992,52 @@ async def _read_marked_equity_once_per_day(
             venue, key_id, stored.mark_day,
         )
         return stored, None, None
+    from services.allocator_equity_derive import account_groups
     from services.equity_reconstruction import read_marked_equity_usd
+
+    # WR-07 (founder D-10, "the refresh's source"): a Binance coin with no ticker is sized across
+    # the key's whole account group, as the refresh does. A group that cannot be read, or that
+    # does not contain this key, is UNKNOWN (None), never this key alone: the mark is write-once,
+    # and this key's newest priced row can be older than its sibling's. ``None`` skips the dust
+    # check, so the mark refuses ``wallet_unpriced``. Bybit never uses the group.
+    group_ids: list[str] | None = None
+
+    def _sel_owner_keys() -> Any:
+        return (
+            ctx.supabase.table("api_keys")
+            .select("id, account_share_kind, account_shared_with_api_key_id")
+            .eq("user_id", ctx.key_row["user_id"])
+            .execute()
+        )
+
+    if venue.lower() == "binance":
+        try:
+            owner_keys = list(getattr(await db_execute(_sel_owner_keys), "data", None) or [])
+            for group in account_groups(owner_keys):
+                if any(str(r.get("id")) == key_id for r in group):
+                    group_ids = [str(r.get("id")) for r in group]
+        except Exception as exc:  # noqa: BLE001 - an optional sizing read never fails the derive
+            logger.warning(
+                "derive_broker_dailies: nav mark could not read the account group, dust check "
+                "skipped (exc_class=%s venue=%s)",
+                type(exc).__name__, venue,
+            )
+        else:
+            if group_ids is None:
+                logger.warning(
+                    "derive_broker_dailies: nav mark found no account group for the key, dust "
+                    "check skipped (venue=%s)",
+                    venue,
+                )
 
     read: tuple[float, float, float] | str
     try:
         read = await asyncio.wait_for(
-            read_marked_equity_usd(ctx.exchange, venue), timeout=_BROKER_CRAWL_TIMEOUT_S
+            read_marked_equity_usd(
+                ctx.exchange, venue,
+                supabase=ctx.supabase, allocator_id=ctx.key_row["user_id"], api_key_ids=group_ids,
+            ),
+            timeout=_BROKER_CRAWL_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
         logger.warning(
@@ -4003,6 +4045,15 @@ async def _read_marked_equity_once_per_day(
             _BROKER_CRAWL_TIMEOUT_S, venue, key_id,
         )
         read = "positions_unreadable"
+    except ccxt.RateLimitExceeded as exc:
+        # D-10: a 429 on the mark read stamps the cooldown like every other handler's 429 arm
+        # (``_stamp_429`` skips a geo-block), then refuses as ``balance_error`` and leaves the
+        # derive running. Venue only in the log: no key id, no venue error text.
+        await _stamp_429(ctx.supabase, ctx.key_row, exc)
+        logger.warning(
+            "derive_broker_dailies: nav mark read rate limited (venue=%s)", venue,
+        )
+        read = "balance_error"
     except Exception as exc:  # noqa: BLE001 - a refused optional read never fails the derive
         logger.warning(
             "derive_broker_dailies: nav mark read raised (exc_class=%s venue=%s api_key=%s)",
@@ -6895,17 +6946,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     native_flow_by_day=_mt5_flow_by_day,
                 )
                 # The flows are now ``amount x close(flow day)`` (a flow on a day with no
-                # close is not persisted), so the instants are priced the same way.
+                # close is not persisted), so ``amount`` prices an instant the same way. An
+                # instant can land in two places, though (167.2.1.1.1.1 MARKSOURCE D-02, REVIEW-3
+                # IN-02): on its own day, or INSIDE the mark of the day before when it was made
+                # before that mark's read. The mark is priced at the close of ITS day (NAVMTM
+                # D-07), so a flow moved into it is valued there too: ``amount_prior_day`` is the
+                # native amount at close(day - 1). An instant whose own-day close is not stored yet
+                # keeps ``amount`` 0.0 (no stored flow carries it, so nothing leaves its own day)
+                # and is dropped only when neither close exists.
                 import pandas as _pandas_px
 
                 from services.native_to_usd import _usable_closes
 
                 _close_by_day = _usable_closes(_btc_closes) if _btc_closes is not None else {}
-                _event_flow_instants = [
-                    _fi._replace(amount=_fi.amount * _close_by_day[_pandas_px.Timestamp(_fi.day)])
-                    for _fi in _event_flow_instants
-                    if _pandas_px.Timestamp(_fi.day) in _close_by_day
-                ]
+                _priced_instants: list[FlowInstant] = []
+                for _fi in _event_flow_instants:
+                    _fi_day = _pandas_px.Timestamp(_fi.day)
+                    _own_close = _close_by_day.get(_fi_day)
+                    _prior_close = _close_by_day.get(_fi_day - _pandas_px.Timedelta(days=1))
+                    if _own_close is None and _prior_close is None:
+                        continue
+                    _priced_instants.append(
+                        _fi._replace(
+                            amount=0.0 if _own_close is None else _fi.amount * _own_close,
+                            amount_prior_day=(
+                                None if _prior_close is None else _fi.amount * _prior_close
+                            ),
+                        )
+                    )
+                _event_flow_instants = _priced_instants
                 returns = _usd_key.returns
                 _day_pnl_usd = _usd_key.day_pnl
                 _realized_terminal = _usd_key.realized_terminal
@@ -7811,9 +7880,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 if _key_writer_basis_pnl is not None and _composed_flows_usd is not None:
                     for _mv_day, _mv_amount in _applied_marks.flow_moves.items():
                         _mv_from = _pandas_mv.Timestamp(_mv_day) + _pandas_mv.Timedelta(days=1)
+                        _mv_out = _applied_marks.flow_moves_out[_mv_day]
                         _composed_flows_usd = _composed_flows_usd.add(
                             _pandas_mv.Series(
-                                [_mv_amount, -_mv_amount],
+                                [_mv_amount, -_mv_out],
                                 index=_pandas_mv.DatetimeIndex(
                                     [_pandas_mv.Timestamp(_mv_day), _mv_from]
                                 ).as_unit(_composed_flows_usd.index.unit),
@@ -7821,20 +7891,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             fill_value=0.0,
                         )
                 else:
-                    external_flows = [
-                        *(external_flows or []),
-                        *(
-                            _f
-                            for _mv_day, _mv_amount in _applied_marks.flow_moves.items()
-                            for _f in (
-                                _ExternalFlowMv(_mv_day, _mv_amount),
+                    _moved_flows = list(external_flows or [])
+                    for _mv_day, _mv_amount in _applied_marks.flow_moves.items():
+                        _moved_flows.append(_ExternalFlowMv(_mv_day, _mv_amount))
+                        # What leaves the read day is the amount the day aggregate stored there;
+                        # nothing leaves when no stored flow carries the moved one (its own-day
+                        # close was not stored yet).
+                        _mv_out = _applied_marks.flow_moves_out[_mv_day]
+                        if _mv_out != 0.0:
+                            _moved_flows.append(
                                 _ExternalFlowMv(
                                     (date.fromisoformat(_mv_day) + timedelta(days=1)).isoformat(),
-                                    -_mv_amount,
-                                ),
+                                    -_mv_out,
+                                )
                             )
-                        ),
-                    ]
+                    external_flows = _moved_flows
             if _applied_marks.held_out_flow_days:
                 # A flow dated after the last mark day is in no base and no numerator, so it
                 # is left out of this derive's stored flows and enters the next derive's
@@ -7955,8 +8026,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # before an empty poll is then neither proof nor contradiction (the safe direction its
         # docstring names), never a false contradiction WARNING stamped with a later clock.
         # In every other case (no mark for the label day, e.g. today's was refused, so the last
-        # mark is older than this derive's label) the live read, its ladder and its clock are the
-        # anchor exactly as before: a stale value must not mask a live zero.
+        # mark is older than this derive's label) the live read's ladder judges the live read, as
+        # before: a stale value must not mask a live zero, so a null reason stands. 167.2.1.1.1.1
+        # MARKSOURCE plan 03: when that ladder is silent (the live read is sound, material and
+        # positive) the anchor is the last STORED mark and its ``marked_at``, never the live equity
+        # of this derive's day. The live read would otherwise be booked by ``replay_key_equity`` as
+        # a one-day step on the mark day, a return of 144.0 on 03-08 that no day earned. The days
+        # between are the NAVMTM D-05 gap the next mark covers, still named by ``mark_gap_days`` /
+        # ``marks_trailing_since``: a gap is named, never carried (MARKSOURCE D-02).
         _anchor_mark: StoredMark | None = None
         if (
             _applied_marks is not None
@@ -8013,6 +8090,25 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _anchor_null_reason = "dust"
         elif _skipped_nonfinite_flows > 0:
             _anchor_null_reason = "flow_drop"
+        if (
+            _anchor_mark is None
+            and _anchor_null_reason is None
+            and _applied_marks is not None
+            and _applied_marks.terminal is not None
+            and _mark_read_at is not None
+            and _applied_marks.terminal[0] < mark_day_for(_mark_read_at).isoformat()
+        ):
+            _stale_mark = next(
+                (_m for _m in _stored_marks if _m.mark_day == _applied_marks.terminal[0]), None
+            )
+            if (
+                _stale_mark is not None
+                and math.isfinite(float(_stale_mark.nav_usd))
+                and abs(float(_stale_mark.nav_usd)) > DUST_NAV_FLOOR
+                and float(_stale_mark.nav_usd) > 0.0
+            ):
+                _anchor_mark = _stale_mark
+                _anchor_basis = float(_stale_mark.nav_usd)
         # ``_anchor_basis`` is provably non-None when _anchor_null_reason is None (the
         # ``is None`` branch above stamps "balance_error"); the explicit ``is not None`` is a
         # mypy narrowing that changes no runtime path.

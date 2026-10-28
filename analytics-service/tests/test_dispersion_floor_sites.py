@@ -28,7 +28,6 @@ from services.allocated_capital import _annualised_sharpe
 from services.analytics_runner import _compute_derived_trade_metrics
 from services.csv_validator import validate_csv
 from services.dispersion import residue_floor
-from services.equity_reconstruction import EquityCurveBuilder
 from services.optimizer import optimize_weights
 from services.portfolio_optimizer import _compute_sharpe, find_improvement_candidates
 from services.portfolio_risk import compute_risk_decomposition
@@ -246,32 +245,6 @@ def test_s4_annualised_sharpe_constant_yield_is_nan(daily_yield):
 
 def test_s4_annualised_sharpe_real_quantisation_dispersion_is_finite():
     assert math.isfinite(_annualised_sharpe(_cent_rounded_1pct_apy()))
-
-
-# ---------------------------------------------------------------------------
-# S5: EquityCurveBuilder.compute_sharpe
-# ---------------------------------------------------------------------------
-
-
-def _builder_over(daily_return: pd.Series) -> EquityCurveBuilder:
-    """A builder whose reconstructed curve is ``daily_return`` (no open PnL);
-    ``compute_sharpe`` reads nothing else."""
-    df = pd.DataFrame({"daily_return": daily_return.to_numpy(), "unrealized_pnl": 0.0})
-    builder = EquityCurveBuilder.__new__(EquityCurveBuilder)
-    builder.to_equity_curve_daily = lambda: df  # type: ignore[method-assign]
-    return builder
-
-
-@_YIELD_PARAMS
-def test_s5_equity_curve_sharpe_constant_yield_is_none(daily_yield):
-    r = _residue_yield(daily_yield)
-    assert _builder_over(_exact_constant_like(r)).compute_sharpe() is None
-    assert _builder_over(r).compute_sharpe() is None
-
-
-def test_s5_equity_curve_sharpe_real_quantisation_dispersion_is_finite():
-    out = _builder_over(_cent_rounded_1pct_apy()).compute_sharpe()
-    assert out is not None and math.isfinite(out)
 
 
 # ---------------------------------------------------------------------------
