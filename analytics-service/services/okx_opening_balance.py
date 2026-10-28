@@ -114,21 +114,17 @@ BILLS_ARCHIVE_PAGE_CEILING: Final[int] = 500
 #: ``OPENING_TOLERANCE_USD`` and ``OPENING_TOLERANCE_REL`` times the anchor. The shape mirrors
 #: ``_BYBIT_UPNL_TOLERANCE_USD`` / ``_BYBIT_UPNL_TOLERANCE_REL`` in
 #: ``services/equity_reconstruction.py``: a USD floor for tiny accounts and a relative term
-#: that scales with the account. The relative value is the founder's recorded choice at
-#: plan 03's decision checkpoint (2026-10-27, ``172-03-SUMMARY.md`` ``tolerance-rel:``), and
-#: it is NOT a measured calibration. The reading cited at that checkpoint, on the one OKX
-#: account the 5x gate refused (a4), was ``opening_residual_over_anchor=-0.0147`` beside
-#: ``bal_over_cashbal=0.932``. It came from a PARTIAL bills walk (one page of bills against
-#: a far larger trade read), and the oracle as fixed in review round 1 refuses that shape:
-#: it demands a walk that reaches the opening and a newest bill that equals today's cash
-#: balance. The rule that chose 5% was: the smallest of 0.005, 0.01, 0.02, 0.05 that is at
-#: least twice the absolute residual (2 x 0.0147 = 0.0294, so 0.05), and no allowed value
-#: exceeds 5%. Plan 05's post-deploy re-read of a4 (the probe prints ``opening_check`` and
-#: ``opening_residual_over_anchor`` for an anchored member too) re-measures the residual on a
-#: complete walk, and the value is to be re-decided from that reading. Until then ONE
-#: account is the only basis and a second OKX account is unmeasured.
+#: that scales with the account. The relative value is 0.02 by founder decision
+#: D-08 (Phase 179, 2026-10-28, "Tighten to 2%"), taken against the 172-05 step 9b
+#: recommendation to keep 5%. Its basis is a4's SC-3 reading on a complete walk after the
+#: Phase 179 close fix (``opening_check=measured``, ``opening_residual_over_anchor=-0.0136``,
+#: ``bills_read=1490``; ``179-05-SUMMARY.md``), which sits inside it. It is a founder choice, not
+#: a measured calibration: ONE account is the only basis and a second OKX account is unmeasured
+#: (TODOS ``172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT``). Before D-08 the value was 5%, Phase 172
+#: plan 03's choice (2026-10-27) made on a partial walk the oracle now refuses. A change is a
+#: founder decision recorded first.
 OPENING_TOLERANCE_USD: Final[float] = 1.0
-OPENING_TOLERANCE_REL: Final[float] = 0.05
+OPENING_TOLERANCE_REL: Final[float] = 0.02
 
 #: The relative bound of the close arm in ``close_agrees`` (Phase 179 D-07, founder 2026-10-28,
 #: "Trillionth bound only"; it supersedes the decimal-places half of D-06): the newest bill's

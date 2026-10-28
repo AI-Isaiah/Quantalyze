@@ -615,8 +615,9 @@ def test_opening_agrees_scales_with_the_anchor(sign: float) -> None:
 
 
 def test_the_tolerance_is_the_measured_value() -> None:
-    """The founder's recorded choice at plan 03's decision checkpoint, 172-03-SUMMARY.md line
-    `tolerance-rel: 0.05` (a4's residual 0.0147 of the anchor, doubled, rounded up the allowed
-    ladder). Changing it is a decision to record there first, not an edit to make here."""
-    assert obal.OPENING_TOLERANCE_REL == 0.05
+    """The founder's recorded decision D-08 (179-05-SUMMARY.md `tolerance-founder-decision: Tighten
+    to 2%`, `tolerance-rel-after: 0.02`) on a4's measured residual -0.0136 of the anchor on a
+    complete walk. It replaced Phase 172 plan 03's 5%. Changing it is a decision to record there
+    first, not an edit to make here."""
+    assert obal.OPENING_TOLERANCE_REL == 0.02
     assert obal.OPENING_TOLERANCE_USD == 1.0
