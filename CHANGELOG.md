@@ -71,6 +71,7 @@
 - `tests/test_ledger_refresh_reuse_collision.py`: the entry-read fake counts `strategy_analytics` reads only, so the mark path's account-group read is not counted as an entry read (closes the verifier's one red full-suite test).
 - Vitest: `HoldingsTable`, `HoldingsTabPanel.key-read-notes`, `ScenarioComposer`, `live-holdings-summary`, `holding-compare-adapter` and the untrusted-key surface tests pin the "No price" copy and counts.
 - Merged with main at 0.133.5.1 (174 MARKPAUSE, 175 MT5OFFSET, 172 OKXANCHOR, 171 READCEILING). The one conflict was the `_FakeTable` test double in `test_equity_reconstruction.py`. It keeps main's `lt` and shared `_row_matches` predicate, plus this phase's recording `order`/`limit` and the `gt` operator. Full analytics suite: 13389 passed, 99 skipped. CI's `mypy --strict` line is clean.
+- `src/__tests__/marksource-okx-census-sql.test.ts`: its three narrowing slices take a checked `anchorIndex` instead of a raw `indexOf`, which the repo-wide scan in `test-restore-workflow-wiring.test.ts` refuses (a missed anchor returns -1 and the pin passes vacuously).
 
 ### Notes
 - **No migration, no cron change in this release.** Plans 08 and 14 are post-land operator steps:
