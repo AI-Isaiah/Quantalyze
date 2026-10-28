@@ -33,8 +33,8 @@ the census: "The stored-row rewrite of D-05 waits on the OKX ordering gate
 as a deferral; a booked follow-up phase measures the gate with a founder-approved worker probe
 and then rebuilds the 90-day window."
 
-So this runbook is the procedure the follow-up phase runs. Until the ordering gate reads measured
-with 0 violations, pre-flight P4 is a write STOP: the read-only steps (P0 to P3, P5, P6, B'1,
+So this runbook is the procedure the follow-up phase runs. Until the probe's summary
+`okx_order_gate` reads `ok`, pre-flight P4 is a write STOP: the read-only steps (P0 to P3, P5, P6, B'1,
 B'2) run and are recorded, and nothing from B'3a on runs. A follow-up session re-runs every
 pre-flight and every census fresh: readings from an earlier session are claims, not inputs.
 
@@ -284,13 +284,16 @@ a STOP on the write sequence only. Record each answer as a count, a boolean or a
   same for `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`. A heading that ends with `CLOSED <date>)` is
   closed; a heading without it is open. Record both readings.
   - `167.2.1.1.2.1-OKX-ORDER-UNMEASURED`: "Until it is measured, no OKX-holding account may be
-    rebuilt." It closes when `okx_order_readings` equals the number of OKX members that read
-    trades and violations are 0 (the allocator history probe,
-    `analytics-service/scripts/allocator_history_probe.py`, prints both). While it is open,
+    rebuilt." It closes only when the probe's summary `okx_order_gate` reads `ok`. The allocator
+    history probe, `analytics-service/scripts/allocator_history_probe.py`, prints
+    `okx_order_readings` and `okx_members_with_trades` on each account record and in the summary,
+    and the summary's code-derived `okx_order_gate` reads `ok` only when the two are equal and
+    above 0 with 0 violations and 0 full-page stops (Phase 173, D-01); a full-page stop reads
+    `violated` even when every reading is present. While it is open,
     **STOP here means no write until the founder rules at plan 14 Task 2.** The read-only
     steps still run and are recorded: P5, P6, B'1 and B'2. B'3a onward (the in-flight check, the
     guarded `enqueue` and everything after it) does not run before the ruling, and a rebuild runs
-    only once the gate reads measured with 0 violations.
+    only once `okx_order_gate` reads `ok`.
   - `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`: one OKX account (named there by the probe's own
     label, which is not an a-label: map it by what the entry says, one OKX member and a 90-day
     window, against B'1's `okx_working` and `keys_total`) is refused `anchor_skipped_implausible`.

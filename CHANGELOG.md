@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.133.7.0] - 2026-10-28 — REBUILDGATES: the allocator history probe measures OKX fills ordering on a refused member and Bybit transfer depth per kind
+
+### Root cause
+- The OKX ordering gate could never read measured on the one OKX account. The probe took its raw fills-history ordering read only after `_fetch_and_price_window(..., require_anchor=True)` returned, and an anchor refusal raised before it. a4 is refused `anchor_skipped_implausible`, so the post-deploy probe printed `okx_order_readings=0` and `167.2.1.1.2.1-OKX-ORDER-UNMEASURED` stayed open with no way to close. The Bybit gate counted deposits and withdrawals older than 365 days as one pooled number, so one kind could pass the gate for the other (TRADEPAGES REVIEW-3 WR-07).
+
+### Added
+- OKX ordering read on every member that read trades (plan 01, D-01, `analytics-service/scripts/allocator_history_probe.py`):
+  - A refused OKX member now takes the raw fills-history ordering read, on the recorder snapshot taken before the anchor diagnostic, so diagnostic calls never count as the forced pass. This covers a refusal token outside the vocabulary too (eee903595).
+  - Read, refused and cut-short (`TruncatedTradeRead`) OKX members take the same ordering read. Bybit members, members that read nothing and other failure classes take none. A raw read that raises changes no member outcome and prints only its allow-listed class as `okx_order_failure_class` (7561fec2e).
+  - Each account record and the summary print `okx_members_with_trades`, and the summary prints a code-derived `okx_order_gate` (`okx_order_verdict`): `violated` on any violation or full-page stop, `ok` only when at least one member read trades and every such member carries a reading, `unmeasured` otherwise (8194ea988).
+- Bybit transfer depth per kind (plan 02, D-02):
+  - `deposits_older_365d` and `withdrawals_older_365d` are permanent record fields, counted per kind with the pooled field's cutoff. The pooled `transfers_older_365d` stays for lineage (9216e65d5).
+  - Corroboration evidence for the founder's checkpoint: `deposits_in_window`, `withdrawals_in_window`, the oldest fill, deposit and withdrawal age buckets, and whether the oldest fill is older than the oldest deposit and the oldest withdrawal. None of it opens the gate (a6698fc4b).
+  - A strict per-account `bybit_transfers_gate` (`bybit_transfers_verdict`): `ok` only when both kinds count at least 1 on a full `BYBIT_TRADE_TERMINUS_DAYS` window. A 0 keeps that kind `unmeasured` (D-02) (7183b2483).
+- Every new key is declared in the record vocabularies, validated as a count or a closed token, and refused by `emit_record` outside them, so the probe's redaction contract holds. `BYBIT_TRADE_TERMINUS_DAYS` joins `DEPLOYED_ER_NAMES`, so a probe run against an older deployed rebuild module is refused before any decrypt.
+
+### Fixed
+- Review round 1:
+  - The summary's Bybit transfer-depth roll-up is derived in code, never assembled by the operator (WR-02, SFH-1, f473dc8d1).
+  - An OKX ordering page counts only if it reaches the newest fill of the forced pass (WR-01, b1772495a).
+  - The ordering read covers every instrument type the forced pass read, not only the busiest one (SFH-2, 6c393d241).
+  - The agreed-anchor ordering read is pinned to the forced-pass snapshot (WR-03, a07a96ac1).
+- Review round 2:
+  - An instrument type that read a single timestamp owes the member no ordering reading (R2-WR-01, d07645a63).
+  - The summary Bybit gate read `ok` while an account had been refused at selection; it was tightened (R2-SFH-1, b9fcbd2ef) and then replaced in round 3 by D-05.
+- Review round 3:
+  - D-05: the summary `bybit_transfers_gate` reads `ok` only when at least one account is applicable and every applicable account reads `ok`. An account refused at selection neither opens nor shuts it, and the summary prints `bybit_accounts_applicable` (R3-WR-01, 41a4ef24d).
+  - `_row_inst_types` skips an instrument type only when it read one millisecond on one short page. A multi-page type, or one with no usable timestamps, is read and voids the member's reading instead of being skipped (R3-WR-03, 35d92107c).
+
+### Changed
+- `docs/runbooks/marksource-okx-history-correction.md`: pre-flight P4 names the probe's summary `okx_order_gate` reading `ok` as the one condition that opens the write sequence, and says what the gate is computed from (WR-04, 03a097fbe). The opening paragraph says the same instead of "measured with 0 violations" (R2-WR-03, a62ae56a4).
+
+### Tests
+- `analytics-service/tests/test_allocator_history_probe.py` pins the refusal-arm and truncated-arm ordering reads, the forced-pass instrument type, the swallowed raw-read failure, the per-kind counts and the one-kind-only case, the per-account and summary Bybit gates (parametrized over PROD's record shape), and the one-millisecond and multi-page skip rule. Each gate verdict was mutated off-tree and went RED. R2-WR-02 pins the ordering reach check to each instrument type's own newest fill (1b505c2f5).
+
+### Notes
+- Founder decisions, 2026-10-28: D-01 read the OKX ordering without the anchor; D-02 a per-kind 0 stays `unmeasured`; D-03 "No, full probe", taken over the recommended transfers-only mode, so no transfers-only mode exists; D-04 rebuilds are decided in 173 and none run by default; D-05 the Bybit summary gate counts readable accounts and lists refused ones.
+- Planning records stay on the phase branch and land with the close: discuss context, research, validation, pattern map, the three plans and their checker pass (201e7b4e1, b1307dec4, b2ffb0b40, 659f53aca, 192942866, 4be15811a); plan 01 and 02 summaries and STATE/ROADMAP advances (386b54596, 885425959, 14edbf898, 15d0955a2); four rounds of code review and silent-failure reports and the fix reports (34ec87bab, 5cd6c7b9a, b7040f092, 602f70d8d, 6f37e3c0b, c1a7aae46, 8d4cde32d); the D-05 record (b81e9813e); plan 03's GATES_OK chain fixes (R2-SFH-2, R2-SFH-3, R3-WR-01, R3-WR-02: 8abb41d9b, 8800f14a2); verification, code half verified and the live gates `human_needed` (4b7926dd6); the security audit, 13/13 threats closed, and the UAT items for the post-ship probe (c568cd219).
+- No migration. The probe writes nothing and calls no venue write; the source tests that pin this still pass.
+
+### Known limits
+- Plan 03, the post-deploy probe on the backfill worker, runs after this deploys. Until it does, neither `okx-order:` nor `bybit-transfers:` has a live reading, and SC-1 to SC-3 are open. A live `unmeasured` would leave SC-1 open, and a live per-kind 0 is a legitimate D-02 outcome that leaves the Bybit TODOS entry open.
+- a4's rebuild still waits on Phase 179 OKXBILLSCHAIN. An `okx_order_gate` of `ok` measures ordering only; a4 stays refused `anchor_skipped_implausible` until the bills chain closes.
+- Four review findings in plan 03's GATES_OK check survived the 3-round cap (round 4: the `bybit-transfers-unread:` check accepts duplicate labels and is not counted against the summary's accounts, and the `bybit-transfers-evidence:` lines are only shape-checked). They are in operator records, not shipped code, and are fixed in the plan before it runs.
+
 ## [0.133.6.1] - 2026-10-28 — records: close READCEILING 171, OKXANCHOR 172 and MARKPAUSE 174; book OKXBILLSCHAIN 179
 
 ### Notes
