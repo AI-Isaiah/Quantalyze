@@ -205,13 +205,14 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 - [x] **Phase 171: READCEILING — an account above the trade-read ceiling is read in full** — complete 2026-10-28 (v0.133.4.0 #1138; booked 2026-10-27 from TRADEPAGES; data-integrity, user-facing; SC-3: a6 read in full post-deploy, 203279 trades over 2158 calls)
 - [x] **Phase 172: OKXANCHOR — an OKX account's history rebuild gets a plausible balance anchor** — complete 2026-10-28 (v0.133.4.0 #1136; booked 2026-10-27 from TRADEPAGES; data-integrity; SC-3: a4 still refused, bills chain does not close (`chain_break`), routed to Phase 179 by the founder)
-- [ ] **Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live** — booked 2026-10-27 from TRADEPAGES (founder 2026-10-27 "You can use add"), not planned yet
+- [x] **Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live** — complete 2026-10-28 (v0.133.7.0 #1143; booked 2026-10-27 from TRADEPAGES; data-integrity; SC-1 `okx-order: ok`, 1 reading; SC-2 not met, a6 reads 0 transfers at every age (on-chain only), routed to Phase 180 BYBITFUNDING by the founder; no rebuild)
 - [x] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — complete 2026-10-28 (v0.133.2.0 #1133, shipped 2026-10-27; booked 2026-10-27 from NAVMTM review)
 - [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
 - [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
 - [ ] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — booked 2026-10-27 from MARKSOURCE plan 03 (founder 2026-10-27 "Deribit moved-flow pricing"), not planned yet
 - [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
 - [ ] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — booked 2026-10-28 from OKXANCHOR plan 05 (founder 2026-10-28 "Record, route a follow-up"), not planned yet
+- [ ] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up"), not planned yet
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6470,7 +6471,7 @@ Plans:
 **Goal:** The two gates that block any OKX or Bybit history rebuild are measured on the live worker: OKX's trade ordering on a multi-page read, and how far back Bybit serves deposits and withdrawals.
 **Requirements**: TBD
 **Depends on:** Phase 171, Phase 172
-**Plans:** 0 plans
+**Plans:** 3/3 plans complete
 
 Booked 2026-10-27 from TRADEPAGES plan 06 (same founder decisions as Phase 171). TODOS `167.2.1.1.2.1-OKX-ORDER-UNMEASURED` and `167.2.1.1.2.1-BYBIT-TRANSFER-DEPTH-UNMEASURED`. Data integrity.
 
@@ -6479,8 +6480,12 @@ Booked 2026-10-27 from TRADEPAGES plan 06 (same founder decisions as Phase 171).
 2. Bybit deposit and withdrawal depth older than 365 days is measured per kind on a 730-day account.
 3. The gates' outcome decides, with the founder, which stored OKX and Bybit histories are rebuilt.
 
+**Outcome 2026-10-28 (plan 03):** SC-1 met: `okx-order: ok` with 1 reading and 0 violations, taken on a4's refusal arm. SC-2 not met: a6's read completed and both kinds read 0 at every age, which D-02 keeps `unmeasured` (the transfer read is on-chain only); founder 2026-10-28 "Record, book follow-up (Recommended)": booked as Phase 180 BYBITFUNDING, and the TODOS entry stays open. SC-3 met: founder "None now (Recommended)", no rebuild enqueued; a4 waits on Phase 179, a6 on Phase 180.
+
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 173-01-PLAN.md — The probe takes the raw OKX fills-history ordering read on every arm whose forced pass read OKX trades, and the OKX ordering gate becomes a code-derived token (wave 1)
+- [x] 173-02-PLAN.md — The probe counts Bybit deposits and withdrawals older than 365 days per kind, with corroboration evidence and a strict code-derived `bybit_transfers_gate` (wave 2)
+- [x] 173-03-PLAN.md — Operator: full deployed probe, both gates recorded, founder rebuild decision, ledger (wave 3)
 
 ### Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record
 
@@ -6580,6 +6585,23 @@ Booked 2026-10-28 from OKXANCHOR 172 plan 05 (SC-3 mismatch: founder 2026-10-28 
 1. A read-only measurement (counts and tokens only) names which arm of `chain_break` fires for a4, a bill whose `bal` is not the previous `bal` plus its `balChg` or a newest `bal` that is not today's cash balance, and which currency and bill kind it falls on.
 2. The cause is fixed in the bills oracle with a test that goes RED on the old reading, or recorded as a real gap in OKX's archive with a named refusal; a4 never anchors on an unproven opening.
 3. After deploy the probe re-reads a4: `opening_check` is `measured` with a residual, or the refusal carries the named cause, and the 0.05 tolerance is kept or re-set by the founder on that reading.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured
+
+**Goal:** The allocator history probe and the rebuild read a Bybit account's internal (off-chain) deposits and sub-account transfers beside its on-chain deposits and withdrawals, so a6's funding is explained and the Bybit transfer-depth gate (`bybit_transfers_gate`) can be measured before any Bybit history rebuild.
+**Requirements**: TBD
+**Depends on:** Phase 173
+**Plans:** 0 plans
+
+Booked 2026-10-28 from REBUILDGATES 173 plan 03 (SC-2 not met: founder 2026-10-28 "Record, book follow-up (Recommended)"; rebuild decision "None now (Recommended)"). Evidence: the 2026-10-28 deployed probe read a6 (Bybit, 730-day window) in full, 203467 trades, and its on-chain transfer read found 0 deposits and 0 withdrawals at every age while its oldest fill is 180 to 364 days old, so `bybit-transfers: unmeasured (a6)`. TODOS `167.2.1.1.2.1-BYBIT-TRANSFER-DEPTH-UNMEASURED` and `173-BYBIT-TRANSFERS-ON-CHAIN-ONLY`. Data integrity.
+
+**Success Criteria** (what must be TRUE):
+1. A read-only measurement (counts and tokens only) names how a6 was funded: on-chain deposits, internal (off-chain) deposits, sub-account or universal transfers, or a source still unnamed, per kind and age bucket.
+2. The transfer read the rebuild uses covers every kind that funds a6 and every page of a window, with a test that goes RED on the on-chain-only read and on a dropped page.
+3. After deploy the probe re-reads a6: `bybit_transfers_gate` reads `ok`, or stays `unmeasured` with the named cause; the founder then decides whether a6's stored history is rebuilt, and nothing is rebuilt over a shut gate.
 
 Plans:
 - [ ] TBD — plans not listed yet
@@ -6876,13 +6898,14 @@ kept verbatim.
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 | 171 READCEILING | 12/12 | Complete — v0.133.4.0 #1138; layer 1 continues a Bybit window past the page ceiling, layer 2 resumes a too-big book across claims; SC-3 post-deploy: a6 read in full (203279 trades, 2158 calls, 1048 s, over the 900 s claim budget, so a real job would use layer 2); no a6 job enqueued | 2026-10-28 |
 | 172 OKXANCHOR | 5/5 | Complete — v0.133.4.0 #1136; SC-1 and SC-2 verified in code; SC-3 recorded post-deploy: a4 refused `anchor_skipped_implausible` (`chain_break` over 1489 bills), not the expected anchoring; routed to 179 OKXBILLSCHAIN (founder); 0.05 tolerance kept, re-decided there; no rebuild | 2026-10-28 |
-| 173 REBUILDGATES | 0/0 | Not started | - |
+| 173 REBUILDGATES | 3/3 | Complete — v0.133.7.0 #1143; the probe takes the OKX ordering read on a refused member and counts Bybit deposits and withdrawals per kind; post-deploy: `okx-order: ok` (1 reading, 0 violations), `bybit-transfers: unmeasured (a6)` (0 of each kind at every age), routed to 180 BYBITFUNDING (founder); no rebuild | 2026-10-28 |
 | 174 MARKPAUSE | 2/2 | Complete — v0.133.2.0 #1133 (re-dump #1134); weekly re-admit of a paused marked series after 3 days, mark refusals kept owner-only | 2026-10-28 |
 | 175 MT5OFFSET | 0/0 | Not started | - |
 | 176 LEGACYRETIRE | 0/0 | Not started | - |
 | 177 DERIBITFLOWS | 0/0 | Not started | - |
 | 178 OKXREWRITE | 0/0 | Not started | - |
 | 179 OKXBILLSCHAIN | 0/0 | Not started | - |
+| 180 BYBITFUNDING | 0/0 | Not started | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
