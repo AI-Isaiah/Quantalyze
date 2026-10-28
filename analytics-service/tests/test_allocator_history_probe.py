@@ -198,12 +198,16 @@ class _StubVenue:
         pages: list[list[dict[str, Any]]] | None = None,
         *,
         order_raw: Any = None,
+        order_by_type: dict[str, Any] | None = None,
+        order_effect: BaseException | None = None,
         fetch_effect: BaseException | None = None,
         hang: bool = False,
     ) -> None:
         self.pages = [list(p) for p in (pages or [])]
         self.page_count = len(self.pages)
         self._order_raw = order_raw
+        self._order_by_type = order_by_type or {}  # an answer (or an exception) per instType
+        self._order_effect = order_effect
         self._fetch_effect = fetch_effect
         self._hang = hang
         self.raw_calls: list[dict[str, Any]] = []
@@ -220,6 +224,13 @@ class _StubVenue:
 
     async def private_get_trade_fills_history(self, params: dict[str, Any]) -> Any:
         self.raw_calls.append(dict(params))
+        by_type = self._order_by_type.get(params["instType"])
+        if isinstance(by_type, BaseException):
+            raise by_type
+        if by_type is not None:
+            return by_type
+        if self._order_effect is not None:
+            raise self._order_effect
         return self._order_raw
 
     async def close(self) -> None:
@@ -401,6 +412,8 @@ async def test_run_end_to_end_prints_one_record_per_account_and_a_summary(
     assert a2["comparable"] is False  # an MT5 member is not read
     assert (a2["members_read"], a2["members_failed"]) == (1, 0)
     assert a2["trade_calls"] == 2 and a2["trades_read"] == 120 and a2["first_page_rows"] == 100
+    assert (a1["okx_members_with_trades"], a2["okx_members_with_trades"]) == (0, 1)
+    assert (a1["bybit_transfers_gate"], a2["bybit_transfers_gate"]) == ("not-applicable",) * 2  # 21-day window
     assert (a2["days_compared"], a2["days_differing"]) == (0, 0)
     assert a2["max_rel_diff"] == "field-absent"
 
@@ -417,6 +430,14 @@ async def test_run_end_to_end_prints_one_record_per_account_and_a_summary(
         "days_compared": 6,
         "okx_order_violations": 0,
         "okx_passes_ended_full": 0,
+        # The OKX stub answers nothing readable, so its one member with trades has no reading.
+        "okx_order_readings": 0,
+        "okx_members_with_trades": 1,
+        "okx_order_gate": "unmeasured",
+        # Both accounts hold a 21-day window, so no account is applicable and the roll-up is
+        # ``unmeasured``, never a vacuous ``ok``.
+        "bybit_accounts_applicable": 0,
+        "bybit_transfers_gate": "unmeasured",
     }
 
     # The read is the rebuild's own: every member through the wrapper, anchored, over the
@@ -465,6 +486,13 @@ def _fills(*stamps: Any) -> dict[str, Any]:
     return {"code": "0", "msg": "", "data": [{"ts": s, "tradeId": f"fake-fill-{i}"} for i, s in enumerate(stamps)]}
 
 
+def _newest_page() -> dict[str, Any]:
+    """A raw answer that lists newest first AND starts at the newest fill the stub forced passes
+    read (``_ms(_TODAY)``), as an OKX answer to an unbounded range does."""
+    newest = _ms(_TODAY)
+    return _fills(str(newest), str(newest - 1000), str(newest - 2000))
+
+
 def test_okx_order_reads_newest_first_from_the_raw_fills() -> None:
     # The backward walk plan 02 builds is only right if OKX answers newest first.
     assert hp.okx_newest_first(_fills("300", "200", "100")) is True
@@ -506,7 +534,7 @@ def _okx_only_book() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-async def test_one_raw_order_read_per_okx_member_on_its_busiest_inst_type(
+async def test_one_raw_order_read_per_inst_type_the_forced_pass_read_and_one_reading_per_member(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     pages = [
@@ -514,7 +542,7 @@ async def test_one_raw_order_read_per_okx_member_on_its_busiest_inst_type(
         _trade_page("sw1", 100, newest_ms=_ms(_TODAY)),
         _trade_page("sw2", 40, newest_ms=_ms(_TODAY) - 10**9),
     ]
-    descending = _StubVenue(pages, order_raw=_fills("300", "200", "100"))
+    descending = _StubVenue(pages, order_raw=_newest_page())
     window = (_TODAY - timedelta(days=20), 21)
     services = _Services(_okx_only_book(), [descending], window=window)
     services.reader = _okx_two_pass_reader(services)
@@ -525,14 +553,19 @@ async def test_one_raw_order_read_per_okx_member_on_its_busiest_inst_type(
 
     assert descending.raw_calls == [
         {
-            "instType": "SWAP",  # the pass that returned the most rows, not the first pass
+            "instType": inst_type,  # every type the forced pass read rows on, in the order it met them
             "begin": str(_ms(window[0])),  # spanning the window the rebuild reads
             "end": str(_ms(_TODAY + timedelta(days=1))),
             "limit": "100",
         }
+        for inst_type in ("SPOT", "SWAP")
     ]
+    # Two types were read, one reading is carried: readings never exceed members with trades.
     assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, 0)
     assert summary["okx_order_violations"] == 0
+    assert account["okx_members_with_trades"] == 1
+    assert (summary["okx_order_readings"], summary["okx_members_with_trades"]) == (1, 1)
+    assert summary["okx_order_gate"] == "ok"
 
     # An OKX that answers oldest first is counted as a violation, per account and in total.
     ascending = _StubVenue([list(p) for p in pages], order_raw=_fills("100", "200", "300"))
@@ -543,6 +576,7 @@ async def test_one_raw_order_read_per_okx_member_on_its_busiest_inst_type(
     account, summary = _stdout_records(capsys)
     assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, 1)
     assert summary["okx_order_violations"] == 1
+    assert summary["okx_order_gate"] == "violated"
 
     # An answer that cannot say is not a reading at all.
     unreadable = _StubVenue([list(p) for p in pages], order_raw=_fills("300"))
@@ -552,6 +586,213 @@ async def test_one_raw_order_read_per_okx_member_on_its_busiest_inst_type(
     assert await hp.run() == 0
     account, summary = _stdout_records(capsys)
     assert (account["okx_order_readings"], account["okx_order_violations"]) == (0, 0)
+    # The member read trades but its answer could not say: absent evidence, never ``ok``.
+    assert account["okx_members_with_trades"] == 1
+    assert summary["okx_order_gate"] == "unmeasured"
+
+
+async def test_a_descending_raw_page_that_does_not_reach_the_newest_fill_is_no_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review WR-01. The rebuild's walk needs the unbounded page to hold the NEWEST fills. Rows that
+    # descend inside a page that stops short of the forced pass's newest fill are what OKX would
+    # answer if it returned the OLDEST rows of the range, sorted descending; the walk would then
+    # stop on a short page and lose every newer fill. That page must not read as ``True``.
+    pages = [
+        _trade_page("sp", 30, newest_ms=_ms(_TODAY)),
+        _trade_page("sw1", 100, newest_ms=_ms(_TODAY)),
+        _trade_page("sw2", 40, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    newest = _ms(_TODAY)
+    window = (_TODAY - timedelta(days=20), 21)
+    for first_ts, readings, gate in ((newest, 1, "ok"), (newest - 1, 0, "unmeasured")):
+        okx = _StubVenue(
+            [list(p) for p in pages],
+            order_raw=_fills(str(first_ts), str(first_ts - 1000), str(first_ts - 2000)),
+        )
+        services = _Services(_okx_only_book(), [okx], window=window)
+        services.reader = _okx_two_pass_reader(services)
+        services.install(monkeypatch)
+
+        assert await hp.run() == 0
+        account, summary = _stdout_records(capsys)
+
+        assert len(okx.raw_calls) == 2  # both types were read; the stale answers were not accepted
+        assert (account["okx_order_readings"], account["okx_order_violations"]) == (readings, 0)
+        assert account["okx_members_with_trades"] == 1
+        assert summary["okx_order_gate"] == gate, first_ts
+
+
+async def test_the_members_reading_is_true_only_when_every_inst_type_it_read_answers_newest_first(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review SFH-2. The rebuild's walk pages every instrument type it meets, and a member trading
+    # on two types used to be measured on the busiest one only (SWAP here: 140 rows against 30),
+    # so an OKX that answered the other type oldest first still produced ``ok``.
+    import ccxt
+
+    pages = [
+        _trade_page("sp", 30, newest_ms=_ms(_TODAY)),
+        _trade_page("sw1", 100, newest_ms=_ms(_TODAY)),
+        _trade_page("sw2", 40, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    newest = _ms(_TODAY)
+    good = _newest_page()
+    stale = _fills(str(newest - 1), str(newest - 1000), str(newest - 2000))  # does not reach the newest
+    ascending = _fills("100", "200", "300")
+    window = (_TODAY - timedelta(days=20), 21)
+    cases = (
+        # (answers by type, readings, violations, failure class, gate)
+        ({"SPOT": good, "SWAP": good}, 1, 0, "none", "ok"),
+        ({"SPOT": ascending, "SWAP": good}, 1, 1, "none", "violated"),  # the NON-busiest type violates
+        ({"SPOT": good, "SWAP": stale}, 0, 0, "none", "unmeasured"),
+        ({"SPOT": good, "SWAP": _fills("300")}, 0, 0, "none", "unmeasured"),  # one type cannot say
+        ({"SPOT": ccxt.NetworkError("fake 4321.5"), "SWAP": good}, 0, 0, "NetworkError", "unmeasured"),
+        ({"SPOT": ccxt.NetworkError("fake 4321.5"), "SWAP": ascending}, 1, 1, "NetworkError", "violated"),
+    )
+    for answers, readings, violations, failure, gate in cases:
+        okx = _StubVenue([list(p) for p in pages], order_by_type=answers)
+        services = _Services(_okx_only_book(), [okx], window=window)
+        services.reader = _okx_two_pass_reader(services)
+        services.install(monkeypatch)
+
+        assert await hp.run() == 0
+        captured = capsys.readouterr()
+        account, summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+
+        label = repr(sorted(answers))
+        assert [call["instType"] for call in okx.raw_calls] == ["SPOT", "SWAP"], label
+        assert (account["members_read"], account["members_failed"]) == (1, 0), label
+        # ONE reading per member, however many types were read: readings <= members_with_trades.
+        assert (account["okx_order_readings"], account["okx_order_violations"]) == (readings, violations), label
+        assert account["okx_members_with_trades"] == 1, label
+        assert account["okx_order_failure_class"] == failure, label
+        assert summary["okx_order_gate"] == gate, label
+        assert "4321.5" not in captured.out + captured.err, label
+
+
+async def test_an_inst_type_that_cannot_show_an_order_owes_the_member_no_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Round 2 WR-01. SFH-2 made the member read every type the forced pass read rows on, so a
+    # SPOT type whose fills share ONE millisecond (a single market order matched against several
+    # makers) voided the reading of a member whose busy SWAP type answered newest first. A type
+    # that read fewer than two distinct timestamps cannot say, and the walk reads it in full
+    # whatever the order, so it must not wipe out the member's reading (CONTEXT discretion bound:
+    # each OKX member that read trades past one page carries at least one reading).
+    newest = _ms(_TODAY)
+    pages = [
+        _trade_page("sp", 3, newest_ms=newest, step_ms=0),  # three fills, one millisecond
+        _trade_page("sw1", 100, newest_ms=newest),
+        _trade_page("sw2", 40, newest_ms=newest - 10**9),
+    ]
+    window = (_TODAY - timedelta(days=20), 21)
+    okx = _StubVenue(pages, order_by_type={"SWAP": _newest_page(), "SPOT": _fills(str(newest), str(newest))})
+    services = _Services(_okx_only_book(), [okx], window=window)
+    services.reader = _okx_two_pass_reader(services)
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    account, summary = _stdout_records(capsys)
+
+    assert [call["instType"] for call in okx.raw_calls] == ["SWAP"]  # SPOT cannot say, so it is not read
+    assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, 0)
+    assert account["okx_members_with_trades"] == 1
+    assert summary["okx_order_gate"] == "ok"
+
+
+async def test_a_multi_page_inst_type_with_no_usable_timestamps_still_voids_the_members_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Round 3 WR-03. Only a type whose rows share ONE millisecond AND fit on one short page may
+    # owe the member no reading. A 140-row SPOT pass (100 + 40, two calls) with no timestamp, or
+    # with every row at one millisecond, is still a type the walk paged and the probe has no
+    # evidence for; skipping it left the member's reading ``True`` from SWAP alone and the gate
+    # ``ok``. It must be read and fail shut.
+    newest = _ms(_TODAY)
+    window = (_TODAY - timedelta(days=20), 21)
+
+    def _without_timestamps(tag: str, count: int) -> list[dict[str, Any]]:
+        return [{"id": f"fake-trade-{tag}-{i}"} for i in range(count)]
+
+    cases = (
+        # (label, SPOT pages, SPOT's raw answer): a descending answer cannot reach a newest fill the
+        # pass never stamped; one millisecond throughout cannot say which way it lists.
+        ("no timestamp", [_without_timestamps("sp1", 100), _without_timestamps("sp2", 40)], _newest_page()),
+        (
+            "one millisecond",
+            [_trade_page("sp1", 100, newest_ms=newest, step_ms=0), _trade_page("sp2", 40, newest_ms=newest, step_ms=0)],
+            _fills(str(newest), str(newest)),
+        ),
+    )
+    for label, spot_pages, spot_raw in cases:
+        okx = _StubVenue(
+            [*spot_pages, _trade_page("sw1", 100, newest_ms=newest), _trade_page("sw2", 40, newest_ms=newest - 10**9)],
+            order_by_type={"SWAP": _newest_page(), "SPOT": spot_raw},
+        )
+        services = _Services(_okx_only_book(), [okx], window=window)
+
+        async def _read(
+            exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+        ) -> Any:
+            for kind in ("spot", "spot", "swap", "swap"):
+                await exchange.fetch_my_trades(None, _ms(start), 500, {"type": kind})
+            return _window_rows(end), False, {}
+
+        services.reader = _read
+        services.install(monkeypatch)
+
+        assert await hp.run() == 0
+        account, summary = _stdout_records(capsys)
+
+        assert [call["instType"] for call in okx.raw_calls] == ["SPOT", "SWAP"], label  # SPOT is still read
+        assert account["okx_order_readings"] == 0, label
+        assert summary["okx_order_gate"] == "unmeasured", label
+
+
+async def test_each_inst_types_page_must_reach_that_types_own_newest_fill(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Round 2 WR-02. The reach check is per instrument type. Every other fixture gives every type
+    # the same newest fill, so a check that compared a type's page with ANOTHER type's newest fill
+    # (the oldest type's, say) passed them all. Here SPOT's newest fill is a million seconds older
+    # than SWAP's, so a page that merely reaches SPOT's newest fill is the OLDEST rows of the SWAP
+    # range sorted descending, and must not read as newest first for SWAP.
+    swap_newest = _ms(_TODAY)
+    spot_newest = swap_newest - 10**9
+    pages = [
+        _trade_page("sp", 30, newest_ms=spot_newest),
+        _trade_page("sw1", 100, newest_ms=swap_newest),
+        _trade_page("sw2", 40, newest_ms=swap_newest - 10**9),
+    ]
+
+    def _page_from(first_ts: int) -> dict[str, Any]:
+        return _fills(str(first_ts), str(first_ts - 1000), str(first_ts - 2000))
+
+    window = (_TODAY - timedelta(days=20), 21)
+    cases = (
+        # (SPOT page starts at, SWAP page starts at, readings, gate)
+        (spot_newest, spot_newest, 0, "unmeasured"),  # SWAP's page stops at SPOT's newest fill
+        (swap_newest, swap_newest, 1, "ok"),  # a page above a type's own newest fill is fine
+        (spot_newest, swap_newest, 1, "ok"),  # each type reaches its OWN newest fill
+        (swap_newest, spot_newest, 0, "unmeasured"),  # SWAP short of its own, SPOT above its own
+    )
+    for spot_first, swap_first, readings, gate in cases:
+        okx = _StubVenue(
+            [list(p) for p in pages],
+            order_by_type={"SPOT": _page_from(spot_first), "SWAP": _page_from(swap_first)},
+        )
+        services = _Services(_okx_only_book(), [okx], window=window)
+        services.reader = _okx_two_pass_reader(services)
+        services.install(monkeypatch)
+
+        assert await hp.run() == 0
+        account, summary = _stdout_records(capsys)
+
+        label = (spot_first - spot_newest, swap_first - swap_newest)
+        assert [call["instType"] for call in okx.raw_calls] == ["SPOT", "SWAP"], label
+        assert (account["okx_order_readings"], account["okx_order_violations"]) == (readings, 0), label
+        assert summary["okx_order_gate"] == gate, label
 
 
 async def test_no_raw_order_read_for_a_bybit_member_or_an_okx_member_that_read_nothing(
@@ -574,6 +815,144 @@ async def test_no_raw_order_read_for_a_bybit_member_or_an_okx_member_that_read_n
     assert bybit.raw_calls == [] and quiet_okx.raw_calls == []
     assert (a1["okx_order_readings"], a2["okx_order_readings"]) == (0, 0)
     assert summary["okx_order_violations"] == 0
+    # An OKX member that read nothing is not a member with trades, so nothing is owed a reading
+    # and zero members with trades is ``unmeasured``, never ``ok``.
+    assert (a1["okx_members_with_trades"], a2["okx_members_with_trades"]) == (0, 0)
+    assert (summary["okx_order_readings"], summary["okx_members_with_trades"]) == (0, 0)
+    assert summary["okx_order_gate"] == "unmeasured"
+
+
+async def test_a_raw_order_read_that_raises_after_a_good_read_keeps_the_member_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Phase 173 D-01. The ordering read is a side measurement. It used to run inside the
+    # member's read, so a raw GET that failed turned a member whose forced read had SUCCEEDED
+    # into a failed member and hid its trades; now it is recorded by class and the member
+    # stays read.
+    import ccxt
+
+    pages = [
+        _trade_page("sp", 30, newest_ms=_ms(_TODAY)),
+        _trade_page("sw1", 100, newest_ms=_ms(_TODAY)),
+        _trade_page("sw2", 40, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    okx = _StubVenue(pages, order_effect=ccxt.NetworkError("fake okx 4321.5 signature=abc123"))
+    services = _Services(_okx_only_book(), [okx], window=(_TODAY - timedelta(days=20), 21))
+    services.reader = _okx_two_pass_reader(services)
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account, _summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+
+    assert (account["members_read"], account["members_failed"]) == (1, 0)
+    assert account["failure_class"] == "none"
+    assert account["trades_read"] == 170  # the forced read's trades are not lost
+    assert len(okx.raw_calls) == 2  # it was attempted on both types
+    assert account["okx_order_readings"] == 0
+    assert account["okx_order_failure_class"] == "NetworkError"
+    for leak in ("4321.5", "signature", "abc123"):
+        assert leak not in captured.out + captured.err, leak
+
+
+async def test_a_truncated_okx_member_carries_an_ordering_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A read cut short at the OKX page ceiling DID read trades past one page, which is the very
+    # case the TRADEPAGES gate is about: it must carry a reading and not drop out of the count
+    # of OKX members that read trades.
+    okx = _StubVenue(
+        [_trade_page("sw1", 100, newest_ms=_ms(_TODAY)), _trade_page("sw2", 40, newest_ms=_ms(_TODAY) - 10**9)],
+        order_raw=_newest_page(),
+    )
+    services = _Services(_okx_only_book(), [okx], window=(_TODAY - timedelta(days=20), 21))
+
+    async def _cut_short(
+        exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for _ in range(2):
+            await exchange.fetch_my_trades(None, _ms(start), 100, {"type": "swap"})
+        raise er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE, site="okx_page_ceiling")
+
+    services.reader = _cut_short
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    account, _summary = _stdout_records(capsys)
+    assert account["failure_class"] == "truncated" and account["truncated_site"] == "okx_page_ceiling"
+    assert [call["instType"] for call in okx.raw_calls] == ["SWAP"]
+    assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, 0)
+    assert account["okx_order_failure_class"] == "none"
+
+
+async def test_no_raw_order_read_after_another_failure_or_on_a_bybit_member(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import ccxt
+
+    answer = _fills("100", "200")
+
+    async def _auth_failure(
+        exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        await exchange.fetch_my_trades(None, _ms(start), 100, {"type": "swap"})
+        raise ccxt.AuthenticationError("fake rejection")
+
+    async def _bybit_truncated(
+        exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for _ in range(2):
+            await exchange.fetch_my_trades(None, _ms(start), 100, {"type": "swap"})
+        raise er.TruncatedTradeRead(er._TRUNCATED_READ_MESSAGE, site="bybit_segment_ceiling")
+
+    async def _bybit_in_full(
+        exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for _ in range(2):
+            await exchange.fetch_my_trades(None, _ms(start), 100, {"type": "swap"})
+        return _window_rows(end), False, {}
+
+    pages = [_trade_page("a", 5, newest_ms=_ms(_TODAY)), _trade_page("b", 5, newest_ms=_ms(_TODAY) - 10**9)]
+    cases = (
+        ("another failure class, OKX", _okx_only_book, _auth_failure, "AuthenticationError"),
+        ("Bybit, cut short", _bybit_only_book, _bybit_truncated, "truncated"),
+        ("Bybit, read in full", _bybit_only_book, _bybit_in_full, "none"),
+    )
+    for label, book, reader, failure in cases:
+        venue = _StubVenue([list(p) for p in pages], order_raw=answer)
+        services = _Services(book(), [venue], window=(_TODAY - timedelta(days=20), 21))
+        services.reader = reader
+        services.install(monkeypatch)
+
+        await hp.run()
+        account, _summary = _stdout_records(capsys)
+        assert account["failure_class"] == failure, label
+        assert venue.raw_calls == [], label  # no raw call: a failed OKX read is not a read of trades
+        assert (account["okx_order_readings"], account["okx_order_failure_class"]) == (0, "none"), label
+
+
+@pytest.mark.parametrize(
+    ("violations", "ended_full", "readings", "members_with_trades", "gate"),
+    [
+        (0, 0, 1, 1, "ok"),
+        (0, 0, 2, 2, "ok"),
+        (0, 0, 0, 0, "unmeasured"),  # no OKX member read trades: absent evidence is never ok
+        (0, 0, 0, 1, "unmeasured"),  # a member with trades and no reading
+        (0, 0, 1, 2, "unmeasured"),  # one of two members measured
+        (1, 0, 1, 1, "violated"),
+        (0, 1, 1, 1, "violated"),  # a full-page stop outranks a complete set of readings
+        (1, 0, 0, 1, "violated"),  # and so does a violation with no reading to match
+        (0, 1, 0, 0, "violated"),
+    ],
+)
+def test_the_okx_order_verdict_puts_violated_first_and_absent_evidence_is_unmeasured(
+    violations: int, ended_full: int, readings: int, members_with_trades: int, gate: str
+) -> None:
+    # Phase 173 D-01. The gate used to be worked out by hand from the printed counts; a gate
+    # that says ``ok`` on missing evidence would let a rebuild walk OKX's pages in an order
+    # nobody measured, so the verdict is code and its precedence is pinned.
+    assert hp.okx_order_verdict(violations, ended_full, readings, members_with_trades) == gate
+    assert gate in hp._OKX_ORDER_GATES
 
 
 def _call(rows: int, oldest_ts: int | None, since: int | None, kind: str = "swap") -> Any:
@@ -620,13 +999,22 @@ async def test_a_full_okx_page_reaches_the_account_record_and_the_summary(
     account, summary = _stdout_records(capsys)
     assert account["okx_passes_ended_full"] == 1
     assert summary["okx_passes_ended_full"] == 1
+    assert summary["okx_order_gate"] == "violated"  # a full-page stop, with no reading to offset it
 
 
 class _StubVenueWithTransfers(_StubVenue):
     """A venue that also answers ``fetch_deposits`` / ``fetch_withdrawals`` with fixed rows."""
 
-    def __init__(self, pages: list[list[dict[str, Any]]], *, deposits: Any, withdrawals: Any) -> None:
-        super().__init__(pages)
+    def __init__(
+        self,
+        pages: list[list[dict[str, Any]]],
+        *,
+        deposits: Any,
+        withdrawals: Any,
+        order_raw: Any = None,
+        order_effect: BaseException | None = None,
+    ) -> None:
+        super().__init__(pages, order_raw=order_raw, order_effect=order_effect)
         self.deposits = deposits
         self.withdrawals = withdrawals
 
@@ -679,6 +1067,107 @@ async def test_transfer_events_older_than_365_days_are_counted_per_account(
     captured = capsys.readouterr()
     account = json.loads(captured.out.splitlines()[0])
     assert account["transfers_older_365d"] == 3  # d1 and d3 deposits, d1 withdrawal; d2 is not older
+    # D-02: the same events per kind. d1 is both a deposit and a withdrawal id, and the kind keeps
+    # them apart; the pooled field is their sum.
+    assert account["deposits_older_365d"] == 2
+    assert account["withdrawals_older_365d"] == 1
+    assert account["transfers_older_365d"] == account["deposits_older_365d"] + account["withdrawals_older_365d"]
+    # The corroboration evidence: in-window totals, closed age buckets and ordering booleans only.
+    assert (account["deposits_in_window"], account["withdrawals_in_window"]) == (3, 1)
+    assert account["oldest_fill_age_bucket"] == "0-29"
+    assert account["oldest_deposit_age_bucket"] == "365-546"  # about 376 days
+    assert account["oldest_withdrawal_age_bucket"] == "365-546"  # exactly 365 days
+    assert account["oldest_fill_before_oldest_deposit"] is False
+    assert account["oldest_fill_before_oldest_withdrawal"] is False
+    assert account["bybit_transfers_gate"] == "ok"  # both kinds seen older than a year, on a 730-day window
+    assert "fake-transfer" not in captured.out + captured.err
+
+
+async def test_fills_older_than_the_first_transfer_are_recorded_as_evidence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # D-02: a 0 deposit count older than a year is not a depth finding when the fills themselves
+    # start before the first deposit the transfer read returned. The founder judges that from
+    # these fields; they open no gate, and they carry no id and no timestamp.
+    deposit_ms = _ms(_TODAY - timedelta(days=100))
+    bybit = _StubVenueWithTransfers(
+        [_trade_page("by", 5, newest_ms=_ms(_TODAY - timedelta(days=500)))],
+        deposits=[{"id": "fake-transfer-e1", "timestamp": deposit_ms}],
+        withdrawals=[],
+    )
+    services = _Services(
+        _bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730)
+    )
+
+    async def _read(
+        exchange: _StubVenueWithTransfers, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        await exchange.fetch_my_trades(None, _ms(start), 500, {})
+        await exchange.fetch_deposits(None, 1, 500, {"until": 2})
+        await exchange.fetch_withdrawals(None, 1, 500, {"until": 2})
+        return _window_rows(end), False, {}
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+    assert account["oldest_fill_age_bucket"] == "365-546"
+    assert account["oldest_deposit_age_bucket"] == "90-179"
+    assert account["oldest_withdrawal_age_bucket"] == "none"
+    assert account["oldest_fill_before_oldest_deposit"] is True
+    assert account["oldest_fill_before_oldest_withdrawal"] == hp.FIELD_ABSENT
+    assert (account["deposits_in_window"], account["withdrawals_in_window"]) == (1, 0)
+    assert account["deposits_older_365d"] == 0
+    assert "fake-transfer" not in captured.out + captured.err
+    assert str(deposit_ms) not in captured.out + captured.err
+
+
+def test_the_bybit_transfers_verdict_needs_both_kinds_on_a_full_bybit_window() -> None:
+    full = er.BYBIT_TRADE_TERMINUS_DAYS
+    assert hp.bybit_transfers_verdict(1, full, 1, 1) == "ok"
+    assert hp.bybit_transfers_verdict(2, full, 3, 1) == "ok"
+    # D-02: a 0 for either kind keeps the gate shut, a pooled total never opens it.
+    assert hp.bybit_transfers_verdict(1, full, 1, 0) == "unmeasured"
+    assert hp.bybit_transfers_verdict(1, full, 0, 1) == "unmeasured"
+    assert hp.bybit_transfers_verdict(1, full, 0, 0) == "unmeasured"
+    # No Bybit member, or a window short of the full Bybit one (any OKX member makes it 90 days).
+    assert hp.bybit_transfers_verdict(0, full, 5, 5) == "not-applicable"
+    assert hp.bybit_transfers_verdict(1, 90, 5, 5) == "not-applicable"
+
+
+async def test_one_kind_older_than_a_year_keeps_the_bybit_gate_unmeasured(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # WR-07: one deposit 500 days old and no withdrawal makes the POOLED count 1, which must not
+    # open a gate that asks for both kinds.
+    bybit = _StubVenueWithTransfers(
+        [_trade_page("by", 5, newest_ms=_ms(_TODAY))],
+        deposits=[{"id": "fake-transfer-w7", "timestamp": _ms(_TODAY - timedelta(days=500))}],
+        withdrawals=[],
+    )
+    services = _Services(
+        _bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730)
+    )
+
+    async def _read(
+        exchange: _StubVenueWithTransfers, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        await exchange.fetch_my_trades(None, _ms(start), 500, {})
+        await exchange.fetch_deposits(None, 1, 500, {"until": 2})
+        await exchange.fetch_withdrawals(None, 1, 500, {"until": 2})
+        return _window_rows(end), False, {}
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+    assert account["transfers_older_365d"] == 1
+    assert (account["deposits_older_365d"], account["withdrawals_older_365d"]) == (1, 0)
+    assert account["bybit_transfers_gate"] == "unmeasured"
     assert "fake-transfer" not in captured.out + captured.err
 
 
@@ -710,7 +1199,13 @@ async def test_a_venue_without_transfer_fetchers_reads_zero_old_transfers(
     services = _Services(book, [bybit])
     services.install(monkeypatch)
     assert await hp.run() == 0
-    assert _stdout_records(capsys)[0]["transfers_older_365d"] == 0
+    account = _stdout_records(capsys)[0]
+    assert account["transfers_older_365d"] == 0
+    assert (account["deposits_older_365d"], account["withdrawals_older_365d"]) == (0, 0)
+    assert (account["deposits_in_window"], account["withdrawals_in_window"]) == (0, 0)
+    assert account["oldest_deposit_age_bucket"] == account["oldest_withdrawal_age_bucket"] == "none"
+    assert account["oldest_fill_before_oldest_deposit"] == hp.FIELD_ABSENT
+    assert account["oldest_fill_before_oldest_withdrawal"] == hp.FIELD_ABSENT
     assert not hasattr(bybit, "fetch_deposits")  # the probe adds no method the venue lacks
 
 
@@ -913,14 +1408,31 @@ def test_the_emitter_refuses_a_key_or_a_value_outside_the_vocabulary() -> None:
         hp.emit_record(dict(rec, selection="not_a_token"))
     with pytest.raises(ValueError):
         hp.emit_record(dict(rec, member_refusal="anchor_unreadable_extra"))
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(rec, okx_order_failure_class="BadRequest: 4321.5"))
     # A uuid or an amount-shaped string in a vocabulary slot.
     with pytest.raises(ValueError):
         hp.emit_record(dict(rec, selection="123e4567-e89b-12d3-a456-426614174000"))
     with pytest.raises(ValueError):
         hp.emit_record(dict(rec, window_days="4321.5"))
 
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(rec, okx_members_with_trades=-1))
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(rec, deposits_older_365d=-1))
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(rec, withdrawals_older_365d=True))
+
     summary = hp.summarize([rec], "2026-10-23")
     hp.emit_record(summary)  # control
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(summary, okx_order_gate="maybe"))
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(summary, okx_order_readings=True))
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(summary, bybit_transfers_gate="not-applicable"))  # no such summary token
+    with pytest.raises(ValueError):
+        hp.emit_record(dict(summary, bybit_accounts_applicable=True))
     with pytest.raises(ValueError):
         hp.emit_record(dict(summary, accounts=True))
     with pytest.raises(ValueError):
@@ -931,6 +1443,88 @@ def test_the_emitter_refuses_a_key_or_a_value_outside_the_vocabulary() -> None:
         hp.emit_record(dict(rec, failure_class="boom 4321.5"))
     assert "4321.5" not in str(exc.value)
     assert "failure_class" in str(exc.value)
+
+
+def test_the_transfer_evidence_keys_refuse_values_outside_their_vocabulary() -> None:
+    rec = hp._account_record("a1", "2026-10-23")
+    hp.emit_record(rec)  # control: the defaults print
+    for key, value in (
+        ("oldest_deposit_age_bucket", "400"),
+        ("deposits_in_window", -1),
+        ("oldest_fill_before_oldest_deposit", "yes"),
+        ("bybit_transfers_gate", "open"),
+    ):
+        with pytest.raises(ValueError) as exc:
+            hp.emit_record(dict(rec, **{key: value}))
+        assert key in str(exc.value)
+        assert str(value) not in str(exc.value).replace(key, "")
+
+
+def test_the_runbook_names_the_code_derived_okx_gate_token_as_its_only_opening_condition() -> None:
+    # Review WR-04. P4 said the entry closes on "readings equal members and violations are 0" and a
+    # rebuild runs once the gate "reads measured": the first omits full-page stops, which the probe
+    # reads as ``violated``, and ``measured`` is not a token of the gate. An operator following this
+    # PROD write runbook could take a ``violated`` run as green. One condition, the token itself.
+    runbook = Path(__file__).resolve().parents[2] / "docs" / "runbooks" / "marksource-okx-history-correction.md"
+    text = re.sub(r"\s+", " ", runbook.read_text(encoding="utf-8"))
+    start = text.index("`167.2.1.1.2.1-OKX-ORDER-UNMEASURED`: ")
+    entry = text[start : text.index("`167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`: ", start)]
+
+    assert re.search(r"closes only when the probe's summary `okx_order_gate` reads `ok`", entry)
+    assert re.search(r"a rebuild runs only once `okx_order_gate` reads `ok`", entry)
+    assert "measured with" not in entry and "reads measured" not in entry
+    # Round 2 WR-03: the opening "Where this stands" paragraph, which every operator reads first,
+    # carried the old condition ("reads measured with 0 violations") that a full-page-stop run
+    # satisfies. The whole runbook, not only the P4 entry, names the token and never "measured".
+    assert "reads measured" not in text and "measured with 0 violations" not in text
+    assert "Until the probe's summary `okx_order_gate` reads `ok`, pre-flight P4 is a write STOP" in text
+    assert "full-page stop" in entry  # the condition the old sentence left out
+    named = set(re.findall(r"`okx_order_gate` reads `([a-z]+)`", entry))
+    assert named and named <= set(hp._OKX_ORDER_GATES)  # every token the runbook names exists in code
+
+
+@pytest.mark.parametrize(
+    ("account_gates", "applicable", "gate", "selection_refused"),
+    [
+        ((), 0, "unmeasured", False),  # no account at all
+        (("not-applicable",), 0, "unmeasured", False),  # a 90-day window: never a vacuous ok
+        (("not-applicable", "not-applicable"), 0, "unmeasured", False),
+        (("ok",), 1, "ok", False),
+        (("not-applicable", "ok"), 1, "ok", False),  # a not-applicable account neither opens nor shuts it
+        (("ok", "ok"), 2, "ok", False),
+        (("unmeasured",), 1, "unmeasured", False),
+        (("ok", "unmeasured"), 2, "unmeasured", False),  # one shut account shuts the roll-up
+        (("not-applicable", "unmeasured"), 1, "unmeasured", False),
+        # Founder D-05: a selection-refused account is never read and the rebuild refuses it at the
+        # same selection, so it neither shuts nor opens the roll-up. PROD's shape: four refused
+        # accounts (revoked keys) beside one applicable ``ok`` account reads ``ok``; refused
+        # accounts alone leave nothing applicable, so ``unmeasured``.
+        (("not-applicable", "ok"), 1, "ok", True),
+        (("not-applicable", "not-applicable", "not-applicable", "not-applicable", "ok"), 1, "ok", True),
+        (("not-applicable", "not-applicable"), 0, "unmeasured", True),
+        (("not-applicable", "unmeasured"), 1, "unmeasured", True),  # a refusal never hides a shut gate
+    ],
+)
+def test_the_summary_bybit_gate_is_ok_only_with_an_applicable_account_and_all_applicable_ok(
+    account_gates: tuple[str, ...], applicable: int, gate: str, selection_refused: bool
+) -> None:
+    # Review WR-02 / SFH-1. The operator copies ``bybit-transfers:`` from this token. Deriving it
+    # by hand ("ok when none is unmeasured") printed ``ok`` for a Bybit account that was never
+    # read: a selection refusal, or an account that gained an OKX key and so has a 90-day window,
+    # reads ``not-applicable`` and left nothing to be unmeasured.
+    records = [
+        hp._account_record(
+            f"a{i + 1}",
+            "2026-10-23",
+            bybit_transfers_gate=g,
+            selection=sorted(er.FORCED_REBUILD_REFUSAL_REASONS)[0] if selection_refused and g == "not-applicable" else "ok",
+        )
+        | {"comparable": False, "days_compared": 0, "days_differing": 0}
+        for i, g in enumerate(account_gates)
+    ]
+    summary = hp.summarize(records, "2026-10-23")
+    assert (summary["bybit_accounts_applicable"], summary["bybit_transfers_gate"]) == (applicable, gate)
+    hp.emit_record(summary)  # and the token is inside the emitter's vocabulary
 
 
 def test_the_declared_vocabulary_is_the_rebuilds_own_refusal_tokens() -> None:
@@ -1664,8 +2258,16 @@ class _OkxAnchorVenue(_StubVenueWithTransfers):
         balance: Any,
         bills: OkxBillsArchive,
         deposits: list[dict[str, Any]] | None = None,
+        order_raw: Any = None,
+        order_effect: BaseException | None = None,
     ) -> None:
-        super().__init__(pages, deposits=deposits or [], withdrawals=[])
+        super().__init__(
+            pages,
+            deposits=deposits or [],
+            withdrawals=[],
+            order_raw=order_raw,
+            order_effect=order_effect,
+        )
         self._balance = balance
         self.bills = bills
         self.balance_calls = 0
@@ -1727,6 +2329,7 @@ def _refusing_reader(
     rows: list[dict[str, Any]] | None = None,
     fills_per_pass: list[dict[str, Any]] | None = None,
     deposits_per_pass: int = 0,
+    advisory_inst_type: str = "swap",
 ) -> Any:
     """The rebuild's read as the forced pass meets it on an implausible OKX anchor: it drives
     the venue the way the real loop does, then refuses when the anchor is required. Called
@@ -1744,8 +2347,11 @@ def _refusing_reader(
         *,
         require_anchor: bool = False,
     ) -> Any:
+        # The forced pass is always "swap"; the advisory pass (no ``require_anchor``) may meet
+        # another instrument type, to prove the ordering read never takes its type from there.
+        inst_type = "swap" if require_anchor else advisory_inst_type
         for i in range(pages_per_pass):
-            page = await exchange.fetch_my_trades(None, _ms(start), 500, {"type": "swap"})
+            page = await exchange.fetch_my_trades(None, _ms(start), 500, {"type": inst_type})
             assert isinstance(page, list)
         for _ in range(deposits_per_pass):
             await exchange.fetch_deposits(None, _ms(start), 500, {})
@@ -1804,10 +2410,139 @@ async def test_an_implausible_okx_refusal_is_measured_and_still_refused(
         assert leak not in everything, leak
 
 
-def _anchoring_reader(*, agreed: bool) -> Any:
+def _refusal_pages() -> list[list[dict[str, Any]]]:
+    """Two swap pages for the forced pass, then two for the diagnostic's advisory pass."""
+    return [
+        _trade_page("fa", 3, newest_ms=_ms(_TODAY)),
+        _trade_page("fb", 2, newest_ms=_ms(_TODAY) - 10**9),
+        _trade_page("ga", 4, newest_ms=_ms(_TODAY)),
+        _trade_page("gb", 5, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+
+
+async def test_a_refused_okx_member_carries_an_ordering_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Phase 173 D-01. The raw fills-history read used to sit AFTER the anchored rebuild read, and
+    # a refusal raised out of that read first, so a refused member (the only OKX account in PROD)
+    # could never be measured: ``okx_order_readings`` stayed 0 and the TRADEPAGES gate stayed
+    # ``unmeasured`` for a reason that had nothing to do with ordering.
+    window = _ANCHOR_WINDOW
+    expected_call = {
+        "instType": "SWAP",
+        "begin": str(_ms(window[0])),
+        "end": str(_ms(_TODAY + timedelta(days=1))),
+        "limit": "100",
+    }
+
+    for answer, violations in ((_newest_page(), 0), (_fills("100", "200", "300"), 1)):
+        okx = _OkxAnchorVenue(
+            _refusal_pages(), balance=_anchor_balance(), bills=_opening_bills(), order_raw=answer
+        )
+        services = _Services(_okx_only_book(), [okx], window=window)
+        services.reader = _refusing_reader(pages_per_pass=2)
+        services.install(monkeypatch)
+
+        assert await hp.run() == 1  # the member stays refused, so the run still fails
+        account, summary = _stdout_records(capsys)
+
+        assert account["member_refusal"] == "anchor_skipped_implausible"
+        assert okx.raw_calls == [expected_call]  # one read, on the forced pass's type
+        assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, violations)
+        assert account["okx_order_failure_class"] == "none"
+        assert account["okx_members_with_trades"] == 1
+        # A refused OKX member now yields ``ok`` or ``violated``, never ``unmeasured``.
+        assert summary["okx_order_gate"] == ("violated" if violations else "ok")
+        # The raw read is not a forced-pass call: the counters are unchanged by it.
+        assert (account["trade_calls"], account["trades_read"], account["first_page_rows"]) == (2, 5, 3)
+
+    # A refusal whose reason is outside the vocabulary is a failure of class "other", and the
+    # member still holds its forced pass's trades, so it carries the reading too.
+    async def _undeclared_refusal(
+        exchange: Any, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for _ in range(2):
+            await exchange.fetch_my_trades(None, _ms(start), 500, {"type": "swap"})
+        raise er.ForcedRebuildRefusedError("a token nobody declared 4321.5")
+
+    other = _StubVenue(
+        [_trade_page("fa", 3, newest_ms=_ms(_TODAY)), _trade_page("fb", 2, newest_ms=_ms(_TODAY) - 10**9)],
+        order_raw=_newest_page(),
+    )
+    services = _Services(_okx_only_book(), [other], window=window)
+    services.reader = _undeclared_refusal
+    services.install(monkeypatch)
+    assert await hp.run() == 1
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+    assert account["failure_class"] == "other" and account["member_refusal"] == "none"
+    assert other.raw_calls == [expected_call]
+    assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, 0)
+    assert "4321.5" not in captured.out + captured.err
+
+
+async def test_the_refused_members_ordering_read_uses_the_forced_pass_instrument_type(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The diagnostic's advisory pass runs through the same wrapped client and here reads MORE
+    # rows on another instrument type. The ordering read must still describe the forced pass:
+    # choosing the type from the live recorder, or after the diagnostic, would pick FUTURES.
+    pages = [
+        _trade_page("fa", 3, newest_ms=_ms(_TODAY)),
+        _trade_page("fb", 2, newest_ms=_ms(_TODAY) - 10**9),
+        _trade_page("ga", 40, newest_ms=_ms(_TODAY)),
+        _trade_page("gb", 50, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    okx = _OkxAnchorVenue(
+        pages, balance=_anchor_balance(), bills=_opening_bills(), order_raw=_newest_page()
+    )
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2, advisory_inst_type="futures")
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    account, _summary = _stdout_records(capsys)
+
+    assert account["anchor_diagnostic"] == "run"  # the advisory pass really ran
+    assert [call["instType"] for call in okx.raw_calls] == ["SWAP"]
+    assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, 0)
+    assert (account["trade_calls"], account["trades_read"]) == (2, 5)
+
+
+async def test_a_raw_order_read_that_raises_leaves_the_refusal_and_names_its_class(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import ccxt
+
+    hostile = ccxt.BadRequest("fake okx fills-history 4321.5 signature=abc123")
+    okx = _OkxAnchorVenue(
+        _refusal_pages(), balance=_anchor_balance(), bills=_opening_bills(), order_effect=hostile
+    )
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _refusing_reader(pages_per_pass=2)
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1  # still refused: the side measurement changed nothing
+    captured = capsys.readouterr()
+    account, summary = (json.loads(line) for line in captured.out.splitlines() if line.strip())
+
+    assert summary["record"] == "summary"  # nothing was hidden
+    assert account["member_refusal"] == "anchor_skipped_implausible"
+    assert (account["members_read"], account["members_failed"]) == (0, 1)
+    assert account["failure_class"] == "none"
+    assert len(okx.raw_calls) == 1  # it was attempted
+    assert (account["okx_order_readings"], account["okx_order_violations"]) == (0, 0)
+    assert account["okx_order_failure_class"] == "BadRequest"
+    assert account["anchor_diagnostic"] == "run"  # the diagnostic is not skipped by it
+    for leak in ("4321.5", "signature", "abc123", "fills-history"):
+        assert leak not in captured.out + captured.err, leak
+
+
+def _anchoring_reader(*, agreed: bool, advisory_inst_type: str = "swap") -> Any:
     """The rebuild's read when the forced pass is NOT refused: with ``agreed`` the anchor passed
     the 5x gate only through the bills check (``anchor_opening_agreed``); without it the anchor
-    never tripped the gate. The advisory (second) pass is the unanchored replay."""
+    never tripped the gate. The advisory (second) pass is the unanchored replay, and may meet another
+    instrument type than the forced pass's ``swap``."""
     forced_telemetry = (
         {"anchor_opening_agreed": True, "anchor_opening_check": "agreed", "skipped_symbols": []}
         if agreed
@@ -1823,13 +2558,44 @@ def _anchoring_reader(*, agreed: bool) -> Any:
         *,
         require_anchor: bool = False,
     ) -> Any:
+        inst_type = "swap" if require_anchor else advisory_inst_type
         for _ in range(2):
-            await exchange.fetch_my_trades(None, _ms(start), 500, {"type": "swap"})
+            await exchange.fetch_my_trades(None, _ms(start), 500, {"type": inst_type})
         if require_anchor:
             return _advisory_rows(), False, forced_telemetry
         return _advisory_rows(), False, {"anchor_offset_implausible": True, "skipped_symbols": []}
 
     return _read
+
+
+async def test_the_agreed_anchors_ordering_read_uses_the_forced_pass_instrument_type(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review WR-03. a4 takes this arm once its bills chain is fixed, and its reading is the one that
+    # decides ``okx-order:``. The diagnostic's advisory pass runs through the same wrapped client and
+    # here reads MORE rows on another instrument type: an ordering read taken from the live recorder,
+    # or after the diagnostic, would be made on FUTURES and describe the advisory pass.
+    pages = [
+        _trade_page("fa", 3, newest_ms=_ms(_TODAY)),
+        _trade_page("fb", 2, newest_ms=_ms(_TODAY) - 10**9),
+        _trade_page("ga", 40, newest_ms=_ms(_TODAY)),
+        _trade_page("gb", 50, newest_ms=_ms(_TODAY) - 10**9),
+    ]
+    okx = _OkxAnchorVenue(
+        pages, balance=_anchor_balance(), bills=_opening_bills(), order_raw=_newest_page()
+    )
+    services = _Services(_okx_only_book(), [okx], window=_ANCHOR_WINDOW)
+    services.reader = _anchoring_reader(agreed=True, advisory_inst_type="futures")
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    account, _summary = _stdout_records(capsys)
+
+    assert account["member_refusal"] == "none" and account["members_read"] == 1
+    assert account["anchor_diagnostic"] == "run"  # the advisory pass really ran
+    assert [call["instType"] for call in okx.raw_calls] == ["SWAP"]
+    assert (account["okx_order_readings"], account["okx_order_violations"]) == (1, 0)
+    assert account["trade_calls"] == 2  # the forced pass's, not doubled by the advisory pass
 
 
 async def test_an_okx_anchor_that_passed_through_the_bills_check_prints_the_oracle_reading(

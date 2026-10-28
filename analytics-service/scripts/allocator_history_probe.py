@@ -21,20 +21,41 @@ a1..aN by the account's earliest such key:
   2. re-reads each selected OKX or Bybit member through the rebuild's own read
      (_fetch_and_price_window, anchored), recording per call the row count, the
      distinct trade ids and the oldest timestamp, in memory only. The deposit and
-     withdrawal calls of that same read are recorded too, and the account record counts
-     the distinct transfer events stamped more than 365 days before the run date
-     (``transfers_older_365d``): a 0 there beside a 729-day window means Bybit returned
-     nothing that old OR the account has none that old, which this count alone cannot
-     tell apart;
+     withdrawal calls of that same read are recorded too (Phase 173 D-02). The account
+     record counts the distinct events stamped more than 365 days before the run date PER
+     KIND (``deposits_older_365d``, ``withdrawals_older_365d``); the pooled
+     ``transfers_older_365d`` stays for lineage and equals their sum. The strict
+     ``bybit_transfers_gate`` is derived in code from the two per-kind counts and never
+     from the pooled one: ``ok`` only when the account holds a Bybit member, its window
+     is the rebuild's full Bybit window (730 days) and BOTH counts are at least 1,
+     ``unmeasured`` otherwise, ``not-applicable`` when no full Bybit window applies. A 0 is
+     NOT a depth finding: the rebuild's Bybit transfer read is on-chain only, so a 0 can
+     come from the funding route as well as from no history that old. The corroboration
+     fields (``deposits_in_window``, ``withdrawals_in_window``, three closed age buckets
+     for the oldest fill, deposit and withdrawal, and two booleans for whether the oldest
+     fill is older than the oldest deposit or withdrawal) inform the founder and never open
+     the gate;
   3. compares the summed rebuilt curve with the stored one, but only when every
      exchange account the allocator holds is OKX, Bybit or Deribit (which the rebuild
      counts as $0) and every OKX or Bybit member was read: a stored row is the sum
      across all of the allocator's exchange accounts, so a mixed account (an MT5
      member is not read here) reports comparable false with its read counts;
-  4. for each OKX member that read a row, makes ONE raw fills-history read on the
-     instrument type that returned the most rows, to learn whether OKX answers newest
-     first; and counts the OKX passes that ended on a full page without reaching their
-     window start;
+  4. for each OKX member whose forced pass read trades (Phase 173 D-01: a member that was
+     read, REFUSED by the forced read under any refusal token, or cut short by a truncated
+     read), makes one raw fills-history read on EVERY instrument type that pass's own calls
+     returned at least two rows on (a snapshot taken before the anchor diagnostic runs; a type whose
+     rows share one millisecond on one short page cannot show an order and is left out), to learn whether
+     OKX answers newest first. The member carries ONE reading: ``True`` only when every type
+     answers newest first and its page reaches the newest fill the forced pass read on that
+     type, ``False`` when any type answers oldest first, no reading otherwise. The read is a side measurement: one that raises
+     changes no member's outcome and is recorded as ``okx_order_failure_class`` (an
+     allow-listed exception CLASS, never its message). The account record counts the OKX
+     members whose forced pass read trades (``okx_members_with_trades``) beside
+     ``okx_order_readings``, and the summary's code-derived ``okx_order_gate`` reads
+     ``violated`` when a reading found OKX answering oldest first or a pass ended on a full
+     page, ``ok`` only when at least one OKX member read trades and every such member
+     carries a reading, and ``unmeasured`` otherwise. The probe also counts the OKX passes
+     that ended on a full page without reaching their window start;
   5. for an OKX member REFUSED ``anchor_skipped_implausible`` (the replay ended far below
      today's venue equity), or whose anchor passed the 5x gate only through the bills check
      (``anchor_opening_agreed``; its record then has ``member_refusal`` ``none``), measures
@@ -68,8 +89,8 @@ whose circuit-breaker arm can write), the 429 stamp (_stamp_429) or any persist 
 (replace_equity_snapshots, replace_equity_snapshots_window, persist_equity_snapshots),
 and it names no venue write endpoint. A static pin in the tests proves it. Keys are
 decrypted inside the worker process and nowhere else. The venue calls outside the
-rebuild's own read are GETs: the fills-history ordering read (one per OKX member that
-read), and, for an OKX member refused on its anchor, one ``GET /api/v5/account/balance``
+rebuild's own read are GETs: the fills-history ordering read (one per OKX member whose
+forced pass read trades), and, for an OKX member refused on its anchor, one ``GET /api/v5/account/balance``
 plus the bills-archive pages read through ``services.okx_opening_balance``.
 
 D-01 (Phase 171): WHICH LIMIT STOPPED A CUT-SHORT READ. For a member whose read was cut
@@ -122,7 +143,7 @@ import math
 import re
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -207,9 +228,16 @@ _WINDOW_AGE_BUCKETS: tuple[str, ...] = (
     "730+",
 )
 
+# The OKX ordering gate, derived in code by ``okx_order_verdict`` (Phase 173 D-01).
+_OKX_ORDER_GATES: tuple[str, ...] = ("ok", "violated", "unmeasured")
+
+# The Bybit transfer-depth gate, derived in code by ``bybit_transfers_verdict`` (Phase 173 D-02).
+_BYBIT_TRANSFERS_GATES: tuple[str, ...] = ("not-applicable", "ok", "unmeasured")
+
 # Every attribute the probe reads off the rebuild module. ``run()`` refuses before any decrypt when
 # the module it runs against lacks one (see ``missing_deployed_names``).
 DEPLOYED_ER_NAMES: tuple[str, ...] = (
+    "BYBIT_TRADE_TERMINUS_DAYS",
     "FORCED_REBUILD_REFUSAL_REASONS",
     "ForcedRebuildRefusedError",
     "TruncatedTradeRead",
@@ -246,7 +274,9 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "first_page_rows",
     "okx_order_readings",
     "okx_order_violations",
+    "okx_order_failure_class",
     "okx_passes_ended_full",
+    "okx_members_with_trades",
     "comparable",
     "stored_days",
     "rebuilt_days",
@@ -255,6 +285,16 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "max_rel_diff",
     "days_incomplete",
     "transfers_older_365d",
+    "deposits_older_365d",
+    "withdrawals_older_365d",
+    "deposits_in_window",
+    "withdrawals_in_window",
+    "oldest_fill_age_bucket",
+    "oldest_deposit_age_bucket",
+    "oldest_withdrawal_age_bucket",
+    "oldest_fill_before_oldest_deposit",
+    "oldest_fill_before_oldest_withdrawal",
+    "bybit_transfers_gate",
     "truncated_site",
     "last_window_age_bucket",
     "last_window_calls",
@@ -298,6 +338,11 @@ SUMMARY_RECORD_KEYS: tuple[str, ...] = (
     "days_compared",
     "okx_order_violations",
     "okx_passes_ended_full",
+    "okx_order_readings",
+    "okx_members_with_trades",
+    "okx_order_gate",
+    "bybit_accounts_applicable",
+    "bybit_transfers_gate",
 )
 
 
@@ -359,7 +404,9 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "first_page_rows": _is_count,
     "okx_order_readings": _is_count,
     "okx_order_violations": _is_count,
+    "okx_order_failure_class": _is_one_of(_FAILURE_CLASSES),
     "okx_passes_ended_full": _is_count,
+    "okx_members_with_trades": _is_count,
     "comparable": _is_bool,
     "stored_days": _is_count,
     "rebuilt_days": _is_count,
@@ -368,6 +415,16 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "max_rel_diff": _is_ratio,
     "days_incomplete": _is_count,
     "transfers_older_365d": _is_count,
+    "deposits_older_365d": _is_count,
+    "withdrawals_older_365d": _is_count,
+    "deposits_in_window": _is_count,
+    "withdrawals_in_window": _is_count,
+    "oldest_fill_age_bucket": _is_one_of(_WINDOW_AGE_BUCKETS),
+    "oldest_deposit_age_bucket": _is_one_of(_WINDOW_AGE_BUCKETS),
+    "oldest_withdrawal_age_bucket": _is_one_of(_WINDOW_AGE_BUCKETS),
+    "oldest_fill_before_oldest_deposit": _is_bool_or_absent,
+    "oldest_fill_before_oldest_withdrawal": _is_bool_or_absent,
+    "bybit_transfers_gate": _is_one_of(_BYBIT_TRANSFERS_GATES),
     "truncated_site": _is_one_of(_TRUNCATED_SITES),
     "last_window_age_bucket": _is_one_of(_WINDOW_AGE_BUCKETS),
     "last_window_calls": _is_count,
@@ -416,6 +473,11 @@ _SUMMARY_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "days_compared": _is_count,
     "okx_order_violations": _is_count,
     "okx_passes_ended_full": _is_count,
+    "okx_order_readings": _is_count,
+    "okx_members_with_trades": _is_count,
+    "okx_order_gate": _is_one_of(_OKX_ORDER_GATES),
+    "bybit_accounts_applicable": _is_count,
+    "bybit_transfers_gate": _is_one_of(("ok", "unmeasured")),
 }
 
 
@@ -611,6 +673,39 @@ def transfers_older_than(transfers: Sequence[tuple[str, Any, int | None]], cutof
     return len(seen) + no_id
 
 
+def transfers_of_kind(
+    transfers: Sequence[tuple[str, Any, int | None]], kind: str
+) -> list[tuple[str, Any, int | None]]:
+    """The recorded transfers of one kind (``"deposits"`` or ``"withdrawals"``, the recorder's
+    own literals)."""
+    return [t for t in transfers if t[0] == kind]
+
+
+def oldest_fill_ms(calls: Sequence[_Call]) -> int | None:
+    """The oldest fill timestamp across the calls, else None when no call returned a stamped row."""
+    stamps = [c.oldest_ts for c in calls if c.oldest_ts is not None]
+    return min(stamps) if stamps else None
+
+
+def oldest_transfer_ms(transfers: Sequence[tuple[str, Any, int | None]], kind: str) -> int | None:
+    """The oldest timestamp among the recorded transfers of one kind, else None."""
+    stamps = [stamp for _kind, _id, stamp in transfers_of_kind(transfers, kind) if stamp is not None]
+    return min(stamps) if stamps else None
+
+
+def _oldest_of(stamps: Iterable[int | None]) -> int | None:
+    present = [s for s in stamps if s is not None]
+    return min(present) if present else None
+
+
+def _fill_before(fill_ms: int | None, transfer_ms: int | None) -> bool | str:
+    """Whether the oldest fill is older than the oldest transfer: ordering only, never a stamp.
+    ``field-absent`` when either side has no timestamp."""
+    if fill_ms is None or transfer_ms is None:
+        return FIELD_ABSENT
+    return fill_ms < transfer_ms
+
+
 def _passes(calls: Sequence[_Call]) -> dict[Any, list[_Call]]:
     """The calls grouped by the ``type`` param (an OKX instrument-type pass), in order."""
     grouped: dict[Any, list[_Call]] = {}
@@ -714,15 +809,21 @@ def missing_deployed_names() -> list[str]:
     return [name for name in DEPLOYED_ER_NAMES if not hasattr(er, name)]
 
 
-def _busiest_inst_type(calls: Sequence[_Call]) -> str | None:
-    """The instrument type of the pass that returned the most rows, upper-cased."""
-    best: str | None = None
-    best_rows = 0
+def _row_inst_types(calls: Sequence[_Call]) -> list[str]:
+    """Every instrument type (upper-cased, in the order the forced pass met them) whose pass
+    returned at least two rows, except a type that cannot show an order: one whose rows share ONE
+    millisecond AND fit on one short page (fewer rows than the OKX page size). The walk reads such
+    a type in full whatever the order, so it owes the member no reading. A multi-page type, or one
+    whose rows carry no timestamp, is still read, and fails shut through ``_okx_order_reading``'s
+    reach check (CONTEXT: every type that returned at least two rows)."""
+    types: list[str] = []
     for kind, pass_calls in _passes(calls).items():
         rows = sum(c.rows for c in pass_calls)
-        if isinstance(kind, str) and rows > best_rows:
-            best, best_rows = kind.upper(), rows
-    return best
+        stamps = [s for c in pass_calls for s in (c.newest_ts, c.oldest_ts) if s is not None]
+        one_ms_short_page = rows < _OKX_PAGE_ROWS and bool(stamps) and max(stamps) == min(stamps)
+        if isinstance(kind, str) and rows >= 2 and not one_ms_short_page and kind.upper() not in types:
+            types.append(kind.upper())
+    return types
 
 
 def okx_newest_first(raw: Any) -> bool | str:
@@ -749,6 +850,58 @@ def okx_newest_first(raw: Any) -> bool | str:
     if any(later > earlier for earlier, later in zip(stamps, stamps[1:])):
         return False
     return True
+
+
+def _pass_newest_ms(calls: Sequence[_Call], inst_type: str) -> int | None:
+    """The newest fill (ms) the forced pass read on this instrument type (upper-cased), or
+    ``None`` when none of that pass's calls carried a timestamp."""
+    stamps = [
+        c.newest_ts
+        for kind, pass_calls in _passes(calls).items()
+        if isinstance(kind, str) and kind.upper() == inst_type
+        for c in pass_calls
+        if c.newest_ts is not None
+    ]
+    return max(stamps) if stamps else None
+
+
+def okx_order_verdict(
+    violations: int, ended_full: int, readings: int, members_with_trades: int
+) -> str:
+    """The OKX ordering gate, derived in code (Phase 173 D-01): ``violated``, ``ok`` or
+    ``unmeasured``.
+
+    ``violated`` when any reading found OKX answering oldest first or any pass stopped on a
+    full page, and it is tested FIRST: a violation outranks an otherwise complete set of
+    readings. ``ok`` only when at least one OKX member read trades and EVERY such member
+    carries a reading. This is stricter than the TRADEPAGES plan 06 wording (every account
+    whose OKX read went past one page carries at least one reading), so whenever it says ``ok``
+    that wording holds too. Absent evidence is never ``ok``: no OKX member with trades, or a
+    member whose answer could not say, is ``unmeasured``."""
+    if violations > 0 or ended_full > 0:
+        return "violated"
+    if members_with_trades >= 1 and readings == members_with_trades:
+        return "ok"
+    return "unmeasured"
+
+
+def bybit_transfers_verdict(
+    bybit_members: int, window_days: int, deposits_old: int, withdrawals_old: int
+) -> str:
+    """The Bybit transfer-depth gate, derived in code (Phase 173 D-02): ``not-applicable``,
+    ``ok`` or ``unmeasured``.
+
+    ``not-applicable`` unless the account holds a Bybit member and its window is the rebuild's
+    full Bybit window (``BYBIT_TRADE_TERMINUS_DAYS``). ``ok`` only when BOTH per-kind counts of
+    events older than 365 days are at least 1; a 0 for either kind keeps the gate shut, and the
+    pooled count never decides it (TRADEPAGES REVIEW-3 WR-07). Corroboration never opens it.
+    An account holding any OKX member has a 90-day window (``_account_rebuild_window``), so
+    whenever the gate applies its counts are Bybit members' counts."""
+    if bybit_members < 1 or window_days != er.BYBIT_TRADE_TERMINUS_DAYS:
+        return "not-applicable"
+    if deposits_old >= 1 and withdrawals_old >= 1:
+        return "ok"
+    return "unmeasured"
 
 
 def compare_days(
@@ -989,11 +1142,70 @@ class _MemberResult:
     calls: list[_Call] = field(default_factory=list)
     transfers: list[tuple[str, Any, int | None]] = field(default_factory=list)
     order: bool | str | None = None  # None: no raw ordering read was made
+    order_failure_class: str = "none"  # the allow-listed class of a raw ordering read that raised
     truncated_site: str = "none"
     last_window_age_bucket: str = "none"
     last_window_calls: int = 0
     elapsed_s: int = 0
     diagnostic: dict[str, Any] | None = None  # the anchor diagnostic's record keys, when run
+
+
+async def _okx_order_reading(
+    client: Any, venue: str, calls: Sequence[_Call], window_start: date, end_date: date
+) -> tuple[bool | str | None, str]:
+    """One raw OKX fills-history read on EVERY instrument type the forced pass read at least two
+    rows on (``_row_inst_types``: a type whose rows share one millisecond on one short page is
+    left out, it cannot show an order), and whether the member's answers list their rows newest first: ``(reading, failure_class)``.
+
+    The rebuild's OKX walk pages each instrument type it meets (review SFH-2), so a member's
+    reading is ``True`` only when every such type answers newest first AND its page reaches the
+    newest fill the forced pass read on that type (review WR-01), ``False`` when any type answers
+    oldest first, and otherwise ``field-absent`` (a type whose answer cannot say or does not reach
+    its newest fill) or ``None`` (a type whose read raised). One reading per member, so readings
+    never exceed members with trades. ``None`` is also returned when the member is not OKX or
+    ``calls`` holds no typed pass that ``_row_inst_types`` selects. A read that raises is swallowed here and recorded as
+    the allow-listed CLASS of the first exception (its message is never read, a ccxt message can
+    carry a signed URL). A side measurement that never changes a member's outcome. ``calls`` must
+    be a SNAPSHOT taken before the anchor diagnostic runs: the diagnostic re-wraps the same client,
+    so the live recorder list would also hold its advisory pass and could add another instrument
+    type. The raw reads are not wrapped by the recorder, so they never enter the forced pass's
+    counters."""
+    inst_types = _row_inst_types(calls) if venue == "okx" else []
+    if not inst_types:
+        return None, "none"
+    readings: list[bool | str] = []
+    failure = "none"
+    for inst_type in inst_types:
+        try:
+            raw = await asyncio.wait_for(
+                client.private_get_trade_fills_history(
+                    {
+                        "instType": inst_type,
+                        "begin": str(_day_ms(window_start)),
+                        "end": str(_day_ms(end_date + timedelta(days=1))),
+                        "limit": str(_OKX_PAGE_ROWS),
+                    }
+                ),
+                er._RECONSTRUCT_CRAWL_TIMEOUT_S,
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
+            if failure == "none":
+                failure = classify_failure(exc)
+            continue
+        reading = okx_newest_first(raw)
+        if reading is True:
+            # Rows that descend inside one page prove nothing if the page is not the NEWEST
+            # fills: the rebuild's walk stops on a short page, so a range answered with its oldest
+            # rows would lose every newer fill and still read ``True`` here (review WR-01).
+            newest = _pass_newest_ms(calls, inst_type)
+            if newest is None or int(raw["data"][0]["ts"]) < newest:
+                reading = FIELD_ABSENT
+        readings.append(reading)
+    if any(r is False for r in readings):
+        return False, failure
+    if len(readings) == len(inst_types) and all(r is True for r in readings):
+        return True, failure
+    return (None if failure != "none" else FIELD_ABSENT), failure
 
 
 async def _read_member(
@@ -1002,26 +1214,14 @@ async def _read_member(
     supabase: ReadOnlySupabase,
     window_start: date,
     end_date: date,
-    recorder: _TradeRecorder,
-) -> tuple[list[dict[str, Any]], bool | str | None, bool]:
-    """The rebuild's own read, then (OKX only) one raw ordering read. The third value is
-    whether the anchor passed the 5x gate only through the bills check."""
+) -> tuple[list[dict[str, Any]], bool]:
+    """The rebuild's own read. The second value is whether the anchor passed the 5x gate
+    only through the bills check. The OKX ordering read is ``_okx_order_reading``'s, taken by
+    ``_probe_member`` from its call snapshot on every arm that read trades."""
     rows, _hit_terminus, telemetry = await er._fetch_and_price_window(
         client, venue, supabase, window_start, end_date, require_anchor=True
     )
-    order: bool | str | None = None
-    inst_type = _busiest_inst_type(recorder.calls) if venue == "okx" else None
-    if inst_type is not None:
-        raw = await client.private_get_trade_fills_history(
-            {
-                "instType": inst_type,
-                "begin": str(_day_ms(window_start)),
-                "end": str(_day_ms(end_date + timedelta(days=1))),
-                "limit": str(_OKX_PAGE_ROWS),
-            }
-        )
-        order = okx_newest_first(raw)
-    return rows, order, telemetry.get("anchor_opening_agreed") is True
+    return rows, telemetry.get("anchor_opening_agreed") is True
 
 
 async def _measure_anchor(
@@ -1147,8 +1347,8 @@ async def _probe_member(
         client = _make_exchange_client(venue, api_key, api_secret, passphrase)
         recorder = _TradeRecorder(client)
         started = _monotonic()
-        rows, order, agreed = await asyncio.wait_for(
-            _read_member(client, venue, supabase, window_start, end_date, recorder),
+        rows, agreed = await asyncio.wait_for(
+            _read_member(client, venue, supabase, window_start, end_date),
             er._RECONSTRUCT_CRAWL_TIMEOUT_S,
         )
         # Snapshot BEFORE the diagnostic, as in the refusal arm below. An anchor that passed
@@ -1157,6 +1357,10 @@ async def _probe_member(
         calls = list(recorder.calls)
         moved = list(recorder.transfers)
         elapsed_s = _elapsed()
+        # The ordering read is a side measurement: one that raises is recorded by class and
+        # the member stays read. It follows the snapshot, so ``read_elapsed_s`` keeps meaning
+        # the forced pass.
+        order, order_failure = await _okx_order_reading(client, venue, calls, window_start, end_date)
         diagnostic: dict[str, Any] | None = None
         if venue == "okx" and agreed:
             diagnostic = await _anchor_diagnostic(client, supabase, window_start, end_date)
@@ -1166,6 +1370,7 @@ async def _probe_member(
             calls=calls,
             transfers=moved,
             order=order,
+            order_failure_class=order_failure,
             elapsed_s=elapsed_s,
             diagnostic=diagnostic,
         )
@@ -1176,6 +1381,10 @@ async def _probe_member(
         calls = list(recorder.calls) if recorder is not None else []
         moved = list(recorder.transfers) if recorder is not None else []
         elapsed_s = _elapsed()
+        # D-01 (Phase 173): the refusal is raised at the END of the rebuild's read, so the
+        # snapshot already holds the whole forced pass. Take the ordering reading from it now,
+        # before the diagnostic's advisory pass can add calls to the client's recorder.
+        order, order_failure = await _okx_order_reading(client, venue, calls, window_start, end_date)
         if exc.reason in er.FORCED_REBUILD_REFUSAL_REASONS:
             diagnostic = None
             if venue == "okx" and client is not None and exc.reason == "anchor_skipped_implausible":
@@ -1185,27 +1394,46 @@ async def _probe_member(
                 refusal=exc.reason,
                 calls=calls,
                 transfers=moved,
+                order=order,
+                order_failure_class=order_failure,
                 elapsed_s=elapsed_s,
                 diagnostic=diagnostic,
             )
         return _MemberResult(
-            read=False, failure_class="other", calls=calls, transfers=moved, elapsed_s=elapsed_s
+            read=False,
+            failure_class="other",
+            calls=calls,
+            transfers=moved,
+            order=order,
+            order_failure_class=order_failure,
+            elapsed_s=elapsed_s,
         )
     except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
-        calls = recorder.calls if recorder is not None else []
-        moved = recorder.transfers if recorder is not None else []
+        calls = list(recorder.calls) if recorder is not None else []
+        moved = list(recorder.transfers) if recorder is not None else []
+        elapsed_s = _elapsed()
         truncated = isinstance(exc, er.TruncatedTradeRead)
+        # A cut-short read did read trades, so it takes the ordering reading too. Every other
+        # class (auth, network, the crawl-bound timeout, decrypt, lookup) is not a read of
+        # trades that can be trusted to describe the venue, so it takes none.
+        order, order_failure = (
+            await _okx_order_reading(client, venue, calls, window_start, end_date)
+            if truncated
+            else (None, "none")
+        )
         return _MemberResult(
             read=False,
             failure_class="truncated" if truncated else classify_failure(exc),
             calls=calls,
             transfers=moved,
+            order=order,
+            order_failure_class=order_failure,
             truncated_site=truncated_site_of(exc, venue, calls) if truncated else "none",
             last_window_age_bucket=(
                 window_age_bucket(calls[-1].since if calls else None, end_date) if truncated else "none"
             ),
             last_window_calls=last_window_calls(calls) if truncated else 0,
-            elapsed_s=_elapsed(),
+            elapsed_s=elapsed_s,
         )
     finally:
         if client is not None:
@@ -1261,7 +1489,9 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "first_page_rows": 0,
         "okx_order_readings": 0,
         "okx_order_violations": 0,
+        "okx_order_failure_class": "none",
         "okx_passes_ended_full": 0,
+        "okx_members_with_trades": 0,
         "comparable": False,
         "stored_days": 0,
         "rebuilt_days": 0,
@@ -1270,6 +1500,16 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "max_rel_diff": FIELD_ABSENT,
         "days_incomplete": 0,
         "transfers_older_365d": 0,
+        "deposits_older_365d": 0,
+        "withdrawals_older_365d": 0,
+        "deposits_in_window": 0,
+        "withdrawals_in_window": 0,
+        "oldest_fill_age_bucket": "none",
+        "oldest_deposit_age_bucket": "none",
+        "oldest_withdrawal_age_bucket": "none",
+        "oldest_fill_before_oldest_deposit": FIELD_ABSENT,
+        "oldest_fill_before_oldest_withdrawal": FIELD_ABSENT,
+        "bybit_transfers_gate": "not-applicable",
         "truncated_site": "none",
         "last_window_age_bucket": "none",
         "last_window_calls": 0,
@@ -1346,6 +1586,18 @@ async def _probe_account(
     # The FIRST measured member's keys go into the record; the count tells the reader when
     # more than one member was measured.
     first_diagnostic: dict[str, Any] = dict(diagnostics[0]) if diagnostics else {}
+    cutoff_365 = _day_ms(end_date - timedelta(days=365))
+    deposits_old = sum(
+        transfers_older_than(transfers_of_kind(r.transfers, "deposits"), cutoff_365) for r in results
+    )
+    withdrawals_old = sum(
+        transfers_older_than(transfers_of_kind(r.transfers, "withdrawals"), cutoff_365)
+        for r in results
+    )
+    all_in_window = _day_ms(end_date + timedelta(days=1))
+    fill_ms = _oldest_of(oldest_fill_ms(r.calls) for r in results)
+    deposit_ms = _oldest_of(oldest_transfer_ms(r.transfers, "deposits") for r in results)
+    withdrawal_ms = _oldest_of(oldest_transfer_ms(r.transfers, "withdrawals") for r in results)
     record = _account_record(
         label,
         run_date,
@@ -1363,12 +1615,41 @@ async def _probe_account(
         first_page_rows=sum(first_page_rows(v, r.calls) for v, r in zip(venue_of, results)),
         okx_order_readings=len(readings),
         okx_order_violations=sum(1 for ok in readings if ok is False),
+        okx_order_failure_class=next(
+            (r.order_failure_class for r in results if r.order_failure_class != "none"), "none"
+        ),
         okx_passes_ended_full=sum(
             okx_passes_ended_full(r.calls) for v, r in zip(venue_of, results) if v == "okx"
         ),
-        transfers_older_365d=sum(
-            transfers_older_than(r.transfers, _day_ms(end_date - timedelta(days=365)))
+        okx_members_with_trades=sum(
+            1 for v, r in zip(venue_of, results) if v == "okx" and trades_read(r.calls) > 0
+        ),
+        transfers_older_365d=sum(transfers_older_than(r.transfers, cutoff_365) for r in results),
+        # Per kind (Phase 173 D-02), same cutoff and same distinct-event rule as the pooled field.
+        # A Bybit deposit row may carry no id, and an id-less event counts each time it appears,
+        # so a deposit COUNT can double-count a row two windows returned; "at least one" stays sound.
+        deposits_older_365d=deposits_old,
+        withdrawals_older_365d=withdrawals_old,
+        # Corroboration for the founder to judge (D-02); these fields feed no gate. A 0 is not a
+        # depth finding: the rebuild's Bybit transfer read is on-chain only (RESEARCH Pitfall 3),
+        # so a 0 can come from the funding route. Counts, closed age buckets and booleans only.
+        deposits_in_window=sum(
+            transfers_older_than(transfers_of_kind(r.transfers, "deposits"), all_in_window)
             for r in results
+        ),
+        withdrawals_in_window=sum(
+            transfers_older_than(transfers_of_kind(r.transfers, "withdrawals"), all_in_window)
+            for r in results
+        ),
+        oldest_fill_age_bucket=window_age_bucket(fill_ms, end_date),
+        oldest_deposit_age_bucket=window_age_bucket(deposit_ms, end_date),
+        oldest_withdrawal_age_bucket=window_age_bucket(withdrawal_ms, end_date),
+        oldest_fill_before_oldest_deposit=_fill_before(fill_ms, deposit_ms),
+        oldest_fill_before_oldest_withdrawal=_fill_before(fill_ms, withdrawal_ms),
+        # Strict, from the per-kind counts only; independent of members_failed because a positive
+        # per-kind count is sound evidence even from a member that failed later (RESEARCH Pitfall 4).
+        bybit_transfers_gate=bybit_transfers_verdict(
+            venues.count("bybit"), window_days, deposits_old, withdrawals_old
         ),
         truncated_site=first_failure.truncated_site if first_failure is not None else "none",
         last_window_age_bucket=(
@@ -1399,7 +1680,21 @@ async def _probe_account(
 
 
 def summarize(records: Sequence[Mapping[str, Any]], run_date: str) -> dict[str, Any]:
-    """The summary line: counts only."""
+    """The summary line: counts only, and the OKX ordering gate and the Bybit transfer-depth gate
+    derived from them."""
+    violations = sum(r["okx_order_violations"] for r in records)
+    ended_full = sum(r["okx_passes_ended_full"] for r in records)
+    # A reading is only taken for a member with trades, so per account readings never exceed
+    # members with trades, and equal sums mean equality on every account.
+    readings = sum(r["okx_order_readings"] for r in records)
+    members_with_trades = sum(r["okx_members_with_trades"] for r in records)
+    # The Bybit roll-up (review WR-02, founder D-05): ``ok`` only when at least one account has a
+    # full Bybit window and EVERY such account reads ``ok``. An account refused at selection is
+    # ``not-applicable`` and does not shut it (the rebuild refuses that account at the same
+    # selection, so an ``ok`` opens nothing for it); plan 03 names those accounts on a
+    # ``bybit-transfers-unread:`` line. Absent evidence is never ``ok``: with no applicable
+    # account it is ``unmeasured``, not a vacuous truth.
+    applicable = [r["bybit_transfers_gate"] for r in records if r["bybit_transfers_gate"] != "not-applicable"]
     return {
         "record": "summary",
         "run_date": run_date,
@@ -1418,8 +1713,17 @@ def summarize(records: Sequence[Mapping[str, Any]], run_date: str) -> dict[str, 
         ),
         "trades_read": sum(r["trades_read"] for r in records),
         "days_compared": sum(r["days_compared"] for r in records),
-        "okx_order_violations": sum(r["okx_order_violations"] for r in records),
-        "okx_passes_ended_full": sum(r["okx_passes_ended_full"] for r in records),
+        "okx_order_violations": violations,
+        "okx_passes_ended_full": ended_full,
+        "okx_order_readings": readings,
+        "okx_members_with_trades": members_with_trades,
+        "okx_order_gate": okx_order_verdict(violations, ended_full, readings, members_with_trades),
+        "bybit_accounts_applicable": len(applicable),
+        "bybit_transfers_gate": (
+            "ok"
+            if applicable and all(g == "ok" for g in applicable)
+            else "unmeasured"
+        ),
     }
 
 
