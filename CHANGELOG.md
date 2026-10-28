@@ -28,6 +28,14 @@
 - Booked below MEDIUM, not fixed: a bill posted between the balance read and the walk makes the newest `bal` differ from `cashBal`, which fails closed as `chain_break` (about 1e-4 per attempt at a4's fill rate, unless OKX's archive lags `cashBal`, unmeasured); a forced OKX rebuild whose replay ends at or below zero is not gated by the 5x arm and anchors without the bills check (pre-existing, pinned; booked as `172-OKX-NONPOSITIVE-REPLAY-UNGATED` by plan 05).
 - No migration, no Railway or environment change. Three review rounds and three fixer rounds left nothing open at MEDIUM or above; security audit SECURED (29/29).
 
+## [0.133.3.1] - 2026-10-28 — XDISTPIN: the shared_test_db xdist group forms again (pytest capped below 9.2)
+
+### Fixed
+- `analytics-service/requirements-dev.txt` caps `pytest<9.2`. PR CI runs that resolved the unpinned `pytest` to 9.2.0 (released 2026-10-27) went red in `tests/test_xdist_group_is_real.py` ("3 result line(s) lack the @shared_test_db suffix"), and the shared-DB race tests in `test_compute_jobs_fencing.py` then failed because they ran on several workers at once. Under the cap a fresh install resolves 9.1.1: the gate is GREEN, and the full suite under `-n auto --dist loadgroup` passes (13057 passed, 96 skipped).
+
+### Root cause
+- pytest 9.2.0 replaced the string `Node._nodeid` with a structured `Node._id` and now computes `nodeid` as `str(self._id)`. pytest-xdist 3.8.0, the latest release, forms `--dist loadgroup` groups by appending `@<group>` to `item._nodeid` in its worker `pytest_collection_modifyitems`. On 9.2.0 that write lands on an attribute nothing reads, so no nodeid carries the suffix and the controller schedules every grouped test as ungrouped. Hook order is not involved: the conftest marker still lands first (`tryfirst=True`), and xdist reads it. Upstream: pytest-dev/pytest-xdist#1386, fixed by #1388 on xdist main and not released yet. Lift the cap only together with an xdist release carrying #1388. The gate test fails if the group stops forming again.
+
 ## [0.133.3.0] - 2026-10-27 — MT5OFFSET: MT5 deal days and instants follow the broker's daylight-saving clock
 
 ### Root cause
