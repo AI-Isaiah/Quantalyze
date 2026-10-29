@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 167.2.1.1.1
 current_phase_name: NAVMTM
 status: executing
-stopped_at: 173 REBUILDGATES closed; 180 BYBITFUNDING booked; 177 and 179 in progress; several shipped phases await their records
-last_updated: "2026-10-28T15:27:58.250Z"
-last_activity: 2026-10-28
-last_activity_desc: 173 REBUILDGATES closed (okx-order ok; Bybit transfer depth unmeasured, routed to 180 BYBITFUNDING by the founder; no rebuild)
-state_head: 17bfd004c6907cb2cbc8d7aa232314fdcca3541c
+stopped_at: 177 DERIBITFLOWS closed; 178, 179 and 180 in progress; several shipped phases await their records
+last_updated: "2026-10-29T07:42:58.250Z"
+last_activity: 2026-10-29
+last_activity_desc: 177 DERIBITFLOWS closed (first-night reading moved=0 in all 8 derive runs; one night)
+state_head: dff2d4ecf98850c139e757e0206784d4a1cbd839
 progress:
   total_phases: 135
-  completed_phases: 127
-  total_plans: 922
-  completed_plans: 915
-  percent: 94
+  completed_phases: 128
+  total_plans: 929
+  completed_plans: 922
+  percent: 95
 ---
 
 ## ⭐ STATE lineage
@@ -174,9 +174,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 167.2.1.1.1 (NAVMTM) — SHIPPED, NOT YET CLOSED
 Plan: post-ship records pending
-Status: Executing — several phases in parallel. In progress: 177 DERIBITFLOWS and 179 OKXBILLSCHAIN. Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138), 172 OKXANCHOR (v0.133.4.0 #1136; a4 routed to 179), 173 REBUILDGATES (v0.133.7.0 #1143; `okx-order: ok`; Bybit transfer depth unmeasured, routed to 180 BYBITFUNDING by the founder; no rebuild) and 174 MARKPAUSE (v0.133.2.0 #1133). Booked, not planned: 176, 178, 180.
-Last activity: 2026-10-28 — 173 REBUILDGATES closed; 180 BYBITFUNDING booked
-Progress: [█████████░] 94%
+Status: Executing — several phases in parallel. In progress: 178 OKXREWRITE, 179 OKXBILLSCHAIN (code shipped through v0.133.9.2, plan 179-07 re-read pending) and 180 BYBITFUNDING (in ship). Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138), 172 OKXANCHOR (v0.133.4.0 #1136; a4 routed to 179), 173 REBUILDGATES (v0.133.7.0 #1143; `okx-order: ok`; Bybit transfer depth unmeasured, routed to 180 BYBITFUNDING by the founder; no rebuild) and 174 MARKPAUSE (v0.133.2.0 #1133). Closed 2026-10-29: 177 DERIBITFLOWS (v0.133.8.0 #1145; first-night reading moved=0 in all 8 derive runs, one night). Booked, not planned: 176.
+Last activity: 2026-10-29 — 177 DERIBITFLOWS closed
+Progress: [█████████░] 95%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1718,7 +1718,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 173 REBUILDGATES closed; 180 BYBITFUNDING booked
+**Stopped At:** 177 DERIBITFLOWS closed
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
