@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 167.2.1.1.1
 current_phase_name: NAVMTM
 status: executing
-stopped_at: 177 DERIBITFLOWS and 179 OKXBILLSCHAIN closed; 178 and 180 in progress; several shipped phases await their records
-last_updated: "2026-10-29T09:41:03.000Z"
+stopped_at: 177 DERIBITFLOWS, 179 OKXBILLSCHAIN and 180 BYBITFUNDING closed; 178 in progress; several shipped phases await their records
+last_updated: "2026-10-29T11:25:38.066Z"
 last_activity: 2026-10-29
-last_activity_desc: 179 OKXBILLSCHAIN closed (a4 anchored on the deployed 0.02 tolerance, residual -0.0138; nothing enqueued)
-state_head: c3c1ef81e35f2c20def1c3f40f628fd6c100989e
+last_activity_desc: 180 BYBITFUNDING closed (a6 funded by sub-account transfers; gate unmeasured, cause neither_older_365d; nothing rebuilt)
+state_head: 10387c1ae49923f57c6e11b084f99bd3f274f6d6
 progress:
   total_phases: 135
-  completed_phases: 129
-  total_plans: 936
-  completed_plans: 929
+  completed_phases: 130
+  total_plans: 944
+  completed_plans: 937
   percent: 96
 ---
 
@@ -174,8 +174,8 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 167.2.1.1.1 (NAVMTM) — SHIPPED, NOT YET CLOSED
 Plan: post-ship records pending
-Status: Executing — several phases in parallel. In progress: 178 OKXREWRITE (code shipped, PR #1154, v0.133.11.0; operator plans 03-04 pending) and 180 BYBITFUNDING (shipped v0.133.10.0 #1151, plan 08 post-deploy probe pending). Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138), 172 OKXANCHOR (v0.133.4.0 #1136; a4 routed to 179), 173 REBUILDGATES (v0.133.7.0 #1143; `okx-order: ok`; Bybit transfer depth unmeasured, routed to 180 BYBITFUNDING by the founder; no rebuild) and 174 MARKPAUSE (v0.133.2.0 #1133). Closed 2026-10-29: 177 DERIBITFLOWS (v0.133.8.0 #1145; first-night reading moved=0 in all 8 derive runs, one night) and 179 OKXBILLSCHAIN (v0.133.9.0 #1147 to v0.133.9.2 #1149; a4 anchored on the deployed 0.02 tolerance, residual -0.0138; nothing enqueued). Booked, not planned: 176.
-Last activity: 2026-10-29 — 179 OKXBILLSCHAIN closed
+Status: Executing — several phases in parallel. In progress: 178 OKXREWRITE (code shipped v0.133.11.0; plan 03 measurement taken 2026-10-29, P7/crosswalk and the founder checkpoint pending; plan 04 pending). Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138), 172 OKXANCHOR (v0.133.4.0 #1136; a4 routed to 179), 173 REBUILDGATES (v0.133.7.0 #1143; `okx-order: ok`; Bybit transfer depth unmeasured, routed to 180 BYBITFUNDING by the founder; no rebuild) and 174 MARKPAUSE (v0.133.2.0 #1133). Closed 2026-10-29: 177 DERIBITFLOWS (v0.133.8.0 #1145; first-night reading moved=0 in all 8 derive runs, one night), 179 OKXBILLSCHAIN (v0.133.9.0 #1147 to v0.133.9.2 #1149; a4 anchored on the deployed 0.02 tolerance, residual -0.0138; nothing enqueued) and 180 BYBITFUNDING (v0.133.10.0 #1151; a6 funded by sub-account transfers, Unified read `read`, gate `unmeasured` with cause `neither_older_365d`; nothing rebuilt, the founder rebuild question not asked because the gate is not `ok`). Booked, not planned: 176.
+Last activity: 2026-10-29 — 180 BYBITFUNDING closed
 Progress: [█████████░] 96%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -1718,7 +1718,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 179 OKXBILLSCHAIN closed
+**Stopped At:** 180 BYBITFUNDING closed
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z

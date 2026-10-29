@@ -212,7 +212,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — complete 2026-10-29 (v0.133.8.0 #1145, re-dump #1146; booked 2026-10-27 from MARKSOURCE plan 03; data-integrity; SC-1 first-night reading: moved=0 in all 8 derive runs, one night)
 - [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
 - [x] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — complete 2026-10-29 (v0.133.9.1 #1148, v0.133.9.2 #1149; booked 2026-10-28 from OKXANCHOR plan 05; data-integrity; SC-3 deployed re-read: a4 anchored on the 0.02 tolerance, residual -0.0138)
-- [ ] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up"), not planned yet
+- [x] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up") (shipped v0.133.10.0 #1151; closed 2026-10-29: SC-1 and SC-2 met live, a6 funded by sub-account transfers; SC-3 gate stays `unmeasured`, cause `neither_older_365d`; nothing rebuilt)
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6619,7 +6619,7 @@ Plans:
 **Goal:** The allocator history probe and the rebuild read a Bybit account's internal (off-chain) deposits and sub-account transfers beside its on-chain deposits and withdrawals, so a6's funding is explained and the Bybit transfer-depth gate (`bybit_transfers_gate`) can be measured before any Bybit history rebuild.
 **Requirements**: TBD
 **Depends on:** Phase 173
-**Plans:** 0 plans
+**Plans:** 8/8 plans complete
 
 Booked 2026-10-28 from REBUILDGATES 173 plan 03 (SC-2 not met: founder 2026-10-28 "Record, book follow-up (Recommended)"; rebuild decision "None now (Recommended)"). Evidence: the 2026-10-28 deployed probe read a6 (Bybit, 730-day window) in full, 203467 trades, and its on-chain transfer read found 0 deposits and 0 withdrawals at every age while its oldest fill is 180 to 364 days old, so `bybit-transfers: unmeasured (a6)`. TODOS `167.2.1.1.2.1-BYBIT-TRANSFER-DEPTH-UNMEASURED` and `173-BYBIT-TRANSFERS-ON-CHAIN-ONLY`. Data integrity.
 
@@ -6930,7 +6930,7 @@ kept verbatim.
 | 177 DERIBITFLOWS | 7/7 | Complete — v0.133.8.0 #1145 (re-dump #1146); a moved Deribit flow is priced at the open of its own 1-minute `{CCY}_USDC-PERPETUAL` candle and each price is stored once; post-deploy first night: `moved=0` in all 8 derive runs (one night's reading), no composite line in the window | 2026-10-29 |
 | 178 OKXREWRITE | 0/0 | Not started | - |
 | 179 OKXBILLSCHAIN | 7/7 | Complete — v0.133.9.0 #1147, v0.133.9.1 #1148, v0.133.9.2 #1149; the OKX bills oracle's close passes within 1e-12 of the larger balance, the opening tolerance is 0.02 (founder D-08); post-deploy: a4 anchored (`opening_check=measured`, residual -0.0138, 0.02 deployed), nothing enqueued | 2026-10-29 |
-| 180 BYBITFUNDING | 0/0 | Not started | - |
+| 180 BYBITFUNDING | 8/8 | Complete — v0.133.10.0 #1151; the probe and the rebuild read the Bybit Unified edge and page by cursor; post-deploy: a6 `explained` (funded by universal transfers, 8 rows), Unified state `read`, `bybit-transfers: unmeasured (a6)` cause `neither_older_365d`; nothing rebuilt | 2026-10-29 |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
