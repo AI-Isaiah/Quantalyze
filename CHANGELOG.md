@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.9.2] - 2026-10-29 — OKXBILLSCHAIN: the OKX opening tolerance tightens to 2%, so an opening 2% to 5% of the anchor away refuses instead of anchoring
+
+### Why
+- Founder decision D-08 (Phase 179, 2026-10-28, AskUserQuestion at plan 179-05 Task 2): "Tighten to 2%". The recommendation by the 172-05 step 9b rule was "Keep 5% (Recommended)"; the founder chose against it. The option text read: "a4 still passes at 1.36%, but other accounts get less room; one data point behind the number."
+- The reading behind it is a4's SC-3 re-read on the deployed close fix (0.133.9.1): `opening_check=measured`, `opening_residual_over_anchor=-0.0136` on a complete walk (`bills_read=1490`). Phase 172 plan 03 had chosen 5% on a partial walk the oracle now refuses, so the 5% never rested on a complete reading.
+
+### Changed
+- `OPENING_TOLERANCE_REL` in `services/okx_opening_balance.py` goes from 0.05 to 0.02 (8848fa429). An OKX forced rebuild whose bills open between 2% and 5% of the anchor away from the opening the anchor implies used to anchor and now refuses `disagreed`. `OPENING_TOLERANCE_USD` (1.0) and `CLOSE_RESIDUAL_REL_BOUND` (1e-12) are unchanged, and no new reason token exists. The comment above the constant now records D-08, the 5% it replaced, and that one account is the only basis.
+
+### Tests
+- New `tests/test_okx_opening_tolerance.py` (8848fa429, f126657f8): the whole forced job on a bills opening 3% above the implied opening refuses `disagreed` (RED at the old 5%); an opening between 2% and 5% off refuses on both sides; a4's measured residual of 0.0136 still agrees at the decided tolerance, so a4 still anchors. Every expected number is the test's own constant.
+- The two existing value pins move from 0.05 to 0.02 (8848fa429): the constants test in `tests/test_okx_close_precision.py` and the tolerance pin in `tests/test_okx_opening_balance.py`. No other existing test changed.
+
+### Notes
+- Planning and records: the SC-3 re-read record and the D-08 decision with a `TODOS.md` update (0ccf2076e), plans 179-06 and 179-07 (9139887cc), the 179-06 summary (b25972eb2), its code review and silent-failure hunt, both clean (0edb6cb71), its verification and security audit (b2d22e508). The `TODOS.md` entry for the close fix carries a sentence written before this change shipped ("a later Phase 179 plan makes with its test"); this release is that plan.
+- Branch coverage: every non-merge commit after 14d71e24a (the last commit whose content shipped in 0.133.9.1, #1148) maps to a bullet above: 0ccf2076e, 9139887cc, 8848fa429, f126657f8, b25972eb2, 0edb6cb71, b2d22e508. Two merge commits (main into the branch, and the fix of a block the automatic merge duplicated) carry no content of their own.
+- No migration, no schema change, no write to any table.
+- Known limit: plan 179-07, the operator re-read of a4 on the deployed 0.02, is still to run after this deploys; the phase stays open until it does.
+- Known limit: one account's reading is the whole basis for 0.02. `TODOS.md` `172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT` stays open until a second OKX account's residual is recorded.
+
 ## [0.133.9.1] - 2026-10-28 — OKXBILLSCHAIN: the bills oracle's close passes at OKX precision, within 1e-12 of the larger balance, so a stable account stops refusing `chain_break` over rounding
 
 ### Why
