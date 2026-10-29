@@ -697,11 +697,11 @@ describe("okx-nonworking-keys.sql and the crosswalk form, EXECUTED on a throwawa
     beforeAll(() => {
       psql(
         [
-          forcedJob(uid(1, 1), '{"force_rebuild": true, "expected_non_working_accounts": 1, "expected_window_days": 90, "expected_key_digest": "0123456789abcdef0123456789abcdef"}'),
-          forcedJob(uid(2, 1), '{"force_rebuild": true, "expected_non_working_accounts": 1, "expected_key_digest": "0123456789abcdef0123456789abcdef"}'),
+          forcedJob(uid(1, 1), '{"force_rebuild": true, "expected_non_working_accounts": 1, "expected_window_days": 90, "expected_key_digest": "00000000000000000000000000000000"}'),
+          forcedJob(uid(2, 1), '{"force_rebuild": true, "expected_non_working_accounts": 1, "expected_key_digest": "00000000000000000000000000000000"}'),
           forcedJob(uid(3, 2), '{"force_rebuild": true, "expected_non_working_accounts": 0, "expected_window_days": 90}'),
-          forcedJob(uid(5, 3), '{"force_rebuild": true, "expected_non_working_accounts": "0", "expected_window_days": 90, "expected_key_digest": "0123456789abcdef0123456789abcdef"}'),
-          forcedJob(uid(6, 1), '{"force_rebuild": true, "expected_non_working_accounts": 2, "expected_window_days": 90, "expected_key_digest": "0123456789abcdef0123456789abcdef"}'),
+          forcedJob(uid(5, 3), '{"force_rebuild": true, "expected_non_working_accounts": "0", "expected_window_days": 90, "expected_key_digest": "00000000000000000000000000000000"}'),
+          forcedJob(uid(6, 1), '{"force_rebuild": true, "expected_non_working_accounts": 2, "expected_window_days": 90, "expected_key_digest": "00000000000000000000000000000000"}'),
           forcedJob(uid(6, 1), '{"force_rebuild": true}'),
           forcedJob(uid(9, 1), '{"force_rebuild": true, "expected_non_working_accounts": 0, "expected_window_days": 90, "expected_key_digest": 5}'),
         ].join("\n"),
