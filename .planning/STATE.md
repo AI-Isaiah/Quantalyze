@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 167.2.1.1.1
 current_phase_name: NAVMTM
 status: executing
-stopped_at: 177, 178 and 179 closed; 180 BYBITFUNDING records PR open (#1155); several shipped phases await their records
-last_updated: "2026-10-29T11:32:36.219Z"
+stopped_at: 177, 178, 179 and 180 closed; several shipped phases await their records
+last_updated: "2026-10-29T12:00:00.000Z"
 last_activity: 2026-10-29
 last_activity_desc: 178 OKXREWRITE closed record-only (founder ruling D-09; zero rewrites, nothing written to PROD)
 state_head: 10387c1ae49923f57c6e11b084f99bd3f274f6d6
 progress:
   total_phases: 135
   completed_phases: 130
-  total_plans: 940
-  completed_plans: 933
+  total_plans: 944
+  completed_plans: 937
   percent: 96
 ---
 
@@ -174,7 +174,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 167.2.1.1.1 (NAVMTM) — SHIPPED, NOT YET CLOSED
 Plan: post-ship records pending
-Status: Executing — several phases in parallel. In progress: 180 BYBITFUNDING (shipped v0.133.10.0 #1151; records PR #1155 open). Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138), 172 OKXANCHOR (v0.133.4.0 #1136; a4 routed to 179), 173 REBUILDGATES (v0.133.7.0 #1143; `okx-order: ok`; Bybit transfer depth unmeasured, routed to 180 BYBITFUNDING by the founder; no rebuild) and 174 MARKPAUSE (v0.133.2.0 #1133). Closed 2026-10-29: 177 DERIBITFLOWS (v0.133.8.0 #1145; first-night reading moved=0 in all 8 derive runs, one night), 178 OKXREWRITE (v0.133.11.0 #1154; closed record-only by founder ruling D-09: zero rewrites, plan 04 closed without execution, nothing written to PROD, census a1, a2 and a5 kept as stored) and 179 OKXBILLSCHAIN (v0.133.9.0 #1147 to v0.133.9.2 #1149; a4 anchored on the deployed 0.02 tolerance, residual -0.0138; nothing enqueued). Booked, not planned: 176.
+Status: Executing — several phases in parallel. No phase in active build. Shipped and not yet closed: 167.2.1.1.1 NAVMTM (v0.133.1.0 #1130), 167.2.1.1.1.1 MARKSOURCE (v0.133.6.0 #1141), 175 MT5OFFSET (v0.133.3.0 #1135). Closed 2026-10-28: 171 READCEILING (v0.133.4.0 #1138), 172 OKXANCHOR (v0.133.4.0 #1136; a4 routed to 179), 173 REBUILDGATES (v0.133.7.0 #1143; `okx-order: ok`; Bybit transfer depth unmeasured, routed to 180 BYBITFUNDING by the founder; no rebuild) and 174 MARKPAUSE (v0.133.2.0 #1133). Closed 2026-10-29: 177 DERIBITFLOWS (v0.133.8.0 #1145; first-night reading moved=0 in all 8 derive runs, one night), 178 OKXREWRITE (v0.133.11.0 #1154; closed record-only by founder ruling D-09: zero rewrites, plan 04 closed without execution, nothing written to PROD, census a1, a2 and a5 kept as stored), 180 BYBITFUNDING (v0.133.10.0 #1151; a6 funded by sub-account transfers, gate unmeasured, rebuild held by founder) and 179 OKXBILLSCHAIN (v0.133.9.0 #1147 to v0.133.9.2 #1149; a4 anchored on the deployed 0.02 tolerance, residual -0.0138; nothing enqueued). Booked, not planned: 176.
 Last activity: 2026-10-29 — 178 OKXREWRITE closed
 Progress: [█████████░] 96%
 

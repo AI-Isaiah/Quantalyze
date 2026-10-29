@@ -13313,6 +13313,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Measured 2026-10-28 (Phase 173 REBUILDGATES, counts only).** `bybit-transfers-kinds: a6 deposits=0 withdrawals=0 gate=unmeasured`; `bybit-transfers-evidence: a6 deposits_in_window=0 withdrawals_in_window=0 oldest_fill=180-364 oldest_deposit=none oldest_withdrawal=none fill_before_deposit=field-absent fill_before_withdrawal=field-absent`; `bybit-transfers: unmeasured (a6)`. Not read: a1, a2, a3, a5, refused at selection (`account_key_not_working`), so not applicable (D-05). a6's read completed (203467 trades), so the per-kind counts were taken on a real Bybit key, but both are 0 at every age, inside the window and older than 365 days, while a6 has fills 180 to 364 days old. A per-kind 0 is not a depth finding: the rebuild's Bybit transfer read is on-chain only, so an account funded off-chain shows 0 at every age. Under Phase 173 D-02 ("a per-kind count of 0 older than 365 days keeps that kind `unmeasured` and the gate stays shut for it") the subject of this entry stays unmeasured, and closing it would read as "gate open". **Stays open.** Founder 2026-10-28: "Record, book follow-up (Recommended)"; rebuild decision "None now (Recommended)". Owner from 2026-10-28: Phase 180 BYBITFUNDING, which reads Bybit internal and sub-account transfers to explain a6's funding. No rebuild was enqueued.
 
+**Measured 2026-10-29 (Phase 180 BYBITFUNDING, counts only).** `bybit-transfers-kinds: a6 deposits=0 withdrawals=0 gate=unmeasured cause=neither_older_365d`; `bybit-unified: a6 state=read in=4 out=2 sign_mismatch=0`; `bybit-transfers: unmeasured (a6)`. From Phase 180 the per-kind counts come from the Unified edge (D-01), so a per-kind 0 now means no Unified-edge move that old and the `cause=` names which: here `neither_older_365d`, no deposit and no withdrawal older than 365 days on the edge. The gate stays shut under carried Phase 173 D-02, because a6 has no move that old to measure, so it may never read `ok` on a re-probe alone; the entry stays open.
+
 ## Phase 167.2.1.1.1.1 (MARKSOURCE) — routed items (logged 2026-10-27)
 
 ### 167.2.1.1.1.1-OKX-DOUBLE-COUNT-BEYOND-REBUILD-WINDOW — OKX open profit stays counted twice in the stored rows no product path can rewrite (booked 2026-10-27, Phase 167.2.1.1.1.1 MARKSOURCE D-05, DATA INTEGRITY, user-facing)
@@ -13367,14 +13369,32 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 ## Phase 173 (REBUILDGATES) — routed items (logged 2026-10-28)
 
-### 173-BYBIT-TRANSFERS-ON-CHAIN-ONLY — the rebuild's Bybit transfer read sees on-chain deposits and withdrawals only and may drop rows past a 50-row page (booked 2026-10-28, Phase 173 RESEARCH Open Question 2, DATA INTEGRITY)
+### 173-BYBIT-TRANSFERS-ON-CHAIN-ONLY — the rebuild's Bybit transfer read sees on-chain deposits and withdrawals only and may drop rows past a 50-row page (booked 2026-10-28, Phase 173 RESEARCH Open Question 2, DATA INTEGRITY, CLOSED 2026-10-29)
 
 **Reading.** Bybit v5's deposit-record endpoint is the on-chain one; internal (off-chain) deposits sit on a separate endpoint. Withdraw-record's `withdrawType` defaults to on-chain, and ccxt sends none. `fetch_ccxt_transfers` advances one millisecond past the newest row and ignores `nextPageCursor`, so a 30-day window holding more than 50 transfers may lose rows. RESEARCH A6 and A7; unmeasured. The 2026-10-28 deployed probe is consistent with the first half: a6 read 0 deposits and 0 withdrawals at every age while it has fills 180 to 364 days old.
 
 **Owner / Trigger:** Phase 180 BYBITFUNDING from 2026-10-28. Trigger: any plan to rebuild a Bybit account. Closed when the transfer read covers off-chain flows and every page of a window, or a measurement shows the replay misses none.
+
+**Measured 2026-10-29 (Phase 180 BYBITFUNDING, counts only).** `bybit-unified: a6 state=read in=4 out=2 sign_mismatch=0`; `bybit-funding: a6 explained=explained master=false uta=true key_info=read census=0 census_state=read`; `bybit-funding-source: a6 onchain_dep rows=0 older_365d=0 oldest=none other_status=0 depth=547-729 state=read`; `bybit-funding-source: a6 internal_dep rows=0 older_365d=0 oldest=none other_status=0 depth=547-729 state=read`; `bybit-funding-source: a6 withdraw_all rows=field-absent older_365d=field-absent oldest=field-absent other_status=field-absent depth=field-absent state=not-master`; `bybit-funding-source: a6 inter_xfer rows=0 older_365d=0 oldest=none other_status=0 depth=547-729 state=read`; `bybit-funding-source: a6 universal_xfer rows=8 older_365d=0 oldest=180-364 other_status=0 depth=547-729 state=read`. Plans 04 to 07 moved the rebuild's Bybit flow read to the Unified edge's `TRANSFER_IN` / `TRANSFER_OUT` rows, and `fetch_ccxt_transfers` pages Bybit by cursor for every caller (D-02). The Unified state reads `read`, sign mismatches are 0 and the funding explanation is `explained`, so all three closing conditions hold. a6 was funded by sub-account (universal) transfers; the master-only withdrawal source is `not-master` on this sub key, a limit of the key.
 
 ### 173-BYBIT-HISTORY-REBUILD-HELD — a6's stored 730-day Bybit history is not rebuilt (booked 2026-10-28, Phase 173 D-04, DATA INTEGRITY)
 
 **Reading.** `bybit-transfers: unmeasured (a6)`. Founder 2026-10-28, rebuild decision: "None now (Recommended)" ("Rebuild nothing; stored histories stay as recorded. a4 waits on 179, a6 on the Bybit follow-up."). `rebuilds-enqueued: 0`.
 
 **Owner / Trigger:** unowned; Phase 180 BYBITFUNDING produces the reading it waits on. Trigger: `bybit-transfers: ok` for a6 on a later probe, or a founder override. Closed when a6 is rebuilt through the guarded path or the founder rules it stays as recorded.
+
+**Measured 2026-10-29 (Phase 180 BYBITFUNDING, counts only).** `bybit-transfers: unmeasured (a6)`; a6 `cause=neither_older_365d`, `explained=explained`, `census=0`. Founder rebuild decision (2026-10-29, only `hold` and `as-recorded` offered): `rebuild-decision: Hold (Recommended)`, `rebuild-option: hold`. `rebuilds-enqueued: 0`. The entry stays open. Trigger: `bybit-transfers: ok` for a6 on a later probe (which needs a deposit and a withdrawal older than 365 days on the Unified edge), or the founder choosing `as-recorded`.
+
+## Phase 180 (BYBITFUNDING) — routed items (logged 2026-10-29)
+
+### 180-BYBIT-LIVE-FLOW-KINDS — the live NAV / composite derive and broker-dailies Bybit readers keep their on-chain deposit and withdrawal kinds (booked 2026-10-29, Phase 180 D-02, DATA INTEGRITY)
+
+**Reading.** D-02 put the Unified-edge kinds in `_fetch_and_price_window` (the forced rebuild and the reconstruct job) and the probe only; `run_derive_broker_dailies_job` and `run_stitch_composite_job` still read Bybit through `fetch_ccxt_transfers` (on-chain deposits and withdrawals, now cursor-paged), so for an account funded off-chain the live readers and the rebuilt history read different flows. a6 is such an account: its measured funding is sub-account (universal) transfers, which the on-chain pair does not carry.
+
+**Owner / Trigger:** the follow-up phase the orchestrator books per D-02, with its own measurement (named here once booked; unowned until then). Trigger: that booking, or any Bybit account whose live NAV and rebuilt history disagree on a flow day. Closed when the live readers read the same kinds with their own measurement, or the founder rules otherwise.
+
+### 180-BYBIT-EARN-FLOWS-UNREAD — Earn, staking, bonus and PEF transaction-log moves are not read as Bybit rebuild flows (booked 2026-10-29, Phase 180 orchestrator reading 3, DATA INTEGRITY)
+
+**Reading.** The rebuild reads only `TRANSFER_IN` and `TRANSFER_OUT` from the Unified transaction log (plan 04); the probe's census over the eight candidate types (`CENSUS_LOG_TYPES`, plan 02) read a6 census=0 census_state=read; a non-zero count means money moved through those types and the Unified-edge replay does not see it. Related limit, recorded here once: a sub-account key cannot read the master-only withdrawal endpoint (`withdraw_all` reads `not-master` on a6), so withdrawals of every type are not evidenced for such a key.
+
+**Owner / Trigger:** unowned. Trigger: a non-zero census on any Bybit account a rebuild is planned for. Closed when those types are classified as flows or not with their own measurement, or the founder rules them out of scope.
