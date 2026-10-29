@@ -210,7 +210,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
 - [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
 - [x] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — complete 2026-10-29 (v0.133.8.0 #1145, re-dump #1146; booked 2026-10-27 from MARKSOURCE plan 03; data-integrity; SC-1 first-night reading: moved=0 in all 8 derive runs, one night)
-- [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
+- [x] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — complete 2026-10-29 (v0.133.11.0 #1154; booked 2026-10-27 from MARKSOURCE D-09; data-integrity; closed record-only by founder ruling D-09, zero rewrites, nothing written to PROD; census a1, a2 and a5 kept as stored)
 - [x] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — complete 2026-10-29 (v0.133.9.1 #1148, v0.133.9.2 #1149; booked 2026-10-28 from OKXANCHOR plan 05; data-integrity; SC-3 deployed re-read: a4 anchored on the 0.02 tolerance, residual -0.0138)
 - [ ] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up"), not planned yet
 
@@ -6559,10 +6559,20 @@ Plans:
 
 **Goal:** The stored OKX snapshot rows that counted open profit twice are rebuilt inside the 90-day window, once Phase 173 has measured OKX trade ordering at 0 violations, so past OKX equity reads the same as the MARKSOURCE forward fix.
 **Requirements**: TBD
-**Depends on:** Phase 173, Phase 167.2.1.1.1.1
-**Plans:** 0 plans
+**Depends on:** Phase 173, Phase 167.2.1.1.1.1, Phase 179
+**Plans:** 4/4 plans complete (plan 04 closed without execution by founder ruling D-09)
 
 Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 CONTEXT D-09 (founder 2026-10-27 "Measure gate first, then rewrite (Recommended)"): MARKSOURCE ships the forward fix of D-05 and records the stored-row rewrite as a deferral. MARKSOURCE census 2026-10-27: 248 suspect days over 3 accounts, 164 inside the 90-day window. Data integrity, user-facing.
+
+2026-10-28 (founder, verbatim): "If a bybit Ley is Revoked, then that is only relevant for that Key. It is Not relevant for OKX and its keys, neither for other bybit keys". The rebuild's whole-account `account_key_not_working` refusal is a defect fixed in this phase (178 CONTEXT D-05); it narrows ACCTREBUILD's 2026-10-23 "Accept as recorded" for that token.
+
+2026-10-28 (founder, AskUserQuestion): "Don't rebuild that account (Recommended)" — "Keep its stored window as is, name it as not recomputed; other accounts are rebuilt normally." An account whose dead key overlaps the window (a read-only PROD check before any write) is not rebuilt (178 CONTEXT D-06).
+
+2026-10-29 (founder, AskUserQuestion): "Keep refusing; measure first (Recommended)" — a tied crosswalk fingerprint stays not recomputed; plan 03 measures whether ties occur (178 CONTEXT D-07).
+
+2026-10-29 (founder, AskUserQuestion): "Also the 179-07 re-read (Recommended)" — 178 writes only after 179-07's reading is recorded and Phase 179 is closed (178 CONTEXT D-08).
+
+2026-10-29 (founder, AskUserQuestion at the D-01 checkpoint): "Close 178, record only (Recommended)" — "Record the measurement, name the in-window rows in the existing double-count TODOS entry, close 178 with zero rewrites. Nothing written to PROD." SC-2's rebuild is replaced by this ruling and is reported as not met by founder ruling, never as met; census a1, a2 and a5 are kept as stored (178 CONTEXT D-09).
 
 **Success Criteria** (what must be TRUE):
 1. The Phase 173 OKX ordering gate reading (`okx-order: ok`, 0 violations) is cited by run before any rewrite; any other reading stops the phase.
@@ -6570,7 +6580,19 @@ Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 CONTEXT D-09 (founder 2026-10-27
 3. Rows older than the 90-day window and `allocator_holdings` history are named as kept, with their counts.
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 178-01-PLAN.md — the rebuild skips and counts an exchange account with no working key, on any venue (D-05); the audit and the probe carry the count
+- [x] 178-02-PLAN.md — runbook: dead-key census P7 (D-06) and the 16 refusal tokens, with vitest pins
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 178-05-PLAN.md — runbook: label crosswalk, B'1 group rule, D-02 per-target reading, B'5 count check, with vitest pins
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 178-03-PLAN.md — operator, read-only: deployed probe, crosswalk, P7 and census, per-account predicted outcome, founder checkpoint (D-01)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 178-04-PLAN.md — operator: SC-1 cite, D-03 and D-04 gates, guarded rebuild of the ruled labels, after-census, kept rows in the ledger
+  ⭐ **178-04 CLOSED WITHOUT EXECUTION 2026-10-29 (founder D-09, "Close 178, record only (Recommended)"):** zero targets were writable, nothing was enqueued, nothing was written to PROD. No SUMMARY is written for it (a SUMMARY would record work nobody did and would end its pending state in `plan-anchor-verify`); `178-03-SUMMARY.md` is the record; the plan carries `status: superseded` and no `-DEFERRED.md` is added, because `verify-plan-anchors.test.ts` and `ci.yml` pin the exemption count at 2.
 
 ### Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named
 
@@ -6928,7 +6950,7 @@ kept verbatim.
 | 175 MT5OFFSET | 0/0 | Not started | - |
 | 176 LEGACYRETIRE | 0/0 | Not started | - |
 | 177 DERIBITFLOWS | 7/7 | Complete — v0.133.8.0 #1145 (re-dump #1146); a moved Deribit flow is priced at the open of its own 1-minute `{CCY}_USDC-PERPETUAL` candle and each price is stored once; post-deploy first night: `moved=0` in all 8 derive runs (one night's reading), no composite line in the window | 2026-10-29 |
-| 178 OKXREWRITE | 0/0 | Not started | - |
+| 178 OKXREWRITE | 4/4 | Complete — v0.133.11.0 #1154; a forced rebuild skips an exchange account with no working key; post-deploy probe: all five OKX accounts read, `okx_order_gate` `ok`; closed record-only by founder ruling D-09 (zero rewrites, plan 04 closed without execution, nothing written to PROD; SC-2 not met by ruling) | 2026-10-29 |
 | 179 OKXBILLSCHAIN | 7/7 | Complete — v0.133.9.0 #1147, v0.133.9.1 #1148, v0.133.9.2 #1149; the OKX bills oracle's close passes within 1e-12 of the larger balance, the opening tolerance is 0.02 (founder D-08); post-deploy: a4 anchored (`opening_check=measured`, residual -0.0138, 0.02 deployed), nothing enqueued | 2026-10-29 |
 | 180 BYBITFUNDING | 0/0 | Not started | - |
 
