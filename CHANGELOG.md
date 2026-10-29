@@ -31,6 +31,16 @@
 - Known limit: plan 180-08, the founder-approved post-deploy probe of a6, is still to run; the phase stays open until it does.
 - Known limit: the D-02 follow-up (new flow kinds in the live NAV / composite and broker-dailies readers) is booked in plan 180-08, not shipped here.
 
+## [0.133.9.3] - 2026-10-29 — records: close DERIBITFLOWS 177 (v0.133.8.0 #1145; first-night reading moved=0 in all 8 derive runs)
+
+### Notes
+- Phase 177 closed with `phase complete`: 7 of 7 plans, VERIFICATION `passed`. The phase directory (plans 01-07, summaries, context, research, patterns, validation, review, security, verification, coverage) comes onto `main` from the phase branch; the ship PR carried none of it.
+- Post-deploy SC-1 reading recorded in `177-VERIFICATION.md` (section "Post-deploy reading (2026-10-29)"): from the backfill worker's deploy logs, 00:48Z to 01:30Z, eight `derive_broker_dailies: deribit flows moved by marks (moved=0 at_instant=0 usd_family=0 on_last_mark=0 mode=key)` lines, and no `run_stitch_composite_job: deribit flows moved by marks` line in that window. On the first night after deploy no Deribit flow was moved onto a neighbouring mark day. The fix is in place and its test goes RED on own-day pricing (`test_deribit_moved_btc_flow_priced_at_the_instant_price` in `analytics-service/tests/test_nav_marks_compose_roundtrip.py`). The count is one night's reading, not a rate.
+- `ROADMAP.md` ticks Phase 177 and its Progress row; the `phase complete` handler's overwrite of that row's Status prose was restored by hand. `STATE.md` `## Current Position` was corrected by hand (the handler moved it to the next roadmap phase, wrong while phases run in parallel): shipped not closed are NAVMTM 167.2.1.1.1, MARKSOURCE 167.2.1.1.1.1 and 175; in progress are 178, 179 (code shipped through v0.133.9.2, plan 179-07 re-read pending) and 180 (in ship).
+- `TODOS.md` carries no entry owned by Phase 177, so no entry was updated or closed.
+- Branch coverage: one records commit over one theme (records); of the three unpushed commits on the phase branch, 131b3811a (CONTEXT store-scope answer) arrives through the phase directory, 7a6fa3453 is a merge of main, and b09c0337b (a stamp-gate test) is byte-identical to `main`'s file, so it shipped in 0.133.8.0.
+- No code, no migration, no schema change, no write to any table.
+
 ## [0.133.9.2] - 2026-10-29 — OKXBILLSCHAIN: the OKX opening tolerance tightens to 2%, so an opening 2% to 5% of the anchor away refuses instead of anchoring
 
 ### Why

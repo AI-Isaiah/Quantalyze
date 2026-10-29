@@ -209,7 +209,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — complete 2026-10-28 (v0.133.2.0 #1133, shipped 2026-10-27; booked 2026-10-27 from NAVMTM review)
 - [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
 - [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
-- [ ] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — booked 2026-10-27 from MARKSOURCE plan 03 (founder 2026-10-27 "Deribit moved-flow pricing"), not planned yet
+- [x] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — complete 2026-10-29 (v0.133.8.0 #1145, re-dump #1146; booked 2026-10-27 from MARKSOURCE plan 03; data-integrity; SC-1 first-night reading: moved=0 in all 8 derive runs, one night)
 - [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
 - [ ] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — booked 2026-10-28 from OKXANCHOR plan 05 (founder 2026-10-28 "Record, route a follow-up"), not planned yet
 - [ ] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up"), not planned yet
@@ -6544,7 +6544,7 @@ Plans:
 **Goal:** A Deribit deposit or withdrawal is valued at the close of the day it is marked on, the way MARKSOURCE plan 03 fixed the MT5 BTC moved-flow case, so a flow moved onto a neighbouring mark day is never priced at its own day's price.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.1.1
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 
 Booked 2026-10-27 from MARKSOURCE 167.2.1.1.1.1 plan 03 (RESEARCH A5: Deribit's `native_flow_instants` values an instant at the mark of its own day; same shape as the MT5 case, unmeasured, left unchanged). Founder 2026-10-27 "Deribit moved-flow pricing (Recommended)". Data integrity.
 
@@ -6902,7 +6902,7 @@ kept verbatim.
 | 174 MARKPAUSE | 2/2 | Complete — v0.133.2.0 #1133 (re-dump #1134); weekly re-admit of a paused marked series after 3 days, mark refusals kept owner-only | 2026-10-28 |
 | 175 MT5OFFSET | 0/0 | Not started | - |
 | 176 LEGACYRETIRE | 0/0 | Not started | - |
-| 177 DERIBITFLOWS | 0/0 | Not started | - |
+| 177 DERIBITFLOWS | 7/7 | Complete — v0.133.8.0 #1145 (re-dump #1146); a moved Deribit flow is priced at the open of its own 1-minute `{CCY}_USDC-PERPETUAL` candle and each price is stored once; post-deploy first night: `moved=0` in all 8 derive runs (one night's reading), no composite line in the window | 2026-10-29 |
 | 178 OKXREWRITE | 0/0 | Not started | - |
 | 179 OKXBILLSCHAIN | 0/0 | Not started | - |
 | 180 BYBITFUNDING | 0/0 | Not started | - |
