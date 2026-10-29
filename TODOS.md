@@ -13381,7 +13381,7 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Owner / Trigger:** unowned; Phase 180 BYBITFUNDING produces the reading it waits on. Trigger: `bybit-transfers: ok` for a6 on a later probe, or a founder override. Closed when a6 is rebuilt through the guarded path or the founder rules it stays as recorded.
 
-**Measured 2026-10-29 (Phase 180 BYBITFUNDING, counts only).** `bybit-transfers: unmeasured (a6)`; a6 `cause=neither_older_365d`, `explained=explained`, `census=0`. Founder rebuild decision: `rebuild-decision: not offered: gate unmeasured (neither_older_365d)`; the plan's single founder question was not asked in this run (`founder-rebuild: not asked (gate not ok, per plan)`), so `rebuild-option: hold` is the default state and not a founder answer. `rebuilds-enqueued: 0`. The entry stays open. Trigger: `bybit-transfers: ok` for a6 on a later probe (which needs a deposit and a withdrawal older than 365 days on the Unified edge), or the founder choosing `as-recorded`.
+**Measured 2026-10-29 (Phase 180 BYBITFUNDING, counts only).** `bybit-transfers: unmeasured (a6)`; a6 `cause=neither_older_365d`, `explained=explained`, `census=0`. Founder rebuild decision (2026-10-29, only `hold` and `as-recorded` offered): `rebuild-decision: Hold (Recommended)`, `rebuild-option: hold`. `rebuilds-enqueued: 0`. The entry stays open. Trigger: `bybit-transfers: ok` for a6 on a later probe (which needs a deposit and a withdrawal older than 365 days on the Unified edge), or the founder choosing `as-recorded`.
 
 ## Phase 180 (BYBITFUNDING) — routed items (logged 2026-10-29)
 

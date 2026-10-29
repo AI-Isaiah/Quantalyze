@@ -79,11 +79,11 @@ sc2-met: yes
 
 ## Rebuild decision (SC-3, D-04)
 
-rebuild-decision: not offered: gate unmeasured (neither_older_365d)
-founder-rebuild: not asked (gate not ok, per plan)
+rebuild-decision: Hold (Recommended)
+founder-rebuild: Hold (Recommended)
 rebuild-option: hold
 
-Deviation, flagged for the founder. Task 2 of the plan says the founder is asked once, with only `hold` and `as-recorded` offered while the gate reads `unmeasured`, and that no option is auto-selected. The orchestrator instead instructed that no founder answer be invented, and the question was not asked in this run. `rebuild-option: hold` is therefore the default state (nothing is rebuilt, nothing is written), not a founder answer. `173-BYBIT-HISTORY-REBUILD-HELD` stays open with today's reading and the founder can still choose `as-recorded` (which closes it) or `hold` at any time; nothing in this record is rebuilt over a shut gate, and no override line exists.
+The founder answered Task 2 through AskUserQuestion on 2026-10-29. With the gate `unmeasured` (cause `neither_older_365d`) only `hold` and `as-recorded` were on offer, and the founder chose Hold; the option text shown read: "Keep a6's stored history as is; the TODOS entry holding the rebuild stays open until the gate can be measured." `173-BYBIT-HISTORY-REBUILD-HELD` therefore stays open with today's reading. Nothing is rebuilt over a shut gate, and no override line exists.
 
 rebuilds-enqueued: 0
 

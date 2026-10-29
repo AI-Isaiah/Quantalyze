@@ -105,3 +105,6 @@ None of the asset endpoints states a retention period.
 - Adding the new Bybit flow kinds to the live NAV / composite derive and broker-dailies readers, with its own measurement (D-02); orchestrator books the follow-up phase.
 - Rebuilding a6: decided by the founder after the post-deploy probe (SC-3), not before.
 </deferred>
+
+## Decisions recorded after the post-deploy probe
+- 2026-10-29, plan 08 Task 2 (SC-3), founder via AskUserQuestion: "Hold (Recommended)". The gate read `unmeasured` (cause `neither_older_365d`), so only `hold` and `as-recorded` were offered; the option text read "Keep a6's stored history as is; the TODOS entry holding the rebuild stays open until the gate can be measured." Nothing is rebuilt; `173-BYBIT-HISTORY-REBUILD-HELD` stays open.
