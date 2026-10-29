@@ -1761,6 +1761,37 @@ async def test_a_selection_refusal_is_a_token_and_that_accounts_keys_are_never_d
     assert summary["accounts"] == 2 and summary["accounts_read"] == 1
 
 
+async def test_a_revoked_bybit_key_leaves_the_owners_okx_account_readable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-05 (founder 2026-10-28): "If a bybit Ley is Revoked, then that is only relevant for
+    that Key. It is Not relevant for OKX and its keys, neither for other bybit keys".
+
+    One owner holds a revoked Bybit key and a working OKX key, two exchange accounts. The
+    selection used to refuse the whole owner ``account_key_not_working`` and the probe measured
+    nothing for the OKX account. Now the revoked Bybit account is skipped and COUNTED, the OKX
+    account is selected, its 90-day window applies and only the OKX key is decrypted."""
+    book = {
+        "api_keys": [
+            _key_row(_KEY_BYBIT, _USER_ONE, "bybit", "2026-01-01T00:00:00Z", sync_status="revoked"),
+            _key_row(_KEY_OKX, _USER_ONE, "okx", "2026-02-01T00:00:00Z"),
+        ],
+        "allocator_equity_snapshots": [],
+    }
+    services = _Services(book, [_StubVenue([_trade_page("ok", 5, newest_ms=_ms(_TODAY))])])
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    account, summary = _stdout_records(capsys)
+    assert account["selection"] == "ok"
+    assert account["non_working_accounts_excluded"] == 1
+    assert (account["okx_members"], account["bybit_members"]) == (1, 0)
+    assert account["window_days"] == 90
+    assert account["members_read"] == 1
+    assert services.decrypt_calls == [_KEY_OKX]  # the revoked key is never decrypted
+    assert summary["accounts"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Fail loud: one failed member does not hide the others, and nothing leaks.
 # ---------------------------------------------------------------------------

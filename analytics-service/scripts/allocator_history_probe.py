@@ -270,6 +270,7 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "bybit_members",
     "other_members",
     "zero_contribution_members",
+    "non_working_accounts_excluded",
     "window_days",
     "members_read",
     "members_failed",
@@ -401,6 +402,7 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "bybit_members": _is_count,
     "other_members": _is_count,
     "zero_contribution_members": _is_count,
+    "non_working_accounts_excluded": _is_count,
     "window_days": _is_count_or_absent,
     "members_read": _is_count,
     "members_failed": _is_count,
@@ -1500,6 +1502,7 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "bybit_members": 0,
         "other_members": 0,
         "zero_contribution_members": 0,
+        "non_working_accounts_excluded": 0,
         "window_days": FIELD_ABSENT,
         "members_read": 0,
         "members_failed": 0,
@@ -1580,7 +1583,9 @@ async def _probe_account(
     job_key_id = choose_job_key(account_rows)
     try:
         account_keys = await er._read_account_keys(supabase, allocator_id, job_key_id)
-        selected, zero_contribution = er._select_account_crawl_keys(account_keys, job_key_id)
+        selected, zero_contribution, non_working_excluded = er._select_account_crawl_keys(
+            account_keys, job_key_id
+        )
     except er.ForcedRebuildRefusedError as exc:
         # An out-of-vocabulary reason is refused by the emitter, loudly, not mapped.
         return _account_record(label, run_date, selection=exc.reason)
@@ -1627,6 +1632,7 @@ async def _probe_account(
         bybit_members=venues.count("bybit"),
         other_members=sum(1 for v in venues if v not in _PROBE_VENUES),
         zero_contribution_members=zero_contribution,
+        non_working_accounts_excluded=non_working_excluded,
         window_days=window_days,
         members_read=len(results) - len(failed),
         members_failed=len(failed),
@@ -1713,8 +1719,11 @@ def summarize(records: Sequence[Mapping[str, Any]], run_date: str) -> dict[str, 
     # The Bybit roll-up (review WR-02, founder D-05): ``ok`` only when at least one account has a
     # full Bybit window and EVERY such account reads ``ok``. An account refused at selection is
     # ``not-applicable`` and does not shut it (the rebuild refuses that account at the same
-    # selection, so an ``ok`` opens nothing for it); plan 03 names those accounts on a
-    # ``bybit-transfers-unread:`` line. Absent evidence is never ``ok``: with no applicable
+    # selection, so an ``ok`` opens nothing for it); after phase 178 D-05 only an allocator with
+    # no working exchange account at all (or one refused ``account_identity_pending`` or
+    # ``account_key_venue_unsupported``) is refused at selection, and a dead key's own exchange
+    # account is skipped and counted in ``non_working_accounts_excluded``. Plan 03 names the
+    # refused accounts on a ``bybit-transfers-unread:`` line. Absent evidence is never ``ok``: with no applicable
     # account it is ``unmeasured``, not a vacuous truth.
     applicable = [r["bybit_transfers_gate"] for r in records if r["bybit_transfers_gate"] != "not-applicable"]
     return {

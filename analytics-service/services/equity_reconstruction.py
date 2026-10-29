@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 # WR-01 — `math.isfinite` guards the MT5 NAV anchor in `_mt5_fetch_window`. This
@@ -2527,6 +2528,39 @@ def _account_marker_key_ids(account_keys: Sequence[Mapping[str, Any]]) -> list[s
 # ``run_reconstruct_allocator_history_job`` reads it; the daily fan-out's OWED predicate
 # (and its SQL twin) does not, so the flag never makes a key owed.
 RECONSTRUCT_FORCE_REBUILD_KEY: Final[str] = "force_rebuild"
+# Phase 178 OKXREWRITE (review CR-02): the key in ``compute_jobs.metadata`` that carries the
+# operator's P7 reading of how many exchange accounts have no working key. A forced job that
+# finds a different count when it selects its crawl keys refuses ``account_keys_changed``
+# before any venue call, so a key that stopped working after P7 can never be skipped from a
+# rebuilt window the operator measured as complete. It is a CONTRACT with the runbook's
+# enqueue form, which spells the same literal. Absent means "no expectation" (unchanged).
+RECONSTRUCT_EXPECTED_NON_WORKING_KEY: Final[str] = "expected_non_working_accounts"
+# Round 2 (WR-R2-01 / SFH R2-2): the same contract for the window. The operator's P7
+# ``predicted_window_days`` rides in the metadata; a forced job whose ``_account_rebuild_window``
+# differs refuses ``account_keys_changed`` before any venue call. Both expectation values must
+# be exact JSON integers (a boolean or a float refuses). Absent means "no expectation".
+RECONSTRUCT_EXPECTED_WINDOW_KEY: Final[str] = "expected_window_days"
+# Round 3 (WR-R3-01): the same contract for the allocator's FULL key set. Two counts cannot
+# see a hard-deleted working key or a dead/working swap, so the metadata also carries a digest
+# of every ``api_keys`` row the selection reads, each with its working flag. CANONICAL FORM (the
+# SQL side reproduces it exactly): the rows sorted by the id's text; each rendered
+# ``<id>:<t|f>`` where ``t`` means ``working_holder_predicate`` is true and ``f`` false; joined
+# by ``|``; the digest is the lower-case hex MD5 of that UTF-8 string (SQL:
+# ``md5(string_agg(id::text || ':' || CASE WHEN working THEN 't' ELSE 'f' END, '|'
+# ORDER BY id::text COLLATE "C"))``). A forced job whose digest differs, or whose value is not
+# a string, refuses ``account_keys_changed`` before any venue call. Absent means "no expectation".
+RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY: Final[str] = "expected_key_digest"
+
+
+def _account_keys_digest(account_keys: Iterable[Mapping[str, Any]]) -> str:
+    """The canonical digest of the allocator's key set (see ``RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY``)."""
+    canonical = "|".join(
+        f"{key_id}:{'t' if working else 'f'}"
+        for key_id, working in sorted(
+            (str(row["id"]), working_holder_predicate(row)) for row in account_keys
+        )
+    )
+    return hashlib.md5(canonical.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
@@ -2667,8 +2701,10 @@ def _key_venue(key_row: Mapping[str, Any]) -> str:
 
 def _select_account_crawl_keys(
     account_keys: Sequence[Mapping[str, Any]], job_api_key_id: str
-) -> tuple[list[Mapping[str, Any]], int]:
+) -> tuple[list[Mapping[str, Any]], int, int]:
     """Pick the ONE working key each exchange account is crawled through, or refuse.
+
+    Returns ``(selected, zero_contribution, non_working_excluded)``.
 
     ``account_keys`` is EVERY ``api_keys`` row of the user, whatever its status (D-07): the
     grouping needs the departed and duplicate rows to see that two keys read one account.
@@ -2677,42 +2713,56 @@ def _select_account_crawl_keys(
     daily refresh's own venue set), so the rebuild cannot count an exchange account twice
     or call a key working that the writers would not.
 
-    Per group, in the group order ``account_groups`` fixes:
+    D-05 (founder 2026-10-28): "If a bybit Ley is Revoked, then that is only relevant for
+    that Key. It is Not relevant for OKX and its keys, neither for other bybit keys". A dead
+    key therefore never refuses the allocator and never decides a venue question: the deciding
+    venues of a group are its WORKING members' (every member's only when none works).
 
-    * the members must all be on one venue, else ``account_key_venue_unsupported`` (one
+    Per group, in the group order ``account_groups`` fixes, checked in this order:
+
+    * a Deribit group (by its deciding venues) is skipped and COUNTED (the second return
+      value): both writers store it as $0, whatever its key's state, so it is neither crawled
+      nor a refusal;
+    * a group with no working member, on any venue, is skipped and COUNTED (the third return
+      value): the daily refresh leaves it out too, and its key is never decrypted;
+    * working members on more than one venue refuse ``account_key_venue_unsupported`` (one
       exchange account is on one venue, so a marker across venues cannot be read by any
       single crawl);
-    * a Deribit group is skipped and COUNTED (the second return value): both writers store
-      it as $0, whatever its key's state, so it is neither crawled nor a refusal;
-    * a venue outside ``_ACCOUNT_REBUILD_VENUES`` (sfox, anything unknown) refuses
+    * a working venue outside ``_ACCOUNT_REBUILD_VENUES`` (sfox, anything unknown) refuses
       ``account_key_venue_unsupported``: leaving it out would store a total that claims to
       cover the allocator;
-    * a group with no working member refuses ``account_key_not_working``;
     * otherwise the job's own key is chosen when it is a working member, else the working
-      member with the smallest id. A departed or duplicate member is thereby covered by a
-      working sibling instead of by nobody.
+      member with the smallest id. A departed, duplicate or dead member is thereby covered by
+      a working sibling instead of by nobody.
 
-    OKX is selected (UPNLVENUES D-05); the one window it forces is
-    ``_account_rebuild_window``'s concern. After the loop two unstamped working keys on one
-    stamping venue may be ONE exchange account, which crawling both would count twice, so
-    the daily refresh's own ``identity_pending_venues`` call refuses
+    ``account_key_not_working`` is raised only when no exchange account is left to crawl and
+    at least one was skipped as dead. OKX is selected (UPNLVENUES D-05); the one window it
+    forces is ``_account_rebuild_window``'s concern. After the loop two unstamped working keys
+    on one stamping venue may be ONE exchange account, which crawling both would count twice,
+    so the daily refresh's own ``identity_pending_venues`` call refuses
     ``account_identity_pending``.
     """
     selected: list[Mapping[str, Any]] = []
     zero_contribution = 0
+    non_working_excluded = 0
     for group in account_groups(account_keys):
-        venues = {_key_venue(member) for member in group}
-        if len(venues) != 1:
-            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
-        venue = next(iter(venues))
-        if venue in _ACCOUNT_ZERO_CONTRIBUTION_VENUES:
+        working = [member for member in group if working_holder_predicate(member)]
+        venues = {_key_venue(member) for member in (working or group)}
+        if venues <= _ACCOUNT_ZERO_CONTRIBUTION_VENUES:
             zero_contribution += 1
             continue
-        if venue not in _ACCOUNT_REBUILD_VENUES:
-            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
-        working = [member for member in group if working_holder_predicate(member)]
         if not working:
-            raise ForcedRebuildRefusedError("account_key_not_working")
+            # D-05: a dead key is relevant only to its own exchange account. The daily refresh
+            # skips a group with no eligible key the same way, so the rebuild counts it and
+            # goes on instead of refusing the allocator. Stored days that still carry such a
+            # key's balance (a failing key was carried with no age cap from v0.111.0.0 until
+            # CARRY_AGE_CAP_DAYS shipped in v0.132.5.0) are D-06's to keep out of any write.
+            non_working_excluded += 1
+            continue
+        if len(venues) != 1:
+            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
+        if next(iter(venues)) not in _ACCOUNT_REBUILD_VENUES:
+            raise ForcedRebuildRefusedError("account_key_venue_unsupported")
         job_member = next(
             (member for member in working if str(member.get("id")) == str(job_api_key_id)),
             None,
@@ -2722,13 +2772,16 @@ def _select_account_crawl_keys(
             if job_member is not None
             else min(working, key=lambda member: str(member.get("id")))
         )
+    if not selected and non_working_excluded > 0:
+        # Every non-Deribit exchange account is dead: nothing is left to rebuild.
+        raise ForcedRebuildRefusedError("account_key_not_working")
     if identity_pending_venues(account_keys, VENUES_WITH_ACCOUNT_ID - {"deribit"}) > 0:
         raise ForcedRebuildRefusedError("account_identity_pending")
     if not selected:
-        # Unreachable for a job whose own key is not Deribit (that key's group is then
-        # selected or refused above); kept so a Deribit-only book never reaches the crawl.
+        # Reached only for a Deribit-only book (an all-dead book refuses above); kept so such
+        # a book never reaches the crawl.
         raise ForcedRebuildRefusedError("account_sum_empty")
-    return selected, zero_contribution
+    return selected, zero_contribution, non_working_excluded
 
 
 def _bybit_window_start(end_date: date) -> date:
@@ -6103,10 +6156,16 @@ class _AccountCrawl:
     # Every api_keys id the user held when the crawl began; the persist half re-reads and
     # refuses ``account_keys_changed`` when the set moved.
     account_key_ids: frozenset[str]
+    # The ids of those keys that were WORKING when the crawl began; the persist half refuses
+    # ``account_keys_changed`` when that set moved too (a key that stopped or resumed working
+    # changes which exchange accounts the window covers, with the id set unchanged).
+    working_key_ids: frozenset[str]
     window_start: date
     window_days: int
     exchange_accounts: int
     zero_contribution_accounts: int
+    # D-05: exchange accounts with no working key, skipped and counted (never crawled).
+    non_working_accounts_excluded: int
     days_incomplete: int
 
 
@@ -6266,8 +6325,24 @@ async def _crawl_whole_account(
     are kept so a later run resumes from them.
     """
     own_key_id = str(job["api_key_id"])
-    selected, zero_contribution = _select_account_crawl_keys(account_keys, own_key_id)
+    selected, zero_contribution, non_working_excluded = _select_account_crawl_keys(
+        account_keys, own_key_id
+    )
+    metadata = job.get("metadata")
     window_start, window_days = _account_rebuild_window(selected, end_date)
+    if isinstance(metadata, dict) and any(
+        expectation_key in metadata
+        and (
+            type(metadata[expectation_key]) is not type(actual)
+            or metadata[expectation_key] != actual
+        )
+        for expectation_key, actual in (
+            (RECONSTRUCT_EXPECTED_NON_WORKING_KEY, non_working_excluded),
+            (RECONSTRUCT_EXPECTED_WINDOW_KEY, window_days),
+            (RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY, _account_keys_digest(account_keys)),
+        )
+    ):
+        raise ForcedRebuildRefusedError("account_keys_changed")
 
     opened: list[Any] = []
     try:
@@ -6410,10 +6485,14 @@ async def _crawl_whole_account(
         telemetry=_merge_account_telemetry(per_account_telemetry),
         selected_venues=tuple(_key_venue(key) for key in selected),
         account_key_ids=frozenset(str(key.get("id")) for key in account_keys),
+        working_key_ids=frozenset(
+            str(key.get("id")) for key in account_keys if working_holder_predicate(key)
+        ),
         window_start=window_start,
         window_days=window_days,
         exchange_accounts=len(selected),
         zero_contribution_accounts=zero_contribution,
+        non_working_accounts_excluded=non_working_excluded,
         days_incomplete=days_incomplete,
     )
 
@@ -6841,6 +6920,13 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             _current_keys = await _read_account_keys(ctx.supabase, allocator_id, api_key_id)
             if frozenset(str(row.get("id")) for row in _current_keys) != account.account_key_ids:
                 raise ForcedRebuildRefusedError("account_keys_changed")
+            # CR-02: a key that stopped (or resumed) working since the crawl began moves an
+            # exchange account into (out of) the skipped set, so the window would claim a
+            # coverage the crawl did not have.
+            if frozenset(
+                str(row.get("id")) for row in _current_keys if working_holder_predicate(row)
+            ) != account.working_key_ids:
+                raise ForcedRebuildRefusedError("account_keys_changed")
             rebuilt_account_keys = _current_keys
             # D-01 / D-02 / D-03 in ONE transaction: replace only the window, refuse a
             # stored in-window day the rows lack, record the seam date. Never the
@@ -7029,6 +7115,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 "account_key_count": len(account.account_key_ids),
                 "account_exchange_accounts": account.exchange_accounts,
                 "account_zero_contribution_accounts": account.zero_contribution_accounts,
+                "account_non_working_accounts_excluded": account.non_working_accounts_excluded,
                 "account_days_incomplete": account.days_incomplete,
                 "window_days": account.window_days,
             }
