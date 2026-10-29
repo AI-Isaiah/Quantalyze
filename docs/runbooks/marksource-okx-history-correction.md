@@ -24,9 +24,25 @@ keeping every older row byte for byte and recording the seam.
 **What it cannot reach is KEPT and NAMED** in the last section: refresh rows older than the
 90-day window, every `allocator_holdings` history row, and any scenario-commit audit size.
 
-## Where this stands (CONTEXT D-09, founder 2026-10-27)
+## Where this stands (Phase 178, 2026-10-28; the earlier 2026-10-27 reading follows as lineage)
 
-CONTEXT D-05 asked for the stored past rows to be corrected through the product's own recompute
+**2026-10-28.** D-09's gate is met: the ordering gate entry `167.2.1.1.2.1-OKX-ORDER-UNMEASURED`
+closed on 2026-10-28 on Phase 173's deployed probe (`okx-order: ok`). Phase 178 OKXREWRITE runs
+this runbook, and its rulings shape the steps below:
+
+- D-05 (founder 2026-10-28): "If a bybit Ley is Revoked, then that is only relevant for that Key.
+  It is Not relevant for OKX and its keys, neither for other bybit keys". A dead key is relevant
+  only to its own exchange account: the rebuild skips and counts an exchange account with no
+  working key, on any venue, and B'1 and B'5 follow that rule.
+- D-06 and P7: an account whose dead key overlaps the window is kept as stored and named
+  `not recomputed (D-06)`; other accounts are rebuilt normally.
+- D-02 and P4: the gate's closure is not enough; each target needs its own ordering reading from
+  the probe, mapped through `crosswalk`.
+- D-03: no write before Phase 179's close fix is deployed and its tolerance decision is recorded.
+- D-04: the first write comes only after MARKSOURCE plan 08's cut-over and its first night, never
+  in the merge hold.
+
+**(2026-10-27, kept as lineage)** CONTEXT D-05 asked for the stored past rows to be corrected through the product's own recompute
 path, measured read-only on PROD first, with a before and after census. D-09 then ruled, after
 the census: "The stored-row rewrite of D-05 waits on the OKX ordering gate
 (`167.2.1.1.2.1-OKX-ORDER-UNMEASURED`): this phase ships the forward fix and records the rewrite
@@ -34,7 +50,7 @@ as a deferral; a booked follow-up phase measures the gate with a founder-approve
 and then rebuilds the 90-day window."
 
 So this runbook is the procedure the follow-up phase runs. Until the probe's summary
-`okx_order_gate` reads `ok`, pre-flight P4 is a write STOP: the read-only steps (P0 to P3, P5, P6, B'1,
+`okx_order_gate` reads `ok`, pre-flight P4 is a write STOP: the read-only steps (P0 to P3, P5 to P7, B'1,
 B'2) run and are recorded, and nothing from B'3a on runs. A follow-up session re-runs every
 pre-flight and every census fresh: readings from an earlier session are claims, not inputs.
 
@@ -76,7 +92,7 @@ q() { supabase db query --linked --agent no --workdir "$QZ_MAIN" -o csv -f "$1";
 - `MS_SP` is a scratch directory outside the repo. Every SQL file and CSV lives there.
 
 The renderer extracts a named SQL form from this file, so what is run is what is written here.
-It substitutes four placeholders and refuses (exit 2, nothing printed) when a placeholder in
+It substitutes five placeholders and refuses (exit 2, nothing printed) when a placeholder in
 the form has no valid value:
 
 | Placeholder | Source | Validated as | Rendered as |
@@ -85,6 +101,7 @@ the form has no valid value:
 | `__LABELS__` | env `MS_LABELS` | `^[1-9][0-9]*(,[1-9][0-9]*)*$` | `ARRAY[1,2]::bigint[]` |
 | `__T0__` | env `MS_T0` | an ISO UTC instant ending in `Z`, a real calendar date | `'...'::timestamptz` |
 | `__DEPLOYED_AT__` | env `MS_DEPLOYED_AT` | the same | `'...'::timestamptz` |
+| `__EXPECTED__` | `p7-before-enqueue.csv` in `MS_SP` (the B'3a P7 re-run), one row per `MS_LABELS` label | a file modified at or after `MS_T0`, that is not empty, has no quoted field, and holds for every chosen label a row with `p7_outcome` `rebuild`, `predicted_window_days` 90, a whole-number `dead_exchange_accounts` and a `key_digest` of 32 lower-case hex characters | `(label,dead_exchange_accounts,predicted_window_days,'key_digest'),...` |
 
 ```bash
 cat > "$MS_SP/form.mjs" <<'JS'
@@ -117,6 +134,28 @@ const instant = (ph, envName) => {
 };
 instant("__T0__", "MS_T0");
 instant("__DEPLOYED_AT__", "MS_DEPLOYED_AT");
+if (uses("__EXPECTED__")) {
+  const dir = process.env.MS_SP;
+  if (typeof dir !== "string" || dir === "") fail("__EXPECTED__: set MS_SP");
+  const file = dir + "/p7-before-enqueue.csv";
+  let csv;
+  try { csv = fs.readFileSync(file, "utf8"); } catch { fail("__EXPECTED__: cannot read p7-before-enqueue.csv in MS_SP"); }
+  if (fs.statSync(file).mtimeMs < Date.parse(process.env.MS_T0)) fail("__EXPECTED__: p7-before-enqueue.csv was written before MS_T0: re-run P7 after exporting MS_T0 (B'3a)");
+  const lines = csv.split(/\r?\n/).filter((l) => l.length > 0);
+  if (lines.length === 0 || lines.some((l) => l.includes('"'))) fail("__EXPECTED__: p7-before-enqueue.csv is empty, or has a quoted field");
+  const head = lines[0].split(",");
+  const col = (n) => { const i = head.indexOf(n); if (i < 0) fail("__EXPECTED__: no column " + n); return i; };
+  const [cLabel, cDead, cWindow, cOutcome, cDigest] = ["account_label", "dead_exchange_accounts", "predicted_window_days", "p7_outcome", "key_digest"].map(col);
+  const rows = new Map(lines.slice(1).map((l) => { const f = l.split(","); return [f[cLabel], f]; }));
+  const parts = [];
+  for (const n of process.env.MS_LABELS.split(",")) {
+    const f = rows.get("a" + n);
+    if (!f) fail("__EXPECTED__: p7-before-enqueue.csv has no row for a" + n);
+    if (f[cOutcome] !== "rebuild" || f[cWindow] !== "90" || !/^[0-9]+$/.test(f[cDead]) || !/^[0-9a-f]{32}$/.test(f[cDigest])) fail("__EXPECTED__: a" + n + " is not a P7 rebuild at window 90 with a key digest");
+    parts.push("(" + n + "," + f[cDead] + "," + f[cWindow] + ",'" + f[cDigest] + "')");
+  }
+  sql = sql.split("__EXPECTED__").join(parts.join(","));
+}
 const left = sql.match(/__[A-Z0-9_]+__/);
 if (left) fail("unresolved placeholder " + left[0]);
 process.stdout.write(sql + "\n");
@@ -238,9 +277,178 @@ SELECT m.marker_is_prod,
   FROM m;
 ```
 
+### Probe labels and census labels (`crosswalk`)
+
+The allocator history probe and the census files both call an allocator `a1`, `a2`, ..., and they
+do not mean the same one. The probe labels owners in the order of their earliest ACTIVE OKX or
+Bybit key and includes owners who hold only Bybit. The census labels owners who hold an OKX key of
+any status, in the order of their earliest OKX key. So a probe `a2` is not a census `a2`, and an
+owner whose only OKX key is inactive has a census label and no probe label. The `crosswalk` form
+computes both labels in ONE statement, with the counts a probe record prints, over the same key
+grouping as P7 (the block from `user_key` to `exchange_account` is the one in
+`okx-nonworking-keys.sql`, pinned byte for byte). A mapping is proven twice:
+
+- By the statement: the row's `census_label` and `probe_label`.
+- By the fingerprint: a probe record whose `selection` is `ok` must show `okx_members`,
+  `bybit_members`, `other_members`, `zero_contribution_members`, `non_working_accounts_excluded`
+  and `window_days` equal to the row's `predicted_okx_members`, `predicted_bybit_members`,
+  `predicted_other_members`, `predicted_zero_contribution_members`,
+  `predicted_non_working_accounts_excluded` and `predicted_window_days`. A refused record maps by
+  the statement alone.
+
+One abort and one per-label outcome guard the mapping, because a wrong one writes a target on
+another account's ordering reading:
+
+- **Abort if** the probe and the crosswalk did not run on the same UTC day, or `probe_accounts_total`
+  differs from the probe summary's `accounts`. A key connected or re-activated in between shifts
+  every later label, and an equal total after one key joined and another left would pass the count
+  alone. The probe orders owners with the same first-key time arbitrarily and the form orders them
+  by `user_id`, a second way for two labels to swap. Re-run both, together.
+- **An ambiguous fingerprint is a per-label outcome, not an abort.** Six small counts are shared by
+  many accounts (one OKX member, nothing else, window 90), so a census row whose predicted
+  fingerprint equals another census row's predicted fingerprint cannot be proven by the fingerprint
+  alone: a swap of the two labels would read the same. The form counts the tie, so nobody has to
+  find it by eye: `fingerprint_ties` is the number of OTHER census rows whose six predicted counts
+  equal this row's. Above 0 the row's fingerprint is `ambiguous`, whatever the probe record shows,
+  and it is never `match`; at 0 the comparison above decides. A re-run never clears it, because
+  the same shapes print the same six counts every time. Each such row is recorded
+  `recorded, not recomputed (crosswalk ambiguous)` and left out of `MS_LABELS`. No ruling makes an
+  ambiguous label writable: the mapping cannot be proven for the founder either, so it stays
+  recorded until a change to this runbook proves it by other means. The other labels go on.
+
+Counts and labels only, read-only, the `marker` form first as its own call:
+
+<!-- form: crosswalk -->
+```sql
+WITH RECURSIVE m AS (
+  SELECT coalesce((SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()) = __MARKER__, false)::int AS marker_is_prod
+),
+okx_account AS (
+  SELECT k.user_id AS allocator_id,
+         row_number() OVER (ORDER BY min(k.created_at), k.user_id) AS label_no
+    FROM public.api_keys k
+   WHERE lower(k.exchange) = 'okx'
+   GROUP BY k.user_id
+),
+user_key AS (
+  SELECT a.label_no,
+         k.id,
+         lower(k.exchange) AS venue,
+         (k.is_active
+            AND k.disconnected_at IS NULL
+            AND (k.sync_status IS NULL OR k.sync_status NOT IN ('revoked', 'sign_in_failed', 'error'))) AS working,
+         k.account_share_kind,
+         k.account_shared_with_api_key_id
+    FROM public.api_keys k
+    JOIN okx_account a ON a.allocator_id = k.user_id
+),
+marker_edge AS (
+  SELECT u.label_no,
+         u.id AS a_id,
+         u.account_shared_with_api_key_id AS b_id
+    FROM user_key u
+    JOIN user_key v ON v.label_no = u.label_no AND v.id = u.account_shared_with_api_key_id
+   WHERE u.account_share_kind IN ('duplicate', 'composite_member')
+     AND u.account_shared_with_api_key_id <> u.id
+),
+reach AS (
+  SELECT u.label_no,
+         u.id AS key_id,
+         u.id AS reached_id
+    FROM user_key u
+  UNION
+  SELECT r.label_no,
+         r.key_id,
+         CASE WHEN e.a_id = r.reached_id THEN e.b_id ELSE e.a_id END
+    FROM reach r
+    JOIN marker_edge e
+      ON e.label_no = r.label_no
+     AND (e.a_id = r.reached_id OR e.b_id = r.reached_id)
+),
+key_group AS (
+  SELECT label_no,
+         key_id,
+         min(reached_id::text) AS group_root
+    FROM reach
+   GROUP BY label_no, key_id
+),
+group_member AS (
+  SELECT g.label_no,
+         g.group_root,
+         u.venue,
+         u.working,
+         (u.working OR NOT bool_or(u.working) OVER (PARTITION BY g.label_no, g.group_root)) AS deciding
+    FROM key_group g
+    JOIN user_key u ON u.label_no = g.label_no AND u.id = g.key_id
+),
+exchange_account AS (
+  SELECT label_no,
+         group_root,
+         bool_or(working) AS has_working,
+         count(DISTINCT venue) FILTER (WHERE deciding) AS deciding_venue_count,
+         CASE WHEN count(DISTINCT venue) FILTER (WHERE deciding) = 1
+              THEN min(venue) FILTER (WHERE deciding) END AS venue,
+         CASE WHEN bool_and(venue = 'deribit') FILTER (WHERE deciding) THEN 'zero'
+              WHEN NOT bool_or(working) THEN 'dead'
+              WHEN count(DISTINCT venue) FILTER (WHERE deciding) > 1
+                OR min(venue) FILTER (WHERE deciding) NOT IN ('deribit', 'bybit', 'binance', 'mt5', 'okx') THEN 'refused'
+              ELSE 'crawled' END AS state
+    FROM group_member
+   GROUP BY label_no, group_root
+),
+probe_account AS (
+  SELECT k.user_id AS allocator_id,
+         row_number() OVER (ORDER BY min(k.created_at), k.user_id) AS probe_no,
+         count(*) FILTER (WHERE lower(k.exchange) = 'okx') AS active_okx_keys,
+         count(*) FILTER (WHERE lower(k.exchange) = 'bybit') AS active_bybit_keys
+    FROM public.api_keys k
+   WHERE k.is_active
+     AND lower(k.exchange) IN ('okx', 'bybit')
+   GROUP BY k.user_id
+),
+predicted AS (
+  SELECT a.label_no,
+         count(*) FILTER (WHERE e.state = 'crawled' AND e.venue = 'okx') AS okx_members,
+         count(*) FILTER (WHERE e.state = 'crawled' AND e.venue = 'bybit') AS bybit_members,
+         count(*) FILTER (WHERE e.state = 'crawled' AND e.venue IN ('mt5', 'binance')) AS other_members,
+         count(*) FILTER (WHERE e.state = 'zero') AS zero_contribution_members,
+         count(*) FILTER (WHERE e.state = 'dead') AS non_working_accounts_excluded
+    FROM okx_account a
+    LEFT JOIN exchange_account e ON e.label_no = a.label_no
+   GROUP BY a.label_no
+),
+snapshot_count AS (
+  SELECT a.label_no,
+         count(s.asof) AS snapshot_days
+    FROM okx_account a
+    LEFT JOIN public.allocator_equity_snapshots s ON s.allocator_id = a.allocator_id
+   GROUP BY a.label_no
+)
+SELECT m.marker_is_prod,
+       'a' || a.label_no AS census_label,
+       coalesce('a' || p.probe_no, 'none') AS probe_label,
+       (SELECT count(*) FROM probe_account) AS probe_accounts_total,
+       coalesce(p.active_okx_keys, 0) AS active_okx_keys,
+       coalesce(p.active_bybit_keys, 0) AS active_bybit_keys,
+       pr.okx_members AS predicted_okx_members,
+       pr.bybit_members AS predicted_bybit_members,
+       pr.other_members AS predicted_other_members,
+       pr.zero_contribution_members AS predicted_zero_contribution_members,
+       pr.non_working_accounts_excluded AS predicted_non_working_accounts_excluded,
+       CASE WHEN pr.okx_members > 0 THEN 90 ELSE 730 END AS predicted_window_days,
+       count(*) OVER (PARTITION BY pr.okx_members, pr.bybit_members, pr.other_members, pr.zero_contribution_members, pr.non_working_accounts_excluded, CASE WHEN pr.okx_members > 0 THEN 90 ELSE 730 END) - 1 AS fingerprint_ties,
+       sc.snapshot_days
+  FROM m
+ CROSS JOIN okx_account a
+  JOIN predicted pr ON pr.label_no = a.label_no
+  JOIN snapshot_count sc ON sc.label_no = a.label_no
+  LEFT JOIN probe_account p ON p.allocator_id = a.allocator_id
+ ORDER BY a.label_no;
+```
+
 ## The committed census files
 
-Four read-only files in `docs/runbooks/marksource-okx-census/` (each ONE statement, run with `q`
+Five read-only files in `docs/runbooks/marksource-okx-census/` (each ONE statement, run with `q`
 by absolute path, output to `MS_SP` only; its README says what each column means) carry the
 measurement. They are run by name in the steps below:
 
@@ -250,10 +458,11 @@ measurement. They are run by name in the steps below:
 | `okx-snapshot-census.sql` | B'1 and B'6 | per a-label: snapshot days, the days the double count is suspected on, split by the 90-day window, and the size of the overcount as ratios |
 | `okx-holdings-census.sql` | B'1 and B'6 | the same question for the `allocator_holdings` USDT row, which no product path can rewrite |
 | `okx-snapshot-rows.sql` | B'2 and B'6 | the row set for the before and after diff; carries amounts, scratch only |
+| `okx-nonworking-keys.sql` | P7 and B'5 | per a-label: the exchange accounts with no working key, grouped and decided as the rebuild does them, the dead keys tested against the window, the predicted window, the stored in-window days a dead key's holdings span overlaps, bulk-written in-window days, the hard-deleted keys the holdings polls' audit rows still name, and the P7 outcome (`rebuild` or `not recomputed (D-06)`) |
 
 `marker.sql` in the same directory is the `marker` form as a file.
 
-## Pre-flight — ALL BLOCKING, P4 is a write STOP
+## Pre-flight P0 to P7 — ALL BLOCKING, P4 is a write STOP
 
 Any item that does not return its expected answer is an ABORT (do not go on), except P4, which is
 a STOP on the write sequence only. Record each answer as a count, a boolean or a public SHA.
@@ -267,8 +476,11 @@ a STOP on the write sequence only. Record each answer as a count, a boolean or a
   `git grep -n -F '_extract_okx_cash_balances' <sha> -- analytics-service/services/allocator_positions.py`
   and
   `git grep -n -F 'FORCED_REBUILD_REFUSAL_REASONS' <sha> -- analytics-service/services/equity_reconstruction.py`
-  must each print a hit. Record the SHAs (public). **Abort if** either is missing on any service
-  or a SHA cannot be read.
+  and
+  `git grep -n -F 'account_non_working_accounts_excluded' <sha> -- analytics-service/services/equity_reconstruction.py`
+  must each print a hit. The third is Phase 178's D-05 fix: without it one dead key still refuses
+  the whole account and B'5's dead-account count is absent. Record the SHAs (public). **Abort if**
+  any is missing on any service or a SHA cannot be read.
 - **P2 — every working OKX key has been polled by the fixed worker (`pollafter`).** Export
   `MS_LABELS` as every a-label (`1,2,...`, from the census), and `MS_DEPLOYED_AT` as the instant
   the deployment from P1 went live (the platform record, in UTC). Expected: for every a-label,
@@ -293,7 +505,16 @@ a STOP on the write sequence only. Record each answer as a count, a boolean or a
     **STOP here means no write until the founder rules at plan 14 Task 2.** The read-only
     steps still run and are recorded: P5, P6, B'1 and B'2. B'3a onward (the in-flight check, the
     guarded `enqueue` and everything after it) does not run before the ruling, and a rebuild runs
-    only once `okx_order_gate` reads `ok`.
+    only once `okx_order_gate` reads `ok`. `167.2.1.1.2.1-OKX-ORDER-UNMEASURED` closed on
+    2026-10-28 (Phase 173's deployed probe read `okx-order: ok`). Phase 178 D-02 (founder
+    2026-10-28, "Also read each target (Recommended)") adds a per-target reading: each label in
+    `MS_LABELS` needs its own probe account record, mapped through `crosswalk`, with `selection`
+    `ok`, `okx_members_with_trades` at least 1, `okx_order_readings` equal to it,
+    `okx_order_violations` 0, `okx_passes_ended_full` 0 and `okx_order_failure_class` `none`; a
+    label without that reading is not written. A label whose OKX members read no trade inside the
+    window (`okx_members_with_trades` 0) has no reading and is recorded
+    `recorded, not recomputed (no ordering reading)`, unless the founder's recorded ruling at
+    Phase 178's measurement checkpoint says otherwise.
   - `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE`: one OKX account (named there by the probe's own
     label, which is not an a-label: map it by what the entry says, one OKX member and a 90-day
     window, against B'1's `okx_working` and `keys_total`) is refused `anchor_skipped_implausible`.
@@ -306,6 +527,52 @@ a STOP on the write sequence only. Record each answer as a count, a boolean or a
   if** it is within 30 minutes of 00:00Z on either side: a job that crosses midnight mid-crawl
   refuses `anchor_skipped_okx_terminus`. Run late in the UTC day: the rebuild's last row is a live
   read labelled today, so the closer to the close, the closer it is to that day's close.
+- **P7 — a dead key never shapes a rebuilt window (`okx-nonworking-keys.sql`, Phase 178 D-06).**
+  Run the `marker` form as its own call, then the file by absolute path with `q`, output to `MS_SP`:
+  `q "$PWD/docs/runbooks/marksource-okx-census/okx-nonworking-keys.sql" > "$MS_SP/p7-nonworking.csv"`.
+  Record per chosen a-label `dead_exchange_accounts`, `dead_keys`, `predicted_window_days`,
+  `in_window_days_overlapping_dead_key_holdings`, `in_window_days_written_in_bulk`,
+  `deleted_keys_seen_in_window` and `p7_outcome`. The file also prints `key_digest`, a hash of the
+  allocator's key ids and working flags that B'3b binds the job to. It stays in the scratch
+  directory with the CSV and is never written in a tracked file.
+  `rebuild` lets the label go on. `not recomputed (D-06)` is the founder's ruling of 2026-10-28,
+  quoted verbatim: "Don't rebuild that account (Recommended)", option text "Keep its stored
+  window as is, name it as not recomputed; other accounts are rebuilt normally." It is applied before
+  the write: the label is left out of the `MS_LABELS` exported for B'3a onward and recorded
+  `recorded, not recomputed (D-06)`. This is not a "predicted outcome" in B'1's sense: B'1 forbids
+  choosing an account by a predicted refusal token, and P7 applies a standing ruling to a measured
+  fact, it predicts no token.
+  **A label whose `predicted_window_days` is not 90 is never written.** No crawled OKX exchange
+  account remains for it, so the rebuild would replace 729 or 730 days, far outside the 90-day OKX
+  window this runbook corrects, and B'1's seam rule and B'6's `older_rows_changed` assume 90. It is
+  left out of the `MS_LABELS` exported for B'3a onward, whatever its `p7_outcome` reads, and
+  recorded `recorded, not recomputed (no crawled OKX account)`.
+  Why: the daily refresh drops an exchange account on the day its last eligible key is revoked or
+  disconnected and carries an `error` or `sign_in_failed` key at most `CARRY_AGE_CAP_DAYS` (7) days,
+  so a rebuild that skips a dead account (or reads an account through a working key on another venue
+  than a dead member) matches the stored rows only on days after the key stopped counting. The cap
+  is recent: v0.111.0.0 (2026-09-29) began carrying a quiet account at its latest holdings with NO
+  age limit, and v0.132.5.0 (2026-10-19) added the 7-day cap, so a row labelled 2026-09-29 to
+  2026-10-19 can hold a dead key's balance from any age. The overlap test is therefore the holdings
+  span widened by 1 day before and 7 after, plus every stored day from 2026-09-29 to 2026-10-19
+  after the key's first holdings day (the lower bound is the release date, a superset; the upper bound is measured: the cap's merge CI finished 2026-10-19T20:31Z, before the 2026-10-20 05:00Z refresh). It is a
+  superset of the days the key could have counted, and a bulk-written in-window day may hold a dead
+  key's balance with no holdings row behind it.
+  **A hard-deleted key leaves a trace, and P7 counts it (`deleted_keys_seen_in_window`).**
+  `delete_allocator_api_key` (the product's "delete the holdings too" choice) removes the key and
+  its holdings rows together and writes no audit event of its own, while the stored snapshot rows
+  of a book that keeps another key still hold that account up to its deletion day, and the
+  rebuild cannot read it either. But every holdings poll writes one `audit_log` row per key
+  (`allocator.holdings.sync_completed` or `allocator.holdings.sync_failed`, `entity_type`
+  `api_key`, `entity_id` the key, `user_id` the allocator), `audit_log.entity_id` has no foreign
+  key, and hot rows are kept 2 years. So the file counts the distinct keys the allocator's polls
+  named from 8 days before the window starts (the carry pad) that are no longer in `api_keys`.
+  A count above 0 rules the label `not recomputed (D-06)` whatever else it reads.
+  The audit write is fire-and-forget (a dropped row leaves nothing to count), so the owner's word
+  stays as the backstop: per chosen label, record the key owner's confirmation that no key of that
+  account was deleted with its holdings inside the predicted window; without it the label is
+  recorded `recorded, not recomputed (D-06)` and left out of `MS_LABELS`.
+  **Abort if** the file errors or prints no row for a chosen label.
 
 ## B'1 — census and prediction (read-only, counts only)
 
@@ -333,18 +600,21 @@ its window may already have been rebuilt: both read `suspect_days_in_window` 0 a
 **Predict each chosen account's outcome by the code's rules** and record the prediction per
 a-label (all from the feasibility file's columns, plus P4):
 
-- `keys_on_a_venue_the_rebuild_refuses` above 0: `account_key_venue_unsupported`
-  (`_ACCOUNT_REBUILD_VENUES` is bybit, binance, mt5, okx; Deribit counts as $0).
-- An exchange account with no working key: `account_key_not_working`.
+- An exchange account (a key group, as `account_groups` forms it) with no working key is skipped and counted, never refused on its own (Phase 178 D-05), on any venue, sfox included: the audit's `account_non_working_accounts_excluded` and P7's `dead_exchange_accounts` carry the count. `account_key_not_working` is predicted only when every exchange account of the allocator is dead or counted as $0 (Deribit), so nothing is left to crawl.
+- P7's `refused_exchange_accounts` above 0: `account_key_venue_unsupported` (a WORKING key on a venue outside bybit, binance, mt5, okx, or working keys of one exchange account on two venues; Deribit counts as $0). A dead key's venue never decides this (Phase 178 D-05).
 - `working_keys_with_unknown_account` above 1: look closer (the file does not split it by
   exchange). Two or more unstamped working keys on one of bybit, binance or okx:
   `account_identity_pending`.
 - The account `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE` names (P4): `anchor_skipped_implausible`.
 - Otherwise: rebuildable unless a venue-read refusal or `history_days_unreproduced`, which depends
   on the replay and cannot be predicted from the database.
-- Predicted window: `predicted_window_days` (90, the OKX window). A seam row is expected iff
-  `days_before_the_90_day_window` is above 0. `keys_total` is the key count B'5 compares with
+- Predicted window: P7's `predicted_window_days` (90 while a crawled OKX exchange account
+  remains; a dead OKX account beside a working Bybit one gives 730), not the feasibility file's
+  fixed 90. A label that does not read 90 is left out of `MS_LABELS` (P7). A seam row is expected
+  iff `days_before_the_90_day_window` is above 0. `keys_total` is the key count B'5 compares with
   `account_key_count`.
+- Labels P7 rules `not recomputed (D-06)` keep their prediction line and are left out of
+  `MS_LABELS` from B'3a on.
 
 ## B'2 — before (read-only, scratch only, amounts)
 
@@ -356,9 +626,34 @@ Keep it in `MS_SP`. Nothing from it is written into a tracked file.
 
 ## B'3a — in-flight pre-check (first step that is not run while P4 is a STOP)
 
+**Timing.** B'3a and B'3b are one sitting and fall outside the daily holdings poll and refresh band.
+Read both slots when you run it, from the `schedule` of the jobs named `poll-allocator-positions`
+and `refresh-allocator-equity` in `scripts/prod-prober/cron-manifest.json` (never from memory).
+The band opens 30 minutes before the poll slot and closes 105 minutes after the refresh slot.
+A poll writes the transient `error` status that P7
+reads as a dead key, so a reading taken inside the band can move before the write. Inside the band,
+wait for it to end and start B'3a over.
+
 Export `MS_LABELS`, render and run `inflight`. Expected: `reconstruct_jobs_in_flight` 0. If it is
 above 0, wait for the jobs to end (never cancel one) and run it again. Export the `t0` of the run
 that read 0 as `MS_T0` and keep it in `MS_SP`.
+
+Then re-run P7 (the `marker` form first as its own call, then `okx-nonworking-keys.sql`, output to
+`$MS_SP/p7-before-enqueue.csv`) and compare it, per chosen label, with the pre-flight file
+`$MS_SP/p7-nonworking.csv`. **STOP** if the file errors, prints no row, or lacks a chosen label, or
+if any of `dead_exchange_accounts`, `dead_keys`, `in_window_days_overlapping_dead_key_holdings`,
+`in_window_days_written_in_bulk`, `deleted_keys_seen_in_window`, `p7_outcome` or `key_digest` differs
+for any chosen label, or if a chosen label no longer reads `predicted_window_days` 90: a key
+changed state (a poll blip, a revoke, a reconnect, a key added or deleted) or a stored day moved
+which days a dead key's holdings overlap (the daily refresh stores one), so the first reading was a
+claim and not an input. Go back to P7 and start again; never enqueue on a reading that has moved.
+Only an unchanged reading goes on to B'3b, and this file is the reading B'3b carries: the renderer
+fills the `enqueue` form's `__EXPECTED__` from it, and refuses (exit 2) a file modified before
+`MS_T0`. So a file left from an earlier attempt, or a re-run skipped on a second pass, is never
+carried: every B'3a, the re-enqueue after a refusal included, exports a fresh `MS_T0` and then
+re-runs P7. (`MS_T0` is the database's clock and the modification time is this machine's. The
+re-run comes minutes after `t0`, so only a skew larger than that refuses a fresh file, and it
+refuses loudly.)
 
 ## B'3b — the one write: ONE forced reconstruct per chosen account
 
@@ -371,8 +666,27 @@ calls only `public.enqueue_compute_job`. The job key of each a-label is chosen i
 the allocator history probe chose it: the earliest-created working Bybit key, else the earliest-
 created working OKX key. The statement skips an account that already has a reconstruct job open
 or created at or after `MS_T0`, so a retry after an ambiguous CLI error can never queue a second
-forced job (two would race the same window replace). It prints `marker_is_prod`, the accounts it
-targeted and the ids it got back, nothing else.
+forced job (two would race the same window replace). The operator's reading goes into the job:
+the renderer fills `__EXPECTED__` from the B'3a re-run file (`p7-before-enqueue.csv`) with each
+chosen label's `dead_exchange_accounts`, `predicted_window_days` and `key_digest`, never typed by
+hand, and the statement targets a label only when its own count of exchange accounts with no
+working key, its own predicted window (P7's grouping: the block from `user_key` to
+`exchange_account` is the one in `okx-nonworking-keys.sql`, pinned byte for byte) and its own key
+digest equal the rendered values. The digest is the lower-case hex MD5 of every `api_keys` row of
+the allocator, sorted by the id's text, each rendered `<id>:<t or f>` (`t` when the key is working)
+and joined by `|`. The `key_digest` block is the same in `okx-nonworking-keys.sql` (pinned byte for
+byte) and the worker computes the same string (pinned by a literal). It moves when any key is
+added, deleted, revived or killed, which the two counts cannot see: a hard-deleted working sibling,
+or one dead account reviving while another goes dead. The job's metadata carries the RENDERED
+values as `expected_non_working_accounts`, `expected_window_days` and `expected_key_digest`, not a
+recount. The worker refuses `account_keys_changed` before any venue call, on every claim (a job
+that is deferred and claimed again is checked again), when its own count, window or digest
+differs, so a key that stopped working, revived, was added or was deleted after the B'3a re-run
+cannot be skipped from a window the operator measured as complete. What the contract binds is the
+allocator's key set and each key's working flag. It does not bind P7's other inputs (the stored
+days a dead key's holdings overlap, the days written in bulk, the audit trace of a deleted key):
+the B'3a re-run reads them, and nothing re-reads them after the enqueue. It prints
+`marker_is_prod`, the accounts it targeted and the ids it got back, nothing else.
 
 <!-- form: enqueue -->
 ```sql
@@ -383,7 +697,7 @@ BEGIN
   END IF;
 END
 $guard$;
-WITH m AS (
+WITH RECURSIVE m AS (
   SELECT coalesce((SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()) = __MARKER__, false)::int AS marker_is_prod
 ),
 okx_account AS (
@@ -393,17 +707,103 @@ okx_account AS (
    WHERE lower(k.exchange) = 'okx'
    GROUP BY k.user_id
 ),
+user_key AS (
+  SELECT a.label_no,
+         k.id,
+         lower(k.exchange) AS venue,
+         (k.is_active
+            AND k.disconnected_at IS NULL
+            AND (k.sync_status IS NULL OR k.sync_status NOT IN ('revoked', 'sign_in_failed', 'error'))) AS working,
+         k.account_share_kind,
+         k.account_shared_with_api_key_id
+    FROM public.api_keys k
+    JOIN okx_account a ON a.allocator_id = k.user_id
+),
+marker_edge AS (
+  SELECT u.label_no,
+         u.id AS a_id,
+         u.account_shared_with_api_key_id AS b_id
+    FROM user_key u
+    JOIN user_key v ON v.label_no = u.label_no AND v.id = u.account_shared_with_api_key_id
+   WHERE u.account_share_kind IN ('duplicate', 'composite_member')
+     AND u.account_shared_with_api_key_id <> u.id
+),
+reach AS (
+  SELECT u.label_no,
+         u.id AS key_id,
+         u.id AS reached_id
+    FROM user_key u
+  UNION
+  SELECT r.label_no,
+         r.key_id,
+         CASE WHEN e.a_id = r.reached_id THEN e.b_id ELSE e.a_id END
+    FROM reach r
+    JOIN marker_edge e
+      ON e.label_no = r.label_no
+     AND (e.a_id = r.reached_id OR e.b_id = r.reached_id)
+),
+key_group AS (
+  SELECT label_no,
+         key_id,
+         min(reached_id::text) AS group_root
+    FROM reach
+   GROUP BY label_no, key_id
+),
+group_member AS (
+  SELECT g.label_no,
+         g.group_root,
+         u.venue,
+         u.working,
+         (u.working OR NOT bool_or(u.working) OVER (PARTITION BY g.label_no, g.group_root)) AS deciding
+    FROM key_group g
+    JOIN user_key u ON u.label_no = g.label_no AND u.id = g.key_id
+),
+exchange_account AS (
+  SELECT label_no,
+         group_root,
+         bool_or(working) AS has_working,
+         count(DISTINCT venue) FILTER (WHERE deciding) AS deciding_venue_count,
+         CASE WHEN count(DISTINCT venue) FILTER (WHERE deciding) = 1
+              THEN min(venue) FILTER (WHERE deciding) END AS venue,
+         CASE WHEN bool_and(venue = 'deribit') FILTER (WHERE deciding) THEN 'zero'
+              WHEN NOT bool_or(working) THEN 'dead'
+              WHEN count(DISTINCT venue) FILTER (WHERE deciding) > 1
+                OR min(venue) FILTER (WHERE deciding) NOT IN ('deribit', 'bybit', 'binance', 'mt5', 'okx') THEN 'refused'
+              ELSE 'crawled' END AS state
+    FROM group_member
+   GROUP BY label_no, group_root
+),
+key_digest AS (
+  SELECT u.label_no,
+         md5(string_agg(u.id::text || ':' || CASE WHEN u.working THEN 't' ELSE 'f' END, '|' ORDER BY u.id::text COLLATE "C")) AS key_digest
+    FROM user_key u
+   GROUP BY u.label_no
+),
+expected AS (
+  SELECT v.label_no,
+         v.expected_dead_accounts,
+         v.expected_window_days,
+         v.expected_key_digest
+    FROM (VALUES __EXPECTED__) AS v(label_no, expected_dead_accounts, expected_window_days, expected_key_digest)
+),
 job_key AS (
   SELECT DISTINCT ON (k.user_id)
          a.label_no,
-         k.id AS api_key_id
+         k.id AS api_key_id,
+         ex.expected_dead_accounts,
+         ex.expected_window_days,
+         ex.expected_key_digest
     FROM public.api_keys k
     JOIN okx_account a ON a.allocator_id = k.user_id
+    JOIN expected ex ON ex.label_no = a.label_no
    WHERE a.label_no = ANY(__LABELS__)
      AND k.is_active
      AND k.disconnected_at IS NULL
      AND (k.sync_status IS NULL OR k.sync_status NOT IN ('revoked', 'sign_in_failed', 'error'))
      AND lower(k.exchange) IN ('bybit', 'okx')
+     AND ex.expected_dead_accounts = (SELECT count(*) FROM exchange_account x WHERE x.label_no = a.label_no AND x.state = 'dead')
+     AND ex.expected_window_days = CASE WHEN EXISTS (SELECT 1 FROM exchange_account x WHERE x.label_no = a.label_no AND x.state = 'crawled' AND x.venue = 'okx') THEN 90 ELSE 730 END
+     AND ex.expected_key_digest = (SELECT d.key_digest FROM key_digest d WHERE d.label_no = a.label_no)
      AND NOT EXISTS (
        SELECT 1
          FROM public.compute_jobs c
@@ -421,7 +821,12 @@ enq AS (
            p_strategy_id := NULL,
            p_kind := 'reconstruct_allocator_history',
            p_api_key_id := j.api_key_id,
-           p_metadata := jsonb_build_object('force_rebuild', true)
+           p_metadata := jsonb_build_object(
+             'force_rebuild', true,
+             'expected_non_working_accounts', j.expected_dead_accounts,
+             'expected_window_days', j.expected_window_days,
+             'expected_key_digest', j.expected_key_digest
+           )
          ) AS job_id
     FROM job_key j
 )
@@ -432,14 +837,21 @@ SELECT m.marker_is_prod,
 ```
 
 - **Expected:** `marker_is_prod` 1 and `accounts_targeted` equal to `jobs_returned`. Fewer
-  targeted accounts than labels means an account has no working Bybit or OKX key (or a job open):
-  B'3c names which. An exception from the guard means the database did not name PRODUCTION:
+  targeted accounts than labels means an account has no working Bybit or OKX key, has a job open,
+  or reads a dead-account count, window or key digest other than the rendered P7 reading. An exception from the guard means the database did not name PRODUCTION:
   nothing was written.
 - A returned id is not proof of a new job (`_enqueue_compute_job_internal` returns an existing
   open job's id for the same target and kind): B'3c is the proof.
 - A `serialization_failure` is a lost race. Re-run B'3a for a fresh `t0`, then B'3b.
 - The flag literal is `force_rebuild`, pinned in the worker by
-  `test_force_rebuild_key_spelling_is_the_handoff_literal`.
+  `test_force_rebuild_key_spelling_is_the_handoff_literal`. The expectation literal is
+  `expected_non_working_accounts`, the window literal is `expected_window_days` and the key-set
+  literal is `expected_key_digest`, pinned by `RECONSTRUCT_EXPECTED_NON_WORKING_KEY`,
+  `RECONSTRUCT_EXPECTED_WINDOW_KEY` and `RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY` and a vitest parity
+  check against this form.
+- A refusal `account_keys_changed` at B'5 means the expectation no longer matched the job's own
+  count, window or key digest (or the working key set moved during the crawl): re-run P7, and if it
+  still rules `rebuild`, re-enqueue once (B'5 rule 3).
 - **Never a second forced job for the same account in one attempt.**
 
 ## B'3c — new-job proof (read-only, right after B'3b)
@@ -478,7 +890,11 @@ SELECT m.marker_is_prod,
        count(c.id) AS forced_jobs_since_t0,
        (array_agg(c.status ORDER BY c.created_at DESC) FILTER (WHERE c.id IS NOT NULL))[1] AS latest_status,
        (array_agg(c.error_kind ORDER BY c.created_at DESC) FILTER (WHERE c.id IS NOT NULL))[1] AS latest_error_kind,
-       (array_agg(c.attempts ORDER BY c.created_at DESC) FILTER (WHERE c.id IS NOT NULL))[1] AS latest_attempts
+       (array_agg(c.attempts ORDER BY c.created_at DESC) FILTER (WHERE c.id IS NOT NULL))[1] AS latest_attempts,
+       (count(c.id) > 0
+          AND count(c.id) FILTER (WHERE jsonb_typeof(c.metadata -> 'expected_non_working_accounts') = 'number'
+                                    AND jsonb_typeof(c.metadata -> 'expected_window_days') = 'number'
+                                    AND jsonb_typeof(c.metadata -> 'expected_key_digest') = 'string') = count(c.id)) AS expectation_armed
   FROM m
  CROSS JOIN okx_account a
   LEFT JOIN job_key jk ON jk.label_no = a.label_no
@@ -492,9 +908,18 @@ SELECT m.marker_is_prod,
  ORDER BY a.label_no;
 ```
 
-An account with `forced_jobs_since_t0` 0 was absorbed by an existing open job (or has no job
-key): wait for it to end, then repeat B'3a to B'3c for that account only. Never enqueue a second
-forced job by hand outside that loop.
+**Expected for every label:** `forced_jobs_since_t0` 1 and `expectation_armed` true (every forced
+job since `MS_T0` carries `expected_non_working_accounts` and `expected_window_days` as JSON
+numbers and `expected_key_digest` as a JSON string). **STOP** on a false `expectation_armed`: that
+job would run without the pre-write check, and the stored window would be replaced on a reading
+nobody compared. Tell the founder at once. A worker claims a new job within seconds, so the job may
+already have started: this check is detective and not preventive, which is why the operator records
+it (`expectation_armed=true` on every `newjob` line). Never enqueue a second job by hand.
+
+An account with `forced_jobs_since_t0` 0 was absorbed by an existing open job, has no job key, or
+was not targeted because its count or window at the statement differs from the rendered P7 reading:
+wait for the open job to end, then repeat B'3a to B'3c for that account only (the B'3a re-run reads
+the moved key). Never enqueue a second forced job by hand outside that loop.
 
 ## B'4 — wait
 
@@ -549,6 +974,7 @@ SELECT m.marker_is_prod,
        coalesce(tm.metadata -> 'account_rebuild' = 'true'::jsonb, false) AS account_rebuild,
        coalesce(tm.metadata -> 'forced_rebuild' = 'true'::jsonb, false) AS forced_rebuild,
        CASE WHEN jsonb_typeof(tm.metadata -> 'account_key_count') = 'number' THEN (tm.metadata ->> 'account_key_count')::int END AS account_key_count,
+       CASE WHEN jsonb_typeof(tm.metadata -> 'account_non_working_accounts_excluded') = 'number' THEN (tm.metadata ->> 'account_non_working_accounts_excluded')::int END AS account_non_working_accounts_excluded,
        CASE WHEN jsonb_typeof(tm.metadata -> 'window_days') = 'number' THEN (tm.metadata ->> 'window_days')::int END AS window_days,
        coalesce(tm.metadata -> 'okx_terminus_hit' = 'true'::jsonb, false) AS okx_terminus_hit,
        coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(tm.metadata -> 'anchor_partial_ticker_symbols') = 'array' THEN tm.metadata -> 'anchor_partial_ticker_symbols' END), 0) > 0 AS partial_ticker_symbols_named,
@@ -605,9 +1031,12 @@ account by these rules, in order.
    - **Re-enqueue ONCE** (fresh B'3a, B'3b, B'3c, B'4, then this audit again with the new `t0`;
      keep the first attempt's token) for these 8: `positions_unreadable`, `anchor_unreadable`,
      `anchor_skipped_partial_ticker`, `anchor_skipped_okx_terminus`, `account_state_unreadable`,
-     `account_key_read_failed`, `account_keys_changed`, `account_key_read_stalled` (the stored
-     windows are kept, so a later run can clear it). If it refuses again, record "recorded, not
-     recomputed (<token>)".
+     `account_key_read_failed`, `account_key_read_stalled`, `account_keys_changed`. If it refuses
+     again, record "recorded, not recomputed (<token>)". `account_key_read_stalled` (Phase 171)
+     keeps the stored windows, so a later run can clear it, which is why it is re-enqueued once.
+     `account_keys_changed` also means the enqueue's expectation (the P7 dead-account count or
+     window) no longer matched the job's own: re-run P7 first, and re-enqueue only if it still
+     rules `rebuild`.
    - **Record only, no re-run** for these 9: `anchor_skipped_unreliable_replay`,
      `anchor_skipped_implausible`, `account_identity_pending`, `account_key_venue_unsupported`,
      `account_key_not_working`, `account_key_no_rows`, `account_sum_empty`,
@@ -621,14 +1050,19 @@ account by these rules, in order.
 5. **RECOMPUTED only when ALL of these hold:** `terminal_kind` is `reconstruct_complete` with no
    `completion_reason` and none of rule 4's flags; the `newjob` row's `latest_status` is `done`;
    `atomic_replace`, `account_rebuild` and `forced_rebuild` are true; `account_key_count` equals
-   B'1's `keys_total`; `window_days` equals B'1's predicted window (90); a seam row exists
+   B'1's `keys_total`; `account_non_working_accounts_excluded` equals P7's
+   `dead_exchange_accounts` for the a-label (a mismatch is a STOP: the deployed selection is not
+   what P7 measured, and an exchange account may have left the window unmeasured); `window_days`
+   equals P7's `predicted_window_days`; a seam row exists
    (`snapshot_rebuild_boundary_present`) iff B'1 counted days before the window; **and the
    after-census's `suspect_days_in_window` for the a-label is at or below the post-deploy tail**
    (B'6). Then the row diff in B'6 is read; rows before the seam changed must be 0, any other
    count is a STOP (the older rows were to be kept byte for byte).
 6. **Everything else is NOT recomputed** and is recorded with its cause. A completion with
    `atomic_replace` false, or without `account_rebuild`, is a STOP (the deployed code is not this
-   runbook's). `reconstruct_unexpected_noop`, `reconstruct_no_data` and
+   runbook's). A completion whose
+   `account_non_working_accounts_excluded` is NULL is a STOP (the deployed code predates
+   Phase 178's fix). `reconstruct_unexpected_noop`, `reconstruct_no_data` and
    `reconstruct_partial_unsupported` are "recorded, not recomputed (<kind>)", and the founder is
    asked if any row changed. No terminal audit while the job is terminal is "not shown (no
    terminal audit)". Anything else is "not shown (<cause>)".
@@ -723,7 +1157,7 @@ Then delete the scratch directory (print its path first: `echo "$MS_SP"`, then `
 ## What this cannot reach
 
 The forced rebuild is the only product path that recomputes a stored past row, and it reaches the
-last 90 days of snapshots. Three things stay as stored. Each is KEPT and NAMED here and in the
+last 90 days of snapshots. Three things stay as stored, P7 can add a fourth case, and a fifth case only the key owner's confirmation covers (the last two bullets). Each of the three is KEPT and NAMED here and in the
 ledger entry `167.2.1.1.1.1-OKX-DOUBLE-COUNT-BEYOND-REBUILD-WINDOW` in `TODOS.md`, and the
 census counts each one:
 
@@ -743,6 +1177,18 @@ census counts each one:
   commit time from the holdings AUM of that moment, in an append-only `audit_log` row. An OKX
   allocator who committed a scenario while open profit was on carries the double count in that
   row, if any such commit exists. Nothing reads it after the commit.
+- **Accounts P7 rules `not recomputed (D-06)` (Phase 178, a ruling and not a window limit).**
+  A dead key's holdings overlap their stored window, or a day of it was written in bulk with a dead key present, so the rebuild would not reproduce
+  the stored days. Such an account keeps its whole stored window; its in-window suspect days stay as
+  stored, are named with their count (`suspect_days_in_window` from the B'1 census), and the founder's
+  ruling of 2026-10-28 is cited beside them.
+- **A key deleted with its holdings inside the window whose poll audit rows were dropped (Phase 178, backstop only).**
+  The product's hard delete removes the key and its holdings rows and records nothing, so the
+  rebuild cannot see that an account was counted in the stored days and is gone from the keys, and
+  writes those days lower by that whole account. P7 reads the trace the polls left in `audit_log`
+  (`deleted_keys_seen_in_window`) and rules such a label `not recomputed (D-06)`. A poll's audit
+  write is fire-and-forget, so a dropped row leaves nothing; the key owner's confirmation recorded
+  in P7 is the control for that residual, and an account for which it cannot be given is not rebuilt.
 
 **The hand-computed subtraction is not a product path and is not in this runbook.** Subtracting
 the same-day OKX derivative open profit from the USDT row and from the snapshot is deterministic
