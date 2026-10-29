@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,7 +20,14 @@ import pytest
 
 from services import equity_reconstruction as er
 from services.job_worker import classify_exception
-from tests._trade_pages import DAY_MS, VenueTradeBook, real_ccxt_client, trade_rows
+from tests._trade_pages import (
+    DAY_MS,
+    VenueTradeBook,
+    install_unified_log,
+    real_ccxt_client,
+    trade_rows,
+    unified_flow,
+)
 from tests.test_equity_reconstruction import _make_ohlcv_row
 
 
@@ -54,6 +62,7 @@ async def test_a_bybit_window_with_a_quiet_first_week_and_more_than_one_page_rea
     exchange.fetch_ohlcv = AsyncMock(
         return_value=[_make_ohlcv_row(start_ms + d * DAY_MS, 50000.0) for d in range(62)]
     )
+    install_unified_log(exchange)
 
     seen: list[list[dict[str, Any]]] = []
     original = er._compute_daily_equity
@@ -69,6 +78,131 @@ async def test_a_bybit_window_with_a_quiet_first_week_and_more_than_one_page_rea
     assert len(seen) == 1
     assert len(seen[0]) == 250
     assert len({t["id"] for t in seen[0]}) == 250
+
+
+# ---------------------------------------------------------------------------
+# Phase 180 BYBITFUNDING plan 06: the rebuild's Bybit flows are the Unified edge's, read first
+# ---------------------------------------------------------------------------
+
+
+def _bybit_flow_exchange(
+    start_ms: int, order: list[str] | None = None
+) -> tuple[Any, Any, Any]:
+    """A Bybit exchange holding one trade, an on-chain pair (deposit "fake-onchain-1", withdrawal
+    "fake-onchain-2") and a Unified log of one TRANSFER_IN and one TRANSFER_OUT. When ``order`` is
+    given, each log request and each trade request appends "log" or "trade" to it."""
+    exchange = AsyncMock()
+    exchange.id = "bybit"
+    trades = trade_rows(1, start_ms + 3 * DAY_MS, DAY_MS, id_prefix="t")
+    trade_book = VenueTradeBook(exchange, trades)
+    exchange.fetch_my_trades = AsyncMock(side_effect=trade_book)
+    exchange.fetch_deposits = AsyncMock(
+        return_value=[
+            {"id": "fake-onchain-1", "currency": "ETH", "amount": 1.0, "timestamp": start_ms + DAY_MS}
+        ]
+    )
+    exchange.fetch_withdrawals = AsyncMock(
+        return_value=[
+            {"id": "fake-onchain-2", "currency": "ETH", "amount": 0.5, "timestamp": start_ms + 2 * DAY_MS}
+        ]
+    )
+    exchange.fetch_ohlcv = AsyncMock(
+        return_value=[_make_ohlcv_row(start_ms + d * DAY_MS, 50000.0) for d in range(12)]
+    )
+    log = install_unified_log(
+        exchange,
+        [
+            unified_flow("fake-unified-in-1", "TRANSFER_IN", start_ms + 4 * DAY_MS, change="1000"),
+            unified_flow("fake-unified-out-1", "TRANSFER_OUT", start_ms + 5 * DAY_MS, change="-200"),
+        ],
+    )
+    if order is not None:
+        logged = exchange.private_get_v5_account_transaction_log.side_effect
+
+        async def _log(params: dict[str, Any]) -> Any:
+            order.append("log")
+            return await logged(params)
+
+        async def _trade(*args: Any, **kwargs: Any) -> Any:
+            order.append("trade")
+            return await trade_book(*args, **kwargs)
+
+        exchange.private_get_v5_account_transaction_log = AsyncMock(side_effect=_log)
+        exchange.fetch_my_trades = AsyncMock(side_effect=_trade)
+    return exchange, log, trade_book
+
+
+async def test_the_bybit_replay_takes_only_the_unified_flows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-01: a Bybit replay is fed the Unified edge's rows and NOTHING from the on-chain pair.
+    Reading the on-chain pair instead drops the internal transfers (the money that funds the
+    account is missed); adding both counts a FUND deposit and its FUND-to-UNIFIED move twice."""
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=10)
+    exchange, log, _ = _bybit_flow_exchange(_utc_midnight(start_date))
+
+    seen: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+    original = er._compute_daily_equity
+
+    def _spy(trades_in: Any, deposits: Any, withdrawals: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append((list(deposits), list(withdrawals)))
+        return original(trades_in, deposits, withdrawals, *args, **kwargs)
+
+    monkeypatch.setattr(er, "_compute_daily_equity", _spy)
+
+    await er._fetch_and_price_window(exchange, "bybit", MagicMock(), start_date, end_date)
+
+    assert len(seen) == 1
+    deposits, withdrawals = seen[0]
+    assert {d["id"] for d in deposits} == {"fake-unified-in-1"}
+    assert {w["id"] for w in withdrawals} == {"fake-unified-out-1"}
+    assert exchange.fetch_deposits.await_count == 0
+    assert exchange.fetch_withdrawals.await_count == 0
+    assert log.calls, "the Unified log was never asked"
+    assert {c["accountType"] for c in log.calls} == {"UNIFIED"}
+    assert {c["type"] for c in log.calls} == {"TRANSFER_IN", "TRANSFER_OUT"}
+
+
+async def test_the_bybit_flows_are_read_before_the_trades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orchestrator reading 1: every Unified log request precedes the first trade request, so a
+    trade crawl that runs out of time cannot lose the flows, and a missing permission is found
+    before the long read."""
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=10)
+    order: list[str] = []
+    exchange, _, _ = _bybit_flow_exchange(_utc_midnight(start_date), order)
+
+    await er._fetch_and_price_window(exchange, "bybit", MagicMock(), start_date, end_date)
+
+    assert "log" in order and "trade" in order
+    assert order.index("trade") > max(i for i, kind in enumerate(order) if kind == "log"), order
+
+
+def test_only_the_rebuild_reads_the_unified_flows() -> None:
+    """D-02: the live broker-dailies, composite and OKX-archive readers keep their kinds. Among
+    the service modules only the rebuild and the reader itself name the function; the worker may
+    import the reader's error class (the classifier arm) and nothing else from the module."""
+    services = Path(__file__).resolve().parent.parent / "services"
+    naming = sorted(
+        path.name
+        for path in services.glob("*.py")
+        if "fetch_bybit_unified_flows" in path.read_text(encoding="utf-8")
+    )
+    assert naming == ["bybit_unified_flows.py", "equity_reconstruction.py"], naming
+
+    for name in ("broker_dailies.py", "okx_archive_job.py"):
+        text = (services / name).read_text(encoding="utf-8")
+        assert "fetch_bybit_unified_flows" not in text, name
+        assert "bybit_unified_flows" not in text, name
+
+    worker = (services / "job_worker.py").read_text(encoding="utf-8").splitlines()
+    mentions = [line for line in worker if "bybit_unified_flows" in line]
+    assert len(mentions) <= 1, mentions
+    for line in mentions:
+        assert line.strip().replace("(", "").replace(")", "").endswith("import BybitUnifiedFlowReadError"), line
 
 
 # ---------------------------------------------------------------------------

@@ -40,7 +40,9 @@ from typing import Any
 import pytest
 
 import scripts.allocator_history_probe as hp
+import scripts.bybit_funding_record as bf
 from services import equity_reconstruction as er
+from tests._bybit_evidence import DAY_MS, METHODS, EvidenceBook
 
 _PROBE_SRC = Path(hp.__file__).read_text(encoding="utf-8")
 
@@ -1083,6 +1085,181 @@ async def test_transfer_events_older_than_365_days_are_counted_per_account(
     assert "fake-transfer" not in captured.out + captured.err
 
 
+async def test_a_bybit_members_onchain_deposit_evidence_reaches_the_account_record(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SC-1 tracer: the probe names how a Bybit account was funded. The on-chain deposit record is
+    # read newest window first, counted by success status, and printed as counts, a closed age
+    # bucket and a state token; the failed row is visible as a count and never as a deposit.
+    now_ms = _ms(_TODAY) + 12 * 60 * 60 * 1000
+    monkeypatch.setattr(bf, "_now_ms", lambda: now_ms)
+    book = EvidenceBook()
+    stamps = {}
+    for days, status in ((10, "3"), (200, "3"), (500, "3"), (20, "4")):
+        stamps[days] = now_ms - days * DAY_MS
+        book.add("onchain_dep", stamps[days], status, rid=f"fake-transfer-{days}")
+    bybit = _StubVenue([_trade_page("by", 5, newest_ms=_ms(_TODAY))])
+    book.attach(bybit)
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+    assert account["bybit_onchain_dep_rows"] == 3  # the three status-3 rows, not the failed one
+    assert account["bybit_onchain_dep_older_365d"] == 1  # only the 500-day-old one
+    assert account["bybit_onchain_dep_oldest_age_bucket"] == "365-546"
+    assert account["bybit_onchain_dep_other_status_rows"] == 1
+    assert account["bybit_onchain_dep_depth_bucket"] == "547-729"  # the oldest window answered
+    assert account["bybit_onchain_dep_state"] == "read"
+    assert account["bybit_evidence_members"] == 1
+
+    # Every request spans under 30 days and carries both bounds; the first window ends at now and
+    # each next one ends a millisecond before the previous one starts (newest window first).
+    calls = book.calls_to("onchain_dep")
+    assert len(calls) >= 25  # 729 days in windows of 29 days
+    for params in calls:
+        assert int(params["endTime"]) - int(params["startTime"]) < 30 * DAY_MS
+    assert int(calls[0]["endTime"]) == now_ms
+    for newer, older in zip(calls, calls[1:]):
+        assert int(older["endTime"]) == int(newer["startTime"]) - 1
+
+    output = captured.out + captured.err
+    assert "fake-transfer" not in output
+    assert not any(str(stamp) in output for stamp in stamps.values())
+
+
+async def test_a_bybit_members_census_reaches_the_account_record(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SC-1, orchestrator reading 3: Earn, bonus-transfer and PEF log rows are not flows, but the
+    # founder must see how many there are before a6's history is rebuilt. They reach the account
+    # record as one count and a state, never as a flow and never with an id or a stamp.
+    now_ms = _ms(_TODAY) + 12 * 60 * 60 * 1000
+    monkeypatch.setattr(bf, "_now_ms", lambda: now_ms)
+    book = EvidenceBook()
+    stamps = []
+    for log_type, days, rid in (
+        ("ONCHAINEARN_SUBSCRIPTION", 10, "fake-transfer-earn-a"),
+        ("ONCHAINEARN_SUBSCRIPTION", 45, "fake-transfer-earn-b"),
+        ("BONUS_TRANSFER_IN", 200, "fake-transfer-bonus"),
+        ("TRANSFER_IN", 20, "fake-transfer-in"),  # a flow of the rebuild, not a census row
+        ("TRADE", 30, "fake-transfer-trade"),
+    ):
+        stamps.append(now_ms - days * DAY_MS)
+        book.add_log(log_type, stamps[-1], rid=rid)
+    bybit = _StubVenue([_trade_page("by", 5, newest_ms=_ms(_TODAY))])
+    book.attach(bybit)
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+    assert account["bybit_other_transfer_like_rows"] == 3
+    assert account["bybit_other_transfer_like_state"] == "read"
+
+    calls = book.calls_to("transaction_log")
+    assert {params["type"] for params in calls} == set(bf.CENSUS_LOG_TYPES)
+    assert all(params["accountType"] == "UNIFIED" for params in calls)
+    output = captured.out + captured.err
+    assert "fake-transfer" not in output
+    assert not any(str(stamp) in output for stamp in stamps)
+
+
+_FUNDING_LEAK_NEEDLES = (
+    "fake-transfer",
+    "fake-member",
+    "fake-userid",
+    "fake-parentuid",
+    "987654.32",
+    "123456.789",
+)
+
+
+def test_a_record_with_every_funding_key_set_is_emitted() -> None:
+    # Half one: the whitelist and the closed vocabulary accept every funding key at a real,
+    # non-default value, so the first honest run of a populated account is not refused at the
+    # emitter. A key left out of the validators would be refused here, not at SC-3.
+    populated: dict[str, Any] = {
+        "bybit_key_info_state": "read",
+        "bybit_is_master": True,
+        "bybit_is_uta": False,
+        "bybit_other_transfer_like_rows": 4,
+        "bybit_other_transfer_like_state": "read",
+    }
+    for source in bf.EVIDENCE_SOURCES:
+        populated.update(
+            {
+                f"bybit_{source.name}_rows": 7,
+                f"bybit_{source.name}_older_365d": 2,
+                f"bybit_{source.name}_oldest_age_bucket": "365-546",
+                f"bybit_{source.name}_other_status_rows": 1,
+                f"bybit_{source.name}_depth_bucket": "547-729",
+                f"bybit_{source.name}_state": "read",
+            }
+        )
+    assert set(populated) == set(bf.FUNDING_KEYS)
+    defaults = bf.funding_defaults()
+    assert all(populated[key] != defaults[key] for key in bf.FUNDING_KEYS)  # every key is non-default
+
+    record = hp._account_record("a1", "2026-10-23", bybit_evidence_members=1, **populated)
+    printed = json.loads(hp.emit_record(record))
+    assert all(printed[key] == populated[key] for key in bf.FUNDING_KEYS)
+    assert printed["bybit_evidence_members"] == 1
+
+
+async def test_a_fully_populated_evidence_record_is_emitted_and_leaks_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SC-1 / T-180-33: the probe's output is pasted into a tracked file in a public repo. Every
+    # evidence source, the key info and the census answer with rows that carry transfer ids, member
+    # ids, a UID and amounts; the record must be fully populated and none of them may reach stdout
+    # or stderr.
+    now_ms = _ms(_TODAY) + 12 * 60 * 60 * 1000
+    monkeypatch.setattr(bf, "_now_ms", lambda: now_ms)
+    book = EvidenceBook()
+    stamps: list[int] = []
+    for name, status in (
+        ("onchain_dep", "3"),
+        ("internal_dep", 2),
+        ("withdraw_all", "success"),
+        ("inter_xfer", "SUCCESS"),
+        ("universal_xfer", "SUCCESS"),
+    ):
+        for days in (10, 400):
+            stamps.append(now_ms - days * DAY_MS)
+            book.add(name, stamps[-1], status, rid=f"fake-transfer-{name}-{days}", amount="987654.32")
+        stamps.append(now_ms - 20 * DAY_MS)
+        book.add(name, stamps[-1], "failed-status", rid=f"fake-transfer-{name}-other", amount="987654.32")
+    for index, log_type in enumerate(bf.CENSUS_LOG_TYPES[:4]):
+        stamps.append(now_ms - (30 + index) * DAY_MS)
+        book.add_log(log_type, stamps[-1], rid=f"fake-transfer-log-{index}", change="123456.789")
+    bybit = _StubVenue([_trade_page("by", 5, newest_ms=_ms(_TODAY))])
+    book.attach(bybit)
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+
+    # The record is fully populated, so a leak had every chance to show.
+    defaults = bf.funding_defaults()
+    assert all(account[key] != defaults[key] for key in bf.FUNDING_KEYS), [
+        key for key in bf.FUNDING_KEYS if account[key] == defaults[key]
+    ]
+    assert account["bybit_is_master"] is True and account["bybit_is_uta"] is True
+    assert account["bybit_other_transfer_like_rows"] == 4
+    assert all(account[f"bybit_{src.name}_rows"] == 2 for src in bf.EVIDENCE_SOURCES)
+    assert all(account[f"bybit_{src.name}_other_status_rows"] == 1 for src in bf.EVIDENCE_SOURCES)
+
+    output = captured.out + captured.err
+    for needle in _FUNDING_LEAK_NEEDLES:
+        assert needle not in output, needle
+    assert not any(str(stamp) in output for stamp in stamps)
+
+
 async def test_fills_older_than_the_first_transfer_are_recorded_as_evidence(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1186,6 +1363,760 @@ async def test_the_rebuilds_own_transfer_read_is_what_the_recorder_sees() -> Non
     await fetch_ccxt_transfers(venue, "deposits", cutoff - 10**9, cutoff + 10**9)
     await fetch_ccxt_transfers(venue, "withdrawals", cutoff - 10**9, cutoff + 10**9)
     assert hp.transfers_older_than(recorder.transfers, cutoff) == 1
+
+
+class _StubVenueWithUnifiedLog(_StubVenue):
+    """A venue whose Unified transaction log answers one prepared page per requested ``type``
+    (what the rebuild's own Bybit flow read asks for after Phase 180), in the vendor's shape."""
+
+    def __init__(
+        self,
+        pages: list[list[dict[str, Any]]],
+        *,
+        rows: dict[str, list[dict[str, Any]]],
+        answers: dict[str, Any] | None = None,
+        hang_on: str | None = None,
+    ) -> None:
+        super().__init__(pages)
+        self.rows = rows
+        self.answers = answers or {}  # a raw answer, or an exception to raise, per requested type
+        self.hang_on = hang_on  # a requested type whose call never answers (the crawl bound cuts it)
+        self.log_params: list[dict[str, Any]] = []
+
+    async def private_get_v5_account_transaction_log(self, params: dict[str, Any]) -> Any:
+        self.log_params.append(dict(params))
+        if params.get("type") == self.hang_on:
+            await asyncio.sleep(5)
+        if params.get("type") in self.answers:
+            answer = self.answers[params["type"]]
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        # The venue answers each row with the type it was asked for (a test that wants another type
+        # sets it on the row, which this keeps).
+        listed = [{"type": params.get("type"), **row} for row in self.rows.get(params.get("type"), [])]
+        return {"retCode": 0, "result": {"list": listed, "nextPageCursor": ""}}
+
+
+def _log_row(rid: str, days: int, change: str, **extra: Any) -> dict[str, Any]:
+    """A raw Unified log row, stamped ``days`` before the run date, as the vendor shapes it: a
+    string of milliseconds, and ``""`` in the numeric fields a transfer does not use."""
+    row: dict[str, Any] = {
+        "id": rid,
+        "currency": "USDT",
+        "transactionTime": str(_ms(_TODAY) - days * DAY_MS),
+        "change": change,
+        "cashFlow": change,
+        "funding": "",
+    }
+    row.update(extra)
+    return row
+
+
+async def test_the_unified_log_rows_the_rebuild_reads_are_its_deposits_and_withdrawals(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # D-01: the rebuild's Bybit flow source is the Unified transaction log. Its TRANSFER_IN rows
+    # are the gate's deposit kind and its TRANSFER_OUT rows the withdrawal kind, so every per-kind
+    # field and the strict gate describe the Unified edge. Mapping them the wrong way round would
+    # print a gate that opens (or stays shut) on the wrong evidence, which is what the founder
+    # reads at SC-3.
+    in_rows = [_log_row("fake-transfer-u1", 500, "5"), _log_row("fake-transfer-u2", 10, "3")]
+    out_rows = [_log_row("fake-transfer-u3", 400, "-5")]
+    census = [_log_row("fake-transfer-u4", 30, "9")]
+    bybit = _StubVenueWithUnifiedLog(
+        [_trade_page("by", 5, newest_ms=_ms(_TODAY))],
+        rows={"TRANSFER_IN": in_rows, "TRANSFER_OUT": out_rows, "ONCHAINEARN_SUBSCRIPTION": census},
+    )
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+
+    async def _read(
+        exchange: _StubVenueWithUnifiedLog, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for log_type in ("TRANSFER_IN", "TRANSFER_IN", "TRANSFER_OUT", "ONCHAINEARN_SUBSCRIPTION"):
+            await exchange.private_get_v5_account_transaction_log(
+                {"accountType": "UNIFIED", "type": log_type, "limit": 50}
+            )
+        await exchange.fetch_my_trades(None, _ms(start), 500, {})
+        return _window_rows(end), False, {}
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+    assert (account["deposits_older_365d"], account["withdrawals_older_365d"]) == (1, 1)
+    assert (account["deposits_in_window"], account["withdrawals_in_window"]) == (2, 1)  # u1 read twice counts once
+    assert account["bybit_transfers_gate"] == "ok"
+    assert account["bybit_unified_state"] == "read"
+    assert (account["bybit_unified_in_rows"], account["bybit_unified_out_rows"]) == (2, 1)
+    assert account["bybit_unified_sign_mismatch_rows"] == 0
+    assert account["oldest_deposit_age_bucket"] == "365-546"  # 500 days
+    assert account["oldest_withdrawal_age_bucket"] == "365-546"  # 400 days
+    # The census-type row is in no count: not a flow, and not a deposit by another name.
+    assert account["transfers_older_365d"] == 2
+    output = captured.out + captured.err
+    assert "fake-transfer" not in output
+    assert not any(str(_ms(_TODAY) - days * DAY_MS) in output for days in (500, 400, 30, 10))
+
+
+async def test_a_member_that_never_reads_the_unified_log_prints_not_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A member whose reader never asks for TRANSFER_IN / TRANSFER_OUT has not read the Unified edge:
+    # the account must say "not-run", never a clean zero. The funding evidence's own census reads
+    # the same log method with other types, and those calls must not count as a flow read.
+    bybit = _StubVenueWithUnifiedLog(
+        [_trade_page("by", 5, newest_ms=_ms(_TODAY))],
+        rows={"TRANSFER_IN": [_log_row("fake-transfer-u1", 500, "5")]},
+    )
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    account = _stdout_records(capsys)[0]
+    assert any(p.get("type") not in ("TRANSFER_IN", "TRANSFER_OUT") for p in bybit.log_params)  # census ran
+    assert account["bybit_unified_state"] == "not-run"
+    assert (account["bybit_unified_in_rows"], account["bybit_unified_out_rows"]) == (0, 0)
+    assert account["bybit_unified_sign_mismatch_rows"] == 0
+    assert (account["deposits_older_365d"], account["withdrawals_older_365d"]) == (0, 0)
+    assert account["bybit_transfers_gate"] == "unmeasured"
+
+
+async def test_a_unified_log_call_that_raises_is_named_and_reraised() -> None:
+    # T-180-08: the recorder wraps the rebuild's own read, so it must never change what the rebuild
+    # sees. A failed Unified read is named by CLASS (never by message) and the SAME exception object
+    # reaches the caller, so the rebuild's own handling is untouched.
+    import ccxt
+
+    denied = ccxt.PermissionDenied("fake-transfer key 4321.5 signature=abc123")
+    venue = _StubVenueWithUnifiedLog([], rows={}, answers={"TRANSFER_IN": denied})
+    recorder = hp._TradeRecorder(venue)
+    assert recorder.unified_state() == "not-run"
+    with pytest.raises(ccxt.PermissionDenied) as raised:
+        await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": "TRANSFER_IN"})
+    assert raised.value is denied
+    assert recorder.unified_state() == "PermissionDenied"
+    assert recorder.transfers == [] and recorder.unified == []
+
+
+async def test_a_malformed_unified_answer_is_named_and_handed_back_unchanged() -> None:
+    # An answer the recorder cannot read is handed back as the very same object (the rebuild decides
+    # what it means) and is named "malformed", never read as an empty page.
+    odd = ["not", "a", "dict"]
+    venue = _StubVenueWithUnifiedLog([], rows={}, answers={"TRANSFER_OUT": odd})
+    recorder = hp._TradeRecorder(venue)
+    got = await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": "TRANSFER_OUT"})
+    assert got is odd
+    assert recorder.unified_state() == "malformed"
+
+    # A row the rebuild's reader would refuse (no id, a stamp that is not milliseconds, no amount)
+    # is malformed too, and is recorded nowhere: the counts are the reader's, not the raw page's.
+    for bad in (
+        {"change": "5", "transactionTime": "1700000000000"},
+        _log_row("fake-transfer-x", 5, "5") | {"transactionTime": "soon"},
+        _log_row("fake-transfer-d", 8, "", cashFlow=""),
+        {"id": "fake-transfer-h", "transactionTime": "1700000000000", "currency": "USDT"},
+    ):
+        venue = _StubVenueWithUnifiedLog([], rows={"TRANSFER_IN": [bad]})
+        recorder = hp._TradeRecorder(venue)
+        await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": "TRANSFER_IN"})
+        assert recorder.unified_state() == "malformed"
+        assert recorder.unified == [] and recorder.transfers == []
+    for answer in ({"result": None}, {"result": {"list": "no"}}, {}):
+        venue = _StubVenueWithUnifiedLog([], rows={}, answers={"TRANSFER_IN": answer})
+        recorder = hp._TradeRecorder(venue)
+        assert await venue.private_get_v5_account_transaction_log({"type": "TRANSFER_IN"}) is answer
+        assert recorder.unified_state() == "malformed"
+
+
+async def test_a_unified_row_whose_sign_contradicts_its_type_is_counted() -> None:
+    # RESEARCH A2: the sign of a TRANSFER_IN / TRANSFER_OUT row is not documented. Direction comes
+    # from the requested type, so a contradicting sign changes no kind; it is COUNTED, as evidence
+    # the founder reads, and never used.
+    venue = _StubVenueWithUnifiedLog(
+        [],
+        rows={
+            "TRANSFER_IN": [
+                _log_row("fake-transfer-a", 5, "-5"),  # contradicts: an IN row that left
+                _log_row("fake-transfer-b", 6, "5"),
+                _log_row("fake-transfer-c", 7, "", cashFlow="-2"),  # change empty: cashFlow is read
+                _log_row("fake-transfer-e", 9, "5", funding="-99"),  # funding is never read
+            ],
+            "TRANSFER_OUT": [
+                _log_row("fake-transfer-f", 5, "5"),  # contradicts: an OUT row that arrived
+                _log_row("fake-transfer-g", 6, "-5"),
+            ],
+        },
+    )
+    recorder = hp._TradeRecorder(venue)
+    for log_type in ("TRANSFER_IN", "TRANSFER_OUT"):
+        await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": log_type})
+    assert recorder.unified_sign_mismatch == 3
+    assert [kind for kind, _id, _stamp in recorder.unified].count("deposits") == 4  # kinds follow the request
+    assert [kind for kind, _id, _stamp in recorder.unified].count("withdrawals") == 2
+    assert recorder.unified_state() == "read"
+
+
+async def test_other_log_types_are_not_recorded() -> None:
+    # The census and a funding SETTLEMENT read use the same log method with other types. They are
+    # not flows: answered unchanged, recorded nowhere, and they do not make the Unified read "run".
+    census = {"retCode": 0, "result": {"list": [_log_row("fake-transfer-z", 5, "-5")], "nextPageCursor": ""}}
+    venue = _StubVenueWithUnifiedLog(
+        [], rows={}, answers={"ONCHAINEARN_SUBSCRIPTION": census, "SETTLEMENT": census}
+    )
+    recorder = hp._TradeRecorder(venue)
+    for log_type in ("ONCHAINEARN_SUBSCRIPTION", "SETTLEMENT"):
+        got = await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": log_type})
+        assert got is census
+    assert await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED"}) == {
+        "retCode": 0,
+        "result": {"list": [], "nextPageCursor": ""},
+    }  # no type at all: also unrecorded
+    assert recorder.unified_calls == 0
+    assert recorder.unified == [] and recorder.transfers == []
+    assert recorder.unified_sign_mismatch == 0
+    assert recorder.unified_state() == "not-run"
+
+
+async def test_a_unified_page_of_another_type_is_malformed_and_counts_nothing() -> None:
+    # WR-01: the rebuild's reader refuses a row whose type is not the one it asked for. A recorder
+    # that counts it anyway reads TRANSFER_OUT rows as deposits and prints "read" for an answer the
+    # rebuild threw away.
+    venue = _StubVenueWithUnifiedLog(
+        [], rows={"TRANSFER_IN": [_log_row("fake-transfer-a", 500, "-5", type="TRANSFER_OUT")]}
+    )
+    recorder = hp._TradeRecorder(venue)
+    await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": "TRANSFER_IN"})
+    assert recorder.unified_state() == "malformed"
+    assert recorder.unified == [] and recorder.transfers == []
+
+
+async def test_a_repeated_unified_cursor_is_malformed_and_a_repeated_row_counts_once() -> None:
+    # WR-01 / IN-04: a cursor that comes back as the one it was sent, on a page that held rows, is
+    # the reader's "did not advance" refusal. The same fifty rows served twice are one set of rows
+    # to the replay, so they are one set here.
+    page = [_log_row(f"fake-transfer-{i}", 500, "5", type="TRANSFER_IN") for i in range(3)]
+    answer = {"retCode": 0, "result": {"list": page, "nextPageCursor": "fake-cursor-1"}}
+    venue = _StubVenueWithUnifiedLog([], rows={}, answers={"TRANSFER_IN": answer})
+    recorder = hp._TradeRecorder(venue)
+    base = {"accountType": "UNIFIED", "type": "TRANSFER_IN"}
+    await venue.private_get_v5_account_transaction_log(base)
+    assert recorder.unified_state() == "read"  # the first page advanced
+    await venue.private_get_v5_account_transaction_log({**base, "cursor": "fake-cursor-1"})
+    assert recorder.unified_state() == "malformed"
+    assert len(recorder.unified) == 3 and len(recorder.transfers) == 3  # not six
+
+
+async def test_a_unified_cursor_that_is_not_a_string_is_malformed() -> None:
+    answer = {"retCode": 0, "result": {"list": [_log_row("fake-transfer-a", 5, "5", type="TRANSFER_IN")], "nextPageCursor": 7}}
+    venue = _StubVenueWithUnifiedLog([], rows={}, answers={"TRANSFER_IN": answer})
+    recorder = hp._TradeRecorder(venue)
+    await venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": "TRANSFER_IN"})
+    assert recorder.unified_state() == "malformed"
+
+
+async def test_a_call_cut_by_the_crawl_bound_is_a_timeout_and_the_cancel_is_reraised() -> None:
+    # WR-01 / SFH M-5: asyncio.wait_for cancels the read mid-call. CancelledError is not an
+    # Exception, so a recorder that catches only Exception leaves the state "read" over a partial
+    # count. The cancel itself must still reach the caller, or the bound would stop bounding.
+    venue = _StubVenueWithUnifiedLog([], rows={}, hang_on="TRANSFER_OUT")
+    recorder = hp._TradeRecorder(venue)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            venue.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": "TRANSFER_OUT"}),
+            0.05,
+        )
+    assert recorder.unified_state() == "Timeout"
+
+
+async def test_a_venue_that_answers_each_type_with_the_other_prints_a_refused_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # WR-01 end to end: the venue ignores the type filter and returns an old IN row under the OUT
+    # request and an old OUT row under the IN request. The rebuild refuses both. The record must
+    # not say "read", must not count either row, and the strict gate must stay shut.
+    bybit = _StubVenueWithUnifiedLog(
+        [_trade_page("by", 5, newest_ms=_ms(_TODAY))],
+        rows={
+            "TRANSFER_IN": [_log_row("fake-transfer-u1", 500, "-5", type="TRANSFER_OUT")],
+            "TRANSFER_OUT": [_log_row("fake-transfer-u2", 400, "5", type="TRANSFER_IN")],
+        },
+    )
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+
+    async def _read(
+        exchange: _StubVenueWithUnifiedLog, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for log_type in ("TRANSFER_IN", "TRANSFER_OUT"):
+            await exchange.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": log_type})
+        await exchange.fetch_my_trades(None, _ms(start), 500, {})
+        raise er.ForcedRebuildRefusedError("account_flow_source_unreadable")
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    account = _stdout_records(capsys)[0]
+    assert account["bybit_unified_state"] != "read"
+    assert (account["bybit_unified_in_rows"], account["bybit_unified_out_rows"]) == (0, 0)
+    assert (account["deposits_older_365d"], account["withdrawals_older_365d"]) == (0, 0)
+    assert account["bybit_transfers_gate"] == "unmeasured"
+    assert account["bybit_transfers_cause"] == "flow_source_unreadable"
+
+
+async def test_a_flow_source_refusal_the_recorder_saw_no_fault_in_is_not_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # WR-01 (a): the reader's page ceiling, and any other refusal made after a call returned, leave
+    # the recorder with clean calls. The rebuild still named the flow source unreadable, and the
+    # record must not print "read" beside that refusal.
+    bybit = _StubVenueWithUnifiedLog(
+        [_trade_page("by", 5, newest_ms=_ms(_TODAY))],
+        rows={"TRANSFER_IN": [_log_row("fake-transfer-u1", 500, "5")]},
+    )
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+
+    async def _read(
+        exchange: _StubVenueWithUnifiedLog, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for log_type in ("TRANSFER_IN", "TRANSFER_OUT"):
+            await exchange.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": log_type})
+        raise er.ForcedRebuildRefusedError("account_flow_source_unreadable")
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    account = _stdout_records(capsys)[0]
+    assert account["member_refusal"] == "account_flow_source_unreadable"
+    assert account["bybit_unified_state"] == "malformed"
+    assert account["bybit_transfers_cause"] == "flow_source_unreadable"
+
+
+async def test_a_member_cut_by_the_crawl_bound_mid_unified_read_prints_its_state(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("services.equity_reconstruction._RECONSTRUCT_CRAWL_TIMEOUT_S", 0.05)
+    bybit = _StubVenueWithUnifiedLog(
+        [], rows={"TRANSFER_IN": [_log_row("fake-transfer-u1", 500, "5")]}, hang_on="TRANSFER_OUT"
+    )
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+
+    async def _read(
+        exchange: _StubVenueWithUnifiedLog, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for log_type in ("TRANSFER_IN", "TRANSFER_OUT"):
+            await exchange.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": log_type})
+        return _window_rows(end), False, {}
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    assert await hp.run() == 1
+    account = _stdout_records(capsys)[0]
+    assert account["failure_class"] == "Timeout"
+    assert account["bybit_unified_state"] == "Timeout"
+    assert account["bybit_transfers_cause"] == "read_incomplete"
+
+
+def _reader_verdict(row: Any, requested: str) -> bool:
+    from services.bybit_unified_flows import BybitUnifiedFlowReadError, normalise_unified_flow_row
+
+    try:
+        normalise_unified_flow_row(row, requested)
+    except BybitUnifiedFlowReadError:
+        return False
+    return True
+
+
+def test_the_probes_unified_row_check_agrees_with_the_readers() -> None:
+    # The probe may not import the reader (an older deployed tree lacks it), so it mirrors the row
+    # check. The mirror is only worth anything while it gives the reader's verdict on every shape,
+    # so run both over one corpus, rows each refusal rule applies to and rows that pass.
+    good = _log_row("fake-transfer-a", 5, "5", type="TRANSFER_IN")
+    corpus: list[Any] = [
+        good,
+        good | {"id": 7},
+        good | {"id": ""},
+        good | {"id": None},
+        good | {"id": True},
+        good | {"id": 1.5},
+        good | {"type": "TRANSFER_OUT"},
+        good | {"type": None},
+        good | {"currency": ""},
+        good | {"currency": None},
+        good | {"currency": 5},
+        good | {"transactionTime": "soon"},
+        good | {"transactionTime": None},
+        good | {"transactionTime": True},
+        good | {"transactionTime": 1700000000000},
+        good | {"transactionTime": 1700000000000.0},
+        good | {"change": "", "cashFlow": "-2"},
+        good | {"change": "", "cashFlow": ""},
+        good | {"change": None, "cashFlow": None},
+        good | {"change": "nan"},
+        good | {"change": "inf"},
+        good | {"change": "five"},
+        good | {"change": True},
+        good | {"change": ["5"]},
+        {k: v for k, v in good.items() if k not in ("change", "cashFlow")},
+        "not a row",
+        None,
+        ["TRANSFER_IN"],
+    ]
+    for row in corpus:
+        assert hp._reader_accepts_unified_row("TRANSFER_IN", row) == _reader_verdict(row, "TRANSFER_IN"), row
+    assert sum(_reader_verdict(row, "TRANSFER_IN") for row in corpus) >= 4  # the corpus has both verdicts
+
+
+# Every branch of the funding explanation, oracle values written by hand (never computed from the
+# function). Evidence keys not named are field-absent / not-run.
+_ABSENT = hp.FIELD_ABSENT
+
+
+def _evidence(**values: Any) -> dict[str, Any]:
+    return {**bf.funding_defaults(), **values}
+
+
+@pytest.mark.parametrize(
+    ("members", "state", "in_rows", "trades", "evidence", "want"),
+    [
+        # not-applicable: no Bybit member
+        (0, "not-run", 0, 0, _evidence(), "not-applicable"),
+        (0, "read", 5, 9, _evidence(bybit_onchain_dep_rows=4), "not-applicable"),
+        # explained: the Unified edge shows a TRANSFER_IN, whatever the Unified state
+        (1, "read", 1, 10, _evidence(), "explained"),
+        (1, "PermissionDenied", 2, 0, _evidence(), "explained"),
+        (1, "malformed", 1, 0, _evidence(bybit_onchain_dep_state="Timeout"), "explained"),
+        # off_edge: no in-row, but an inflow source shows money arriving
+        (1, "read", 0, 10, _evidence(bybit_onchain_dep_rows=3, bybit_onchain_dep_state="read"), "off_edge"),
+        (1, "read", 0, 10, _evidence(bybit_internal_dep_rows=1), "off_edge"),
+        (1, "not-run", 0, 0, _evidence(bybit_inter_xfer_rows=2), "off_edge"),
+        (1, "read", 0, 10, _evidence(bybit_universal_xfer_rows=1, bybit_universal_xfer_state="read"), "off_edge"),
+        # withdrawals cannot explain funding: they are not an inflow source
+        (1, "read", 0, 10, _evidence(bybit_withdraw_all_rows=9), "unmeasured"),
+        # unexplained: edge read, trades read, every inflow source read (or master-only) and empty
+        (
+            1,
+            "read",
+            0,
+            10,
+            _evidence(
+                bybit_onchain_dep_rows=0,
+                bybit_onchain_dep_state="read",
+                bybit_internal_dep_rows=0,
+                bybit_internal_dep_state="read",
+                bybit_inter_xfer_rows=0,
+                bybit_inter_xfer_state="read",
+                bybit_universal_xfer_rows=0,
+                bybit_universal_xfer_state="read",
+            ),
+            "unexplained",
+        ),
+        (
+            1,
+            "read",
+            0,
+            3,
+            _evidence(
+                bybit_onchain_dep_rows=0,
+                bybit_onchain_dep_state="not-master",
+                bybit_internal_dep_rows=0,
+                bybit_internal_dep_state="read",
+                bybit_inter_xfer_rows=0,
+                bybit_inter_xfer_state="read",
+                bybit_universal_xfer_rows=0,
+                bybit_universal_xfer_state="read",
+            ),
+            "unexplained",
+        ),
+        # unmeasured: the Unified edge never read, no trades, or an inflow source failed / never ran
+        (1, "not-run", 0, 10, _evidence(), "unmeasured"),
+        (1, "PermissionDenied", 0, 10, _evidence(), "unmeasured"),
+        (1, "malformed", 0, 10, _evidence(), "unmeasured"),
+        (1, "read", 0, 0, _evidence(), "unmeasured"),
+        (1, "read", 0, 10, _evidence(), "unmeasured"),  # every source "not-run"
+        (
+            1,
+            "read",
+            0,
+            10,
+            _evidence(
+                bybit_onchain_dep_rows=0,
+                bybit_onchain_dep_state="read",
+                bybit_internal_dep_rows=_ABSENT,
+                bybit_internal_dep_state="Timeout",
+                bybit_inter_xfer_rows=0,
+                bybit_inter_xfer_state="read",
+                bybit_universal_xfer_rows=0,
+                bybit_universal_xfer_state="read",
+            ),
+            "unmeasured",
+        ),
+    ],
+)
+def test_the_funding_explanation_is_derived_from_the_unified_edge_and_the_evidence(
+    members: int, state: str, in_rows: int, trades: int, evidence: dict[str, Any], want: str
+) -> None:
+    assert hp.bybit_funding_explained(members, state, in_rows, trades, [evidence]) == want
+    assert want in hp._FUNDING_EXPLANATIONS
+
+
+def test_the_funding_explanation_table_covers_every_token() -> None:
+    # The parametrization above must reach every value the emitter accepts, or a token could be
+    # declared and never derived.
+    reached = {
+        hp.bybit_funding_explained(0, "not-run", 0, 0, [_evidence()]),
+        hp.bybit_funding_explained(1, "read", 1, 0, [_evidence()]),
+        hp.bybit_funding_explained(1, "read", 0, 0, [_evidence(bybit_onchain_dep_rows=1)]),
+        hp.bybit_funding_explained(
+            1,
+            "read",
+            0,
+            1,
+            [_evidence(**{f"bybit_{n}_state": "read" for n in bf.INFLOW_SOURCE_NAMES})],
+        ),
+        hp.bybit_funding_explained(1, "not-run", 0, 0, [_evidence()]),
+    }
+    assert reached == set(hp._FUNDING_EXPLANATIONS)
+
+
+def _all_read() -> dict[str, Any]:
+    return _evidence(**{f"bybit_{n}_state": "read" for n in bf.INFLOW_SOURCE_NAMES})
+
+
+def test_the_funding_explanation_needs_every_bybit_members_evidence() -> None:
+    # SFH M-6: a master and a sub are two Bybit members. "Unexplained" says no inflow source is
+    # unnamed, which is only a statement about the account when EVERY member's sources were asked.
+    one = [_all_read()]
+    two = [_all_read(), _all_read()]
+    assert hp.bybit_funding_explained(2, "read", 0, 5, two) == "unexplained"  # control
+    assert hp.bybit_funding_explained(2, "read", 0, 5, one) == "unmeasured"  # member 2 never asked
+    assert hp.bybit_funding_explained(2, "read", 0, 5, []) == "unmeasured"
+    # A source that shows money arriving on the SECOND member is an off-edge inflow, not silence.
+    second = _all_read() | {"bybit_internal_dep_rows": 3, "bybit_internal_dep_state": "read"}
+    assert hp.bybit_funding_explained(2, "read", 0, 5, [_all_read(), second]) == "off_edge"
+    # A source that failed on the second member keeps the account unmeasured.
+    failed = _all_read() | {"bybit_internal_dep_state": "Timeout"}
+    assert hp.bybit_funding_explained(2, "read", 0, 5, [_all_read(), failed]) == "unmeasured"
+
+
+def _bybit_pair_book() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "api_keys": [
+            _key_row("fake-key-id-bybit-master", _USER_ONE, "bybit", "2026-01-01T00:00:00Z"),
+            _key_row("fake-key-id-bybit-sub", _USER_ONE, "bybit", "2026-01-02T00:00:00Z"),
+        ],
+        "allocator_equity_snapshots": [],
+    }
+
+
+async def test_an_account_with_two_bybit_members_reads_the_evidence_of_both(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SFH M-6 end to end: member 1's evidence is silent, member 2's shows an inflow. The verdict
+    # must be off_edge; one built from the first member alone said "unexplained".
+    stubs = [
+        _StubVenueWithUnifiedLog([_trade_page("by", 3, newest_ms=_ms(_TODAY))], rows={}) for _ in range(2)
+    ]
+    services = _Services(_bybit_pair_book(), stubs, window=(_TODAY - timedelta(days=729), 730))
+
+    async def _read(
+        exchange: _StubVenueWithUnifiedLog, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for log_type in ("TRANSFER_IN", "TRANSFER_OUT"):
+            await exchange.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": log_type})
+        await exchange.fetch_my_trades(None, _ms(start), 500, {})
+        return _window_rows(end), False, {}
+
+    services.reader = _read
+    services.install(monkeypatch)
+    answers = iter([_all_read(), _all_read() | {"bybit_internal_dep_rows": 3}])
+
+    async def _measure(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return next(answers)
+
+    monkeypatch.setattr(bf, "measure_funding", _measure)
+
+    assert await hp.run() == 0
+    account = _stdout_records(capsys)[0]
+    assert (account["bybit_members"], account["bybit_evidence_members"]) == (2, 2)
+    assert account["bybit_funding_explained"] == "off_edge"
+
+
+async def test_another_venues_trades_do_not_make_a_bybit_funding_unexplained(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SFH M-6: an OKX member's fills are not a read of the Bybit trades. A Bybit member that read
+    # none, beside an OKX member that read some, with every evidence source silent, is unmeasured.
+    book = {
+        "api_keys": [
+            _key_row(_KEY_OKX, _USER_ONE, "okx", "2026-01-01T00:00:00Z"),
+            _key_row(_KEY_BYBIT, _USER_ONE, "bybit", "2026-03-01T00:00:00Z"),
+        ],
+        "allocator_equity_snapshots": [],
+    }
+    stubs = [
+        _StubVenueWithUnifiedLog([_trade_page("mx", 3, newest_ms=_ms(_TODAY))], rows={}) for _ in range(2)
+    ]
+    services = _Services(book, stubs, window=(_TODAY - timedelta(days=729), 730))
+
+    async def _read(
+        exchange: _StubVenueWithUnifiedLog, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        if venue == "okx":
+            await exchange.fetch_my_trades(None, _ms(start), 500, {"type": "swap"})
+        else:
+            for log_type in ("TRANSFER_IN", "TRANSFER_OUT"):
+                await exchange.private_get_v5_account_transaction_log(
+                    {"accountType": "UNIFIED", "type": log_type}
+                )
+        return _window_rows(end), False, {}
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    async def _measure(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return _all_read()
+
+    monkeypatch.setattr(bf, "measure_funding", _measure)
+
+    assert await hp.run() == 0
+    account = _stdout_records(capsys)[0]
+    assert (account["okx_members"], account["bybit_members"]) == (1, 1)
+    assert account["trades_read"] == 3  # the OKX member's
+    assert account["bybit_unified_state"] == "read"
+    assert account["bybit_funding_explained"] == "unmeasured"
+
+
+@pytest.mark.parametrize(
+    ("args", "want"),
+    [
+        # (gate, unified_state, member_refusal, failure_class, trade_calls, deposits_old, withdrawals_old)
+        (("not-applicable", "read", "none", "none", 10, 1, 1), "not-applicable"),
+        (("not-applicable", "not-run", "none", "none", 0, 0, 0), "not-applicable"),
+        (("ok", "read", "none", "none", 10, 1, 1), "none"),
+        # D-03: an account whose flow source the rebuild refused, or whose answer cannot be read, or
+        # whose key cannot get past the read, is "unreadable" - never read as "no withdrawal".
+        (("unmeasured", "read", hp._FLOW_SOURCE_REFUSAL, "none", 10, 0, 0), "flow_source_unreadable"),
+        (("unmeasured", "PermissionDenied", "none", "none", 0, 0, 0), "flow_source_unreadable"),
+        (("unmeasured", "AuthenticationError", "none", "none", 0, 0, 0), "flow_source_unreadable"),
+        (("unmeasured", "BadRequest", "none", "none", 0, 0, 0), "flow_source_unreadable"),
+        (("unmeasured", "malformed", "none", "none", 5, 0, 0), "flow_source_unreadable"),
+        # A transient fault a retry may clear is "incomplete", never "unreadable": the founder must
+        # not be told a key lacks access when the venue was only busy.
+        (("unmeasured", "RateLimitExceeded", "none", "RateLimitExceeded", 0, 0, 0), "read_incomplete"),
+        (("unmeasured", "NetworkError", "none", "NetworkError", 0, 0, 0), "read_incomplete"),
+        (("unmeasured", "RequestTimeout", "none", "RequestTimeout", 0, 0, 0), "read_incomplete"),
+        (("unmeasured", "Timeout", "none", "Timeout", 0, 0, 0), "read_incomplete"),
+        (("unmeasured", "ExchangeError", "none", "none", 3, 0, 0), "read_incomplete"),
+        # The flow read never ran, or the member failed before any trade call.
+        (("unmeasured", "not-run", "none", "BadRequest", 0, 0, 0), "read_incomplete"),
+        (("unmeasured", "not-run", "none", "none", 4, 0, 0), "read_incomplete"),
+        (("unmeasured", "read", "none", "Timeout", 0, 0, 0), "read_incomplete"),
+        # A member that reached its trades finished its flow read: the counts are a measurement.
+        (("unmeasured", "read", "none", "Timeout", 7, 1, 0), "no_withdrawal_older_365d"),
+        (("unmeasured", "read", "anchor_skipped_implausible", "none", 7, 0, 1), "no_deposit_older_365d"),
+        (("unmeasured", "read", "none", "none", 7, 0, 0), "neither_older_365d"),
+    ],
+)
+def test_the_bybit_transfers_cause_names_why_the_gate_is_shut(args: tuple[Any, ...], want: str) -> None:
+    # D-03: the gate stays unmeasured with a NAMED cause. The founder reads one token at SC-3, so a
+    # wrong cause is a wrong instruction: "unreadable" sends them to the key, "no withdrawal" tells
+    # them the history is simply that short.
+    assert hp.bybit_transfers_cause(*args) == want
+    assert want in hp._BYBIT_TRANSFERS_CAUSES
+
+
+def test_the_bybit_transfers_cause_table_reaches_every_token() -> None:
+    reached = {
+        hp.bybit_transfers_cause("not-applicable", "not-run", "none", "none", 0, 0, 0),
+        hp.bybit_transfers_cause("ok", "read", "none", "none", 1, 1, 1),
+        hp.bybit_transfers_cause("unmeasured", "read", "none", "none", 1, 0, 1),
+        hp.bybit_transfers_cause("unmeasured", "read", "none", "none", 1, 1, 0),
+        hp.bybit_transfers_cause("unmeasured", "read", "none", "none", 1, 0, 0),
+        hp.bybit_transfers_cause("unmeasured", "malformed", "none", "none", 1, 0, 0),
+        hp.bybit_transfers_cause("unmeasured", "Timeout", "none", "Timeout", 0, 0, 0),
+    }
+    assert reached == set(hp._BYBIT_TRANSFERS_CAUSES)
+    assert hp._FLOW_SOURCE_REFUSAL == "account_flow_source_unreadable"
+
+
+async def test_a_shut_bybit_gate_prints_its_cause_and_the_funding_explanation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SC-3 end to end: a6's shape. The Unified edge shows a TRANSFER_IN 500 days old and no
+    # TRANSFER_OUT, so the strict gate stays shut for a NAMED reason and the funding is explained.
+    bybit = _StubVenueWithUnifiedLog(
+        [_trade_page("by", 5, newest_ms=_ms(_TODAY))],
+        rows={"TRANSFER_IN": [_log_row("fake-transfer-u1", 500, "5")]},
+    )
+    services = _Services(_bybit_only_book(), [bybit], window=(_TODAY - timedelta(days=729), 730))
+
+    async def _read(
+        exchange: _StubVenueWithUnifiedLog, venue: str, supabase: Any, start: date, end: date, **_k: Any
+    ) -> Any:
+        for log_type in ("TRANSFER_IN", "TRANSFER_OUT"):
+            await exchange.private_get_v5_account_transaction_log({"accountType": "UNIFIED", "type": log_type})
+        await exchange.fetch_my_trades(None, _ms(start), 500, {})
+        return _window_rows(end), False, {}
+
+    services.reader = _read
+    services.install(monkeypatch)
+
+    assert await hp.run() == 0
+    captured = capsys.readouterr()
+    account = json.loads(captured.out.splitlines()[0])
+    assert (account["deposits_older_365d"], account["withdrawals_older_365d"]) == (1, 0)
+    assert account["bybit_transfers_gate"] == "unmeasured"
+    assert account["bybit_transfers_cause"] == "no_withdrawal_older_365d"
+    assert account["bybit_funding_explained"] == "explained"
+    assert account["bybit_unified_state"] == "read"
+    assert "fake-transfer" not in captured.out + captured.err
+
+
+async def test_a_short_window_account_prints_not_applicable_for_both_derivations(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A 90-day account has no full Bybit window: the gate does not apply, so neither does its
+    # cause. The funding explanation is a statement about a Bybit account and is derived anyway;
+    # with no Bybit member in the account it is not-applicable.
+    okx = _StubVenue([_trade_page("ok", 5, newest_ms=_ms(_TODAY))])
+    services = _Services(_okx_only_book(), [okx], window=(_TODAY - timedelta(days=89), 90))
+    services.install(monkeypatch)
+    assert await hp.run() == 0
+    account = _stdout_records(capsys)[0]
+    assert account["bybit_transfers_gate"] == "not-applicable"
+    assert account["bybit_transfers_cause"] == "not-applicable"
+    assert account["bybit_funding_explained"] == "not-applicable"
+    assert account["bybit_unified_state"] == "not-run"
+
+
+def test_the_unified_keys_refuse_values_outside_their_vocabulary() -> None:
+    rec = hp._account_record("a1", "2026-10-23")
+    hp.emit_record(rec)  # control: the defaults print
+    for key, value in (
+        ("bybit_unified_state", "open"),
+        ("bybit_unified_in_rows", -1),
+        ("bybit_unified_out_rows", "2"),
+        ("bybit_unified_sign_mismatch_rows", True),
+        ("bybit_funding_explained", "yes"),
+        ("bybit_transfers_cause", "unknown"),
+    ):
+        with pytest.raises(ValueError) as exc:
+            hp.emit_record(dict(rec, **{key: value}))
+        assert key in str(exc.value)
+        assert str(value) not in str(exc.value).replace(key, "")
+    # And every declared token prints, so a token declared and refused is caught here.
+    for key, tokens in (
+        ("bybit_unified_state", hp._UNIFIED_STATES),
+        ("bybit_funding_explained", hp._FUNDING_EXPLANATIONS),
+        ("bybit_transfers_cause", hp._BYBIT_TRANSFERS_CAUSES),
+    ):
+        for token in tokens:
+            hp.emit_record(dict(rec, **{key: token}))
 
 
 async def test_a_venue_without_transfer_fetchers_reads_zero_old_transfers(
@@ -2160,6 +3091,111 @@ async def test_a_decrypt_failure_is_recorded_for_that_account_and_the_next_is_me
     assert a2["members_read"] == 1 and a2["trades_read"] == 4
     assert _KEY_BYBIT not in captured.out + captured.err
     assert _CIPHER not in captured.out + captured.err
+
+
+async def _read_then_refuse(
+    exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+) -> Any:
+    await exchange.fetch_my_trades(None, _ms(start), 100, {})
+    raise er.ForcedRebuildRefusedError("anchor_unreadable")
+
+
+async def _read_then_refuse_off_vocabulary(
+    exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+) -> Any:
+    await exchange.fetch_my_trades(None, _ms(start), 100, {})
+    raise er.ForcedRebuildRefusedError("a token nobody declared 4321.5")
+
+
+async def _read_then_truncate(
+    exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+) -> Any:
+    await exchange.fetch_my_trades(None, _ms(start), 100, {})
+    raise _deployed_truncated()
+
+
+async def _read_then_reject(
+    exchange: _StubVenue, venue: str, supabase: Any, start: date, end: date, **_k: Any
+) -> Any:
+    import ccxt.async_support as ccxt
+
+    await exchange.fetch_my_trades(None, _ms(start), 100, {})
+    raise ccxt.AuthenticationError("fake rejection")
+
+
+@pytest.mark.parametrize(
+    ("label", "reader", "okx", "taken", "outcome"),
+    [
+        # (members_read, failure_class, member_refusal) are what the member's own outcome says,
+        # with the evidence on the read, refused and cut-short arms and on none of the others.
+        ("read", None, False, True, (1, "none", "none")),
+        ("refused", _read_then_refuse, False, True, (0, "none", "anchor_unreadable")),
+        ("refused off vocabulary", _read_then_refuse_off_vocabulary, False, True, (0, "other", "none")),
+        ("cut short", _read_then_truncate, False, True, (0, "truncated", "none")),
+        ("rejected by the venue", _read_then_reject, False, False, (0, "AuthenticationError", "none")),
+        ("an OKX member", None, True, False, (1, "none", "none")),
+    ],
+)
+async def test_the_evidence_runs_after_the_snapshot_and_changes_no_member_outcome(
+    label: str,
+    reader: Any,
+    okx: bool,
+    taken: bool,
+    outcome: tuple[int, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The evidence is a side measurement. It follows the member's snapshot (so read_elapsed_s and
+    # trade_calls describe the forced pass only), it is taken on the arms that read trades, and it
+    # never decides a member's outcome: the same arm reads the same with or without it.
+    clock = [0.0]
+    monkeypatch.setattr(hp, "_monotonic", lambda: clock[0])
+    book = EvidenceBook()
+    venue = _StubVenue([_trade_page("ev", 5, newest_ms=_ms(_TODAY))])
+    book.attach(venue)
+    for method in METHODS:
+        original = getattr(venue, method)
+
+        def _timed(inner: Any = original) -> Any:
+            async def _call(*args: Any, **kwargs: Any) -> Any:
+                clock[0] += 500.0  # a source that ran before the snapshot would show up as elapsed time
+                return await inner(*args, **kwargs)
+
+            return _call
+
+        setattr(venue, method, _timed())
+    monkeypatch.setattr(bf, "_now_ms", lambda: _ms(_TODAY))
+    services = _Services(
+        _okx_only_book() if okx else _bybit_only_book(),
+        [venue],
+        window=(_TODAY - timedelta(days=729), 730),
+    )
+    if reader is not None:
+        services.reader = reader
+    services.install(monkeypatch)
+
+    code = await hp.run()
+    account, _summary = _stdout_records(capsys)
+
+    members_read, failure_class, refusal = outcome
+    assert (account["members_read"], account["failure_class"], account["member_refusal"]) == (
+        members_read,
+        failure_class,
+        refusal,
+    ), label
+    assert code == (0 if members_read else 1), label
+    assert account["read_elapsed_s"] == 0, label  # the 500 s per evidence call is not in the read
+    if taken:
+        assert account["bybit_evidence_members"] == 1, label
+        assert account["bybit_onchain_dep_state"] == "read", label
+        assert account["bybit_key_info_state"] == "read", label
+        assert book.calls, label
+        assert account["trade_calls"] == 1, label  # the evidence reads are not trade reads
+    else:
+        assert account["bybit_evidence_members"] == 0, label
+        assert all(account[f"bybit_{name}_state"] == "not-run" for name in (src.name for src in bf.EVIDENCE_SOURCES)), label
+        assert account["bybit_key_info_state"] == "not-run", label
+        assert book.calls == [], label  # a rejected venue, or another venue, is not asked
 
 
 # ---------------------------------------------------------------------------
