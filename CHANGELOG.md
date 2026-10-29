@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.133.11.0] - 2026-10-29 — OKXREWRITE: a forced rebuild skips an exchange account with no working key instead of refusing the whole allocator, and the operator's dead-key reading binds the job
+
+### Why
+- The OKX history rewrite (Phase 178) found that one revoked key refused a whole allocator's forced rebuild, so every working account under the same allocator went unrebuilt. The founder's decisions, quoted from `178-CONTEXT.md`:
+  - **D-01:** Refused keys: measure first, then decide; the founder sees each account's predicted outcome before any write.
+  - **D-02:** Cite 173's ordering gate and also require each target's own ordering reading from the probe before its write.
+  - **D-03:** No target writes until Phase 179's post-deploy re-read and the founder's tolerance decision are done.
+  - **D-04:** 178 owns the runbook rewrite; first PROD write only after MARKSOURCE plan 08's cut-over and first night, every working OKX key polled, never in the merge hold.
+  - **D-05:** A revoked key affects only that key; the whole-account refusal is fixed at the root in every place.
+  - **D-06:** An account whose dead key overlaps the window is not rebuilt; it is named as not recomputed.
+  - **D-07:** A tied crosswalk fingerprint keeps refusing; plan 03 measures whether ties occur, and a follow-up to tell them apart comes back before any write.
+  - **D-08:** 178 writes only after 179-07's re-read is recorded on main and Phase 179 is closed.
+
+### Changed
+- **Behaviour change.** A forced allocator rebuild no longer refuses the whole allocator because one exchange account has no working key. That account is skipped and counted (`account_non_working_accounts_excluded`) and the working accounts are rebuilt (3e66e7e7a, 44a8f45ad, e88baa633; D-05). An allocator whose exchange accounts are ALL dead still refuses (ca25a4c47).
+- The forced job now checks the operator's P7 reading at claim: `expected_non_working_accounts`, `expected_window_days` and `expected_key_digest`. A job whose live dead-account count, window or key set differs from what the operator measured refuses `account_keys_changed` before any write (44a8f45ad, 795972b36, 3848481b4, d9100ab8a, 4bd133747). Both numeric expectations must be exact integers. The digest covers the allocator's full key set, so a deleted working key or a dead/working swap is caught, not only a changed count.
+
+### Added
+- Runbook P7, the dead-key census (`docs/runbooks/marksource-okx-census/okx-nonworking-keys.sql`): per target, decides `rebuild` or `not recomputed` (D-06). It counts hard-deleted keys that the holdings polls' audit rows still name, covers the uncapped-carry era 2026-09-29 to 2026-10-19, prints the key digest; the crosswalk never writes a label whose predicted window is not 90 days (30cb16596, 444b8a7bf, e7b431788, 48ba80225, 83dbf83d0, b1be32d41, 66670df3b, a08306060).
+- A crosswalk form mapping probe labels to census labels, with the B'1 group rule, the D-02 per-target ordering reading and the B'5 dead-account count check (c8063e9ee, 9b276a14b; D-02, D-05, D-06). The label total and fingerprint uniqueness are explicit aborts (6f9b65f82), a fingerprint tie ends in a recorded outcome that a re-run can clear (60133dd65), and the crosswalk counts the tie itself as `fingerprint_ties` (aceb2fc6c).
+- Runbook refusal list: the rebuild's closed set of 16 refusal tokens is pinned against `FORCED_REBUILD_REFUSAL_REASONS` (66a9edeb1; D-06). B'3a re-runs P7 and stops on any move (f2dd9eecb), B'3c requires the job armed (3848481b4) and no longer promises an operator action before the worker claims an unarmed job (492ad6108), and plan 04 records and verifies the armed single job and the B'3a re-run (e4a054983).
+
+### Fixed
+- The runbook renderer refuses a B'3a re-run file older than `MS_T0`, and B'3a compares every P7 input with the pre-flight file before the write (4e22200fd). B'3a keeps clear of the poll band, and no clock example in it can go stale after the cut-over moves the jobs (3848481b4, 0b341e482).
+- The dead-account comment and test docstring state the carry age correctly (e88baa633).
+- The P7 era's upper bound states the measured CI time rather than reasoning that ran the wrong way (48ba80225).
+
+### Tests
+- New execution test `src/__tests__/marksource-okx-nonworking-keys-exec.test.ts` runs P7 and the crosswalk form against hand-computed oracles on a throwaway local PostgreSQL cluster it boots itself (a77203496, 906a5b40c). There is no skip gate: with no binaries it throws. `marksource-okx-census-sql.test.ts` pins the SQL and the runbook text, including P7's audit-trace literals against the worker that writes them, so a renamed action or entity type turns a test red instead of every deleted-key count going to 0 (60cde102e).
+- `tests/test_reconstruct_whole_account.py` pins the all-dead refusal and the per-account dead count (ca25a4c47), the claim-time expectation refusals, and the key digest. `tests/test_allocator_history_probe.py`.
+
+### Notes
+- Merged after BYBITFUNDING (v0.133.10.0): the runbook's refusal-token paragraph now carries the union, 17 tokens matching `FORCED_REBUILD_REFUSAL_REASONS` (8 re-enqueue once, 9 record only, `account_flow_source_unreadable` among the record-only ones).
+- Planning and records, no shipped content: context, research, pattern map, validation strategy and plans (4106680e9, 1b68c6572, d857a6760, 8ff83343f, c72bb57c4, c36a61abf, ec1fb28ba, ff6093941, bb4ab7062, 73e35fc6d, e89a6192c); plan summaries (c78d593ba, d05839052, 59566b0c6); review rounds (1e6baa982, 68e06de99, d9e4b4e2e, c97818c56, c9892004c, 7217f59a8, 483f59684, c7433e7ef); verification (`human_needed`, operator plans pending) and security audit (secured) (d11ca1c57); founder D-07 and D-08 (d7076e2d7).
+- Branch coverage: 54 non-merge commits over six themes (decisions and planning, the dead-account fix, P7, the crosswalk, the job's claim-time binding, tests), each named in a bullet above.
+- No migration, no schema change, no write to any table.
+
+### Known limits
+- Plans 03 and 04 (the PROD probe, P7, the founder checkpoint and the guarded rebuild) are operator plans and have NOT run. Nothing in PROD is rewritten by this release.
+- A tied crosswalk fingerprint is never written (D-07): it keeps refusing until a follow-up tells the tied labels apart.
+- D-08 holds the first write until Phase 179-07's re-read is recorded on main and Phase 179 is closed.
+
 ## [0.133.10.0] - 2026-10-29 — BYBITFUNDING: the Bybit rebuild reads the Unified edge's transfers, an unreadable flow source refuses by name, and no transfer window drops rows past 50
 
 ### Why
