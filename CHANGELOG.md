@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.11.3] - 2026-10-29 — records: close OKXREWRITE 178 (v0.133.11.0 #1154; closed record-only by founder ruling D-09, zero rewrites, nothing written to PROD)
+
+### Why
+- Phase 178 was to rebuild the stored OKX snapshot rows that counted open profit twice. Its operator plan 03 measured, read-only on the deployed code, what a forced rebuild would do for each account, and the founder then closed the phase record-only (D-01 checkpoint, 2026-10-29, "Close 178, record only (Recommended)"; recorded as D-09 in `178-CONTEXT.md`). SC-2 (the 90-day window rebuilt through the forced path) is reported NOT MET by founder ruling, never as met.
+
+### Notes
+- Plan 178-03 is recorded in `178-03-SUMMARY.md`. One founder-approved probe run on the backfill worker, shared with Phase 180 plan 08 (2026-10-29, 10:47Z to about 11:20Z), read all five OKX-holding accounts at `selection` `ok` (none refused as a whole, D-05), `non_working_accounts_excluded` 2, 1, 2, 0, 1, `okx_order_gate` `ok` with 5 of 5 readings and 0 violations. The worker was restored. Import check `0 17 True True True True True` on both sides; the plan expected 16, and Phase 180 added the 17th refusal token after the plan was written.
+- Crosswalk: census a1, a3 and a5 matched by fingerprint; census a2 and a4 tie each other and read `ambiguous` (D-07). P7: census a1, a2 and a5 read `not recomputed (D-06)` (a dead key's holdings overlap the 90-day window for 34, 34 and 46 in-window days; a5 also has 7 deleted keys named in the window); census a3 and a4 have no stored history.
+- Plan 178-04 (the guarded rebuild) was closed without execution: `status: superseded` in its frontmatter and `178-03-SUMMARY.md` as the record, no SUMMARY (a SUMMARY would record work nobody did and end its pending state in `plan-anchor-verify`; a `-DEFERRED.md` was not added because the exemption count is pinned at 2). The plan therefore stays "pending" for `plan-anchor-verify`, which still passes. Nothing was enqueued; nothing was written to PROD.
+- Recorded deviations in `178-03-SUMMARY.md`: `run-shared-with: 180` (the plan's gate allows only none or 179), the 17-token import line, the Task 2 readings not taken after the ruling (P1 to P5, B'1 census) and Task 3 asked as one question. The plan's own `MEASURE_OK` and `DECISION_OK` gates therefore cannot print.
+- `TODOS.md`: `167.2.1.1.1.1-OKX-DOUBLE-COUNT-BEYOND-REBUILD-WINDOW` gains a dated reading naming the in-window rows of census a1, a2 and a5 as kept (counts only). It stays open.
+- `178-VERIFICATION.md` moved from `human_needed` to `passed` by hand (frontmatter `status`, `verified_at_sha`, `drift_subjects` only) with a dated section stating that SC-2 is replaced by the ruling and that SC-3's `allocator_holdings` row-day count was not re-taken. The gsd-verifier was not re-run.
+- `ROADMAP.md` ticks Phase 178, its plans and its Progress row (`phase complete` ran, then its collateral on STATE.md was reverted and `## Current Position` was written by hand: shipped and not closed 167.2.1.1.1, 167.2.1.1.1.1 and 175; closed 2026-10-29 177, 178 and 179; 180 records PR open; 176 booked).
+- Branch coverage: one records commit over one theme (records). The phase branch's planning commits arrive through the phase directory; its code is already on `main` through #1154.
+- No code, no migration, no schema change, no write to any table.
+
 ## [0.133.11.2] - 2026-10-29 — records: close BYBITFUNDING 180 (v0.133.10.0 #1151; a6 funded by sub-account transfers, gate `unmeasured` with cause `neither_older_365d`, nothing rebuilt)
 
 ### Notes
