@@ -118,6 +118,19 @@ class TestClassifyException:
         kind, msg = classify_exception(exc)
         assert kind == "permanent"
 
+    def test_a_bybit_unified_flow_read_error_is_permanent(self) -> None:
+        """Phase 180 BYBITFUNDING (orchestrator reading 2): the Unified flow reader refusing its
+        own answer (a stalled cursor, a malformed answer, an unreadable row, the page ceiling) is a
+        RuntimeError that would otherwise read ``unknown`` and be retried, about 210 requests a
+        retry, for a fault no retry can clear. It is PERMANENT and ships the reader's own static
+        text. RED when the arm is gone."""
+        from services.bybit_unified_flows import BybitUnifiedFlowReadError
+
+        text = "fetch_bybit_unified_flows: the cursor did not advance on a page that returned rows"
+        kind, msg = classify_exception(BybitUnifiedFlowReadError(text))
+        assert kind == "permanent"
+        assert msg == text
+
     def test_bad_request_is_permanent(self) -> None:
         exc = ccxt.BadRequest("unknown symbol XYZABC/USDT")
         kind, msg = classify_exception(exc)

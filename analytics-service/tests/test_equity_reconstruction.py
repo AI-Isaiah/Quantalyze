@@ -1191,6 +1191,10 @@ async def test_history_depth_months_per_venue(monkeypatch, venue, expected_depth
     mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
     mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
     mock_exchange.close = AsyncMock()
+    # Phase 180: a Bybit rebuild reads the Unified transaction log first; an empty book answers it.
+    from tests._trade_pages import install_unified_log
+
+    install_unified_log(mock_exchange)
 
     _install_fake_preflight(monkeypatch, venue, fake_supabase, mock_exchange)
 
