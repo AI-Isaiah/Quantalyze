@@ -24,6 +24,31 @@ import ccxt.async_support as ccxt
 
 logger = logging.getLogger("quantalyze.analytics.ccxt_flow_fetch")
 
+# Bybit's documented page size for the deposit and withdraw record endpoints (1 to 50).
+_BYBIT_TRANSFER_PAGE_LIMIT: int = 50
+
+
+class TransferPageStalled(RuntimeError):
+    """A Bybit transfer window's page cursor did not advance (Phase 180, D-02).
+
+    Raised instead of returning a short list: a truncated list reads as "no more
+    transfers" to every caller. The text is static: the kind and the window start
+    only, never venue text.
+    """
+
+
+def _bybit_next_cursor(response: Any) -> str | None:
+    """The ``result.nextPageCursor`` of one raw Bybit answer, or None.
+
+    Read from the answer of the call just made, never from a parsed row and never from
+    ``exchange.last_json_response``: ccxt writes the cursor onto one raw row and drops
+    any parsed row stamped 0 or None, taking the cursor with it, and it only keeps
+    ``last_json_response`` when ``enableLastJsonResponse`` is on (it is off by default,
+    and is shared state on the exchange). Phase 180 round 1, WR-02."""
+    result = response.get("result") if isinstance(response, dict) else None
+    cursor = result.get("nextPageCursor") if isinstance(result, dict) else None
+    return str(cursor) if cursor else None
+
 
 async def _rate_limit_sleep(exchange: Any) -> None:
     """Back-off between paginated calls to the same exchange.
@@ -48,6 +73,91 @@ async def _rate_limit_sleep(exchange: Any) -> None:
         logger.warning("_rate_limit_sleep skipped: %s", exc)
 
 
+async def _read_bybit_transfer_window(
+    exchange: Any,
+    kind: str,
+    window_start: int,
+    window_end: int,
+    all_rows: list[dict[str, Any]],
+    seen_ids: set[Any],
+) -> bool:
+    """Read one Bybit window ``[window_start, window_end]`` whole by Bybit's cursor.
+
+    Appends the rows to ``all_rows`` (deduplicated by id against ``seen_ids``).
+    Returns False when the exchange cannot enumerate transfers (``ccxt.NotSupported``,
+    the only exception caught, WR-04), True otherwise. Raises ``TransferPageStalled``
+    on a cursor already seen in this window (a repeat or a cycle) and on reaching the
+    1000-page ceiling, never a short list. The window start never moves: Bybit pages by
+    cursor, newest first.
+    """
+    # The raw endpoint ``fetch_deposits`` / ``fetch_withdrawals`` call (ccxt 4.5.85 and
+    # 4.5.88 are identical here), so the cursor comes from this call's own answer.
+    endpoint = (
+        exchange.privateGetV5AssetDepositQueryRecord
+        if kind == "deposits"
+        else exchange.privateGetV5AssetWithdrawQueryRecord
+    )
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for _ in range(1000):
+        request: dict[str, Any] = {
+            "startTime": window_start,
+            "limit": _BYBIT_TRANSFER_PAGE_LIMIT,
+            "endTime": window_end,
+        }
+        if cursor is not None:
+            request["cursor"] = cursor
+        try:
+            if exchange.markets is None:
+                await exchange.load_markets()
+            response = await endpoint(request)
+        except ccxt.NotSupported:
+            return False
+        raw_rows = exchange.add_pagination_cursor_to_result(response)
+        if not raw_rows:
+            # An empty answer ends the window whatever cursor it carries (plan 05; the
+            # Unified reader and ccxt's own cursor paginator stop the same way).
+            return True
+        # What ``fetch_deposits`` does with the answer: the parsed transactions callers
+        # get today (sorted ascending, rows stamped 0 or None dropped, at most 50).
+        page = exchange.parse_transactions(
+            raw_rows, None, window_start, _BYBIT_TRANSFER_PAGE_LIMIT
+        )
+        if len(page) < len(raw_rows):
+            # Counts only, never ids, amounts or venue text. Most drops are a deposit
+            # not yet credited (stamp 0), but nothing else tells that from a drifted field.
+            logger.warning(
+                "Bybit transfer rows dropped by parsing (kind=%s window_start_ms=%d "
+                "raw_rows=%d parsed_rows=%d)",
+                kind,
+                window_start,
+                len(raw_rows),
+                len(page),
+            )
+        nxt = _bybit_next_cursor(response)
+        for _row in page:
+            _rid = _row.get("id") if isinstance(_row, dict) else None
+            if _rid is not None:
+                if _rid in seen_ids:
+                    continue  # already collected from the overlapping window
+                seen_ids.add(_rid)
+            all_rows.append(_row)
+        if nxt is None:
+            return True
+        if nxt in seen_cursors:
+            raise TransferPageStalled(
+                "a Bybit transfer window's page cursor did not advance; nothing "
+                f"past it was read (kind={kind}, window_start_ms={window_start})"
+            )
+        seen_cursors.add(nxt)
+        cursor = nxt
+        await _rate_limit_sleep(exchange)
+    raise TransferPageStalled(
+        "a Bybit transfer window exceeded 1000 pages; nothing past it was read "
+        f"(kind={kind}, window_start_ms={window_start})"
+    )
+
+
 async def fetch_ccxt_transfers(
     exchange: Any, kind: str, since_ms: int, now_ms: int
 ) -> list[dict[str, Any]]:
@@ -57,6 +167,17 @@ async def fetch_ccxt_transfers(
     deposit/withdraw record endpoints cap the startTime->endTime interval at 30
     days (BYBIT-131002). We page forward through sliding windows sized to the
     venue cap, passing an explicit endTime per window, and collect all rows.
+
+    Phase 180 BYBITFUNDING (D-02, 2026-10-29): the Bybit branch follows
+    ``nextPageCursor`` (read from the raw answer of the deposit / withdraw record call,
+    which this branch makes itself) and asks for 50 rows a page. Bybit answers newest
+    first, so the old advance to one millisecond past the newest row of a page jumped
+    over every older row of the window once a window held more than one page. A cursor that does not advance raises
+    ``TransferPageStalled``; it never returns a short list. Every caller inherits
+    this:
+    ``run_derive_broker_dailies_job`` and ``run_stitch_composite_job`` in
+    ``services/job_worker.py`` and the rebuild's non-Bybit venues
+    (``okx_archive_job`` reads OKX only). Binance and OKX read exactly as before.
     """
     fetcher_name = "fetch_deposits" if kind == "deposits" else "fetch_withdrawals"
     fetcher = getattr(exchange, fetcher_name, None)
@@ -90,6 +211,14 @@ async def fetch_ccxt_transfers(
     window_start = since_ms
     while window_start < now_ms:
         window_end = min(window_start + window_ms, now_ms)
+        if exchange_id == "bybit":
+            if not await _read_bybit_transfer_window(
+                exchange, kind, window_start, window_end, all_rows, seen_ids
+            ):
+                return all_rows
+            window_start += window_ms
+            await _rate_limit_sleep(exchange)
+            continue
         # Paginate WITHIN each venue-sized window so a bursty allocator with a
         # large per-window transfer count doesn't lose rows past page 1.
         inner_cursor = window_start

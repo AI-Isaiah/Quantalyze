@@ -1026,7 +1026,7 @@ account by these rules, in order.
 3. **A refusal (`refusal_token` present):** NOT recomputed. A refused account writes nothing and
    is recorded; it is never retried by hand beyond the one re-enqueue allowed below. Compare the
    token with B'1's prediction; a mismatch is recorded and the founder asked. The closed set is
-   `FORCED_REBUILD_REFUSAL_REASONS`, 16 tokens, and a token outside it is a STOP (the deployed
+   `FORCED_REBUILD_REFUSAL_REASONS`, 17 tokens, and a token outside it is a STOP (the deployed
    code is not the code this runbook was written for).
    - **Re-enqueue ONCE** (fresh B'3a, B'3b, B'3c, B'4, then this audit again with the new `t0`;
      keep the first attempt's token) for these 8: `positions_unreadable`, `anchor_unreadable`,
@@ -1037,10 +1037,12 @@ account by these rules, in order.
      `account_keys_changed` also means the enqueue's expectation (the P7 dead-account count or
      window) no longer matched the job's own: re-run P7 first, and re-enqueue only if it still
      rules `rebuild`.
-   - **Record only, no re-run** for these 8: `anchor_skipped_unreliable_replay`,
+   - **Record only, no re-run** for these 9: `anchor_skipped_unreliable_replay`,
      `anchor_skipped_implausible`, `account_identity_pending`, `account_key_venue_unsupported`,
      `account_key_not_working`, `account_key_no_rows`, `account_sum_empty`,
-     `history_days_unreproduced`. Note each one's count.
+     `history_days_unreproduced`, `account_flow_source_unreadable` (a Bybit key whose Unified
+     transaction log the venue refused or answered unreadably; it clears only when the key's
+     permissions change). Note each one's count.
    - Any other `reconstruct_failed` (no token): record by `latest_error_kind`.
 4. **A `reconstruct_complete` that is not clean:** `partial_ticker_symbols_named`,
    `anchor_offset_implausible`, `anchor_replay_unreliable` or `okx_terminus_hit` true: STOP and

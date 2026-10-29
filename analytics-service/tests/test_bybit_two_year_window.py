@@ -28,7 +28,7 @@ import copy
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -360,8 +360,12 @@ async def test_the_two_year_refusal_adds_no_token() -> None:
 
     2026-10-27 (Phase 171 READCEILING plan 10): the set is 16 tokens. The 16th,
     ``account_key_read_stalled``, is Phase 171's (a forced read that makes no progress); the
-    two-year guard still adds none."""
-    assert len(er.FORCED_REBUILD_REFUSAL_REASONS) == 16
+    two-year guard still adds none.
+
+    2026-10-28 (Phase 180 BYBITFUNDING plan 07): the set is 17 tokens. The 17th,
+    ``account_flow_source_unreadable``, is Phase 180's (a forced Bybit flow read the venue
+    refused); the two-year guard still adds none."""
+    assert len(er.FORCED_REBUILD_REFUSAL_REASONS) == 17
     exchange = AsyncMock()
     exchange.id = "bybit"
     now_ms = _ms(AFTER_MIDNIGHT)
@@ -372,4 +376,27 @@ async def test_the_two_year_refusal_adds_no_token() -> None:
     # The guard stays a plain BadRequest: only a cut-short read is a TruncatedTradeRead, so the
     # allocator history probe can tell the two apart.
     assert type(excinfo.value) is er.ccxt.BadRequest
+    assert exchange.fetch_my_trades.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_two_year_guard_runs_before_the_flow_read_and_outside_its_refusal() -> None:
+    """Phase 180 BYBITFUNDING D-03 / T-180-21: a forced crawl whose start is older than the venue's
+    two-year terminus raises the guard's own plain ``ccxt.BadRequest`` (which the forced path turns
+    into the existing ``account_key_read_failed``), NOT the new ``account_flow_source_unreadable``,
+    and the Unified log is never asked. RED when the guard moves inside the wrapped flow read: the
+    same BadRequest would then be mistaken for a refused permission."""
+    exchange = AsyncMock()
+    exchange.id = "bybit"
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=800)
+
+    with pytest.raises(er.ccxt.BadRequest) as excinfo:
+        await er._fetch_and_price_window(
+            exchange, "bybit", MagicMock(), start_date, end_date, require_anchor=True
+        )
+
+    assert type(excinfo.value) is er.ccxt.BadRequest
+    assert not isinstance(excinfo.value, er.ForcedRebuildRefusedError)
+    assert exchange.private_get_v5_account_transaction_log.await_count == 0
     assert exchange.fetch_my_trades.await_count == 0

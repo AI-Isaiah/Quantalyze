@@ -37,18 +37,20 @@ from __future__ import annotations
 
 import copy
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import ccxt
 import pytest
 
+from services import bybit_unified_flows as buf
 from services import equity_reconstruction as er
 from services.equity_reconstruction import run_reconstruct_allocator_history_job
 from services.job_worker import DispatchOutcome
 from tests._okx_bills import OkxBillsArchive, okx_balance_payload, okx_detail
+from tests._trade_pages import install_unified_log, unified_flow
 from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
@@ -754,7 +756,7 @@ async def test_forced_rebuild_refuses_an_implausible_okx_anchor_offset(
 
 
 def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
-    """The post-deploy handoff matches the ``forced rebuild refused (`` prefix and these 16
+    """The post-deploy handoff matches the ``forced rebuild refused (`` prefix and these 17
     tokens to decide re-enqueue-once versus record-only (PD-I). An extra reason, or a
     renamed one, that the handoff does not know would be recorded as an unknown failure;
     the set is therefore pinned in both halves, and so is the message each token produces.
@@ -764,7 +766,7 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
     left the set with the unified whole-account path (decision AR-7), and their raise sites
     left the handler with them. The raise-site scan at the end pins that from the source:
     the double-quoted lower_snake literals the module passes to ``ForcedRebuildRefusedError(``
-    or assigns to ``_refusal =`` EQUAL the 16 tokens, so no token is without a raise site
+    or assigns to ``_refusal =`` EQUAL the 17 tokens, so no token is without a raise site
     and no raise site names a token outside the set.
 
     Phase 171 READCEILING (plan 10, 2026-10-27): the set gained its 16th token,
@@ -772,7 +774,15 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
     its job reached the 24 h backstop; the stored windows are kept, so a later run can clear
     it). It moved with this pin, the two-year-window pin, the probe's derived vocabulary and
     the post-deploy handoff, as the closed-vocabulary rule says.
+
+    Phase 180 BYBITFUNDING (plan 07, 2026-10-28, D-03): the set gained its 17th token,
+    ``account_flow_source_unreadable`` (a forced Bybit rebuild whose Unified-edge flow read the
+    venue refused or answered unreadably; it clears only when the key's permissions or the
+    venue's answer change). It moved with this pin, the two-year-window pin, the raise-site scan,
+    the probe's ``_FLOW_SOURCE_REFUSAL`` and the runbook's B'3 list.
     """
+    import scripts.allocator_history_probe as hp
+
     anchor = frozenset(
         {
             "positions_unreadable",
@@ -795,6 +805,7 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
             "account_keys_changed",
             "history_days_unreproduced",
             "account_key_read_stalled",
+            "account_flow_source_unreadable",
         }
     )
     assert er.FORCED_REBUILD_ANCHOR_REASONS == anchor, (
@@ -806,7 +817,18 @@ def test_forced_rebuild_refusal_reasons_are_a_closed_set() -> None:
         "tokens; change both together"
     )
     assert anchor.isdisjoint(account)
-    assert len(anchor) + len(account) == 16
+    assert len(anchor) + len(account) == 17
+    # The probe's refusal literal for an unreadable flow source is a member, and a record
+    # carrying it (with its cause) is accepted by the probe's own validator.
+    assert hp._FLOW_SOURCE_REFUSAL in account
+    assert hp.emit_record(
+        hp._account_record(
+            "a1",
+            "2026-10-28",
+            member_refusal=hp._FLOW_SOURCE_REFUSAL,
+            bybit_transfers_cause="flow_source_unreadable",
+        )
+    )
     assert er.FORCED_REBUILD_REFUSAL_REASONS == anchor | account, (
         "FORCED_REBUILD_REFUSAL_REASONS is no longer the union of its two halves"
     )
@@ -925,3 +947,251 @@ async def test_unforced_reconstruct_calls_the_crawl_and_the_anchor_with_their_ex
     ((anchor_args, anchor_kwargs),) = anchor_calls
     assert anchor_args == (exchange, "bybit")
     assert anchor_kwargs == {"refuse_unread_positions": True}, anchor_kwargs
+
+
+# ---------------------------------------------------------------------------
+# Phase 180 BYBITFUNDING plan 07 (D-03): an unreadable Unified flow source is refused by name
+# when forced, fails permanently when unforced, and stays retryable when it is only transient
+# ---------------------------------------------------------------------------
+
+FLOW_SOURCE_REFUSAL = "account_flow_source_unreadable"
+# The four ways the reader itself refuses an answer (``BybitUnifiedFlowReadError``).
+READER_CAUSES = ("non_dict_answer", "repeated_cursor", "wrong_type", "page_ceiling")
+VENUE_PERMANENT = (ccxt.PermissionDenied, ccxt.AuthenticationError, ccxt.BadRequest)
+VENUE_TRANSIENT = (ccxt.RateLimitExceeded, ccxt.NetworkError, ccxt.RequestTimeout)
+
+
+def _flows_at(timestamp: int, count: int = 120) -> list[dict[str, Any]]:
+    """``count`` TRANSFER_IN rows inside one 7-day window: more than two pages of 50."""
+    return [
+        unified_flow(f"fake-flow-in-{i}", "TRANSFER_IN", timestamp, change="5")
+        for i in range(count)
+    ]
+
+
+def _break_flow_source(
+    exchange: Any, cause: str, monkeypatch: pytest.MonkeyPatch, timestamp: int
+) -> None:
+    """Make ``exchange``'s Unified log fail the reader's own checks, ``cause`` one of
+    ``READER_CAUSES``."""
+    if cause == "non_dict_answer":
+        exchange.private_get_v5_account_transaction_log = AsyncMock(
+            return_value=["not", "a", "dict"]
+        )
+    elif cause == "repeated_cursor":
+        install_unified_log(exchange, _flows_at(timestamp), repeat_cursor=True)
+    elif cause == "wrong_type":
+        install_unified_log(exchange, _flows_at(timestamp), wrong_type=True)
+    else:
+        assert cause == "page_ceiling", cause
+        monkeypatch.setattr(buf, "UNIFIED_FLOW_PAGE_CAP", 2)
+        install_unified_log(exchange, _flows_at(timestamp))
+
+
+def _direct_flow_timestamp() -> int:
+    return int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
+
+
+def _direct_window() -> tuple[Any, Any]:
+    end_date = datetime.now(timezone.utc).date()
+    return end_date - timedelta(days=10), end_date
+
+
+async def _direct_crawl(exchange: Any, *, require_anchor: bool) -> Any:
+    start_date, end_date = _direct_window()
+    return await er._fetch_and_price_window(
+        exchange, "bybit", MagicMock(), start_date, end_date, require_anchor=require_anchor
+    )
+
+
+def _fail_the_log_with(exchange: Any, exc: BaseException) -> None:
+    exchange.private_get_v5_account_transaction_log = AsyncMock(side_effect=exc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", [c.__name__ for c in VENUE_PERMANENT] + list(READER_CAUSES))
+async def test_a_forced_bybit_read_whose_flow_source_is_unreadable_refuses_by_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, cause: str
+) -> None:
+    """D-03: a forced rebuild whose Unified flow read the venue refuses (a permission, an
+    authentication or a bad-request error) or answers unreadably (the reader's own four
+    refusals) raises the closed refusal ``account_flow_source_unreadable`` before any trade is
+    requested, with a static message and no venue exception chained. RED on a rebuild that
+    lets the raw error out (the job would read ``unknown``) or that swallows it into an empty
+    flow list (a silent 0)."""
+    exchange = await _bybit_exchange()
+    by_name = {c.__name__: c for c in VENUE_PERMANENT}
+    if cause in by_name:
+        _fail_the_log_with(exchange, by_name[cause](f"fixture failure signature={LEAKED_SIGNATURE}"))
+    else:
+        _break_flow_source(exchange, cause, monkeypatch, _direct_flow_timestamp())
+
+    with caplog.at_level("WARNING"), pytest.raises(er.ForcedRebuildRefusedError) as excinfo:
+        await _direct_crawl(exchange, require_anchor=True)
+
+    assert excinfo.value.reason == FLOW_SOURCE_REFUSAL
+    assert str(excinfo.value) == f"{REFUSAL_PREFIX}{FLOW_SOURCE_REFUSAL})"
+    assert LEAKED_SIGNATURE not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None and excinfo.value.__suppress_context__ is True
+    assert exchange.fetch_my_trades.await_count == 0
+    # Round 1 M-4: ``from None`` drops the cause, so the refusal leaves one line naming
+    # the exception class, and never the venue's text.
+    ours = [r.getMessage() for r in caplog.records if r.name == er.logger.name]
+    cause_class = cause if cause in by_name else "BybitUnifiedFlowReadError"
+    assert any(f"exc_class={cause_class}" in m for m in ours), ours
+    assert not any(LEAKED_SIGNATURE in m for m in ours)
+
+
+@pytest.mark.asyncio
+async def test_a_forced_bybit_job_on_an_unreadable_flow_source_fails_permanent_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same refusal end to end through the whole-account crawl: the job ends FAILED /
+    permanent naming the token, requests no trade, and leaves every stored row, the marker and
+    the audit as they were."""
+    exchange = await _bybit_exchange()
+    _fail_the_log_with(
+        exchange, ccxt.PermissionDenied(f"fixture failure signature={LEAKED_SIGNATURE}")
+    )
+    await _assert_forced_rebuild_refused(monkeypatch, exchange, FLOW_SOURCE_REFUSAL, crawled=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", VENUE_TRANSIENT, ids=lambda e: e.__name__)
+async def test_a_transient_flow_source_fault_is_not_a_refusal(
+    error: type[ccxt.BaseError],
+) -> None:
+    """A rate limit, a network fault or a timeout on the Unified log is the venue being busy,
+    not the key being unable to read it: the SAME exception object propagates (never the
+    token), so the whole-account converter and the worker keep treating it as retryable.
+    RED on a wrapper that catches everything."""
+    exchange = await _bybit_exchange()
+    raised = error("fixture transient fault")
+    _fail_the_log_with(exchange, raised)
+
+    with pytest.raises(error) as excinfo:
+        await _direct_crawl(exchange, require_anchor=True)
+
+    assert excinfo.value is raised
+    assert exchange.fetch_my_trades.await_count == 0
+
+
+def _job_flow_timestamp() -> int:
+    return int((END_DATE - timedelta(days=2)).timestamp() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_an_unforced_bybit_read_hit_by_a_permission_error_propagates_it_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the forced path refuses by name. Unforced, the venue's own error leaves the crawl as
+    the same object, and the job worker classifies it."""
+    exchange = await _bybit_exchange()
+    raised = ccxt.PermissionDenied("fixture permission error")
+    _fail_the_log_with(exchange, raised)
+
+    with pytest.raises(ccxt.PermissionDenied) as excinfo:
+        await _direct_crawl(exchange, require_anchor=False)
+
+    assert excinfo.value is raised
+    assert exchange.fetch_my_trades.await_count == 0
+
+
+async def _run_unforced_bybit_job(
+    monkeypatch: pytest.MonkeyPatch, exchange: Any
+) -> tuple[Any, Any, Any]:
+    """An unmarked sole Bybit key, an UNFORCED job over ``exchange``: (result, fake, audit)."""
+    fake = _MarkerFake()
+    _seed_key(fake, API_KEY_ID_1, marker=None, exchange="bybit")
+    audit = _install_fake_audit(monkeypatch)
+    _install_fake_preflight(monkeypatch, "bybit", fake, exchange)
+    _freeze_now(monkeypatch)
+    result = await run_reconstruct_allocator_history_job(_job())
+    return result, fake, audit
+
+
+def _assert_nothing_was_written(fake: Any, audit: Any) -> None:
+    assert fake.rows_for("allocator_equity_snapshots") == []
+    assert _marker_of(fake, API_KEY_ID_1) is None, "the marker moved"
+    assert fake.api_key_updates() == [], fake.api_key_updates()
+    actions = [c.kwargs["action"] for c in audit.call_args_list]
+    assert not (set(actions) & COMPLETION_ACTIONS), actions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["PermissionDenied"] + list(READER_CAUSES))
+async def test_an_unforced_bybit_read_whose_flow_source_is_unreadable_fails_loud_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, cause: str
+) -> None:
+    """Orchestrator reading 2 (a behaviour change): an UNFORCED job whose Unified flows cannot be
+    read does NOT fall back to the on-chain pair and does NOT write a curve from the trades
+    alone. It ends FAILED with error_kind ``permanent`` (the queue does not retry a fault no
+    retry can clear), the message is not a forced refusal, no trade is requested and nothing is
+    stored. RED on a rebuild that raises the refusal whatever the path (the message would carry
+    the forced prefix), and on a classifier that calls the reader's error ``unknown`` (retried)."""
+    exchange = await _bybit_exchange()
+    if cause == "PermissionDenied":
+        _fail_the_log_with(exchange, ccxt.PermissionDenied("fixture permission error"))
+    else:
+        _break_flow_source(exchange, cause, monkeypatch, _job_flow_timestamp())
+
+    result, fake, audit = await _run_unforced_bybit_job(monkeypatch, exchange)
+
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "permanent", result
+    assert not (result.error_message or "").startswith(REFUSAL_PREFIX), result.error_message
+    assert exchange.fetch_my_trades.await_count == 0
+    _assert_nothing_was_written(fake, audit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", VENUE_TRANSIENT, ids=lambda e: e.__name__)
+async def test_an_unforced_transient_flow_fault_still_retries(
+    monkeypatch: pytest.MonkeyPatch, error: type[ccxt.BaseError]
+) -> None:
+    """A transient fault on the Unified log still ends the unforced job FAILED with error_kind
+    ``transient`` (the queue retries it), with no curve, marker or completion audit written. The
+    429 cooldown stamp a rate limit writes is expected and is not asserted on."""
+    exchange = await _bybit_exchange()
+    _fail_the_log_with(exchange, error("fixture transient fault"))
+
+    result, fake, audit = await _run_unforced_bybit_job(monkeypatch, exchange)
+
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "transient", result
+    assert exchange.fetch_my_trades.await_count == 0
+    assert fake.rows_for("allocator_equity_snapshots") == []
+    assert _marker_of(fake, API_KEY_ID_1) is None
+    actions = [c.kwargs["action"] for c in audit.call_args_list]
+    assert not (set(actions) & COMPLETION_ACTIONS), actions
+
+
+def test_the_runbook_lists_every_refusal_token_once() -> None:
+    """The post-deploy handoff (runbook section B'3, rule 3) decides re-enqueue-once versus
+    record-only from two lists. They must name EVERY token of the closed set exactly once, with
+    the count the runbook states and the counts it gives each list, or an operator meets a
+    refusal the runbook does not know. RED when a token is added to the code and not to the
+    runbook (this was already true of ``account_key_read_stalled`` before Phase 180)."""
+    runbook = (
+        Path(__file__).resolve().parents[2]
+        / "docs" / "runbooks" / "marksource-okx-history-correction.md"
+    )
+    text = re.sub(r"\s+", " ", runbook.read_text(encoding="utf-8"))
+    total = len(er.FORCED_REBUILD_REFUSAL_REASONS)
+    assert f"`FORCED_REBUILD_REFUSAL_REASONS`, {total} tokens, and a token outside it" in text
+
+    once = re.search(r"Re-enqueue ONCE\*\* \(.*?\) for these (\d+): (.*?)\. If it refuses again", text)
+    record = re.search(r"Record only, no re-run\*\* for these (\d+): (.*?) Note each one's count", text)
+    assert once and record, "B'3 rule 3 changed shape: the two lists could not be read"
+    once_tokens = re.findall(r"`([a-z_]+)`", once.group(2))
+    record_tokens = re.findall(r"`([a-z_]+)`", record.group(2))
+
+    assert int(once.group(1)) == len(once_tokens), (once.group(1), once_tokens)
+    assert int(record.group(1)) == len(record_tokens), (record.group(1), record_tokens)
+    assert len(set(once_tokens)) == len(once_tokens), "a token is listed twice for re-enqueue"
+    assert len(set(record_tokens)) == len(record_tokens), "a token is listed twice for record-only"
+    assert set(once_tokens).isdisjoint(record_tokens)
+    assert set(once_tokens) | set(record_tokens) == set(er.FORCED_REBUILD_REFUSAL_REASONS), (
+        f"runbook only: {sorted((set(once_tokens) | set(record_tokens)) - er.FORCED_REBUILD_REFUSAL_REASONS)}; "
+        f"code only: {sorted(er.FORCED_REBUILD_REFUSAL_REASONS - (set(once_tokens) | set(record_tokens)))}"
+    )

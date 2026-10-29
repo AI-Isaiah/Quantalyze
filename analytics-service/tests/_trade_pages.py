@@ -20,13 +20,17 @@ Venue rules mirrored (vendor docs and ccxt 4.5.88, see the phase RESEARCH Q2):
   Bybit also rejects a request whose start is older than two years (retCode 10001,
   which ccxt raises as ``BadRequest``); ``VenueTradeBook(two_year_limit_now=...)``
   mirrors that, measured against a caller-supplied clock.
+- bybit Unified transaction log: ``GET /v5/account/transaction-log``. ``accountType`` UNIFIED,
+  one ``type`` per request, both ``startTime`` and ``endTime`` required with a span of at most
+  7 days, at most 50 rows a page, newest first, paged with an opaque ``nextPageCursor`` (an
+  empty string when no row remains).
 - any other venue: the rows at or after ``since``, ascending.
 """
 from __future__ import annotations
 
 import copy
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -38,6 +42,7 @@ BYBIT_PAGE_CAP = 100
 BYBIT_TWO_YEAR_MS = 730 * DAY_MS
 OKX_PAGE_CAP = 100
 OTHER_PAGE_CAP = 1000
+BYBIT_LOG_PAGE_CAP = 50
 
 
 def trade_rows(
@@ -246,6 +251,98 @@ class VenueTradeBook:
             (t for t in self.trades if int(t["timestamp"]) >= begin), key=_order_key
         )
         return [copy.deepcopy(t) for t in inside[: self._cap(OTHER_PAGE_CAP, limit)]]
+
+
+def unified_flow(
+    flow_id: str,
+    log_type: str,
+    timestamp: int,
+    *,
+    currency: str = "USDT",
+    change: str = "100",
+) -> dict[str, Any]:
+    """One entry of a ``UnifiedLogBook``: an internal flow, rendered as a raw row on request."""
+    return {
+        "id": flow_id,
+        "type": log_type,
+        "timestamp": timestamp,
+        "currency": currency,
+        "change": change,
+    }
+
+
+class UnifiedLogBook:
+    """An async callable ``(params)`` over in-memory Unified transaction-log entries, for
+    ``AsyncMock(side_effect=...)``, answering the way Bybit's ``GET /v5/account/transaction-log``
+    does (see the module docstring). Every call's params are recorded on ``.calls``.
+
+    ``repeat_cursor`` answers, on every page after the first, the cursor it was sent.
+    ``wrong_type`` answers rows of the other flow type than the one requested.
+    """
+
+    def __init__(
+        self,
+        flows: Iterable[dict[str, Any]] = (),
+        *,
+        repeat_cursor: bool = False,
+        wrong_type: bool = False,
+    ) -> None:
+        inspect.markcoroutinefunction(self)
+        self.flows = [copy.deepcopy(f) for f in flows]
+        self._repeat_cursor = repeat_cursor
+        self._wrong_type = wrong_type
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = dict(params)
+        self.calls.append(copy.deepcopy(params))
+        if params.get("accountType") != "UNIFIED":
+            raise ccxt.BadRequest("bybit: the fixture only answers accountType UNIFIED")
+        if "startTime" not in params or "endTime" not in params:
+            raise ccxt.BadRequest("bybit: startTime and endTime must both be given")
+        requested = params.get("type")
+        if self._wrong_type:
+            entries = [f for f in self.flows if f["type"] != requested]
+        else:
+            entries = [f for f in self.flows if f["type"] == requested]
+        chunk, next_cursor = bybit_select(
+            entries,
+            start=int(params["startTime"]),
+            end=int(params["endTime"]),
+            cursor=params.get("cursor"),
+            size=min(int(params.get("limit", BYBIT_LOG_PAGE_CAP)), BYBIT_LOG_PAGE_CAP),
+        )
+        if self._repeat_cursor and params.get("cursor"):
+            next_cursor = str(params["cursor"])
+        listed = [
+            {
+                "id": str(f["id"]),
+                "type": f["type"],
+                "transactionTime": str(int(f["timestamp"])),
+                "currency": f["currency"],
+                "change": f["change"],
+                "cashFlow": f["change"],
+                "funding": "",
+                "fee": "0",
+                "symbol": "",
+                "category": "",
+            }
+            for f in chunk
+        ]
+        return {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {"list": listed, "nextPageCursor": next_cursor or ""},
+        }
+
+
+def install_unified_log(
+    exchange: Any, flows: Iterable[dict[str, Any]] = (), **options: Any
+) -> UnifiedLogBook:
+    """Point ``exchange.private_get_v5_account_transaction_log`` at a ``UnifiedLogBook``."""
+    book = UnifiedLogBook(flows, **options)
+    exchange.private_get_v5_account_transaction_log = AsyncMock(side_effect=book)
+    return book
 
 
 def _raw_bybit_execution(trade: dict[str, Any]) -> dict[str, Any]:

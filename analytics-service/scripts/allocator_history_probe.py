@@ -29,12 +29,18 @@ a1..aN by the account's earliest such key:
      from the pooled one: ``ok`` only when the account holds a Bybit member, its window
      is the rebuild's full Bybit window (730 days) and BOTH counts are at least 1,
      ``unmeasured`` otherwise, ``not-applicable`` when no full Bybit window applies. A 0 is
-     NOT a depth finding: the rebuild's Bybit transfer read is on-chain only, so a 0 can
-     come from the funding route as well as from no history that old. The corroboration
+     NOT a depth finding on the on-chain read (Phase 180 note below). The corroboration
      fields (``deposits_in_window``, ``withdrawals_in_window``, three closed age buckets
      for the oldest fill, deposit and withdrawal, and two booleans for whether the oldest
      fill is older than the oldest deposit or withdrawal) inform the founder and never open
-     the gate;
+     the gate. From Phase 180 on (D-01) a Bybit member's flow read is the Unified wallet's
+     transaction log: its ``TRANSFER_IN`` rows are the deposit kind and its ``TRANSFER_OUT``
+     rows the withdrawal kind, so the per-kind counts, in-window totals, buckets and the gate
+     describe the Unified edge, and ``bybit_unified_state`` says whether that read answered.
+     ``bybit_transfers_cause`` (D-03) names why a shut gate is shut and ``bybit_funding_explained``
+     whether the account's funding is explained; both are derived in code and open nothing.
+     Lineage (Phase 173, 2026-10-28): the Bybit transfer read was on-chain only, so a6's reading
+     ``deposits=0 withdrawals=0 gate=unmeasured`` was not a depth finding;
   3. compares the summed rebuilt curve with the stored one, but only when every
      exchange account the allocator holds is OKX, Bybit or Deribit (which the rebuild
      counts as $0) and every OKX or Bybit member was read: a stored row is the sum
@@ -74,6 +80,13 @@ a1..aN by the account's earliest such key:
      scripts/okx_chain_record.py. Its venue calls are GETs only, made through
      services.okx_bills_chain.BudgetedExchange under CHAIN_CALL_CEILING, and it prints the
      chain_* keys that module declares. The refusal and every key above are unchanged.
+  7. for each Bybit member read, refused or cut short, takes the funding evidence (Phase 180):
+     the five evidence reads (on-chain deposits, internal deposits, withdrawals, inter-account
+     transfers and universal transfers), the key's master and UTA flags and a census of eight
+     Earn, staking, bonus-transfer and PEF transaction-log types, all read-only GETs and all
+     through scripts/bybit_funding_record.py, after the member's snapshot and each under its own
+     bound. A source past its bound prints the state Timeout, never a 0. They print counts,
+     closed age buckets and closed state tokens, and they feed no gate (D-01, D-03).
 
 REDACTION CONTRACT (the output is pasted into a tracked file in a public repo): labels,
 counts, booleans, closed-vocabulary tokens and 3-significant-figure ratios, and no
@@ -95,8 +108,10 @@ whose circuit-breaker arm can write), the 429 stamp (_stamp_429) or any persist 
 and it names no venue write endpoint. A static pin in the tests proves it. Keys are
 decrypted inside the worker process and nowhere else. The venue calls outside the
 rebuild's own read are GETs: the fills-history ordering read (one per OKX member whose
-forced pass read trades), and, for an OKX member refused on its anchor, one ``GET /api/v5/account/balance``
-plus the bills-archive pages read through ``services.okx_opening_balance``.
+forced pass read trades), for an OKX member refused on its anchor, one ``GET /api/v5/account/balance``
+plus the bills-archive pages read through ``services.okx_opening_balance``, and, for a Bybit member,
+the funding evidence of ``scripts/bybit_funding_record.py`` (five asset record and transfer-list
+reads, the key-info read and the Unified transaction-log census).
 
 D-01 (Phase 171): WHICH LIMIT STOPPED A CUT-SHORT READ. For a member whose read was cut
 short (``failure_class`` "truncated") the account record also names ``truncated_site`` (the
@@ -159,7 +174,7 @@ from services import equity_reconstruction as er
 from services import okx_opening_balance as obal
 from services.allocator_equity_derive import working_holder_predicate
 from services.closed_sets import STABLECOINS
-from scripts import okx_chain_record
+from scripts import bybit_funding_record, okx_chain_record
 
 # The failure classes this probe may print: the shared allow-list plus "truncated", a trade read
 # cut short (er.TruncatedTradeRead), told apart from a venue rejection and from the two-year guard.
@@ -240,6 +255,55 @@ _OKX_ORDER_GATES: tuple[str, ...] = ("ok", "violated", "unmeasured")
 # The Bybit transfer-depth gate, derived in code by ``bybit_transfers_verdict`` (Phase 173 D-02).
 _BYBIT_TRANSFERS_GATES: tuple[str, ...] = ("not-applicable", "ok", "unmeasured")
 
+# D-01 (Phase 180): the rebuild's Bybit flow source is the Unified wallet's transaction log. Its
+# ``TRANSFER_IN`` rows are the gate's deposit kind and its ``TRANSFER_OUT`` rows the withdrawal
+# kind (the mapping D-01 left to the plan), in the recorder's own kind literals. Plan 04 pins these
+# two types equal to the rebuild's ``UNIFIED_FLOW_TYPES``; the probe does not import that module,
+# because an older deployed tree lacks it.
+_UNIFIED_FLOW_KINDS: dict[str, str] = {"TRANSFER_IN": "deposits", "TRANSFER_OUT": "withdrawals"}
+
+# SC-1 ("or a source still unnamed"): whether a Bybit account's funding is explained, derived in code
+# by ``bybit_funding_explained``.
+_FUNDING_EXPLANATIONS: tuple[str, ...] = (
+    "not-applicable",
+    "explained",
+    "off_edge",
+    "unexplained",
+    "unmeasured",
+)
+
+# D-03 (Phase 180): why a shut Bybit transfer-depth gate is shut, derived in code by
+# ``bybit_transfers_cause``. The cause explains a shut gate; it never opens one.
+_BYBIT_TRANSFERS_CAUSES: tuple[str, ...] = (
+    "not-applicable",
+    "none",
+    "no_deposit_older_365d",
+    "no_withdrawal_older_365d",
+    "neither_older_365d",
+    "flow_source_unreadable",
+    "read_incomplete",
+)
+
+# The literal contract with plan 07 (D-03): the closed refusal reason the rebuild gains when an
+# account's Bybit flow source cannot be read. Plan 07 adds it to the rebuild's forced-refusal
+# vocabulary and its token-set test asserts this name is a member of that set, so the two cannot
+# drift. Until then it is not in this probe's emit vocabulary, so the cause is tested as a pure
+# function and no record carrying that refusal is emitted.
+_FLOW_SOURCE_REFUSAL: str = "account_flow_source_unreadable"
+
+# The Unified states that mean the key or the request cannot get past the read (the permanent
+# classes of ``classify_failure``); every other failure class is a transient or unclassified fault.
+_PERMANENT_UNIFIED_STATES: tuple[str, ...] = ("AuthenticationError", "PermissionDenied", "BadRequest")
+
+# What the Unified flow read may have done: never asked, answered, answered in a shape the
+# recorder could not read, or raised a failure class.
+_UNIFIED_STATES: tuple[str, ...] = (
+    "not-run",
+    "read",
+    "malformed",
+    *(name for name in FAILURE_CLASSES if name != "none"),
+)
+
 # Every attribute the probe reads off the rebuild module. ``run()`` refuses before any decrypt when
 # the module it runs against lacks one (see ``missing_deployed_names``).
 DEPLOYED_ER_NAMES: tuple[str, ...] = (
@@ -302,6 +366,12 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "oldest_fill_before_oldest_deposit",
     "oldest_fill_before_oldest_withdrawal",
     "bybit_transfers_gate",
+    "bybit_unified_state",
+    "bybit_unified_in_rows",
+    "bybit_unified_out_rows",
+    "bybit_unified_sign_mismatch_rows",
+    "bybit_funding_explained",
+    "bybit_transfers_cause",
     "truncated_site",
     "last_window_age_bucket",
     "last_window_calls",
@@ -332,6 +402,10 @@ ACCOUNT_RECORD_KEYS: tuple[str, ...] = (
     "negative_stable_cash",
     "breakdown_truncated",
     "opening_day_is_window_start",
+    # The Bybit funding evidence (Phase 180) sits BEFORE the chain keys: two pins in
+    # tests/test_okx_chain_record.py hold the chain keys as the tail of this tuple, on purpose.
+    "bybit_evidence_members",
+    *bybit_funding_record.FUNDING_KEYS,
     *okx_chain_record.CHAIN_KEYS,
 )
 SUMMARY_RECORD_KEYS: tuple[str, ...] = (
@@ -434,6 +508,12 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "oldest_fill_before_oldest_deposit": _is_bool_or_absent,
     "oldest_fill_before_oldest_withdrawal": _is_bool_or_absent,
     "bybit_transfers_gate": _is_one_of(_BYBIT_TRANSFERS_GATES),
+    "bybit_unified_state": _is_one_of(_UNIFIED_STATES),
+    "bybit_unified_in_rows": _is_count,
+    "bybit_unified_out_rows": _is_count,
+    "bybit_unified_sign_mismatch_rows": _is_count,
+    "bybit_funding_explained": _is_one_of(_FUNDING_EXPLANATIONS),
+    "bybit_transfers_cause": _is_one_of(_BYBIT_TRANSFERS_CAUSES),
     "truncated_site": _is_one_of(_TRUNCATED_SITES),
     "last_window_age_bucket": _is_one_of(_WINDOW_AGE_BUCKETS),
     "last_window_calls": _is_count,
@@ -468,6 +548,8 @@ _ACCOUNT_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "negative_stable_cash": _is_bool_or_absent,
     "breakdown_truncated": _is_bool_or_absent,
     "opening_day_is_window_start": _is_bool_or_absent,
+    "bybit_evidence_members": _is_count,
+    **bybit_funding_record.FUNDING_VALIDATORS,
     **okx_chain_record.CHAIN_VALIDATORS,
 }
 
@@ -590,6 +672,77 @@ def _as_int(raw: Any) -> int | None:
     return None
 
 
+def _as_ms(raw: Any) -> int | None:
+    """A venue millisecond stamp: an int that is not a bool, or a string of ASCII digits, as an
+    int. Anything else is None (a stamp is never invented)."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _log_rows(answer: Any) -> list[Any] | None:
+    """The entries of a Unified transaction-log answer (``result.list``), or None when the answer
+    is not that shape. Entries are handed back unfiltered: the caller counts a non-object as
+    malformed, as the rebuild's reader refuses it."""
+    if not isinstance(answer, dict):
+        return None
+    result = answer.get("result")
+    if not isinstance(result, dict):
+        return None
+    listed = result.get("list")
+    if not isinstance(listed, list):
+        return None
+    return listed
+
+
+def _reader_accepts_unified_row(requested: str, row: Any) -> bool:
+    """Whether the rebuild's Unified reader would accept this log row (``normalise_unified_flow_row``
+    in the rebuild's ``bybit_unified_flows`` module): an object of the requested type, a usable id (a str or an
+    int that is not a bool, never ``""``), a usable ``transactionTime``, a non-empty currency, and a
+    finite ``change`` (else ``cashFlow``). Mirrored here, not imported: the probe must run against an
+    older deployed tree that lacks that module; ``test_the_probes_unified_row_check_agrees_with_the_readers``
+    pins the two together."""
+    if not isinstance(row, Mapping) or row.get("type") != requested:
+        return False
+    row_id = row.get("id")
+    if isinstance(row_id, bool) or not isinstance(row_id, (str, int)) or row_id == "":
+        return False
+    if _as_ms(row.get("transactionTime")) is None:
+        return False
+    currency = row.get("currency")
+    if not isinstance(currency, str) or not currency:
+        return False
+    for field_name in ("change", "cashFlow"):
+        raw = row.get(field_name)
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, bool):
+            return False
+        try:
+            return math.isfinite(float(raw))
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _sign_contradicts(kind: str, row: Mapping[str, Any]) -> bool:
+    """Whether a Unified flow row's sign contradicts the type it was requested under. The sign of
+    a ``TRANSFER_IN`` / ``TRANSFER_OUT`` row is not documented (RESEARCH A2), so direction always
+    comes from the requested type and a contradiction is only COUNTED, as evidence. Reads
+    ``change``, else ``cashFlow`` (``""``, None and a non-finite value are absent), never
+    ``funding``."""
+    value = _num(row.get("change"))
+    if value is None:
+        value = _num(row.get("cashFlow"))
+    if value is None:
+        return False
+    return value < 0 if kind == "deposits" else value > 0
+
+
 def _page_cursor(rows: Sequence[Mapping[str, Any]]) -> str | None:
     """The Bybit ``nextPageCursor`` left on a row's ``info``, read as the rebuild reads it. Only
     compared with the cursor the call was sent; the text is never stored."""
@@ -645,6 +798,80 @@ class _TradeRecorder:
             fetcher = getattr(client, name, None)
             if fetcher is not None:
                 setattr(client, name, self._recording_transfers(kind, fetcher))
+
+        # D-01 (Phase 180): the rebuild's Bybit flow read is the Unified transaction log, recorded
+        # into the SAME per-kind list, plus a list of its own so the account record can say how
+        # many rows the Unified edge alone gave.
+        self.unified: list[tuple[str, Any, int | None]] = []
+        self.unified_calls = 0
+        self.unified_failure = "none"
+        self.unified_malformed = 0
+        self.unified_sign_mismatch = 0
+        self._unified_seen: set[tuple[str, str]] = set()
+        log_fetcher = getattr(client, "private_get_v5_account_transaction_log", None)
+        if log_fetcher is not None:
+            client.private_get_v5_account_transaction_log = self._recording_unified_log(log_fetcher)
+
+    def unified_state(self) -> str:
+        """What the Unified flow read did: ``not-run`` when it was never asked, the first failure
+        class it raised, ``malformed`` when an answer or a row could not be read, else ``read``."""
+        if self.unified_calls == 0:
+            return "not-run"
+        if self.unified_failure != "none":
+            return self.unified_failure
+        if self.unified_malformed > 0:
+            return "malformed"
+        return "read"
+
+    def _recording_unified_log(self, fetcher: Any) -> Callable[..., Any]:
+        async def _recorded_log(*args: Any, **kwargs: Any) -> Any:
+            params = args[0] if args else kwargs.get("params")
+            requested = params.get("type") if isinstance(params, Mapping) else None
+            kind = _UNIFIED_FLOW_KINDS.get(requested) if isinstance(requested, str) else None
+            if kind is None or not isinstance(requested, str) or not isinstance(params, Mapping):
+                # Not a flow (the Earn census, a funding settlement read): answered, never recorded.
+                return await fetcher(*args, **kwargs)
+            self.unified_calls += 1
+            try:
+                answer = await fetcher(*args, **kwargs)
+            except asyncio.CancelledError:
+                # The crawl bound cancels the read mid-call: the flows it holds are partial. The
+                # bound is the only canceller, so the state reads as the timeout it is.
+                if self.unified_failure == "none":
+                    self.unified_failure = classify_failure(TimeoutError())
+                raise
+            except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
+                if self.unified_failure == "none":
+                    self.unified_failure = classify_failure(exc)
+                raise  # the same exception object: the recorder never changes what the rebuild sees
+            listed = _log_rows(answer)
+            if listed is None:
+                self.unified_malformed += 1
+                return answer
+            # Count what the rebuild's reader would accept, once per (type, id) as its replay does.
+            # A row it would refuse, or a cursor it would refuse, is malformed and counts nothing.
+            for row in listed:
+                if not _reader_accepts_unified_row(requested, row):
+                    self.unified_malformed += 1
+                    continue
+                key = (kind, str(row["id"]))
+                if key in self._unified_seen:
+                    continue
+                self._unified_seen.add(key)
+                entry = (kind, row["id"], _as_ms(row.get("transactionTime")))
+                self.transfers.append(entry)
+                self.unified.append(entry)
+                if _sign_contradicts(kind, row):
+                    self.unified_sign_mismatch += 1
+            next_cursor = answer["result"].get("nextPageCursor")
+            sent = params.get("cursor")
+            if (next_cursor is not None and not isinstance(next_cursor, str)) or (
+                listed and next_cursor and next_cursor == sent
+            ):
+                self.unified_malformed += 1
+            return answer
+
+        return _recorded_log
 
     def _recording_transfers(self, kind: str, fetcher: Any) -> Callable[..., Any]:
         async def _recorded_transfers(*args: Any, **kwargs: Any) -> Any:
@@ -914,6 +1141,100 @@ def bybit_transfers_verdict(
     return "unmeasured"
 
 
+def bybit_transfers_cause(
+    gate: str,
+    unified_state: str,
+    member_refusal: str,
+    failure_class: str,
+    trade_calls: int,
+    deposits_old: int,
+    withdrawals_old: int,
+) -> str:
+    """Why the Bybit transfer-depth gate reads as it does (D-03), one closed token, derived in code.
+
+    ``not-applicable`` when the gate is; ``none`` when it is ``ok``. For a shut gate, in this order:
+    ``flow_source_unreadable`` when the rebuild refused the flow source
+    (``_FLOW_SOURCE_REFUSAL``), the Unified answer was malformed, or the read failed with a
+    permanent class (the key or the request cannot get past it); ``read_incomplete`` when the
+    Unified read never ran or failed with any other class (a transient or unclassified fault a retry
+    may clear, so never reported as an unreadable source), or when the member failed before any
+    trade call (the rebuild reads the Bybit flows BEFORE the trades, so a member that made a trade
+    call finished its flow read and its per-kind counts are a measurement); otherwise the per-kind
+    counts name what is missing. The cause explains a shut gate and never opens one."""
+    if gate == "not-applicable":
+        return "not-applicable"
+    if gate == "ok":
+        return "none"
+    if (
+        member_refusal == _FLOW_SOURCE_REFUSAL
+        or unified_state == "malformed"
+        or unified_state in _PERMANENT_UNIFIED_STATES
+    ):
+        return "flow_source_unreadable"
+    if unified_state != "read" or (failure_class != "none" and trade_calls == 0):
+        return "read_incomplete"
+    if deposits_old == 0 and withdrawals_old == 0:
+        return "neither_older_365d"
+    if deposits_old == 0:
+        return "no_deposit_older_365d"
+    return "no_withdrawal_older_365d"
+
+
+def account_unified_state(states: Sequence[str]) -> str:
+    """One account's Unified flow-read state from its Bybit members' states, in key order: the
+    first that is neither ``read`` nor ``not-run`` (a failure or a malformed answer outranks a
+    clean read), else ``read`` when any member read, else ``not-run``."""
+    for state in states:
+        if state not in ("read", "not-run"):
+            return state
+    return "read" if "read" in states else "not-run"
+
+
+def bybit_funding_explained(
+    bybit_members: int,
+    unified_state: str,
+    unified_in_rows: int,
+    trades_read: int,
+    evidences: Sequence[Mapping[str, Any]],
+) -> str:
+    """Whether a Bybit account's funding is explained (SC-1), derived in code, one closed token.
+    ``evidences`` is every Bybit member's funding evidence and ``trades_read`` counts the Bybit
+    members' trades only.
+
+    ``not-applicable`` without a Bybit member. ``explained`` when the Unified edge shows at least
+    one ``TRANSFER_IN`` row, whatever the Unified state. ``off_edge`` when no Unified in-row exists
+    but an inflow evidence source of ANY member shows money arriving: RESEARCH Pitfall 2's
+    disagreement between the evidence and the edge, and a reason to hold a rebuild. ``unexplained``
+    is SC-1's "a source still unnamed": the Unified edge was read, trades were read, EVERY Bybit
+    member's evidence was taken and every inflow source was read (or is master-only and was not
+    asked), and none shows a funding row. Anything else, a Unified edge never read, no trades, a
+    member whose evidence was never taken, an evidence source that failed or never ran, is
+    ``unmeasured``.
+    The explanation feeds no gate."""
+    if bybit_members < 1:
+        return "not-applicable"
+    if unified_in_rows >= 1:
+        return "explained"
+    names = bybit_funding_record.INFLOW_SOURCE_NAMES
+    for evidence in evidences:
+        for name in names:
+            rows = evidence.get(f"bybit_{name}_rows")
+            if isinstance(rows, int) and not isinstance(rows, bool) and rows >= 1:
+                return "off_edge"
+    if (
+        unified_state == "read"
+        and trades_read >= 1
+        and len(evidences) == bybit_members
+        and all(
+            evidence.get(f"bybit_{name}_state") in ("read", "not-master")
+            for evidence in evidences
+            for name in names
+        )
+    ):
+        return "unexplained"
+    return "unmeasured"
+
+
 def compare_days(
     stored: Mapping[str, float], rebuilt: Mapping[str, float]
 ) -> tuple[int, int, float | str]:
@@ -1158,6 +1479,10 @@ class _MemberResult:
     last_window_calls: int = 0
     elapsed_s: int = 0
     diagnostic: dict[str, Any] | None = None  # the anchor diagnostic's record keys, when run
+    funding: dict[str, Any] | None = None  # the Bybit funding evidence's record keys, when taken
+    unified: list[tuple[str, Any, int | None]] = field(default_factory=list)  # the Unified-edge flows
+    unified_state: str = "not-run"
+    unified_sign_mismatch: int = 0
 
 
 async def _okx_order_reading(
@@ -1216,6 +1541,31 @@ async def _okx_order_reading(
     if len(readings) == len(inst_types) and all(r is True for r in readings):
         return True, failure
     return (None if failure != "none" else FIELD_ABSENT), failure
+
+
+def _unified_snapshot(recorder: _TradeRecorder | None) -> dict[str, Any]:
+    """The recorder's Unified-edge reading, as ``_MemberResult`` fields (the defaults when the
+    member never got as far as a recorder)."""
+    if recorder is None:
+        return {}
+    return {
+        "unified": list(recorder.unified),
+        "unified_state": recorder.unified_state(),
+        "unified_sign_mismatch": recorder.unified_sign_mismatch,
+    }
+
+
+async def _bybit_funding_evidence(
+    client: Any, venue: str, window_start: date, end_date: date
+) -> dict[str, Any] | None:
+    """The Bybit funding evidence (Phase 180 SC-1): how the account was funded, as counts and
+    closed tokens, from five read-only GETs and the key's flags. ``None`` unless the member is a
+    Bybit member with a client. It is a side measurement: it runs AFTER the member's snapshot,
+    outside the crawl bound, so it can change neither a member's outcome nor its forced-pass
+    counters, and ``measure_funding`` records a failure by state and never raises one."""
+    if venue != "bybit" or client is None:
+        return None
+    return await bybit_funding_record.measure_funding(client, _day_ms(window_start), end_date)
 
 
 async def _read_member(
@@ -1379,11 +1729,13 @@ async def _probe_member(
         # (review WR-02), so it gets the same read-only diagnostic a refusal does.
         calls = list(recorder.calls)
         moved = list(recorder.transfers)
+        unified = _unified_snapshot(recorder)
         elapsed_s = _elapsed()
         # The ordering read is a side measurement: one that raises is recorded by class and
         # the member stays read. It follows the snapshot, so ``read_elapsed_s`` keeps meaning
         # the forced pass.
         order, order_failure = await _okx_order_reading(client, venue, calls, window_start, end_date)
+        funding = await _bybit_funding_evidence(client, venue, window_start, end_date)
         diagnostic: dict[str, Any] | None = None
         if venue == "okx" and agreed:
             diagnostic = await _anchor_diagnostic(client, supabase, window_start, end_date)
@@ -1396,6 +1748,8 @@ async def _probe_member(
             order_failure_class=order_failure,
             elapsed_s=elapsed_s,
             diagnostic=diagnostic,
+            funding=funding,
+            **unified,
         )
     except er.ForcedRebuildRefusedError as exc:
         # Snapshot BEFORE the diagnostic: its second pass runs through the same wrapped
@@ -1403,11 +1757,19 @@ async def _probe_member(
         # describe the forced pass only).
         calls = list(recorder.calls) if recorder is not None else []
         moved = list(recorder.transfers) if recorder is not None else []
+        unified = _unified_snapshot(recorder)
+        if exc.reason == _FLOW_SOURCE_REFUSAL and unified.get("unified_state") == "read":
+            # The reader refused an answer the recorder saw no fault in (the page ceiling, say):
+            # the Unified read did not answer, whatever its calls looked like.
+            unified["unified_state"] = "malformed"
         elapsed_s = _elapsed()
         # D-01 (Phase 173): the refusal is raised at the END of the rebuild's read, so the
         # snapshot already holds the whole forced pass. Take the ordering reading from it now,
         # before the diagnostic's advisory pass can add calls to the client's recorder.
         order, order_failure = await _okx_order_reading(client, venue, calls, window_start, end_date)
+        # The Bybit funding evidence follows the same snapshot: it describes the account, not the
+        # refusal, so it is taken whichever way the refusal reads below.
+        funding = await _bybit_funding_evidence(client, venue, window_start, end_date)
         if exc.reason in er.FORCED_REBUILD_REFUSAL_REASONS:
             diagnostic = None
             if venue == "okx" and client is not None and exc.reason == "anchor_skipped_implausible":
@@ -1421,6 +1783,8 @@ async def _probe_member(
                 order_failure_class=order_failure,
                 elapsed_s=elapsed_s,
                 diagnostic=diagnostic,
+                funding=funding,
+                **unified,
             )
         return _MemberResult(
             read=False,
@@ -1430,10 +1794,13 @@ async def _probe_member(
             order=order,
             order_failure_class=order_failure,
             elapsed_s=elapsed_s,
+            funding=funding,
+            **unified,
         )
     except Exception as exc:  # noqa: BLE001 - recorded by CLASS; the message is never read
         calls = list(recorder.calls) if recorder is not None else []
         moved = list(recorder.transfers) if recorder is not None else []
+        unified = _unified_snapshot(recorder)
         elapsed_s = _elapsed()
         truncated = isinstance(exc, er.TruncatedTradeRead)
         # A cut-short read did read trades, so it takes the ordering reading too. Every other
@@ -1443,6 +1810,11 @@ async def _probe_member(
             await _okx_order_reading(client, venue, calls, window_start, end_date)
             if truncated
             else (None, "none")
+        )
+        # The same reasoning for the funding evidence: a venue that hung or rejected the key is
+        # not asked five more questions.
+        funding = (
+            await _bybit_funding_evidence(client, venue, window_start, end_date) if truncated else None
         )
         return _MemberResult(
             read=False,
@@ -1457,6 +1829,8 @@ async def _probe_member(
             ),
             last_window_calls=last_window_calls(calls) if truncated else 0,
             elapsed_s=elapsed_s,
+            funding=funding,
+            **unified,
         )
     finally:
         if client is not None:
@@ -1534,6 +1908,12 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "oldest_fill_before_oldest_deposit": FIELD_ABSENT,
         "oldest_fill_before_oldest_withdrawal": FIELD_ABSENT,
         "bybit_transfers_gate": "not-applicable",
+        "bybit_unified_state": "not-run",
+        "bybit_unified_in_rows": 0,
+        "bybit_unified_out_rows": 0,
+        "bybit_unified_sign_mismatch_rows": 0,
+        "bybit_funding_explained": "not-applicable",
+        "bybit_transfers_cause": "not-applicable",
         "truncated_site": "none",
         "last_window_age_bucket": "none",
         "last_window_calls": 0,
@@ -1564,6 +1944,8 @@ def _account_record(label: str, run_date: str, **values: Any) -> dict[str, Any]:
         "negative_stable_cash": FIELD_ABSENT,
         "breakdown_truncated": FIELD_ABSENT,
         "opening_day_is_window_start": FIELD_ABSENT,
+        "bybit_evidence_members": 0,
+        **bybit_funding_record.funding_defaults(),
         **okx_chain_record.chain_defaults(),
     }
     return {**record, **values}
@@ -1613,6 +1995,8 @@ async def _probe_account(
     # The FIRST measured member's keys go into the record; the count tells the reader when
     # more than one member was measured.
     first_diagnostic: dict[str, Any] = dict(diagnostics[0]) if diagnostics else {}
+    fundings = [r.funding for r in results if r.funding is not None]
+    first_funding: dict[str, Any] = dict(fundings[0]) if fundings else {}
     cutoff_365 = _day_ms(end_date - timedelta(days=365))
     deposits_old = sum(
         transfers_older_than(transfers_of_kind(r.transfers, "deposits"), cutoff_365) for r in results
@@ -1622,9 +2006,22 @@ async def _probe_account(
         for r in results
     )
     all_in_window = _day_ms(end_date + timedelta(days=1))
+    # D-01 (Phase 180): what the Unified edge alone gave, over the Bybit members only.
+    bybit_results = [r for v, r in zip(venue_of, results) if v == "bybit"]
+    unified_state = account_unified_state([r.unified_state for r in bybit_results])
+    unified_in_rows = sum(
+        transfers_older_than(transfers_of_kind(r.unified, "deposits"), all_in_window)
+        for r in bybit_results
+    )
     fill_ms = _oldest_of(oldest_fill_ms(r.calls) for r in results)
     deposit_ms = _oldest_of(oldest_transfer_ms(r.transfers, "deposits") for r in results)
     withdrawal_ms = _oldest_of(oldest_transfer_ms(r.transfers, "withdrawals") for r in results)
+    # Strict, from the per-kind counts only; independent of members_failed because a positive
+    # per-kind count is sound evidence even from a member that failed later (RESEARCH Pitfall 4).
+    gate = bybit_transfers_verdict(venues.count("bybit"), window_days, deposits_old, withdrawals_old)
+    failure_class = first_failure.failure_class if first_failure is not None else "none"
+    member_refusal = next((r.refusal for r in failed if r.refusal != "none"), "none")
+    trade_calls = sum(len(r.calls) for r in results)
     record = _account_record(
         label,
         run_date,
@@ -1636,9 +2033,9 @@ async def _probe_account(
         window_days=window_days,
         members_read=len(results) - len(failed),
         members_failed=len(failed),
-        failure_class=first_failure.failure_class if first_failure is not None else "none",
-        member_refusal=next((r.refusal for r in failed if r.refusal != "none"), "none"),
-        trade_calls=sum(len(r.calls) for r in results),
+        failure_class=failure_class,
+        member_refusal=member_refusal,
+        trade_calls=trade_calls,
         trades_read=sum(trades_read(r.calls) for r in results),
         first_page_rows=sum(first_page_rows(v, r.calls) for v, r in zip(venue_of, results)),
         okx_order_readings=len(readings),
@@ -1658,9 +2055,11 @@ async def _probe_account(
         # so a deposit COUNT can double-count a row two windows returned; "at least one" stays sound.
         deposits_older_365d=deposits_old,
         withdrawals_older_365d=withdrawals_old,
-        # Corroboration for the founder to judge (D-02); these fields feed no gate. A 0 is not a
-        # depth finding: the rebuild's Bybit transfer read is on-chain only (RESEARCH Pitfall 3),
-        # so a 0 can come from the funding route. Counts, closed age buckets and booleans only.
+        # Corroboration for the founder to judge (D-02); these fields feed no gate. From Phase 180
+        # on a Bybit member's flow read is the Unified wallet's transaction log (D-01), so these
+        # describe the Unified edge and ``bybit_transfers_cause`` names why a shut gate is shut.
+        # Lineage (Phase 173, 2026-10-28): that read was on-chain only (RESEARCH Pitfall 3), so a 0
+        # was not a depth finding. Counts, closed age buckets and booleans only.
         deposits_in_window=sum(
             transfers_older_than(transfers_of_kind(r.transfers, "deposits"), all_in_window)
             for r in results
@@ -1674,10 +2073,23 @@ async def _probe_account(
         oldest_withdrawal_age_bucket=window_age_bucket(withdrawal_ms, end_date),
         oldest_fill_before_oldest_deposit=_fill_before(fill_ms, deposit_ms),
         oldest_fill_before_oldest_withdrawal=_fill_before(fill_ms, withdrawal_ms),
-        # Strict, from the per-kind counts only; independent of members_failed because a positive
-        # per-kind count is sound evidence even from a member that failed later (RESEARCH Pitfall 4).
-        bybit_transfers_gate=bybit_transfers_verdict(
-            venues.count("bybit"), window_days, deposits_old, withdrawals_old
+        bybit_transfers_gate=gate,
+        bybit_unified_state=unified_state,
+        bybit_unified_in_rows=unified_in_rows,
+        bybit_unified_out_rows=sum(
+            transfers_older_than(transfers_of_kind(r.unified, "withdrawals"), all_in_window)
+            for r in bybit_results
+        ),
+        bybit_unified_sign_mismatch_rows=sum(r.unified_sign_mismatch for r in bybit_results),
+        bybit_funding_explained=bybit_funding_explained(
+            venues.count("bybit"),
+            unified_state,
+            unified_in_rows,
+            sum(trades_read(r.calls) for r in bybit_results),
+            fundings,
+        ),
+        bybit_transfers_cause=bybit_transfers_cause(
+            gate, unified_state, member_refusal, failure_class, trade_calls, deposits_old, withdrawals_old
         ),
         truncated_site=first_failure.truncated_site if first_failure is not None else "none",
         last_window_age_bucket=(
@@ -1687,6 +2099,8 @@ async def _probe_account(
         read_elapsed_s=sum(r.elapsed_s for r in results),
         diagnostic_members=len(diagnostics),
         **first_diagnostic,
+        bybit_evidence_members=len(fundings),
+        **first_funding,
     )
 
     comparable = bool(results) and not failed and len(results) == len(selected)

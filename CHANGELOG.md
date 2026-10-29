@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.10.0] - 2026-10-29 — OKXREWRITE: a forced rebuild skips an exchange account with no working key instead of refusing the whole allocator, and the operator's dead-key reading binds the job
+## [0.133.11.0] - 2026-10-29 — OKXREWRITE: a forced rebuild skips an exchange account with no working key instead of refusing the whole allocator, and the operator's dead-key reading binds the job
 
 ### Why
 - The OKX history rewrite (Phase 178) found that one revoked key refused a whole allocator's forced rebuild, so every working account under the same allocator went unrebuilt. The founder's decisions, quoted from `178-CONTEXT.md`:
@@ -32,6 +32,7 @@
 - `tests/test_reconstruct_whole_account.py` pins the all-dead refusal and the per-account dead count (ca25a4c47), the claim-time expectation refusals, and the key digest. `tests/test_allocator_history_probe.py`.
 
 ### Notes
+- Merged after BYBITFUNDING (v0.133.10.0): the runbook's refusal-token paragraph now carries the union, 17 tokens matching `FORCED_REBUILD_REFUSAL_REASONS` (8 re-enqueue once, 9 record only, `account_flow_source_unreadable` among the record-only ones).
 - Planning and records, no shipped content: context, research, pattern map, validation strategy and plans (4106680e9, 1b68c6572, d857a6760, 8ff83343f, c72bb57c4, c36a61abf, ec1fb28ba, ff6093941, bb4ab7062, 73e35fc6d, e89a6192c); plan summaries (c78d593ba, d05839052, 59566b0c6); review rounds (1e6baa982, 68e06de99, d9e4b4e2e, c97818c56, c9892004c, 7217f59a8, 483f59684, c7433e7ef); verification (`human_needed`, operator plans pending) and security audit (secured) (d11ca1c57); founder D-07 and D-08 (d7076e2d7).
 - Branch coverage: 54 non-merge commits over six themes (decisions and planning, the dead-account fix, P7, the crosswalk, the job's claim-time binding, tests), each named in a bullet above.
 - No migration, no schema change, no write to any table.
@@ -40,6 +41,37 @@
 - Plans 03 and 04 (the PROD probe, P7, the founder checkpoint and the guarded rebuild) are operator plans and have NOT run. Nothing in PROD is rewritten by this release.
 - A tied crosswalk fingerprint is never written (D-07): it keeps refusing until a follow-up tells the tied labels apart.
 - D-08 holds the first write until Phase 179-07's re-read is recorded on main and Phase 179 is closed.
+
+## [0.133.10.0] - 2026-10-29 — BYBITFUNDING: the Bybit rebuild reads the Unified edge's transfers, an unreadable flow source refuses by name, and no transfer window drops rows past 50
+
+### Why
+- Phase 180 decisions, quoted from `180-CONTEXT.md`. D-01 (founder 2026-10-28, "Unified edge (Recommended)"): the rebuild's Bybit flow source is `GET /v5/account/transaction-log` with `accountType=UNIFIED`, types `TRANSFER_IN` and `TRANSFER_OUT`, because the rebuild anchors on the Unified account only, so the flows that move its balance are those crossing the Unified edge; the on-chain deposit, internal deposit, withdrawal, inter-transfer and universal-transfer endpoints stay in the probe as evidence (counts and tokens only). D-02 ("Page fix everywhere, kinds in rebuild (Recommended)"): `fetch_ccxt_transfers` pages Bybit with `nextPageCursor` for every caller; the new flow kinds reach the rebuild and the probe only, and the live NAV / composite derive and broker-dailies readers keep their current kinds. D-03 ("Refuse by name (Recommended)"): the probe records a closed token per unreadable source and a master/sub boolean, never an id; the rebuild refuses with a closed reason when its flow source cannot be read, never a silent 0; the gate stays `unmeasured` with that named cause. D-04 ("One phase, one deploy (Recommended)"): probe counts, then the rebuild read with tests that go RED on the on-chain-only read and on a dropped page, then one approved post-deploy probe of a6 and the founder's rebuild decision.
+- A Bybit rebuild that read only on-chain deposits and a transfer window that stopped at the first 50-row page both produced a flow series that silently under-counted what crossed the account, which feeds the equity reconstruction.
+
+### Added
+- The probe reads each Bybit funding source (on-chain deposit, internal deposit, withdrawal, inter-transfer, universal transfer) and the key's master flag as counts and closed tokens only, bounded by token, with the record module pinned read-only (f20c1d6e1, dd08c4a8f, 3c69939cc). It censuses transfer-like log types as funding evidence (bececddf0).
+- The probe records the rebuild's Unified-edge flows as the gate's deposit and withdrawal kinds, derives whether a Bybit account's funding is explained, and names why the transfer gate is shut (1758e4e21, 87ec85d12, 5360f483f).
+- New `services/bybit_unified_flows.py`: reads every page of a Unified transaction-log flow window, refuses a stalled cursor and an unreadable flow row, and states the Earn limitation (5d6af6b1a, 4b5eea21f, e6b100c1f).
+- The Bybit rebuild replays the Unified-edge flows, read before its trades (1d600ce83, D-01).
+
+### Changed
+- (1) An unforced Bybit reconstruct whose Unified log cannot be read now fails permanent, writes nothing, and does not fall back to on-chain flows; before, the job retried or used the on-chain read (1169ec2b5, e3f4b92b3, D-03). A forced rebuild refused for an unreadable flow source logs the exception class before the refusal (088960547); the Unified read failure log names the class only, never venue text (4061cdac5).
+- (2) Live broker-dailies and composite/NAV readers now return every Bybit transfer row in a window. They lost rows past 50 before, so busy keys' live figures can move on the next derive (f84c472cb, D-02).
+- (3) A stalled Bybit transfer cursor raises instead of truncating, so those jobs fail loudly and are retried as unknown (8a83a9fee, 0fd5234b8).
+- (4) Earn, staking and bonus log types (`ONCHAINEARN_*`, `FLEXIBLE_STAKING_*`, `BONUS_TRANSFER_*`) are not flows, so the replay level is off while an account is staked (e6b100c1f).
+- The probe's Unified state and counts follow the reader: a refused read is not read, only rows the reader accepts count, once per (type, id), and a crawl-bound cancel is a timeout (ab3c53007). `bybit_funding_explained` reads every Bybit member's evidence and counts only Bybit members' trades (fbc4127e6). An evidence cursor that is not a string makes the source malformed instead of ending its window as read (fb16c9b3a).
+
+### Fixed
+- The Bybit transfer cursor is read from the raw record call's own answer, so a row ccxt drops cannot end the window (be74e6084, bf2a8ccab). A window raises on a cycling cursor and at the page ceiling instead of returning a short list (0fd5234b8). An empty raw page ends the window whatever cursor it carries (314806593). Parsing that drops raw rows logs the counts (45a2ff0e3).
+
+### Tests
+- Pins that a full Bybit page whose rows all parse away continues, and that an empty raw page with a fresh cursor ends the window (a253eb778). RED-on-neuter tests cover the on-chain-only read and the dropped page (D-04).
+
+### Notes
+- Planning and records, no shipped code: context, research, validation, pattern map, plans and plan revisions (2e9943ce1, 612c7ad16, 907b8e35a, e3d614dfc, fef3f54a5, 379e8a8df, 7342b7434); plan summaries 180-01 to 180-07 (f541b9793, 555267fee, dfb199ada, 935b21058, 88b2b53f4, a6825d9d5, 3cdeb565f, 10847b78b); reviews, silent-failure hunts and fix reports for rounds 1 to 3 (eb8d860bd, fbd008041, 51bd81df7, a79d99941, fee98b345, e08531676, a7653d14f, 108f3cd58, c9043ecb1); verification (human_needed) and the security audit, SECURED (d8b1a6a5d); a home-path scrub (1d855bb8d).
+- No migration, no schema change, no write to any table. Runbook `marksource-okx-history-correction.md` gains the new refusal vocabulary.
+- Known limit: plan 180-08, the founder-approved post-deploy probe of a6, is still to run; the phase stays open until it does.
+- Known limit: the D-02 follow-up (new flow kinds in the live NAV / composite and broker-dailies readers) is booked in plan 180-08, not shipped here.
 
 ## [0.133.9.3] - 2026-10-29 — records: close DERIBITFLOWS 177 (v0.133.8.0 #1145; first-night reading moved=0 in all 8 derive runs)
 

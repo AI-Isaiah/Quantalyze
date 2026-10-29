@@ -56,6 +56,7 @@ from services.allocator_equity_derive import (
     working_holder_predicate,
 )
 from services.benchmark import BtcClosesReadError, read_btc_closes
+from services.bybit_unified_flows import BybitUnifiedFlowReadError, fetch_bybit_unified_flows
 from services.ccxt_flow_fetch import _rate_limit_sleep, fetch_ccxt_transfers
 from services.closed_sets import (
     # A-03 — the MT5 go-dark gate. Added HERE, in the block this module already
@@ -860,6 +861,29 @@ async def _read_bybit_window(
     raise TruncatedTradeRead(_TRUNCATED_READ_MESSAGE, site="bybit_segment_ceiling")
 
 
+def _refuse_bybit_start_past_terminus(since_ms: int, now_ms: int) -> None:
+    """Refuse a Bybit read whose start is older than the venue's two-year limit at ``now_ms``.
+
+    Shared by ``_fetch_bybit_trades`` and the Bybit branch of ``_fetch_and_price_window`` (Phase
+    180 BYBITFUNDING): the flow read runs before the trades, so the guard must run before it too,
+    and a crawl begun before UTC midnight keeps its existing ``account_key_read_failed`` / permanent
+    disposition instead of failing inside the flow read."""
+    if since_ms < now_ms - BYBIT_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000:
+        # Refuse, never clamp: a clamp would start the trades after the curve starts, and the
+        # replay's opening balance would be wrong (RESEARCH Anti-Patterns). BadRequest is the
+        # class Bybit's own retCode 10001 arrives as, so the forced gather converter
+        # (account_key_read_failed) and the unforced generic arm (permanent) dispose it as they
+        # already dispose the venue's rejection: no new token, no new exception class (D-01).
+        logger.warning(
+            "bybit trade window starts before the venue's two-year limit "
+            "venue=bybit window_age_days=%d",
+            max(0, (now_ms - since_ms) // 86_400_000),
+        )
+        raise ccxt.BadRequest(
+            "bybit trade window starts before the venue's two-year limit; nothing was read"
+        )
+
+
 async def _fetch_bybit_trades(
     exchange: Any, since_ms: int, now_ms: int,
 ) -> list[dict[str, Any]]:
@@ -892,20 +916,7 @@ async def _fetch_bybit_trades(
     existing yet because the worker deployed before the migration applied), it is the read
     above exactly: no budget, no deferral, no store call.
     """
-    if since_ms < now_ms - BYBIT_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000:
-        # Refuse, never clamp: a clamp would start the trades after the curve starts, and the
-        # replay's opening balance would be wrong (RESEARCH Anti-Patterns). BadRequest is the
-        # class Bybit's own retCode 10001 arrives as, so the forced gather converter
-        # (account_key_read_failed) and the unforced generic arm (permanent) dispose it as they
-        # already dispose the venue's rejection: no new token, no new exception class (D-01).
-        logger.warning(
-            "bybit trade window starts before the venue's two-year limit "
-            "venue=bybit window_age_days=%d",
-            max(0, (now_ms - since_ms) // 86_400_000),
-        )
-        raise ccxt.BadRequest(
-            "bybit trade window starts before the venue's two-year limit; nothing was read"
-        )
+    _refuse_bybit_start_past_terminus(since_ms, now_ms)
     scope = store.current_trade_read_scope()
     if scope is not None and scope.api_key_id is not None and scope.job_id is not None:
         return await _read_bybit_trades_resumable(exchange, since_ms, now_ms, scope, scope.api_key_id)
@@ -2582,7 +2593,7 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
 # writes a curve only when that curve is anchored to today's venue equity INCLUDING the
 # open-position uPnL. Any other outcome refuses: the job fails (error_kind "permanent", PD-I:
 # no automatic re-crawl) and nothing is written. This is the closed set of reasons; the
-# post-deploy handoff matches the "forced rebuild refused (" prefix and these 16 tokens, and
+# post-deploy handoff matches the "forced rebuild refused (" prefix and these 17 tokens, and
 # a test pins both halves. The unforced path is untouched (PD-B).
 #
 # Phase 167.2.1.1.2 (UPNLVENUES D-04, D-02 of this phase): the rebuild is now WHOLE-ACCOUNT,
@@ -2597,6 +2608,12 @@ def _job_requests_force_rebuild(job: Mapping[str, Any]) -> bool:
 # (a member's resumable trade read made no progress across claims, or its job reached the 24 h
 # backstop). The stored windows are KEPT, so a later run can clear it; that is why the handoff
 # lists it with the re-enqueue-once tokens.
+#
+# 2026-10-28, Phase 180 BYBITFUNDING: the set gained its 17th token, ``account_flow_source_unreadable``
+# (a forced Bybit rebuild whose Unified-edge flow read was refused by the venue or answered
+# unreadably, D-03). It clears only when the key's permissions or the venue's answer change, so the
+# handoff lists it with the record-only tokens. It moved with both ``len`` pins, the raise-site scan,
+# the probe's ``_FLOW_SOURCE_REFUSAL`` and the runbook's B'3 list.
 FORCED_REBUILD_ANCHOR_REASONS: Final[frozenset[str]] = frozenset(
     {
         "positions_unreadable",
@@ -2619,6 +2636,7 @@ FORCED_REBUILD_ACCOUNT_REASONS: Final[frozenset[str]] = frozenset(
         "account_keys_changed",
         "history_days_unreproduced",
         "account_key_read_stalled",
+        "account_flow_source_unreadable",
     }
 )
 FORCED_REBUILD_REFUSAL_REASONS: Final[frozenset[str]] = (
@@ -4152,7 +4170,9 @@ async def _fetch_and_price_window(
     require_anchor: bool = False,
 ) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     """Fetch trades + transfers + OHLCV in [start_date, end_date] and build
-    the per-day equity rows. Returns ``(rows, hit_okx_terminus, telemetry)``.
+    the per-day equity rows. A Bybit window's flows come from the Unified transaction log,
+    read before the trades (Phase 180 BYBITFUNDING); every other venue reads its transfers
+    after the trades. Returns ``(rows, hit_okx_terminus, telemetry)``.
 
     ``require_anchor`` (forced path only, Phase 167.2.1.1 PD-H): raise
     ``ForcedRebuildRefusedError`` instead of returning rows that are not anchored to
@@ -4183,24 +4203,70 @@ async def _fetch_and_price_window(
     )
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
+    is_bybit = venue.lower() == "bybit"
+    deposits: list[dict[str, Any]] = []
+    withdrawals: list[dict[str, Any]] = []
+    if is_bybit:
+        # Phase 180 BYBITFUNDING. A Bybit window's flows are the money that crossed the UNIFIED
+        # account's edge (the transaction log's TRANSFER_IN and TRANSFER_OUT), and they REPLACE
+        # the on-chain deposit and withdraw record below, never join it (D-01): a FUND deposit
+        # plus its FUND-to-UNIFIED move would be counted twice. Earn, staking and bonus types are
+        # not flows here; the reader's docstring states that limitation.
+        #
+        # They are read BEFORE the trades (orchestrator reading 1): a crawl near its 1500 s
+        # bound cannot lose them, and a missing permission is found in seconds. The two-year
+        # guard runs first so a crawl begun before UTC midnight keeps its existing disposition
+        # rather than failing inside the flow read.
+        #
+        # Cost of reading first: an unforced job that takes several claims re-reads the flows on
+        # every claim (about 210 requests, about 90 s), because the trade windows are stored and
+        # the flows are not, and that time counts against the soft claim budget
+        # ``_TRADE_READ_CLAIM_BUDGET_S`` (900 s; RESEARCH Q7).
+        _refuse_bybit_start_past_terminus(start_ms, now_ms)
+        # D-03 (founder 2026-10-28): a forced rebuild whose flow source cannot be read refuses by
+        # name and writes nothing, never a silent 0. Only the venue's PERMANENT errors (the set
+        # ``classify_exception`` calls permanent) and the reader's own error class are caught: a
+        # transient fault keeps its existing disposition (retried), and the two-year guard above
+        # stays outside this ``try``, so a crawl begun before UTC midnight keeps
+        # ``account_key_read_failed``. Unforced, the error propagates unchanged and the job
+        # worker's classifier makes it permanent (orchestrator reading 2: no on-chain fallback).
+        try:
+            deposits, withdrawals = await fetch_bybit_unified_flows(exchange, start_ms, now_ms)
+        except (
+            ccxt.AuthenticationError,
+            ccxt.PermissionDenied,
+            ccxt.BadRequest,
+            BybitUnifiedFlowReadError,
+        ) as exc:
+            if require_anchor:
+                # The refusal is chained ``from None``, so this line is the only trace of
+                # the cause. The exception CLASS only: never the venue's text.
+                logger.warning(
+                    "forced bybit rebuild refused: flow source unreadable exc_class=%s",
+                    type(exc).__name__,
+                )
+                raise ForcedRebuildRefusedError("account_flow_source_unreadable") from None
+            raise
+
     trades, hit_terminus = await _fetch_trades_with_pagination(
         exchange, venue, start_ms, now_ms
     )
-    # When the trade window was clamped to the OKX 90-day terminus, pre-
-    # terminus deposits/withdrawals would arrive with no matching trades
-    # to offset them — producing phantom quantities for assets long
-    # since sold outside the recorded trade window. Clamp transfers to
-    # the same terminus so the replay stays consistent.
-    transfers_since_ms = start_ms
-    if hit_terminus:
-        okx_terminus_ms = now_ms - OKX_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000
-        transfers_since_ms = max(start_ms, okx_terminus_ms)
-    deposits = await fetch_ccxt_transfers(
-        exchange, "deposits", transfers_since_ms, now_ms
-    )
-    withdrawals = await fetch_ccxt_transfers(
-        exchange, "withdrawals", transfers_since_ms, now_ms
-    )
+    if not is_bybit:
+        # When the trade window was clamped to the OKX 90-day terminus, pre-
+        # terminus deposits/withdrawals would arrive with no matching trades
+        # to offset them — producing phantom quantities for assets long
+        # since sold outside the recorded trade window. Clamp transfers to
+        # the same terminus so the replay stays consistent.
+        transfers_since_ms = start_ms
+        if hit_terminus:
+            okx_terminus_ms = now_ms - OKX_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000
+            transfers_since_ms = max(start_ms, okx_terminus_ms)
+        deposits = await fetch_ccxt_transfers(
+            exchange, "deposits", transfers_since_ms, now_ms
+        )
+        withdrawals = await fetch_ccxt_transfers(
+            exchange, "withdrawals", transfers_since_ms, now_ms
+        )
 
     # Collect symbols from trades + transfers
     symbols: set[str] = set()

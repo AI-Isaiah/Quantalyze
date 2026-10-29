@@ -31,7 +31,7 @@ import pytest
 
 from services.equity_reconstruction import run_reconstruct_allocator_history_job
 from services.job_worker import DispatchOutcome
-from tests._trade_pages import VenueTradeBook
+from tests._trade_pages import VenueTradeBook, install_unified_log
 from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
@@ -162,6 +162,9 @@ def _crawl_exchange(*, fail: bool = False) -> AsyncMock:
     exchange.fetch_withdrawals = AsyncMock(return_value=[])
     exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
     exchange.close = AsyncMock()
+    # Phase 180: a Bybit rebuild reads the Unified transaction log before its trades. An empty
+    # book answers it; the other venues never ask.
+    install_unified_log(exchange)
     return exchange
 
 

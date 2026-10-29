@@ -22,6 +22,7 @@ decision:
   ccxt.AuthenticationError | PermissionDenied | BadRequest -> permanent
   cryptography.fernet.InvalidToken -> permanent (sanitized message)
   asyncio.TimeoutError -> transient (wait_for expiry)
+  Bybit Unified flow reader's error class -> permanent (static text)
   fastapi.HTTPException 4xx (except 408, 429) -> permanent
   fastapi.HTTPException 408, 429 -> transient
   everything else -> unknown (retried by default)
@@ -167,6 +168,9 @@ from services.mt5_concurrency import (
 )
 # Phase 164.6.6 criterion 1 — the lease-site names the handover record carries.
 from services.mt5_handover import SITE_BALANCE, SITE_DERIVE
+# Phase 180 BYBITFUNDING: the Unified flow reader's error class, for the
+# classify_exception arm only (the reader is called by the rebuild alone, D-02).
+from services.bybit_unified_flows import BybitUnifiedFlowReadError
 # 153.6 / A3 — the operator-fault type + its curated copy, for the
 # classify_exception arm. worker -> services leaf, the correct direction (D-07):
 # `services/mt5_probe.py` imports only mt5_client + mt5_validation and can never
@@ -1190,6 +1194,17 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # this phase exists to remove.
     if isinstance(exc, Mt5GatewayMisconfigured):
         return ("permanent", curated_gateway_detail(exc))
+
+    # Phase 180 BYBITFUNDING (orchestrator reading 2). The Bybit Unified flow read refused its
+    # own answer: a cursor that did not advance, a malformed answer, an unreadable or other-type
+    # row, or the page ceiling. That is deterministic: a retry repeats about 210 requests for
+    # the same answer, and a forced rebuild already refuses it by name. PERMANENT, so the queue
+    # does not retry it. The reader's text is static by contract (no venue text, id or amount),
+    # so it can be shipped as it is, unlike the gateway arm above. Placed in the same position
+    # and shape as that arm: above the HTTPException, geo-block and ccxt arms, which would
+    # otherwise let a RuntimeError subclass fall through to ``unknown`` (retried).
+    if isinstance(exc, BybitUnifiedFlowReadError):
+        return ("permanent", str(exc)[:500])
 
     # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
     # trade history" and similar pre-condition failures that no amount of
