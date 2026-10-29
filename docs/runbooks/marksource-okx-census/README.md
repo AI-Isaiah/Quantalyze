@@ -7,7 +7,7 @@ Phase 167.2.1.1.1.1 (MARKSOURCE) measures PROD before it changes anything. Two f
 - **D-05** rewrites past OKX rows, and the correction is measured read-only first: rows and accounts affected,
   and the size of the change.
 
-Every file here is ONE read-only statement. Nothing in this directory writes.
+Every file here is ONE read-only statement. Nothing in this directory writes. Phase 178 OKXREWRITE added `okx-nonworking-keys.sql`. `src/__tests__/marksource-okx-nonworking-keys-exec.test.ts` executes it, and the runbook's `crosswalk` and `enqueue` forms, on a throwaway local PostgreSQL cluster against hand-computed oracles; it runs in the ordinary vitest shards, so a change to the file's grouping, carry pad, window or outcome rule turns CI red.
 
 | File | What it measures | Decision |
 |------|------------------|----------|
@@ -18,6 +18,7 @@ Every file here is ONE read-only statement. Nothing in this directory writes.
 | `okx-holdings-census.sql` | The same question for the allocator holdings USDT row, which has no recompute path. | D-05 |
 | `okx-rebuild-feasibility.sql` | What a rebuild would face: key counts by venue and working state, the predicted 90-day window, days already bulk-written, whether a rebuild seam exists. | D-05 |
 | `okx-snapshot-rows.sql` | The row set for a before and after diff around the rebuild. Carries amounts. | D-05 |
+| `okx-nonworking-keys.sql` | Exchange accounts with no working key, grouped and decided as the rebuild does them (marker links followed transitively), the dead keys tested against the window, the predicted window, how many stored in-window days a dead key's holdings span plus the 7-day carry overlaps (and every stored day labelled 2026-09-29 to 2026-10-19, when the carry had no age cap), bulk-written in-window days, the hard-deleted keys the holdings polls' audit rows still name (`deleted_keys_seen_in_window`), the P7 outcome (`rebuild` or `not recomputed (D-06)`), and `key_digest`, an MD5 over the allocator's key ids and working flags that the forced job is bound to (scratch only: it hashes real ids, so it is never written in tracked text). Counts and day counts otherwise. | OKXREWRITE D-06 (P7) |
 
 ## How to run
 

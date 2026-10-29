@@ -34,6 +34,7 @@ test body so a missing implementation fails the test instead of the collection.
 from __future__ import annotations
 
 import copy
+import hashlib
 from datetime import date, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -141,15 +142,17 @@ def _three_bybit_keys() -> list[dict[str, Any]]:
 def test_select_crawls_one_key_per_exchange_account() -> None:
     """Two keys that read ONE exchange account must be crawled once: crawling both would
     sum the same account twice into the stored aggregate."""
-    selected, skipped = er._select_account_crawl_keys(_three_bybit_keys(), "key-1")
+    selected, skipped, excluded = er._select_account_crawl_keys(_three_bybit_keys(), "key-1")
     assert _ids(selected) == ["key-1", "key-3"]
     assert skipped == 0
+    assert excluded == 0
 
 
 def test_select_prefers_the_job_key_when_it_is_a_working_member() -> None:
-    selected, skipped = er._select_account_crawl_keys(_three_bybit_keys(), "key-2")
+    selected, skipped, excluded = er._select_account_crawl_keys(_three_bybit_keys(), "key-2")
     assert _ids(selected) == ["key-2", "key-3"]
     assert skipped == 0
+    assert excluded == 0
 
 
 def test_select_covers_a_departed_key_through_a_working_member() -> None:
@@ -163,9 +166,10 @@ def test_select_covers_a_departed_key_through_a_working_member() -> None:
         account_share_kind="duplicate",
         account_shared_with_api_key_id="key-1",
     )
-    selected, skipped = er._select_account_crawl_keys(keys, "key-2")
+    selected, skipped, excluded = er._select_account_crawl_keys(keys, "key-2")
     assert _ids(selected) == ["key-1", "key-3"]
     assert skipped == 0
+    assert excluded == 0
 
 
 @pytest.mark.parametrize(
@@ -187,9 +191,10 @@ def test_select_counts_a_deribit_exchange_account_as_zero_whatever_its_state(
         _key("key-1", "bybit", venue_account_id="fixture-acct-1"),
         _key("key-2", "deribit", venue_account_id="fixture-acct-2", **overrides),
     ]
-    selected, skipped = er._select_account_crawl_keys(keys, "key-1")
+    selected, skipped, excluded = er._select_account_crawl_keys(keys, "key-1")
     assert _ids(selected) == ["key-1"]
     assert skipped == 1
+    assert excluded == 0
 
 
 def test_select_crawls_an_okx_exchange_account() -> None:
@@ -198,9 +203,10 @@ def test_select_crawls_an_okx_exchange_account() -> None:
         _key("key-1", "bybit", venue_account_id="fixture-acct-1"),
         _key("key-2", "okx", venue_account_id="fixture-okx-2"),
     ]
-    selected, skipped = er._select_account_crawl_keys(keys, "key-1")
+    selected, skipped, excluded = er._select_account_crawl_keys(keys, "key-1")
     assert _ids(selected) == ["key-1", "key-2"]
     assert skipped == 0
+    assert excluded == 0
 
 
 @pytest.mark.parametrize(
@@ -229,6 +235,93 @@ def test_select_refuses_an_exchange_account_no_rebuild_can_read(
 
 
 @pytest.mark.parametrize(
+    ("dead_keys", "expected_selected", "expected_deribit", "expected_dead"),
+    [
+        # A revoked sfox account: the venue the rebuild cannot read, but nothing to read
+        # through a key that cannot sign in. The daily refresh leaves it out too.
+        ([_key("key-2", "sfox", sync_status="revoked", venue_account_id="fixture-acct-2")], ["key-1"], 0, 1),
+        ([_key("key-2", "kraken", disconnected_at="2026-04-01T00:00:00+00:00", venue_account_id="fixture-acct-2")], ["key-1"], 0, 1),
+        # A marker group of two DEAD keys across two venues: no working member decides the venue.
+        (
+            [
+                _key(
+                    "key-2",
+                    "okx",
+                    sync_status="revoked",
+                    account_share_kind="duplicate",
+                    account_shared_with_api_key_id="key-3",
+                ),
+                _key("key-3", "bybit", sync_status="revoked", venue_account_id="fixture-acct-3"),
+            ],
+            ["key-1"],
+            0,
+            1,
+        ),
+        # A dead member on ANOTHER venue than the working key of its group: the group is read
+        # through its working key, and nothing is counted dead (its exchange account is crawled).
+        (
+            [
+                _key(
+                    "key-2",
+                    "okx",
+                    sync_status="revoked",
+                    account_share_kind="duplicate",
+                    account_shared_with_api_key_id="key-1",
+                ),
+            ],
+            ["key-1"],
+            0,
+            0,
+        ),
+        # A dead member beside a WORKING Deribit key of its group: the working member's venue
+        # decides, so the group is the Deribit $0 account and the dead key refuses nothing.
+        (
+            [
+                _key("key-2", "deribit", venue_account_id="fixture-acct-2"),
+                _key(
+                    "key-3",
+                    "bybit",
+                    sync_status="revoked",
+                    account_share_kind="duplicate",
+                    account_shared_with_api_key_id="key-2",
+                ),
+            ],
+            ["key-1"],
+            1,
+            0,
+        ),
+    ],
+    ids=[
+        "dead-sfox",
+        "dead-unknown-venue",
+        "dead-cross-venue-group",
+        "dead-member-on-another-venue",
+        "dead-member-beside-a-working-deribit",
+    ],
+)
+def test_select_a_dead_key_never_decides_the_venue_check(
+    dead_keys: list[dict[str, Any]],
+    expected_selected: list[str],
+    expected_deribit: int,
+    expected_dead: int,
+) -> None:
+    """D-05 (founder 2026-10-28): "If a bybit Ley is Revoked, then that is only relevant for
+    that Key. It is Not relevant for OKX and its keys, neither for other bybit keys".
+
+    The venue checks used to read EVERY member of a group before asking whether any member
+    could sign in, so a revoked sfox key, a disconnected key on an unknown venue or a dead
+    member of a cross-venue marker group refused the whole allocator
+    ``account_key_venue_unsupported``. The daily refresh leaves an exchange account with no
+    eligible key out whatever its venue, so a dead key's venue must not refuse the allocator.
+    The deciding venues are the group's WORKING members' (every member's only when none works).
+    A dead member on another venue than its group's working key is read through that working
+    key, and plan 02's P7 census counts such a member's holdings against the window (D-06)."""
+    keys = [_key("key-1", "bybit", venue_account_id="fixture-acct-1"), *dead_keys]
+    selected, deribit, dead = er._select_account_crawl_keys(keys, "key-1")
+    assert (_ids(selected), deribit, dead) == (expected_selected, expected_deribit, expected_dead)
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"is_active": False},
@@ -239,16 +332,114 @@ def test_select_refuses_an_exchange_account_no_rebuild_can_read(
     ],
     ids=["inactive", "disconnected", "revoked", "sign-in-failed", "error"],
 )
-def test_select_refuses_an_exchange_account_with_no_working_key(
+def test_select_skips_and_counts_an_exchange_account_with_no_working_key(
     overrides: dict[str, Any],
 ) -> None:
-    """An account whose only keys cannot sign in cannot be crawled; leaving it out would
-    store its history as $0."""
+    """D-05 (founder 2026-10-28): "If a bybit Ley is Revoked, then that is only relevant for
+    that Key. It is Not relevant for OKX and its keys, neither for other bybit keys".
+
+    An exchange account whose only key cannot sign in cannot be crawled, and that is its
+    problem alone: the selection used to refuse the WHOLE allocator
+    ``account_key_not_working`` over it, which was the defect. It is now skipped, counted in
+    the third return value, and the working account is selected."""
     keys = [
         _key("key-1", "bybit", venue_account_id="fixture-acct-1"),
         _key("key-2", "bybit", venue_account_id="fixture-acct-2", **overrides),
     ]
-    assert _refusal(keys) == "account_key_not_working"
+    selected, skipped, excluded = er._select_account_crawl_keys(keys, "key-1")
+    assert _ids(selected) == ["key-1"]
+    assert skipped == 0
+    assert excluded == 1
+
+
+@pytest.mark.parametrize(
+    "allocator",
+    [
+        pytest.param(
+            [_key("key-1", "bybit", venue_account_id="fixture-acct-1", is_active=False)],
+            id="inactive",
+        ),
+        pytest.param(
+            [
+                _key(
+                    "key-1",
+                    "bybit",
+                    venue_account_id="fixture-acct-1",
+                    disconnected_at="2026-04-01T00:00:00+00:00",
+                )
+            ],
+            id="disconnected",
+        ),
+        pytest.param(
+            [_key("key-1", "bybit", venue_account_id="fixture-acct-1", sync_status="revoked")],
+            id="revoked",
+        ),
+        pytest.param(
+            [_key("key-1", "bybit", venue_account_id="fixture-acct-1", sync_status="sign_in_failed")],
+            id="sign-in-failed",
+        ),
+        pytest.param(
+            [_key("key-1", "bybit", venue_account_id="fixture-acct-1", sync_status="error")],
+            id="error",
+        ),
+        pytest.param(
+            [
+                _key("key-1", "bybit", venue_account_id="fixture-acct-1", sync_status="revoked"),
+                _key("key-2", "deribit", venue_account_id="fixture-acct-2"),
+            ],
+            id="revoked-beside-deribit",
+        ),
+        # The one token change the D-05 reorder makes: a dead key's venue no longer decides, so
+        # an allocator whose only key is a revoked sfox key refuses "no working exchange
+        # account" instead of "venue unsupported".
+        pytest.param(
+            [_key("key-1", "sfox", venue_account_id="fixture-acct-1", sync_status="revoked")],
+            id="revoked-sfox-only",
+        ),
+    ],
+)
+def test_select_refuses_an_allocator_with_no_working_exchange_account(
+    allocator: list[dict[str, Any]],
+) -> None:
+    """D-05 skips a DEAD exchange account, it does not invent a rebuild out of nothing: an
+    allocator with no working non-Deribit exchange account has nothing to crawl, and storing
+    a curve for it would claim a history no key can read. It still refuses
+    ``account_key_not_working``, the token an operator already knows, whatever mix of dead
+    keys and $0 Deribit accounts the book holds."""
+    assert _refusal(allocator) == "account_key_not_working"
+
+
+def test_select_counts_two_dead_keys_of_one_exchange_account_once() -> None:
+    """The dead count is per EXCHANGE ACCOUNT, not per key: plan 02's P7 census predicts one
+    dead account for a group of two dead keys and B'5 compares that prediction with this
+    count, so counting keys would turn a correct run into a mismatch STOP."""
+    keys = [
+        _key("key-1", "bybit", venue_account_id="fixture-acct-1"),
+        _key("key-2", "bybit", venue_account_id="fixture-acct-2", sync_status="revoked"),
+        _key(
+            "key-3",
+            "bybit",
+            sync_status="revoked",
+            account_share_kind="duplicate",
+            account_shared_with_api_key_id="key-2",
+        ),
+    ]
+    selected, skipped, excluded = er._select_account_crawl_keys(keys, "key-1")
+    assert _ids(selected) == ["key-1"]
+    assert skipped == 0
+    assert excluded == 1
+
+
+def test_select_a_dead_exchange_account_does_not_preempt_identity_pending() -> None:
+    """A dead key must not hide the identity question two WORKING keys raise: the dead
+    account is skipped, then the two unstamped working Bybit keys, which may read ONE exchange
+    account that crawling both would count twice, are the real blocker and keep their token."""
+    keys = [
+        _key("key-1", "bybit", venue_account_id="fixture-acct-1", sync_status="revoked"),
+        _key("key-2", "bybit"),
+        _key("key-3", "bybit"),
+    ]
+    assert _refusal(keys, "key-2") == "account_identity_pending"
 
 
 def test_select_refuses_two_unstamped_working_keys_on_one_venue_as_identity_pending() -> None:
@@ -904,16 +1095,20 @@ async def _run_forced_two_account_job(
     exchange_1: Any,
     exchange_2: Any,
     results: dict[str, Any] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> tuple[DispatchResult, Any, dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     """Install the audit, the per-key preflight and the clock, snapshot the book, run a forced
-    job on key 1. Returns the result, the audit mock, the book before, the preflight job log."""
+    job on key 1. Returns the result, the audit mock, the book before, the preflight job log.
+    ``extra_metadata`` is merged into the job's metadata beside the force flag."""
     audit = _install_fake_audit(monkeypatch)
     calls = _install_account_preflight(
         monkeypatch, fake, {API_KEY_ID_1: exchange_1, API_KEY_ID_2: exchange_2}, results
     )
     _freeze_now(monkeypatch)
     before = _book_state(fake)
-    result = await run_reconstruct_allocator_history_job(_forced_job())
+    job = _forced_job()
+    job["metadata"] = {**job["metadata"], **(extra_metadata or {})}
+    result = await run_reconstruct_allocator_history_job(job)
     return result, audit, before, calls
 
 
@@ -1475,9 +1670,8 @@ async def test_curves_with_no_shared_day_refuse_the_account(
     ("second_exchange", "second_sync_status", "reason"),
     [
         ("sfox", "ok", "account_key_venue_unsupported"),
-        ("bybit", "revoked", "account_key_not_working"),
     ],
-    ids=["venue-the-rebuild-cannot-read", "only-key-revoked"],
+    ids=["venue-the-rebuild-cannot-read"],
 )
 async def test_an_exchange_account_the_rebuild_cannot_read_refuses_before_any_venue_call(
     monkeypatch: pytest.MonkeyPatch, second_exchange: str, second_sync_status: str, reason: str
@@ -1536,6 +1730,418 @@ async def test_a_deribit_exchange_account_is_counted_as_zero(
     assert complete["account_key_count"] == 2
     assert complete["account_exchange_accounts"] == 1
     assert complete["account_zero_contribution_accounts"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_exchange", "overrides"),
+    [
+        ("bybit", {"sync_status": "revoked"}),
+        ("okx", {"sync_status": "error"}),
+        ("sfox", {"sync_status": "revoked"}),
+    ],
+    ids=["dead-bybit-revoked", "dead-okx-error", "dead-sfox-revoked"],
+)
+async def test_a_dead_exchange_account_is_skipped_and_counted(
+    monkeypatch: pytest.MonkeyPatch, second_exchange: str, overrides: dict[str, Any]
+) -> None:
+    """D-05 (founder 2026-10-28): "If a bybit Ley is Revoked, then that is only relevant for
+    that Key. It is Not relevant for OKX and its keys, neither for other bybit keys".
+
+    One exchange account of the allocator has no working key, on any venue. The forced rebuild
+    used to refuse the WHOLE allocator (``account_key_not_working``, or
+    ``account_key_venue_unsupported`` for a dead sfox key). It now skips that exchange account,
+    counts it in the completion audit, and rebuilds the working one: the job ends DONE with
+    every in-window row equal to the working Bybit account alone, the dead key is never opened,
+    and the day older than the window is untouched.
+
+    WHY skipping is honest: both stored-row writers count a key up to the day it stops and $0
+    once its carry has ended, so the skipped account rewrites only days on which the stored row
+    already holds $0 for it. The carry of a failing (error / sign_in_failed) key is capped at
+    CARRY_AGE_CAP_DAYS (7) only since v0.132.5.0 (2026-10-19); from v0.111.0.0 (2026-09-29)
+    until then it had no age cap, so stored days of that era can hold a dead key's balance. An
+    account whose dead key still counted INSIDE the window is kept out of any
+    write by D-06 (plan 02's P7 census and the operator plans), not by this code. And
+    ``window_days`` stays 730: a dead OKX account does not force the 90-day window, because
+    the window reads the crawled keys only."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake, second_exchange)
+    fake.store[("api_keys", (API_KEY_ID_2,))].update(overrides)
+    older_asof = (END_DATE - timedelta(days=800)).date().isoformat()
+    older_key = ("allocator_equity_snapshots", (ALLOCATOR_ID, older_asof))
+    older_before = copy.deepcopy(fake.store[older_key])
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, _before, calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert [c["api_key_id"] for c in calls] == [API_KEY_ID_1], "a dead key's session was opened"
+    _assert_no_venue_call(exchange_2, "the dead account's exchange")
+    expected = round(_usdt_equity(BYBIT_UNIFIED_WALLET_BALANCE), 2)
+    assert expected == 1250.5
+    in_window = [r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] != older_asof]
+    assert len(in_window) == SENTINEL_ROWS, in_window
+    for row in in_window:
+        assert row["value_usd"] == pytest.approx(expected, abs=0.01), (
+            f"day {row['asof']} holds {row['value_usd']}, not the working account alone {expected}"
+        )
+        assert row["value_usd"] != SENTINEL_VALUE
+    assert fake.store[older_key] == older_before, "the day older than the window was rewritten"
+    # PD-O is unchanged: every ACTIVE non-Deribit key of the rebuilt account is stamped, and
+    # the dead key is still active (only its sync_status says it cannot sign in).
+    assert _marker_of(fake, API_KEY_ID_1) != MARKER
+    assert _marker_of(fake, API_KEY_ID_2) != MARKER
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["account_key_count"] == 2
+    assert complete["account_exchange_accounts"] == 1
+    assert complete["account_zero_contribution_accounts"] == 0
+    assert complete["account_non_working_accounts_excluded"] == 1
+    assert complete["window_days"] == 730
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_stopped_working_after_the_operator_reading_refuses_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review CR-02 / SFH M1, enqueue to crawl. The operator's P7 reading said no exchange
+    account was dead (``expected_non_working_accounts`` 0), but the second key reads ``error``
+    when the job selects its crawl keys. Skipping it would replace the whole window without
+    that account while the stored days correctly hold it, so the job refuses
+    ``account_keys_changed`` BEFORE any venue call and writes nothing, marker included."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 0},
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_operator_reading_that_matches_the_selection_lets_the_rebuild_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control of the pin above: the same book with the reading P7 would have produced
+    (one dead exchange account) rebuilds, so the refusal is the count mismatch and nothing
+    else, and the literal key is the one the runbook's enqueue form spells."""
+    assert er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY == "expected_non_working_accounts"
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, _before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 1},
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["account_non_working_accounts_excluded"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_value",
+    [True, 1.0, "1", None],
+    ids=["bool", "float", "string", "null"],
+)
+async def test_a_non_integer_dead_count_expectation_refuses_even_when_it_equals_the_count(
+    monkeypatch: pytest.MonkeyPatch, bad_value: Any
+) -> None:
+    """SFH R2-1 / N3. The selection finds exactly one dead exchange account, so JSON ``true``
+    and ``1.0`` compare EQUAL to it in Python. The expectation is the operator's P7 bigint, so
+    anything but an exact integer is a malformed enqueue and refuses ``account_keys_changed``
+    before any venue call, rather than passing as if it were the reading."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: bad_value},
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_differs_from_the_operator_reading_refuses_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review WR-R2-01 / SFH R2-2. The dead count matches (one), but P7 predicted a 90-day
+    window and the selection yields 730: the OKX sibling was hard-deleted after P7, so the
+    rewrite would replace 730 days where the operator measured 90. The job refuses
+    ``account_keys_changed`` before any venue call and writes nothing."""
+    assert er.RECONSTRUCT_EXPECTED_WINDOW_KEY == "expected_window_days"
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={
+            er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 1,
+            er.RECONSTRUCT_EXPECTED_WINDOW_KEY: 90,
+        },
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_value",
+    [730.0, "730", None],
+    ids=["float", "string", "null"],
+)
+async def test_a_non_integer_window_expectation_refuses_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch, bad_value: Any
+) -> None:
+    """The window expectation is held to the same exact-integer rule as the dead count: a float
+    that equals the real window (730.0) refuses rather than passing as the reading."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={
+            er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 1,
+            er.RECONSTRUCT_EXPECTED_WINDOW_KEY: bad_value,
+        },
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_matches_the_operator_reading_lets_the_rebuild_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control of the window pins above: the same book with the window the selection yields
+    (730) rebuilds, so each refusal is the one expectation that moved and nothing else."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, _before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={
+            er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 1,
+            er.RECONSTRUCT_EXPECTED_WINDOW_KEY: 730,
+        },
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["window_days"] == 730
+
+
+def _digest_of(canonical: str) -> str:
+    """The oracle: the canonical string hashed here, never by the code under test."""
+    return hashlib.md5(canonical.encode("utf-8")).hexdigest()  # noqa: S324 - not a security use
+
+
+def test_the_key_set_digest_has_the_canonical_form_the_sql_side_reproduces() -> None:
+    """WR-R3-01. The digest is the lower-case hex MD5 of the keys sorted by id text, each
+    rendered ``<id>:<t|f>`` (``t`` = ``working_holder_predicate``), joined by ``|``. The SQL
+    side of the runbook pins the SAME literal, so a drift on either side fails a test. The
+    rows are given out of order and cover each way a key stops working."""
+    rows = [
+        {"id": "key-e", "is_active": False, "disconnected_at": None, "sync_status": "ok"},
+        {"id": "key-c", "is_active": True, "disconnected_at": "2026-01-01", "sync_status": "ok"},
+        {"id": "key-a", "is_active": True, "disconnected_at": None, "sync_status": "ok"},
+        {"id": "key-d", "is_active": True, "disconnected_at": None, "sync_status": None},
+        {"id": "key-b", "is_active": True, "disconnected_at": None, "sync_status": "error"},
+    ]
+    assert er.RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY == "expected_key_digest"
+    assert er._account_keys_digest(rows) == "b686b2e1962180296772b08bb7e395c1"
+    assert er._account_keys_digest(rows) == _digest_of("key-a:t|key-b:f|key-c:f|key-d:t|key-e:f")
+
+
+@pytest.mark.asyncio
+async def test_a_working_sibling_absent_at_crawl_start_refuses_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-R3-01 case 1. The operator read two working keys (no dead account, a 730-day
+    window). The sibling was hard-deleted afterwards, so the selection finds the same dead
+    count (0) and the same window: only the key-set digest differs. The job refuses
+    ``account_keys_changed`` before any venue call; nothing is written, no marker stamped."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    digest = _digest_of(f"{API_KEY_ID_1}:t|{API_KEY_ID_2}:t")
+    del fake.store[("api_keys", (API_KEY_ID_2,))]
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={
+            er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 0,
+            er.RECONSTRUCT_EXPECTED_WINDOW_KEY: 730,
+            er.RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY: digest,
+        },
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dead_working_swap_with_equal_counts_refuses_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-R3-01 case 2. The operator read key 2 dead and key 3 working. Before the claim key 2
+    revived and key 3 went ``error``: one dead account and a 730-day window either way, so
+    both counts match, but the digest names a different key set. The job refuses
+    ``account_keys_changed`` before any venue call and writes nothing."""
+    key_id_3 = "00000000-0000-0000-0000-000000000003"
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    _seed_account_key(fake, key_id_3, "bybit", venue_account_id="fixture-acct-3")
+    fake.store[("api_keys", (key_id_3,))]["sync_status"] = "error"
+    digest = _digest_of(f"{API_KEY_ID_1}:t|{API_KEY_ID_2}:f|{key_id_3}:t")
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={
+            er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 1,
+            er.RECONSTRUCT_EXPECTED_WINDOW_KEY: 730,
+            er.RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY: digest,
+        },
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_value",
+    [123, None, True, ["x"]],
+    ids=["int", "null", "bool", "list"],
+)
+async def test_a_non_string_key_digest_expectation_refuses_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch, bad_value: Any
+) -> None:
+    """A digest that is not a string is a malformed enqueue and refuses ``account_keys_changed``
+    even when both counts match, rather than passing as if no expectation were present."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={
+            er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 1,
+            er.RECONSTRUCT_EXPECTED_WINDOW_KEY: 730,
+            er.RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY: bad_value,
+        },
+    )
+
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(), exchanges_untouched=(exchange_1, exchange_2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_key_digest_that_matches_the_operator_reading_lets_the_rebuild_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control of the digest pins: the same book with the digest the operator's reading
+    names (key 2 dead) rebuilds, so each refusal is the digest that moved and nothing else."""
+    fake = _MarkerFake()
+    _seed_two_account_book(fake)
+    fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    result, audit, _before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2,
+        extra_metadata={
+            er.RECONSTRUCT_EXPECTED_NON_WORKING_KEY: 1,
+            er.RECONSTRUCT_EXPECTED_WINDOW_KEY: 730,
+            er.RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY: _digest_of(
+                f"{API_KEY_ID_1}:t|{API_KEY_ID_2}:f"
+            ),
+        },
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    (complete,) = _audit_metadata(audit, COMPLETE)
+    assert complete["account_non_working_accounts_excluded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_stopped_working_during_the_crawl_refuses_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review CR-02 / SFH M1, crawl to persist. Both keys work when the crawl begins; the
+    second reads ``error`` while the first is being crawled. The key ID set is unchanged, so
+    the old persist-time re-read passed and the window was written. The re-read now compares
+    the WORKING key set as well and refuses ``account_keys_changed``: the crawl's coverage no
+    longer matches the account the window would claim to cover. Nothing is written."""
+    fake = _AccountFake()
+    _seed_two_account_book(fake)
+    exchange_1 = await _bybit_exchange()
+    exchange_2 = await _sibling_bybit_exchange()
+
+    def _second_key_errors() -> None:
+        fake.store[("api_keys", (API_KEY_ID_2,))]["sync_status"] = "error"
+
+    _mutate_on_first_trades_call(exchange_1, _second_key_errors)
+
+    result, audit, before, _calls = await _run_forced_two_account_job(
+        monkeypatch, fake, exchange_1, exchange_2
+    )
+
+    # The one row the test itself moved is the only difference the api_keys equality may see.
+    for row in before["api_keys"]:
+        if row["id"] == API_KEY_ID_2:
+            row["sync_status"] = "error"
+    _assert_account_rebuild_refused(
+        fake, result, audit, "account_keys_changed",
+        before=before, exchanges_crawled=(exchange_1, exchange_2), exchanges_untouched=(),
+    )
 
 
 # ------------------------------------------------------------ mixed venues and the marker rule
