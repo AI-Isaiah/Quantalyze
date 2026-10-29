@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.133.11.1] - 2026-10-29 — records: close OKXBILLSCHAIN 179 (v0.133.9.0 #1147 to v0.133.9.2 #1149; a4 anchored on the deployed 0.02 tolerance, residual -0.0138)
+
+### Notes
+- Phase 179 closed with `phase complete`: 7 of 7 plans, VERIFICATION `passed`. The phase directory (plans 01-07, summaries, context, research, patterns, validation, reviews, silent-failure hunts, security, verification, coverage) comes onto `main` from the phase branch; the ship PRs carried none of it.
+- Plan 179-07 (the operator re-read) is recorded in `179-07-SUMMARY.md`. The deployed commit carried the 0.02 tolerance: the import check computed from it and the worker's own line are equal, `0 59 6 16 0.02 1E-12 True False`. One founder-approved read-only probe run on the backfill worker (2026-10-29, 09:13Z to about 09:32Z) read a4: `opening_check=measured`, `member_refusal` none, `opening_residual_over_anchor=-0.0138`, inside 0.02 with 0.0062 of room (-0.0136 on 2026-10-28; the 90-day window slid), `bills_read=1492`; the 5x advisory arm still reads `implausible` (`anchor_over_replay=11.2`). Nothing was enqueued (`rebuilds-enqueued: 0`) and the worker was restored to its normal start command (`worker-restored: yes`). The residual is one account's reading on one day, not a calibration.
+- `TODOS.md`: both entries Phase 179 measured gain one dated paragraph, "Phase 179 OKXBILLSCHAIN, 0.02 deployed". `172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT` stays open (its condition needs a second OKX account's residual; a4 is still the only measured account). `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE` stays closed: the deployed read confirms its sentence that a4 still anchors after the tolerance change.
+- `179-VERIFICATION.md` moved from `human_needed` to `passed` by hand (frontmatter `status`, `verified_at_sha`, `drift_subjects` only) with a dated post-deploy section; the gsd-verifier was not re-run, since the only outstanding item was the 179-07 reading.
+- `ROADMAP.md` ticks Phase 179, its plan 179-07 and its Progress row (the Progress row's Status prose was written by hand; the `phase complete` handler did not touch the roadmap file this time). `STATE.md` `## Current Position` was corrected by hand after the handler moved it to the next roadmap phase, wrong while phases run in parallel, and the handler's `state.json` rewrite was reverted: shipped not closed are NAVMTM 167.2.1.1.1, MARKSOURCE 167.2.1.1.1.1 and 175; in progress are 178 (code in ship, PR #1152) and 180 (shipped v0.133.10.0, plan 08 post-deploy probe pending); closed 2026-10-29 are 177 and 179; booked, not planned: 176.
+- Branch coverage: one records commit over one theme (records). The phase branch's planning commits arrive through the phase directory; its merges of `main` and the 179-04 and 179-06 code are already on `main` through #1148 and #1149.
+- No code, no migration, no schema change, no write to any table.
+
 ## [0.133.11.0] - 2026-10-29 — OKXREWRITE: a forced rebuild skips an exchange account with no working key instead of refusing the whole allocator, and the operator's dead-key reading binds the job
 
 ### Why

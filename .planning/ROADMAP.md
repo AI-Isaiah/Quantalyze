@@ -211,7 +211,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
 - [x] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — complete 2026-10-29 (v0.133.8.0 #1145, re-dump #1146; booked 2026-10-27 from MARKSOURCE plan 03; data-integrity; SC-1 first-night reading: moved=0 in all 8 derive runs, one night)
 - [ ] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — booked 2026-10-27 from MARKSOURCE D-09 (founder 2026-10-27 "Measure gate first, then rewrite"), not planned yet
-- [ ] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — booked 2026-10-28 from OKXANCHOR plan 05 (founder 2026-10-28 "Record, route a follow-up"), not planned yet
+- [x] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — complete 2026-10-29 (v0.133.9.1 #1148, v0.133.9.2 #1149; booked 2026-10-28 from OKXANCHOR plan 05; data-integrity; SC-3 deployed re-read: a4 anchored on the 0.02 tolerance, residual -0.0138)
 - [ ] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up"), not planned yet
 
 ### Phase 158: OPS-CI — A merge means a deploy
@@ -6577,9 +6577,15 @@ Plans:
 **Goal:** Find why the OKX bills-archive running balance does not close for a4 (`chain_break` over 1489 bills), fix the reading or name the break, then re-decide the 0.05 opening tolerance on a complete walk, before any OKX history rebuild.
 **Requirements**: TBD
 **Depends on:** Phase 172
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 
 Booked 2026-10-28 from OKXANCHOR 172 plan 05 (SC-3 mismatch: founder 2026-10-28 "Record, route a follow-up (Recommended)"; tolerance founder 2026-10-28 "Keep 0.05, re-decide later (Recommended)"). Evidence: the 2026-10-28 deployed probe refused a4 `anchor_skipped_implausible` with `opening_check=unavailable`, `opening_unavailable_reason=chain_break`, `bills_read=1489`, `bal_over_cashbal=1`; plan 03 had expected it to anchor. TODOS `167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE` and `172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT`. Data integrity.
+
+Founder override 2026-10-28 (179-CONTEXT D-06): after a4's reading, the fix is a close-arm comparison at OKX precision ("Compare at OKX precision (Recommended)"), departing from plan 03's literal precedence (second-run) because the residual is below 1e-12 on a stable currency; 0.05 tolerance unchanged until SC-3.
+
+Founder decision 2026-10-28 (179-CONTEXT D-07, on SFH-179-04-01): "Trillionth bound only (Recommended)": the decimal-places rule of D-06 is deleted; the close check passes only within 1e-12 of the larger balance.
+
+Founder override 2026-10-28 (179-CONTEXT D-08, on SC-3: a4 anchored, `opening_check=measured`, residual -0.0136): "Tighten to 2%", against the recommendation "Keep 5% (Recommended)"; `OPENING_TOLERANCE_REL` 0.05 → 0.02 by a replan-added plan with its test (D-03).
 
 **Success Criteria** (what must be TRUE):
 1. A read-only measurement (counts and tokens only) names which arm of `chain_break` fires for a4, a bill whose `bal` is not the previous `bal` plus its `balChg` or a newest `bal` that is not today's cash balance, and which currency and bill kind it falls on.
@@ -6587,7 +6593,26 @@ Booked 2026-10-28 from OKXANCHOR 172 plan 05 (SC-3 mismatch: founder 2026-10-28 
 3. After deploy the probe re-reads a4: `opening_check` is `measured` with a residual, or the refusal carries the named cause, and the 0.05 tolerance is kept or re-set by the founder on that reading.
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 179-01-PLAN.md — Chain measurement from the walked bills: tracer through oracle, analysis, record and probe; GET-only budget, redaction and Wave 0 fakes; bill kinds, residual size and signature (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 179-02-PLAN.md — Chain measurement from extra GETs: ordering and ties, second walk, below-stop bills, balance clock, 7-day overlap, type and instType sweep under the 120-call ceiling; full e2e record (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 179-03-PLAN.md — Operator: founder-approved read-only probe run on a4 (SC-1), then the founder's fix decision on the reading; fix and SC-3 plans follow by replan (wave 3, not autonomous)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 179-04-PLAN.md — Close fix at OKX precision (D-06): the close arm passes at the bills' printed precision or within 1e-12 relative, interior links stay exact; tests RED on exact equality through the oracle and the forced path; the chain diagnostic shares the rule (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 179-05-PLAN.md — Operator: founder-approved read-only probe re-read of a4 on the deployed fix (SC-3), then the founder keeps or re-sets the 0.05 tolerance; TODOS readings (wave 5, not autonomous)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 179-06-PLAN.md — Opening tolerance to 0.02 (D-08): the constant and its comment, both value pins; tracer RED at the old value through the forced job; the 2-5% band refuses on both sides and a4's measured residual still agrees and anchors, each proven by a byte-backup mutation (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 179-07-PLAN.md — Operator: founder-approved read-only probe re-read of a4 on the deployed 0.02 (import check ends 0.02 1E-12 True False); a4 anchors within 0.02 or STOP; TODOS readings (wave 7, not autonomous)
 
 ### Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured
 
@@ -6904,7 +6929,7 @@ kept verbatim.
 | 176 LEGACYRETIRE | 0/0 | Not started | - |
 | 177 DERIBITFLOWS | 7/7 | Complete — v0.133.8.0 #1145 (re-dump #1146); a moved Deribit flow is priced at the open of its own 1-minute `{CCY}_USDC-PERPETUAL` candle and each price is stored once; post-deploy first night: `moved=0` in all 8 derive runs (one night's reading), no composite line in the window | 2026-10-29 |
 | 178 OKXREWRITE | 0/0 | Not started | - |
-| 179 OKXBILLSCHAIN | 0/0 | Not started | - |
+| 179 OKXBILLSCHAIN | 7/7 | Complete — v0.133.9.0 #1147, v0.133.9.1 #1148, v0.133.9.2 #1149; the OKX bills oracle's close passes within 1e-12 of the larger balance, the opening tolerance is 0.02 (founder D-08); post-deploy: a4 anchored (`opening_check=measured`, residual -0.0138, 0.02 deployed), nothing enqueued | 2026-10-29 |
 | 180 BYBITFUNDING | 0/0 | Not started | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
