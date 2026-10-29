@@ -13293,6 +13293,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **CLOSED 2026-10-28.**
 
+**Measured 2026-10-29 (Phase 179 OKXBILLSCHAIN, 0.02 deployed, counts only).** `sc3-deployed: a4 anchored (opening_check=measured residual=-0.0138)`, with `bills_read=1492`, `member_refusal=none` and the 5x advisory arm still `implausible` (`anchor_over_replay=11.2`). Confirms the paragraph above: a4 still anchors at 0.02. The entry stays closed.
+
 ### 167.2.1.1.2.1-OKX-ORDER-UNMEASURED — the live OKX fills ordering (newest first) has no reading on a multi-page read (booked 2026-10-26, 167.2.1.1.2.1 plan 06 probe, DATA INTEGRITY, gates any OKX rebuild, CLOSED 2026-10-28)
 
 **Reading.** The backward OKX walk rests on fills-history answering newest first (RESEARCH A1). The 2026-10-26 probe read an OKX account past one page (1282 trades, 22 calls) but carried 0 ordering readings, with 0 violations and 0 passes ended on a full page. Absence of a reading is not a reading, so the gate reads `okx-order: unmeasured`. Until it is measured, no OKX-holding account may be rebuilt.
@@ -13358,6 +13360,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 **Owner / Trigger:** unowned; Phase 179 OKXBILLSCHAIN re-decides it on a4 once a4's chain closes. Trigger: the next OKX account a probe can read with `opening_check=measured`. Closed when a second account's `opening_residual_over_anchor` is recorded and the tolerance re-decided or confirmed.
 
 **Measured 2026-10-28 (Phase 179 OKXBILLSCHAIN SC-3, counts only).** `tolerance-basis: opening_check=measured reason=none residual=-0.0136 bills_read=1490 bal_over_cashbal=1`, the first measured residual (a4, complete walk). Recommended by the 172-05 step 9b rule: keep 0.05. Founder 2026-10-28: "Tighten to 2%". After-value: 0.02, pending a Phase 179 replan that adds the change with its test (`OPENING_TOLERANCE_REL` stays 0.05 in code until it ships). Not closed: its condition needs a second OKX account's residual; a4 is still the only measured account.
+
+**Measured 2026-10-29 (Phase 179 OKXBILLSCHAIN, 0.02 deployed, counts only).** D-08's change shipped in Phase 179 plan 06 (v0.133.9.2, PR #1149): `OPENING_TOLERANCE_REL` is 0.02 and the deployed import check ends ` 0.02 1E-12 True False`, equal to the check computed from the deployed commit. The founder-approved read-only probe re-read a4 on that value: `sc3-deployed: a4 anchored (opening_check=measured residual=-0.0138)`, inside 0.02 with 0.0062 of room (it was -0.0136 on 2026-10-28; the 90-day window slid). Nothing was enqueued or written. Not closed: its condition needs a second OKX account's residual; a4 is still the only measured account.
 
 ## Phase 173 (REBUILDGATES) — routed items (logged 2026-10-28)
 
