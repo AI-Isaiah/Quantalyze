@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.11.6] - 2026-10-30 — MARKSOURCE plan 08: commit the cron manifest after the legacy chain moved to 01:00Z / 01:30Z
+
+### Changed
+- `scripts/prod-prober/cron-manifest.json` now records `poll-allocator-positions` at `0 1 * * *` (was `0 4 * * *`) and `refresh-allocator-equity` at `30 1 * * *` (was `0 5 * * *`), captured from PROD with `--capture-manifest` right after the go-live runbook's Step B. The diff against the previous manifest was exactly those two schedules and `captured_at`; `--preflight-repoint` reports the manifest matches PROD (19 rows), `prod-prober-wiring` is green and the prober self-test passes 91/91.
+
+### Notes
+- Step B ran on PROD at 13:07Z on 2026-10-30, after that day's 04:00Z poll and 05:00Z refresh had both succeeded, so the cut-over day D0 is 2026-10-31: the old pair ran on 2026-10-30, the new pair first runs at 01:00Z and 01:30Z on 2026-10-31, and every label gets one run. The runbook's P6 wording ("before 04:00Z and before the chosen poll slot, on a UTC day D0") is read with D0 as the next UTC day; founder decision 2026-10-30. P7: no snapshot row is labelled 2026-10-30, so outcome 1 applies.
+- The session pooler address for `--preflight-repoint` came from the Supabase CLI's cached `supabase/.temp/pooler-url` (session pooler, port 5432, no password).
+
 ## [0.133.11.5] - 2026-10-30 — records: book the react-hooks 7.1 lint follow-up
 
 ### Notes
