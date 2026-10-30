@@ -3,7 +3,7 @@
 ## [0.133.11.4] - 2026-10-30 — dependency refresh: one PR for the three red Dependabot PRs (#1122, #1123, #1124)
 
 ### Changed
-- npm (supersedes #1124): `posthog-js` ^1.438.12 to ^1.438.19, `posthog-node` ^5.56.1 to ^5.57.0, `puppeteer-core` ^25.14.0 to ^25.16.0, `resend` ^6.33.0 to ^6.34.1, `eslint-config-next` 16.3.8 to 16.4.2, `knip` ^6.41.0 to ^6.42.1. `package-lock.json` was regenerated with `npm install`, so the proxy-agent transitives the Dependabot lock was missing are present and `npm ci` accepts it.
+- npm (supersedes #1124): `posthog-js` ^1.438.12 to ^1.438.19, `posthog-node` ^5.56.1 to ^5.57.0, `puppeteer-core` ^25.14.0 to ^25.16.0, `resend` ^6.33.0 to ^6.34.1, `eslint-config-next` 16.3.8 to 16.4.2, `knip` ^6.41.0 to ^6.42.1. `package-lock.json` was regenerated with npm 10 (CI runs Node 22; an npm 11 lock omitted the optional `proxy-agent` peer that npm 10 installs and `npm ci` then refused it), so the proxy-agent transitives the Dependabot lock was missing are present and `npm ci` accepts it.
 - Python, `analytics-service` (supersedes #1123): `ccxt` 4.5.88 to 4.5.89, `fastapi` 0.143.2 to 0.161.1, `sentry-sdk[fastapi]` 2.72.0 to 2.73.0. `requirements.in` was edited and `requirements.txt` regenerated with `make lock` (uv, `--universal`, Python 3.12), so the lock keeps its environment markers and `# via` annotations that Dependabot's own compile had stripped.
 - GitHub Actions (supersedes #1122): `actions/setup-python` v7.0.0 to v7.1.0 in `ci.yml` and `cassette-refresh.yml`, SHA-pinned to `6d4fd22b20465ccc0f7354476588e8df7c9ca0e0`.
 
