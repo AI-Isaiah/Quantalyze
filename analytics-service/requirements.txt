@@ -30,7 +30,7 @@ attrs==26.1.0
     #   ccxt
 beautifulsoup4==4.15.0
     # via yfinance
-ccxt==4.5.88
+ccxt==4.5.89
     # via -r requirements.in
 certifi==2026.6.17
     # via
@@ -72,7 +72,7 @@ deprecation==2.1.0
     # via
     #   postgrest
     #   storage3
-fastapi==0.143.2
+fastapi==0.161.1
     # via
     #   -r requirements.in
     #   sentry-sdk
@@ -236,7 +236,7 @@ scipy==1.18.0
     # via quantstats
 seaborn==0.13.2
     # via quantstats
-sentry-sdk==2.72.0
+sentry-sdk==2.73.0
     # via -r requirements.in
 six==1.17.0
     # via python-dateutil
