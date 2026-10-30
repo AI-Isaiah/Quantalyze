@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.11.5] - 2026-10-30 — records: book the react-hooks 7.1 lint follow-up
+
+### Notes
+- Books `TODOS.md` `[DEPS-REACT-HOOKS-7.1-LINT]`, the follow-up the 0.133.11.4 entry says is booked separately: `eslint-config-next` 16.4.2 (with `eslint-plugin-react-hooks` 7.1.1) raises 64 new lint errors in `src/` and was left out of #1157 rather than weakening any rule.
+
 ## [0.133.11.4] - 2026-10-30 — dependency refresh: one PR for the three red Dependabot PRs (#1122, #1123, #1124)
 
 ### Changed
