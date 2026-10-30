@@ -52,7 +52,7 @@ import pytest
 # The ccxt version whose ``bybit.parse_balance`` these semantics were read from
 # (``account['total'] = ... 'walletBalance'``). The pin guard below goes RED when
 # analytics-service/requirements.txt moves without these tests being re-read.
-CCXT_PIN_READ = "4.5.88"
+CCXT_PIN_READ = "4.5.89"
 
 # A V5 wallet-balance response in ccxt's documented shape. Values are chosen so
 # the account's equity differs from its wallet balance (nonzero open uPnL):

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.133.11.4] - 2026-10-30 — dependency refresh: one PR for the three red Dependabot PRs (#1122, #1123, #1124)
+
+### Changed
+- npm (supersedes #1124): `posthog-js` ^1.438.12 to ^1.438.19, `posthog-node` ^5.56.1 to ^5.57.0, `puppeteer-core` ^25.14.0 to ^25.16.0, `resend` ^6.33.0 to ^6.34.1, `knip` ^6.41.0 to ^6.42.1. `package-lock.json` was regenerated with npm 10 (CI runs Node 22; an npm 11 lock omitted the optional `proxy-agent` peer that npm 10 installs and `npm ci` then refused it), so the proxy-agent transitives the Dependabot lock was missing are present and `npm ci` accepts it.
+- Python, `analytics-service` (supersedes #1123): `ccxt` 4.5.88 to 4.5.89, `fastapi` 0.143.2 to 0.161.1, `sentry-sdk[fastapi]` 2.72.0 to 2.73.0. `requirements.in` was edited and `requirements.txt` regenerated with `make lock` (uv, `--universal`, Python 3.12), so the lock keeps its environment markers and `# via` annotations that Dependabot's own compile had stripped.
+- GitHub Actions (supersedes #1122): `actions/setup-python` v7.0.0 to v7.1.0 in `ci.yml` and `cassette-refresh.yml`, SHA-pinned to `6d4fd22b20465ccc0f7354476588e8df7c9ca0e0`.
+
+### Fixed
+- `tests/test_upnl_venues.py::test_ccxt_pin_is_the_version_these_semantics_were_read_from` is red by design on any ccxt bump. The re-read it asks for was done: `bybit.parse_balance` and `binance.parse_balance_custom` were extracted from the 4.5.88 and 4.5.89 wheels and compared as source, and both are byte-identical across the two versions. `CCXT_PIN_READ` moved to 4.5.89.
+
+### Notes
+- `eslint-config-next` 16.4.2 (the #1124 bump) is left out and stays at 16.3.8: it requires `eslint-plugin-react-hooks` 7.1.1, whose React Compiler rules raise 64 errors in `src/` under `npm run lint`. That is a code migration, not a dependency bump, so `eslint.config.mjs` is unchanged and no rule was weakened; the migration is booked separately. Dependabot will re-propose it.
+- Verified locally: `npm run lint` exit 0, `tsc --noEmit` clean, `vitest run`, `pytest` from `analytics-service/` (14016 passed, 102 skipped), and CI's `mypy --strict` line (no issues in 131 source files). `knip` is a non-blocking report in CI and still prints findings.
+- Dependabot PRs #1122, #1123 and #1124 are superseded by this entry and are to be closed by hand.
+
 ## [0.133.11.3] - 2026-10-29 — records: close OKXREWRITE 178 (v0.133.11.0 #1154; closed record-only by founder ruling D-09, zero rewrites, nothing written to PROD)
 
 ### Why
