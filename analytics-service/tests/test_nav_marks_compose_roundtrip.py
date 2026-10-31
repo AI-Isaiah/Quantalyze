@@ -1130,6 +1130,7 @@ async def derive_deribit_key(
     composed_flows: dict[str, float] | None = None, instants: tuple[FlowInstant, ...] = (),
     ledger_marks: dict[str, pd.Series] | None = None, chart: _ScriptedChart | None = None,
     flow_prices: FlowPricesTable | None = None, store_db_execute: Any = None,
+    day_pnl: dict[str, float] | None = None, no_terminal: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """Deribit key-mode derive on the NAV path. The ledger quantities (realized terminal 1000.0
     on 03-05, the day P&L, a +100 composed flow on the gap day) are what the ledger helpers return;
@@ -1139,6 +1140,13 @@ async def derive_deribit_key(
     instant, which ``native_flow_instants`` values at its own-day mark. ``chart`` is the scripted
     ``get_tradingview_chart_data``; when given, the derive's exchange close is also recorded in
     ``chart.events`` as ``"close"``.
+
+    ``day_pnl`` replaces the writer's day P&L (default: this module's own roll of the realized
+    series from its terminal), for a writer chain that starts earlier than the realized series
+    does, such as a funding day with zero P&L (G-01).
+
+    ``no_terminal`` makes the ledger's realized terminal answer None beside a non-empty writer basis
+    (G-01 review, the named refusal that replaced the key-mode ``assert``).
 
     ``store_db_execute`` replaces the inline ``db_execute`` the store reads go through (a test that
     needs a store read that hangs awaits there; a blocking sync stub cannot be cancelled).
@@ -1173,7 +1181,10 @@ async def derive_deribit_key(
         # carries a balance and an index (this is not an input to the nav the mark stores).
         native_balance={"BTC": 0.0188}, index_usd_snapshot={"BTC": 100000.0},
     )
-    pnl = realized_day_pnl(REALIZED_THROUGH_0305, "2026-03-05", OKX_TERMINAL)
+    pnl = (
+        realized_day_pnl(REALIZED_THROUGH_0305, "2026-03-05", OKX_TERMINAL)
+        if day_pnl is None else day_pnl
+    )
     patches = _base_patches(
         ctx, key_mode=True,
         ledger_mock=AsyncMock(
@@ -1193,7 +1204,9 @@ async def derive_deribit_key(
         patch("services.job_worker._utc_now", new=MagicMock(return_value=now)),
         patch(
             "services.broker_dailies.native_ledger_realized_terminal",
-            new=MagicMock(return_value=(pd.Timestamp("2026-03-05"), OKX_TERMINAL)),
+            new=MagicMock(
+                return_value=None if no_terminal else (pd.Timestamp("2026-03-05"), OKX_TERMINAL)
+            ),
         ),
         patch(
             "services.broker_dailies.native_ledger_day_pnl",

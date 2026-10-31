@@ -501,6 +501,12 @@ async def run_deribit_composite(
             "services.broker_dailies.native_ledger_day_pnl",
             new=MagicMock(return_value=pd.Series(dtype="float64")),
         ),
+        # The writer's own realized terminal, the first mark's base (G-01, D-25): the 1000.0 on
+        # 03-05 this docstring and ``test_deribit_member_marks_apply_to_cash_only`` state.
+        patch(
+            "services.broker_dailies.native_ledger_realized_terminal",
+            new=MagicMock(return_value=(pd.Timestamp("2026-03-05"), 1000.0)),
+        ),
     ]
     if ledgers is not None:
         by_exchange = {id(c.exchange): kid for kid, c in ctxs.items()}

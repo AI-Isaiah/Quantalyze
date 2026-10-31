@@ -629,11 +629,16 @@ async def test_twin_section5_refusal_writes_nothing(caplog: pytest.LogCaptureFix
 
 @pytest.mark.asyncio
 async def test_a_nonpositive_allocated_base_is_a_gap_not_a_failed_derive() -> None:
-    """CR-02. A first mark whose wallet is 95.0 gives the base L(03-05) = 95.0 - 20.0 - 100.0 =
-    -25.0, which is not positive. 03-06 has no return of its own (a gap), the derive is DONE, and
-    03-07 is measured from the stored 1900.0: (1910 - 1900) / 1900."""
-    db = seeded(MARKS, first_wallet=95.0)
-    run = await derive_allocated(db, cfg=config(), now_day="2026-03-08")
+    """CR-02. A twin whose 03-06 deposit is 2100.0 gives the base L(03-05) = 2000.0 - 5.0 - 20.0 -
+    2100.0 = -125.0, which is not positive. 03-06 has no return of its own (a gap), the derive is
+    DONE, and 03-07 is measured from the stored 1900.0: (1910 - 1900) / 1900.
+
+    The trigger sits in the twin, not in the first mark's wallet (95.0, the original trigger):
+    the base is the writer's own level the day before (G-01, D-25, D-26), and the wallet is no
+    longer read on this path."""
+    twin = Levels(("2026-03-07", 2000.0), {"2026-03-06": 20.0, "2026-03-07": 5.0}, {"2026-03-06": 2100.0})
+    db = seeded(MARKS)
+    run = await derive_allocated(db, cfg=config(), now_day="2026-03-08", twin=twin)
     assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
     assert failed_stamps(run.capture) == []
     assert "2026-03-06" not in run.rows

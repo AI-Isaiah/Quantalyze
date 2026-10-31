@@ -224,6 +224,12 @@ async def run_allocated_composite(
         helper_calls.append("flows")
         return _series_of(_levels(ledger), "flows")
 
+    def _terminal(ledger: Any, _indexable: Any) -> Any:
+        # The writer's own realized terminal, the first mark's base (G-01, D-25, D-26). Answered
+        # by ledger identity like the other two, and not counted in ``helper_calls``.
+        t = _levels(ledger).terminal
+        return None if t is None else (pd.Timestamp(t[0]), t[1])
+
     cash_m1, cash_m2 = day_series(M1_FULL), day_series(member2 if member2 is not None else ALLOCATED)
     mtm_m1 = day_series({d: v * 2.0 for d, v in M1_FULL.items()})
     mtm_m2 = day_series({d: v * 2.0 for d, v in (member2 or ALLOCATED).items()})
@@ -242,6 +248,7 @@ async def run_allocated_composite(
         patch("services.job_worker._utc_now", new=MagicMock(return_value=at_0010(now_day))),
         patch("services.broker_dailies.native_ledger_day_pnl", new=MagicMock(side_effect=_pnl)),
         patch("services.broker_dailies.native_ledger_composed_flows", new=MagicMock(side_effect=_flows)),
+        patch("services.broker_dailies.native_ledger_realized_terminal", new=MagicMock(side_effect=_terminal)),
         *(
             [patch(
                 "services.deribit_flow_prices.db_execute",
@@ -523,10 +530,16 @@ async def test_a_member_rotated_out_under_an_open_mandate_keeps_its_tail_to_its_
     its window, and the mandate is OPEN. Nothing later can cover its days after the last mark, so
     member 1 keeps its own realized rows for 02-27 and 02-28 verbatim, with the 02-26 mark's open
     profit reversed on the first of them (D-24: NAV 1000.0 and open profit 50.0 give
-    0.996 * 950 / 1000 - 1 for 02-27, where the allocated row is -0.004)."""
+    0.996 * 950 / 1000 - 1 for 02-27, where the allocated row is -0.004).
+
+    D-24 as amended 2026-10-31 lands the row on the writer's own level on the last mark day. The
+    shared twin stub answers both members, so this one is a twin whose terminal is (02-26, 950.0),
+    the level the mark's wallet (1000.0 less 50.0) also has: the amended rule and the original one
+    agree here, and the expected value is unchanged."""
     key1_marks = [stored("2026-02-26", 1000.0, venue="deribit", open_pnl=50.0)]
     out = await run_allocated_composite(
         marks={"key-1": key1_marks, "key-2": MARKS}, cfg=config(), now_day="2026-03-08",
+        twin=Levels(("2026-02-26", 950.0), {}, {}),
     )
     assert out.run.result.outcome == DispatchOutcome.DONE, out.run.result.error_message
     rows = out.run.csv_rows()

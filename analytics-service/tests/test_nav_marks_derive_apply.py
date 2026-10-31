@@ -583,7 +583,8 @@ async def test_a_ccxt_deposit_is_placed_by_its_instant_against_the_read() -> Non
 
 
 async def run_mt5(monkeypatch: pytest.MonkeyPatch, *, btc: bool, config: bool = False,
-                  seed_unit: str | None = None, deposit_before_read: bool = False) -> Run:
+                  seed_unit: str | None = None, deposit_before_read: bool = False,
+                  first_open: float | None = None) -> Run:
     """The canonical deal ledger (2025-06-02 .. 06-05), plus ONE deposit on a gap day, derived in
     strategy mode. USD: balance 110_500 / equity 110_600, a deposit of 5000 on 2026-10-07,
     marks 10-06 (105_550, seeded) and 10-08 (110_600, the derive's own equity). BTC (native
@@ -594,7 +595,12 @@ async def run_mt5(monkeypatch: pytest.MonkeyPatch, *, btc: bool, config: bool = 
     L(S-1) = balance - deposit = 105_500 (USD) / 0.1085 (BTC), and
     r(S)    = (105_550 - 105_500) / 105_500                = 50 / 105_500
     r(next) = (110_600 - (105_550 + 5000)) / (105_550 + 5000) = 50 / 110_550
-    (BTC: 0.0005 / 0.1085 and (0.1115 - (0.1090 + 0.002)) / (0.1090 + 0.002) = 0.0005 / 0.1110)."""
+    (BTC: 0.0005 / 0.1085 and (0.1115 - (0.1090 + 0.002)) / (0.1090 + 0.002) = 0.0005 / 0.1110).
+
+    ``first_open`` is the open profit the seeded mark stores, in the series unit (None keeps 50.0 /
+    0.0005 BTC, the mark's wallet equal to the writer's level). A different one puts the mark's
+    wallet off the writer's own level, which is what G-01 was about: the first return must not
+    depend on it (D-25, D-26)."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     if btc:
         scale = _BTC_SCALE
@@ -625,7 +631,7 @@ async def run_mt5(monkeypatch: pytest.MonkeyPatch, *, btc: bool, config: bool = 
             unit = seed_unit if seed_unit is not None else ("BTC" if btc else "USD")
             # The first mark's own wallet is the base: 105_500 (USD) / 0.1085 BTC, so the open
             # profit is the 50 / 0.0005 BTC the NAV holds above it.
-            open_native = 0.0005 if btc else 50.0
+            open_native = (0.0005 if btc else 50.0) if first_open is None else first_open
             seed_mark(
                 db, seed_day,
                 seed_nav * 60000.0 if btc else seed_nav, key="key-mt5", venue="mt5",
@@ -723,7 +729,7 @@ async def run_deribit(
     dense_flows: bool = False, instants: tuple[FlowInstant, ...] = (),
     ledger_marks: dict[str, pd.Series] | None = None, chart: Callable[[], Any] | None = None,
     flow_prices: FlowPricesTable | None = None, marked_run_patches: list[Any] | None = None,
-    mark_read_at: dict[str, str] | None = None,
+    mark_read_at: dict[str, str] | None = None, first_wallet: float | None = None,
 ) -> Run:
     """Deribit on the NAV path (no returns_denominator_config, so not ``_returns_are_allocated``).
     The realized terminal, the day P&L and the composed flows come from the cash-pass ledger,
@@ -745,7 +751,9 @@ async def run_deribit(
     predicts its own mark and may read the chart, so each run needs its own script); ``flow_prices``
     is the marked run's price store (the baseline run gets a fresh one); ``marked_run_patches``
     apply to the marked run only, after the base patches; ``mark_read_at`` maps a mark day to the
-    ISO ``marked_at`` that replaces the seeded 00:10Z one."""
+    ISO ``marked_at`` that replaces the seeded 00:10Z one. ``first_wallet`` is the wallet of the
+    FIRST seeded mark (None keeps 1000.0, equal to the writer's level); a different one puts the
+    mark's wallet off the writer's own level (G-01, D-26)."""
     from dataclasses import replace
 
     from tests.test_mtm_single_key import (
@@ -776,8 +784,9 @@ async def run_deribit(
             ctx.exchange.public_get_get_tradingview_chart_data = scripted
         route_flow_prices(route_csv(route_marks(ctx, db), db), table)
         if not apply_nothing:
-            for day, nav in use_marks.items():
-                seed_mark(db, day, nav, venue="deribit", open_pnl=nav - 1000.0, native_unit=None)
+            for k, (day, nav) in enumerate(use_marks.items()):
+                wallet = first_wallet if (k == 0 and first_wallet is not None) else 1000.0
+                seed_mark(db, day, nav, venue="deribit", open_pnl=nav - wallet, native_unit=None)
                 if mark_read_at and day in mark_read_at:
                     db.marks[(KEY, day)]["marked_at"] = mark_read_at[day]
         state = DeribitNativeAccountState(

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.13.0] - 2026-11-01 — NAVMTM G-01: the first mark's base is the writer's own level
+
+### Root cause
+- `apply_marks` measured the first marked day from the wallet balance read at the first mark, not from the writer's own realized level at the end of the day before marks start. The wallet is read hours after the day boundary, so those hours were booked into the pre-mark history a second time, the compose levels before the first mark shifted off the realized chain, and the zero-start check failed or read the wrong base.
+- PROD evidence, counts only: two allocator books read `inception_unreconciled` from the 2026-10-27 derive; 5 Deribit and MT5 keys across 3 books breached the zero-start band; first marks read 5.5 to 6.7 hours after the day boundary.
+
+### Fixed
+- **D-25, key mode (MT5 and Deribit).** The first mark's base is the writer's own realized level the day before marks start, rolled over the writer's own P&L and flows. The writer roll reads the flows before rule 10 places any of them. The pre-mark compose levels keep their realized values and the zero-start check passes.
+- **D-26, strategy, allocated and composite.** Strategy mode (Deribit, MT5), the allocated twin and both composite member seams take the same writer-level base; the writer's own terminal is handed to `apply_marks` at each seam.
+- **D-24, tail landing (amended and corrected, founder 2026-10-31).** A closed window's first tail row lands on the writer's level on the last mark day instead of the last mark's wallet, so the hours between the day boundary and the last read are not booked twice. The tail carries the moved-flow term (`flow_moves_out`, the amount rule 10 took out of the read day, which differs from the moved-in amount for a BTC or ETH Deribit flow priced at its own minute): without it a closing withdrawal read as a gain. When the rolled writer level is unusable the tail keeps the wallet level.
+- **Named refusal.** A key-mode writer basis without a realized terminal refuses with `mark_writer_terminal_absent` instead of falling back to the wallet base, since a silent fallback would bring G-01 back.
+- **Wallet-fallback WARNINGs.** The first-mark and tail wallet fallbacks of a writer path are now named in the log.
+
+### Notes
+- **D-27.** OKX, Bybit, Binance and sFOX keep the wallet base pending measurement of their first-mark offset (founder decision: measure, then decide); any material offset goes back to the founder with the numbers.
+- No migration and no band change.
+- Known limit, review WR-01: MT5 credit deals may move the writer level between derives; to be measured after deploy.
+- The two affected books heal on the next nightly derive.
+
+### Tests
+- New `test_nav_marks_writer_chain_base.py` (key-mode matrix, strategy-mode cases, rule unit cases) and `test_nav_marks_g01_review_fixes.py` (refusal, fallback warnings, tail landing, moved-flow term); the existing allocated, composite, compose round-trip and derive-apply modules are adjusted to the new base. The data-integrity tests were shown RED by neutering one seam each and restored from byte backups.
+
 ## [0.133.12.1] - 2026-10-31 — BASELINE: automated re-dump after the PROD apply of 5db85bb0
 
 ### Changed
