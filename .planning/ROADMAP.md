@@ -213,6 +213,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — complete 2026-10-29 (v0.133.11.0 #1154; booked 2026-10-27 from MARKSOURCE D-09; data-integrity; closed record-only by founder ruling D-09, zero rewrites, nothing written to PROD; census a1, a2 and a5 kept as stored)
 - [x] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — complete 2026-10-29 (v0.133.9.1 #1148, v0.133.9.2 #1149; booked 2026-10-28 from OKXANCHOR plan 05; data-integrity; SC-3 deployed re-read: a4 anchored on the 0.02 tolerance, residual -0.0138)
 - [x] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up") (shipped v0.133.10.0 #1151; closed 2026-10-29: SC-1 and SC-2 met live, a6 funded by sub-account transfers; SC-3 gate stays `unmeasured`, cause `neither_older_365d`; nothing rebuilt)
+- [ ] **Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book** — booked 2026-10-31 from MARKSOURCE plan 08 first-night reading (a) (founder "Book a phase, close plan 08 (Recommended)"); 3 allocators holding positions have no equity curve because their keys are strategy-linked; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6653,6 +6654,25 @@ Booked 2026-10-28 from REBUILDGATES 173 plan 03 (SC-2 not met: founder 2026-10-2
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book
+
+**Goal:** One rule, stated once and applied in the SQL refresh fan-out, the Python worker and the app's allocator view: an API key linked to a strategy is also part of its owner's allocator book, so an allocator whose keys are linked to a strategy gets an equity curve like any other allocator.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-31 from MARKSOURCE 167.2.1.1.1.1 plan 08's first-night reading (a) (founder 2026-10-31 "Book a phase, close plan 08 (Recommended)"). Founder rule 2026-10-31: "An allocator and a manager can use the same key, even several managers or several allocator. The idea is that one manager creates the strategy. But many want to have a look. Often the manager will share one key among many peers and allocators". Data integrity and user-facing.
+Evidence (PROD 2026-10-31, counts only): 7 allocators hold non-Deribit positions; 3 have no `allocator_equity_snapshots` row ever, because every live non-Deribit key they hold is linked to a non-archived strategy and `enqueue_refresh_allocator_equity_for_all` (latest body `supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql`) leaves linked keys out of both its reconstruct bootstrap and its zero-snapshot refresh arm. Python `_strategy_linked_key_ids` (`analytics-service/services/equity_reconstruction.py`) and TS `deriveStrategyLinkedKeyIds` (`src/lib/queries.ts`) apply the same exclusion. Two inconsistencies to resolve in the same rule: a book that already has history refreshes its linked keys daily (the snapshot branch), and SQL and Python count any linked strategy as manager-side while TS exempts `own_capital` strategies. No data loss: the 2026-10-23 refused forced rebuilds wrote and deleted nothing.
+
+**Success Criteria** (what must be TRUE):
+1. One rule, stated once and applied in SQL, Python and TS: a key linked to a strategy is also part of its owner's allocator book.
+2. The three zero-snapshot books get their first curve through the product's own path, and a multi-key book is never stored as one key's partial total.
+3. Tests go RED on the current exclusion.
+4. After deploy, a PROD reading shows every allocator holding non-Deribit positions has a snapshot for the closed day.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -6953,6 +6973,7 @@ kept verbatim.
 | 178 OKXREWRITE | 4/4 | Complete — v0.133.11.0 #1154; a forced rebuild skips an exchange account with no working key; post-deploy probe: all five OKX accounts read, `okx_order_gate` `ok`; closed record-only by founder ruling D-09 (zero rewrites, plan 04 closed without execution, nothing written to PROD; SC-2 not met by ruling) | 2026-10-29 |
 | 179 OKXBILLSCHAIN | 7/7 | Complete — v0.133.9.0 #1147, v0.133.9.1 #1148, v0.133.9.2 #1149; the OKX bills oracle's close passes within 1e-12 of the larger balance, the opening tolerance is 0.02 (founder D-08); post-deploy: a4 anchored (`opening_check=measured`, residual -0.0138, 0.02 deployed), nothing enqueued | 2026-10-29 |
 | 180 BYBITFUNDING | 8/8 | Complete — v0.133.10.0 #1151; the probe and the rebuild read the Bybit Unified edge and page by cursor; post-deploy: a6 `explained` (funded by universal transfers, 8 rows), Unified state `read`, `bybit-transfers: unmeasured (a6)` cause `neither_older_365d`; nothing rebuilt | 2026-10-29 |
+| 181 SHAREDKEYS | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 08 | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
