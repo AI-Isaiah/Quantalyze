@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.11.8] - 2026-10-31 — records: book Phase 182 SPIKEREPAIR
+
+### Notes
+- Books Phase 182 SPIKEREPAIR from MARKSOURCE plan 14: 22 stored allocator equity days across 4 books sit more than 20% below or above both neighbours, because a refresh or reconstruct written before the price-gap fix left positions (one coin, every perpetual, or a whole exchange account) out of that day's total. On the charts each one shows as a one-day crash or jump. They are repaired through the product's own path or kept and named. Records only.
+
 ## [0.133.11.7] - 2026-10-31 — records: book Phase 181 SHAREDKEYS
 
 ### Notes
