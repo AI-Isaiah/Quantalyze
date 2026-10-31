@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.11.10] - 2026-10-31 — records: book Phase 183 DUPCOUNT
+
+### Notes
+- Books Phase 183 DUPCOUNT from the 2026-10-31 Sentry check (founder "Count once, draw the curve (Recommended)"). Sentry QUANTALYZE-2H recurs nightly since 2026-10-20: one allocator book's derived equity curve is refused as `account_duplicate`, so the book shows the "rebuilding, duplicate account" panel instead of a curve. The derive's account-group resolution already counts the shared account once; the identity gate after it refuses the book anyway whenever a marked duplicate's holder is healthy. The phase drops that refusal for an account already counted once and keeps refusing a real double count. Records only.
+
 ## [0.133.11.9] - 2026-10-31 — records: close MARKSOURCE 167.2.1.1.1.1 (v0.133.6.0 #1141; plan 08 cron move PR #1159; OKX past rows recorded, not recomputed)
 
 ### Notes

@@ -215,6 +215,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up") (shipped v0.133.10.0 #1151; closed 2026-10-29: SC-1 and SC-2 met live, a6 funded by sub-account transfers; SC-3 gate stays `unmeasured`, cause `neither_older_365d`; nothing rebuilt)
 - [ ] **Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book** — booked 2026-10-31 from MARKSOURCE plan 08 first-night reading (a) (founder "Book a phase, close plan 08 (Recommended)"); 3 allocators holding positions have no equity curve because their keys are strategy-linked; data integrity, user-facing
 - [ ] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing
+- [ ] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6695,6 +6696,26 @@ Evidence (PROD 2026-10-31, read-only, ratios only): 22 stored `allocator_equity_
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve
+
+**Goal:** A book whose marked duplicate key is already counted once by the derive's account-group resolution draws its equity curve instead of refusing it. A real double count, with two counted keys reading one account, still refuses.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-31 from the Sentry check (founder 2026-10-31 "Count once, draw the curve (Recommended)"). Data integrity and user-facing: the book renders the "rebuilding, duplicate account" panel instead of a curve, and after Phase 176 LEGACYRETIRE the derived curve is the only curve it has. Founder rule: one exchange account under several logins is intended.
+Evidence (PROD 2026-10-31, read-only, counts only): Sentry QUANTALYZE-2H recurs nightly since 2026-10-20 (14 events, last 2026-10-31 01:35Z). Exactly 1 `allocator_equity_derived` `equity_curve` row carries a refusal, token `account_duplicate`. That book holds 2 keys with `account_share_kind='duplicate'` (one Deribit, one MT5), each marked against a healthy sibling holder.
+Root cause: in `analytics-service/services/job_worker.py` the derive's account-group loop (`account_groups`, building `excluded_shared` and `counted_ids`) already counts each shared account once. The identity gate after it (`duplicate_keys`: an eligible key marked `duplicate` whose holder is working) then refuses the whole book with `DeriveRefusal.ACCOUNT_DUPLICATE` regardless. The reader (`untrustworthyRebuildReason` and `countsAsDuplicate` in `src/lib/queries.ts`) maps the token to the `duplicate_account` line. `TODOS.md` records these refusals as expected since 167.1.2.1.1 WRITERRESIDUALS; that line changes with this phase.
+
+**Success Criteria** (what must be TRUE):
+1. A marked duplicate whose account the group resolution already counts once no longer refuses the book. Two counted keys on one account (`account_identity_collision`) still refuse.
+2. Writer and reader apply the same rule (`job_worker.py` and `countsAsDuplicate` in `queries.ts`).
+3. Tests go RED on the current refusal.
+4. After deploy, a PROD reading shows 0 `account_duplicate` refusal rows, the book has a trustworthy curve, and QUANTALYZE-2H stops recurring.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -6997,6 +7018,7 @@ kept verbatim.
 | 180 BYBITFUNDING | 8/8 | Complete — v0.133.10.0 #1151; the probe and the rebuild read the Bybit Unified edge and page by cursor; post-deploy: a6 `explained` (funded by universal transfers, 8 rows), Unified state `read`, `bybit-transfers: unmeasured (a6)` cause `neither_older_365d`; nothing rebuilt | 2026-10-29 |
 | 181 SHAREDKEYS | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 08 | - |
 | 182 SPIKEREPAIR | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 14 | - |
+| 183 DUPCOUNT | 0/0 | Not started — booked 2026-10-31 from the Sentry check (QUANTALYZE-2H) | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
