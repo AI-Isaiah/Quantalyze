@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.11.7] - 2026-10-31 — records: book Phase 181 SHAREDKEYS
+
+### Notes
+- Books Phase 181 SHAREDKEYS from MARKSOURCE plan 08's first-night reading (a): 3 of the 7 allocators holding non-Deribit positions have no equity curve, because every key they hold is linked to a strategy and the daily refresh fan-out, the Python worker and the app's allocator view all leave strategy-linked keys out of the allocator book. Founder rule 2026-10-31: one key can serve a manager and allocators at once, so a linked key also counts in its owner's allocator book. Nothing was lost: those books never had a snapshot. Records only.
+
 ## [0.133.11.6] - 2026-10-30 — MARKSOURCE plan 08: commit the cron manifest after the legacy chain moved to 01:00Z / 01:30Z
 
 ### Changed
