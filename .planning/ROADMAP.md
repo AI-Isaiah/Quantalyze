@@ -179,7 +179,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — complete 2026-10-23 (v0.133.0.0 #1116; founder 2026-10-22; data-integrity; SC-3: all 5 accounts refused by name, 1 routed to TRADEPAGES)
 - [x] **Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page** (INSERTED 2026-10-23) — complete 2026-10-27 (v0.133.0.6 #1125; founder 2026-10-23; from ACCTREBUILD SC-3; data-integrity; SC-2 and SC-3 closed by founder decision 2026-10-26, rebuild none)
 - [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
-- [ ] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after NAVMTM)
+- [x] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — complete 2026-10-31 (v0.133.6.0 #1141; founder 2026-10-22; data-integrity; plan 08 legacy poll and refresh moved to 01:00Z and 01:30Z, PR #1159; plan 14 OKX rows recorded, not recomputed, via Phase 178; follow-ups 181 SHAREDKEYS and 182 SPIKEREPAIR)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
 - [x] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified (completed 2026-10-04)
 - [x] **Phase 169.1: ZOOMKPIS — the KPI strip and metrics rail follow the zoom window, and every windowed figure follows the engine's conventions** (INSERTED) — verification: passed (completed 2026-10-01, PR #913, v0.117.0.0)
@@ -5681,10 +5681,12 @@ Plans:
 2. The two curves agree within a stated tolerance on a book with open positions, or the legacy curve is retired with every reader moved.
 3. The last-bar spike is gone.
 
-**Plans:** 0 plans
+**Plans:** 16/16 plans complete
+
+2026-10-31 (plan 14): option-b; follow-up phase 178 measured the gate and closed record-only (178 D-09); a1, a2, a5 recorded, not recomputed (D-06); rows kept and named (F1)
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 167.2.1.1.1.1-01 to 167.2.1.1.1.1-16 — complete; see the phase directory SUMMARYs (plan 08 cron move PR #1159, plan 14 recorded via Phase 178)
 
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
@@ -6959,7 +6961,7 @@ kept verbatim.
 | 167.2.1.1.2 ACCTREBUILD | 9/9 | Complete — v0.133.0.0 #1116; SC-3: 4 accounts refused `account_key_not_working` (accepted as recorded), 1 refused `account_key_read_failed` (routed to TRADEPAGES); nothing written | 2026-10-23 |
 | 167.2.1.1.2.1 TRADEPAGES | 6/6 | Complete — v0.133.0.6 #1125; SC-1 verified in code; SC-2 and SC-3 closed by founder decision 2026-10-26 (rebuild none, probe recorded: 0 of 6 accounts comparable, 4 have no working key); 4 follow-ups booked | 2026-10-27 |
 | 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
-| 167.2.1.1.1.1 MARKSOURCE | 0/? | Queued — booked 2026-10-22 (founder), after NAVMTM | - |
+| 167.2.1.1.1.1 MARKSOURCE | 16/16 | Complete — v0.133.6.0 #1141; forward fix shipped earlier, plan 08 legacy poll and refresh moved to 01:00Z and 01:30Z (PR #1159), plan 14 OKX rows a1, a2 and a5 recorded not recomputed via Phase 178 (nothing written to PROD); follow-ups Phase 181 SHAREDKEYS and Phase 182 SPIKEREPAIR | 2026-10-31 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7/7 | Complete    | 2026-10-04 |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
