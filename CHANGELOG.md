@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.11.9] - 2026-10-31 — records: close MARKSOURCE 167.2.1.1.1.1 (v0.133.6.0 #1141; plan 08 cron move PR #1159; OKX past rows recorded, not recomputed)
+
+### Notes
+- Closes Phase 167.2.1.1.1.1 MARKSOURCE: 16 of 16 plans, `167.2.1.1.1.1-VERIFICATION.md` status `passed`. The forward fix shipped earlier (v0.133.6.0 #1141); this PR carries the phase directory and the records.
+- Plan 08: the legacy poll and refresh moved to `0 1 * * *` and `30 1 * * *` on 2026-10-30 at 13:07Z (founder 2026-10-30, "Run it now (Recommended)"; the manifest shipped as PR #1159, v0.133.11.6). First night on the new clock (run day 2026-10-31): poll 01:00Z and refresh 01:30Z both succeeded, nothing ran at 04:00Z or 05:00Z; 7 eligible allocators, 4 with a closed-day row, 3 without. The two comparable closed-day rows are within tolerance (rel_diff 0.00121 and 0.000750). The 3 books without a snapshot row never had one: every live non-Deribit key on them is linked to a strategy and the refresh fan-out leaves strategy-linked keys out. Founder 2026-10-31 booked this as Phase 181 SHAREDKEYS (PR #1160).
+- Plan 14: read-only on PROD, nothing written. Suspect OKX snapshot days in the 90-day window are a1 71, a2 71, a5 29 (outside it a1 43, a2 43, a5 0). All three are `recorded, not recomputed (D-06)`: option-b, rewrite deferred to Phase 178, which closed record-only (178 D-09). a2's maximum overcount share of 0.516 is a 2026-10-15 price-gap dip, not a double count. A scan found 22 such one-day spikes or dips across 4 books, booked as Phase 182 SPIKEREPAIR (PR #1161).
+- `TODOS.md`: `167.2.1.1.1.1-OKX-DOUBLE-COUNT-BEYOND-REBUILD-WINDOW` gains the dated counts-only reading; it stays open. `167.2.1.1.1.1-CONTEXT.md` D-05 and the ROADMAP phase entry each carry one dated deferral line.
+- `ROADMAP.md` ticks the Phase 167.2.1.1.1.1 overview bullet, its plans and its Progress row. `phase complete` ran; its collateral on STATE.md (advance to Phase 167.2.1.1.1) and `state.json` was reverted and `## Current Position` was written by hand.
+- Branch coverage: one records commit over one theme (records). No code, no migration, no schema change, no write to any table.
+
 ## [0.133.11.8] - 2026-10-31 — records: book Phase 182 SPIKEREPAIR
 
 ### Notes
