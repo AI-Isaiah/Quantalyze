@@ -26,6 +26,7 @@
 - Floors moved (read from the files): `scripts/mutation-floors.mjs` `FILES_FLOOR` 82 -> 83, `ARMS_FLOOR` 829 -> 862, `WAIVED_CEILING` stays 0; `.github/workflows/ci.yml` `SENTINEL_FLOOR` 26 -> 27 and `ARMS_FLOOR` 394 -> 408. `mutation-runner-floors.test.ts`, `gate-family-meta.test.ts`, `lint-sql-gates.test.ts`, `drift-check-scripts.test.ts` and the baseline schema snapshots moved by measured counts.
 
 ### Notes
+- The migration carries a VAC-04 `prod-body-ack` for `compute_bridge_outcome_deltas`: PROD's live body is the 20260426131718 definition (equal to the committed baseline snapshot), so overwriting it is intended.
 - Migration `20261102120000` applies to TEST then PROD on merge, with no human stop between.
 - Known limits: rows older than 365 days keep the old basis (the CHECK forbids any UPDATE of them; recorded under `176-BRIDGE-CHECK-WINDOW-ABORT`). The legacy table is still written until PR 2.
 - `TODOS.md`: `176-BRIDGE-CHECK-WINDOW-ABORT` (fixed), `176-INERT-LEFTOVERS` (the `managerSide*` plumbing and the `equityCurveSource` "legacy" value are inert after D-01 and D-07) and `176-PR1-REVIEW-RESIDUALS` (four below-the-bar review items: `failed_count` noise with no reader, the stored-wins pin covering +30d only, a digit-shaped impossible date still extending coverage, and a note-only upsert re-measuring after a restatement).
