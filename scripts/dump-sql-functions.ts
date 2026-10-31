@@ -392,31 +392,11 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-10-31: Phase 176 LEGACYRETIRE plan 02 adds two `snapshot-only` rows,
-  // for `derived_account_return_over` (the helper the bridge batch now calls) and
-  // `reset_holding_bridge_outcomes_to_derived_basis` (the D-06 one-time reset), both
-  // created by 20261102120000_bridge_outcome_holding_branch_derived.sql. The clearing
-  // condition of each is the re-dump taken after that migration has applied to PROD;
-  // that act turns the row into `ratchet-stale` and it is DELETED, as the rows below
-  // were.
-  {
-    name: "derived_account_return_over",
-    side: "snapshot-only",
-    capturedAt: "2026-10-31",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER 20261102120000_bridge_outcome_holding_branch_derived.sql has applied to PROD",
-    reason:
-      "Phase 176 LEGACYRETIRE plan 02 defines the function in a forward migration (the account-level compounded-return helper of the bridge outcome batch) while the committed PROD dump predates that migration, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
-  {
-    name: "reset_holding_bridge_outcomes_to_derived_basis",
-    side: "snapshot-only",
-    capturedAt: "2026-10-31",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER 20261102120000_bridge_outcome_holding_branch_derived.sql has applied to PROD",
-    reason:
-      "Phase 176 LEGACYRETIRE plan 02 defines the function in a forward migration (the D-06 one-time reset of stored holding outcomes, owner only) while the committed PROD dump predates that migration, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-10-31: the Phase 176 LEGACYRETIRE plan 02 rows
+  // (`derived_account_return_over` and `reset_holding_bridge_outcomes_to_derived_basis`,
+  // `snapshot-only`, captured 2026-10-31) are DELETED: their clearing condition, a
+  // re-dump taken after 20261102120000_bridge_outcome_holding_branch_derived.sql
+  // applied to PROD, was met by the re-dump after the PROD apply of 5db85bb0.
   // ⭐ 2026-10-26: the Phase 167.2.1.1.1 NAVMTM row
   // (`enforce_api_key_nav_marks_owner_coherence`, `snapshot-only`, captured
   // 2026-10-26) is DELETED: its clearing condition, a re-dump taken after

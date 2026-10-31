@@ -3415,7 +3415,7 @@ DECLARE
   v_started TIMESTAMPTZ := NOW();
 BEGIN
   WITH
-  -- ---------------- strategy branch (verbatim from migration 073) ----------------
+  -- ---------------- strategy branch (migration 073; fix round 1 adds the allocated_at window conjunct) ----------------
   strategy_candidates AS (
     SELECT
       bo.id,
@@ -3426,6 +3426,7 @@ BEGIN
     JOIN public.strategy_analytics sa ON sa.strategy_id = bo.strategy_id
     WHERE bo.kind = 'allocated'
       AND bo.allocated_at IS NOT NULL
+      AND bo.allocated_at >= (CURRENT_DATE - '365 days'::interval)
       AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
       AND (
         bo.match_decision_id IS NULL
@@ -3459,7 +3460,14 @@ BEGIN
       AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
     RETURNING bo.id
   ),
-  -- ---------------- holding branch (verbatim from migration 073) ----------------
+  -- ---------------- holding branch (Phase 176 LEGACYRETIRE, D-03 / D-05) ----------------
+  -- Measured PER ACCOUNT, not per symbol: the +30, +90 and +180 day outcome compounds
+  -- the account's flow-neutral daily returns (allocator_equity_derived, kind
+  -- equity_curve, payload.returns) over (allocated_at, allocated_at + N] through
+  -- public.derived_account_return_over. A window the derived curve does not cover is
+  -- NULL. The candidate set and the UPDATE are as migration 073 had them, plus the
+  -- allocated_at window conjunct below, plus (fix round 1) a matured-window refill: a
+  -- row whose +30d landed is picked again while its +90d or +180d is NULL and old enough.
   holding_candidates AS (
     SELECT
       bo.id,
@@ -3471,55 +3479,56 @@ BEGIN
     LEFT JOIN LATERAL public.parse_holding_ref(md.original_holding_ref) hp ON TRUE
     WHERE bo.kind = 'allocated'
       AND bo.allocated_at IS NOT NULL
-      AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
+      AND (
+        bo.delta_30d IS NULL OR bo.needs_recompute = TRUE
+        OR (bo.delta_90d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '91 days'::interval))
+        OR (bo.delta_180d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '181 days'::interval))
+      )
       AND md.original_strategy_id IS NULL
       AND md.original_holding_ref IS NOT NULL
       AND hp.symbol IS NOT NULL
+      -- bridge_outcomes_allocated_at_check admits only allocated_at inside
+      -- [CURRENT_DATE - 365 days, CURRENT_DATE] and PostgreSQL re-checks it on EVERY
+      -- UPDATE of a row, so touching a row aged past the window raises 23514 and
+      -- aborts this whole statement for every allocator. Such a row is not a candidate.
+      AND bo.allocated_at >= (CURRENT_DATE - '365 days'::interval)
   ),
   holding_computed AS (
     SELECT
       hc.id,
-      CASE
-        WHEN public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at) IS NULL
-          OR public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 30) IS NULL
-        THEN NULL
-        ELSE (
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 30) /
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at)
-        ) - 1
-      END AS d30,
-      CASE
-        WHEN public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at) IS NULL
-          OR public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 90) IS NULL
-        THEN NULL
-        ELSE (
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 90) /
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at)
-        ) - 1
-      END AS d90,
-      CASE
-        WHEN public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at) IS NULL
-          OR public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 180) IS NULL
-        THEN NULL
-        ELSE (
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 180) /
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at)
-        ) - 1
-      END AS d180
+      public.derived_account_return_over(hc.allocator_id, hc.allocated_at, 30)  AS d30,
+      public.derived_account_return_over(hc.allocator_id, hc.allocated_at, 90)  AS d90,
+      public.derived_account_return_over(hc.allocator_id, hc.allocated_at, 180) AS d180
     FROM holding_candidates hc
   ),
   holding_updated AS (
     UPDATE public.bridge_outcomes AS bo
     SET
-      delta_30d          = COALESCE(hc.d30,  bo.delta_30d),
-      delta_90d          = COALESCE(hc.d90,  bo.delta_90d),
-      delta_180d         = COALESCE(hc.d180, bo.delta_180d),
+      delta_30d          = CASE WHEN bo.needs_recompute THEN COALESCE(hc.d30,  bo.delta_30d)  ELSE COALESCE(bo.delta_30d,  hc.d30)  END,
+      delta_90d          = CASE WHEN bo.needs_recompute THEN COALESCE(hc.d90,  bo.delta_90d)  ELSE COALESCE(bo.delta_90d,  hc.d90)  END,
+      delta_180d         = CASE WHEN bo.needs_recompute THEN COALESCE(hc.d180, bo.delta_180d) ELSE COALESCE(bo.delta_180d, hc.d180) END,
       needs_recompute    = FALSE,
       deltas_computed_at = v_started
     FROM holding_computed hc
     WHERE bo.id = hc.id
       AND bo.kind = 'allocated'
-      AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
+      AND (
+        bo.delta_30d IS NULL OR bo.needs_recompute = TRUE
+        OR (bo.delta_90d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '91 days'::interval))
+        OR (bo.delta_180d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '181 days'::interval))
+      )
+      -- A row whose three new deltas are all NULL measured nothing: it is not written,
+      -- so it stays needs_recompute TRUE, and holding_failed below counts it.
+      AND (hc.d30 IS NOT NULL OR hc.d90 IS NOT NULL OR hc.d180 IS NOT NULL)
+      -- A stored delta is kept. A row picked again only because a matured window is still
+      -- NULL is written (and counted, and stamped) only when a NULL window actually filled;
+      -- a row with needs_recompute set is re-measured, new value first.
+      AND (
+        bo.needs_recompute = TRUE
+        OR (bo.delta_30d  IS NULL AND hc.d30  IS NOT NULL)
+        OR (bo.delta_90d  IS NULL AND hc.d90  IS NOT NULL)
+        OR (bo.delta_180d IS NULL AND hc.d180 IS NOT NULL)
+      )
     RETURNING bo.id
   ),
   -- ---------------- voluntary_add branch (NEW — Phase 10 / H2) ----------------
@@ -3527,7 +3536,8 @@ BEGIN
   -- strategy_id (the suggested strategy) NOT NULL. Match against
   -- strategy_analytics.returns_series the same way the strategy branch does — but
   -- gate on md.kind='voluntary_add' to be unambiguous and avoid double-counting
-  -- bridge_recommended rows that the strategy branch already covers.
+  -- bridge_recommended rows that the strategy branch already covers. Fix round 1 adds the
+  -- allocated_at window conjunct (see the holding branch for why).
   voluntary_add_candidates AS (
     SELECT
       bo.id,
@@ -3538,6 +3548,7 @@ BEGIN
     JOIN public.strategy_analytics sa ON sa.strategy_id = bo.strategy_id
     WHERE bo.kind = 'allocated'
       AND bo.allocated_at IS NOT NULL
+      AND bo.allocated_at >= (CURRENT_DATE - '365 days'::interval)
       AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
       AND md.kind = 'voluntary_add'
       AND md.strategy_id IS NOT NULL
@@ -3574,8 +3585,10 @@ BEGIN
   SELECT
     (SELECT COUNT(*)::INT FROM strategy_updated) +
     (SELECT COUNT(*)::INT FROM holding_updated) +
-    (SELECT COUNT(*)::INT FROM voluntary_add_updated)
-  INTO v_updated;
+    (SELECT COUNT(*)::INT FROM voluntary_add_updated),
+    (SELECT COUNT(*)::INT FROM holding_computed hc
+      WHERE hc.d30 IS NULL AND hc.d90 IS NULL AND hc.d180 IS NULL)
+  INTO v_updated, v_failed;
 
   RETURN QUERY SELECT v_updated, v_failed, v_started;
 END;
@@ -3585,7 +3598,7 @@ $$;
 ALTER FUNCTION "public"."compute_bridge_outcome_deltas"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."compute_bridge_outcome_deltas"() IS 'Daily batch: realized 30/90/180-day deltas for bridge_outcomes where kind=''allocated'' AND (delta_30d IS NULL OR needs_recompute=TRUE). Phase 10 extension (migration 080): adds voluntary_add CTE branch matching md.kind=''voluntary_add'' so browse-added strategies accrue deltas once strategy_analytics.returns_series catches up. Strategy + holding branches preserved verbatim from migration 073. Idempotent — re-run produces no changes once windows populate.';
+COMMENT ON FUNCTION "public"."compute_bridge_outcome_deltas"() IS 'Daily batch: realized 30/90/180-day deltas for bridge_outcomes where kind=''allocated'' AND (delta_30d IS NULL OR needs_recompute=TRUE). Strategy and voluntary_add rows read strategy_analytics.returns_series through extract_delta; holding rows (Phase 176, D-03/D-05) compound the account''s flow-neutral derived returns through derived_account_return_over and take only allocated_at inside the bridge_outcomes_allocated_at_check window; all three branches take only that window. A holding row stays a candidate while its +90d or +180d is NULL and old enough, and is written only when a NULL window fills or needs_recompute is set: a stored delta is kept. Idempotent - re-run produces no changes once windows populate. A holding row whose three new deltas are all NULL is not written and is counted in failed_count.';
 
 
 
@@ -4456,6 +4469,63 @@ ALTER FUNCTION "public"."delete_api_key_if_unreferenced"("p_api_key_id" "uuid") 
 
 
 COMMENT ON FUNCTION "public"."delete_api_key_if_unreferenced"("p_api_key_id" "uuid") IS 'Atomic orphan-key revoke (audit M-0347): DELETE the api_key IFF no strategy references it, in one statement (no count-then-delete TOCTOU). Dual-mode owner gate — authenticated deletes only its own key (user_id=auth.uid()); a service caller (auth.uid() NULL, role<>anon) sweeps any unreferenced key for the cleanup-wizard-drafts cron. anon is REVOKEd and also blocked at the gate (defense-in-depth).';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."derived_account_return_over"("p_allocator_id" "uuid", "p_anchor" "date", "p_days" integer) RETURNS numeric
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+  WITH d AS (
+    SELECT payload
+      FROM public.allocator_equity_derived
+     WHERE allocator_id = p_allocator_id
+       AND kind = 'equity_curve'
+       AND p_anchor IS NOT NULL
+       AND p_days >= 1
+       AND jsonb_typeof(payload) = 'object'
+       AND payload->>'version' = '2'
+       AND payload->'is_trustworthy' = 'true'::jsonb
+       AND jsonb_typeof(payload->'returns') = 'array'
+  ),
+  want AS (
+    SELECT to_char(p_anchor + i, 'YYYY-MM-DD') AS day
+      FROM generate_series(1, p_days) AS g(i)
+  ),
+  got AS (
+    SELECT e->>'date' AS day,
+           CASE WHEN jsonb_typeof(e->'r') = 'number' THEN (e->>'r')::numeric END AS r
+      FROM d, jsonb_array_elements(d.payload->'returns') AS e
+  ),
+  cov AS (
+    SELECT min(day) AS first_day, max(day) AS last_day
+      FROM got
+     WHERE day ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  ),
+  j AS (
+    SELECT got.day AS got_day,
+           got.r,
+           CASE WHEN got.r > -1 THEN ln(1 + got.r) ELSE 0 END AS lg
+      FROM want
+      LEFT JOIN got ON got.day = want.day
+  )
+  SELECT CASE
+           WHEN count(*) = p_days
+            AND count(got_day) > 0
+            AND NOT bool_or(got_day IS NOT NULL AND r IS NULL)
+            AND (SELECT first_day FROM cov) <= to_char(p_anchor + 1, 'YYYY-MM-DD')
+            AND (SELECT last_day FROM cov) >= to_char(p_anchor + p_days, 'YYYY-MM-DD')
+            AND sum(lg) < 1000
+           THEN CASE WHEN bool_or(r <= -1) THEN -1 ELSE exp(sum(lg)) - 1 END
+         END
+    FROM j
+$_$;
+
+
+ALTER FUNCTION "public"."derived_account_return_over"("p_allocator_id" "uuid", "p_anchor" "date", "p_days" integer) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."derived_account_return_over"("p_allocator_id" "uuid", "p_anchor" "date", "p_days" integer) IS 'Phase 176 LEGACYRETIRE (D-03, D-05): the account''s compounded flow-neutral return over the p_days days after p_anchor, from the returns of the allocator''s allocator_equity_derived equity_curve row. A day with no returns entry counts as no change; a day with 1 + r <= 0 compounds to -1. NULL when the curve does not cover the window (its first YYYY-MM-DD returns date is after p_anchor + 1 or its last before p_anchor + p_days), no returns entry falls inside the window, a day is repeated, the row is not version 2 and trustworthy, an r is not a number, or the payload is malformed. SECURITY INVOKER; its only caller is compute_bridge_outcome_deltas.';
 
 
 
@@ -9856,6 +9926,38 @@ ALTER FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid")
 
 
 COMMENT ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") IS 'Authenticated wrapper for a holdings sync request. Returns {already_inflight: true, next_attempt_at} when a poll_allocator_positions job for the key is already pending, running or done_pending_children; otherwise enqueues one and returns {ok: true, job_id}, and for an api_key whose history_reconstructed_at marker is NULL and with no reconstruct_allocator_history job in flight (pending, running, done_pending_children) or awaiting retry (failed_retry) also enqueues that; a finished (done) job alone does not suppress it, the marker is authoritative (O-2). Raises 42501 for an unauthenticated caller or a key the caller does not own, and P0001 api_key_disconnected for a soft-disconnected key. Phase 164.9.1: restores migration 067''s in-flight look-up and migration 075''s disconnected-key refusal on migration 076''s per-api_key reconstruct gate. Phase 167.1.2.1: the reconstruct gate counts failed_retry (SC-5, D-13) and a set marker (D-04) and no longer counts a done job (O-2); the poll look-up is unchanged.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."reset_holding_bridge_outcomes_to_derived_basis"() RETURNS integer
+    LANGUAGE "sql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+  WITH u AS (
+    UPDATE public.bridge_outcomes AS bo
+       SET needs_recompute    = TRUE,
+           delta_30d          = NULL,
+           delta_90d          = NULL,
+           delta_180d         = NULL,
+           deltas_computed_at = NULL
+      FROM public.match_decisions AS md
+     WHERE md.id = bo.match_decision_id
+       AND bo.kind = 'allocated'
+       AND bo.allocated_at IS NOT NULL
+       AND bo.allocated_at >= (CURRENT_DATE - '365 days'::interval)
+       AND md.original_strategy_id IS NULL
+       AND EXISTS (SELECT 1 FROM public.parse_holding_ref(md.original_holding_ref) AS hp
+                    WHERE hp.symbol IS NOT NULL)
+    RETURNING bo.id
+  )
+  SELECT count(*)::integer FROM u
+$$;
+
+
+ALTER FUNCTION "public"."reset_holding_bridge_outcomes_to_derived_basis"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."reset_holding_bridge_outcomes_to_derived_basis"() IS 'Phase 176 LEGACYRETIRE (D-06): sets needs_recompute = TRUE and NULLs delta_30d, delta_90d, delta_180d and deltas_computed_at together for the holding-measuring bridge_outcomes rows inside the allocated_at CHECK window, so the next compute_bridge_outcome_deltas run measures them on the derived basis. Returns the row count. Owner only.';
 
 
 
@@ -18019,6 +18121,11 @@ GRANT ALL ON FUNCTION "public"."delete_api_key_if_unreferenced"("p_api_key_id" "
 
 
 
+REVOKE ALL ON FUNCTION "public"."derived_account_return_over"("p_allocator_id" "uuid", "p_anchor" "date", "p_days" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."derived_account_return_over"("p_allocator_id" "uuid", "p_anchor" "date", "p_days" integer) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."disconnect_allocator_api_key"("p_api_key_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."disconnect_allocator_api_key"("p_api_key_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."disconnect_allocator_api_key"("p_api_key_id" "uuid") TO "service_role";
@@ -18373,6 +18480,10 @@ GRANT ALL ON FUNCTION "public"."replace_allocator_equity_snapshots_window"("p_al
 REVOKE ALL ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."reset_holding_bridge_outcomes_to_derived_basis"() FROM PUBLIC;
 
 
 
