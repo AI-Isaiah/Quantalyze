@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.12.1] - 2026-10-31 — BASELINE: automated re-dump after the PROD apply of 5db85bb0
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `41239837180`, after the PROD apply of merge `5db85bb0`: sha256 `7f82cb20…` → `30216c75…`.
+- Shape, old → new: tables 67 → 67, policies 156 → 156, function statements 134 → 136, distinct function names 132 → 134, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261102120000_bridge_outcome_holding_branch_derived.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-31` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.12.0 → 0.133.12.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=312 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 136 — MATCH 133, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `41239837180` succeeded, and this entry was composed by the `redump-pr` job. Run `41239837180` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.12.0] - 2026-10-31 — 176 LEGACYRETIRE PR 1: readers move to the derived curve
 
 ### Changed
