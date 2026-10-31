@@ -235,6 +235,7 @@ from services.nav_marks_apply import (
     AppliedMark,
     MarkApplyRefusal,
     MarkedSeries,
+    _writer_level_before,
     apply_marks,
 )
 from services.sfox_factory import make_sfox_client
@@ -403,6 +404,11 @@ _MARK_ALLOCATED_NAV_UNRECONCILED: Final[str] = "mark_allocated_nav_unreconciled"
 # price. Accepted known limit: a minute where the perpetual printed no candle refuses on EVERY derive,
 # because such a minute has no price to store; there is no override or fallback in this phase.
 _MARK_FLOW_INDEX_UNAVAILABLE: Final[str] = "mark_flow_index_unavailable"
+# G-01 fix round 1 (silent-failure M2): the derive-level refusal token of a key-mode MT5 or Deribit
+# derive that holds a writer basis (day P&L and flows) but no realized terminal. The first mark's
+# base cannot be taken from the writer's level, and falling back to the wallet would bring G-01
+# back, so it takes the same road as ``mark_unit_mismatch``: a named refusal that writes nothing.
+_MARK_WRITER_TERMINAL_ABSENT: Final[str] = "mark_writer_terminal_absent"
 
 
 class _MemberNavUnreconciled(Exception):
@@ -687,22 +693,80 @@ def _iso_day_amounts(values: "pd.Series | None") -> dict[str, float]:
     return {ts.date().isoformat(): float(v) for ts, v in values.items()}
 
 
-def _tail_without_open_profit(tail: "pd.Series", nav: float, open_pnl: float) -> "pd.Series":
-    """The realized tail kept after a closed window's last applied mark, with that mark's open
-    profit reversed on its first row (NAVMTM D-24).
+def _tail_without_open_profit(
+    tail: "pd.Series",
+    nav: float,
+    open_pnl: float,
+    *,
+    last_mark_day: str,
+    writer_terminal: tuple[str, float] | None,
+    day_pnl: Mapping[str, float] | None,
+    flows: Mapping[str, float],
+    placed_into_last: float,
+    dust_floor: float,
+    job: str,
+    site: str,
+) -> "pd.Series":
+    """The realized tail kept after a closed window's last applied mark, landed on the writer's own
+    level on the last mark day (NAVMTM D-24, amended 2026-10-31, corrected 2026-11-01).
 
-    The last mark already booked its open profit ``U`` (the D-04 step), so the level after it is
-    ``M = w + U`` while a realized-basis row is a return on the wallet ``w = M - U``. A position
-    closed in the tail would book ``U`` a second time. The first row's growth factor is therefore
-    taken on ``M``: ``r1' = (1 + r1) * (M - U) / M - 1``. A position closed in the tail nets to its
-    true realized result, and one still open at the window end loses its unrealized profit, the
-    convention before this phase. A row the series left out (NaN) has no growth factor, so the
-    first row that has one carries the reversal."""
+    The tail rows are returns on the writer's realized level, and the mark's wallet is read hours
+    after the day boundary, so landing the first row on the wallet would book those hours twice.
+    The first row's growth factor is taken on the mark's level ``M = nav``:
+    ``r1' = ((1 + r1) * L_writer(last) + placed_into_last) / M - 1``, where ``L_writer(last)`` is
+    the writer's level at the end of ``last_mark_day``, rolled from ``writer_terminal`` over the
+    same day P&L and the same (pre-placement) flows the first mark's base uses (D-25), and
+    ``placed_into_last`` is the amount rule 10 took out of the read day (``flow_moves_out``): the
+    flow is inside ``M`` but not inside the pre-placement writer level, so it is added after the
+    growth step (round-2 CR-01), and it is the own-day amount the writer's row for the read day
+    holds, which differs from the amount counted into the mark for a Deribit BTC or ETH flow
+    priced at its own minute (round-3 CR-02).
+    A rolled level that is not finite or not above ``dust_floor`` is no level to land on: the
+    tail keeps the wallet level and says so once (round-2 silent-failure MEDIUM-1). A position
+    closed in the tail nets to its true realized result, and one still open at the window end
+    loses its unrealized profit, the convention before this phase. A caller without a writer
+    terminal (ccxt members, D-27) keeps the original D-24 level, the mark's wallet ``M - U``. A
+    row the series left out (NaN) has no growth factor, so the first row that has one carries the
+    reversal."""
+    if writer_terminal is None:
+        level = nav - open_pnl
+        placed_into_last = 0.0
+    else:
+        level = _writer_level_before(
+            date.fromisoformat(last_mark_day) + timedelta(days=1),
+            (date.fromisoformat(writer_terminal[0]), writer_terminal[1]),
+            {date.fromisoformat(d): v for d, v in (day_pnl or {}).items()},
+            {date.fromisoformat(d): v for d, v in flows.items()},
+        )
+        if not (math.isfinite(level) and level > dust_floor):
+            logger.warning(
+                "%s: nav marks tail landing falls back to the wallet, writer level unusable "
+                "(site=%s tail_rows=%d)",
+                job, site, len(tail),
+            )
+            level = nav - open_pnl
+            placed_into_last = 0.0
     out = tail.copy()
     first = out.first_valid_index()
     if first is not None:
-        out.loc[first] = (1.0 + out.loc[first]) * (nav - open_pnl) / nav - 1.0
+        out.loc[first] = ((1.0 + out.loc[first]) * level + placed_into_last) / nav - 1.0
     return out
+
+
+def _warn_wallet_base_fallback(
+    job: str, site: str, returns: "pd.Series", first_mark_day: str
+) -> None:
+    """G-01 fix round 1 (silent-failure M1, review WR-02): a D-25/D-26 writer path with rows before
+    its first mark to roll but no writer terminal or basis takes the first mark's base from the
+    mark's wallet (D-27: the fallback stays, measurement first). Say so once: a static message,
+    the site and the row count, never an id or an amount."""
+    pre_start_rows = sum(1 for ts in returns.index if ts.date().isoformat() < first_mark_day)
+    if pre_start_rows:
+        logger.warning(
+            "%s: nav marks first-mark base falls back to the wallet, no writer terminal "
+            "(site=%s pre_start_rows=%d)",
+            job, site, pre_start_rows,
+        )
 
 
 async def _fetch_mt5_account_balance(
@@ -7839,12 +7903,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # read). Except Deribit's two, which the key-mode path computes where it builds the
             # NAV and strategy mode never did: they are computed here, only when stored marks
             # exist, so a strategy derive without marks makes no new call and stays
-            # byte-identical. The first mark's base comes from that mark's own wallet (plan 03
-            # rule 3, review CR-01), so no live realized terminal is read here.
+            # byte-identical. The first mark's base (plan 03 rule 3) is the WRITER'S OWN realized
+            # level the day before marks start for MT5 and Deribit, key mode and strategy mode: they
+            # hand ``apply_marks`` the writer's own terminal, read from the same ledger helpers as
+            # their day P&L and flows (G-01, D-25, D-26), never a live read. Every other venue (OKX,
+            # Bybit, Binance, sFOX) keeps that mark's own wallet (review CR-01), so no realized
+            # terminal is read for them here.
             _apply_flows: dict[str, float] = {}
             _apply_instants: list[FlowInstant] = []
             _apply_day_pnl: dict[str, float] | None = None
             _apply_roll: Literal["returns", "day_pnl"] = "returns"
+            _apply_writer_terminal: tuple[str, float] | None = None
             if is_key_mode and venue in WRITER_BASIS_VENUES:
                 # Plan 12. A key-mode MT5 or Deribit derive has already computed the
                 # quantities its NAV obeys (the day P&L, the composed flows) and stores them
@@ -7888,8 +7957,24 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     )
                     _apply_day_pnl = _iso_day_amounts(_key_writer_basis_pnl)
                     _apply_roll = "day_pnl"
+                    # G-01 / D-25: the first mark's base is the writer's own level the day before
+                    # marks start. Read here, BEFORE the key-mode block below overwrites
+                    # ``_realized_terminal`` with the last mark. A writer basis exists only beside
+                    # a realized terminal (every writer-basis day P&L is built from the same
+                    # levels the terminal is), so None here is a bug that must fail loud rather
+                    # than quietly fall back to the wallet base and bring G-01 back: it is a named
+                    # refusal on the nav-marks road below, never a bare AssertionError.
+                    if _realized_terminal is not None:
+                        _apply_writer_terminal = (
+                            _realized_terminal[0].date().isoformat(), float(_realized_terminal[1])
+                        )
+                    elif _marks_refusal is None:
+                        _marks_refusal = _MARK_WRITER_TERMINAL_ABSENT
                 else:
                     _key_writer_basis_pnl = None
+                    _warn_wallet_base_fallback(
+                        "derive_broker_dailies", "key", returns, _marks_in[0].day
+                    )
                     for _xf in external_flows or []:
                         _apply_flows[_xf.utc_day_iso] = _apply_flows.get(
                             _xf.utc_day_iso, 0.0
@@ -7903,8 +7988,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # give the day P&L the first mark's base is rolled back through. They come from
                 # the NAV TWIN of this same crawl (plan 13; no extra venue call, D-10/D-16): the
                 # day P&L and the composed flows off its levels, the same two helpers the key-mode
-                # NAV path calls, rolled by ``roll_basis="day_pnl"`` (plan 03 rule 3:
-                # ``L(S-1) = w_S - P_S - F_S``; the input returns are never read for the base). Only the Deribit allocated path comes here.
+                # NAV path calls, and the twin's own realized terminal. The first mark's base is the
+                # twin's level the day before marks start (plan 03 rule 3 with a writer terminal,
+                # G-01, D-26; the input returns are never read for the base). Only the Deribit
+                # allocated path comes here.
                 #
                 # W1 / L3: with a stored in-window mark to apply, a twin that is missing or cannot
                 # be valued (a NavReconstructionError from a helper, section 5 included, or a mark
@@ -7920,6 +8007,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             _twin_ledger, _completeness.indexable_currencies
                         )
                         _twin_flows = native_ledger_composed_flows(
+                            _twin_ledger, _completeness.indexable_currencies
+                        )
+                        _twin_terminal = native_ledger_realized_terminal(
                             _twin_ledger, _completeness.indexable_currencies
                         )
                     except NavReconstructionError as _twin_exc:
@@ -7945,6 +8035,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             at_instant_index=_moved_flow_prices.index,
                         )
                         _apply_roll = "day_pnl"
+                        # G-01 / D-26: the first mark's base is the twin's own level the day
+                        # before marks start, rolled from the twin's realized terminal.
+                        if _twin_terminal is not None:
+                            _apply_writer_terminal = (
+                                _twin_terminal[0].date().isoformat(), float(_twin_terminal[1])
+                            )
+                        else:
+                            _warn_wallet_base_fallback(
+                                "derive_broker_dailies", "allocated_twin", returns,
+                                _marks_in[0].day,
+                            )
             elif venue == "deribit":
                 # The NAV path's ledger quantities (the returns path already passed the same
                 # section-5 gate on this ledger, so their exceptions propagate exactly as in
@@ -7957,6 +8058,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         native_ledger, _completeness.indexable_currencies
                     )
                 )
+                # G-01 / D-26: the writer's own realized terminal, from the same ledger as the two
+                # helpers above (its exceptions propagate exactly as theirs do).
+                _strategy_terminal = native_ledger_realized_terminal(
+                    native_ledger, _completeness.indexable_currencies
+                )
+                if _strategy_terminal is not None:
+                    _apply_writer_terminal = (
+                        _strategy_terminal[0].date().isoformat(), float(_strategy_terminal[1])
+                    )
+                else:
+                    _warn_wallet_base_fallback(
+                        "derive_broker_dailies", "strategy_deribit", returns, _marks_in[0].day
+                    )
                 _gate = _deribit_moved_flow_gate(
                     native_ledger.flow_instants, _marks_in,
                     _completeness.indexable_currencies,
@@ -7976,12 +8090,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     # deal ledger's day-summed flows and its P&L per NAV day.
                     _apply_flows = dict(_mt5_flow_by_day)
                     _apply_instants = _event_flow_instants
-                    _apply_day_pnl = _iso_day_amounts(
-                        mt5_day_pnl(
-                            _mt5_deals,
-                            server_utc_offset_s=_mt5_clock,
-                        )
+                    _strategy_day_pnl = mt5_day_pnl(
+                        _mt5_deals,
+                        server_utc_offset_s=_mt5_clock,
                     )
+                    _apply_day_pnl = _iso_day_amounts(_strategy_day_pnl)
+                    if not _strategy_day_pnl.empty:
+                        # G-01 / D-26: the writer's own realized terminal, in the series unit.
+                        # ``equity - (equity - balance)`` is the expression MT5 key mode stores as
+                        # its realized terminal, on the deal ledger's last NAV day.
+                        _apply_writer_terminal = (
+                            _strategy_day_pnl.index[-1].date().isoformat(),
+                            float(_mt5_equity - (_mt5_equity - _mt5_balance)),
+                        )
+                    else:
+                        _warn_wallet_base_fallback(
+                            "derive_broker_dailies", "strategy_mt5", returns, _marks_in[0].day
+                        )
                 elif venue == "sfox":
                     _apply_flows = _iso_day_amounts(_flows_series)
                     _apply_instants = _event_flow_instants
@@ -7993,18 +8118,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _apply_instants = _event_flow_instants
             if _marks_refusal is None:
                 try:
+                    _apply_dust_floor = (
+                        _mt5_unit.floors.dust_nav
+                        if _series_unit is not None and _mt5_unit is not None
+                        else DUST_NAV_FLOOR
+                    )
                     _applied_marks = apply_marks(
                         returns,
                         _apply_flows,
                         _marks_in,
                         day_pnl=_apply_day_pnl,
                         roll_basis=_apply_roll,
-                        dust_floor=(
-                            _mt5_unit.floors.dust_nav
-                            if _series_unit is not None and _mt5_unit is not None
-                            else DUST_NAV_FLOOR
-                        ),
+                        dust_floor=_apply_dust_floor,
                         flow_instants=_apply_instants,
+                        writer_terminal=_apply_writer_terminal,
                     )
                 except MarkApplyRefusal as _apply_exc:
                     _marks_refusal = _apply_exc.token
@@ -8083,7 +8210,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 if len(_tail):
                     assert _marks_in is not None
                     _tail = _tail_without_open_profit(
-                        _tail, _marks_in[-1].nav, _marks_in[-1].open_pnl
+                        _tail, _marks_in[-1].nav, _marks_in[-1].open_pnl,
+                        last_mark_day=_tail_from,
+                        writer_terminal=_apply_writer_terminal,
+                        day_pnl=_apply_day_pnl,
+                        flows=_apply_flows,
+                        placed_into_last=_applied_marks.flow_moves_out.get(_tail_from, 0.0),
+                        dust_floor=_apply_dust_floor,
+                        job="derive_broker_dailies",
+                        site="allocated_mandate_tail",
                     )
                     returns = _pandas_tail.concat([returns, _tail]).sort_index()
         # ── NAVMTM plan 16: THE simple-sum rule (NAVMTM D-14). ───────────────────────────────
@@ -8104,6 +8239,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # the MARKED series: the terminal is the last mark's NAV on the last mark day,
             # the writer basis (MT5, Deribit) is the pre-start day P&L joined with
             # ``apply_marks``' post-start P&L, and no flow is dated after the last mark.
+            # With the writer terminal as the first mark's base (G-01), the joined basis
+            # telescopes back to the writer's own level at S-1, so the pre-start levels and the
+            # zero-start check are the ones the writer had before marks.
             # Any one of them left on the realized basis rolls the levels to the wrong
             # place or degrades the key blocking (``key_inputs_mismatch``,
             # ``writer_basis_mismatch``, ``out_of_window_flow``), and My Allocation falls
@@ -9800,6 +9938,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         gap_fill_daily_returns,
         native_ledger_composed_flows,
         native_ledger_day_pnl,
+        native_ledger_realized_terminal,
     )
     from services.deribit_ingest import (
         CurrencyEnumerationError,
@@ -10320,15 +10459,25 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         seq: int,
         returns: pd.Series,
         build_inputs: Callable[
-            [], tuple[dict[str, float], dict[str, float] | None, Sequence[FlowInstant]]
+            [],
+            tuple[
+                dict[str, float],
+                dict[str, float] | None,
+                Sequence[FlowInstant],
+                tuple[str, float] | None,
+            ],
         ],
         *,
         price_flows: Callable[[list[MarkReadAt]], Awaitable[None]] | None = None,
     ) -> pd.Series:
         """Return ``returns`` with this member key's stored marks applied, or unchanged when it
-        has none that matter. ``build_inputs`` yields ``(flows by day, day P&L, flow instants)``
-        and is called only when there is a mark to apply, so a member without marks makes no new
-        call and stays byte-identical. Raises ``MarkApplyRefusal`` (L3).
+        has none that matter. ``build_inputs`` yields ``(flows by day, day P&L, flow instants,
+        writer terminal or None)`` and is called only when there is a mark to apply, so a member
+        without marks makes no new call and stays byte-identical. The writer terminal is the
+        member ledger's own realized terminal, ``(ISO day, level)``, for a Deribit member (the
+        first mark's base is then the writer's own level the day before marks start, G-01, D-26)
+        and ``None`` for a ccxt member (it keeps its mark's wallet, CR-01). Raises
+        ``MarkApplyRefusal`` (L3).
 
         ``price_flows`` (Phase 177, Deribit members only) is awaited with the member's EXACT marks,
         ``(mark day, read instant)``, after they are known and before ``build_inputs`` values the
@@ -10346,7 +10495,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             await price_flows(
                 [(mk.mark_day, datetime.fromisoformat(mk.marked_at)) for mk in relevant]
             )
-        flows_by_day, day_pnl, flow_instants = await asyncio.to_thread(build_inputs)
+        flows_by_day, day_pnl, flow_instants, writer_terminal = await asyncio.to_thread(
+            build_inputs
+        )
         marked = apply_marks(
             returns,
             flows_by_day,
@@ -10359,6 +10510,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             day_pnl=day_pnl,
             dust_floor=DUST_NAV_FLOOR,
             flow_instants=flow_instants,
+            writer_terminal=writer_terminal,
         )
         member_marked[seq] = marked
         out = marked.returns
@@ -10384,7 +10536,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             ]
             if len(tail):
                 tail = _tail_without_open_profit(
-                    tail, relevant[-1].nav_usd, relevant[-1].open_pnl_usd
+                    tail, relevant[-1].nav_usd, relevant[-1].open_pnl_usd,
+                    last_mark_day=tail_from,
+                    writer_terminal=writer_terminal,
+                    day_pnl=day_pnl,
+                    flows=flows_by_day,
+                    placed_into_last=marked.flow_moves_out.get(tail_from, 0.0),
+                    dust_floor=DUST_NAV_FLOOR,
+                    job="run_stitch_composite_job",
+                    site="composite_deribit_member_tail",
                 )
                 out = pd.concat([out, tail]).sort_index()
         logger.info(
@@ -10453,23 +10613,34 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             raise _MemberNavUnreconciled()
         indexable = completeness.indexable_currencies
 
-        def _twin_inputs() -> tuple[dict[str, float], dict[str, float], list[FlowInstant]]:
+        def _twin_inputs() -> tuple[
+            dict[str, float], dict[str, float], list[FlowInstant], tuple[str, float] | None
+        ]:
+            terminal = native_ledger_realized_terminal(twin, indexable)
             return (
                 _iso_day_amounts(native_ledger_composed_flows(twin, indexable)),
                 _iso_day_amounts(native_ledger_day_pnl(twin, indexable)),
                 native_flow_instants(
                     twin, indexable_currencies=indexable, at_instant_index=at_instant_index
                 ),
+                # G-01 / D-26: the twin's own realized terminal, the first mark's base.
+                None if terminal is None else (terminal[0].date().isoformat(), float(terminal[1])),
             )
 
         try:
-            flows_by_day, day_pnl, flow_instants = await asyncio.to_thread(_twin_inputs)
+            flows_by_day, day_pnl, flow_instants, writer_terminal = await asyncio.to_thread(
+                _twin_inputs
+            )
         except NavReconstructionError as twin_exc:
             logger.warning(
                 "run_stitch_composite_job: nav twin not valued (seq=%d error=%s)",
                 seq, type(twin_exc).__name__,
             )
             raise _MemberNavUnreconciled() from None
+        if writer_terminal is None:
+            _warn_wallet_base_fallback(
+                "run_stitch_composite_job", "composite_allocated_twin", returns, marks[0].mark_day
+            )
         marked = apply_marks(
             returns,
             flows_by_day,
@@ -10483,6 +10654,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             roll_basis="day_pnl",
             dust_floor=DUST_NAV_FLOOR,
             flow_instants=flow_instants,
+            writer_terminal=writer_terminal,
         )
         member_marked[seq] = marked
         out = marked.returns
@@ -10512,7 +10684,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             ]
             if len(tail):
                 tail = _tail_without_open_profit(
-                    tail, marks[-1].nav_usd, marks[-1].open_pnl_usd
+                    tail, marks[-1].nav_usd, marks[-1].open_pnl_usd,
+                    last_mark_day=tail_from,
+                    writer_terminal=writer_terminal,
+                    day_pnl=day_pnl,
+                    flows=flows_by_day,
+                    placed_into_last=marked.flow_moves_out.get(tail_from, 0.0),
+                    dust_floor=DUST_NAV_FLOOR,
+                    job="run_stitch_composite_job",
+                    site="composite_allocated_member_tail",
                 )
                 out = pd.concat([out, tail]).sort_index()
         logger.info(
@@ -10667,7 +10847,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 )
 
             def _deribit_apply_inputs() -> tuple[
-                dict[str, float], dict[str, float] | None, list[FlowInstant]
+                dict[str, float], dict[str, float] | None, list[FlowInstant],
+                tuple[str, float] | None,
             ]:
                 # Order matters: the instants are valued after the composed flows have passed the
                 # density contract on the same ledger (``native_flow_instants``' contract).
@@ -10676,7 +10857,18 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 _member_valued[:] = native_flow_instants(
                     ledger, indexable_currencies=_indexable, at_instant_index=_member_flow_index
                 )
-                return (_flows, _pnl, _member_valued)
+                # G-01 / D-26: the member ledger's own realized terminal, the first mark's base.
+                _terminal = native_ledger_realized_terminal(ledger, _indexable)
+                if _terminal is None:
+                    _warn_wallet_base_fallback(
+                        "run_stitch_composite_job", "composite_deribit_member", returns,
+                        _member_marks_in[0][0],
+                    )
+                return (
+                    _flows, _pnl, _member_valued,
+                    None if _terminal is None
+                    else (_terminal[0].date().isoformat(), float(_terminal[1])),
+                )
 
             returns = await _apply_member_marks(
                 ctx, mark_seq, returns, _deribit_apply_inputs, price_flows=_price_member_flows
@@ -10908,18 +11100,21 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
         if mark_seq is not None:
             # NAVMTM plan 09: this member's stored marks, applied on its own cash series with the
-            # flows this builder just used. The first mark's base comes from that mark's own
-            # wallet (plan 03 rule 3), so the live equity read is not an input. Placed after the
-            # degrade checks so a member that cannot be represented never reaches it.
+            # flows this builder just used. A ccxt member keeps the first mark's base from that
+            # mark's own wallet (plan 03 rule 3, CR-01; D-25 scopes the writer chain to MT5 and
+            # Deribit), so the live equity read is not an input and no writer terminal is given.
+            # Placed after the degrade checks so a member that cannot be represented never reaches
+            # it.
             def _ccxt_apply_inputs() -> tuple[
-                dict[str, float], dict[str, float] | None, list[FlowInstant]
+                dict[str, float], dict[str, float] | None, list[FlowInstant],
+                tuple[str, float] | None,
             ]:
                 _flows: dict[str, float] = {}
                 for _xf in external_flows or []:
                     _flows[_xf.utc_day_iso] = _flows.get(_xf.utc_day_iso, 0.0) + float(
                         _xf.usd_signed
                     )
-                return _flows, None, _flow_instants
+                return _flows, None, _flow_instants, None
 
             returns = await _apply_member_marks(ctx, mark_seq, returns, _ccxt_apply_inputs)
 

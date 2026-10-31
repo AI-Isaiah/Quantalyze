@@ -15,14 +15,29 @@ The rule (CONTEXT D-04, D-05, D-09, L1; RESEARCH 5.1)
 2. ``S`` is the first mark day. Every input day before ``S`` keeps its value exactly
    (L1). Nothing before ``S`` is recomputed, and nothing is invented from position
    history (D-09).
-3. ``L_real(S-1)``, the realized level at the end of the day before ``S``, comes from the
-   first mark's OWN wallet ``w_S = nav - open_pnl`` (the same basis as the realized level on
-   every venue), rolled back one day through day ``S``'s realized return and flow with the
-   compose's own convention, ``L(S-1) = (w_S - F_S) / (1 + r_S)``. A day absent from the input
+3. ``L_real(S-1)``, the realized level at the end of the day before ``S``, is the base the
+   first mark is measured against, and it has two sources (gap G-01, CONTEXT D-25, D-26).
+   WRITER CHAIN (a caller that passes ``writer_terminal``: MT5 and Deribit, key and strategy
+   mode, the allocated-capital twin, and a composite's Deribit members): ``L(S-1)`` is the
+   writer's OWN realized level, reached from its terminal ``(T_day, T)`` by the writer's identity
+   ``L(d) = L(d-1) + P_d + F_d`` over its own day P&L and its own flows (see
+   ``_writer_level_before``). This is the level the pre-start rows are already chained to, so the
+   first marked day books the whole boundary move once (open profit, what was realized between
+   the day boundary and the read, a price move to the read) and does not depend on the open
+   profit the mark stores. THE MARK'S WALLET (every other caller: OKX, Bybit, Binance and sFOX
+   keys and strategies, ccxt composite members, and a native-unit MT5 key with an interior hole,
+   which has no writer basis): ``L(S-1)`` comes from the first mark's OWN wallet
+   ``w_S = nav - open_pnl`` rolled back one day through day ``S``'s realized return and flow with
+   the compose's own convention, ``L(S-1) = (w_S - F_S) / (1 + r_S)``. A day absent from the input
    is ``r = 0`` with its flow. A NaN ``r_S`` uses the day P&L when it holds ``S``,
-   ``L(S-1) = w_S - P_S - F_S``, and otherwise leaves ``S`` with no base (rule 4). Nothing
-   later than ``S`` is read, so the base, and with it the first marked day's return, is final
-   the day ``S`` is stored and cannot move between derives (review CR-01).
+   ``L(S-1) = w_S - P_S - F_S``, and otherwise leaves ``S`` with no base (rule 4). Either way
+   nothing later than ``S`` is read from a live source, so the base, and with it the first
+   marked day's return, is final the day ``S`` is stored and cannot move between derives
+   (review CR-01). For the wallet that is because the wallet is stored with the mark. For the
+   writer chain it is because the base reads the writer's own ledger through ``S-1`` and
+   nothing from a later live read: for MT5 and Deribit ``NAV_{S-1}`` moves only if the ledger
+   itself changes (D-25), and the roll below reaches the same level from a terminal on any later
+   day because it uses the ledger's own P&L and flows.
 4. A mark with no USABLE base has no return row, but its level is still pinned and the next
    mark chains from it (D-05: no row, the next mark covers the day). A base is unusable when
    no input day precedes ``S``, when ``S`` cannot be rolled back (rule 3), and when the base
@@ -71,8 +86,8 @@ Further rules
     own instant (Phase 177), so the three can never disagree about what moved.
 11. ``marked_levels`` maps every USED mark day to its stored NAV; ``terminal`` is the last mark
     day and its NAV.
-12. An input that is not a well-formed mark or flow (a non-finite amount, marks out of
-    order) raises ``MarkApplyRefusal`` with one token from ``MARK_APPLY_REFUSAL_TOKENS`` and
+12. An input that is not a well-formed mark, flow or writer terminal (a non-finite amount, a
+    terminal day that is not a canonical ISO day, marks out of order) raises ``MarkApplyRefusal`` with one token from ``MARK_APPLY_REFUSAL_TOKENS`` and
     static text (L3). Nothing is applied partly.
 13. ``covered_from`` is the first day whose absence a mark's return covers instead of the
     derive refusing it: the day after the last INPUT index day before ``S`` (a NaN day
@@ -90,7 +105,9 @@ P&L over SCHEDULED capital, not NAV changes, so ``(1 + r)`` would roll the wrong
 ``roll_basis="day_pnl"`` rolls by the day P&L and flow alone, ``L(S-1) = w_S - P_S - F_S``,
 and never reads the input returns for the base. ``day_pnl`` is then required. Everything else
 in the rule is unchanged: the output still keeps every input day before ``S`` and emits only
-mark days from ``S`` on.
+mark days from ``S`` on. With a ``writer_terminal`` (rule 3) the roll basis no longer decides the
+base: both arms take the writer's own level at ``S-1``, and ``roll_basis`` is read only by
+callers that give no writer terminal.
 
 D-15 (founder, 2026-10-26: "Yes, one observation"): a return that spans unmarked days is
 ONE row, so it is one observation in volatility, Sharpe and drawdown. Nothing is spread over
@@ -135,7 +152,8 @@ class MarkApplyRefusal(ValueError):
 
 class AppliedMark(NamedTuple):
     """One stored mark: its ISO mark day, the NAV and the open profit in the series' unit. The
-    first mark's wallet ``nav - open_pnl`` is what its base is rolled back from (rule 3).
+    first mark's wallet ``nav - open_pnl`` is what its base is rolled back from (rule 3) only
+    when the caller gives no ``writer_terminal``; with one the wallet is not read (G-01, D-25).
     ``read_at`` is the instant the equity was read (``marked_at``), which places a flow made
     that day against the mark (rule 10)."""
 
@@ -240,6 +258,42 @@ def placed_flow_instants(
     return [fi for fi in flow_instants if fi.day == read_day and fi.at_ms / 1000.0 <= read_s]
 
 
+def _writer_level_before(
+    start: date,
+    writer_terminal: tuple[date, float],
+    pnl: Mapping[date, float],
+    writer_flows: Mapping[date, float],
+) -> float:
+    """The writer's own level at the end of ``start - 1`` (rule 3, writer chain; G-01, D-25).
+
+    The writer's identity is ``L(d) = L(d-1) + P_d + F_d`` over its own day P&L ``pnl`` and its own
+    flows ``writer_flows`` (a day absent from either counts 0.0). From the terminal
+    ``(T_day, T)``:
+
+    * ``T_day >= start``: ``T`` minus every ``P_d`` and ``F_d`` (separate terms, ``math.fsum``)
+      over each calendar day from ``start`` through ``T_day``.
+    * ``T_day < start - 1``: ``T`` plus the same sum over each day after ``T_day`` through
+      ``start - 1``, so a chain that stops early carries its level forward through the flows.
+    * ``T_day == start - 1``: ``T`` itself.
+
+    ``writer_flows`` is the writer's flows BEFORE rule 10 places any of them: the writer's level
+    obeys the writer's own flow days, so a flow rule 10 moved into a mark day must not enter this
+    roll (it would be counted twice, once here and once in the mark's numerator)."""
+    t_day, level = writer_terminal
+    before = start - timedelta(days=1)
+    if t_day >= start:
+        days = _days_inclusive(start, t_day)
+        return level - math.fsum(
+            term for d in days for term in (pnl.get(d, 0.0), writer_flows.get(d, 0.0))
+        )
+    if t_day < before:
+        days = _days_inclusive(t_day + timedelta(days=1), before)
+        return level + math.fsum(
+            term for d in days for term in (pnl.get(d, 0.0), writer_flows.get(d, 0.0))
+        )
+    return level
+
+
 def apply_marks(
     returns: pd.Series,
     flows_by_day: Mapping[str, float],
@@ -249,15 +303,24 @@ def apply_marks(
     roll_basis: Literal["returns", "day_pnl"] = "returns",
     dust_floor: float = 0.0,
     flow_instants: Sequence[FlowInstant] = (),
+    writer_terminal: tuple[str, float] | None = None,
 ) -> MarkedSeries:
     """Apply ``marks`` to ``returns``; see the module docstring for the rule.
 
     ``flows_by_day`` is {ISO day: signed amount} (deposit positive). ``dust_floor`` is the
     smallest base a return is measured against, in the series' unit (rule 4). Raises
     ``MarkApplyRefusal`` on a malformed input. ``flow_instants`` places a flow made on a mark's
-    read day against that mark (rule 10)."""
+    read day against that mark (rule 10).
+
+    ``writer_terminal`` is the writer's own realized terminal, ``(ISO day, level in the series'
+    unit)``, given only by callers whose ``day_pnl`` and ``flows_by_day`` are the writer chain from
+    the account's inception (MT5 and Deribit). With it the first mark's base is the writer's own
+    level at the end of ``S-1`` (rule 3, G-01, D-25, D-26); without it the mark's wallet is the base
+    (CR-01). It needs ``day_pnl``: giving one without is a programming error (``ValueError``)."""
     if roll_basis not in ("returns", "day_pnl"):
         raise ValueError("apply_marks: unknown roll_basis")
+    if writer_terminal is not None and day_pnl is None:
+        raise ValueError("apply_marks: writer_terminal needs day_pnl")
     if not marks:
         return MarkedSeries(returns.copy(), None, (), {}, (), {}, {}, None, None, (), {})
 
@@ -274,6 +337,18 @@ def apply_marks(
         for day, amount in (day_pnl or {}).items()
     }
     open_pnls = [_finite(m.open_pnl) for m in marks]
+    # Rule 3 (writer chain) and rule 12: the terminal is validated like a flow, and the writer's
+    # flows are copied BEFORE the rule-10 placement below mutates ``flows``.
+    parsed_terminal: tuple[date, float] | None = None
+    if writer_terminal is not None:
+        try:
+            terminal_day, terminal_level = writer_terminal
+        except (TypeError, ValueError):
+            raise MarkApplyRefusal("mark_input_nonfinite") from None
+        parsed_terminal = (
+            _parse_day(terminal_day, "mark_input_nonfinite"), _finite(terminal_level)
+        )
+    writer_flows = dict(flows)
 
     # Rule 10: a flow dated the read day (``md + 1``) and made at or before the mark's read is
     # inside the mark, so it is counted in ``md`` (at ``amount_prior_day`` when the instant has
@@ -302,22 +377,26 @@ def apply_marks(
     def usable(base: float) -> bool:
         return math.isfinite(base) and base > dust_floor
 
-    # The base the first mark is measured against, L_real(S-1), from the first mark's own
-    # wallet (rule 3). A mark with no usable base is pinned but has no return (rule 4).
+    # The base the first mark is measured against, L_real(S-1) (rule 3): the writer's own level
+    # when the caller gave its terminal (G-01, D-25, D-26), else the first mark's own wallet. A
+    # mark with no usable base is pinned but has no return (rule 4).
     base0: float | None = None
     if pre:
-        wallet = navs[0] - open_pnls[0]
-        flow_s = flows.get(start, 0.0)
-        if roll_basis == "day_pnl":
-            base0 = wallet - pnl.get(start, 0.0) - flow_s
+        if parsed_terminal is not None:
+            base0 = _writer_level_before(start, parsed_terminal, pnl, writer_flows)
         else:
-            r_s = dict(in_days).get(start, 0.0)
-            if not math.isnan(r_s):
-                factor = 1.0 + r_s
-                if factor > 0.0:
-                    base0 = (wallet - flow_s) / factor
-            elif start in pnl:
-                base0 = wallet - pnl[start] - flow_s
+            wallet = navs[0] - open_pnls[0]
+            flow_s = flows.get(start, 0.0)
+            if roll_basis == "day_pnl":
+                base0 = wallet - pnl.get(start, 0.0) - flow_s
+            else:
+                r_s = dict(in_days).get(start, 0.0)
+                if not math.isnan(r_s):
+                    factor = 1.0 + r_s
+                    if factor > 0.0:
+                        base0 = (wallet - flow_s) / factor
+                elif start in pnl:
+                    base0 = wallet - pnl[start] - flow_s
         if base0 is not None and not usable(base0):
             base0 = None
 
