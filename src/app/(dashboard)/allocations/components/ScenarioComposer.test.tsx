@@ -691,7 +691,6 @@ function makePayload(
     apiKeys: [],
     alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
     outcomes: [],
-    equitySnapshots: [],
     holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
     snapshotCount: 60,
     allKeysStale: false,
@@ -707,8 +706,6 @@ function makePayload(
     equityHistoryState: "rebuilding",
     equityDailyReturns: [],
     equityHistoryRebuildReason: null,
-    minHistoryDepthMonths: 12,
-    equityBaselineUnknown: false,
     activeVenues: ["Binance"],
     hasConnectedKeys: true,
     flaggedHoldings: [],
@@ -18559,7 +18556,8 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
 
   // Review C3 IN-03: the D-15 arms use the producer's own shape for a
   // non-ready book (`derivePhase07Fields` in src/lib/queries.ts): no curve,
-  // no returns, no raw snapshots, and a named reason. `makePayload`'s default
+  // no returns, a null `snapshotCount` (the count is the drawn derived days, so
+  // it is null while the history is not ready), and a named reason. `makePayload`'s default
   // 2-point curve is a shape the producer never sends under "rebuilding", and
   // with it a gate that also required a curve would pass every arm while
   // hiding the disclosure for every real book.
@@ -18571,14 +18569,14 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       equityHistoryRebuildReason: "awaiting_derivation",
       equityDailyPoints: [],
       equityDailyReturns: [],
-      equitySnapshots: [],
       derivedCurveComputedAt: null,
+      snapshotCount: null,
       ...overrides,
     });
 
   it.each([
-    ["0 snapshots on the legacy source (SFH-05's book)", 0, "legacy"],
-    ["3 snapshots on the legacy source", 3, "legacy"],
+    ["a null count on the legacy source (SFH-05's book, the producer's own shape)", null, "legacy"],
+    ["a non-null count of 3, which must not decide it (D-15: by state, never by count)", 3, "legacy"],
   ] as const)(
     "rebuilding + %s: the disclosure renders exactly once, and the live-book KPIs stay (D-15)",
     (_label, snapshotCount, equityCurveSource) => {
@@ -18610,8 +18608,8 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   // Phase 167.1.2 D-15 (2026-09-27) supersedes IN-01 (2026-09-25): under
   // 'rebuilding' the copy is chosen by state, never by count, because the
   // warm-up line promises a timer the D-02 hold never honours.
-  // Review round 2 WR-02's two books, 0 legacy snapshots with and without a
-  // derived curve, now read the same: the disclosure renders for both. The
+  // Review round 2 WR-02's two books, with and without a held-back derived
+  // curve, now read the same: the disclosure renders for both. The
   // "neither source" book used to be the control that kept it off.
   // Producer-shaped (IN-03). The derived book is the one the producer stamps
   // "derived" under "rebuilding": a trustworthy v2 curve exists but is held
@@ -18620,13 +18618,13 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   // source" book carries no curve at all.
   it.each([
     [
-      "a derived curve held back and 0 legacy snapshots",
+      "a derived curve held back",
       "derived",
       "2026-09-20T05:30:00Z",
       "account_identity_pending",
     ],
     [
-      "neither source (0 legacy snapshots, no derived curve)",
+      "neither source (no derived curve)",
       "legacy",
       null,
       "awaiting_derivation",
@@ -18635,7 +18633,6 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     "rebuilding + %s: the disclosure renders (D-15, state-driven)",
     (_label, equityCurveSource, derivedCurveComputedAt, reason) => {
       const payload = producerRebuildingPayload({
-        snapshotCount: 0,
         equityCurveSource,
         derivedCurveComputedAt,
         equityHistoryRebuildReason: reason,
@@ -18656,16 +18653,16 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   // D-15: blank mode has no own book to compare with, so the disclosure never
   // renders there, whatever the state and whatever the history shape.
   it.each([
-    ["rebuilding", "rebuilding", 0, "legacy"],
-    ["rebuilding", "rebuilding", 3, "derived"],
-    ["null", null, 0, "legacy"],
-    ["an unrecognised state", "partial", 3, "legacy"],
-    ["ready", "ready", 3, "derived"],
+    ["rebuilding", "rebuilding", "legacy"],
+    ["rebuilding", "rebuilding", "derived"],
+    ["null", null, "legacy"],
+    ["an unrecognised state", "partial", "legacy"],
+    ["ready", "ready", "derived"],
   ] as const)(
     // Review C3 SFH-C3-05 / IN-04: one placeholder per column, in row order
-    // (label, state, snapshotCount, source), so a red run names its case.
-    "blank mode + %s (equityHistoryState %s, %s snapshots, %s source): no disclosure",
-    (_label, state, snapshotCount, equityCurveSource) => {
+    // (label, state, source), so a red run names its case.
+    "blank mode + %s (equityHistoryState %s, %s source): no disclosure",
+    (_label, state, equityCurveSource) => {
       // Review C3 IN-03: producer-shaped. Only "ready" carries a curve and its
       // returns; every other state carries none, as `derivePhase07Fields`
       // sends it.
@@ -18676,12 +18673,12 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
               equityHistoryRebuildReason: null,
               equityDailyPoints: THREE_POINT_CURVE,
               equityDailyReturns: THREE_POINT_RETURNS,
-              snapshotCount,
+              // The producer's count for a ready book: the drawn derived days.
+              snapshotCount: THREE_POINT_CURVE.length,
               equityCurveSource,
             })
           : producerRebuildingPayload({
               equityHistoryState: state as never,
-              snapshotCount,
               equityCurveSource,
             });
       render(

@@ -1102,7 +1102,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): `armsSeen` 803 -> 811, the +8 arms of the NEW gate test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 811 to be 803`, and ONE full lane run printed `coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`.
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): both moves above started from the same base; the merged corpus is re-read by this file's run.
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `armsSeen` 816 -> 829, the +13 arms; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
-    expect(armsSeen).toBe(829);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `armsSeen` 829 -> 848, the +19 arms; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): `armsSeen` 857 -> 862, the +5 arms (B5e, B5f, B5g, W1c, W1d of test_bridge_outcome_deltas_derived.sql); copied from ONE full lane run (`coverage: files 83/110`, `arms: 862/862/0`, `biting: 862`).
+    expect(armsSeen).toBe(862);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1140,7 +1142,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): `stepsSeen` 916 -> 924, the +8 file steps of the NEW gate test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 924 to be 916`.
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): both moves above started from the same base; the merged corpus is re-read by this file's run.
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `stepsSeen` 929 -> 942, the +13 file steps; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
-    expect(stepsSeen).toBe(942);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `stepsSeen` 942 -> 966, the +24 file steps; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): `stepsSeen` 975 -> 981, the +6 file steps (B5e carries two edits, B5f, B5g, W1c and W1d one each); measured by this file's run (`expected 981 to be 975`).
+    expect(stepsSeen).toBe(981);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2094,7 +2098,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 916 -> 924, the same +8 steps as `stepsSeen`. MEASURED: this file's run read `expected 924 to be 916`.
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): both moves above started from the same base; the merged corpus is re-read by this file's run.
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `needles.length` 929 -> 942, the +13 file steps; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
-    expect(needles.length).toBe(942);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `needles.length` 942 -> 966, the +24 file steps; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): `needles.length` 975 -> 981, the same +6 file steps; measured by this file's run (`expected 981 to be 975`).
+    expect(needles.length).toBe(981);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2699,7 +2705,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 106 -> 107, the NEW gate file test_api_key_nav_marks.sql. MEASURED: this file's run read `expected 107 to be 106`, and the full lane run printed `coverage: files 80/107`.
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 107 -> 108, the NEW gate file test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 108 to be 107`, and the full lane run printed `coverage: files 81/108`.
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `filesTotal` 108 -> 109; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
-    expect(corpus.filesTotal).toBe(109);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `filesTotal` 109 -> 110; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
+    expect(corpus.filesTotal).toBe(110);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2786,7 +2793,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79 -> 80, moving WITH `filesTotal`; the by-name list below gained test_api_key_nav_marks.sql. MEASURED: the full lane run printed `coverage: files 80/107`.
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80 -> 81, moving WITH `filesTotal`; the by-name list below gained test_allocator_trade_reads.sql. MEASURED: the full lane run printed `coverage: files 81/108`.
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `filesAnnotated` 81 -> 82; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
-    expect(corpus.filesAnnotated).toBe(82);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `filesAnnotated` 82 -> 83; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
+    expect(corpus.filesAnnotated).toBe(83);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2823,6 +2831,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // 'complete_with_warnings' (3).
       "test_api_keys_sync_status_sign_in_failed.sql",
       "test_api_keys_venue_identity_uniq.sql",
+      // ⭐ ADDED 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): the bridge-outcome derived-basis gate (11 sections, 19 annotated arms) for migration 20261102120000.
+      "test_bridge_outcome_deltas_derived.sql",
       // ⭐ ADDED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): the bridge-outcomes decision-delete cascade gate C (6 arms).
       "test_bridge_outcomes_decision_delete_cascade.sql",
       // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): the native-owner GRANT gate (5 arms) for migration 20261010120000.
@@ -3355,7 +3365,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 106 -> 107, the NEW gate file test_api_key_nav_marks.sql. MEASURED: this file's run read `expected 107 to be 106`, and the full lane run printed `coverage: files 80/107`.
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 107 -> 108, the NEW gate file test_allocator_trade_reads.sql. MEASURED: this file's run read `expected 108 to be 107`, and the full lane run printed `coverage: files 81/108`.
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `filesTotal` 108 -> 109; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
-    expect(corpus.filesTotal).toBe(109);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `filesTotal` 109 -> 110; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
+    expect(corpus.filesTotal).toBe(110);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3398,7 +3409,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 79 -> 80, moving WITH `filesAnnotated`; the by-name list gained test_api_key_nav_marks.sql. MEASURED: the full lane run printed `coverage: files 80/107`.
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 80 -> 81, moving WITH `filesAnnotated`; the by-name list gained test_allocator_trade_reads.sql. MEASURED: the full lane run printed `coverage: files 81/108`.
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `annotatedFiles` 81 -> 82, moving WITH `filesAnnotated`; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
-    expect(corpus.annotatedFiles).toHaveLength(82);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `annotatedFiles` 82 -> 83, moving WITH `filesAnnotated`; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
+    expect(corpus.annotatedFiles).toHaveLength(83);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

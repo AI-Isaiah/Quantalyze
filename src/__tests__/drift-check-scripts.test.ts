@@ -5055,9 +5055,17 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // equal [ ...(25) ]`) and `expected 26 to be 25` against the floor; this pin read
     // `expected 1 to be +0` once ci.yml carried SENTINEL_FLOOR=26. 386 + 8 = 394 is the
     // table's own sum, which that test re-derives from the corpus.
+    // RAISED 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02), 26/394 -> 27/405.
+    // test_bridge_outcome_deltas_derived.sql JOINED (an ordinary sql-tests gate: it posts nothing)
+    // and declares `ALL 11 ARMS EXECUTED`. MEASURED: this pin read `expected 1 to be +0` once
+    // ci.yml carried SENTINEL_FLOOR=27, and ci-anti-skip-gate.contract.test.ts re-derives the
+    // sentinel-bearing set from the corpus. 394 + 11 = 405 is the table's own sum.
+    // RAISED 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 1), 27/405 -> 27/408. The same file
+    // goes from `ALL 11 ARMS EXECUTED` to `ALL 14 ARMS EXECUTED` (arms G2, H1, W1); no file
+    // joined, so SENTINEL_FLOOR stays 27. 405 + 3 = 408 is the table's own sum.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=26", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=27", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5068,7 +5076,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=394", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=408", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

@@ -470,8 +470,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         timeframe="ALL"
         snapshotCount={10}
         allKeysStale={false}
-        minHistoryDepthMonths={null}
-        activeVenues={[]}
         mode="scenario"
         scenarioMetrics={null}
         liveMetrics={null}

@@ -16,14 +16,14 @@ import { KpiPanel, type KpiPanelCell } from "@/components/kpi/KpiPanel";
  * Each cell renders { label, formatted value, sub helper line }.
  *
  * **Phase 07 / 07-03 invariants preserved verbatim:**
- *   - `warmupCopy(snapshotCount, minHistoryDepthMonths, activeVenues)`:
- *     when MIN history depth ≤ 3 months AND a venue is named, returns the
- *     venue-specific "Only N months of history available on {venues}"
- *     copy; otherwise the generic "Warming up — need N more days of synced
- *     data." countdown.
- *   - `warmingUp = snapshotCount < 30 && !allKeysStale` gate: stale state
- *     suppresses the per-cell warm-up helper so the page-level WarningBanner
- *     can carry the stale copy once.
+ *   - `warmupCopy(snapshotCount)`: the generic "Warming up — need N more days
+ *     of synced data." countdown. Phase 176 (D-07) removed the venue-specific
+ *     retention branch with the legacy `history_depth_months` column it read.
+ *   - `warmingUp = snapshotCount !== null && snapshotCount < 30 && !allKeysStale`
+ *     gate: stale state suppresses the per-cell warm-up helper so the
+ *     page-level WarningBanner can carry the stale copy once. Phase 176: the
+ *     count is the drawn derived curve's days, and `null` (a rebuilding book)
+ *     never warms up, so no countdown shows over a held-back history.
  *   - `formatPercent` / `formatNumber` / `formatCurrency` already render `—`
  *     for null inputs (Phase 07 f8 invariant).
  *
@@ -66,29 +66,19 @@ interface KpiStripProps {
    */
   timeframe?: string;
   /**
-   * Phase 07 / 07-03. When the allocator has < 30 snapshot rows and is
-   * NOT stale, render the warm-up helper sub-line beneath every null KPI
-   * cell. Defaults to 30 so untouched callers see no warm-up render.
+   * Phase 07 / 07-03, Phase 176. The day count of the drawn derived curve.
+   * When it is < 30 and the allocator is NOT stale, render the warm-up helper
+   * sub-line beneath every null KPI cell. `null` means the history is
+   * rebuilding: no countdown and no suppression of the scenario primary.
+   * Defaults to 30 so untouched callers see no warm-up render.
    */
-  snapshotCount?: number;
+  snapshotCount?: number | null;
   /**
    * Phase 07 / 07-03. When true, every null KPI renders plain em-dash
    * AND a stale sub-copy ("Last sync stale — awaiting next update") on
    * every cell so the user sees a consistent staleness signal.
    */
   allKeysStale?: boolean;
-  /**
-   * Per VOICES-ACCEPTED f9. Min(history_depth_months) across the
-   * allocator's snapshots. When `<= 3` AND activeVenues is non-empty,
-   * the warm-up copy switches to the venue-specific "Only {N} months of
-   * history available on {venues}" message.
-   */
-  minHistoryDepthMonths?: number | null;
-  /**
-   * Per VOICES-ACCEPTED f9. Display-cased venues (e.g. ["Binance", "OKX"]).
-   * Consumed by the venue-specific warm-up copy.
-   */
-  activeVenues?: string[];
   /**
    * Phase 10 / 10-04 D-13. Render mode:
    *   - "live" (default) — preserves Phase 07 / 09.1 behavior verbatim.
@@ -135,30 +125,11 @@ interface Cell {
 }
 
 /**
- * Phase 07 / 07-03 — resolve the warm-up helper copy per VOICES-ACCEPTED f9.
- *
- * When the allocator's dominant venue has ≤ 3 months of retention (i.e.
- * OKX via ccxt's 90-day trade-history cap), the default "30 days of synced
- * data" copy is misleading because the backfill will never reach 30 days.
- * Switch to a venue-specific explanation. Otherwise render the standard
- * 30-day countdown copy.
+ * Phase 07 / 07-03 — the warm-up helper copy: the standard 30-day countdown.
+ * Phase 176 (D-07) removed the venue-specific branch that read the legacy
+ * per-venue retention depth.
  */
-function warmupCopy(
-  snapshotCount: number,
-  minHistoryDepthMonths: number | null,
-  activeVenues: string[],
-): string {
-  // The condition is inclusive of 3 months because OKX's trade-history
-  // cap IS 3 months — an allocator sitting AT that boundary needs the
-  // venue-specific explanation, not the generic countdown. Matches the
-  // Test-E/F specs in KpiStrip.warmup.test.tsx.
-  if (
-    minHistoryDepthMonths != null &&
-    minHistoryDepthMonths <= 3 &&
-    activeVenues.length > 0
-  ) {
-    return `Only ${minHistoryDepthMonths} months of history available on ${activeVenues.join(", ")}`;
-  }
+function warmupCopy(snapshotCount: number): string {
   return `Warming up — need ${30 - snapshotCount} more days of synced data.`;
 }
 
@@ -342,8 +313,6 @@ export function KpiStrip({
   metrics,
   snapshotCount = 30,
   allKeysStale = false,
-  minHistoryDepthMonths = null,
-  activeVenues = [],
   mode = "live",
   scenarioMetrics = null,
   liveMetrics = null,
@@ -353,10 +322,11 @@ export function KpiStrip({
   // cell when the allocator is still backfilling AND not globally stale.
   // Stale suppresses the helper so the stale sub-copy can carry the
   // signal instead of mixing two messages.
-  const warmingUp = snapshotCount < 30 && !allKeysStale;
-  const warmupHelper = warmingUp
-    ? warmupCopy(snapshotCount, minHistoryDepthMonths, activeVenues)
-    : null;
+  // `null` is a rebuilding book (Phase 176): `null < 30` is true in JS, so the
+  // guard is explicit and a held-back history never shows a countdown.
+  const warmingUp =
+    snapshotCount !== null && snapshotCount < 30 && !allKeysStale;
+  const warmupHelper = warmingUp ? warmupCopy(snapshotCount) : null;
 
   // 4-cell return-form sources (D-09 · Phase 64 / PRESENT-01 removed the AUM
   // cell — a position-space dollar figure — so the strip is return-form only):

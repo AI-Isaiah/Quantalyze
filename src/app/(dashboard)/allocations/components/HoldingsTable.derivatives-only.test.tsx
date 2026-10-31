@@ -123,7 +123,6 @@ describe("HoldingsTabPanel, a book with only open positions (D-02)", () => {
       ],
       alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
       outcomes: [],
-      equitySnapshots: [],
       holdingsSummary: [
         derivative("key-a", "BTC-PERP", "long", 30_000),
         derivative("key-a", "ETH-PERP", "short", 12_000),
@@ -134,7 +133,6 @@ describe("HoldingsTabPanel, a book with only open positions (D-02)", () => {
       lastSyncAt: null,
       hasSyncing: false,
       equityDailyPoints: [],
-      minHistoryDepthMonths: null,
       activeVenues: [],
       flaggedHoldings: [],
       matchDecisionsByHoldingRef: {},

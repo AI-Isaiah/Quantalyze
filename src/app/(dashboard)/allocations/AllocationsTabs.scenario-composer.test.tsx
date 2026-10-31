@@ -193,7 +193,6 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   apiKeys: [],
   alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
   outcomes: [],
-  equitySnapshots: [],
   holdingsSummary: [
     {
       symbol: "BTC",
@@ -209,7 +208,7 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
       unrealized_pnl_usd: null,
     },
   ],
-  snapshotCount: 30,
+  snapshotCount: null,
   allKeysStale: false,
   lastSyncAt: null,
   hasSyncing: false,
@@ -220,8 +219,6 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   equityDailyReturns: [],
   equityHistoryRebuildReason: null,
   derivedCurveComputedAt: null,
-  minHistoryDepthMonths: null,
-  equityBaselineUnknown: false,
   activeVenues: [],
   hasConnectedKeys: false,
   flaggedHoldings: [],

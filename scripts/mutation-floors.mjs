@@ -1320,7 +1320,13 @@
 // `per-arm lane time: mean 1.7s over 829 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_api_key_flow_prices.sql:
 // sections 8 / judged 13 / annotated 13 / waived 0 / biting 13`. The stale-low direction was observed first: `RATCHET STALE: 82 of 109 gate files
 // are now annotated but FILES_FLOOR is still 81. Raise FILES_FLOOR in scripts/mutation-floors.mjs to 82.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 82;
+// RAISED 82 -> 83 2026-10-31 (Phase 176 LEGACYRETIRE plan 02): +1 file, test_bridge_outcome_deltas_derived.sql (migration 20261102120000, eleven sections,
+// nineteen annotated arms: arms B4, B5, B6 and C1 carry sub-identities 4a/4b, 5a-5d, 6a/6b and C1/C1b-C1d), so 83 of 110 files. MEASURED by ONE full
+// `node scripts/mutation-runner/run.mjs`, no file edited during it, exit 0: `scope: FULL 83/83 annotated files`, `lane-concurrency: 4`, `coverage: files 83/110`,
+// `arms: 848/848/0`, `biting: 848`, `lane-invocations: 848 ... plus 83 baseline / 83 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+// `lane-probe: pg_cron AVAILABLE`, `per-arm lane time: mean 2.6s over 848 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line:
+// `test_bridge_outcome_deltas_derived.sql: sections 11 / judged 19 / annotated 19 / waived 0 / biting 19`. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 83;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3332,7 +3338,22 @@ export const FILES_FLOOR = 82;
 // FILES_FLOOR: `arms: 829/829/0`, `biting: 829`, `lane-invocations: 829`; per-file `test_api_key_flow_prices.sql: sections 8 / judged 13 / annotated 13 / waived 0 /
 // biting 13`. The stale-low direction was observed first: `The corpus declares 829 twin(s) of which 0 are waivers, so a green run bites 829. ARMS_FLOOR is 816.`
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 829;
+// RAISED 829 -> 848 2026-10-31 (Phase 176 LEGACYRETIRE plan 02): +19 biting arms, the nineteen annotated arms of the NEW gate test_bridge_outcome_deltas_derived.sql
+// (migration 20261102120000; its sentinel counts eleven sections, the runner counts nineteen twins). MEASURED by the same single run recorded under FILES_FLOOR:
+// `arms: 848/848/0`, `biting: 848`, `lane-invocations: 848`; per-file `test_bridge_outcome_deltas_derived.sql: sections 11 / judged 19 / annotated 19 / waived 0 /
+// biting 19`. WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 848 -> 857 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 1): +9 biting arms in the existing gate test_bridge_outcome_deltas_derived.sql (no file joined, so
+// FILES_FLOOR stays 83): B3 is rewritten (an absent day is no change) and gains B3b, B3c and B3d; the new arms G2/G2b (strategy and voluntary_add take the allocated_at window),
+// H1/H1b (a holding row that measured nothing is not stamped and is counted failed) and W1/W1b (a later run fills a matured +90d / +180d). The file goes from 19 to 28
+// twins (fourteen sentinel sections). MEASURED by ONE full `node scripts/mutation-runner/run.mjs`: `arms: 857/857/0`, `biting: 857`, `lane-invocations: 857 ... plus 83
+// baseline / 83 restore leg(s)` (the two independent tallies AGREE), `per-arm lane time: mean 2.6s over 857 arm run(s)`; per-file `test_bridge_outcome_deltas_derived.sql:
+// sections 14 / judged 28 / annotated 28 / waived 0 / biting 28`. The stale-low direction was observed first: `The corpus declares 857 twin(s) of which 0 are waivers, so a
+// green run bites 857. ARMS_FLOOR is 848.` WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 857 -> 862 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): +5 biting arms in the existing gate test_bridge_outcome_deltas_derived.sql (no file joined, so
+// FILES_FLOOR stays 83): B5e/B5f/B5g (only well-formed YYYY-MM-DD dates count toward the helper's coverage; a window with no return inside it is NULL) and W1c/W1d (a stored
+// delta is kept; a row picked again with nothing new to fill is not written or counted). The file goes from 28 to 33 twins (the sentinel still counts fourteen sections).
+// MEASURED by ONE full `node scripts/mutation-runner/run.mjs`: `arms: 862/862/0`, `biting: 862`, `lane-invocations: 862 ... plus 83 baseline / 83 restore leg(s)` (the two independent tallies AGREE), `per-arm lane time: mean 2.6s over 862 arm run(s)`; per-file `test_bridge_outcome_deltas_derived.sql: sections 14 / judged 33 / annotated 33 / waived 0 / biting 33`. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 862;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

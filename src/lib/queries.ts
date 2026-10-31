@@ -104,7 +104,6 @@ import {
 } from "./percentile-core";
 import {
   OWN_CAPITAL,
-  isAllocatable,
   type CapitalOwnership,
 } from "./capital-ownership";
 
@@ -865,13 +864,13 @@ export async function hasAnyOwnStrategies(
 export type StrategylessKey = { id: string; exchange: SupportedExchange; label: string };
 
 /**
- * Phase 151 (151-02, AUM-04) — THE manager-role discriminator: which of the
- * owner's keys are already feeding a LIVE strategy they run as a MANAGER?
+ * Phase 151 (151-02) — which of the owner's keys already feed a LIVE strategy
+ * (a direct `strategies.api_key_id` link or a `strategy_keys` composite link)?
  *
  * ⚠️ ROLE, never VENUE. `exchange === "mt5"` is the named wrong-fix class
  * (ROADMAP + CONTEXT). The founder's three deribit keys are equally
- * manager-side (they hang off the Alpha Centauri composite), and a future
- * manager-side bybit key would slip straight through a venue test.
+ * strategy-linked (they hang off the Alpha Centauri composite), and a future
+ * strategy-linked bybit key would slip straight through a venue test.
  *
  * ⚠️ Coverage must consider BOTH link forms. `strategies.api_key_id` is the
  * direct link; `strategy_keys` (migration 20260710120000) is the composite
@@ -881,24 +880,17 @@ export type StrategylessKey = { id: string; exchange: SupportedExchange; label: 
  * ⚠️ W-4 ruling (2026-08-05): archived strategies are NOT coverage. The owner
  * archived them, so their keys are the owner's to use again.
  *
- * Extracted from `deriveStrategylessKeys` and SHARED with the allocator book
- * gate in `getMyAllocationDashboard`. What the two callers share is the
- * MECHANISM, not the result:
+ * Extracted from `deriveStrategylessKeys`. Its callers are
+ * `deriveStrategylessKeys` (/my-strategies: "does this key have a strategy
+ * behind it?") and `reconstructCappedKeyIds` (the reconstruct note), and both
+ * pass the owner's strategies unfiltered. It no longer decides the allocator
+ * book: since Phase 176 (D-01) a strategy-linked key is in its owner's book
+ * (`allocatorEligibleApiKeyIds`). What the callers share is the MECHANISM:
  *   • the two-link-form join (`strategies.api_key_id` ∪ `strategy_keys`), and
  *   • the W-4 archived rule (archived ≠ coverage),
  * so neither caller can quietly grow a third link form or a different archived
- * rule.
- *
- * ⚠️ They do NOT subtract the same set, by design. The ROLE narrowing lives in
- * the AUM-04 caller, which passes only strategies failing `isAllocatable`
- * (`getMyAllocationDashboard`, the `deriveStrategyLinkedKeyIds(...)` call site
- * — search "Filtered HERE, at the role call site"). /my-strategies asks a
- * COVERAGE question ("does this key have a strategy behind it?") where an
- * own-capital strategy IS coverage, so it passes the strategies unfiltered.
- * One helper, two questions: an own-capital strategy's key is covered on
- * /my-strategies (no "No strategy yet" placeholder) and still allocator-
- * eligible for the book. Changing which strategies reach this helper is a
- * CALLER-side decision; do not re-add a role filter in here.
+ * rule. Which strategies reach this helper is a CALLER-side decision; do not
+ * add a role filter in here.
  */
 export function deriveStrategyLinkedKeyIds(
   ownStrategies: readonly { id: string; api_key_id: string | null; status: string }[],
@@ -3149,33 +3141,6 @@ export interface MyAllocationDashboardPayload {
   // Phase 07 / 07-03 extensions (VOICES-ACCEPTED f7 + f9)
   // ─────────────────────────────────────────────────────────────────────
   /**
-   * Per-allocator equity time series from `allocator_equity_snapshots`
-   * (Phase 07 plan 01). Ordered ascending by `asof`. Empty array when
-   * the allocator has no snapshots yet (first-connect reconstruction
-   * may still be running). The `history_depth_months` column carries
-   * the per-venue retention cap so the UI can show venue-specific
-   * warm-up copy (f9).
-   *
-   * Phase 167.1.2 / D-02: `[]` while `equityHistoryState` is not `"ready"`.
-   * These rows are the raw levels the withheld curve is built from, so they
-   * are withheld from the client payload with it (review round 1 SFH-03).
-   * `snapshotCount` and `minHistoryDepthMonths` are computed from the rows
-   * before they are withheld and stay populated.
-   */
-  equitySnapshots: Array<{
-    asof: string;
-    value_usd: number;
-    breakdown: Record<string, number> | null;
-    source: "exchange_primary" | "coingecko_fallback" | "mixed";
-    history_depth_months: number | null;
-    // CL9 / NEW-C01-11: true when the row was reconstructed against an unknown
-    // absolute baseline (OKX 90-day terminus clamped the funding deposit out of
-    // the fetch window). Flagged rows are EXCLUDED from this array before it
-    // reaches the payload (see getMyAllocationDashboard), so every row here is
-    // false — the field is retained for the DB-read cast + symmetry.
-    pre_terminus_balance_unknown: boolean;
-  }>;
-  /**
    * Latest-asof-per-symbol collapse of `allocator_holdings` (Phase 06
    * table). Populated by the Phase 06 poll_allocator_positions cron.
    *
@@ -3227,19 +3192,17 @@ export interface MyAllocationDashboardPayload {
      */
     asof?: string;
   }>;
-  /** Row count of TRUSTWORTHY snapshots (flagged zero-baseline rows excluded) — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
-  snapshotCount: number;
   /**
-   * CL9 / NEW-C01-11: true when ANY of the allocator's reconstructed snapshots
-   * had an unknown absolute baseline (OKX 90-day terminus clamped the funding
-   * deposit out of the fetch window). When true, the flagged rows have been
-   * dropped from `equitySnapshots` / `equityDailyPoints` / `snapshotCount` and
-   * all level-derived metrics, and the dashboard surfaces a banner explaining
-   * that absolute equity/drawdown history before the live-refresh window is
-   * unavailable (live holdings + AUM remain accurate). Stays true even once
-   * trustworthy daily-refresh rows accrue, so the gap is always explained.
+   * The warm-up day count. Phase 176 (D-02, D-07): the day count of the drawn
+   * derived equity curve (`equityDailyPoints.length`) when `equityHistoryState`
+   * is `"ready"`, and `null` otherwise. KpiStrip warms up only when
+   * `snapshotCount !== null && snapshotCount < 30 && !allKeysStale`, so the
+   * 30-day countdown stays, counted on derived days. `null` (not 0) while the
+   * history is rebuilding: a book whose history is held back must never read
+   * "need 30 more days" over a history that may be years long (the D-15
+   * state-driven rule of Phase 167.1.2). No legacy table is read for it.
    */
-  equityBaselineUnknown: boolean;
+  snapshotCount: number | null;
   /** True when every active api_key's last_sync_at is older than 24h. Drives the stale KPI render + WarningBanner. */
   allKeysStale: boolean;
   /** Most recent `last_sync_at` across all active api_keys (ISO string) or null. */
@@ -3249,7 +3212,7 @@ export interface MyAllocationDashboardPayload {
   /**
    * The allocator $-equity curve (EquityCurve / DrawdownChart parallel-prop).
    * Phase 167.1.2 plan 11: the version-2 derived curve when `"ready"`, else
-   * `[]`. Not built from `equitySnapshots`.
+   * `[]`.
    */
   equityDailyPoints: DailyPoint[];
   /**
@@ -3287,6 +3250,11 @@ export interface MyAllocationDashboardPayload {
    *   - `"legacy"`: no such curve. Snapshots are not rendered as the curve
    *     (plan 11 removed that fallback). The label stays because the union
    *     is pinned (`equityChartWidgetDataSchema`'s enum).
+   *
+   * Phase 176 (planner call): the type keeps both values. Since Phase 176 its
+   * `"legacy"` value means "no trustworthy derived curve"; no legacy source is
+   * read, EquityChart's freshness stamp is unchanged, and the rename is booked
+   * in TODOS `176-INERT-LEFTOVERS` with the inert `managerSide*` plumbing.
    *
    * The only production reader is `EquityChart`'s provenance stamp, which
    * mounts in the `"ready"` branch only, where this is always `"derived"`.
@@ -3434,17 +3402,9 @@ export interface MyAllocationDashboardPayload {
     holding_type: "spot" | "derivative";
   }>;
   /**
-   * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
-   * allocator's snapshots, or null when every snapshot's column is
-   * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
-   * specific warm-up copy in KpiStrip (when < 3, show "Only N months
-   * of history available on {venues}").
-   */
-  minHistoryDepthMonths: number | null;
-  /**
    * Per VOICES-ACCEPTED f9: sorted, deduped display-cased venue
    * labels from the allocator's active api_keys (e.g., ["Binance",
-   * "OKX"]). Used in the venue-specific warm-up copy.
+   * "OKX"]). Read by the factsheet markets line.
    */
   activeVenues: string[];
   /**
@@ -3561,22 +3521,29 @@ export interface MyAllocationDashboardPayload {
   // Phase 151 / 151-02 (AUM-04) — the SPLIT book-entry gate
   // ─────────────────────────────────────────────────────────────────────
   /**
-   * Phase 151 / AUM-04. `eligibleApiKeyIds` MINUS the keys that already feed a
-   * live strategy the owner runs as a MANAGER (`deriveStrategyLinkedKeyIds` —
-   * role, never venue). These are the keys the allocator can actually put in
-   * their own book.
+   * The keys in the owner's allocator book: EVERY key the canonical
+   * `isPerKeyDailiesEligibleKey` predicate admits, in `eligibleApiKeyIds`'
+   * order (D-01, founder rule of 2026-10-31, Phase 176 with Phase 181
+   * absorbed). One key can serve a manager and allocators at once, so a key a
+   * strategy uses, by `strategies.api_key_id` or by `strategy_keys`, whatever
+   * its capital mark, also counts in its owner's allocator book.
    *
-   * Read-only; the client must NEVER re-derive it. The discriminator needs two
-   * owner-scoped SSR reads (`strategies` + the `strategy_keys` composite link
-   * table) that the browser has no business making.
+   * The rule is stated here once. It is the rule the allocator derive already
+   * applies (`eligible_key_predicate` in
+   * analytics-service/services/allocator_equity_derive.py, which selects keys
+   * with no strategy-link exclusion) and the key-mode fan-out applies
+   * (`enqueue_derive_broker_dailies_for_allocator_keys`), so this reader
+   * agrees with the curve. It supersedes Phase 151 AUM-04, which subtracted
+   * the linked keys.
+   *
+   * Read-only; the client must NEVER re-derive it from links or marks.
    */
   allocatorEligibleApiKeyIds: string[];
   /**
    * Phase 151 / AUM-04. The subset of `allocatorEligibleApiKeyIds` that has a
    * non-empty per-key series — i.e. the keys that can actually project. The
    * partial-book copy ("{N} of {M} keys not yet contributing") is
-   * `contributingApiKeyIds.length` of `allocatorEligibleApiKeyIds.length`; a
-   * manager key belongs to NEITHER count, because it never will contribute.
+   * `contributingApiKeyIds.length` of `allocatorEligibleApiKeyIds.length`.
    *
    * Read-only; the client must NEVER re-derive it (the Python backfill owns
    * which keys have a series — see `isPerKeyDailiesEligibleKey`).
@@ -3761,49 +3728,6 @@ const VENUE_DISPLAY: Record<string, string> = {
   okx: "OKX",
   bybit: "Bybit",
 };
-
-/**
- * CL9 / NEW-C01-11 — split reconstructed equity snapshots into the trustworthy
- * set and a single `baselineUnknown` flag.
- *
- * A row with `pre_terminus_balance_unknown` was reconstructed against an
- * unknown opening balance (OKX's 90-day trade terminus clamped the funding
- * deposit out of the fetch window), so its absolute equity level — and any
- * drawdown / TWR / per-holding return derived from it — is garbage. Such rows
- * must not feed a level/return-derived surface. This helper is the canonical
- * filter for getMyAllocationDashboard's consumers (equity daily points, the
- * per-holding return reconstruction, live-baseline metrics, the warm-up gate),
- * applied once at that read boundary below.
- *
- * NOTE — `allocator_equity_snapshots` has OTHER read boundaries that consume
- * the same flag and must apply the same predicate at their own query:
- *   - the /compare per-holding adapter (holding-compare-adapter.ts) filters
- *     flagged rows inline before reconstructing its metrics; and
- *   - the analytics scoring engine (analytics-service/routers/match.py) is a
- *     SERVER-SIDE consumer that does NOT yet filter — tracked as a separate
- *     follow-up (changing scoring inputs is a behavioural change that needs its
- *     own analytics review; see the CL9 review notes).
- * So this is not the only place suppression happens — it is the dashboard's.
- *
- * `baselineUnknown` is true whenever ANY flagged row exists — it stays true
- * even after trustworthy daily-refresh rows accrue, so the dashboard keeps
- * explaining why the absolute history starts where it does rather than letting
- * the gap read as a broken connection. Single pass; preserves input order.
- */
-export function partitionTrustworthyEquitySnapshots<
-  T extends { pre_terminus_balance_unknown?: boolean | null },
->(rows: readonly T[]): { trustworthy: T[]; baselineUnknown: boolean } {
-  let baselineUnknown = false;
-  const trustworthy: T[] = [];
-  for (const r of rows) {
-    if (r.pre_terminus_balance_unknown) {
-      baselineUnknown = true;
-    } else {
-      trustworthy.push(r);
-    }
-  }
-  return { trustworthy, baselineUnknown };
-}
 
 /**
  * NEW-C03-01: Equity contribution by holding type.
@@ -4922,8 +4846,6 @@ export function derivePhase07Fields(
     history_reconstructed_at?: string | null;
     history_reconstruct_attempts?: number | null;
   }>,
-  equitySnapshots: MyAllocationDashboardPayload["equitySnapshots"],
-  snapshotCount: number,
   holdingsRows: Array<{
     symbol: string;
     quantity: number;
@@ -4946,10 +4868,6 @@ export function derivePhase07Fields(
     // a row without one is a contract violation (HoldingsUpdatedAtError).
     updated_at: string;
   }>,
-  // CL9 / NEW-C01-11: computed at the read boundary (any flagged row present),
-  // threaded through so both payload branches surface it via the `...phase07`
-  // spread.
-  equityBaselineUnknown: boolean,
   // Phase 115.1 / BACKBONE-02 (RD-1). The row read from the NEW keyed
   // `allocator_equity_derived` surface (kind='equity_curve'), or null when
   // there is no row. Threaded in so the ONE producer site below can gate the
@@ -4982,7 +4900,6 @@ export function derivePhase07Fields(
   reconstructInFlightKeyIds: ReadonlySet<string> | null = new Set<string>(),
 ): Pick<
   MyAllocationDashboardPayload,
-  | "equitySnapshots"
   | "holdingsSummary"
   | "snapshotCount"
   | "allKeysStale"
@@ -5000,10 +4917,8 @@ export function derivePhase07Fields(
   | "unpricedNativeAccounts"
   | "partialPositionReads"
   | "holdingsFingerprintRows"
-  | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
-  | "equityBaselineUnknown"
 > {
   const activeKeys = apiKeys.filter((k) => k.is_active);
   // DOGFOOD-1 (Phase 110.1): the connected-keys SIGNAL uses the canonical
@@ -5094,6 +5009,10 @@ export function derivePhase07Fields(
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.returns : [];
+  // Phase 176 (D-02, D-07): the warm-up count is the drawn derived curve's day
+  // count, null while the history is not ready (see the payload field doc).
+  const snapshotCount =
+    equityHistoryState === "ready" ? equityDailyPoints.length : null;
   // Ready always stamps "derived", and EquityChart (mounted in "ready" only) is
   // the one production reader. Review C3 SFH-C3-02 / IN-02: while rebuilding,
   // no consumer reads either field. Plan 14 removed the Overview warm-up and
@@ -5111,13 +5030,6 @@ export function derivePhase07Fields(
         : "legacy";
   const derivedCurveComputedAt =
     curveForSource !== null ? (derivedRow?.computed_at ?? null) : null;
-
-  // f9: min non-null history_depth_months across snapshots. Null when
-  // every snapshot's column is NULL (e.g. pure CoinGecko-fallback).
-  const depths = equitySnapshots
-    .map((s) => s.history_depth_months)
-    .filter((d): d is number => d != null);
-  const minHistoryDepthMonths = depths.length > 0 ? Math.min(...depths) : null;
 
   // f9: sorted deduped display-cased venues from active keys.
   const activeVenues = Array.from(
@@ -5209,13 +5121,6 @@ export function derivePhase07Fields(
   const shownKeyIds = new Set(holdingsSummary.map((h) => h.api_key_id));
 
   return {
-    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
-    // the same history as the withheld curve, so they do not cross to the
-    // client either. Nothing on the client reads them today; withholding them
-    // keeps a future reader from bypassing D-02, and the 30s refresh from
-    // re-sending the full history. The two counts derived from them are
-    // computed above and stay.
-    equitySnapshots: equityHistoryState === "rebuilding" ? [] : equitySnapshots,
     holdingsSummary,
     snapshotCount,
     allKeysStale,
@@ -5235,10 +5140,8 @@ export function derivePhase07Fields(
       .filter((p) => shownKeyIds.has(p.api_key_id))
       .map((p) => ({ ...p })),
     holdingsFingerprintRows,
-    minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
-    equityBaselineUnknown,
   };
 }
 
@@ -5249,7 +5152,7 @@ export const getMyAllocationDashboard = cache(
 
     // audit-2026-05-07 H-0502 / C-0172 / H-0481: defensive auth backstop.
     // Every read below (api_keys via .eq('user_id', userId); bridge_outcomes,
-    // match_decisions, match_batches, allocator_equity_snapshots,
+    // match_decisions, match_batches,
     // allocator_holdings via .eq('allocator_id', userId)) uses the inline
     // userId argument as its sole tenant boundary — the admin client
     // bypasses RLS by design. If a future caller ever accepts userId from
@@ -5332,7 +5235,6 @@ export const getMyAllocationDashboard = cache(
 
     const [
       portfolio,
-      phase07EquityRes,
       phase07HoldingsRes,
       apiKeys,
       // Phase 09 / finding f5 — latest match_batches row for this allocator.
@@ -5377,28 +5279,15 @@ export const getMyAllocationDashboard = cache(
       // `.eq` posture as the line above. NON-FATAL, never assertOk'd: a failed
       // read yields null and leaves every other dashboard field as it was.
       snapshotRebuildBoundary,
-      // Phase 151 / 151-02 (AUM-04) — the owner's OWN strategies and the
-      // composite `strategy_keys` links, the two halves of the manager-role
-      // discriminator (`deriveStrategyLinkedKeyIds`). Fetched in THIS batch
-      // rather than after the fan-out so the new gate costs zero extra waves.
-      // Both are NON-FATAL by design (never `assertOk`'d): see the degradation
-      // note at the read sites below.
+      // Phase 151 / 151-02 — the owner's OWN strategies and the composite
+      // `strategy_keys` links (`deriveStrategyLinkedKeyIds`). Since Phase 176
+      // (D-01) they no longer decide the allocator book; they still feed the
+      // reconstruct note (`reconstructLinkSource`). Both are NON-FATAL by
+      // design (never `assertOk`'d): see the note at the read sites below.
       phase151OwnStrategiesRes,
       phase151StrategyKeyLinksRes,
     ] = await Promise.all([
       getRealPortfolio(userId),
-      supabase
-        .from("allocator_equity_snapshots")
-        .select(
-          // CL9 / NEW-C01-11: pre_terminus_balance_unknown drives the
-          // zero-baseline suppression below.
-          "asof, value_usd, breakdown, source, history_depth_months, pre_terminus_balance_unknown",
-        )
-        .eq("allocator_id", userId)
-        .order("asof", { ascending: true })
-        // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
-        // payload can't grow unbounded as the table accumulates days.
-        .limit(730),
       // Phase 167.1.2 D-16: each key's rows at that key's own latest asof,
       // read in bounded steps (the owner's key ids, then per key its latest
       // asof, then its rows at it). Returns `{ data, error }` and never
@@ -5612,11 +5501,11 @@ export const getMyAllocationDashboard = cache(
       // ⚠️ The `.eq` is LOAD-BEARING, not defence-in-depth: `strategies_read`
       // RLS is `status='published' OR user_id = auth.uid()` (migration
       // 20260405061912:28), so dropping it would return the entire PUBLISHED
-      // universe and mark every allocator key that any manager anywhere has
-      // linked as manager-side — closing this allocator's book gate on keys
-      // they own. Own-only, always.
-      // Review [4] — `capital_ownership` is projected because the mark is part
-      // of the ROLE question this discriminator answers. See the filter below.
+      // universe and treat every key that any manager anywhere has linked as
+      // this owner's, which would wrongly silence the reconstruct note on
+      // keys they own. Own-only, always.
+      // `capital_ownership` is still projected but no longer read here: the
+      // book rule (D-01) ignores the mark.
       supabase
         .from("strategies")
         .select("id, api_key_id, status, capital_ownership")
@@ -5761,7 +5650,6 @@ export const getMyAllocationDashboard = cache(
     // audit-2026-05-07 G8.A.1 (P34) — Step 1 explicit error checks.
     // Same `assertOk` helper Step 2 uses below; we're a single function
     // so DRY both waves through one helper.
-    assertOk(phase07EquityRes, "allocator_equity_snapshots");
     assertOk(phase07HoldingsRes, "allocator_holdings");
     assertOk(phase09MatchBatchRes, "match_batches");
     assertOk(phase09MatchDecisionsRes, "match_decisions");
@@ -5779,30 +5667,6 @@ export const getMyAllocationDashboard = cache(
     // Phase 11 / D-04 — derive once via the pure helper (W-02 unit-tested).
     const mandateIsSet = deriveMandateIsSet(mandate);
 
-    const rawEquitySnapshots = (phase07EquityRes.data ??
-      []) as MyAllocationDashboardPayload["equitySnapshots"];
-    // CL9 / NEW-C01-11: rows whose absolute baseline is unknown (OKX 90-day
-    // terminus clamped the funding deposit out of the fetch window) carry
-    // garbage absolute levels — the dashboard's level/return-derived surfaces
-    // (equity curve, drawdown, TWR, Sharpe, per-holding returns, warm-up gate)
-    // must exclude them. Filter ONCE here so EVERY consumer downstream OF THIS
-    // read (derivePhase07Fields, the per-key baseline blend) reads the
-    // filtered array — no need to
-    // touch each derivation. (Other read boundaries on this table — the
-    // /compare adapter, and the server-side match.py scorer — apply / will
-    // apply the same predicate at their own query; see the
-    // partitionTrustworthyEquitySnapshots docstring.) The daily-refresh rows
-    // (today's live mark, flag=false) survive and render as they accrue, so a
-    // terminus-clamped allocator who keeps a key connected progressively
-    // regains a trustworthy curve. `equityBaselineUnknown` stays true whenever
-    // ANY flagged row exists, so the dashboard explains the gap (in both the
-    // main view and the empty-holdings branch).
-    const { trustworthy: equitySnapshots, baselineUnknown: equityBaselineUnknown } =
-      partitionTrustworthyEquitySnapshots(rawEquitySnapshots);
-    // Count of TRUSTWORTHY rows — drives the warm-up gate, so a fully
-    // terminus-clamped allocator (0 trustworthy rows) correctly shows warm-up
-    // rather than full-confidence KPIs over zero data.
-    const snapshotCount = equitySnapshots.length;
     const holdingsRows = (phase07HoldingsRes.data ?? []) as Array<{
       symbol: string;
       quantity: number;
@@ -5823,8 +5687,8 @@ export const getMyAllocationDashboard = cache(
     }>;
 
     // Phase 167.1.2.1 review 09 (WR-02): the reconstruct note's link source.
-    // The SAME two owner-scoped reads the book gate below uses (no extra
-    // grant, no extra query), but UNFILTERED by capital mark: the fan-out
+    // The two owner-scoped reads the link-read warning below reports on (no
+    // extra grant, no extra query), UNFILTERED by capital mark: the fan-out
     // excludes any non-archived strategy link, own-capital or not. A failed
     // read passes null so the note names nothing.
     const reconstructLinkSource =
@@ -5855,10 +5719,7 @@ export const getMyAllocationDashboard = cache(
 
     const phase07 = derivePhase07Fields(
       apiKeys,
-      equitySnapshots,
-      snapshotCount,
       holdingsRows,
-      equityBaselineUnknown,
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity row (or null)
       // threaded into the ONE producer site so the repoint gates there.
       phase115DerivedRow,
@@ -6029,32 +5890,36 @@ export const getMyAllocationDashboard = cache(
       perKeyReturnsByApiKeyId,
     );
     // ───────────────────────────────────────────────────────────────────────
-    // Phase 151 / 151-02 (AUM-04) — the SPLIT book-entry gate.
+    // The SPLIT book-entry gate (Phase 151 / 151-02), on the D-01 rule.
     //
-    // An owner who is ALSO a manager has keys that feed live strategies. Those
-    // keys will never carry an allocator per-key series, so the all-or-nothing
-    // gate above is pinned false FOREVER and the allocator cannot reach their
-    // own book (founder PROD census 2026-08-05: 8 eligible keys, 6 of them
-    // manager-side, 2 with real series). Subtract the manager keys by ROLE —
-    // `deriveStrategyLinkedKeyIds`, shared with /my-strategies so the two views
-    // of "strategy-linked" cannot drift — and ask a SOME question of what is
-    // left. `perKeyDailiesGateSatisfied` above is deliberately NOT touched:
-    // it still selects the liveBaselineMetrics source, where SOME-semantics
-    // would present a partial blend as the whole live book (Phase 63
-    // ENGINE-04's mixed-basis honesty invariant).
+    // Founder rule of 2026-10-31 (176-CONTEXT D-01): "one key can serve a
+    // manager and allocators at once, so a strategy-linked key also counts in
+    // its owner's allocator book." The book is every eligible key, matching
+    // the derive's `eligible_key_predicate` and the key-mode fan-out, so no
+    // link table and no capital mark narrows it. The field doc on
+    // `allocatorEligibleApiKeyIds` states the rule once. Superseded lineage:
+    // Phase 151 AUM-04 (2026-08-05) subtracted the linked keys, with a review
+    // [4] exemption for own-capital strategies.
     //
-    // Degradation: both reads are non-fatal (never assertOk'd — a transient
+    // The question asked of that set is still a SOME question: any eligible
+    // key with a series opens book entry. `perKeyDailiesGateSatisfied` above
+    // is deliberately NOT touched: it still selects the liveBaselineMetrics
+    // source, where SOME-semantics would present a partial blend as the whole
+    // live book (Phase 63 ENGINE-04's mixed-basis honesty invariant).
+    //
+    // The two link reads above stay, non-fatal (never assertOk'd — a transient
     // failure must not blank a working dashboard, and `strategy_keys` can be
-    // missing from the PostgREST schema cache on a pre-migration environment).
-    // On error we fall back to an EMPTY link list, which biases keys toward
-    // ALLOCATOR eligibility: the failure mode is an allocator who can still
-    // reach their book, not one locked out of it — the exact defect AUM-04
-    // exists to fix. The Sentry breadcrumb keeps the fault observable.
+    // missing from the PostgREST schema cache on a pre-migration environment),
+    // because the reconstruct note (`reconstructLinkSource`) still reads them.
+    // A failed read changes no book membership; it only makes that note name
+    // nothing, and the Sentry warning keeps the fault observable. The tag
+    // value `role_discriminator_read_failed` is historical since Phase 176;
+    // it is kept because dashboards may filter on it.
     const phase151LinkReadError =
       phase151OwnStrategiesRes.error ?? phase151StrategyKeyLinksRes.error;
     if (phase151LinkReadError) {
       console.error(
-        "[queries.getMyAllocationDashboard] role-discriminator read failed (book gate degrades to allocator-eligible):",
+        "[queries.getMyAllocationDashboard] strategy-link read failed (the reconstruct note names nothing):",
         phase151LinkReadError.message ?? phase151LinkReadError,
       );
       captureToSentry(phase151LinkReadError, {
@@ -6063,53 +5928,7 @@ export const getMyAllocationDashboard = cache(
         level: "warning",
       });
     }
-    // Review [4] — OWN CAPITAL IS NOT A MANAGER ROLE. The discriminator asks
-    // "is this key manager-side?", and a live `strategies` row was the whole
-    // answer. Phase 150 shipped, on this same branch, an explicit answer to the
-    // same question: the wizard's capital mark. `own_capital` means the money
-    // behind the key is the allocator's own — the STRONGEST possible statement
-    // that the key is NOT manager-side — so a strategy carrying that mark must
-    // not evict its key from the allocator's book.
-    //
-    // Without this filter, finalizing a key through the wizard and answering
-    // "my own capital" writes a `strategies` row that lands the key in
-    // `strategyLinkedKeyIds`, subtracts it from `allocatorEligibleApiKeyIds`
-    // below, and — if it was their only series-carrying key — flips
-    // `bookEntryGateSatisfied` false and removes book mode from the composer,
-    // with copy claiming they have no book. That is the very lockout AUM-04
-    // exists to fix, re-entered through the other phase in this branch.
-    //
-    // `team_review` (a trading team's key under verification) and NULL (never
-    // asked) both stay manager-side — NULL deliberately, because it is the
-    // pre-150 population and inferring a role from an absent answer is exactly
-    // the fabrication the nullable-no-default column was chosen to avoid.
-    //
-    // Filtered HERE, at the role call site, and NOT inside
-    // `deriveStrategyLinkedKeyIds`: that helper is shared with
-    // `deriveStrategylessKeys`, where the question is COVERAGE ("does this key
-    // have a strategy behind it?") and an own-capital strategy is coverage. Two
-    // questions, one helper — so the role-only narrowing belongs to the caller.
-    //
-    // The predicate is the SHARED one (`isAllocatable`), never a re-spelled
-    // literal: Phase 150's OWN-03 census (threat T-150-07) pins the mark string
-    // to `src/lib/capital-ownership.ts` alone, and an ad-hoc `!== "own_capital"`
-    // here is precisely the drift it forbids — it fails OPEN for a garbled value
-    // off the untyped `text` column where `isAllocatable` fails CLOSED. The row
-    // shape is asserted at the READ boundary (the untyped PostgREST select), so
-    // the mark arrives typed as `CapitalOwnership | null` and the predicate needs
-    // no cast of its own.
-    const strategyLinkedKeyIds = deriveStrategyLinkedKeyIds(
-      ((phase151OwnStrategiesRes.data ?? []) as Array<{
-        id: string;
-        api_key_id: string | null;
-        status: string;
-        capital_ownership: CapitalOwnership | null;
-      }>).filter((s) => !isAllocatable(s.capital_ownership)),
-      phase151StrategyKeyLinksRes.data ?? [],
-    );
-    const allocatorEligibleApiKeyIds = eligibleKeyIds.filter(
-      (id) => !strategyLinkedKeyIds.has(id),
-    );
+    const allocatorEligibleApiKeyIds = eligibleKeyIds;
     const contributingApiKeyIds = allocatorEligibleApiKeyIds.filter(
       (id) => (perKeyReturnsByApiKeyId[id]?.length ?? 0) > 0,
     );
@@ -6153,9 +5972,8 @@ export const getMyAllocationDashboard = cache(
     // The source is `contributingApiKeyIds` — NOT the eligible set — for the
     // same reason: it is the exact key set the compare panel's live-book column
     // is built from, so the baseline and the comparison now describe one book.
-    // When the old all-or-nothing gate WAS satisfied the two sets differ only
-    // by the manager-side keys the 151 role split removed from the book, which
-    // is the intended new meaning of "your live book".
+    // When the old all-or-nothing gate WAS satisfied the two sets are equal,
+    // since the book is every eligible key (D-01).
     const contributingKeyIdSet = new Set(contributingApiKeyIds);
     const contributingPerKeyReturns = Object.fromEntries(
       Object.entries(perKeyReturnsByApiKeyId).filter(([id]) =>

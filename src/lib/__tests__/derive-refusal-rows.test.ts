@@ -49,7 +49,7 @@ const TABLE: Table = JSON.parse(readFileSync(FIXTURE, "utf8"));
 
 /** The reader's whole verdict on one stored row, with no keys in the way. */
 const readRow = (payload: unknown) =>
-  derivePhase07Fields([], [], 0, [], false, {
+  derivePhase07Fields([], [], {
     payload,
     computed_at: TABLE.composed_at,
   });

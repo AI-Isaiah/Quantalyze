@@ -16,8 +16,10 @@ migration at `supabase/migrations/20260418074935_bridge_outcome_cron.sql`.
 
 - **What it does:** reads `bridge_outcomes` rows with `kind='allocated'` that are either
   un-computed (`delta_30d IS NULL`) or explicitly marked for recompute (`needs_recompute=TRUE`),
-  joins against `strategy_analytics.returns_series`, and writes realized 30/90/180-day
-  deltas plus an in-window estimate (when the allocation is less than 30 days old).
+  measures each one on the right series for its source (see "What it computes": a strategy's
+  `strategy_analytics.returns_series`, or, for a holding decision, the allocator's derived account
+  returns), and writes realized 30/90/180-day deltas plus, for the strategy branches, an in-window
+  estimate (when the allocation is less than 30 days old).
 - **Who sees results:** allocators — delta values drive the D-12 label progression
   (`Pending` → `Estimated: +X.X% (Nd)` → `30-day: +X.X%` → `90-day` → `180-day`).
 - **Phase 1 artifact:** migration `20260418074935_bridge_outcome_cron.sql`.
@@ -41,7 +43,10 @@ headroom.
 
 ## What it computes
 
-For each `bridge_outcomes` row where `kind='allocated'` AND `allocated_at IS NOT NULL`:
+For each `bridge_outcomes` row where `kind='allocated'` AND `allocated_at IS NOT NULL`, the batch
+runs three branches. Which one a row takes depends on its `match_decisions` row.
+
+### Strategy branch (`match_decision_id` NULL, or a decision with `original_strategy_id` set)
 
 ```
 delta_30d  = equity_at(allocated_at + 30d)  / equity_at(allocated_at) - 1
@@ -56,6 +61,76 @@ delta_180d = equity_at(allocated_at + 180d) / equity_at(allocated_at) - 1
 - When the realized windows are not yet available (< 30 days of data since anchor), the
   function writes `estimated_delta_bps` + `estimated_days` for the D-12 Estimated label.
   The estimate fires when `days_elapsed ∈ [1, 29]`.
+
+### Voluntary-add branch (`match_decisions.kind = 'voluntary_add'`)
+
+Measured on the strategy's `returns_series` exactly as the strategy branch is (migration 080).
+
+### Holding branch (decision with `original_holding_ref` set and `original_strategy_id` NULL)
+
+The holding branch measures the **account**, not the symbol the decision named
+(Phase 176 LEGACYRETIRE, decisions D-03 and D-05). For N = 30, 90 and 180:
+
+```
+delta_Nd = prod(1 + r_d) - 1     over the days d in (allocated_at, allocated_at + N]
+```
+
+where `r_d` is the flow-neutral daily return of the allocator's `allocator_equity_derived` row of
+kind `equity_curve` (`payload.returns[]`, the same returns the factsheet KPIs read). The work is
+done by `public.derived_account_return_over(allocator_id, allocated_at, N)`; the batch calls it
+once per window.
+
+A day with no entry in `returns` counts as no change, so the product runs over the returns that are
+present. The derived curve leaves a day out under benign flags (for example
+`missing_return_inside_coverage`), and a rule that needed every calendar day would leave nearly every
+outcome Pending. A day whose return is -100% or worse compounds to -100%, not to NULL.
+
+- **Per account.** Two holding decisions by the same allocator on the same day read the same
+  number whatever symbol they named. Deposits and withdrawals do not count as performance.
+- **NULL, never a guess.** The helper returns NULL when the derived row is missing, is not payload
+  version 2, is not `is_trustworthy`, does not cover the window (its first `returns` date is after the
+  first day of the window, or its last `returns` date is before the last day of it; only dates of the
+  form `YYYY-MM-DD` count toward that), has no `returns` entry at all inside the window, repeats a day,
+  or carries an `r` that is not a number. One return inside the window is enough to measure it. The
+  delta then stays NULL and the UI reads Pending.
+- **Later windows fill in later runs.** A holding row stays a candidate until every window that has
+  matured is filled: it is also picked while `delta_90d` is NULL and `allocated_at` is 91 or more days
+  back, or `delta_180d` is NULL and `allocated_at` is 181 or more days back. Values already written are
+  kept: such a row is written (and counted in `updated_count`) only when a NULL window actually
+  filled, and a later restatement of the curve does not change a stored outcome. Only a row with
+  `needs_recompute = TRUE` (the D-06 reset, or someone setting it on purpose) is re-measured, with
+  the new value winning.
+- **A row that measured nothing.** If all three new deltas are NULL the row is not written (it stays
+  `needs_recompute = TRUE`) and the run counts it in `failed_count`, not in `updated_count`.
+- **No estimate.** The holding branch writes no `estimated_delta_bps` / `estimated_days`.
+- **Window of candidates.** `bridge_outcomes_allocated_at_check` admits an `allocated_at` only inside
+  `[CURRENT_DATE - 365 days, CURRENT_DATE]` and PostgreSQL re-checks it on every UPDATE, so a holding
+  row older than 365 days is not a candidate (touching it would abort the whole batch for every
+  allocator). The strategy and voluntary_add branches take the same window (fixed in the same
+  migration, `176-BRIDGE-CHECK-WINDOW-ABORT` in `TODOS.md`); a row older than 365 days keeps whatever basis
+  it already had.
+- **Legacy table not read.** Nothing in the batch reads `allocator_equity_snapshots` or
+  `extract_symbol_value_at` any more; PR 3 of the phase drops them.
+
+### One-time reset of stored holding outcomes (D-06)
+
+The migration `20261102120000_bridge_outcome_holding_branch_derived.sql` called
+`public.reset_holding_bridge_outcomes_to_derived_basis()` once, at the apply. It set
+`needs_recompute = TRUE` and NULLed `delta_30d`, `delta_90d`, `delta_180d` and `deltas_computed_at`
+on every holding-measuring outcome whose `allocated_at` is inside the last 365 days, so no stored
+number stays on the old per-symbol basis. The old per-symbol values were not kept.
+
+- **What the allocator sees.** Those outcomes read **Pending** until the next 03:00Z run recomputes
+  them. A row whose window the derived curve does not cover stays NULL, which is correct. The apply log
+  carries the number of rows the reset cleared as a NOTICE (a count only).
+- **Who can call the reset.** It is owner only: `EXECUTE` is revoked from PUBLIC, `anon`,
+  `authenticated` and `service_role`, so it cannot be reached through PostgREST.
+- **When it may be re-run.** Only when the holding rule itself changes basis again and every stored
+  holding outcome must be recomputed. A re-run discards the computed holding numbers (the same NULLing
+  as above) until the next 03:00Z run, so it is not a repair for a single bad row; for one row, set
+  `needs_recompute = TRUE` on it instead.
+- **Rollback.** `supabase/migrations/down/20261102120000-rollback.sql`, manual and off the auto-apply
+  path.
 
 ## Signals
 
@@ -101,7 +176,11 @@ WHERE kind = 'allocated'
   AND (delta_30d IS NULL OR needs_recompute = TRUE);
 ```
 
-A non-zero count after the cron's scheduled time is a signal the batch has issues.
+A non-zero count after the cron's scheduled time is a signal the batch has issues. For the holding
+branch a persistent non-zero share is expected where the derived curve does not cover a window (those
+rows stay NULL by design); the read-only form `r3-bridge-holding` in
+`docs/runbooks/legacyretire-go-live.md` splits the holding rows by what was computed, what still
+awaits recompute and which rows sit outside the `allocated_at` CHECK window.
 
 ### Manual dry-run (safe — no side effects if no eligible rows)
 
@@ -138,7 +217,8 @@ SELECT * FROM public.compute_bridge_outcome_deltas();
 5. Manual dry-run:
    ```sql
    SELECT * FROM public.compute_bridge_outcome_deltas();
-   -- Expect updated_count >= 0, failed_count = 0
+   -- Expect updated_count >= 0. failed_count counts holding rows that measured nothing this run
+   -- (all three deltas NULL: no trustworthy derived curve covers the window); it is 0 when none exist.
    ```
 6. Verify the Vercel cron-limit sentinel still green:
    ```bash

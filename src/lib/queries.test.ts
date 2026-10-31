@@ -1520,25 +1520,6 @@ describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () 
 // neuter-proof.
 // ---------------------------------------------------------------------------
 describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLIPRETRY-03)", () => {
-  const SNAPSHOTS = [
-    {
-      asof: "2026-03-10",
-      value_usd: 10_000,
-      breakdown: null,
-      source: "exchange_primary" as const,
-      history_depth_months: 24,
-      pre_terminus_balance_unknown: false,
-    },
-    {
-      asof: "2026-03-11",
-      value_usd: 10_100,
-      breakdown: null,
-      source: "exchange_primary" as const,
-      history_depth_months: 24,
-      pre_terminus_balance_unknown: false,
-    },
-  ];
-
   // A dense, well-formed derived curve — the payload the worker persists.
   const DERIVED_CURVE = [
     { date: "2026-03-10", equity_usd: 100_500.5 },
@@ -1563,14 +1544,7 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     payload: unknown;
     computed_at: string | null;
   } | null) {
-    return derivePhase07Fields(
-      [],
-      SNAPSHOTS,
-      SNAPSHOTS.length,
-      [],
-      false,
-      derivedEquityRow,
-    );
+    return derivePhase07Fields([], [], derivedEquityRow);
   }
 
   it("PASS: a trustworthy well-formed curve renders 'derived' and maps the payload directly", () => {
@@ -1590,7 +1564,7 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     expect(result.derivedCurveComputedAt).toBe(COMPUTED_AT);
   });
 
-  it("FAIL: the BYTE-IDENTICAL curve with is_trustworthy=false renders 'legacy' and falls back to the snapshot render", () => {
+  it("FAIL: the BYTE-IDENTICAL curve with is_trustworthy=false renders 'legacy' and stays rebuilding with no curve", () => {
     // Review C2 round 2 R2-CR-03: version 2, so this arm really exercises the
     // writer's untrustworthy verdict. A row with no version is pre-v2, which
     // reads `awaiting_derivation` (see the version-1 case below).
@@ -1602,8 +1576,8 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     // Phase 167.1.2 / D-02: the producer withholds the display series while the
     // history is rebuilt, so it is [] here. The trust gate's verdict on this
     // byte-identical curve is pinned on the extractor (review round 1 SFH-04).
-    // Plan 11 removed the snapshot display fallback. The curve content lives in
-    // allocation-helpers.equity-adapter.test.ts; this case pins the source stamp.
+    // There is no snapshot display fallback (plan 11 removed it; 176 removed the
+    // snapshot read). This case pins the source stamp.
     expect(extractTrustworthyDerivedSeries(derivedRow(false).payload)).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
     // Review C2 SFH-05: a PRESENT v2 row the writer marked untrustworthy is not
@@ -1662,8 +1636,8 @@ describe("derived-row outcomes — the reason says why there is no series", () =
     curve: [{ date: "2026-03-10", equity_usd: 100 }],
     returns: [{ date: "2026-03-10", r: 0.01 }],
   });
-  const callWith = (row: Parameters<typeof derivePhase07Fields>[5]) =>
-    derivePhase07Fields([], [], 0, [], false, row);
+  const callWith = (row: Parameters<typeof derivePhase07Fields>[2]) =>
+    derivePhase07Fields([], [], row);
 
   it("derivedPayloadRejection names the first thing the reader refuses, and null for an accepted row", () => {
     expect(derivedPayloadRejection(v2())).toBeNull();
@@ -1850,7 +1824,7 @@ describe("derived-row outcomes — the reason says why there is no series", () =
       account_shared_with_api_key_id: null,
     };
     expect(
-      derivePhase07Fields([pendingKey], [], 0, [], false, DERIVED_ROW_READ_FAILED)
+      derivePhase07Fields([pendingKey], [], DERIVED_ROW_READ_FAILED)
         .equityHistoryRebuildReason,
     ).toBe("account_identity_pending");
   });
@@ -2078,7 +2052,7 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
   // and nothing at all under any other reason, so the line can never name a
   // key the hold is not about.
   it("IN-04: the producer lists the failing identity-pending keys, and only under key_not_syncing", () => {
-    const call = (keys: Key[]) => derivePhase07Fields(keys, [], 0, [], false, null);
+    const call = (keys: Key[]) => derivePhase07Fields(keys, [], null);
     const one = call([
       key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
     ]);
@@ -2155,24 +2129,8 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     });
   });
 
-  it("legacy snapshots and no derived row stay rebuilding with an empty curve (plan 11 removed the snapshot fallback)", () => {
-    const result = derivePhase07Fields(
-      [key()],
-      [
-        {
-          asof: "2026-03-10",
-          value_usd: 10_000,
-          breakdown: null,
-          source: "exchange_primary",
-          history_depth_months: 24,
-          pre_terminus_balance_unknown: false,
-        },
-      ],
-      1,
-      [],
-      false,
-      null,
-    );
+  it("no derived row stays rebuilding with an empty curve (there is no snapshot fallback to draw from)", () => {
+    const result = derivePhase07Fields([key()], [], null);
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
     expect(result.equityDailyPoints).toEqual([]);
@@ -2355,7 +2313,7 @@ describe("deriveStrategyLinkedKeyIds — the shared manager-role discriminator (
  * would read as flat.
  */
 describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-16)", () => {
-  type HoldingRow = Parameters<typeof derivePhase07Fields>[3][number];
+  type HoldingRow = Parameters<typeof derivePhase07Fields>[1][number];
   const row = (
     api_key_id: string,
     asof: string,
@@ -2378,7 +2336,7 @@ describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-
     ...over,
   });
   const summarize = (rows: HoldingRow[]) =>
-    derivePhase07Fields([], [], 0, rows, false, null).holdingsSummary;
+    derivePhase07Fields([], rows, null).holdingsSummary;
   const symbolsOf = (rows: HoldingRow[]) =>
     summarize(rows)
       .map((h) => `${h.api_key_id}:${h.symbol}`)
@@ -2456,8 +2414,8 @@ describe("departedHistoryUnavailable: the derived payload's benign flag reaches 
     } as Record<string, unknown>,
     computed_at: "2026-03-11T05:30:00Z",
   });
-  const call = (row: Parameters<typeof derivePhase07Fields>[5]) =>
-    derivePhase07Fields([], [], 0, [], false, row);
+  const call = (row: Parameters<typeof derivePhase07Fields>[2]) =>
+    derivePhase07Fields([], [], row);
 
   it("is true on a ready book whose payload raises the flag", () => {
     const result = call(
@@ -2522,9 +2480,9 @@ describe("historyReconstructFailed: a capped key is a non-gating note (167.1.2.1
     history_reconstruct_attempts: 0,
     ...over,
   });
-  type LinkSource = Parameters<typeof derivePhase07Fields>[8];
+  type LinkSource = Parameters<typeof derivePhase07Fields>[5];
   const call = (keys: Key[], linkSource?: LinkSource) =>
-    derivePhase07Fields(keys, [], 0, [], false, readyRow, [], {}, linkSource);
+    derivePhase07Fields(keys, [], readyRow, [], {}, linkSource);
 
   it("a key at marker NULL and five attempts raises the flag over a ready curve", () => {
     const result = call([key({ history_reconstruct_attempts: 5 })]);
@@ -2641,9 +2599,6 @@ describe("historyReconstructFailed: a capped key is a non-gating note (167.1.2.1
       derivePhase07Fields(
         keys,
         [],
-        0,
-        [],
-        false,
         readyRow,
         [],
         {},
@@ -2728,7 +2683,7 @@ describe("historyReconstructFailed: a capped key is a non-gating note (167.1.2.1
       "account_identity_pending",
     ],
   ])("a capped key on a book rebuilding for %s keeps that reason", (_label, keys, row, reason) => {
-    const result = derivePhase07Fields(keys, [], 0, [], false, row);
+    const result = derivePhase07Fields(keys, [], row);
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityHistoryRebuildReason).toBe(reason);
     expect(result.historyReconstructFailed).toBe(true);
@@ -2768,8 +2723,8 @@ describe("unpricedNativeAccounts: the derive's omitted-account list reaches the 
     } as Record<string, unknown>,
     computed_at: "2026-10-10T05:30:00Z",
   });
-  const call = (r: Parameters<typeof derivePhase07Fields>[5], keys = KEYS) =>
-    derivePhase07Fields(keys, [], 0, [], false, r);
+  const call = (r: Parameters<typeof derivePhase07Fields>[2], keys = KEYS) =>
+    derivePhase07Fields(keys, [], r);
 
   it("names the owner's own key and the writer's day on a ready book", () => {
     const result = call(row({ unpriced_native_keys: [{ api_key_id: "K1", day: "2026-10-08" }] }));

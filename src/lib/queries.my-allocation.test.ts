@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { StrategyForBuilder } from "./scenario";
-import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 
 /**
  * Tests for the My Allocation query helpers added in PR 1 of the
@@ -89,7 +88,8 @@ const state = vi.hoisted(() => ({
     allocator_id?: string;
     expires_at: string;
   }>,
-  // Phase 07 / 07-03 — allocator equity snapshots for getMyAllocationDashboard rewire
+  // Phase 176 (D-02): the legacy table is no longer read. Only the "176 D-02 / D-07"
+  // arms seed it, to prove the payload ignores rows that are present.
   allocatorEquitySnapshots: [] as Array<{
     allocator_id: string;
     asof: string;
@@ -1069,9 +1069,10 @@ describe("getMyAllocationDashboard — outcomes top-level fan-out (Phase 5 D-15)
 // Phase 07 / 07-03 — getMyAllocationDashboard Phase 07 payload extensions
 //
 // New fields per VOICES-ACCEPTED f7 + f9:
-//   - equitySnapshots, holdingsSummary, snapshotCount, allKeysStale,
-//     lastSyncAt, hasSyncing, equityDailyPoints, minHistoryDepthMonths,
-//     activeVenues
+//   - holdingsSummary, snapshotCount, allKeysStale, lastSyncAt, hasSyncing,
+//     equityDailyPoints, activeVenues
+//     (Phase 176: equitySnapshots, minHistoryDepthMonths and
+//     equityBaselineUnknown are retired with the legacy curve, D-07)
 //
 // The rewire MUST still populate these fields when the allocator has
 // NO portfolios row — per Phase 07 SC3 (fresh allocator with api_keys +
@@ -1090,10 +1091,51 @@ const P7_PORTFOLIO = {
   is_test: false,
 };
 
+// Phase 176 (D-02): the warm-up count is the drawn derived curve's day count, so
+// the count arms seed a version-2 derived row of N days and one identified,
+// syncing key (the readiness the "ready" fixtures below use).
+const P7_IDENTIFIED_KEY = {
+  id: "k1",
+  user_id: "user-1",
+  exchange: "binance",
+  label: "Binance main",
+  is_active: true,
+  sync_status: "ok",
+  last_sync_at: new Date().toISOString(),
+  disconnected_at: null,
+  account_balance_usdt: 1000,
+  created_at: "2026-04-01T00:00:00Z",
+  venue_account_id: "acct-synthetic-1",
+  account_share_kind: null,
+  account_shared_with_api_key_id: null,
+};
+
+/** A trustworthy version-2 `equity_curve` row of `days` consecutive days (>= 2). */
+function p7DerivedV2Row(days: number) {
+  const dates = Array.from(
+    { length: days },
+    (_, i) => `2026-03-${String(i + 1).padStart(2, "0")}`,
+  );
+  return {
+    allocator_id: "user-1",
+    kind: "equity_curve",
+    payload: {
+      version: 2,
+      curve: dates.map((date, i) => ({ date, equity_usd: 10_000 + i * 10 })),
+      returns: dates.slice(1).map((date) => ({ date, r: 0.001 })),
+      flags: [],
+      degrade_reasons: [],
+      is_trustworthy: true,
+      scalars: { mwr: 0.12, dietz: 0.11, computable: true },
+      inputs: { n_keys: 1, anchor_asof: dates[days - 1], composed_at: "2026-03-31T00:00:00Z" },
+    } as Record<string, unknown>,
+  };
+}
+
 describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
   beforeEach(resetState);
 
-  it("TC p7-01: payload carries all 9 Phase 07 field names", async () => {
+  it("TC p7-01: payload carries the Phase 07 field names that survive Phase 176", async () => {
     // Include a portfolio so the function takes the main branch and
     // exercises every new fetch; the `!portfolio` branch is tested in p7-02.
     state.portfolios = [P7_PORTFOLIO];
@@ -1102,171 +1144,35 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
       string,
       unknown
     >;
-    expect(result).toHaveProperty("equitySnapshots");
     expect(result).toHaveProperty("holdingsSummary");
     expect(result).toHaveProperty("snapshotCount");
     expect(result).toHaveProperty("allKeysStale");
     expect(result).toHaveProperty("lastSyncAt");
     expect(result).toHaveProperty("hasSyncing");
     expect(result).toHaveProperty("equityDailyPoints");
-    expect(result).toHaveProperty("minHistoryDepthMonths");
     expect(result).toHaveProperty("activeVenues");
   });
 
-  it("TC p7-02: no portfolio but has api_keys + snapshots → snapshotCount>0 (the curve and its raw levels are withheld while rebuilding, D-02)", async () => {
-    // SC3: allocator with no portfolio_strategies row still sees real
-    // equity via the snapshot pipeline. Removes the !portfolio early-return.
+  it("TC p7-02: no portfolio but has api_keys + a derived row → snapshotCount is the drawn derived days (the !portfolio branch spreads the same producer)", async () => {
+    // SC3: allocator with no portfolio_strategies row still sees the derived
+    // book. Removes the !portfolio early-return. Phase 176 (D-02): the count is
+    // the day count of the derived curve, not a legacy row count.
     state.portfolios = [];
-    state.apiKeys = [
-      {
-        id: "k1",
-        user_id: "user-1",
-        exchange: "binance",
-        label: "Binance main",
-        is_active: true,
-        sync_status: "ok",
-        last_sync_at: new Date().toISOString(),
-        account_balance_usdt: 1000,
-        created_at: "2026-04-01T00:00:00Z",
-      },
-    ];
-    state.allocatorEquitySnapshots = [
-      {
-        allocator_id: "user-1",
-        asof: "2026-04-10",
-        value_usd: 10_000,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 24,
-      },
-      {
-        allocator_id: "user-1",
-        asof: "2026-04-11",
-        value_usd: 10_100,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 24,
-      },
-    ];
+    state.apiKeys = [P7_IDENTIFIED_KEY];
+    state.allocatorEquityDerived = [p7DerivedV2Row(2)];
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
     expect(result.portfolio).toBeNull();
-    expect(result.snapshotCount).toBe(2);
-    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
-    // withheld from the client payload with the curve; the count stays.
-    expect(result.equitySnapshots).toEqual([]);
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator. The legacy series'
-    // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retired with the legacy branch, which plan 11 removed.
-    expect(result.equityHistoryState).toBe("rebuilding");
-    expect(result.equityDailyPoints).toEqual([]);
-  });
-
-  it("TC p7-CL9: terminus-flagged rows are excluded end-to-end + equityBaselineUnknown set (NEW-C01-11)", async () => {
-    // The read-boundary wiring (partitionTrustworthyEquitySnapshots feeding
-    // snapshotCount / equityDailyPoints / equitySnapshots) is exercised here
-    // through the real getMyAllocationDashboard — the pure-helper unit tests
-    // alone cannot catch a mis-wired call site (e.g. feeding the raw array to
-    // derivePhase07Fields, or computing snapshotCount off the raw count).
-    state.portfolios = [P7_PORTFOLIO];
-    state.allocatorEquitySnapshots = [
-      // Two flagged (zero-baseline garbage) rows — must be dropped everywhere.
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-01",
-        value_usd: 5,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 3,
-        pre_terminus_balance_unknown: true,
-      },
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-02",
-        value_usd: 18_000,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 3,
-        pre_terminus_balance_unknown: true,
-      },
-      // Two trustworthy (live-refresh) rows — must survive.
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-10",
-        value_usd: 10_000,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 3,
-        pre_terminus_balance_unknown: false,
-      },
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-11",
-        value_usd: 10_100,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 3,
-        pre_terminus_balance_unknown: false,
-      },
-    ];
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-
-    // Any flagged row present → the dashboard explains the gap.
-    expect(result.equityBaselineUnknown).toBe(true);
-    // Flagged rows excluded from the warm-up count: 2 trustworthy of 4 rows. A
-    // call site that fed the raw array onward would count 4.
-    expect(result.snapshotCount).toBe(2);
-    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
-    // withheld from the client payload with the curve, so the flagged rows'
-    // absence is pinned by the count above while the history is rebuilt.
-    expect(result.equitySnapshots).toEqual([]);
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator. The legacy series'
-    // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retired with the legacy branch, which plan 11 removed.
-    expect(result.equityDailyPoints).toEqual([]);
-  });
-
-  it("TC p7-CL9b: a fully-clean series leaves equityBaselineUnknown false and keeps every row", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.allocatorEquitySnapshots = [
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-10",
-        value_usd: 10_000,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 24,
-        pre_terminus_balance_unknown: false,
-      },
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-11",
-        value_usd: 10_100,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 24,
-      },
-    ];
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-    expect(result.equityBaselineUnknown).toBe(false);
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityDailyPoints).toHaveLength(2);
     expect(result.snapshotCount).toBe(2);
   });
 
-  it("TC p7-03: snapshotCount equals mocked row count when < 30", async () => {
+  it("TC p7-03: snapshotCount equals the derived curve's day count when < 30", async () => {
     state.portfolios = [P7_PORTFOLIO];
-    // 15 snapshots (warm-up territory)
-    state.allocatorEquitySnapshots = Array.from({ length: 15 }, (_, i) => ({
-      allocator_id: "user-1",
-      asof: `2026-03-${String(i + 1).padStart(2, "0")}`,
-      value_usd: 1000 + i,
-      breakdown: null,
-      source: "exchange_primary" as const,
-      history_depth_months: 24,
-    }));
+    state.apiKeys = [P7_IDENTIFIED_KEY];
+    // 15 derived days (warm-up territory)
+    state.allocatorEquityDerived = [p7DerivedV2Row(15)];
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
     expect(result.snapshotCount).toBe(15);
@@ -1365,226 +1271,21 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result.allKeysStale).toBe(true);
   });
 
-  it("TC p7-07 (f7): 5 daily snapshot rows are counted; the curve and its raw levels are withheld while rebuilding (D-02)", async () => {
+  it("TC p7-07 (f7): 5 derived days are counted and drawn in order while the history is ready", async () => {
     state.portfolios = [P7_PORTFOLIO];
-    const values = [100, 110, 105, 120, 115];
-    state.allocatorEquitySnapshots = values.map((v, i) => ({
-      allocator_id: "user-1",
-      asof: new Date(Date.UTC(2026, 2, i + 1)).toISOString().slice(0, 10),
-      value_usd: v,
-      breakdown: null,
-      source: "exchange_primary" as const,
-      history_depth_months: 24,
-    }));
+    state.apiKeys = [P7_IDENTIFIED_KEY];
+    state.allocatorEquityDerived = [p7DerivedV2Row(5)];
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
-    // The five rows were read. Phase 167.1.2 / D-02 (review round 1 SFH-03):
-    // their levels are withheld from the client payload with the curve, so the
-    // in-order content pin lives on the adapter itself
-    // (allocation-helpers.equity-adapter.test.ts) while the history is rebuilt.
     expect(result.snapshotCount).toBe(5);
-    expect(result.equitySnapshots).toEqual([]);
-    // Phase 167.1.2 / D-02: the producer withholds the curve while it is rebuilt,
-    // so the display series is [] for every allocator. The legacy series'
-    // content is pinned on the adapter (allocation-helpers.equity-adapter.test.ts)
-    // and retired with the legacy branch, which plan 11 removed.
-    expect(result.equityDailyPoints).toEqual([]);
-  });
-
-  it("TC p7-08 (f9): history_depth_months = [24,24,3] → minHistoryDepthMonths=3", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.allocatorEquitySnapshots = [
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-01",
-        value_usd: 100,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 24,
-      },
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-02",
-        value_usd: 110,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 24,
-      },
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-03",
-        value_usd: 105,
-        breakdown: null,
-        source: "exchange_primary",
-        history_depth_months: 3,
-      },
-    ];
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-    expect(result.minHistoryDepthMonths).toBe(3);
-  });
-
-  it("TC p7-09 (f9): all history_depth_months NULL → minHistoryDepthMonths=null", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.allocatorEquitySnapshots = [
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-01",
-        value_usd: 100,
-        breakdown: null,
-        source: "coingecko_fallback",
-        history_depth_months: null,
-      },
-      {
-        allocator_id: "user-1",
-        asof: "2026-03-02",
-        value_usd: 110,
-        breakdown: null,
-        source: "coingecko_fallback",
-        history_depth_months: null,
-      },
-    ];
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-    expect(result.minHistoryDepthMonths).toBeNull();
-  });
-
-  it("TC p7-10 (f9): active api_keys venues [binance, okx] → activeVenues=[Binance, OKX] display-cased + sorted", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    const nowIso = new Date().toISOString();
-    state.apiKeys = [
-      {
-        id: "k1",
-        user_id: "user-1",
-        exchange: "okx",
-        label: "OKX",
-        is_active: true,
-        sync_status: "ok",
-        last_sync_at: nowIso,
-        account_balance_usdt: null,
-        created_at: "2026-04-01T00:00:00Z",
-      },
-      {
-        id: "k2",
-        user_id: "user-1",
-        exchange: "binance",
-        label: "Binance",
-        is_active: true,
-        sync_status: "ok",
-        last_sync_at: nowIso,
-        account_balance_usdt: null,
-        created_at: "2026-04-01T00:00:00Z",
-      },
-    ];
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-    expect(result.activeVenues).toEqual(["Binance", "OKX"]);
-  });
-
-  // Phase 07 / WR-02 regression — holdingsSummary must keep the max-asof
-  // row per symbol REGARDLESS of input order. The PostgREST query sorts
-  // DESC but the reducer's correctness does not depend on that ordering:
-  // a future refactor that drops the .order() clause (or a backend that
-  // returns rows in a different order) must still produce the same result.
-  it("TC p7-11 (WR-02): holdingsSummary picks max-asof per symbol even when input rows are ASC/unordered", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    // Phase 167.1.2 plan 15 (D-16): the read is per key (the owner's key ids,
-    // then each key's latest asof), so every row names a key the allocator
-    // owns. One key here; both symbols have a row at the key's latest asof
-    // (2026-04-12), so the expectations below are unchanged under D-16.
-    state.apiKeys = [
-      {
-        id: "key-p7",
-        user_id: "user-1",
-        exchange: "binance",
-        label: "Binance",
-        is_active: true,
-        sync_status: "ok",
-        last_sync_at: "2026-04-12T00:00:00Z",
-        account_balance_usdt: 1000,
-        created_at: "2026-04-01T00:00:00Z",
-      },
-    ];
-    // Deliberately pre-load holdings in ASCENDING asof order to invert the
-    // query's DESC assumption. The helper under test collapses via linear
-    // scan with `r.asof > existing.asof`, so ordering is irrelevant.
-    state.allocatorHoldings = [
-      {
-        allocator_id: "user-1",
-        api_key_id: "key-p7",
-        symbol: "BTC",
-        quantity: 0.1,
-        mark_price: 40000,
-        value_usd: 4000,
-        venue: "binance",
-        holding_type: "spot",
-        updated_at: "2026-04-10T04:00:00+00:00",
-        asof: "2026-04-10", // older
-      },
-      {
-        allocator_id: "user-1",
-        api_key_id: "key-p7",
-        symbol: "BTC",
-        quantity: 0.2,
-        mark_price: 50000,
-        value_usd: 10000,
-        venue: "binance",
-        holding_type: "spot",
-        updated_at: "2026-04-12T04:00:00+00:00",
-        asof: "2026-04-12", // newest — MUST win
-      },
-      {
-        allocator_id: "user-1",
-        api_key_id: "key-p7",
-        symbol: "BTC",
-        quantity: 0.15,
-        mark_price: 45000,
-        value_usd: 6750,
-        venue: "binance",
-        holding_type: "spot",
-        updated_at: "2026-04-11T04:00:00+00:00",
-        asof: "2026-04-11", // middle
-      },
-      {
-        allocator_id: "user-1",
-        api_key_id: "key-p7",
-        symbol: "ETH",
-        quantity: 1.0,
-        mark_price: 3000,
-        value_usd: 3000,
-        venue: "binance",
-        holding_type: "spot",
-        updated_at: "2026-04-11T04:00:00+00:00",
-        asof: "2026-04-11",
-      },
-      {
-        allocator_id: "user-1",
-        api_key_id: "key-p7",
-        symbol: "ETH",
-        quantity: 2.0,
-        mark_price: 3100,
-        value_usd: 6200,
-        venue: "binance",
-        holding_type: "spot",
-        updated_at: "2026-04-12T04:00:00+00:00",
-        asof: "2026-04-12", // newest ETH — MUST win
-      },
-    ];
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-
-    const btc = result.holdingsSummary.find((h) => h.symbol === "BTC");
-    const eth = result.holdingsSummary.find((h) => h.symbol === "ETH");
-    expect(btc).toBeDefined();
-    expect(eth).toBeDefined();
-    // Max-asof row wins regardless of input order
-    expect(btc!.quantity).toBe(0.2);
-    expect(btc!.value_usd).toBe(10000);
-    expect(eth!.quantity).toBe(2.0);
-    expect(eth!.value_usd).toBe(6200);
-    // No duplicate symbols in the summary
-    const symbols = result.holdingsSummary.map((h) => h.symbol);
-    expect(new Set(symbols).size).toBe(symbols.length);
+    // The count is the length of the series the chart draws, in date order.
+    expect(result.equityDailyPoints.map((p) => p.date)).toEqual([
+      "2026-03-01",
+      "2026-03-02",
+      "2026-03-03",
+      "2026-03-04",
+      "2026-03-05",
+    ]);
   });
 });
 
@@ -1811,12 +1512,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
   const ASOF = Array.from({ length: 13 }, (_, i) =>
     `2026-05-${String(i + 1).padStart(2, "0")}`,
   );
-  // Snapshot breakdown for a single BTC holding on key-A: a gently-rising USD
-  // series → small positive daily returns.
-  const SNAP_BTC = [
-    50_000, 50_500, 51_000, 51_500, 52_000, 52_500, 53_000, 53_500, 54_000,
-    54_500, 55_000, 55_500, 56_000,
-  ];
   // Per-key csv_daily_returns for key-A: a DELIBERATELY different, larger-
   // magnitude alternating series so the blended curve / Sharpe / maxDD diverge
   // from the snapshot reconstruction. (One value per ASOF entry.)
@@ -1840,17 +1535,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         api_key_id: "key-A",
       },
     ];
-  }
-
-  function seedSnapshotsBTC() {
-    state.allocatorEquitySnapshots = ASOF.map((asof, i) => ({
-      allocator_id: "user-1",
-      asof,
-      value_usd: SNAP_BTC[i],
-      breakdown: { BTC: SNAP_BTC[i] },
-      source: "exchange_primary" as const,
-      history_depth_months: 24,
-    }));
   }
 
   function seedPerKeyDailiesA() {
@@ -1881,7 +1565,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
   it("per-key branch: every active key has dailies → stats derive from the per-key blend (NOT the snapshot reconstruction)", async () => {
     activeKeyA();
     seedHoldingsKeyA();
-    seedSnapshotsBTC();
     seedPerKeyDailiesA();
 
     const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
@@ -1913,7 +1596,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
   it("fallback branch: no per-key rows → gate=false → the honest emptyDefault (AUM preserved, all metrics null) — ENGINE-04", async () => {
     activeKeyA();
     seedHoldingsKeyA();
-    seedSnapshotsBTC();
     // No csvDailyReturns seeded → gate=false → emptyDefault branch.
 
     const { getMyAllocationDashboard, emptyLiveBaselineMetrics } =
@@ -1976,7 +1658,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         asof: ASOF[ASOF.length - 1], api_key_id: "key-B",
       },
     ];
-    seedSnapshotsBTC();
     // A distinct series for the revoked key-B so a leaked blend visibly diverges.
     const PERKEY_B = [
       -0.04, 0.05, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.02, 0.04, -0.05,
@@ -2037,7 +1718,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     ];
     // ONLY key-A holds anything → key-B's blend weight is 0.
     seedHoldingsKeyA();
-    seedSnapshotsBTC();
     const PERKEY_B = [
       -0.04, 0.05, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.02, 0.04, -0.05,
       0.03, -0.04,
@@ -2104,7 +1784,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         asof: ASOF[ASOF.length - 1], api_key_id: "key-B",
       },
     ];
-    seedSnapshotsBTC();
     const PERKEY_B = [
       -0.04, 0.05, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.02, 0.04, -0.05,
       0.03, -0.04,
@@ -2187,15 +1866,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         api_key_id: "key-B",
       },
     ];
-    // Snapshots for BOTH symbols so the fallback reconstruction is non-empty.
-    state.allocatorEquitySnapshots = ASOF.map((asof, i) => ({
-      allocator_id: "user-1",
-      asof,
-      value_usd: SNAP_BTC[i] + 20_000,
-      breakdown: { BTC: SNAP_BTC[i], ETH: 20_000 + i * 100 },
-      source: "exchange_primary" as const,
-      history_depth_months: 24,
-    }));
     // ONLY key-A has per-key dailies — key-B has none.
     seedPerKeyDailiesA();
 
@@ -2270,29 +1940,12 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     );
 
     // (4) ⛔ THE SURVIVING HALF OF D3 — NO SNAPSHOT RECONSTRUCTION IS MIXED IN.
-    // This fixture seeds `allocatorEquitySnapshots` for BOTH symbols precisely
-    // so a snapshot half would be constructible. Move those snapshots by a large
-    // factor and re-derive: if any part of the baseline curve were reconstructed
-    // from them (the half-per-key/half-snapshot stitch D3 forbade), the result
-    // would move. It must be byte-identical.
-    const snapshotsBefore = state.allocatorEquitySnapshots;
-    state.allocatorEquitySnapshots = snapshotsBefore.map((s, i) => ({
-      ...s,
-      value_usd: s.value_usd * 3 + i * 5_000,
-      breakdown: { BTC: SNAP_BTC[i] * 3, ETH: 60_000 + i * 900 },
-    }));
-    const afterSnapshotShift = await getMyAllocationDashboard("user-1");
-    state.allocatorEquitySnapshots = snapshotsBefore;
-    // Non-vacuity: the shift really was a shift (the fixture is not a no-op).
-    expect(state.allocatorEquitySnapshots[0].value_usd).not.toBe(
-      snapshotsBefore[0].value_usd * 3,
-    );
-    expect(afterSnapshotShift.liveBaselineMetrics.equity).toEqual(
-      result.liveBaselineMetrics.equity,
-    );
-    expect(afterSnapshotShift.liveBaselineMetrics.sharpe).toBe(
-      result.liveBaselineMetrics.sharpe,
-    );
+    // Phase 176 (D-02): the snapshot half is not just unmixed, it is unread. The
+    // payload issues no query against the legacy table at all, so there is no
+    // snapshot input a stitched baseline could be built from.
+    expect(
+      chainAudit.entries.filter((e) => e.table === "allocator_equity_snapshots"),
+    ).toHaveLength(0);
 
     // (5) key-B contributes NOTHING to the curve — not a fabricated ρ=1.0
     // stand-in. One contributing key means no pairs, so avgRho is null; a
@@ -2365,14 +2018,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         api_key_id: "key-B",
       },
     ];
-    state.allocatorEquitySnapshots = ASOF.map((asof, i) => ({
-      allocator_id: "user-1",
-      asof,
-      value_usd: SNAP_BTC[i] + 20_000,
-      breakdown: { BTC: SNAP_BTC[i], ETH: 20_000 + i * 100 },
-      source: "exchange_primary" as const,
-      history_depth_months: 24,
-    }));
     // Only key-A (the ELIGIBLE key) has per-key dailies. key-B is revoked.
     seedPerKeyDailiesA();
 
@@ -2418,7 +2063,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
   it("AUM is unchanged on the per-key branch (D2): summed from holdings equity contribution", async () => {
     activeKeyA();
     seedHoldingsKeyA(42_000);
-    seedSnapshotsBTC();
     seedPerKeyDailiesA();
 
     const { getMyAllocationDashboard } = await import("./queries");
@@ -2434,7 +2078,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
   it("Phase 37: populated per-key fixture exposes the per-key channel on the payload (gate true, eligible ids + series present)", async () => {
     activeKeyA();
     seedHoldingsKeyA();
-    seedSnapshotsBTC();
     seedPerKeyDailiesA();
 
     const { getMyAllocationDashboard } = await import("./queries");
@@ -2455,7 +2098,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
   it("Phase 37: byte-identity — exposing the per-key channel does NOT alter liveBaselineMetrics (Pitfall 2)", async () => {
     activeKeyA();
     seedHoldingsKeyA();
-    seedSnapshotsBTC();
     seedPerKeyDailiesA();
 
     const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
@@ -2474,7 +2116,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
   it("Phase 37: cross-tenant guard — perKeyReturnsByApiKeyId keys are a SUBSET of the allocator's own apiKeys[].id (T-37-01-01)", async () => {
     activeKeyA();
     seedHoldingsKeyA();
-    seedSnapshotsBTC();
     seedPerKeyDailiesA();
     // Adversarial: a foreign-tenant key's series is present in the raw table.
     // The allocator-scoped read (.eq("allocator_id", userId)) must filter it out,
@@ -3074,47 +2715,6 @@ const P1151_PORTFOLIO = {
   is_test: false,
 };
 
-// A clean, TRUSTWORTHY snapshot fixture (no pre_terminus_balance_unknown flag) so
-// partitionTrustworthyEquitySnapshots keeps every row — the legacy render is the
-// full fixture, making the deep-equal reference unambiguous.
-const P1151_SNAPSHOTS = [
-  {
-    allocator_id: "user-1",
-    asof: "2026-03-10",
-    value_usd: 10_000,
-    breakdown: null,
-    source: "exchange_primary" as const,
-    history_depth_months: 24,
-    pre_terminus_balance_unknown: false,
-  },
-  {
-    allocator_id: "user-1",
-    asof: "2026-03-11",
-    value_usd: 10_100,
-    breakdown: null,
-    source: "exchange_primary" as const,
-    history_depth_months: 24,
-    pre_terminus_balance_unknown: false,
-  },
-  {
-    allocator_id: "user-1",
-    asof: "2026-03-13",
-    value_usd: 10_250,
-    breakdown: null,
-    source: "exchange_primary" as const,
-    history_depth_months: 24,
-    pre_terminus_balance_unknown: false,
-  },
-];
-
-// The reference legacy rendering — exactly what queries.ts:2409 produces today
-// (the f7 forward-fill adapter over {asof, value_usd}).
-function legacyExpectedDailyPoints() {
-  return equitySnapshotsToDailyPoints(
-    P1151_SNAPSHOTS.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
-  );
-}
-
 // A DENSE derived curve per the phase-wide interfaces contract — dense so the
 // derived path's direct `curve.map` (NO forward-fill adapter) is the exact series.
 const P1151_DERIVED_CURVE = [
@@ -3161,48 +2761,30 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
   });
 
-  it("a trustworthy derived row AND legacy snapshots both present → equityDailyPoints is [] and equityHistoryState is 'rebuilding'", async () => {
+  it("a trustworthy pre-v2 derived row → equityDailyPoints is [], equityHistoryState is 'rebuilding' and snapshotCount is null", async () => {
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
     state.allocatorEquityDerived = [derivedRow(true)];
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // Positive control: both candidate sources were really present and read —
-    // the derived row was selected as today — so the empty series below is the
-    // D-02 gate, not an absent input.
+    // Positive control: the derived row was really present and read — it was
+    // selected as today — so the empty series below is the D-02 gate, not an
+    // absent input. Phase 176: no count over a held-back history (null, not 0).
     expect(result.equityCurveSource).toBe("derived");
-    expect(result.snapshotCount).toBe(3);
+    expect(result.snapshotCount).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
   });
 
-  // Review round 1 (SFH-03): the raw levels the curve is built from are the
-  // same history. Leaving them on the payload meant a future widget, debug
-  // panel or export that reached for them would bypass D-02 with no test
-  // failing. The counts derived from them are computed first and stay.
-  it("the raw snapshot levels are withheld with the curve; snapshotCount and minHistoryDepthMonths stay", async () => {
-    state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
-
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-
-    expect(result.snapshotCount).toBe(3);
-    expect(result.minHistoryDepthMonths).toBe(24);
-    expect(result.equityHistoryState).toBe("rebuilding");
-    expect(result.equitySnapshots).toEqual([]);
-  });
-
   it("the no-portfolio branch withholds the curve too (both branches spread the same producer)", async () => {
     state.portfolios = [];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    state.allocatorEquityDerived = [derivedRow(true)];
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    expect(result.snapshotCount).toBe(3);
+    expect(result.snapshotCount).toBeNull();
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
   });
@@ -3272,6 +2854,98 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     expect(result.equityHistoryRebuildReason).toBe("duplicate_account");
     expect(result.equityDailyPoints).toEqual([]);
     expect(result.equityDailyReturns).toEqual([]);
+  });
+
+  // Phase 176 (D-02, D-07, Discretion). The dashboard reads no legacy curve:
+  // the warm-up count is the day count of the DRAWN derived curve when the
+  // history is ready, and null otherwise. 40 legacy rows are seeded in every
+  // arm so a producer that still read them would report their count.
+  describe("176 D-02 / D-07: the payload reads no legacy curve; snapshotCount counts the drawn derived curve", () => {
+    const legacyRows = () =>
+      Array.from({ length: 40 }, (_, i) => ({
+        allocator_id: "user-1",
+        asof: `2026-02-${String((i % 28) + 1).padStart(2, "0")}`,
+        value_usd: 1000 + i,
+        breakdown: null,
+        source: "exchange_primary" as const,
+        history_depth_months: 3,
+        pre_terminus_balance_unknown: i % 2 === 0,
+      }));
+    const twelveDayV2Row = () => {
+      const row = v2Row();
+      const days = Array.from(
+        { length: 12 },
+        (_, i) => `2026-03-${String(i + 1).padStart(2, "0")}`,
+      );
+      row.payload.curve = days.map((date, i) => ({
+        date,
+        equity_usd: 100_000 + i * 10,
+      }));
+      row.payload.returns = days.slice(1).map((date) => ({ date, r: 0.001 }));
+      return row;
+    };
+
+    it("B-02: the read issues no .from of the legacy table", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [twelveDayV2Row()];
+      state.allocatorEquitySnapshots = legacyRows();
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      await getMyAllocationDashboard("user-1");
+
+      // Positive control: the audit saw the derived read, so an empty filter
+      // below is the absence of the legacy read, not an unhooked audit.
+      expect(
+        chainAudit.entries.some((e) => e.table === "allocator_equity_derived"),
+      ).toBe(true);
+      expect(
+        chainAudit.entries.filter((e) => e.table === "allocator_equity_snapshots"),
+      ).toHaveLength(0);
+    });
+
+    it("B-01: a ready book reports snapshotCount on the drawn derived days, not the legacy row count", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [twelveDayV2Row()];
+      state.allocatorEquitySnapshots = legacyRows();
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.equityHistoryState).toBe("ready");
+      expect(result.equityDailyPoints).toHaveLength(12);
+      expect(result.snapshotCount).toBe(12);
+    });
+
+    it("B-01b: a rebuilding book (no derived row) reports snapshotCount null, never a count over held-back history", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquitySnapshots = legacyRows();
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+      expect(result.snapshotCount).toBeNull();
+    });
+
+    it("D-07: the payload carries no equitySnapshots, minHistoryDepthMonths or equityBaselineUnknown", async () => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [identifiedKey()];
+      state.allocatorEquityDerived = [twelveDayV2Row()];
+      state.allocatorEquitySnapshots = legacyRows();
+
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result).not.toHaveProperty("equitySnapshots");
+      expect(result).not.toHaveProperty("minHistoryDepthMonths");
+      expect(result).not.toHaveProperty("equityBaselineUnknown");
+      // activeVenues stays: the factsheet markets line reads it.
+      expect(result).toHaveProperty("activeVenues");
+    });
   });
 
   // Review C2 SFH-06. A failed read of the derived row used to become
@@ -3711,44 +3385,28 @@ describe("115.1 equity display-repoint", () => {
     );
   }
 
-  it("SAFETY (never redden): no derived row → equityDailyPoints is byte-identical to the legacy snapshot render", async () => {
-    // No allocator_equity_derived row seeded — the fallback branch (and the
-    // CURRENT pre-repoint code, which does not read the table at all) must render
-    // the legacy path. An unexpected read of the table returns empty (the mock's
-    // rowsFor default / seeded-empty case), never throws.
+  it("SAFETY (never redden): no derived row → equityDailyPoints is [], the source stamps 'legacy' and snapshotCount is null", async () => {
+    // No allocator_equity_derived row seeded: the book is rebuilding
+    // (awaiting_derivation). Phase 176 (D-02): there is no legacy render to fall
+    // back to, so nothing is drawn, no source is claimed and no warm-up count is
+    // invented.
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // Positive control: this fixture WOULD render a non-empty legacy curve, so
-    // the empty series below is the D-02 gate, not an empty input.
-    expect(legacyExpectedDailyPoints().length).toBeGreaterThan(0);
-    // Phase 167.1.2 plan 11: the snapshot fallback is gone, so a book with
-    // legacy snapshots and no derived row is rebuilding and equityDailyPoints
-    // stays []. The adapter's own content remains in
-    // allocation-helpers.equity-adapter.test.ts. What this case can still fail
-    // on is the source stamp below: a producer that picked the derived branch
-    // without a row would mislabel it.
     expect(result.equityDailyPoints).toEqual([]);
-    // Neuter gap: the no-row case must ALSO stamp the source 'legacy' (only the
-    // derived/untrusted pins asserted the source before) — a repoint that
-    // defaulted to 'derived' on an absent row would mislabel the legacy render.
+    // Neuter gap: the no-row case must stamp the source 'legacy' (only the
+    // derived/untrusted pins asserted the source before): a producer that
+    // defaulted to 'derived' on an absent row would mislabel the history.
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
     ).toBe("legacy");
-
-    // These stay snapshot-sourced FOREVER (the repoint touches only the $-curve
-    // producer, never the warm-up count / history depth / baseline-unknown gate).
-    expect(result.snapshotCount).toBe(3);
-    expect(result.minHistoryDepthMonths).toBe(24);
-    expect(result.equityBaselineUnknown).toBe(false);
+    expect(result.snapshotCount).toBeNull();
   });
 
   it("RED (plan 05): a trustworthy derived row repoints equityDailyPoints onto the curve (NO forward-fill adapter) and marks the source 'derived'", async () => {
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
     state.allocatorEquityDerived = [derivedRow(true)];
 
     const { getMyAllocationDashboard } = await import("./queries");
@@ -3770,7 +3428,6 @@ describe("115.1 equity display-repoint", () => {
 
   it("RED (plan 05): an untrustworthy derived row falls back to the legacy render and marks the source 'legacy'", async () => {
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
     state.allocatorEquityDerived = [derivedRow(false)];
 
     const { getMyAllocationDashboard } = await import("./queries");
@@ -3790,7 +3447,6 @@ describe("115.1 equity display-repoint", () => {
 
   it("MALFORMED (T-115.1-18): is_trustworthy=true but curve is NOT an array → legacy fallback (no crash)", async () => {
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
     // Corrupt worker-written JSONB: trustworthy flag set, but `curve` is a
     // string. A shape-blind consumer would throw on `.map`; the shape-validate
     // gate must degrade to legacy instead.
@@ -3821,7 +3477,6 @@ describe("115.1 equity display-repoint", () => {
 
   it("MALFORMED (T-115.1-18): is_trustworthy=true but a curve point has non-finite equity_usd → legacy fallback (never NaN)", async () => {
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
     // A single NaN equity_usd must poison the whole derived curve to legacy —
     // rendering a NaN coordinate to the chart is the exact failure the shape
     // gate exists to prevent.
@@ -3861,7 +3516,6 @@ describe("115.1 equity display-repoint", () => {
     // while suppressing the legacy render (which has real data). The last-line
     // defense: an empty points array degrades to null → legacy.
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
     state.allocatorEquityDerived = [
       {
         allocator_id: "user-1",
@@ -3894,7 +3548,6 @@ describe("115.1 equity display-repoint", () => {
     // The trust gate is a strict `=== true`, so a truthy-but-non-boolean flag
     // (e.g. the string "true" from a drifted writer) must NOT be honored.
     state.portfolios = [P1151_PORTFOLIO];
-    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
     state.allocatorEquityDerived = [
       {
         allocator_id: "user-1",
@@ -4008,26 +3661,31 @@ describe("115.1 equity display-repoint", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 151 / 151-02 Task 2 (AUM-04) — the SPLIT book-entry gate
+// Phase 151 / 151-02 Task 2 (AUM-04) — the SPLIT book-entry gate, as the
+// founder rule of 2026-10-31 (D-01, Phase 176, Phase 181 absorbed) now reads it
 // ---------------------------------------------------------------------------
 /**
- * The economics under test: an allocator whose OWN book is 2 keys out of 8 must
- * be able to reach that book. The other 6 keys are MANAGER-side — they feed
- * live strategies the owner runs for other people — and they will NEVER have an
- * allocator per-key series, so the all-or-nothing `perKeyDailiesGateSatisfied`
- * is pinned false FOREVER on the founder's own PROD account.
+ * The rule under test (D-01): `allocatorEligibleApiKeyIds` is EVERY key the
+ * canonical `isPerKeyDailiesEligibleKey` predicate admits. A key a strategy
+ * uses, by `strategies.api_key_id` or by `strategy_keys`, also counts in its
+ * owner's allocator book. This is what the derive already composes
+ * (`eligible_key_predicate` selects keys with no strategy-link exclusion), so
+ * the TS reader agrees with the curve instead of telling an owner who runs
+ * strategies that they have no book. Phase 151 AUM-04 (founder census
+ * 2026-08-05) subtracted the linked keys; that rule is superseded.
  *
- * The fix is a SPLIT, not a mutation. `perKeyDailiesGateSatisfied` still has
- * five consumers, and the one that matters here selects `liveBaselineMetrics`:
+ * The SPLIT itself stays: `perKeyDailiesGateSatisfied` still has five
+ * consumers, and the one that matters here selects `liveBaselineMetrics`:
  * relaxing it in place would present a 2-of-8-key blend as "your live book" on
  * the Overview KPI strip — the exact honesty regression Phase 63 ENGINE-04
  * hardened against. So the fixtures below assert BOTH halves in the SAME
- * fixture: new gate true, old gate false, baseline still the honest emptyDefault.
+ * fixture: book gate true, old gate false, baseline still the honest
+ * emptyDefault where no key carries a series.
  */
 const AUM04_STRATEGIES = [
-  // Every row carries `api_key_id: null` ON PURPOSE. The six manager keys are
-  // reachable ONLY through `strategy_keys`, so these tests fail if the new
-  // composite read is missing, mis-scoped, or never fires.
+  // Every row carries `api_key_id: null` ON PURPOSE. The six strategy-linked
+  // keys are reachable ONLY through `strategy_keys`, so the link-independence
+  // arms below can only pass if no link read decides book membership.
   { id: "mt5-a", user_id: "user-1", api_key_id: null, status: "private" },
   { id: "mt5-b", user_id: "user-1", api_key_id: null, status: "published" },
   { id: "mt5-c", user_id: "user-1", api_key_id: null, status: "draft" },
@@ -4059,9 +3717,9 @@ function aum04Key(id: string, exchange: string) {
 }
 
 /**
- * The founder's PROD census key order, deliberately INTERLEAVED (allocator key,
- * manager keys, allocator key, manager keys) so a regression that returns a
- * prefix slice instead of a filtered subset cannot pass.
+ * The founder's PROD census key order, deliberately INTERLEAVED (unlinked key,
+ * linked keys, unlinked key, linked keys) so a regression that returns a prefix
+ * slice, or re-subtracts the linked keys, cannot pass.
  */
 const AUM04_KEYS = [
   aum04Key("k-bybit", "bybit"),
@@ -4073,6 +3731,9 @@ const AUM04_KEYS = [
   aum04Key("k-mt5-2", "mt5"),
   aum04Key("k-mt5-3", "mt5"),
 ];
+
+/** D-01: the allocator book is every eligible key, in the census order. */
+const AUM04_KEY_IDS = AUM04_KEYS.map((k) => k.id);
 
 const AUM04_DATES = Array.from(
   { length: 12 },
@@ -4090,10 +3751,10 @@ function seedSeriesFor(apiKeyIds: string[]) {
   );
 }
 
-describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)", () => {
+describe("getMyAllocationDashboard — every eligible key, linked or not, is in the owner's allocator book (D-01, founder 2026-10-31; was Phase 151 AUM-04)", () => {
   beforeEach(resetState);
 
-  it("founder census END-TO-END: 6 manager keys excluded via the strategy_keys read → book gate TRUE while the old all-or-nothing gate stays FALSE", async () => {
+  it("founder census END-TO-END: the 6 strategy-linked keys stay in the allocator book → book gate TRUE while the old all-or-nothing gate stays FALSE", async () => {
     state.portfolios = [P7_PORTFOLIO];
     state.apiKeys = AUM04_KEYS;
     state.strategies = AUM04_STRATEGIES;
@@ -4104,19 +3765,20 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // All 8 keys are eligible for the per-key basis — the manager keys are NOT
-    // filtered out by the old predicate, which is precisely why the old gate is
-    // stuck false.
+    // All 8 keys are eligible for the per-key basis, and only 2 carry a
+    // series, so the old all-or-nothing gate is false.
     expect(result.eligibleApiKeyIds).toHaveLength(8);
     expect(result.perKeyDailiesGateSatisfied).toBe(false);
 
-    // The split: the allocator can reach their own 2-key book.
-    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    // D-01: the book is all 8 eligible keys, the six that a strategy links
+    // through `strategy_keys` included. The two with a series contribute.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
+    expect(result.allocatorEligibleApiKeyIds).toEqual(result.eligibleApiKeyIds);
     expect(result.contributingApiKeyIds).toEqual(["k-bybit", "k-okx"]);
     expect(result.bookEntryGateSatisfied).toBe(true);
   });
 
-  it("partial allocator book: 2 allocator keys, 1 with a series → gate TRUE with exactly 1 contributing key", async () => {
+  it("partial allocator book: 8 eligible keys, 1 with a series → gate TRUE with exactly 1 contributing key", async () => {
     state.portfolios = [P7_PORTFOLIO];
     state.apiKeys = AUM04_KEYS;
     state.strategies = AUM04_STRATEGIES;
@@ -4126,28 +3788,71 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // The "{N} of {M}" copy downstream reads these two arrays; M counts only
-    // ALLOCATOR-eligible keys, because a manager key will never contribute.
-    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    // The "{N} of {M}" copy downstream reads these two arrays; M is every
+    // eligible key, linked or not (D-01).
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
     expect(result.contributingApiKeyIds).toEqual(["k-bybit"]);
     expect(result.bookEntryGateSatisfied).toBe(true);
   });
 
-  it("no contributing keys: allocator-eligible keys exist but none has a series → gate FALSE", async () => {
+  it("a strategy-linked key that carries the only series opens the book gate (D-01: linked is not manager-side)", async () => {
     state.portfolios = [P7_PORTFOLIO];
     state.apiKeys = AUM04_KEYS;
     state.strategies = AUM04_STRATEGIES;
     state.strategyKeys = AUM04_LINKS;
-    // A manager key HAS a series (an allocator-side backfill artefact); it must
-    // not open the gate, because it is not the allocator's own book.
+    // k-deribit-1 is reachable only through `strategy_keys`. Under the retired
+    // AUM-04 exclusion its series could not open the gate.
     seedSeriesFor(["k-deribit-1"]);
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
+    expect(result.contributingApiKeyIds).toEqual(["k-deribit-1"]);
+    expect(result.bookEntryGateSatisfied).toBe(true);
+  });
+
+  it("no contributing keys: eligible keys exist but none has a series → gate FALSE", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    // No series at all: the gate closes on the absence of a series, never on a
+    // link.
+    seedSeriesFor([]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
     expect(result.contributingApiKeyIds).toEqual([]);
     expect(result.bookEntryGateSatisfied).toBe(false);
+  });
+
+  it("T-176-09: a link never widens the book — a linked key the owner has disconnected, and a linked key id outside the owner's key set, are not in it", async () => {
+    // The set is `eligibleKeyIds`, derived from the owner's own key read. A
+    // `strategy_keys` row naming a key outside it adds nothing, and a key the
+    // eligibility predicate rejects stays out even when a strategy links it.
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [
+      aum04Key("k-live", "bybit"),
+      { ...aum04Key("k-gone", "okx"), disconnected_at: "2026-05-01T00:00:00Z" },
+    ];
+    state.strategies = [
+      { id: "s-gone", user_id: "user-1", api_key_id: "k-gone", status: "private" },
+      { id: "s-foreign", user_id: "user-1", api_key_id: null, status: "private" },
+    ];
+    state.strategyKeys = [
+      { owner_id: "user-1", strategy_id: "s-foreign", api_key_id: "k-foreign" },
+    ];
+    seedSeriesFor(["k-live", "k-gone", "k-foreign"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.eligibleApiKeyIds).toEqual(["k-live"]);
+    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-live"]);
+    expect(result.contributingApiKeyIds).toEqual(["k-live"]);
   });
 
   it("!portfolio branch: a fresh allocator gets [] / [] / false — never undefined", async () => {
@@ -4183,15 +3888,24 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
   // allocator's live book exists. A pin whose subject is "we changed nothing"
   // cannot see that; these two arms pin the contract instead.
   //
-  // The fixture gives THREE keys a series — the allocator's two AND one
-  // manager-side key — with three DIFFERENT return patterns, and gives all three
-  // holdings. That is what makes the negative below discriminating: a role-blind
-  // baseline (built from `eligibleApiKeyIds`) would fold the manager key's series
+  // The fixture gives THREE eligible keys a series — two unlinked and one a
+  // strategy links — with three DIFFERENT return patterns, and gives all three
+  // holdings. It also carries a FOURTH key with a stale series and a holding: a
+  // key the owner disconnected, which keeps its rows for audit continuity but
+  // is not eligible. That is what makes the negative below discriminating: a
+  // baseline built from the raw per-key map would fold the stale key's series
   // into "your live book", and with identical patterns it would have been
-  // indistinguishable.
+  // indistinguishable. (Before D-01 the odd one out was the linked key; a
+  // linked key is now part of the book, so the stale key plays that part.)
   // ---------------------------------------------------------------------------
 
-  /** Distinct per-key patterns, so the contributing blend and the role-blind
+  /** A key the owner disconnected: ineligible, yet its rows persist. */
+  const AUM04_GONE_KEY = {
+    ...aum04Key("k-gone", "okx"),
+    disconnected_at: "2026-05-10T00:00:00Z",
+  };
+
+  /** Distinct per-key patterns, so the contributing blend and the raw-map
    *  blend cannot coincide by construction. */
   function seedDistinctSeries(patterns: Record<string, number[]>) {
     state.csvDailyReturns = Object.entries(patterns).flatMap(
@@ -4220,24 +3934,27 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     };
   }
 
-  /** The founder's shape: allocator keys k-bybit + k-okx contribute, the
-   *  manager-side k-mt5-1 has a series and holdings but is NOT the book. */
+  /** The founder's shape: k-bybit, k-okx and the strategy-linked k-mt5-1 all
+   *  contribute (D-01); the disconnected k-gone has a series and holdings but is
+   *  NOT the book. */
   function seedSplitGateFixture() {
     state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = AUM04_KEYS;
+    state.apiKeys = [...AUM04_KEYS, AUM04_GONE_KEY];
     state.strategies = AUM04_STRATEGIES;
     state.strategyKeys = AUM04_LINKS;
     state.allocatorHoldings = [
       aum04Holding("k-bybit", "BTC", 50_000),
       aum04Holding("k-okx", "ETH", 30_000),
       aum04Holding("k-mt5-1", "SOL", 25_000),
+      aum04Holding("k-gone", "DOGE", 20_000),
     ];
     seedDistinctSeries({
       "k-bybit": [0.012, -0.004, 0.009, -0.002, 0.014, -0.006],
       "k-okx": [-0.003, 0.011, -0.007, 0.016, -0.001, 0.008],
-      // Deliberately the ODD one out — a manager-side key whose series would
-      // visibly distort "your live book" if it were ever folded in.
-      "k-mt5-1": [-0.05, 0.06, -0.045, 0.055, -0.04, 0.065],
+      "k-mt5-1": [0.021, -0.013, 0.017, -0.009, 0.024, -0.011],
+      // Deliberately the ODD one out — a disconnected key whose stale series
+      // would visibly distort "your live book" if it were ever folded in.
+      "k-gone": [-0.05, 0.06, -0.045, 0.055, -0.04, 0.065],
     });
   }
 
@@ -4252,10 +3969,11 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const result = await getMyAllocationDashboard("user-1");
 
     // (1) Pre-condition: this is the fixture where the two gates DISAGREE —
-    // exactly the partial-book population the split exists to admit.
+    // exactly the partial-book population the split exists to admit. The
+    // strategy-linked k-mt5-1 is part of the book (D-01), so it contributes.
     expect(result.bookEntryGateSatisfied).toBe(true);
     expect(result.perKeyDailiesGateSatisfied).toBe(false);
-    expect(result.contributingApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.contributingApiKeyIds).toEqual(["k-bybit", "k-okx", "k-mt5-1"]);
     expect(result.eligibleApiKeyIds).toHaveLength(8);
 
     // (2) THE AGREEMENT, asserted against the payload's OWN contributing set
@@ -4289,57 +4007,43 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
       emptyLiveBaselineMetrics(result.holdingsSummary),
     );
 
-    // (4) DISCRIMINATING NEGATIVE: it is NOT the role-blind blend over every
-    // eligible key. `contributingApiKeyIds` is a strict subset of
-    // `eligibleApiKeyIds` here, and the difference is the manager-side k-mt5-1 —
-    // whose money is in the AUM (custody counts it) but whose returns are not
-    // "your live book". Without this arm, (2) would still pass on a baseline
-    // that quietly re-admitted the manager keys.
-    const roleBlind = liveBaselineMetricsFromPerKeyDailies(
+    // (4) DISCRIMINATING NEGATIVE: it is NOT the blend over the raw per-key map.
+    // The payload map carries the disconnected k-gone's stale series, which is
+    // not in `contributingApiKeyIds`. Without this arm, (2) would still pass on
+    // a baseline that quietly re-admitted a key the owner disconnected.
+    expect(result.perKeyReturnsByApiKeyId).toHaveProperty("k-gone");
+    expect(result.contributingApiKeyIds).not.toContain("k-gone");
+    const rawMap = liveBaselineMetricsFromPerKeyDailies(
       result.holdingsSummary,
       result.perKeyReturnsByApiKeyId,
     );
-    expect(roleBlind.sharpe).not.toBeNull(); // non-vacuity: a real rival curve
-    expect(result.liveBaselineMetrics.sharpe).not.toBe(roleBlind.sharpe);
-    expect(result.liveBaselineMetrics.equity).not.toEqual(roleBlind.equity);
+    expect(rawMap.sharpe).not.toBeNull(); // non-vacuity: a real rival curve
+    expect(result.liveBaselineMetrics.sharpe).not.toBe(rawMap.sharpe);
+    expect(result.liveBaselineMetrics.equity).not.toEqual(rawMap.equity);
 
-    // (5) Review round 2 F1 — ⛔ THIS ARM FLIPPED, and the flip IS the fix.
-    //
-    // It used to read: "Pitfall 5 restated: AUM is CUSTODY (all three keys'
-    // holdings, 50k + 30k + 25k hand-computed), not the modelled subset … no
-    // copy may claim the AUM is 'from these N keys'." — expecting 105,000.
-    //
-    // That made ONE object describe TWO key sets. `aum` and the DOLLAR drawdown
-    // series (`(p.value + 1) × totalAum`) covered all three keys, while
-    // `ytdTwr` / `sharpe` / `maxDd` / `avgRho` / `equity` covered only the two
-    // contributing ones — the mixed-basis presentation the `bookEntryGateSatisfied`
-    // docblock forbids in so many words ("a 2-of-8-key blend presented as your
-    // live book on the Overview KPI strip"), committed inside a single payload
-    // field instead of across two.
-    //
-    // Hand-computed from the fixture's own holdings, NOT re-derived from the
-    // helper: the contributing keys are k-bybit ($50,000) and k-okx ($30,000),
-    // so the baseline's AUM is 50,000 + 30,000 = 80,000. The manager-side
-    // k-mt5-1's $25,000 is custody's business — the Holdings tab and the
-    // gate=false `emptyLiveBaselineMetrics` arm still report it — but it is not
-    // part of the book whose Sharpe this object states.
-    expect(result.liveBaselineMetrics.aum).toBe(80_000);
+    // (5) Review round 2 F1 — one object, one key set. Hand-computed from the
+    // fixture's own holdings, NOT re-derived from the helper: the contributing
+    // keys are k-bybit ($50,000), k-okx ($30,000) and the strategy-linked
+    // k-mt5-1 ($25,000), so the baseline's AUM is 105,000. The disconnected
+    // k-gone's $20,000 is custody's business — `holdingsSummary` still reports
+    // it — but it is not part of the book whose Sharpe this object states.
+    expect(result.liveBaselineMetrics.aum).toBe(105_000);
     // Non-vacuity + the discriminating negative in one line: the custody total
     // is a genuinely different number, so this cannot pass under both bases.
     expect(
       result.holdingsSummary.reduce((s, h) => s + h.value_usd, 0),
-    ).toBe(105_000);
-    expect(result.liveBaselineMetrics.aum).not.toBe(105_000);
+    ).toBe(125_000);
+    expect(result.liveBaselineMetrics.aum).not.toBe(125_000);
   });
 
   it("AUM-04 [6] (the unchanged half): with the book-entry gate FALSE, liveBaselineMetrics is STILL the honest emptyDefault", async () => {
     // This half of the contract is untouched by the fix and still worth pinning:
     // a null curve is the HONEST answer only when there is no book to describe.
-    // Here the allocator's own two keys carry no series at all — the only series
-    // belongs to a manager-side key, which must not open the gate — so there is
+    // Here every eligible key carries no series at all — the only series
+    // belongs to a disconnected key, which must not open the gate — so there is
     // nothing to blend and the KpiStrip's em-dashes are the truth.
     state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = AUM04_KEYS;
+    state.apiKeys = [...AUM04_KEYS, AUM04_GONE_KEY];
     state.strategies = AUM04_STRATEGIES;
     state.strategyKeys = AUM04_LINKS;
     state.allocatorHoldings = [
@@ -4347,7 +4051,7 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
       aum04Holding("k-mt5-1", "SOL", 25_000),
     ];
     seedDistinctSeries({
-      "k-mt5-1": [-0.05, 0.06, -0.045, 0.055, -0.04, 0.065],
+      "k-gone": [-0.05, 0.06, -0.045, 0.055, -0.04, 0.065],
     });
 
     const { getMyAllocationDashboard, emptyLiveBaselineMetrics } = await import(
@@ -4356,8 +4060,8 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const result = await getMyAllocationDashboard("user-1");
 
     // Pre-condition: the gate really is closed, and NOT because there are no
-    // allocator keys — there are two; they simply carry nothing to model.
-    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    // allocator keys — there are eight; they simply carry nothing to model.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
     expect(result.contributingApiKeyIds).toEqual([]);
     expect(result.bookEntryGateSatisfied).toBe(false);
 
@@ -4372,35 +4076,27 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
   });
 
   // -------------------------------------------------------------------------
-  // 151 test-analyzer gap 2 — THE DEGRADATION PATH.
+  // 151 test-analyzer gap 2 — THE DEGRADATION PATH, as D-01 leaves it.
   //
-  // Both role-discriminator reads are deliberately NON-FATAL (never assertOk'd):
-  // a transient failure must not blank a working dashboard, and `strategy_keys`
-  // can be absent from the PostgREST schema cache on a pre-migration
-  // environment. On error the link set falls back to EMPTY, which biases keys
-  // toward ALLOCATOR eligibility — the failure mode is an allocator who can
-  // still reach their book, not one locked out of it. That fail-OPEN choice is
-  // IN-08, logged and accepted; what was missing is that nothing PINNED it.
-  //
-  // The stake is a data-integrity WRITE, not just a render: with the link set
-  // empty the manager keys (which have per-key series — that is what makes them
-  // manager-side) become both allocator-eligible AND contributing, so the book
-  // gate flips TRUE and `memberKeyIdsForSave = contributingApiKeyIds` stamps
-  // them into a saved scenario's persisted membership. For the founder (6 of 8
-  // keys manager-side) a transient read failure silently changes what a saved
-  // scenario claims to model.
-  //
-  // Without these pins a future refactor could add an `assertOk` (blanking the
-  // dashboard) or drop the capture (making the fault invisible) with no red test.
+  // Both link reads stay NON-FATAL (never assertOk'd): a transient failure must
+  // not blank a working dashboard, and `strategy_keys` can be absent from the
+  // PostgREST schema cache on a pre-migration environment. They no longer feed
+  // book membership: `allocatorEligibleApiKeyIds` is `eligibleKeyIds` whether
+  // the reads succeed or fail, so a read failure cannot change what a saved
+  // scenario's persisted membership (`memberKeyIdsForSave =
+  // contributingApiKeyIds`) claims to model. What the reads still feed is the
+  // reconstruct note, which names nothing when the link source is unreadable.
+  // These pins keep the failure visible and non-fatal: a future refactor that
+  // added an `assertOk` (blanking the dashboard) or dropped the capture (making
+  // the fault invisible) goes red here.
   // -------------------------------------------------------------------------
-  it("degradation (strategy_keys read errors): the dashboard still returns, the gate biases OPEN, and the fault is reported to Sentry", async () => {
+  it("degradation (strategy_keys read errors): the dashboard still returns, book membership is unchanged, and the fault is reported to Sentry", async () => {
     state.portfolios = [P7_PORTFOLIO];
     state.apiKeys = AUM04_KEYS;
     state.strategies = AUM04_STRATEGIES;
     state.strategyKeys = AUM04_LINKS;
     seedSeriesFor(["k-bybit", "k-okx", "k-mt5-1", "k-deribit-1"]);
-    // The link table is unreadable — the manager keys become invisible AS
-    // manager keys.
+    // The link table is unreadable.
     state.tableErrors["strategy_keys"] = {
       message: "PGRST002 schema cache lookup failed (test)",
     };
@@ -4418,13 +4114,11 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     expect(result).toHaveProperty("bookEntryGateSatisfied");
     expect(result.eligibleApiKeyIds).toHaveLength(8);
 
-    // (b) The DOCUMENTED bias: with no link set, every eligible key reads as an
-    // allocator key. Pinning the exact set (not just the boolean) is what makes
-    // the fail-open direction explicit and reviewable — flipping to fail-CLOSED
-    // would empty these and go red here rather than silently in prod.
-    expect(result.allocatorEligibleApiKeyIds).toHaveLength(8);
-    // Two of these (k-deribit-1, k-mt5-1) are MANAGER keys re-admitted by the
-    // degradation. Order follows AUM04_KEYS' deliberately interleaved census.
+    // (b) Membership does not depend on the link reads: the failing run holds
+    // the same book as the healthy run (the control below pins the healthy
+    // one). Pinning the exact set, in census order, is what stops a refactor
+    // from making the book depend on a read again.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
     expect(result.contributingApiKeyIds).toEqual([
       "k-bybit",
       "k-deribit-1",
@@ -4443,7 +4137,18 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
         }),
       }),
     );
-    expect(errSpy).toHaveBeenCalled();
+    // The log names what the reads still feed, not a book-gate degradation the
+    // reads no longer cause.
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "strategy-link read failed (the reconstruct note names nothing)",
+      ),
+      expect.anything(),
+    );
+    expect(errSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("book gate degrades"),
+      expect.anything(),
+    );
 
     captureSpy.mockRestore();
     errSpy.mockRestore();
@@ -4469,7 +4174,7 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const result = await getMyAllocationDashboard("user-1");
 
     expect(result).toHaveProperty("bookEntryGateSatisfied");
-    expect(result.allocatorEligibleApiKeyIds).toHaveLength(8);
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
     expect(captureSpy).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -4477,6 +4182,12 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
           reason: "role_discriminator_read_failed",
         }),
       }),
+    );
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "strategy-link read failed (the reconstruct note names nothing)",
+      ),
+      expect.anything(),
     );
 
     captureSpy.mockRestore();
@@ -4499,8 +4210,8 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // The healthy census: manager keys ARE excluded.
-    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    // The healthy census: the same book as under a read failure (D-01).
+    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
     expect(
       captureSpy.mock.calls.some(
         ([, opts]) =>
@@ -4514,33 +4225,22 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
 });
 
 // ---------------------------------------------------------------------------
-// Phase 151 review [4] / I5 — OWN CAPITAL IS NOT A MANAGER ROLE
+// Phase 151 review [4] / I5, re-stated by D-01 — THE CAPITAL MARK DOES NOT DECIDE
+// BOOK MEMBERSHIP
 // ---------------------------------------------------------------------------
 /**
- * THE GAP THIS CLOSES. The manager-role discriminator subtracts every
- * strategy-linked key from the allocator's own book, with ONE exemption:
- * `.filter((s) => !isAllocatable(s.capital_ownership))` at the
- * `deriveStrategyLinkedKeyIds` call site. Deleting that line left the whole
- * 113-test file green — the classic all-fixtures-identical vacuity. Every
- * `strategies` fixture above omits `capital_ownership`, so `isAllocatable`
- * returned false for every seeded row and the filter was a no-op in every
- * scenario the suite could reach.
+ * History: Phase 151 AUM-04 subtracted every strategy-linked key from the
+ * allocator's book, and review [4] exempted `own_capital` strategies so an
+ * allocator who declared their money their own was not locked out of it.
+ * The founder rule of 2026-10-31 (D-01) removes the subtraction altogether:
+ * every eligible key is in its owner's allocator book, so the mark no longer
+ * decides anything here. The exemption's tests are re-stated as the rule that
+ * replaced it. The mark still means what Phase 150 says it means elsewhere.
  *
- * THE ECONOMICS IT PROTECTS (why this is not a style test). An allocator
- * finalizes a key through the wizard and answers "my own capital". That writes
- * a `strategies` row, which lands the key in `strategyLinkedKeyIds`, which
- * subtracts it from `allocatorEligibleApiKeyIds`. If it was their only
- * series-carrying key, `bookEntryGateSatisfied` flips false and the composer
- * tells them they have no book — the allocator locked out of their own capital,
- * by the act of declaring that it is theirs. That is the exact lockout AUM-04
- * exists to fix, re-entered through the other phase on this branch.
- *
- * `own_capital` is the STRONGEST available statement that a key is not
- * manager-side, so it must survive the subtraction. The two non-allocatable
- * states are the controls, and they are distinct on purpose: `team_review` is
- * an affirmative "this is a team's capital" and `null` is "never asked" (the
- * pre-150 population, where inferring a role from silence is the fabrication
- * the nullable-no-default column was chosen to avoid). Both stay manager-side.
+ * The four keys below cover both link forms (direct `strategies.api_key_id` and
+ * composite `strategy_keys`) and all three states of the mark: `own_capital`,
+ * `team_review` and `null` (never asked). Each must be in the book, and a
+ * garbled value off the untyped `text` column must change nothing.
  */
 const OWN_CAPITAL_KEYS = [
   // Interleaved so a regression returning a prefix slice cannot pass.
@@ -4590,7 +4290,7 @@ const OWN_CAPITAL_LINKS = [
   { owner_id: "user-1", strategy_id: "own-composite", api_key_id: "k-own-composite" },
 ];
 
-describe("getMyAllocationDashboard — own-capital keys stay in the allocator's own book (review [4])", () => {
+describe("getMyAllocationDashboard — the owner's allocator book holds every eligible key whatever its capital mark (D-01)", () => {
   beforeEach(resetState);
 
   function seedOwnCapitalCensus() {
@@ -4600,73 +4300,51 @@ describe("getMyAllocationDashboard — own-capital keys stay in the allocator's 
     state.strategyKeys = OWN_CAPITAL_LINKS;
   }
 
-  it("an own_capital strategy does NOT evict its key — via the direct link AND via strategy_keys — while team_review and unmarked both do", async () => {
+  const OWN_CAPITAL_KEY_IDS = OWN_CAPITAL_KEYS.map((k) => k.id);
+
+  it("own_capital (direct link and strategy_keys), team_review and unmarked strategies all leave their key in the book, in key order", async () => {
     seedOwnCapitalCensus();
     seedSeriesFor(["k-own-direct", "k-own-composite", "k-team", "k-unmarked"]);
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // All four keys clear the per-key basis — the discriminator, not
-    // eligibility, is what separates them.
     expect(result.eligibleApiKeyIds).toHaveLength(4);
-
-    // The exemption, in key order: the two own-capital keys survive.
-    expect(result.allocatorEligibleApiKeyIds).toEqual([
-      "k-own-direct",
-      "k-own-composite",
-    ]);
-    // Stated as its own fact rather than as the complement: the controls are
-    // subtracted, and a filter that exempted EVERYTHING would pass the
-    // assertion above while failing here.
-    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-team");
-    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-unmarked");
-    // Each seeded key really does carry a series, so the split above is the
-    // discriminator's doing and not a missing-series artefact.
-    expect(result.contributingApiKeyIds).toEqual([
-      "k-own-direct",
-      "k-own-composite",
-    ]);
-  });
-
-  it("the LOCKOUT: an own-capital key that is the allocator's ONLY series-carrying key still opens the book gate", async () => {
-    // The founder-facing failure in full. Without the exemption the sole
-    // series-carrying key is subtracted, `contributingApiKeyIds` empties, the
-    // gate flips false, and the composer tells an allocator with live capital
-    // that they have no book.
-    seedOwnCapitalCensus();
-    seedSeriesFor(["k-own-direct"]);
-
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-
-    expect(result.contributingApiKeyIds).toEqual(["k-own-direct"]);
+    // Interleaved fixture order is the order of the book: a re-introduced
+    // subtraction, or a prefix slice, cannot pass.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(OWN_CAPITAL_KEY_IDS);
+    // Each seeded key really does carry a series, so the membership above is
+    // the rule's doing and not a missing-series artefact.
+    expect(result.contributingApiKeyIds).toEqual(OWN_CAPITAL_KEY_IDS);
     expect(result.bookEntryGateSatisfied).toBe(true);
   });
 
-  it("control: flip that SAME sole key's mark to team_review and the gate closes — the exemption reads the mark, not the row's existence", async () => {
-    // Non-vacuity for the test above. If the gate stayed true here, the
-    // exemption would be exempting every strategy-linked key and the
-    // discriminator would be doing nothing at all.
-    seedOwnCapitalCensus();
-    state.strategies = OWN_CAPITAL_STRATEGIES.map((s) =>
-      s.id === "own-direct" ? { ...s, capital_ownership: "team_review" } : s,
-    );
-    seedSeriesFor(["k-own-direct"]);
+  it.each([
+    ["k-own-direct", "own_capital"],
+    ["k-own-composite", "own_capital"],
+    ["k-team", "team_review"],
+    ["k-unmarked", "unmarked (null)"],
+  ])(
+    "the LOCKOUT: %s (%s) as the allocator's ONLY series-carrying key still opens the book gate",
+    async (keyId) => {
+      // The founder-facing failure in full. A subtraction of the sole
+      // series-carrying key empties `contributingApiKeyIds`, closes the gate,
+      // and the composer tells an allocator with live capital that they have no
+      // book. Under D-01 that cannot depend on the capital mark.
+      seedOwnCapitalCensus();
+      seedSeriesFor([keyId]);
 
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
 
-    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-own-direct");
-    expect(result.contributingApiKeyIds).toEqual([]);
-    expect(result.bookEntryGateSatisfied).toBe(false);
-  });
+      expect(result.contributingApiKeyIds).toEqual([keyId]);
+      expect(result.bookEntryGateSatisfied).toBe(true);
+    },
+  );
 
-  it("fails CLOSED on a garbled mark off the untyped text column", async () => {
-    // `capital_ownership` is `text` in Postgres. The exemption is spelled with
-    // the shared `isAllocatable` predicate precisely so a near-miss value
-    // cannot unlock it; an ad-hoc `!== "own_capital"` re-spelling would fail
-    // OPEN for one of these and quietly re-admit a manager key to the book.
+  it("a garbled mark off the untyped text column changes nothing: the book does not read the mark", async () => {
+    // `capital_ownership` is `text` in Postgres. The book no longer reads it, so
+    // a near-miss value neither evicts nor re-admits a key.
     seedOwnCapitalCensus();
     state.strategies = OWN_CAPITAL_STRATEGIES.map((s) =>
       s.id === "own-direct" ? { ...s, capital_ownership: "Own_Capital" } : s,
@@ -4676,8 +4354,8 @@ describe("getMyAllocationDashboard — own-capital keys stay in the allocator's 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-own-direct");
-    expect(result.bookEntryGateSatisfied).toBe(false);
+    expect(result.allocatorEligibleApiKeyIds).toEqual(OWN_CAPITAL_KEY_IDS);
+    expect(result.bookEntryGateSatisfied).toBe(true);
   });
 });
 
