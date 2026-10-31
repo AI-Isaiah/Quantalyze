@@ -214,6 +214,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — complete 2026-10-29 (v0.133.9.1 #1148, v0.133.9.2 #1149; booked 2026-10-28 from OKXANCHOR plan 05; data-integrity; SC-3 deployed re-read: a4 anchored on the 0.02 tolerance, residual -0.0138)
 - [x] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up") (shipped v0.133.10.0 #1151; closed 2026-10-29: SC-1 and SC-2 met live, a6 funded by sub-account transfers; SC-3 gate stays `unmeasured`, cause `neither_older_365d`; nothing rebuilt)
 - [ ] **Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book** — booked 2026-10-31 from MARKSOURCE plan 08 first-night reading (a) (founder "Book a phase, close plan 08 (Recommended)"); 3 allocators holding positions have no equity curve because their keys are strategy-linked; data integrity, user-facing
+- [ ] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6673,6 +6674,25 @@ Evidence (PROD 2026-10-31, counts only): 7 allocators hold non-Deribit positions
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired
+
+**Goal:** Stored allocator equity curves carry no one-day spike or dip that comes from a refresh or reconstruct leaving positions out of the day's total: every such day is found by a census and repaired through the product's own path, or kept and named where no path reaches it.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-10-31 from MARKSOURCE 167.2.1.1.1.1 plan 14 (founder 2026-10-31 "Book a repair phase, close 14 (Recommended)"). Data integrity and user-facing: each such day draws a one-day crash or jump on the allocator's equity and drawdown charts.
+Evidence (PROD 2026-10-31, read-only, ratios only): 22 stored `allocator_equity_snapshots` days across 4 books sit more than 20% below or above both neighbours. On 2026-10-15 one OKX book's refresh left BTC out of the total (0.041 of the day before, 0.039 of the day after), and the same book has a BTC-only dip on 2026-05-15. Three books lose every perpetual position on 2026-05-29, 2026-06-01 and 2026-06-03, with a matching jump on 2026-06-02. One book alternates between exchange accounts present and missing on 2026-09-11 to 2026-09-17, and another dips on 2026-10-05. All of these were written before MARKSOURCE's price-gap fix (D-06), which holds or names such a day instead of writing it. The MARKSOURCE Task 3 reading on 2026-10-31 found 0 price-gap rows on the new clock.
+
+**Success Criteria** (what must be TRUE):
+1. A census, committed as a read-only SQL file, lists every stored one-day spike or dip with its cause class (positions missing from the breakdown, an account missing, or no breakdown difference), in counts and ratios only.
+2. Each listed day is repaired through the product's own recompute path, or kept and named with the reason no path reaches it. No day is hand-edited.
+3. A test goes RED when a day's total leaves out a holding that the same day's holdings rows carry.
+4. After the repair, a PROD re-run of the census shows 0 unexplained spike days.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -6974,6 +6994,7 @@ kept verbatim.
 | 179 OKXBILLSCHAIN | 7/7 | Complete — v0.133.9.0 #1147, v0.133.9.1 #1148, v0.133.9.2 #1149; the OKX bills oracle's close passes within 1e-12 of the larger balance, the opening tolerance is 0.02 (founder D-08); post-deploy: a4 anchored (`opening_check=measured`, residual -0.0138, 0.02 deployed), nothing enqueued | 2026-10-29 |
 | 180 BYBITFUNDING | 8/8 | Complete — v0.133.10.0 #1151; the probe and the rebuild read the Bybit Unified edge and page by cursor; post-deploy: a6 `explained` (funded by universal transfers, 8 rows), Unified state `read`, `bybit-transfers: unmeasured (a6)` cause `neither_older_365d`; nothing rebuilt | 2026-10-29 |
 | 181 SHAREDKEYS | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 08 | - |
+| 182 SPIKEREPAIR | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 14 | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
