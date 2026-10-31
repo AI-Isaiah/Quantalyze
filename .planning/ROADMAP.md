@@ -7018,6 +7018,7 @@ kept verbatim.
 | 180 BYBITFUNDING | 8/8 | Complete — v0.133.10.0 #1151; the probe and the rebuild read the Bybit Unified edge and page by cursor; post-deploy: a6 `explained` (funded by universal transfers, 8 rows), Unified state `read`, `bybit-transfers: unmeasured (a6)` cause `neither_older_365d`; nothing rebuilt | 2026-10-29 |
 | 181 SHAREDKEYS | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 08 | - |
 | 182 SPIKEREPAIR | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 14 | - |
+| 183 DUPCOUNT | 0/0 | Not started — booked 2026-10-31 from the Sentry check (QUANTALYZE-2H) | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
