@@ -1,4 +1,12 @@
 -- ============================================================================
+-- VAC-04 ACKNOWLEDGEMENT: the PROD body this CREATE OR REPLACE overwrites is
+-- the 20260426131718 definition (it equals the committed baseline snapshot, and
+-- main's baseline-content-drift gate reads no drift for it). Overwriting it is
+-- intended.
+--
+-- prod-body-ack: ad8c1468b5a313d2bf724eace91093b12c8e7d6aab199d277f0c34bb82ed49b4
+--
+-- ============================================================================
 -- bridge_outcome_holding_branch_derived: the holding branch of
 -- public.compute_bridge_outcome_deltas() measures a bridge outcome on the ACCOUNT's
 -- derived equity, and every stored holding outcome is recomputed once on that basis
