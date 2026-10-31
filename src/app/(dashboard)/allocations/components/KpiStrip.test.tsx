@@ -214,7 +214,7 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
     ).toBeNull();
   });
 
-  it("Venue-specific warmup precedence beats Avg |ρ| pending copy", () => {
+  it("Generic warmup precedence: default copy beats Avg |ρ| pending copy", () => {
     render(
       <KpiStrip
         analytics={null}
@@ -222,32 +222,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         timeframe="ALL"
         snapshotCount={10}
         allKeysStale={false}
-        minHistoryDepthMonths={3}
-        activeVenues={["OKX"]}
-      />,
-    );
-    // Venue-specific copy renders on null-value cells (YTD, Sharpe,
-    // Max DD, Avg |ρ| — AUM is exempt per Phase 07 / 07-03 f9).
-    expect(
-      screen.getAllByText("Only 3 months of history available on OKX")
-        .length,
-    ).toBeGreaterThanOrEqual(1);
-    // Pending copy must NOT appear when warmup precedence wins.
-    expect(
-      screen.queryByText("Requires per-holding correlation data (pending)"),
-    ).toBeNull();
-  });
-
-  it("Generic warmup precedence (minHistoryDepthMonths > 3): default copy beats Avg |ρ| pending copy", () => {
-    render(
-      <KpiStrip
-        analytics={null}
-        metrics={EMPTY_METRICS}
-        timeframe="ALL"
-        snapshotCount={10}
-        allKeysStale={false}
-        minHistoryDepthMonths={24}
-        activeVenues={["Binance"]}
       />,
     );
     expect(

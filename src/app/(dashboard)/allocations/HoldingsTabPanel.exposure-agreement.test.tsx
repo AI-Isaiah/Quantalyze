@@ -298,10 +298,7 @@ async function readBook(world: World) {
     }));
   const phase07 = derivePhase07Fields(
     apiKeys,
-    [],
-    0,
-    res.data as Parameters<typeof derivePhase07Fields>[3],
-    false,
+    res.data as Parameters<typeof derivePhase07Fields>[1],
     null,
     res.partialReads,
     res.accountByKey,
@@ -316,7 +313,6 @@ function renderPanel(book: { apiKeys: unknown[]; phase07: DerivedFields }) {
     apiKeys: book.apiKeys,
     alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
     outcomes: [],
-    equitySnapshots: [],
     holdingsSummary: book.phase07.holdingsSummary,
     partialPositionReads: book.phase07.partialPositionReads,
     hasConnectedKeys: book.phase07.hasConnectedKeys,
@@ -325,7 +321,6 @@ function renderPanel(book: { apiKeys: unknown[]; phase07: DerivedFields }) {
     lastSyncAt: null,
     hasSyncing: false,
     equityDailyPoints: [],
-    minHistoryDepthMonths: null,
     activeVenues: [],
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},

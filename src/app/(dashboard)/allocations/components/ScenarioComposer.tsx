@@ -962,8 +962,6 @@ export function ScenarioComposer({
     equityDailyPoints,
     snapshotCount,
     allKeysStale,
-    minHistoryDepthMonths,
-    activeVenues,
     // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
     equityHistoryState,
     // Review C3 SFH-C3-01: why the history is withheld, classed by the
@@ -5813,8 +5811,6 @@ export function ScenarioComposer({
           analytics={{}}
           snapshotCount={snapshotCount}
           allKeysStale={allKeysStale}
-          minHistoryDepthMonths={minHistoryDepthMonths}
-          activeVenues={activeVenues}
         />
       </div>
       </div>

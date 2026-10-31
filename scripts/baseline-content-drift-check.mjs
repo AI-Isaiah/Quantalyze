@@ -260,8 +260,21 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply); the finding is
  * EXPECTED until that re-dump. Raising this floor records the function joining the corpus; it does
  * NOT suppress that finding.
+ *
+ * MOVED 2026-10-31 (Phase 176 LEGACYRETIRE plan 02), 134 -> 136: two ADDITIONS, not a removal.
+ * `public.derived_account_return_over(uuid, date, integer)` and
+ * `public.reset_holding_bridge_outcomes_to_derived_basis()` enter the chain via forward migration
+ * 20261102120000_bridge_outcome_holding_branch_derived.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 136 — MATCH 130,
+ * DRIFT 4, SNAPSHOT_MISSING 2`. The two SNAPSHOT_MISSING findings are
+ * `derived_account_return_over/3` and `reset_holding_bridge_outcomes_to_derived_basis/0`, whose
+ * migration is not on PROD yet (recorded as dated `snapshot-only` rows in NAME_SET_RATCHET in
+ * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply). The one new DRIFT
+ * finding is `compute_bridge_outcome_deltas/0`, which the same migration re-bases: the committed
+ * dump still carries the per-symbol body. All three are EXPECTED until that re-dump. Raising this
+ * floor records the functions joining the corpus; it does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 134;
+export const COMPARED_FLOOR = 136;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

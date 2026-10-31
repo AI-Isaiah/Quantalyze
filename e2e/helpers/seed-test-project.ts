@@ -824,10 +824,10 @@ export async function seedStrategyWithHistory(opts: {
  *   - allocator_holdings (20260420073003): api_key_id NOT NULL → the key above;
  *     an enforce_allocator_holdings_owner_coherence trigger asserts
  *     allocator_id === api_keys.user_id, so both use the SAME allocatorUserId.
- *   - allocator_equity_snapshots (20260420213754): allocator_id + asof +
- *     value_usd NOT NULL; pre_terminus_balance_unknown omitted (NULL = trusted),
- *     source defaults 'exchange_primary'. The dashboard reads these directly
- *     (RLS owner-select on allocator_id = auth.uid()).
+ *   - allocator_equity_derived: kind 'equity_curve', the version-2 trustworthy
+ *     row the Overview draws and whose day count is the warm-up count. The
+ *     legacy allocator_equity_snapshots table is no longer seeded (176 D-02):
+ *     the dashboard does not read it.
  *
  * Deterministic curve (no RNG) so the chart renders meaningful variation
  * without flakiness — same sin()-drift idiom as seedStrategyWithHistory.
@@ -854,7 +854,7 @@ export async function seedAllocatorBook(opts: {
    * Phase 170.1.3 gap closure (G-01, G-02): a constant daily growth for the equity level, so the
    * Overview's end-of-year value label prints six integer digits and a window that starts on
    * 2023-05-01 renders a calendar year whose Jan 1 is a Sunday. The daily return on day i is
-   * `dailyGrowth + sin(i / 15) * 0.05`; the snapshots, the derived `curve` and the derived
+   * `dailyGrowth + sin(i / 15) * 0.05`; the derived `curve` and the derived
    * `returns` all come from that one compounded level. Omitted = byte-identical to before: other
    * specs call this.
    */
@@ -955,11 +955,10 @@ export async function seedAllocatorBook(opts: {
     }
   }
 
-  // 3. A daily equity curve so EquityChart has a real series to draw.
+  // 3. A daily equity series so EquityChart has a real curve to draw.
   const dailyGrowth = opts.dailyGrowth;
   let level = 1;
-  const snapshots = Array.from({ length: days }, (_, i) => ({
-    allocator_id: opts.allocatorUserId,
+  const daySeries = Array.from({ length: days }, (_, i) => ({
     asof: new Date(anchorMs - (days - 1 - i) * 86_400_000)
       .toISOString()
       .slice(0, 10),
@@ -968,16 +967,11 @@ export async function seedAllocatorBook(opts: {
         ? 100_000 * (1 + Math.sin(i / 30) * 0.08 * (i / Math.max(1, days)))
         : 100_000 * (level *= 1 + growthReturn(dailyGrowth, i)),
   }));
-  const { error: sErr } = await admin
-    .from("allocator_equity_snapshots")
-    .upsert(snapshots, { onConflict: "allocator_id,asof" });
-  if (sErr) {
-    throw new Error(`seedAllocatorBook (equity snapshots) failed: ${sErr.message}`);
-  }
 
-  // 4. The display series is the version-2 derived row (plan 11). Snapshots
-  // alone leave the Overview rebuilding, so the EquityChart would not mount.
-  const curve = snapshots.map((s, i) => ({
+  // 4. The display series is the version-2 derived row (plan 11). Without it the
+  // Overview is rebuilding, so the EquityChart would not mount. Its day count
+  // is the dashboard's warm-up count (176 D-07).
+  const curve = daySeries.map((s, i) => ({
     date: s.asof,
     equity_usd:
       dailyGrowth === undefined

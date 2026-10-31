@@ -1,28 +1,41 @@
 /**
- * Live-DB integration test — Migration 073 compute_bridge_outcome_deltas holding branch.
+ * Live-DB integration test: the holding branch of compute_bridge_outcome_deltas
+ * measures the ACCOUNT's derived returns (Phase 176 LEGACYRETIRE, D-03 / D-05).
+ *
+ * Until Phase 176 the holding branch read the per-symbol `breakdown` of the legacy
+ * allocator_equity_snapshots table (migration 073). Plan 176-02 re-based it on the
+ * allocator's allocator_equity_derived row of kind equity_curve: the outcome is the
+ * compounded flow-neutral daily returns over (allocated_at, allocated_at + N]. A day
+ * with no returns entry is no change (the derived curve omits days under benign flags),
+ * and a window the derived curve does not cover is NULL.
  *
  * Verifies:
- *   1. holding-sourced outcome populates delta_30d/90d/180d from
- *      allocator_equity_snapshots.breakdown series
- *   2. holding-sourced outcome with missing value_at(allocated_at + N) leaves
- *      that delta as NULL (CASE guard)
- *   3. strategy-sourced outcome still populates deltas (regression check on
- *      existing migration 060 path — post-f3 LEFT JOIN retains processing)
+ *   1. holding-sourced outcome populates delta_30d/90d/180d with the compounded
+ *      derived returns of the account
+ *   2. holding-sourced outcome whose derived returns miss a day inside a window is
+ *      measured over the days that are present (the absent day is no change)
+ *   3. strategy-sourced outcome still populates deltas (regression check on the
+ *      existing migration 060 path, post-f3 LEFT JOIN retains processing)
  *   4. legacy bridge_outcomes with match_decision_id=NULL (kind='allocated')
  *      still populated by the LEFT-JOIN strategy branch (finding f3)
  *
- * Fixture math for holding branch tests:
- *   allocated_at = ANCHOR_DATE (2026-01-01)
- *   breakdown[symbol] on date = value_usd (flat integer per day)
- *   value_at(anchor)      = 100
- *   value_at(anchor + 30) = 110 → expected delta_30d  = (110/100) - 1 = 0.10
- *   value_at(anchor + 90) = 115 → expected delta_90d  = (115/100) - 1 = 0.15
- *   value_at(anchor + 180)= 120 → expected delta_180d = (120/100) - 1 = 0.20
+ * Fixture math for the holding branch tests:
+ *   anchor = allocated_at = today (UTC) minus 200 days
+ *   derived returns[].r = 0.01 on every day anchor+1 .. anchor+180
+ *   delta_N = 1.01^N - 1, computed in the test with Math.pow as the oracle
+ *             (an independent invariant, not a copy of the SQL formula)
+ *   the dollar curve in the payload is deliberately not what the outcome reads
+ *
+ * The dates are relative to the run day. bridge_outcomes_allocated_at_check admits an
+ * allocated_at only inside [CURRENT_DATE - 365 days, CURRENT_DATE], so a fixed anchor
+ * would fall out of the window and make every insert fail on a later calendar day.
+ * Anchor + 180 is 20 days before today, so the whole window is in the past.
  *
  * Gate: requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
- * Skips gracefully when absent.
+ * Skips gracefully when absent. A skip is a skip, never a pass: the CI
+ * frontend-live-db-lane runs this file against a local stack private to its runner.
  *
- * Run locally:
+ * Run locally (against a local stack only, never shared TEST or PROD):
  *   export NEXT_PUBLIC_SUPABASE_URL=...
  *   export SUPABASE_SERVICE_ROLE_KEY=...
  *   npx vitest run src/__tests__/bridge-outcome-cron-holding.test.ts
@@ -44,9 +57,6 @@ const STRATEGY_LEGACY_NULL   = "00000000-0000-0000-0000-000000000731";
 // UNIQUE slot (allocator, strategy, COALESCE(original_holding_ref,'')='')).
 const STRATEGY_LEGACY_NULL_2 = "00000000-0000-0000-0000-000000000732";
 
-// Anchor date for all test fixtures
-const ANCHOR_DATE = "2026-01-01";
-
 /**
  * Add N days to a YYYY-MM-DD date string.
  */
@@ -56,48 +66,54 @@ function addDays(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Anchor date for all test fixtures: 200 days before today (UTC), inside
+// bridge_outcomes_allocated_at_check on every run day (see the header).
+const ANCHOR_DATE = addDays(new Date().toISOString().slice(0, 10), -200);
+
+// The constant daily return of the holding fixtures.
+const DAILY_R = 0.01;
+
+/** The oracle: N days compounding DAILY_R. */
+function compounded(days: number): number {
+  return Math.pow(1 + DAILY_R, days) - 1;
+}
+
+/** The compounded outcome must agree to 1e-9 (a numeric column, not a rounded one). */
+function expectCompounded(actual: unknown, days: number): void {
+  expect(actual).not.toBeNull();
+  expect(Math.abs(Number(actual) - compounded(days))).toBeLessThan(1e-9);
+}
+
 /**
- * Build allocator_equity_snapshots rows with breakdown containing a single
- * symbol so extract_symbol_value_at can read exact values.
- *
- * Seeded dates: anchor, anchor+30, anchor+90, anchor+180
- * Values for "BTC": 100, 110, 115, 120
- *
- * delta_30d  = (110/100) - 1 = 0.10
- * delta_90d  = (115/100) - 1 = 0.15
- * delta_180d = (120/100) - 1 = 0.20
+ * Build the allocator_equity_derived payload of kind equity_curve: payload version 2,
+ * trustworthy, `returns` = one {date, r} entry for each of anchor+1 .. anchor+n except
+ * the day offsets listed in `skip`, and a dollar `curve` that compounds the same r.
  */
-function buildBreakdownSnapshots(allocatorId: string) {
-  return [
-    {
-      allocator_id: allocatorId,
-      asof: ANCHOR_DATE,
-      value_usd: 100,
-      breakdown: { BTC: 100 },
-      source: "exchange_primary",
-    },
-    {
-      allocator_id: allocatorId,
-      asof: addDays(ANCHOR_DATE, 30),
-      value_usd: 110,
-      breakdown: { BTC: 110 },
-      source: "exchange_primary",
-    },
-    {
-      allocator_id: allocatorId,
-      asof: addDays(ANCHOR_DATE, 90),
-      value_usd: 115,
-      breakdown: { BTC: 115 },
-      source: "exchange_primary",
-    },
-    {
-      allocator_id: allocatorId,
-      asof: addDays(ANCHOR_DATE, 180),
-      value_usd: 120,
-      breakdown: { BTC: 120 },
-      source: "exchange_primary",
-    },
+function buildDerivedPayload(
+  anchor: string,
+  n: number,
+  skip: number[] = [],
+): Record<string, unknown> {
+  const curve: Array<{ date: string; equity_usd: number }> = [
+    { date: anchor, equity_usd: 1000 },
   ];
+  const returns: Array<{ date: string; r: number }> = [];
+  let equity = 1000;
+  for (let i = 1; i <= n; i++) {
+    equity *= 1 + DAILY_R;
+    curve.push({ date: addDays(anchor, i), equity_usd: equity });
+    if (!skip.includes(i)) {
+      returns.push({ date: addDays(anchor, i), r: DAILY_R });
+    }
+  }
+  return {
+    version: 2,
+    is_trustworthy: true,
+    flags: [],
+    degrade_reasons: [],
+    curve,
+    returns,
+  };
 }
 
 /**
@@ -165,7 +181,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
     }
 
     // Seed strategy_analytics for all strategies
-    // STRATEGY_HOLDING_TEST: empty series (holding branch uses breakdown, not returns_series)
+    // STRATEGY_HOLDING_TEST: empty series (holding branch reads the derived account curve, not returns_series)
     // STRATEGY_LEGACY_NULL / STRATEGY_LEGACY_NULL_2: linear curve (strategy branch)
     await admin.from("strategy_analytics").upsert(
       [
@@ -189,7 +205,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
   afterAll(async () => {
     if (!HAS_LIVE_DB) return;
 
-    // Cleanup in dependency order: bridge_outcomes → match_decisions → equity_snapshots → strategy_analytics → strategies → user
+    // Cleanup in dependency order: bridge_outcomes → match_decisions → derived equity → strategy_analytics → strategies → user
     if (createdBridgeOutcomeIds.length > 0) {
       await admin
         .from("bridge_outcomes")
@@ -203,7 +219,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
         .in("id", createdMatchDecisionIds);
     }
     await admin
-      .from("allocator_equity_snapshots")
+      .from("allocator_equity_derived")
       .delete()
       .eq("allocator_id", allocatorId);
     await admin
@@ -218,18 +234,26 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 1: holding-sourced outcome → delta_30d/90d/180d from breakdown series
+  // Test 1: holding-sourced outcome → delta_30d/90d/180d compounded from the
+  // account's derived returns
   // ---------------------------------------------------------------------------
 
   it.skipIf(!HAS_LIVE_DB)(
-    "holding-sourced outcome populates delta_30d/90d/180d from breakdown series",
+    "holding-sourced outcome populates delta_30d/90d/180d from the compounded derived returns",
     async () => {
-      // Arrange: insert equity snapshots with per-symbol breakdown
-      const snapshots = buildBreakdownSnapshots(allocatorId);
-      const { error: snapErr } = await admin
-        .from("allocator_equity_snapshots")
-        .upsert(snapshots, { onConflict: "allocator_id,asof" });
-      expect(snapErr).toBeNull();
+      // Arrange: the allocator's derived equity_curve row, a dense returns series
+      // anchor+1 .. anchor+180 (no legacy snapshot row is written).
+      const { error: derErr } = await admin
+        .from("allocator_equity_derived")
+        .upsert(
+          {
+            allocator_id: allocatorId,
+            kind: "equity_curve",
+            payload: buildDerivedPayload(ANCHOR_DATE, 180),
+          },
+          { onConflict: "allocator_id,kind" },
+        );
+      expect(derErr).toBeNull();
 
       // Arrange: insert holding-sourced match_decision
       // audit-2026-05-07 H-0960 (mig 20260516160600 drops the kind DEFAULT):
@@ -275,58 +299,45 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
       );
       expect(cronErr).toBeNull();
 
-      // Assert: delta columns populated from breakdown series
+      // Assert: 1.01^N - 1 for N = 30, 90, 180
       const { data: row, error: rowErr } = await admin
         .from("bridge_outcomes")
         .select("delta_30d, delta_90d, delta_180d, deltas_computed_at")
         .eq("id", bo!.id)
         .single();
       expect(rowErr).toBeNull();
-      expect(row?.delta_30d).not.toBeNull();
-      expect(row?.delta_90d).not.toBeNull();
-      expect(row?.delta_180d).not.toBeNull();
-      // (110/100) - 1 = 0.10
-      expect(Number(row?.delta_30d)).toBeCloseTo(0.10, 4);
-      // (115/100) - 1 = 0.15
-      expect(Number(row?.delta_90d)).toBeCloseTo(0.15, 4);
-      // (120/100) - 1 = 0.20
-      expect(Number(row?.delta_180d)).toBeCloseTo(0.20, 4);
+      expectCompounded(row?.delta_30d, 30);
+      expectCompounded(row?.delta_90d, 90);
+      expectCompounded(row?.delta_180d, 180);
       expect(row?.deltas_computed_at).not.toBeNull();
     },
     30_000,
   );
 
   // ---------------------------------------------------------------------------
-  // Test 2: missing value for a window leaves that delta as NULL
+  // Test 2: a missing day inside a window is no change; the windows are still measured
   // ---------------------------------------------------------------------------
 
   it.skipIf(!HAS_LIVE_DB)(
-    "holding-sourced outcome with missing value_at(allocated_at + N) leaves that delta as NULL",
+    "holding-sourced outcome whose derived returns miss anchor + 45 is measured over the days present (30 / 89 / 179 days)",
     async () => {
-      // Use a recent past date (ANCHOR_DATE + 10 = 2026-01-11) within the
-      // bridge_outcomes_allocated_at_check window (CURRENT_DATE - 365..CURRENT_DATE).
-      // The breakdown snapshots at this date+30/+90/+180 are NOT seeded, so
-      // extract_symbol_value_at will return NULL for those windows → deltas stay NULL.
-      const recentAnchor = addDays(ANCHOR_DATE, 10);
-
-      // Seed only the anchor snapshot (no +30/+90/+180 rows)
-      const { error: snapErr } = await admin
-        .from("allocator_equity_snapshots")
+      // Replace the allocator's derived row with one that has no returns entry on
+      // anchor + 45. Test 1's outcome is already computed (needs_recompute = false and
+      // delta_30d set), so this replacement does not change it.
+      const { error: derErr } = await admin
+        .from("allocator_equity_derived")
         .upsert(
-          [
-            {
-              allocator_id: allocatorId,
-              asof: recentAnchor,
-              value_usd: 200,
-              breakdown: { ETH: 200 },
-              source: "exchange_primary",
-            },
-          ],
-          { onConflict: "allocator_id,asof" },
+          {
+            allocator_id: allocatorId,
+            kind: "equity_curve",
+            payload: buildDerivedPayload(ANCHOR_DATE, 180, [45]),
+          },
+          { onConflict: "allocator_id,kind" },
         );
-      expect(snapErr).toBeNull();
+      expect(derErr).toBeNull();
 
-      // Holding-sourced match_decision for ETH (different holding_ref from Test 1's BTC)
+      // Holding-sourced match_decision for ETH (different holding_ref from Test 1's BTC,
+      // so it takes its own bridge_outcomes UNIQUE slot).
       // audit-2026-05-07 H-0960: kind must be set explicitly post-160600.
       const { data: md2, error: mdErr2 } = await admin
         .from("match_decisions")
@@ -352,7 +363,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
           match_decision_id: md2!.id,
           kind: "allocated",
           percent_allocated: 5,
-          allocated_at: recentAnchor,
+          allocated_at: ANCHOR_DATE,
           needs_recompute: false,
           delta_30d: null,
         })
@@ -362,17 +373,22 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
       if (bo2?.id) createdBridgeOutcomeIds.push(bo2.id as string);
 
       // Act
-      await admin.rpc("compute_bridge_outcome_deltas");
+      const { error: cronErr2 } = await admin.rpc(
+        "compute_bridge_outcome_deltas",
+      );
+      expect(cronErr2).toBeNull();
 
-      // Assert: deltas remain NULL because no +30/+90/+180 snapshots exist
-      const { data: row2 } = await admin
+      // Assert: day 45 has no returns entry, so it is no change. The 30-day window does not
+      // contain it (30 compounded days); the 90 and 180 day windows do (89 and 179).
+      const { data: row2, error: rowErr2 } = await admin
         .from("bridge_outcomes")
         .select("delta_30d, delta_90d, delta_180d")
         .eq("id", bo2!.id)
         .single();
-      expect(row2?.delta_30d).toBeNull();
-      expect(row2?.delta_90d).toBeNull();
-      expect(row2?.delta_180d).toBeNull();
+      expect(rowErr2).toBeNull();
+      expectCompounded(row2?.delta_30d, 30);
+      expectCompounded(row2?.delta_90d, 89);
+      expectCompounded(row2?.delta_180d, 179);
     },
     30_000,
   );
@@ -478,7 +494,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
       expect(cronErr).toBeNull();
 
       // Assert: delta_30d was populated from strategy_analytics.returns_series
-      // (NOT from breakdown — this is the strategy branch, not the holding branch)
+      // (NOT from the derived account curve — this is the strategy branch, not the holding branch)
       const { data: rowLegacy } = await admin
         .from("bridge_outcomes")
         .select("delta_30d, delta_90d, delta_180d")

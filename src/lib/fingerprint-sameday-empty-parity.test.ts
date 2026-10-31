@@ -213,10 +213,7 @@ async function clientFingerprint(
   }));
   const payload = derivePhase07Fields(
     apiKeys,
-    [],
-    0,
-    (read.data ?? []) as Parameters<typeof derivePhase07Fields>[3],
-    false,
+    (read.data ?? []) as Parameters<typeof derivePhase07Fields>[1],
     null,
     read.partialReads,
     read.accountByKey,

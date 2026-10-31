@@ -82,7 +82,7 @@ describe("writer residual parity: the reader against the shared table", () => {
   it.each(TABLE.cells.map((cell) => [cell.id, cell] as const))(
     "%s -> the reader shows the cell's verdict",
     (_id, cell) => {
-      const result = derivePhase07Fields(apiKeys(cell), [], 0, [], false, {
+      const result = derivePhase07Fields(apiKeys(cell), [], {
         payload: payloadFor(cell),
         computed_at: "2026-06-05T00:00:00+00:00",
       });

@@ -522,6 +522,13 @@ INNER JOIN to LEFT JOIN + OR filter so legacy `bridge_outcomes` rows where
 `match_decision_id IS NULL` (set NULL via ON DELETE SET NULL cascade) continue to be processed
 by the cron (finding f3 regression preserved).
 
+> **AMENDED 2026-10-31 (Phase 176 LEGACYRETIRE, D-03 and D-05):** the holding branch no longer reads
+> `allocator_equity_snapshots.breakdown`. It now measures the account: the compounded flow-neutral daily
+> returns of the allocator's derived `equity_curve` row (`allocator_equity_derived`), through
+> `public.derived_account_return_over`, treating a day with no returns entry as no change, and NULL when the curve does not cover the window or holds no return inside it. A stored outcome is kept. The per-symbol breakdown
+> read is gone, and `extract_symbol_value_at` is dropped in PR 3 of the phase together with the legacy table.
+> The strategy branch and the LEFT JOIN described above are unchanged. Original text kept above.
+
 **No new audit event kind is registered.** The action being audited ("Bridge outcome
 recorded") is identical regardless of source; only the entity pointer varies, carried through
 existing `metadata.match_decision_id`. The existing `match.decision_record` kind

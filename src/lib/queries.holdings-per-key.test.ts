@@ -25,7 +25,7 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({}) }));
 
 import { derivePhase07Fields } from "./queries";
 
-type HoldingRow = Parameters<typeof derivePhase07Fields>[3][number];
+type HoldingRow = Parameters<typeof derivePhase07Fields>[1][number];
 
 const row = (
   api_key_id: string,
@@ -58,7 +58,7 @@ const derive = (
   accountByKey: Accounts = {},
   partialReads: Partials = [],
 ) =>
-  derivePhase07Fields([], [], 0, rows, false, null, partialReads, accountByKey);
+  derivePhase07Fields([], rows, null, partialReads, accountByKey);
 
 const total = (rows: ReadonlyArray<{ value_usd: number }>) =>
   rows.reduce((s, r) => s + r.value_usd, 0);

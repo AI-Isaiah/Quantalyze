@@ -4,14 +4,15 @@ import { KpiStrip } from "./KpiStrip";
 import type { ComputedMetrics } from "@/lib/scenario";
 
 /**
- * Phase 07 / 07-03 — KpiStrip warm-up + stale + venue-specific rendering.
+ * Phase 07 / 07-03 — KpiStrip warm-up + stale rendering (Phase 176: counted on
+ * derived days, generic countdown copy only).
  *
  * Covered behaviours:
- *   - Default warm-up copy when `snapshotCount < 30 && !allKeysStale` and
- *     venue context is absent or ≥ 3 months.
- *   - VOICES-ACCEPTED f9 venue-specific copy: when minHistoryDepthMonths
- *     < 3 AND activeVenues is non-empty, substitute "Only {N} months of
- *     history available on {venues.join(", ")}".
+ *   - Default warm-up copy when `snapshotCount !== null && snapshotCount < 30
+ *     && !allKeysStale`.
+ *   - `snapshotCount === null` (a rebuilding book) never warms up (T-176-13).
+ *   - The venue-specific "Only N months of history available" copy is gone
+ *     (D-07); the removed props are ignored.
  *   - Staleness suppresses the warm-up helper entirely (07-05 WarningBanner
  *     carries the global stale copy).
  *   - Sufficient data (snapshotCount >= 30) → no warm-up helper.
@@ -35,8 +36,8 @@ const EMPTY_METRICS: ComputedMetrics = {
   effective_end: null,
 };
 
-describe("KpiStrip — warm-up + stale + venue-specific rendering", () => {
-  it("Test B (default warm-up): snapshotCount=10 + no venue context → renders em-dash AND 'Warming up — need 20 more days of synced data.'", () => {
+describe("KpiStrip — warm-up + stale rendering", () => {
+  it("Test B (default warm-up): snapshotCount=10 → renders em-dash AND 'Warming up — need 20 more days of synced data.'", () => {
     render(
       <KpiStrip
         analytics={null}
@@ -44,8 +45,6 @@ describe("KpiStrip — warm-up + stale + venue-specific rendering", () => {
         timeframe="ALL"
         snapshotCount={10}
         allKeysStale={false}
-        minHistoryDepthMonths={null}
-        activeVenues={[]}
       />,
     );
     expect(
@@ -73,8 +72,6 @@ describe("KpiStrip — warm-up + stale + venue-specific rendering", () => {
         timeframe="ALL"
         snapshotCount={30}
         allKeysStale={false}
-        minHistoryDepthMonths={24}
-        activeVenues={["Binance"]}
       />,
     );
     expect(screen.queryByText(/Warming up/)).toBeNull();
@@ -89,8 +86,6 @@ describe("KpiStrip — warm-up + stale + venue-specific rendering", () => {
         timeframe="ALL"
         snapshotCount={45}
         allKeysStale={true}
-        minHistoryDepthMonths={24}
-        activeVenues={["Binance"]}
       />,
     );
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
@@ -98,7 +93,14 @@ describe("KpiStrip — warm-up + stale + venue-specific rendering", () => {
     expect(screen.queryByText(/Only .* months of history/)).toBeNull();
   });
 
-  it("Test E (venue-specific OKX — f9): snapshotCount=10 + minHistoryDepthMonths=3 + activeVenues=['OKX'] → 'Only 3 months of history available on OKX', NO default copy", () => {
+  // Phase 176 (D-07): the venue-specific "Only N months of history" copy is gone
+  // with the legacy `history_depth_months` column it read. A caller that still
+  // passes the removed props (a stale cast payload) gets the generic countdown.
+  it("Test E (removed props ignored): a props object still carrying minHistoryDepthMonths=3 and activeVenues=['OKX'] with snapshotCount=10 → generic countdown, NO 'months of history' copy", () => {
+    const removedProps = {
+      minHistoryDepthMonths: 3,
+      activeVenues: ["OKX"],
+    } as unknown as Record<string, never>;
     render(
       <KpiStrip
         analytics={null}
@@ -106,69 +108,55 @@ describe("KpiStrip — warm-up + stale + venue-specific rendering", () => {
         timeframe="ALL"
         snapshotCount={10}
         allKeysStale={false}
-        minHistoryDepthMonths={3}
-        activeVenues={["OKX"]}
-      />,
-    );
-    expect(
-      screen.getAllByText("Only 3 months of history available on OKX").length,
-    ).toBeGreaterThan(0);
-    expect(screen.queryByText(/Warming up — need/)).toBeNull();
-  });
-
-  it("Test F (venue-specific multi — f9): minHistoryDepthMonths=3 + activeVenues=['Binance','OKX'] → 'Only 3 months of history available on Binance, OKX'", () => {
-    render(
-      <KpiStrip
-        analytics={null}
-        metrics={EMPTY_METRICS}
-        timeframe="ALL"
-        snapshotCount={5}
-        allKeysStale={false}
-        minHistoryDepthMonths={3}
-        activeVenues={["Binance", "OKX"]}
-      />,
-    );
-    expect(
-      screen.getAllByText("Only 3 months of history available on Binance, OKX")
-        .length,
-    ).toBeGreaterThan(0);
-  });
-
-  it("Test G (Binance default — f9): minHistoryDepthMonths=24 + activeVenues=['Binance'] → DEFAULT warm-up copy, NOT venue-specific", () => {
-    render(
-      <KpiStrip
-        analytics={null}
-        metrics={EMPTY_METRICS}
-        timeframe="ALL"
-        snapshotCount={10}
-        allKeysStale={false}
-        minHistoryDepthMonths={24}
-        activeVenues={["Binance"]}
+        {...removedProps}
       />,
     );
     expect(
       screen.getAllByText("Warming up — need 20 more days of synced data.")
         .length,
     ).toBeGreaterThan(0);
-    expect(screen.queryByText(/Only .* months of history/)).toBeNull();
+    expect(screen.queryByText(/months of history/)).toBeNull();
   });
 
-  it("Test H (Bybit default — f9): minHistoryDepthMonths=24 + activeVenues=['Bybit'] → DEFAULT warm-up copy", () => {
+  // Phase 176 (T-176-13, Discretion): `snapshotCount` is null while the history
+  // is rebuilding (the producer withholds the count with the curve). In JS
+  // `null < 30` is true, so an unguarded gate would print "need 30 more days"
+  // over a history that may be years long and suppress the scenario primary.
+  it("Test N (null count = rebuilding): snapshotCount=null → NO 'Warming up' copy, and the scenario primary shows", () => {
+    const scenario: ComputedMetrics = {
+      ...EMPTY_METRICS,
+      n: 252,
+      twr: 0.18,
+      sharpe: 1.51,
+      max_drawdown: -0.04,
+    };
     render(
       <KpiStrip
         analytics={null}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        snapshotCount={10}
+        snapshotCount={null}
         allKeysStale={false}
-        minHistoryDepthMonths={24}
-        activeVenues={["Bybit"]}
+        mode="scenario"
+        scenarioMetrics={scenario}
+        liveMetrics={EMPTY_METRICS}
       />,
     );
-    expect(
-      screen.getAllByText("Warming up — need 20 more days of synced data.")
-        .length,
-    ).toBeGreaterThan(0);
-    expect(screen.queryByText(/Only .* months of history/)).toBeNull();
+    expect(screen.queryByText(/Warming up/)).toBeNull();
+    expect(screen.getByText("1.51")).toBeTruthy();
+  });
+
+  it("Test O (null count, live mode): snapshotCount=null with null metrics → em-dash cells, NO countdown", () => {
+    render(
+      <KpiStrip
+        analytics={null}
+        metrics={EMPTY_METRICS}
+        timeframe="ALL"
+        snapshotCount={null}
+        allKeysStale={false}
+      />,
+    );
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Warming up/)).toBeNull();
   });
 });

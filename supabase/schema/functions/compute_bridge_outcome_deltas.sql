@@ -2,21 +2,12 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260426131718_match_decisions_kind_enum.sql
--- --------------------------------------------------------------------------
--- STEP 8 (H2): Extend compute_bridge_outcome_deltas() with voluntary_add CTE branch
--- --------------------------------------------------------------------------
--- voluntary_add rows have BOTH original_holding_ref AND original_strategy_id NULL,
--- so neither existing branch in migration 073 fires. Without this third branch
--- they would be silently skipped from delta tracking forever (RESEARCH Pitfall 5).
---
--- The branch joins on bridge_outcomes.strategy_id against
--- strategy_analytics.returns_series using the same extract_delta() / extract_estimated()
--- helpers the strategy branch uses. Idempotency guard preserved:
--- WHERE delta_30d IS NULL OR needs_recompute = TRUE.
---
--- Replaces the entire function body to add the new branch — preserves the migration
--- 073 strategy + holding branches verbatim and appends the voluntary_add branch.
+-- source migration: 20261102120000_bridge_outcome_holding_branch_derived.sql
+-- ───────────── the re-based batch
+-- Re-based on the LATEST definer, 20260426131718 (grep over supabase/migrations/*.sql
+-- for FUNCTION public.compute_bridge_outcome_deltas: 20260418074935, 20260419061003,
+-- 20260421154030, 20260426131718; the last is the newest). Only the holding CTEs change.
+
 CREATE OR REPLACE FUNCTION public.compute_bridge_outcome_deltas()
 RETURNS TABLE(updated_count INT, failed_count INT, batch_started_at TIMESTAMPTZ)
 LANGUAGE plpgsql
@@ -29,7 +20,7 @@ DECLARE
   v_started TIMESTAMPTZ := NOW();
 BEGIN
   WITH
-  -- ---------------- strategy branch (verbatim from migration 073) ----------------
+  -- ---------------- strategy branch (migration 073; fix round 1 adds the allocated_at window conjunct) ----------------
   strategy_candidates AS (
     SELECT
       bo.id,
@@ -40,6 +31,7 @@ BEGIN
     JOIN public.strategy_analytics sa ON sa.strategy_id = bo.strategy_id
     WHERE bo.kind = 'allocated'
       AND bo.allocated_at IS NOT NULL
+      AND bo.allocated_at >= (CURRENT_DATE - '365 days'::interval)
       AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
       AND (
         bo.match_decision_id IS NULL
@@ -73,7 +65,14 @@ BEGIN
       AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
     RETURNING bo.id
   ),
-  -- ---------------- holding branch (verbatim from migration 073) ----------------
+  -- ---------------- holding branch (Phase 176 LEGACYRETIRE, D-03 / D-05) ----------------
+  -- Measured PER ACCOUNT, not per symbol: the +30, +90 and +180 day outcome compounds
+  -- the account's flow-neutral daily returns (allocator_equity_derived, kind
+  -- equity_curve, payload.returns) over (allocated_at, allocated_at + N] through
+  -- public.derived_account_return_over. A window the derived curve does not cover is
+  -- NULL. The candidate set and the UPDATE are as migration 073 had them, plus the
+  -- allocated_at window conjunct below, plus (fix round 1) a matured-window refill: a
+  -- row whose +30d landed is picked again while its +90d or +180d is NULL and old enough.
   holding_candidates AS (
     SELECT
       bo.id,
@@ -85,55 +84,56 @@ BEGIN
     LEFT JOIN LATERAL public.parse_holding_ref(md.original_holding_ref) hp ON TRUE
     WHERE bo.kind = 'allocated'
       AND bo.allocated_at IS NOT NULL
-      AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
+      AND (
+        bo.delta_30d IS NULL OR bo.needs_recompute = TRUE
+        OR (bo.delta_90d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '91 days'::interval))
+        OR (bo.delta_180d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '181 days'::interval))
+      )
       AND md.original_strategy_id IS NULL
       AND md.original_holding_ref IS NOT NULL
       AND hp.symbol IS NOT NULL
+      -- bridge_outcomes_allocated_at_check admits only allocated_at inside
+      -- [CURRENT_DATE - 365 days, CURRENT_DATE] and PostgreSQL re-checks it on EVERY
+      -- UPDATE of a row, so touching a row aged past the window raises 23514 and
+      -- aborts this whole statement for every allocator. Such a row is not a candidate.
+      AND bo.allocated_at >= (CURRENT_DATE - '365 days'::interval)
   ),
   holding_computed AS (
     SELECT
       hc.id,
-      CASE
-        WHEN public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at) IS NULL
-          OR public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 30) IS NULL
-        THEN NULL
-        ELSE (
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 30) /
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at)
-        ) - 1
-      END AS d30,
-      CASE
-        WHEN public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at) IS NULL
-          OR public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 90) IS NULL
-        THEN NULL
-        ELSE (
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 90) /
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at)
-        ) - 1
-      END AS d90,
-      CASE
-        WHEN public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at) IS NULL
-          OR public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 180) IS NULL
-        THEN NULL
-        ELSE (
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at + 180) /
-          public.extract_symbol_value_at(hc.allocator_id, hc.symbol, hc.allocated_at)
-        ) - 1
-      END AS d180
+      public.derived_account_return_over(hc.allocator_id, hc.allocated_at, 30)  AS d30,
+      public.derived_account_return_over(hc.allocator_id, hc.allocated_at, 90)  AS d90,
+      public.derived_account_return_over(hc.allocator_id, hc.allocated_at, 180) AS d180
     FROM holding_candidates hc
   ),
   holding_updated AS (
     UPDATE public.bridge_outcomes AS bo
     SET
-      delta_30d          = COALESCE(hc.d30,  bo.delta_30d),
-      delta_90d          = COALESCE(hc.d90,  bo.delta_90d),
-      delta_180d         = COALESCE(hc.d180, bo.delta_180d),
+      delta_30d          = CASE WHEN bo.needs_recompute THEN COALESCE(hc.d30,  bo.delta_30d)  ELSE COALESCE(bo.delta_30d,  hc.d30)  END,
+      delta_90d          = CASE WHEN bo.needs_recompute THEN COALESCE(hc.d90,  bo.delta_90d)  ELSE COALESCE(bo.delta_90d,  hc.d90)  END,
+      delta_180d         = CASE WHEN bo.needs_recompute THEN COALESCE(hc.d180, bo.delta_180d) ELSE COALESCE(bo.delta_180d, hc.d180) END,
       needs_recompute    = FALSE,
       deltas_computed_at = v_started
     FROM holding_computed hc
     WHERE bo.id = hc.id
       AND bo.kind = 'allocated'
-      AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
+      AND (
+        bo.delta_30d IS NULL OR bo.needs_recompute = TRUE
+        OR (bo.delta_90d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '91 days'::interval))
+        OR (bo.delta_180d IS NULL AND bo.allocated_at <= (CURRENT_DATE - '181 days'::interval))
+      )
+      -- A row whose three new deltas are all NULL measured nothing: it is not written,
+      -- so it stays needs_recompute TRUE, and holding_failed below counts it.
+      AND (hc.d30 IS NOT NULL OR hc.d90 IS NOT NULL OR hc.d180 IS NOT NULL)
+      -- A stored delta is kept. A row picked again only because a matured window is still
+      -- NULL is written (and counted, and stamped) only when a NULL window actually filled;
+      -- a row with needs_recompute set is re-measured, new value first.
+      AND (
+        bo.needs_recompute = TRUE
+        OR (bo.delta_30d  IS NULL AND hc.d30  IS NOT NULL)
+        OR (bo.delta_90d  IS NULL AND hc.d90  IS NOT NULL)
+        OR (bo.delta_180d IS NULL AND hc.d180 IS NOT NULL)
+      )
     RETURNING bo.id
   ),
   -- ---------------- voluntary_add branch (NEW — Phase 10 / H2) ----------------
@@ -141,7 +141,8 @@ BEGIN
   -- strategy_id (the suggested strategy) NOT NULL. Match against
   -- strategy_analytics.returns_series the same way the strategy branch does — but
   -- gate on md.kind='voluntary_add' to be unambiguous and avoid double-counting
-  -- bridge_recommended rows that the strategy branch already covers.
+  -- bridge_recommended rows that the strategy branch already covers. Fix round 1 adds the
+  -- allocated_at window conjunct (see the holding branch for why).
   voluntary_add_candidates AS (
     SELECT
       bo.id,
@@ -152,6 +153,7 @@ BEGIN
     JOIN public.strategy_analytics sa ON sa.strategy_id = bo.strategy_id
     WHERE bo.kind = 'allocated'
       AND bo.allocated_at IS NOT NULL
+      AND bo.allocated_at >= (CURRENT_DATE - '365 days'::interval)
       AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
       AND md.kind = 'voluntary_add'
       AND md.strategy_id IS NOT NULL
@@ -188,8 +190,10 @@ BEGIN
   SELECT
     (SELECT COUNT(*)::INT FROM strategy_updated) +
     (SELECT COUNT(*)::INT FROM holding_updated) +
-    (SELECT COUNT(*)::INT FROM voluntary_add_updated)
-  INTO v_updated;
+    (SELECT COUNT(*)::INT FROM voluntary_add_updated),
+    (SELECT COUNT(*)::INT FROM holding_computed hc
+      WHERE hc.d30 IS NULL AND hc.d90 IS NULL AND hc.d180 IS NULL)
+  INTO v_updated, v_failed;
 
   RETURN QUERY SELECT v_updated, v_failed, v_started;
 END;

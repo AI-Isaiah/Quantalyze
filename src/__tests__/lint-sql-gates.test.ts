@@ -1170,7 +1170,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 106 -> 107, the nav-marks gate file (test_api_key_nav_marks.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 107 file(s); 0…' to match /scanned 106 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 107 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 107 -> 108, the trade-read store gate file (test_allocator_trade_reads.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 108 file(s); …' to match /scanned 107 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 108 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 108 -> 109, the moved-flow price store gate file (test_api_key_flow_prices.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 109 file(s); …' to match /scanned 108 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 109 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
-    expect(res.out).toMatch(/scanned 109 file/);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 109 -> 110, the bridge-outcome derived-basis gate file (test_bridge_outcome_deltas_derived.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 110 file(s); …' to match /scanned 109 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 110 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 110 file/);
     expect(res.status, res.out).toBe(0);
   });
 

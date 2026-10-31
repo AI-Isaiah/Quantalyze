@@ -165,16 +165,13 @@ const baseProps = {
     { date: "2026-03-11", value: 20_000 },
     { date: "2026-03-12", value: 10_000 },
   ],
-  equitySnapshots: [],
   activeVenues: ["Binance"],
   snapshotCount: 3,
-  minHistoryDepthMonths: 3,
   allocator_id: "alloc-1",
   alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
   allKeysStale: false,
   lastSyncAt: null,
   hasSyncing: false,
-  equityBaselineUnknown: false,
   hasConnectedKeys: true,
 } as unknown as MyAllocationDashboardPayload;
 
@@ -268,39 +265,33 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     ).not.toMatch(/earlier chart/i);
   });
 
-  // Review round 1 (SFH-05): the baseline-unknown banner promised "a full
-  // performance history builds up from here as daily snapshots accrue" while
-  // the panel below it said the history is withheld however much accrues.
-  it("rebuilding: the baseline-unknown banner keeps the data-horizon reason and drops the accrual promise; 'ready' keeps it", () => {
-    render(
-      <AllocationDashboardV2
-        {...baseProps}
-        equityHistoryState="rebuilding"
-        equityBaselineUnknown
-      />,
-    );
-    const banner = screen.getByTestId("dashboard-baseline-unknown-banner");
-    expect(banner.textContent).toContain("Limited equity history");
-    expect(banner.textContent).toContain("available data window");
-    expect(banner.textContent).not.toMatch(/accrue|builds up/i);
-    expect(banner.textContent).toContain(
-      "Your live holdings and AUM do not use that history.",
-    );
-
-    cleanup();
-    // Positive control: the "ready" variant still carries the promise, so the
-    // absence above is the rebuilding gate and not a deleted sentence.
-    render(
-      <AllocationDashboardV2
-        {...baseProps}
-        equityHistoryState="ready"
-        equityBaselineUnknown
-      />,
-    );
-    expect(
-      screen.getByTestId("dashboard-baseline-unknown-banner").textContent,
-    ).toMatch(/builds up from here as daily snapshots accrue/);
-  });
+  // Phase 176 (D-07): the "Limited equity history" banner explained rows of the
+  // legacy snapshot table that the dashboard no longer reads. A payload built
+  // before the removal (a cast object that still carries the flag) must not
+  // bring the banner back, in either state.
+  it.each([["rebuilding"], ["ready"]])(
+    "D-07: a %s payload still carrying equityBaselineUnknown: true renders no baseline banner",
+    (state) => {
+      render(
+        <AllocationDashboardV2
+          {...baseProps}
+          {...({ equityBaselineUnknown: true } as unknown as object)}
+          equityHistoryState={state as never}
+        />,
+      );
+      // Positive control: the Overview did render for this state, so the
+      // absence below is the removed banner and not an empty tree.
+      expect(
+        screen.getByTestId(
+          state === "ready" ? "overview-equity-curve" : "overview-equity-rebuilding",
+        ),
+      ).toBeTruthy();
+      expect(
+        screen.queryByTestId("dashboard-baseline-unknown-banner"),
+      ).toBeNull();
+      expect(screen.queryByText(/Limited equity history/)).toBeNull();
+    },
+  );
 
   // Review round 1 (WR-01 / SFH-01): a destructuring default fires on
   // `undefined` alone, so a gate written as `=== "rebuilding"` let null, "" or

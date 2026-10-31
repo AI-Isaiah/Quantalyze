@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.133.12.0] - 2026-10-31 — 176 LEGACYRETIRE PR 1: readers move to the derived curve
+
+### Changed
+- **D-02, readers first.** Every reader of the legacy allocator equity table now reads the derived curve instead; the legacy table is still written until PR 2, so the retirement is reversible at this step. `getMyAllocationDashboard` no longer queries `allocator_equity_snapshots`. `snapshotCount` is the drawn derived curve's day count (null while the history rebuilds), and `KpiStrip` warms up only on a non-null count under 30 with a generic countdown copy. The `derivePhase07Fields` callers and about 25 payload fixtures follow the derived-only signature (60 type errors cleared), and the e2e seed writes only `allocator_equity_derived`.
+- **D-01, shared keys (absorbs Phase 181).** `allocatorEligibleApiKeyIds` is now `eligibleKeyIds`: a strategy-linked key also counts in its owner's allocator book, so the TypeScript reader agrees with what the derive already composes. The rule is stated once in the payload field doc and the Phase 151 AUM-04 rationale is retired.
+- **D-03 and D-05, bridge holding outcome.** The holding branch of `compute_bridge_outcome_deltas` measures +30d, +90d and +180d on the account's compounded derived flow-neutral daily returns (new helper `derived_account_return_over`). Amended twice by founder decision on 2026-10-31: an absent derived day is no change, and a window is NULL when the curve does not cover it or when no return lies inside it. The batch no longer reads `allocator_equity_snapshots` or `extract_symbol_value_at`.
+- **D-06, one-time reset.** Migration `20261102120000` resets every stored holding outcome once (`reset_holding_bridge_outcomes_to_derived_basis`, inside a `DO` block whose NOTICE carries a count only) so the next run recomputes it on the derived basis. PROD held 0 holding rows when measured on 2026-10-31, so the reset is a no-op there. A rollback file ships in `supabase/migrations/down/`.
+- Runbook `bridge-outcome-cron.md` and ADR-0023 describe the per-account holding branch.
+
+### Removed
+- **D-07.** The "Limited equity history" banner (`BaselineUnknownBanner`), the "Only N months of history" depth copy, `minHistoryDepthMonths`, `equityBaselineUnknown` and the legacy curve adapter. 1 of 4 allocators saw the banner. Their tests are deleted with them.
+
+### Added
+- `docs/runbooks/legacyretire-go-live.md`: a validating renderer and sixteen named SQL forms (eleven PROD reads, one TEST read, guarded cron writes, the marker read) for the phase's later plans, with `src/__tests__/legacyretire-runbook-forms.test.ts` as the static guard (read-only, id-free, marker first).
+- New SQL gate `supabase/tests/test_bridge_outcome_deltas_derived.sql`: fourteen sentinel sections, 33 mutation twins, all biting.
+- The live bridge test (`bridge-outcome-cron-holding.test.ts`) seeds the account's derived curve and asserts the compounded deltas (1.01^N - 1), NULL on a missing day, and the unchanged strategy branches.
+
+### Fixed
+- Review fix round 1 (F1-F5): the helper compounds the returns present in the window; a holding row that measured nothing is not stamped and is counted failed; a matured +90d or +180d is filled by a later run (a row no longer stops being a candidate once +30d lands); strategy and voluntary_add rows take the `allocated_at` window; the reset runs in a `DO` block.
+- Review fix round 2 (WR-02, WR-03): coverage considers only well-formed YYYY-MM-DD dates, so a malformed date cannot span a window the curve does not cover, and a window with no return inside it is NULL instead of an invented 0%. A stored delta is kept: new wins only when `needs_recompute` is set, otherwise stored wins, and a re-picked row is written and counted only when something new filled. Code review round 3: 0 MEDIUM and above.
+- `176-BRIDGE-CHECK-WINDOW-ABORT` (fixed here): a strategy or voluntary_add outcome whose delta stayed NULL past 365 days aborted the daily bridge batch on the `allocated_at` CHECK (23514); both branches now exclude rows outside the window.
+
+### Tests
+- Floors moved (read from the files): `scripts/mutation-floors.mjs` `FILES_FLOOR` 82 -> 83, `ARMS_FLOOR` 829 -> 862, `WAIVED_CEILING` stays 0; `.github/workflows/ci.yml` `SENTINEL_FLOOR` 26 -> 27 and `ARMS_FLOOR` 394 -> 408. `mutation-runner-floors.test.ts`, `gate-family-meta.test.ts`, `lint-sql-gates.test.ts`, `drift-check-scripts.test.ts` and the baseline schema snapshots moved by measured counts.
+
+### Notes
+- Migration `20261102120000` applies to TEST then PROD on merge, with no human stop between.
+- Known limits: rows older than 365 days keep the old basis (the CHECK forbids any UPDATE of them; recorded under `176-BRIDGE-CHECK-WINDOW-ABORT`). The legacy table is still written until PR 2.
+- `TODOS.md`: `176-BRIDGE-CHECK-WINDOW-ABORT` (fixed), `176-INERT-LEFTOVERS` (the `managerSide*` plumbing and the `equityCurveSource` "legacy" value are inert after D-01 and D-07) and `176-PR1-REVIEW-RESIDUALS` (four below-the-bar review items: `failed_count` noise with no reader, the stored-wins pin covering +30d only, a digit-shaped impossible date still extending coverage, and a note-only upsert re-measuring after a restatement).
+- Branch coverage: 21 commits touching shipped paths (of 53 on the source branch) over these themes: readers (plans 03, 05, 06), bridge SQL and gate (plan 02, fix rounds 1-2), live test and docs (plan 04, round 1 docs), runbook and guard (plan 01), tests and floors. Planning-only commits (context, research, plans, reviews, tracking) are not shipped here.
+
 ## [0.133.11.10] - 2026-10-31 — records: book Phase 183 DUPCOUNT
 
 ### Notes
