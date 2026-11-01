@@ -107,9 +107,18 @@ class FakeSupabase:
     def __init__(self, responder: Callable[[_Call], Any] | None = None) -> None:
         self.calls: list[_Call] = []
         self._responder = responder
+        self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+        self.rpc_error: BaseException | None = None
 
     def table(self, name: str) -> _Query:
         return _Query(self, name)
+
+    def rpc(self, name: str, params: dict[str, Any]) -> MagicMock:
+        self.rpc_calls.append((name, dict(params)))
+        out = MagicMock()
+        if self.rpc_error is not None:
+            out.execute.side_effect = self.rpc_error
+        return out
 
     def respond(self, call: _Call) -> Any:
         if self._responder is not None:
@@ -283,6 +292,61 @@ async def test_collision_with_a_live_sibling_marks_the_key_and_never_acts_on_it(
     assert ("eq", "venue_account_id", ACCOUNT_ID) in look.filters
     assert ("is", "disconnected_at", "null") in look.filters
     assert ("neq", "id", KEY_ID) in look.filters
+
+
+# Phase 183 WR-01. A curve composed before the marker landed may count the
+# account twice; the reader no longer holds a marked duplicate back, so a new
+# marker must enqueue the owner's recompose or the stale curve is drawn as
+# ready until the next nightly compose.
+_RECOMPOSE = (
+    "enqueue_compute_job",
+    {"p_strategy_id": None, "p_allocator_id": OWNER_ID, "p_kind": "derive_allocator_equity"},
+)
+
+
+@pytest.mark.parametrize("composite", [False, True])
+async def test_a_new_marker_enqueues_the_owners_recompose(
+    audit_mock: MagicMock, composite: bool
+) -> None:
+    members = [
+        _member(HOLDER_ID, STRATEGY_A, "2026-01-01", "2026-06-01", 0),
+        _member(KEY_ID, STRATEGY_A, "2026-06-01", None, 1),
+    ] if composite else []
+    sb = FakeSupabase(_composite_responder(members))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == ("marked_composite_member" if composite else "marked_duplicate")
+    assert sb.rpc_calls == [_RECOMPOSE]
+
+
+async def test_an_unchanged_marker_enqueues_no_recompose(audit_mock: MagicMock) -> None:
+    sb = FakeSupabase(_composite_responder([]))
+    marked = _key_row(account_shared_with_api_key_id=HOLDER_ID, account_share_kind="duplicate")
+
+    outcome = await _stamp(sb, marked, _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    assert sb.rpc_calls == []
+
+
+async def test_a_failed_recompose_enqueue_does_not_undo_the_marker(
+    audit_mock: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    sb = FakeSupabase(_composite_responder([]))
+    sb.rpc_error = RuntimeError("enqueue down")
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    assert {"account_shared_with_api_key_id": HOLDER_ID,
+            "account_share_kind": "duplicate"} in sb.updates()
+    # The audit runs before the enqueue and a failing enqueue must not drop it:
+    # the next poll meets an unchanged marker and would never write it again.
+    audit_mock.assert_called_once()
+    # ERROR, not WARNING: a dropped enqueue is never retried, so it must reach Sentry.
+    failed = [r for r in caplog.records if "recompose enqueue after a new marker failed" in r.getMessage()]
+    assert [r.levelname for r in failed] == ["ERROR"]
 
 
 async def test_the_account_id_value_never_reaches_the_log(

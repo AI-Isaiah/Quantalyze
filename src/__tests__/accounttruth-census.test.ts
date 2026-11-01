@@ -389,7 +389,10 @@ describe("(4) a fixture run prints the six sections, counts only", () => {
       for (const s of SECTIONS) {
         expect(res.stdout).toContain(`(${s.letter}) ${s.title}`);
       }
-      expect(res.stdout).toContain("duplicate.blocking: 1");
+      // Phase 183 D-01: (b) prints the marked counts as information and no
+      // bucket that reads as a book held back over a marked duplicate.
+      expect(res.stdout).toContain("duplicate.marked: 2");
+      expect(res.stdout).not.toContain("duplicate.blocking");
       expect(res.stdout).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
       expect(res.stdout).not.toContain("$");
     } finally {
@@ -448,7 +451,7 @@ function greenFixture(): {
   // assertions read, then the GROUP BY buckets a real answer may carry.
   const values: Record<string, Record<string, number>> = {
     a: { "all.live_keys": 10, "all.live_keys_venue_account_id_null": 2, "okx.live_keys": 4 },
-    b: { "duplicate.blocking": 1, "duplicate.marked": 2 },
+    b: { "duplicate.marked": 2 },
     c: { owners_with_eligible_keys: 5, owners_missing_returns: 1 },
     d: { equity_curve_rows: 5, "version=2,is_trustworthy=true": 4, "degrade_reason=dropped_key": 1 },
     e: { owners_with_eligible_keys: 5, ready: 3, "rebuilding:duplicate_account": 1 },
@@ -512,9 +515,11 @@ describe("(4b) an empty section or a missing fixed bucket fails, naming it", () 
   // Declared in the script, not read from the runbook: the runbook lives under
   // .planning/, which the -pr filter strips and which a planning-only PR can
   // change without running this file. The runbook's section table names the
-  // same buckets (a: <venue>.live_keys_unstamped_unmarked, b: duplicate.blocking,
-  // c: owners_missing_either, d: version=2,is_trustworthy=true, e: ready,
-  // f: departed_key_inputs_row_gone).
+  // same buckets (a: <venue>.live_keys_unstamped_unmarked, c: owners_missing_either,
+  // d: version=2,is_trustworthy=true, e: ready, f: departed_key_inputs_row_gone).
+  // (b) has no gate: the runbook gate on it was retired by Phase 183 D-01 (a
+  // marked duplicate no longer holds a book back), and (b) still prints the
+  // marked counts as information.
   it("every gate bucket is required, except (d)'s GROUP BY bucket, whose absence is a 0", () => {
     const sections = SECTIONS as ReadonlyArray<{
       letter: string;
@@ -524,7 +529,7 @@ describe("(4b) an empty section or a missing fixed bucket fails, naming it", () 
     }>;
     expect(Object.fromEntries(sections.map((s) => [s.letter, [...s.gate]]))).toEqual({
       a: ["binance", "okx", "bybit", "deribit", "sfox", "mt5"].map((x) => `${x}.live_keys_unstamped_unmarked`),
-      b: ["duplicate.blocking"],
+      b: [],
       c: ["owners_missing_either"],
       d: ["version=2,is_trustworthy=true"],
       e: ["ready"],
@@ -893,7 +898,11 @@ describe("(6) the census SQL, executed on a throwaway local PostgreSQL cluster (
     expect(Object.fromEntries(got)).toEqual(Object.fromEntries(expected));
   });
 
-  it("(b) the cross-owner key on one account is no duplicate; only the marker with a working holder blocks", () => {
+  // Phase 183 D-01: this test used to pin `duplicate.blocking` (the marker with a
+  // working holder held the book back). The writer and the reader now count that
+  // marked key once and draw the curve, so (b) counts marked keys and nothing
+  // reads as held back.
+  it("(b) counts marked keys only: the cross-owner key on one account is no duplicate, and since Phase 183 D-01 no marked key holds a book back", () => {
     psql(RESET_SQL + insertKeys(SEED_A));
     const got = counts(sqlB());
     expect(Object.fromEntries(got)).toEqual({
@@ -902,10 +911,6 @@ describe("(6) the census SQL, executed on a throwaway local PostgreSQL cluster (
       // M1, M2, MX and MR carry 'duplicate'.
       "duplicate.marked": 4,
       "duplicate.marked_live": 4,
-      // M1 only: M2's holder departed, MX's holder is another owner's key, and
-      // MR's holder is revoked, so none of them is working.
-      "duplicate.blocking": 1,
-      "duplicate.blocking_owners": 1,
     });
   });
 
@@ -986,6 +991,7 @@ describe("(6) the census SQL, executed on a throwaway local PostgreSQL cluster (
     type RefusalRow = { token: string; reader_reason: string; payload: Record<string, unknown> };
     const table: {
       refusals: RefusalRow[];
+      legacy_refusals: { token: string; reader_reason: string }[];
       blocking: { token: string; reader_reason: string }[];
       precedence: { degrade_reasons: string[]; reader_reason: string }[];
     } = JSON.parse(
@@ -995,6 +1001,12 @@ describe("(6) the census SQL, executed on a throwaway local PostgreSQL cluster (
     const withTokens = (degrade_reasons: string[]) => ({ ...base, degrade_reasons });
     const cases: Array<{ name: string; payload: unknown; reason: string }> = [
       ...table.refusals.map((r) => ({ name: r.token, payload: r.payload, reason: r.reader_reason })),
+      // A pre-Phase-183 row may still carry a retired token; the census CASE keeps reading it.
+      ...table.legacy_refusals.map((l) => ({
+        name: `legacy:${l.token}`,
+        payload: { ...withTokens([l.token]), refusal: l.token },
+        reason: l.reader_reason,
+      })),
       ...table.blocking.map((b) => ({ name: b.token, payload: withTokens([b.token]), reason: b.reader_reason })),
       ...table.precedence.flatMap((p) => [
         { name: p.degrade_reasons.join(" + "), payload: withTokens(p.degrade_reasons), reason: p.reader_reason },
@@ -1007,7 +1019,10 @@ describe("(6) the census SQL, executed on a throwaway local PostgreSQL cluster (
     ];
     // The population must not be empty: a fixture that lost its arrays would
     // otherwise pass on nothing.
-    expect(table.refusals.length).toBeGreaterThanOrEqual(8);
+    // 7, not 8: Phase 183 D-01 retired the marked-duplicate refusal from the
+    // closed vocabulary; its token moved to `legacy_refusals`, floored below.
+    expect(table.refusals.length).toBeGreaterThanOrEqual(7);
+    expect(table.legacy_refusals.length).toBeGreaterThanOrEqual(1);
     expect(table.blocking.length).toBeGreaterThanOrEqual(9);
     expect(table.precedence.length).toBeGreaterThanOrEqual(7);
 
@@ -1044,6 +1059,63 @@ describe("(6) the census SQL, executed on a throwaway local PostgreSQL cluster (
       }
     }
     expect(wrong).toEqual([]);
+  });
+
+  // Phase 183 D-01 (founder 2026-10-31, "Count once, draw the curve"). The census
+  // is the SQL twin of the reader (equityHistoryReadiness), so it must hold a book
+  // back for exactly the reasons the reader does. Its old key-list arm read this
+  // book as `rebuilding:duplicate_account` over any marked duplicate with a
+  // working holder, while the writer (plan 183-01) draws the curve and the reader
+  // (plan 183-02) says ready. Owner A holds three accounts, each with a marked
+  // duplicate beside its working holder, one of them (MD) failing to sync:
+  //   S   okx,     'acct-1'         MD1 okx, no id, duplicate of S
+  //   D   deribit, 'acct-9'         MD  deribit, no id, duplicate of D, sync_status error
+  //   T   mt5,     'mt5-login-1'    MT  mt5, no id, duplicate of T
+  // The calibration arms keep the harness honest: with no curve row the same keys
+  // wait, and a stored refusal row carrying the pre-Phase-183 token still reads
+  // duplicate_account (the stored-token arm is kept for the one stale PROD row).
+  it("(e) a book whose marked duplicates are counted once reads ready over its trustworthy curve (Phase 183 D-01)", () => {
+    const keys: KeyRow[] = [
+      { id: id(31), user_id: A, exchange: "okx", venue_account_id: "acct-1" },
+      { id: id(32), user_id: A, exchange: "okx", holder: id(31), share_kind: "duplicate" },
+      { id: id(33), user_id: A, exchange: "deribit", venue_account_id: "acct-9" },
+      { id: id(34), user_id: A, exchange: "deribit", holder: id(33), share_kind: "duplicate", sync_status: "error" },
+      { id: id(35), user_id: A, exchange: "mt5", venue_account_id: "mt5-login-1" },
+      { id: id(36), user_id: A, exchange: "mt5", holder: id(35), share_kind: "duplicate" },
+    ];
+    const sqlE = (SECTIONS as ReadonlyArray<{ letter: string; sql: string }>).find((x) => x.letter === "e")!.sql;
+    const curveRow = (payload: unknown) =>
+      `INSERT INTO public.allocator_equity_derived (allocator_id, kind, payload) VALUES (${lit(A)}, 'equity_curve', ${lit(JSON.stringify(payload))}::jsonb);\n`;
+    const stateWith = (payload: unknown | null): Record<string, number> => {
+      psql(RESET_SQL + insertKeys(keys) + (payload === null ? "" : curveRow(payload)));
+      return Object.fromEntries(counts(sqlE));
+    };
+
+    expect(
+      stateWith({
+        version: 2,
+        is_trustworthy: true,
+        curve: [{ date: "2026-03-10", equity_usd: 100 }],
+        returns: [{ date: "2026-03-10", r: 0.01 }],
+      }),
+    ).toEqual({ owners_with_eligible_keys: 1, ready: 1 });
+
+    expect(stateWith(null)).toEqual({
+      owners_with_eligible_keys: 1,
+      ready: 0,
+      "rebuilding:awaiting_derivation": 1,
+    });
+
+    expect(
+      stateWith({
+        version: 2,
+        is_trustworthy: false,
+        curve: [],
+        returns: [],
+        degrade_reasons: ["account_duplicate"],
+        refusal: "account_duplicate",
+      }),
+    ).toEqual({ owners_with_eligible_keys: 1, ready: 0, "rebuilding:duplicate_account": 1 });
   });
 
   // ⚠️ One case is not replayed, by name: a timestamptz column cannot hold an

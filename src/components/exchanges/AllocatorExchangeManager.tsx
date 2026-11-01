@@ -1403,7 +1403,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                 bg: "#F1F5F9",
                 fg: "#475569",
               };
-              const shareNote = accountShareNote(key, keysById, "Disconnect");
+              const shareNote = accountShareNote(key, keysById);
               // Phase 169.3 plan 03 (SC7): the balance is the ACCOUNT's, so it
               // renders once, on the row balanceBearers picks for the key's
               // account (review round 1 WR-02, founder D-74: grouped by the
@@ -1451,14 +1451,15 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                         MT5 account {key.venue_account_id ?? "—"}
                       </p>
                     )}
-                    {/* Phase 167.1.2 plan 04 (D-01, D-11): the named cleanup
-                        path for a key whose exchange account another working
-                        key of this owner already reads. Amber: recoverable
-                        by the owner's own Disconnect on this row (DESIGN.md
-                        semantic-color gates). Active rows only: a disconnected
-                        duplicate is no longer counted, so it asks nothing. */}
+                    {/* Phase 167.1.2 plan 04 (D-01, D-11) and Phase 183 D-02:
+                        the account-share note for a key whose exchange account
+                        another working key of this owner already reads. A
+                        neutral muted line: DESIGN.md's semantic-color gates
+                        keep amber for a recoverable state, and the founder's
+                        rule makes one account behind several logins a steady
+                        state. Active rows only, as before. */}
                     {shareNote ? (
-                      <p role="note" className="text-xs text-warning mt-0.5">
+                      <p role="note" className="text-xs text-text-muted mt-0.5">
                         {shareNote}
                       </p>
                     ) : null}

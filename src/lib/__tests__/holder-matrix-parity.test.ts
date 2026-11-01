@@ -16,6 +16,11 @@ import { resolve } from "node:path";
  * derive counts per cell, this file asserts what the reader shows. Either side
  * drifting reddens CI.
  *
+ * Phase 183 D-01: a marked duplicate behind a working holder is counted once
+ * by the derive and reads ready; the shared table has no refusing cell. A
+ * refusal (a real double count) reaches the reader only through its stored
+ * token, never from the key list.
+ *
  * The series handed to the reader is the one the derive leaves: present when
  * the derive composes a trustworthy curve, `null` otherwise, with the reason
  * the producer passes for that case. Only `equityHistoryReadiness` is called;
@@ -45,7 +50,7 @@ type Cell = {
   holder: string;
   marked: string;
   derive: {
-    outcome: "refuse" | "compose";
+    outcome: "compose";
     counted: string[];
     trustworthy: boolean | null;
   };
@@ -101,7 +106,6 @@ function keysFor(cell: Cell): EquityHistoryKey[] {
 
 /** What the derive leaves for the reader: a series only on a trustworthy compose. */
 function readerInputs(cell: Cell): [typeof SERIES | null, MissingSeriesReason] {
-  if (cell.derive.outcome === "refuse") return [null, "awaiting_derivation"];
   if (cell.derive.trustworthy) return [SERIES, "awaiting_derivation"];
   return [null, "derivation_rejected"];
 }
@@ -124,13 +128,15 @@ describe("holder matrix parity — the TS reader against the shared table", () =
     },
   );
 
-  it("the reader says duplicate_account exactly where the derive refuses", () => {
+  it("the reader never says duplicate_account from the key list: no cell refuses (Phase 183 D-01)", () => {
     for (const cell of TABLE.cells) {
       const [series, missing] = readerInputs(cell);
       const verdict = equityHistoryReadiness(keysFor(cell), series, missing);
-      expect(
-        { cell: cellId(cell), duplicate: verdict.reason === "duplicate_account" },
-      ).toEqual({ cell: cellId(cell), duplicate: cell.derive.outcome === "refuse" });
+      expect({
+        cell: cellId(cell),
+        outcome: cell.derive.outcome,
+        duplicate: verdict.reason === "duplicate_account",
+      }).toEqual({ cell: cellId(cell), outcome: "compose", duplicate: false });
     }
   });
 

@@ -19,6 +19,10 @@ import { resolve } from "node:path";
  * src/__tests__/accounttruth-census.test.ts asserts the census CASE. Either side
  * drifting reddens CI. The fixture is loaded in place, never copied (the
  * cross-package idiom of holder-matrix-parity.test.ts).
+ *
+ * Phase 183 D-01 retired the marked-duplicate refusal: the derive counts a marked
+ * duplicate once and draws the curve. `legacy_refusals` lists the tokens a stored
+ * pre-Phase-183 row may still carry, and the reader must keep mapping each one.
  */
 
 // queries.ts pulls in @/lib/audit, which imports "server-only" — that throws
@@ -37,6 +41,7 @@ type RefusalRow = {
 type Table = {
   composed_at: string;
   refusals: RefusalRow[];
+  legacy_refusals: { token: string; reader_reason: string }[];
   blocking: { token: string; reader_reason: string }[];
   precedence: { degrade_reasons: string[]; reader_reason: string }[];
 };
@@ -65,6 +70,26 @@ describe("derive refusal rows: the reader names a line it already has", () => {
       expect(result.equityDailyReturns).toEqual([]);
       expect(result.equityCurveSource).toBe("legacy");
       expect(result.derivedCurveComputedAt).toBeNull();
+    },
+  );
+});
+
+describe("legacy refusal tokens: a stored pre-Phase-183 row still reads its line", () => {
+  it("the list is not empty (a fixture that lost it would pass on nothing)", () => {
+    expect(TABLE.legacy_refusals.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it.each(TABLE.legacy_refusals.map((r) => [r.token, r] as const))(
+    "%s (a pre-Phase-183 refusal row) -> its fixture reader_reason, and never a curve",
+    (token, row) => {
+      const result = readRow({
+        ...TABLE.refusals[0].payload,
+        degrade_reasons: [token],
+        refusal: token,
+      });
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe(row.reader_reason);
+      expect(result.equityDailyPoints).toEqual([]);
     },
   );
 });

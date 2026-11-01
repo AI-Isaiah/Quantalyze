@@ -1902,15 +1902,15 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     });
   });
 
-  it("a duplicate of a working holder is not ready, even with a v2 series", () => {
+  it("a marked duplicate of a working holder is ready over a v2 series: the derive counts its account once (Phase 183 D-01)", () => {
     const marked = key({
       id: "k-dup",
       account_share_kind: "duplicate",
       account_shared_with_api_key_id: "k-holder",
     });
     expect(equityHistoryReadiness([holderKey(), marked], series)).toEqual({
-      state: "rebuilding",
-      reason: "duplicate_account",
+      state: "ready",
+      reason: null,
     });
   });
 
@@ -2072,6 +2072,9 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     expect(
       call([key({ venue_account_id: null })]).equityHistoryNotSyncingKeyIds,
     ).toEqual([]);
+    // Phase 183 D-01: a marked duplicate no longer blocks first, so beside a
+    // failing unstamped key the failing key is the reason and the only key
+    // listed (the marked key is identity-known through its holder's id).
     expect(
       call([
         holderKey(),
@@ -2084,8 +2087,8 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
         key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
       ]),
     ).toMatchObject({
-      equityHistoryRebuildReason: "duplicate_account",
-      equityHistoryNotSyncingKeyIds: [],
+      equityHistoryRebuildReason: "key_not_syncing",
+      equityHistoryNotSyncingKeyIds: ["k-bad"],
     });
   });
 
@@ -2110,16 +2113,17 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     ).toBe("ready");
   });
 
-  it("duplicate wins over a missing account id", () => {
+  it("a marked duplicate whose holder carries the account id is identity-known and ready (Phase 183 D-01)", () => {
     const marked = key({
       id: "k-dup",
       venue_account_id: null,
       account_share_kind: "duplicate",
       account_shared_with_api_key_id: "k-holder",
     });
-    expect(equityHistoryReadiness([holderKey(), marked], series).reason).toBe(
-      "duplicate_account",
-    );
+    expect(equityHistoryReadiness([holderKey(), marked], series)).toEqual({
+      state: "ready",
+      reason: null,
+    });
   });
 
   it("no series, and no identity problem, is awaiting_derivation", () => {
@@ -2135,6 +2139,58 @@ describe("equityHistoryReadiness — plan 11 ready condition", () => {
     expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
     expect(result.equityDailyPoints).toEqual([]);
     expect(result.equityDailyReturns).toEqual([]);
+  });
+
+  // Pitfall 5 (183-RESEARCH): Vercel (reader) and Railway (writer) deploy
+  // independently, and the one stored refusal row carries `account_duplicate`
+  // until the book's next derive replaces it. The key list no longer says
+  // duplicate_account (D-01); the stored token still does.
+  it("Phase 183 transition: the DUPCOUNT key shape reads duplicate_account over a stored pre-Phase-183 refusal row, and ready once the derive replaces it with a trustworthy curve", () => {
+    const keys = [
+      holderKey({ id: "k-holder-d", exchange: "deribit", venue_account_id: "acct-deribit" }),
+      key({
+        id: "k-dup-d",
+        exchange: "deribit",
+        sync_status: "error",
+        venue_account_id: null,
+        account_share_kind: "duplicate",
+        account_shared_with_api_key_id: "k-holder-d",
+      }),
+      holderKey({ id: "k-holder-m", exchange: "mt5", venue_account_id: "acct-mt5" }),
+      key({
+        id: "k-dup-m",
+        exchange: "mt5",
+        venue_account_id: null,
+        account_share_kind: "duplicate",
+        account_shared_with_api_key_id: "k-holder-m",
+      }),
+    ];
+    const trustworthy = {
+      version: 2,
+      is_trustworthy: true,
+      curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      returns: [{ date: "2026-03-10", r: 0.01 }],
+    };
+    const refusal = (token: string) => ({
+      ...trustworthy,
+      is_trustworthy: false,
+      curve: [],
+      returns: [],
+      degrade_reasons: [token],
+      refusal: token,
+    });
+    const read = (payload: unknown) =>
+      derivePhase07Fields(keys, [], { payload, computed_at: null });
+
+    for (const token of ["account_duplicate", "account_identity_collision"]) {
+      const result = read(refusal(token));
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("duplicate_account");
+      expect(result.equityDailyPoints).toEqual([]);
+    }
+    const replaced = read(trustworthy);
+    expect(replaced.equityHistoryState).toBe("ready");
+    expect(replaced.equityHistoryRebuildReason).toBeNull();
   });
 });
 

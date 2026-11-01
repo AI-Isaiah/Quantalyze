@@ -10,6 +10,10 @@ token onto a line it already has. Three runtimes have to agree on that row: this
 file asserts the payload the writer builds, ``src/lib/__tests__/derive-refusal-rows.test.ts``
 asserts the reader's verdict, and ``src/__tests__/accounttruth-census.test.ts``
 asserts the census CASE. The fixture is loaded in place, never copied.
+
+Phase 183 D-01: the marked-duplicate refusal is retired, because the account-group
+resolution counts a marked duplicate once. Its token stays in ``legacy_refusals``,
+which the reader and the census still map for the one stored row that may carry it.
 """
 
 from __future__ import annotations
@@ -89,4 +93,20 @@ def test_every_precedence_row_names_an_existing_line_over_known_tokens() -> None
     assert TABLE["precedence"], "the precedence table must not be empty"
     for row in TABLE["precedence"]:
         assert set(row["degrade_reasons"]) <= producible, row
+        assert row["reader_reason"] in EXISTING_READER_LINES, row
+
+
+def test_no_legacy_refusal_is_a_derive_refusal_member() -> None:
+    """A retired token must stay readable for stored rows and must never quietly
+    come back as a live refusal (Phase 183 D-01). ``legacy_refusals`` names the
+    tokens a pre-Phase-183 row may still carry: the reader and the census map each
+    one, and no writer produces it. Re-adding one to ``DeriveRefusal`` without
+    deciding to un-retire it fails here by name, and a legacy token that maps to a
+    line the reader does not have would show the owner a wrong reason."""
+    from services.allocator_equity_derive import DeriveRefusal
+
+    assert TABLE["legacy_refusals"], "the legacy list must not be empty"
+    live = {m.value for m in DeriveRefusal}
+    for row in TABLE["legacy_refusals"]:
+        assert row["token"] not in live, row
         assert row["reader_reason"] in EXISTING_READER_LINES, row

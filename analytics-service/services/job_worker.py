@@ -14548,7 +14548,9 @@ def _no_capital_exit_consumes_only_dust(
     )
 
 
-async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
+async def run_derive_allocator_equity_job(
+    job: dict[str, Any], *, _markers_rechecked: bool = False
+) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
 
@@ -14650,6 +14652,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         )
 
     key_rows = await db_execute(_load_keys)
+    # Phase 183 D-05: the share markers this compose was built from, re-read just
+    # before the curve is saved (step 5b).
+    markers_at_load = {
+        (r["id"], r.get("account_shared_with_api_key_id"), r.get("account_share_kind"))
+        for r in key_rows
+    }
     eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
     rows_by_id = {r["id"]: r for r in key_rows}
 
@@ -14884,23 +14892,13 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         and key_id in departed_anchored
     }
 
-    # Identity gate. A 'duplicate' is a duplicate while its holder is WORKING
-    # (D-18) — the same rule as queries.ts countsAsDuplicate, so the writer and
-    # the reader agree — and the curve is refused, whatever the marked key's own
-    # status. A holder that is not working leaves the marked key ordinary (the
-    # group resolution above counts the account once), and a same-id overlap
-    # with another counted key is then a collision, not a duplicate. Checked
-    # BEFORE anything is composed, so a double-counted book never composes.
-    duplicate_keys = [
-        row
-        for row in key_rows
-        if row["id"] in eligible_ids
-        and row.get("account_share_kind") == "duplicate"
-        and row.get("account_shared_with_api_key_id") != row["id"]
-        and working_holder_predicate(
-            rows_by_id.get(row.get("account_shared_with_api_key_id"))
-        )
-    ]
+    # Identity gate (Phase 183 D-01). The group loop above already counts each
+    # marked pair ONCE: it keeps one key and puts the rest in ``excluded_shared``,
+    # so a marked duplicate needs no gate of its own and its curve is drawn. A
+    # real double count is two COUNTED keys on one account, which
+    # ``account_identity_collisions`` sees through ``account_identity_tokens``
+    # (venue id OR marker link). Checked BEFORE anything is composed, so a
+    # double-counted book never composes.
     # B4: over the whole HISTORY set, a live key from its first returns day
     # (open while it has none) to an open end, a departed key over the days it
     # counts. A rotation clipped by D-09 does not collide; two live keys on one
@@ -14930,12 +14928,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             for key_id, until in departed_end_by_key.items()
         ]
     )
-    if duplicate_keys or collisions:
-        reason = (
-            DeriveRefusal.ACCOUNT_DUPLICATE.value
-            if duplicate_keys
-            else DeriveRefusal.ACCOUNT_IDENTITY_COLLISION.value
-        )
+    if collisions:
+        reason = DeriveRefusal.ACCOUNT_IDENTITY_COLLISION.value
         await _persist_refusal(reason)
         # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
         # C2 silent-failure SFH-07: WARNING, not INFO. The refusal replaces the
@@ -14960,13 +14954,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             )
         logger.warning(
             "derive_allocator_equity: %s for allocator %s "
-            "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "
+            "(counted_keys=%d colliding_groups=%d) — "
             "recorded the refusal in the equity_curve row; the book shows the "
             "rebuilding panel until the keys are resolved",
             reason,
             allocator_id,
             len(counted_rows),
-            len(duplicate_keys),
             len(collisions),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -15878,6 +15871,43 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    # ── 5a. Phase 183 D-05: a share marker that landed AFTER the keys were read
+    #      above left this compose counting the account twice. The stamper's own
+    #      recompose enqueue cannot fix that: this job is still running, so the
+    #      enqueue dedup absorbs it, and the wrong curve would stand until the next
+    #      day's derive. So re-read the markers just before the save and, if one
+    #      changed, redo the load-and-compose ONCE inside this job (the redo
+    #      recurses at most once, so it always ends). The first pass saved no
+    #      curve; the curve saved is the one built from the new markers. The redo
+    #      is still this running job, so a marker landing DURING it is absorbed the
+    #      same way: the redo re-reads too, and on a second change ends transient
+    #      without a curve, so the queue's retry (a fresh job) re-reads. ──
+    markers_now = {
+        (r["id"], r.get("account_shared_with_api_key_id"), r.get("account_share_kind"))
+        for r in await db_execute(_load_keys)
+    }
+    if markers_now != markers_at_load:
+        if _markers_rechecked:
+            logger.warning(
+                "derive_allocator_equity: share markers changed again while recomposing "
+                "for allocator %s — ending transient so the retry re-reads",
+                allocator_id,
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "derive_allocator_equity: share markers changed again during the "
+                    "recompose; retrying so the curve is built from the current markers"
+                ),
+                error_kind="transient",
+            )
+        logger.info(
+            "derive_allocator_equity: a share marker changed while composing for "
+            "allocator %s — recomposing once before saving the curve",
+            allocator_id,
+        )
+        return await run_derive_allocator_equity_job(job, _markers_rechecked=True)
 
     # ── 5b. Single-row ATOMIC upsert of the NON-EMPTY display row (never the
     #      legacy store — the fake-PostgREST raise pin enforces this forever). ──

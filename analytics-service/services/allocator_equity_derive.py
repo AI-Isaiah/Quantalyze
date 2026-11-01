@@ -223,8 +223,9 @@ class DeriveRefusal(str, Enum):
 
     # The allocator's daily returns exceed the read's hard cap; nothing was composed.
     RETURNS_READ_CAP = "returns_read_cap"
-    # A marked duplicate behind a working holder: the account would be summed twice.
-    ACCOUNT_DUPLICATE = "account_duplicate"
+    # Phase 183 D-01 retired the marked-duplicate refusal: the account-group resolution
+    # counts a marked duplicate once. A stored row carrying the old token reads through
+    # ``legacy_refusals`` in tests/fixtures/derive_refusal_rows.json.
     # Two live keys read one exchange account with no marker between them.
     ACCOUNT_IDENTITY_COLLISION = "account_identity_collision"
     # A persisted value is corrupt (a NULL return, a non-numeric or non-finite flow).

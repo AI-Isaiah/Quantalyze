@@ -410,6 +410,28 @@ def _write_marker_and_audit(
         return False
     if kind == _DUPLICATE:
         _audit_duplicate(key_row, holder_id)
+    # Phase 183 WR-01: a curve composed before this marker landed may count the
+    # account twice, and nothing else enqueues a compose now that the reader no
+    # longer holds a marked duplicate back. Same call, same owner source as the
+    # per-key derive epilogue; best effort, because the marker has landed. A
+    # dropped enqueue is not retried (the next poll meets an unchanged marker),
+    # so the curve stays as composed until the nightly fan-out, which is the
+    # window, not a safety net. Logged at ERROR so it reaches Sentry.
+    try:
+        supabase.rpc(
+            "enqueue_compute_job",
+            {
+                "p_strategy_id": None,
+                "p_allocator_id": str(key_row["user_id"]),
+                "p_kind": "derive_allocator_equity",
+            },
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 — the marker stands; the drop is logged
+        logger.error(
+            "account_identity: recompose enqueue after a new marker failed for "
+            "api_key %s: class=%s code=%s",
+            key_row.get("id"), type(exc).__name__, _error_code(exc),
+        )
     return True
 
 
