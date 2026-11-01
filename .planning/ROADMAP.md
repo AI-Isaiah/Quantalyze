@@ -216,6 +216,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book** — booked 2026-10-31 from MARKSOURCE plan 08 first-night reading (a) (founder "Book a phase, close plan 08 (Recommended)"); 3 allocators holding positions have no equity curve because their keys are strategy-linked; data integrity, user-facing
 - [ ] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing
 - [ ] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing
+- [ ] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6716,6 +6717,23 @@ Root cause: in `analytics-service/services/job_worker.py` the derive's account-g
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills
+
+**Goal:** On each wallet-base venue (OKX and Bybit now; Binance and sFOX once their keys have marks), the first-mark offset is measured per key: the realized P&L plus flows between UTC midnight of the first mark day and the mark read, rebuilt read-only from fills and trade history and stated as a ratio of NAV. The founder then decides whether any venue moves to a writer-chain base.
+**Requirements**: TBD
+**Depends on:** Phase 167.2.1.1.1
+**Plans:** 0 plans
+
+Booked 2026-11-01 by the founder from NAVMTM 167.2.1.1.1 D-27 (AskUserQuestion "Book a measure phase": "Book a phase that rebuilds the realized P&L for that window from fills and measures the offset."). D-25 moved MT5 and Deribit to the writer-chain base (G-01, PR #1166). OKX, Bybit, Binance and sFOX keep the wallet base (NAVMTM REVIEW CR-01: the wallet is final on OKX), so their pre-mark levels sit off the realized chain by that offset; mark reads land about 5.5-6.7 h after the boundary. The stored rows cannot give it: PROD 2026-11-01 (counts only) has 5 OKX keys and 1 Bybit key with marked `key_inputs` since 2026-10-26, their `realized_terminal_usd` equals the mark NAV, and no Binance or sFOX key has inputs yet. Data integrity.
+
+**Success Criteria** (what must be TRUE):
+1. For each key on those venues, the offset as a ratio of NAV is measured from fills and trade history for the first-mark window, read-only, and recorded with counts and ratios only.
+2. The founder gets the numbers and decides whether any venue moves to a writer-chain base; the decision is recorded in this phase's CONTEXT and in this ROADMAP entry.
+3. No published number changes in this phase unless the founder decides so.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7019,6 +7037,7 @@ kept verbatim.
 | 181 SHAREDKEYS | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 08 | - |
 | 182 SPIKEREPAIR | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 14 | - |
 | 183 DUPCOUNT | 0/0 | Not started — booked 2026-10-31 from the Sentry check (QUANTALYZE-2H) | - |
+| 184 WALLETOFFSET | 0/0 | Not started — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
