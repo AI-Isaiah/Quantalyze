@@ -26,6 +26,11 @@ untouched:
 - ``okx_subtypes_payload`` is the ``/account/subtypes`` reply, nested or flat.
 - ``OkxBillsArchive`` honours a ``type`` and an ``instType`` query parameter and can hide a
   type from a query that does not name it (``hide_type``).
+
+Phase 184 WALLETOFFSET addition, additive and default-off like the ones above:
+
+- ``okx_bill`` takes ``pnl`` and ``fee``; a bill carries each key only when the value is given,
+  so the bills the P&L probe sums can be built without touching any earlier caller.
 """
 from __future__ import annotations
 
@@ -46,6 +51,8 @@ def okx_bill(
     sub_type: str = "",
     mgn_mode: str = "",
     pos_bal_chg: str = "",
+    pnl: str = "",
+    fee: str = "",
 ) -> dict[str, str]:
     """One bill with the OKX v5 field names the oracle reads, every value a string.
 
@@ -60,6 +67,10 @@ def okx_bill(
         "instType": inst_type,
     }
     for key, value in (("subType", sub_type), ("mgnMode", mgn_mode), ("posBalChg", pos_bal_chg)):
+        if value:
+            bill[key] = value
+    # Phase 184: the ``pnl`` and ``fee`` keys are set only when given, so no earlier bill changes.
+    for key, value in (("pnl", pnl), ("fee", fee)):
         if value:
             bill[key] = value
     return bill
