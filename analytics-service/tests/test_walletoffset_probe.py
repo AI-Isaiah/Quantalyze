@@ -1655,8 +1655,9 @@ def test_source_calls_the_chains_own_readers() -> None:
 def test_source_names_only_the_one_table_it_reads() -> None:
     literal = re.findall(r'\.table\(\s*"([a-z_]+)"\s*\)', _PROBE_SRC)
     assert literal == ["api_keys"]
-    # The wrapper is imported, not copied, so there is no other ``.table(`` in the source.
-    assert _PROBE_SRC.count(".table(") == 1
+    # The wrapper is carried in the source, so its own ``self._inner.table(name)`` is the one
+    # other ``.table(``; no second table is read.
+    assert _PROBE_SRC.count(".table(") == 2
 
 
 def test_source_every_database_handle_the_probe_passes_on_is_the_wrapper() -> None:

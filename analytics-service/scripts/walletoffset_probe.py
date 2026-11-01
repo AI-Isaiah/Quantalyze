@@ -118,7 +118,6 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Final
 
-from scripts.allocator_history_probe import ReadOnlySupabase, ratio_or_absent
 from scripts.bybit_upnl_probe import FAILURE_CLASSES, FIELD_ABSENT, classify_failure, sig3
 from scripts.deribit_ground_truth import assert_sanitized
 from services import okx_opening_balance as obal
@@ -129,6 +128,56 @@ from services.nav_marks import StoredMark, mark_day_for, read_key_marks
 from services.nav_marks_apply import placed_flow_instants
 from services.nav_twr import NavReconstructionError
 from services.okx_bills_chain import BudgetedExchange, CallCeilingReached
+
+# Carried verbatim from the deleted allocator history probe: the read-only database handle.
+
+
+class _ReadOnlyTable:
+    """A table handle that can select and nothing else."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def select(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.select(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        raise AttributeError(name)
+
+
+class ReadOnlySupabase:
+    """A database client for the probe that cannot write.
+
+    ``table(name)`` hands out a handle exposing ``select`` only; every other attribute of
+    the client or of a table handle, ``rpc`` included, is an ``AttributeError``. It is
+    passed to the rebuild's own read, whose only write (the price cache on a BadSymbol
+    fallback) then fails inside its own caught exception instead of reaching PROD."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def table(self, name: str) -> _ReadOnlyTable:
+        return _ReadOnlyTable(self._inner.table(name))
+
+    def __getattr__(self, name: str) -> Any:
+        raise AttributeError(name)
+
+
+# Carried verbatim from the same file: the ratio helper.
+
+
+def ratio_or_absent(numerator: float | None, denominator: float | None) -> float | str:
+    """``numerator / denominator`` to three significant figures, or ``field-absent``.
+
+    Absent when either side is unread, the denominator is 0, or the quotient is not finite
+    (``sig3`` says ``non-finite`` for inf and NaN, which ``_is_ratio`` rejects). Every
+    ratio the anchor diagnostic prints goes through here, so a ratio against a zero
+    anchor can never reach stdout as an unrounded or non-finite figure."""
+    if numerator is None or denominator is None or denominator == 0:
+        return FIELD_ABSENT
+    shown = sig3(numerator / denominator)
+    return shown + 0.0 if isinstance(shown, float) else FIELD_ABSENT  # + 0.0: never "-0.0"
+
 
 EXIT_OK: Final[int] = 0
 EXIT_FAILED: Final[int] = 1
