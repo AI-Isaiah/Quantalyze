@@ -220,6 +220,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
 - [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
 - [ ] **Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
+- [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6849,6 +6850,30 @@ Data integrity, user-facing. The fix changes published Binance numbers. Relates 
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance
+
+**Goal:** A day whose return is measured against a base that is a small fraction of the account's recent capital (after a near-total withdrawal) no longer reads as the strategy's performance on the book's equity curve and stats. The rule is decided with the founder, applies on every venue, and never invents a value.
+**Requirements**: TBD
+**Depends on:** Nothing
+**Plans:** 0 plans
+
+**Booking.** Founder 2026-11-01, AskUserQuestion, Phase 185 plan 03 question F7, after the reading explained key C's 2026-10-28 day.
+- "Book a fix phase", chosen over the recommendation "Accept as real (Recommended)".
+
+**Evidence (PROD 2026-11-01, `185-03-SUMMARY.md`, key letters only).** Deribit key C's marked days 2026-10-27 (+46.98%) and 2026-10-28 (-52.67%) are real marked-to-market moves of a small option position. On 2026-10-26, the first mark day, the owner withdrew 244.56 times the NAV left behind, so about 0.4% of the account remained. Between the reads the wallet and USDT did not move, the open P&L fell 0.5278 of NAV, and the marks path showed no defect. The returns are correct arithmetic on a tiny base, and they move the book's chained equity curve and its stats.
+
+**Success Criteria** (what must be TRUE):
+1. The discuss step decides with the founder how a day whose base is a small fraction of the account's recent capital is treated (for example: flagged, left out of the chained curve and stats, or chained with a caveat), and records it.
+2. The derive and the reader follow that rule on every venue, not only Deribit.
+3. Tests go RED on today's behaviour for the shape of key C's 2026-10-27 and 2026-10-28 days.
+4. After deploy, a PROD reading shows key C's two days handled by the rule, and no other book's curve changed except on days the rule names.
+5. Never invent data: an uncomputable day is null.
+
+Data integrity, user-facing. Relates to 185 DERIBITFLOWTIME (the 185-03 reading meets its SC-4 "explained" clause; this phase owns what the curve does with such days) and 172 (anchor and tolerance rules).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7156,6 +7181,7 @@ kept verbatim.
 | 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 | 187 BINANCEINCOME | 0/0 | Not started — booked 2026-11-01 from the Phase 184 code review | - |
+| 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
