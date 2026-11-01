@@ -6784,6 +6784,7 @@ Plans:
 **Booking.** Founder 2026-11-01, AskUserQuestion, after a read-only check of the new curve's path (per-key `derive_broker_dailies` plus the compose) against the fixes the legacy engine got from ACCTREBUILD, TRADEPAGES, READCEILING, OKXANCHOR, OKXREWRITE and BYBITFUNDING, which Phase 176 deletes.
 - Gaps 1+2: "Book one fix phase (Recommended)": "One phase: (1) the derive refuses by name on a truncated or failed read, as the trade sync already does; (2) the Bybit derive also reads Unified internal/sub-account transfers, reversing 180's D-02. Each starts with a PROD count of how many keys are affected."
 - Gap 3: "Only that key (Recommended)": "Apply your 2026-10-28 rule: a failing key is left out or flagged on its own, and the rest of the book draws normally. Reverses D-03; goes into the fix phase."
+- Gap 4 (added 2026-11-01, after the Phase 184 probe run): "Add to 186 DERIVEGAPS (Recommended)": "186 already covers silent read gaps in the derive. Start with a read-only count of same-hour funding pairs, then fix the dedup key if any exist."
 
 **Gap 1 (HIGH, data integrity) — a truncated or failed read is published as complete.** `fetch_daily_pnl` (`analytics-service/services/exchange.py`) caps its reads:
 - OKX: `OKX_BILLS_PAGE_CAP` and `OKX_ARCHIVE_PAGE_CAP`, 100 pages of 100 rows each, per instType.
@@ -6798,6 +6799,8 @@ On a cap hit it only records a DQ flag (`daily_pnl_truncated_okx` / `daily_pnl_t
 
 **Gap 3 (MEDIUM, user-visible) — one failing key refuses or downgrades the whole book.** A key in `error` or `sign_in_failed` stays eligible. With no returns and no `key_inputs` it refuses the whole book (`COMPOSE_INCOMPLETE`). If its series ended early, the blocking `FAILING_KEY_SERIES_ENDED` marks the whole curve untrustworthy (167.1.2.1.1 D-03, now reversed). Founder rule 2026-10-28: a dead key affects only itself.
 
+**Gap 4 (MEDIUM, data integrity, latent) — a second funding leg in the same hour is dropped.** `fetch_funding_okx` (`analytics-service/services/funding_fetch.py`) dedups on `<strategy>:okx:<instId>:<1h bucket>` (`_build_match_key`), and the upsert ignores duplicates on `match_key`. Neither key holds `posSide`, `mgnMode` or `billId`. So an account with a long and a short (or a cross and an isolated) position on one perp keeps only one leg's funding, with no error. Bybit has the same shape. Not seen on the one OKX account checked from 2026-10-22 to 2026-11-01 (raw minus deduped stayed at 23); the 3-month archive is unmeasured. Found by the Phase 184 OKX refusal debug.
+
 **Noted, not in scope.** Bybit P&L depth is 365 days in the new path, against 730 in the legacy engine. This is less history, not wrong history. Recorded for the founder.
 
 **Success Criteria** (what must be TRUE):
@@ -6807,6 +6810,7 @@ On a cap hit it only records a DQ flag (`daily_pnl_truncated_okx` / `daily_pnl_t
 4. A failing key no longer refuses or downgrades the rest of the book. It is excluded or flagged on its own, and the readers say which key.
 5. A post-deploy PROD reading confirms all three.
 6. Never invent data: an uncomputable day is null.
+7. A read-only count of same-hour funding pairs per (instrument, hour) on OKX and Bybit is recorded first; if any exist, the dedup key keeps distinct positions, and a test with two legs in one hour goes RED on the current key.
 
 Data integrity, user-facing. Relates to 180 BYBITFUNDING (reverses its D-02), 171 READCEILING and 167.1.2.1.1 (reverses its D-03).
 

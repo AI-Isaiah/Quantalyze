@@ -1,9 +1,12 @@
 # Changelog
 
-## [0.133.16.1] - 2026-11-01 — book Phase 188 TINYBASE
+## [0.133.16.1] - 2026-11-01 — book Phase 188 TINYBASE, extend 186 DERIVEGAPS
 
 ### Added
 - Phase 188 TINYBASE is booked in the ROADMAP (founder 2026-11-01, Phase 185 plan 03 question F7: "Book a fix phase", chosen over accepting the day as real). The 185 reading explained Deribit key C's 2026-10-28 day (-52.67%) and the day before it (+46.98%). Both are real marked-to-market moves of a small option position on about 0.4% of the account, left after the owner withdrew almost everything on the first mark day. The arithmetic is right, but the base is tiny, so the moves dominate the book's curve and stats. The phase decides with the founder how such a tiny-base day is treated, applies the rule on every venue, and checks on PROD after deploy that only the days the rule names change.
+
+### Changed
+- Phase 186 DERIVEGAPS gains Gap 4 (founder 2026-11-01: "Add to 186 DERIVEGAPS"). The OKX funding read keeps one charge per instrument per hour, so an account with two positions on one perp (long and short, or cross and isolated) would lose one leg's funding without an error; Bybit has the same shape. It was not seen on the account checked, and older history is unmeasured, so the phase starts with a read-only count.
 
 ## [0.133.16.0] - 2026-11-01 — WALLETOFFSET: a read-only probe measures the first-mark offset on wallet-base venues
 
