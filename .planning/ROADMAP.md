@@ -220,6 +220,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
 - [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
 - [ ] **Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
+- [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6783,6 +6784,7 @@ Plans:
 **Booking.** Founder 2026-11-01, AskUserQuestion, after a read-only check of the new curve's path (per-key `derive_broker_dailies` plus the compose) against the fixes the legacy engine got from ACCTREBUILD, TRADEPAGES, READCEILING, OKXANCHOR, OKXREWRITE and BYBITFUNDING, which Phase 176 deletes.
 - Gaps 1+2: "Book one fix phase (Recommended)": "One phase: (1) the derive refuses by name on a truncated or failed read, as the trade sync already does; (2) the Bybit derive also reads Unified internal/sub-account transfers, reversing 180's D-02. Each starts with a PROD count of how many keys are affected."
 - Gap 3: "Only that key (Recommended)": "Apply your 2026-10-28 rule: a failing key is left out or flagged on its own, and the rest of the book draws normally. Reverses D-03; goes into the fix phase."
+- Gap 4 (added 2026-11-01, after the Phase 184 probe run): "Add to 186 DERIVEGAPS (Recommended)": "186 already covers silent read gaps in the derive. Start with a read-only count of same-hour funding pairs, then fix the dedup key if any exist."
 
 **Gap 1 (HIGH, data integrity) — a truncated or failed read is published as complete.** `fetch_daily_pnl` (`analytics-service/services/exchange.py`) caps its reads:
 - OKX: `OKX_BILLS_PAGE_CAP` and `OKX_ARCHIVE_PAGE_CAP`, 100 pages of 100 rows each, per instType.
@@ -6797,6 +6799,8 @@ On a cap hit it only records a DQ flag (`daily_pnl_truncated_okx` / `daily_pnl_t
 
 **Gap 3 (MEDIUM, user-visible) — one failing key refuses or downgrades the whole book.** A key in `error` or `sign_in_failed` stays eligible. With no returns and no `key_inputs` it refuses the whole book (`COMPOSE_INCOMPLETE`). If its series ended early, the blocking `FAILING_KEY_SERIES_ENDED` marks the whole curve untrustworthy (167.1.2.1.1 D-03, now reversed). Founder rule 2026-10-28: a dead key affects only itself.
 
+**Gap 4 (MEDIUM, data integrity, latent) — a second funding leg in the same hour is dropped.** `fetch_funding_okx` (`analytics-service/services/funding_fetch.py`) dedups on `<strategy>:okx:<instId>:<1h bucket>` (`_build_match_key`), and the upsert ignores duplicates on `match_key`. Neither key holds `posSide`, `mgnMode` or `billId`. So an account with a long and a short (or a cross and an isolated) position on one perp keeps only one leg's funding, with no error. Bybit has the same shape. Not seen on the one OKX account checked from 2026-10-22 to 2026-11-01 (raw minus deduped stayed at 23); the 3-month archive is unmeasured. Found by the Phase 184 OKX refusal debug.
+
 **Noted, not in scope.** Bybit P&L depth is 365 days in the new path, against 730 in the legacy engine. This is less history, not wrong history. Recorded for the founder.
 
 **Success Criteria** (what must be TRUE):
@@ -6806,6 +6810,7 @@ On a cap hit it only records a DQ flag (`daily_pnl_truncated_okx` / `daily_pnl_t
 4. A failing key no longer refuses or downgrades the rest of the book. It is excluded or flagged on its own, and the readers say which key.
 5. A post-deploy PROD reading confirms all three.
 6. Never invent data: an uncomputable day is null.
+7. A read-only count of same-hour funding pairs per (instrument, hour) on OKX and Bybit is recorded first; if any exist, the dedup key keeps distinct positions, and a test with two legs in one hour goes RED on the current key.
 
 Data integrity, user-facing. Relates to 180 BYBITFUNDING (reverses its D-02), 171 READCEILING and 167.1.2.1.1 (reverses its D-03).
 
@@ -6845,6 +6850,30 @@ Plans:
 6. Never invent data: an uncomputable day is null.
 
 Data integrity, user-facing. The fix changes published Binance numbers. Relates to 186 DERIVEGAPS (silent read failures) and 184 WALLETOFFSET (where it was found).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance
+
+**Goal:** A day whose return is measured against a base that is a small fraction of the account's recent capital (after a near-total withdrawal) no longer reads as the strategy's performance on the book's equity curve and stats. The rule is decided with the founder, applies on every venue, and never invents a value.
+**Requirements**: TBD
+**Depends on:** Nothing
+**Plans:** 0 plans
+
+**Booking.** Founder 2026-11-01, AskUserQuestion, Phase 185 plan 03 question F7, after the reading explained key C's 2026-10-28 day.
+- "Book a fix phase", chosen over the recommendation "Accept as real (Recommended)".
+
+**Evidence (PROD 2026-11-01, `185-03-SUMMARY.md`, key letters only).** Deribit key C's marked days 2026-10-27 (+46.98%) and 2026-10-28 (-52.67%) are real marked-to-market moves of a small option position. On 2026-10-26, the first mark day, the owner withdrew 244.56 times the NAV left behind, so about 0.4% of the account remained. Between the reads the wallet and USDT did not move, the open P&L fell 0.5278 of NAV, and the marks path showed no defect. The returns are correct arithmetic on a tiny base, and they move the book's chained equity curve and its stats.
+
+**Success Criteria** (what must be TRUE):
+1. The discuss step decides with the founder how a day whose base is a small fraction of the account's recent capital is treated (for example: flagged, left out of the chained curve and stats, or chained with a caveat), and records it.
+2. The derive and the reader follow that rule on every venue, not only Deribit.
+3. Tests go RED on today's behaviour for the shape of key C's 2026-10-27 and 2026-10-28 days.
+4. After deploy, a PROD reading shows key C's two days handled by the rule, and no other book's curve changed except on days the rule names.
+5. Never invent data: an uncomputable day is null.
+
+Data integrity, user-facing. Relates to 185 DERIBITFLOWTIME (the 185-03 reading meets its SC-4 "explained" clause; this phase owns what the curve does with such days) and 172 (anchor and tolerance rules).
 
 Plans:
 - [ ] TBD — plans not listed yet
@@ -7156,6 +7185,7 @@ kept verbatim.
 | 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 | 187 BINANCEINCOME | 0/0 | Not started — booked 2026-11-01 from the Phase 184 code review | - |
+| 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
