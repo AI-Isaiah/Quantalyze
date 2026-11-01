@@ -27,7 +27,6 @@ from typing import Any
 import ccxt.async_support as ccxt
 import pytest
 
-import scripts.allocator_history_probe as hp
 import scripts.bybit_funding_record as rec
 from tests._bybit_evidence import DAY_MS, METHODS, EvidenceBook
 
@@ -469,55 +468,6 @@ async def test_measure_funding_never_raises_and_returns_only_funding_keys(
         assert rec.FUNDING_VALIDATORS[key](value), key
 
 
-def test_the_funding_keys_are_the_written_list() -> None:
-    # Written out by hand on purpose: the key list is the record's public vocabulary, and a key added,
-    # dropped or moved must show up here as a decision, not slide through as a computed change. The
-    # census keys come last.
-    written = (
-        "bybit_key_info_state",
-        "bybit_is_master",
-        "bybit_is_uta",
-        "bybit_onchain_dep_rows",
-        "bybit_onchain_dep_older_365d",
-        "bybit_onchain_dep_oldest_age_bucket",
-        "bybit_onchain_dep_other_status_rows",
-        "bybit_onchain_dep_depth_bucket",
-        "bybit_onchain_dep_state",
-        "bybit_internal_dep_rows",
-        "bybit_internal_dep_older_365d",
-        "bybit_internal_dep_oldest_age_bucket",
-        "bybit_internal_dep_other_status_rows",
-        "bybit_internal_dep_depth_bucket",
-        "bybit_internal_dep_state",
-        "bybit_withdraw_all_rows",
-        "bybit_withdraw_all_older_365d",
-        "bybit_withdraw_all_oldest_age_bucket",
-        "bybit_withdraw_all_other_status_rows",
-        "bybit_withdraw_all_depth_bucket",
-        "bybit_withdraw_all_state",
-        "bybit_inter_xfer_rows",
-        "bybit_inter_xfer_older_365d",
-        "bybit_inter_xfer_oldest_age_bucket",
-        "bybit_inter_xfer_other_status_rows",
-        "bybit_inter_xfer_depth_bucket",
-        "bybit_inter_xfer_state",
-        "bybit_universal_xfer_rows",
-        "bybit_universal_xfer_older_365d",
-        "bybit_universal_xfer_oldest_age_bucket",
-        "bybit_universal_xfer_other_status_rows",
-        "bybit_universal_xfer_depth_bucket",
-        "bybit_universal_xfer_state",
-        "bybit_other_transfer_like_rows",
-        "bybit_other_transfer_like_state",
-    )
-    assert len(written) == 35
-    assert rec.FUNDING_KEYS == written
-    assert list(rec.FUNDING_VALIDATORS) == list(written)
-    assert list(rec.funding_defaults()) == list(written)
-    # And the probe's account record carries every one of them, plus the member count.
-    assert set(written) | {"bybit_evidence_members"} <= set(hp.ACCOUNT_RECORD_KEYS)
-
-
 def test_the_record_module_names_only_read_endpoints() -> None:
     # Why (T-180-02): this module is the part of the probe that talks to the venue most. Its source
     # text must name exactly the seven raw GET methods and nothing that writes, so adding a venue write
@@ -537,18 +487,6 @@ def test_the_record_module_names_only_read_endpoints() -> None:
     assert not re.search(r"\bprivate_(post|put|delete)_", src)
     for write in (".insert(", ".update(", ".upsert(", ".delete(", ".rpc(", ".table(", "enqueue"):
         assert write not in src, write
-
-
-def test_age_buckets_match_the_probes() -> None:
-    assert rec.AGE_BUCKETS == hp._WINDOW_AGE_BUCKETS
-    day_ms = rec._day_ms(RUN_DAY)
-    for days in (0, 29, 30, 89, 90, 179, 180, 364, 365, 546, 547, 729, 730, 900):
-        stamp = day_ms - days * DAY_MS
-        assert rec.age_bucket(stamp, RUN_DAY) == hp.window_age_bucket(stamp, RUN_DAY), days
-        stamp_late = stamp + DAY_MS - 1  # the last millisecond of the day before the edge
-        assert rec.age_bucket(stamp_late, RUN_DAY) == hp.window_age_bucket(stamp_late, RUN_DAY), days
-    assert rec.age_bucket(None, RUN_DAY) == hp.window_age_bucket(None, RUN_DAY) == "none"
-    assert rec.age_bucket(day_ms + DAY_MS, RUN_DAY) == "0-29"  # a stamp from the future is not negative
 
 
 def test_the_defaults_and_validators_cover_exactly_the_declared_keys() -> None:

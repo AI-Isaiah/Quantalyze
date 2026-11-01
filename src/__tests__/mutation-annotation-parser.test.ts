@@ -1104,7 +1104,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `armsSeen` 816 -> 829, the +13 arms; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `armsSeen` 829 -> 848, the +19 arms; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): `armsSeen` 857 -> 862, the +5 arms (B5e, B5f, B5g, W1c, W1d of test_bridge_outcome_deltas_derived.sql); copied from ONE full lane run (`coverage: files 83/110`, `arms: 862/862/0`, `biting: 862`).
-    expect(armsSeen).toBe(862);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 09): `armsSeen` 862 -> 859, the -3 arms (R1, R2 and R5 of test_api_keys_history_reconstruct_marker.sql, retired by D-04); copied from ONE full lane run (`coverage: files 83/110`, `arms: 859/859/0`, `biting: 859`).
+    expect(armsSeen).toBe(859);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1144,7 +1145,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `stepsSeen` 929 -> 942, the +13 file steps; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `stepsSeen` 942 -> 966, the +24 file steps; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): `stepsSeen` 975 -> 981, the +6 file steps (B5e carries two edits, B5f, B5g, W1c and W1d one each); measured by this file's run (`expected 981 to be 975`).
-    expect(stepsSeen).toBe(981);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 09): `stepsSeen` 981 -> 975, the -6 file steps (R1 two edits, R2 one, R5 two, and R4's second edit; R3 and R4 keep one each); measured by this file's run (`expected 859 to be 862` and `expected 975 to be 981`).
+    expect(stepsSeen).toBe(975);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2100,7 +2102,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `needles.length` 929 -> 942, the +13 file steps; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `needles.length` 942 -> 966, the +24 file steps; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): `needles.length` 975 -> 981, the same +6 file steps; measured by this file's run (`expected 981 to be 975`).
-    expect(needles.length).toBe(981);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 09): `needles.length` 981 -> 975, the same -6 file steps.
+    expect(needles.length).toBe(975);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

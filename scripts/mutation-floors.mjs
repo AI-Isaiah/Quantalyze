@@ -3353,7 +3353,14 @@ export const FILES_FLOOR = 83;
 // FILES_FLOOR stays 83): B5e/B5f/B5g (only well-formed YYYY-MM-DD dates count toward the helper's coverage; a window with no return inside it is NULL) and W1c/W1d (a stored
 // delta is kept; a row picked again with nothing new to fill is not written or counted). The file goes from 28 to 33 twins (the sentinel still counts fourteen sections).
 // MEASURED by ONE full `node scripts/mutation-runner/run.mjs`: `arms: 862/862/0`, `biting: 862`, `lane-invocations: 862 ... plus 83 baseline / 83 restore leg(s)` (the two independent tallies AGREE), `per-arm lane time: mean 2.6s over 862 arm run(s)`; per-file `test_bridge_outcome_deltas_derived.sql: sections 14 / judged 33 / annotated 33 / waived 0 / biting 33`. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 862;
+// LOWERED 862 -> 859 2026-10-31 (Phase 176 LEGACYRETIRE plan 09): -3 arms, R1, R2 and R5 of test_api_keys_history_reconstruct_marker.sql retired because D-04 removed the
+// per-key reconstruct gate they tested (founder 2026-10-31): request_allocator_holdings_sync no longer enqueues a reconstruct, so a failed_retry job, a set marker and a
+// retained done job no longer decide anything. R3 was rewritten to prove no reconstruct job and one poll job, and R4 re-pointed at the new migration; both still bite. The
+// file goes from 30 to 27 twins. FILES_FLOOR stays 83 and WAIVED_CEILING stays 0 - no waiver was added. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file
+// edited during it: `scope: FULL 83/83 annotated files`, `coverage: files 83/110`, `arms: 859/859/0`, `biting: 859`, `lane-invocations: 859 ... plus 83 baseline / 83 restore
+// leg(s)` (the two independent tallies AGREE); per-file `test_api_keys_history_reconstruct_marker.sql: sections 27 / judged 27 / annotated 27 / waived 0 / biting 27`. The
+// stale-high direction was observed first: with the floor still at 862 the same run exited 1 with `ARMS_FLOOR regression: 859 biting arm(s) < floor 862`.
+export const ARMS_FLOOR = 859;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

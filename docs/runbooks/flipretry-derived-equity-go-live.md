@@ -104,6 +104,8 @@ Watch, simultaneously:
 
 > ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** Step 4 is WAIVED as a pre-gate (decision D-07, founder 2026-10-07). One line each: (1) the harness cannot run for a Deribit key-mode allocator (`scripts/e2_allocator_ground_truth.py` skips it with exit 3, and its `--member` filter keys on `strategy_id` while key-mode series carry `api_key_id`); (2) the legacy fallback this gate protected is gone (167.1.2 plan 11), so an unvalidated curve can no longer "show over" a legacy one; (3) the derivecron rehearsal and the D-06 next-morning reads replace it as the safety evidence. E2GT-01 stays an after-the-fact audit item once the harness supports key-mode, and the requirement records stay open. The "E2 gate MUST be GREEN before the FLIP" sentence in item 4 below no longer binds.
 
+> ⛔ **AMENDED 2026-10-31 (Phase 176 LEGACYRETIRE, D-04):** the E2 harness script named in this step (`scripts/e2_allocator_ground_truth.py`) is deleted by the phase, together with the other legacy operator scripts, so the command below cannot run. The audit item it served (E2GT-01) stays as recorded. Original text kept below.
+
 **1. Provision the read-only creds (Railway env only — never argv, never a tracked file).** Set on the worker service that has the allocator account's egress:
 
 | Env var | Required | Note |

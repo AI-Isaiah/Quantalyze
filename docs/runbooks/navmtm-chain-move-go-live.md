@@ -1,5 +1,7 @@
 # Runbook — NAVMTM Daily Chain Move (Phase 167.2.1.1.1, D-03 and D-13)
 
+> ⛔ **RETIRED 2026-10-31 (Phase 176 LEGACYRETIRE, D-02 and D-04):** the `refresh-allocator-equity` job is unscheduled by a hand-run step of `docs/runbooks/legacyretire-go-live.md`, and the cron manifest is re-captured in the same session. Its handler is a no-op, so the rollback forms below that move or re-create that job must not be run. The legacy rows these forms count stop growing at PR 2 of the phase, and the table is dropped by the phase's last migration. The `poll-allocator-positions` job is kept. Original text kept below.
+
 **Owner:** the orchestrator runs the live ops (PROD writes are authorized); the founder is told
 what was written · **Audience:** whoever moves, watches or rolls back the daily chain, months from
 now, with no memory of this phase · **Risk:** this changes the clock time of two live PROD

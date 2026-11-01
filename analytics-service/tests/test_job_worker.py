@@ -686,12 +686,11 @@ class TestDispatchRouting:
 
     @pytest.mark.asyncio
     async def test_dispatch_routes_reconstruct_allocator_history(self) -> None:
-        """Lazily imported handler — dispatch does
-        `from services.equity_reconstruction import run_reconstruct_allocator_history_job`
-        inside the elif arm, so the patch target is the SOURCE module."""
+        """Phase 176 D-04: the retired kind routes to the no-op stub
+        `run_retired_allocator_equity_job`, defined in this module."""
         job = {"id": "job-recon", "kind": "reconstruct_allocator_history", "allocator_id": "a-3"}
         with patch(
-            "services.equity_reconstruction.run_reconstruct_allocator_history_job",
+            "services.job_worker.run_retired_allocator_equity_job",
             new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
         ) as mock_handler:
             await dispatch(job)
@@ -701,7 +700,7 @@ class TestDispatchRouting:
     async def test_dispatch_routes_refresh_allocator_equity_daily(self) -> None:
         job = {"id": "job-eqd", "kind": "refresh_allocator_equity_daily", "allocator_id": "a-4"}
         with patch(
-            "services.equity_reconstruction.run_refresh_allocator_equity_daily_job",
+            "services.job_worker.run_retired_allocator_equity_job",
             new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
         ) as mock_handler:
             await dispatch(job)

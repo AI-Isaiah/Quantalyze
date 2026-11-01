@@ -27,7 +27,6 @@ from typing import Any
 import ccxt.async_support as ccxt
 import pytest
 
-import scripts.allocator_history_probe as hp
 import scripts.okx_chain_record as rec
 from scripts.bybit_upnl_probe import FIELD_ABSENT
 from scripts.deribit_ground_truth import _DENY_KEY_SUBSTRINGS
@@ -67,29 +66,6 @@ def test_no_chain_key_name_contains_a_deny_substring() -> None:
     for key in rec.CHAIN_KEYS:
         assert key.startswith("chain_"), key
         assert not any(sub in key.lower() for sub in _DENY_KEY_SUBSTRINGS), key
-
-
-def test_the_chain_keys_are_the_tail_of_the_probes_record_keys() -> None:
-    """Phase 173 edits the MIDDLE of the three structures in parallel; the chain keys are the last
-    entries precisely so that the two edits merge without a conflict. A reordering of the splice
-    would make that merge silently wrong."""
-    assert hp.ACCOUNT_RECORD_KEYS[-len(rec.CHAIN_KEYS) :] == rec.CHAIN_KEYS
-
-
-def test_the_probes_defaults_equal_the_chain_defaults() -> None:
-    record = hp._account_record("a1", "2026-10-27")
-    for key, value in rec.chain_defaults().items():
-        assert record[key] == value, key
-
-
-def test_every_default_passes_its_validator_and_none_reads_as_a_clean_zero() -> None:
-    """Not measured is field-absent (or a not-run token), never 0 or False: a 0 here would read
-    as a chain that was checked and held."""
-    for key, value in rec.chain_defaults().items():
-        assert rec.CHAIN_VALIDATORS[key](value), key
-        assert not (isinstance(value, (int, bool)) and value in (0, False)), key
-    # And the emitter prints the default record whole.
-    assert json.loads(hp.emit_record(hp._account_record("a1", "2026-10-27")))["chain_diagnostic"] == "not-run"
 
 
 # ---------------------------------------------------------------------------
@@ -142,17 +118,6 @@ async def _seeded_values() -> dict[str, Any]:
     return await rec.measure_chain(exchange, reading, row, OPENING_DAY)
 
 
-async def test_the_honest_record_prints_and_leaks_nothing() -> None:
-    values = await _seeded_values()
-    assert values["chain_arm"] == "both"  # the control really is a measured record
-
-    line = hp.emit_record(hp._account_record("a1", "2026-10-27", **values))
-
-    assert json.loads(line)["chain_worst_ccy"] == "USDT"
-    for leak in _SEEDED_LEAKS:
-        assert leak not in line, leak
-
-
 _BAD_VALUES: list[tuple[str, Any]] = [
     ("chain_ccys_checked", 1.5),  # a float where a count is declared
     ("chain_interior_links", True),  # True where a count is declared
@@ -175,18 +140,6 @@ _BAD_VALUES: list[tuple[str, Any]] = [
     ("chain_sig_other", 0.5),
     ("chain_break_pos_level", True),
 ]
-
-
-async def test_every_declared_key_refuses_a_value_outside_its_vocabulary() -> None:
-    control = hp._account_record("a1", "2026-10-27", **(await _seeded_values()))
-    hp.emit_record(control)  # the honest record prints, so each refusal below is the bad value's
-
-    for key, value in _BAD_VALUES:
-        with pytest.raises(ValueError) as exc:
-            hp.emit_record(dict(control, **{key: value}))
-        message = str(exc.value)
-        assert key in message, key  # the refusal names the key...
-        assert str(value) not in message, key  # ...never the value
 
 
 def test_a_ticker_outside_the_closed_vocabulary_is_other() -> None:
@@ -475,17 +428,6 @@ _BAD_VALUES_TASK_1: list[tuple[str, Any]] = [
 ]
 
 
-async def test_every_ordering_key_refuses_a_value_outside_its_vocabulary() -> None:
-    control = hp._account_record("a1", "2026-10-27", **(await _seeded_values()))
-    hp.emit_record(control)
-
-    for key, value in _BAD_VALUES_TASK_1:
-        with pytest.raises(ValueError) as exc:
-            hp.emit_record(dict(control, **{key: value}))
-        assert key in str(exc.value), key
-        assert str(value) not in str(exc.value), key
-
-
 # ---------------------------------------------------------------------------
 # Plan 179-02 Task 2: the repeat, balance-clock, below-stop and ceiling groups.
 # ---------------------------------------------------------------------------
@@ -580,17 +522,6 @@ _BAD_VALUES_TASK_2: list[tuple[str, Any]] = [
     ("chain_ceiling_hit", 1),
     ("chain_failed_step", "repeat2"),
 ]
-
-
-async def test_every_repeat_and_below_stop_key_refuses_a_value_outside_its_vocabulary() -> None:
-    control = hp._account_record("a1", "2026-10-27", **(await _seeded_values()))
-    hp.emit_record(control)
-
-    for key, value in _BAD_VALUES_TASK_2:
-        with pytest.raises(ValueError) as exc:
-            hp.emit_record(dict(control, **{key: value}))
-        assert key in str(exc.value), key
-        assert str(value) not in str(exc.value), key
 
 
 def test_the_repeat_reason_vocabulary_is_the_oracles_closed_set_plus_two() -> None:
@@ -880,23 +811,6 @@ _BAD_VALUES_TASK_3: list[tuple[str, Any]] = [
     ("chain_recent_refused", -1),
     ("chain_sweep_refused", True),
 ]
-
-
-async def test_every_seven_day_and_sweep_key_refuses_a_value_outside_its_vocabulary() -> None:
-    control = hp._account_record("a1", "2026-10-27", **(await _seeded_values()))
-    hp.emit_record(control)
-
-    for key, value in _BAD_VALUES_TASK_3:
-        with pytest.raises(ValueError) as exc:
-            hp.emit_record(dict(control, **{key: value}))
-        assert key in str(exc.value), key
-        assert str(value) not in str(exc.value), key
-
-
-def test_the_chain_vocabulary_is_fifty_nine_keys_and_the_tail_of_the_probe() -> None:
-    assert len(rec.CHAIN_KEYS) == 59
-    assert hp.ACCOUNT_RECORD_KEYS[-59:] == rec.CHAIN_KEYS
-    assert set(rec.CHAIN_VALIDATORS) == set(rec.CHAIN_KEYS) == set(rec.chain_defaults())
 
 
 async def test_the_balance_clock_keys_are_measured_from_the_pre_walk_row() -> None:

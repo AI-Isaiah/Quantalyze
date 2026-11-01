@@ -51,10 +51,10 @@ import { retryOnceOnSerializationFailure } from "@/lib/supabase/retry-serializat
  *      api_key-target branch, which arm R3 of
  *      supabase/tests/test_enqueue_race_loss_40001.sql pins DB-side: the race
  *      raises 40001 and the re-run enqueues a fresh poll job. The whole
- *      RPC is re-issued, which is retry-safe: the RPC's one exception handler
- *      (around its reconstruct enqueue) traps only the unique-index
- *      collision, so a 40001 aborts its own transaction (the `api_keys`
- *      UPDATE included) and the re-issue starts clean. The same reasoning
+ *      RPC is re-issued, which is retry-safe: the RPC has no exception
+ *      handler since Phase 176 (D-04), so a 40001 aborts its own
+ *      transaction (the `api_keys` UPDATE included) and the re-issue starts
+ *      clean. The same reasoning
  *      describes PostgREST 14's own retry, which re-runs that transaction
  *      from the start. The retried attempt is a `console.warn`; a 40001 that
  *      survives the retry takes the existing 500 branch, and every other

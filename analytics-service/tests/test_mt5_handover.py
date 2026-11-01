@@ -711,34 +711,6 @@ async def test_the_HOLDINGS_site_records_its_switch_against_its_api_key_id(
     assert sink.pairs() == [(_KEY_A, _KEY_B, mt5_handover.SITE_HOLDINGS)]
 
 
-async def test_the_BACKFILL_site_records_its_switch_against_its_api_key_id(
-    sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`_mt5_fetch_window` imports the lease LAZILY from `mt5_concurrency`, so
-    that is where the spy goes."""
-    from datetime import date
-
-    from services import equity_reconstruction
-    from services import mt5_concurrency
-
-    monkeypatch.setenv("MT5_ENABLED", "true")
-    session = _derive_session()
-    key = session.client.terminal_key
-    mt5_client._note_terminal_holder(key, holder=_KEY_A)
-    seen = _spy_lease(monkeypatch, mt5_concurrency)
-
-    await equity_reconstruction._mt5_fetch_window(
-        session,
-        allocator_id="1f0e2d3c-0000-4000-8000-0000000000aa",
-        api_key_id=_KEY_B,
-        start_date=date(2025, 6, 1),
-        end_date=date(2025, 6, 6),
-    )
-
-    assert seen == [{"holder": _KEY_B, "site": mt5_handover.SITE_BACKFILL}]
-    assert sink.pairs() == [(_KEY_A, _KEY_B, mt5_handover.SITE_BACKFILL)]
-
-
 @pytest.fixture
 def heal_env(monkeypatch: pytest.MonkeyPatch) -> Any:
     """The heal's own harness pieces from `tests/test_mt5_relogin.py` — its

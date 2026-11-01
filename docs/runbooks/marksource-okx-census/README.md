@@ -1,5 +1,7 @@
 # MARKSOURCE read-only PROD census
 
+> ⛔ **RETIRED 2026-10-31 (Phase 176 LEGACYRETIRE, D-02):** the snapshot census files in this directory read the legacy allocator equity table and stop working once the phase's last migration drops it. They are kept as the record of the MARKSOURCE census, not as live reads. Original text kept below.
+
 Phase 167.2.1.1.1.1 (MARKSOURCE) measures PROD before it changes anything. Two founder decisions require it:
 
 - **D-06** sets the dust floor (the share of an account below which a balance with no price is left out of the

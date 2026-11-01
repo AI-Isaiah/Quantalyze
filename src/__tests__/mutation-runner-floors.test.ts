@@ -749,7 +749,8 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): totalAnchored 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): totalAnchored 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 2): totalAnchored 857 -> 862; copied from ONE full lane run (`coverage: files 83/110`, `arms: 862/862/0`, `biting: 862`), +5 twins in test_bridge_outcome_deltas_derived.sql (33 annotated arms).
-    expect(totalAnchored).toBe(862);
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 09): totalAnchored 862 -> 859 ; copied from ONE full lane run (`coverage: files 83/110`, `arms: 859/859/0`, `biting: 859`), R1, R2 and R5 of test_api_keys_history_reconstruct_marker.sql retired (D-04).
+    expect(totalAnchored).toBe(859);
   });
 });
 
@@ -2178,13 +2179,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    "arms: 862/862/0   (executed/annotated/waived)",
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 09): 862 -> 859, -3 arms (R1, R2 and R5 of test_api_keys_history_reconstruct_marker.sql retired, D-04); copied from ONE full lane run (`coverage: files 83/110`, `arms: 859/859/0`, `biting: 859`).
+    "arms: 859/859/0   (executed/annotated/waived)",
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    "biting: 862   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "biting: 859   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829, 81 -> 82 legs; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848, 82 -> 83 legs; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    "lane-invocations: 862   (arm lanes actually spawned — tallied inside runLane, independent of the 862 the verdict loop counted; plus 83 baseline / 83 restore leg(s))",
+    "lane-invocations: 859   (arm lanes actually spawned — tallied inside runLane, independent of the 859 the verdict loop counted; plus 83 baseline / 83 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2234,7 +2236,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_api_keys_account_identity.sql: sections 41 / judged 41 / annotated 41 / waived 0 / biting 41",
     "  file test_api_keys_exchange_not_user_writable.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     // ⭐ ADDED 2026-10-13 (Phase 167.1.2.1 RECONMARKER, plan 01): the per-key reconstruct-marker gate, copied from ONE full lane run.
-    "  file test_api_keys_history_reconstruct_marker.sql: sections 30 / judged 30 / annotated 30 / waived 0 / biting 30",
+    "  file test_api_keys_history_reconstruct_marker.sql: sections 27 / judged 27 / annotated 27 / waived 0 / biting 27",
     "  file test_api_keys_insert_not_client_writable.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     // ⭐ ADDED 2026-09-22 (Phase 167 CREDTRUST, plan 03 Task 2) — the D-11
     // arm B CHECK-widening gate: arm 1 (revert to the pre-migration 8-value
@@ -2375,7 +2377,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 2.4s/816 -> 1.7s/829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 1.7s/829 -> 2.6s/848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    "per-arm lane time: mean 2.6s over 862 arm run(s)",
+    // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 09): 2.6s/862 -> 1.6s/859 ; copied from ONE full lane run (`coverage: files 83/110`, `arms: 859/859/0`, `biting: 859`), R1, R2 and R5 of test_api_keys_history_reconstruct_marker.sql retired (D-04).
+    "per-arm lane time: mean 1.6s over 859 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2417,7 +2420,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    expect(r.out).toContain("862 arm lane(s) spawned");
+    expect(r.out).toContain("859 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2728,10 +2731,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 815 -> 828; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 828 -> 847; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    expect(r.out).toContain("rows sum to 861 biting arm(s) but the aggregate");
+    expect(r.out).toContain("rows sum to 858 biting arm(s) but the aggregate");
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    expect(r.out).toContain("reports 862");
+    expect(r.out).toContain("reports 859");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2780,7 +2783,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    const severed = GREEN_LOG.replace(/^lane-invocations: 862 /m, "lane-invocations: 0 ");
+    const severed = GREEN_LOG.replace(/^lane-invocations: 859 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
@@ -2794,7 +2797,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    expect(r.out).toContain("executed=862 lane-invocations=0 biting=862");
+    expect(r.out).toContain("executed=859 lane-invocations=0 biting=859");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2842,14 +2845,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816/817 -> 829/830; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829/830 -> 848/849; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    const extra = GREEN_LOG.replace(/^lane-invocations: 862 /m, "lane-invocations: 863 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 859 /m, "lane-invocations: 860 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 803 -> 811, 804 -> 812; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816/817 -> 829/830; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829/830 -> 848/849; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    expect(r.out).toContain("executed=862 lane-invocations=863 biting=862");
+    expect(r.out).toContain("executed=859 lane-invocations=860 biting=859");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2875,7 +2878,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 862 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 859 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2929,7 +2932,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    const waived = GREEN_LOG.replace(/^arms: 862\/862\/0 /m, `arms: 862/862/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 859\/859\/0 /m, `arms: 859/859/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -3007,7 +3010,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    const zero = GREEN_LOG.replace(/^arms: 862\/862\/0 /m, "arms: 0/862/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 859\/859\/0 /m, "arms: 0/859/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
@@ -3017,14 +3020,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816/817 -> 829/830; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829/830 -> 848/849; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    const spliced = GREEN_LOG.replace(/^biting: 862 /m, "biting: 863 ");
+    const spliced = GREEN_LOG.replace(/^biting: 859 /m, "biting: 860 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 793 -> 804, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
     // ⭐ CURRENCY 2026-10-27 (Phase 171 READCEILING, plan 06): 804 -> 812, 803 -> 811; copied from ONE full lane run (`coverage: files 81/108`, `arms: 811/811/0`, `biting: 811`), the new gate test_allocator_trade_reads.sql (8 arms).
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 817/816 -> 830/829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 830/829 -> 849/848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-    expect(s.out).toContain("biting (863) exceeds executed (862)");
+    expect(s.out).toContain("biting (860) exceeds executed (859)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -3196,7 +3199,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-27 (MERGE, Phase 171 READCEILING with origin/main 04f5568a9, Phase 174 MARKPAUSE): copied from ONE full lane run on the merged tree (`coverage: files 81/108`, `arms: 816/816/0`, `biting: 816`, `per-arm lane time: mean 2.4s`).
       // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): biting arms 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
       // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): biting arms 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
-      expect(r.out).toContain("biting arms 862 >= 862");
+      expect(r.out).toContain("biting arms 859 >= 859");
     }
   });
 

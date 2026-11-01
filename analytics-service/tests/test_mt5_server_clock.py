@@ -619,17 +619,3 @@ def test_one_clock_per_derive() -> None:
     assert len(sites) == 6, f"{len(sites)} offset-carrying calls: {[_call_name(c) for c in sites]}"
     stray = [_call_name(c) for c in sites if not _passes_clock(c, "_mt5_clock")]
     assert stray == [], f"offset sites that do not pass _mt5_clock: {stray}"
-
-
-def test_one_clock_per_backfill() -> None:
-    """D-01: the allocator-history backfill (the seventh and last former inline read)
-    resolves one clock bound to ``mt5_clock`` and hands it to its one levels fold."""
-    path = _ANALYTICS_ROOT / "services/equity_reconstruction.py"
-    scope = _function(ast.parse(path.read_text(), filename=str(path)), "_mt5_fetch_window")
-
-    assert len(_calls_to(scope, {"resolve_mt5_server_clock"})) == 1
-    assert _resolve_bound_to(scope, "mt5_clock") == 1
-    sites = _calls_to(scope, _OFFSET_SITE_CALLS)
-    assert len(sites) == 1, f"{len(sites)} offset-carrying calls: {[_call_name(c) for c in sites]}"
-    assert _call_name(sites[0]) == "reconstruct_mt5_nav_levels"
-    assert _passes_clock(sites[0], "mt5_clock")

@@ -236,43 +236,6 @@ async def test_deribit_fast_structural_error_still_permanent_wrap_is_transparent
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — reconstruct orchestrating crawl hang → TRANSIENT (Task 2, defensive)
-# ---------------------------------------------------------------------------
-async def test_reconstruct_window_crawl_hang_is_bounded_transient(monkeypatch):
-    """The CONTEXT-named legacy path: _fetch_and_price_window (the single
-    orchestrating crawl) hangs → cut at the reconstruct per-crawl bound → transient
-    FAILED. Defensive half of the A4 mitigation (both pipelines bounded)."""
-    import services.equity_reconstruction as er
-    from services.equity_reconstruction import run_reconstruct_allocator_history_job
-
-    monkeypatch.setattr(er, "_RECONSTRUCT_CRAWL_TIMEOUT_S", 0.05)
-    ctx, _capture = _ctx("bybit")
-    job = {"api_key_id": "key-x"}
-    patches = [
-        patch(
-            "services.equity_reconstruction._allocator_key_preflight",
-            new=AsyncMock(return_value=ctx),
-        ),
-        patch("services.equity_reconstruction.aclose_exchange", new=AsyncMock()),
-        patch(
-            "services.equity_reconstruction._api_key_already_reconstructed",
-            new=AsyncMock(return_value=False),
-        ),
-        patch("services.equity_reconstruction._emit_audit", new=MagicMock()),
-        patch(
-            "services.equity_reconstruction._fetch_and_price_window",
-            new=AsyncMock(side_effect=_hang),
-        ),
-    ]
-    with _apply(patches):
-        result = await asyncio.wait_for(
-            run_reconstruct_allocator_history_job(job), timeout=3.0
-        )
-    assert result.outcome == DispatchOutcome.FAILED
-    assert result.error_kind == "transient"
-
-
-# ---------------------------------------------------------------------------
 # Source-scan gates: the new bounded sites exist; no logger.exception introduced
 # ---------------------------------------------------------------------------
 def _strip_comments(text: str) -> str:

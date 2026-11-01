@@ -793,16 +793,11 @@ async def test_deribit_unreported_pnl_reaches_the_row_as_none_end_to_end(positio
 def test_deribit_error_class_removed():
     """f3 Path B is lifted — the allocator-side DeribitNotSupportedError no
     longer exists (its only purpose was to defer Deribit spot by raising).
-    The SEPARATE equity_reconstruction.DeribitNotSupportedError stays (that
-    deferral — reconstruction — is still in force, SC-3)."""
+    (The separate reconstruction-side class went with the legacy crawl in
+    Phase 176, so only the allocator half of this pin remains.)"""
     import services.allocator_positions as ap
 
     assert not hasattr(ap, "DeribitNotSupportedError")
-    # Reconstruction deferral is untouched.
-    from services.equity_reconstruction import (
-        DeribitNotSupportedError as ReconDeferral,
-    )
-    assert issubclass(ReconDeferral, ccxt.NotSupported)
 
 
 # ---------------------------------------------------------------------------
