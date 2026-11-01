@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.14.1] - 2026-11-01 — book Phase 186 DERIVEGAPS
+
+### Added
+- Phase 186 DERIVEGAPS is booked in the ROADMAP (founder 2026-11-01: "Book one fix phase" and "Only that key"). A read-only check of the per-key derive against the fixes the retiring legacy engine had found three gaps in the path that now draws every curve: a truncated or failed OKX/Bybit realized read is published as a normal, trustworthy curve; the Bybit derive does not read internal or sub-account transfers, so money moved that way is booked as P&L (reversing Phase 180's D-02); and a key in error or failing sign-in holds back or downgrades the whole book (reversing 167.1.2.1.1 D-03, under the founder's rule that a dead key affects only itself). Each gap starts with a read-only PROD count of the keys it affects.
+
 ## [0.133.14.0] - 2026-11-01 — DUPCOUNT: a book whose marked duplicate key is already counted once draws its curve
 
 ### Root cause

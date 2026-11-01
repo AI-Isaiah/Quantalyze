@@ -218,6 +218,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing
 - [ ] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity
 - [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
+- [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6771,6 +6772,45 @@ Data integrity, user-facing. Relates to 164.6.6.2.3 FLOWTIMING (its booked defer
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself
+
+**Goal:** The new curve's path (per-key `derive_broker_dailies` plus the compose) carries the protections the legacy engine got from ACCTREBUILD, TRADEPAGES, READCEILING, OKXANCHOR, OKXREWRITE and BYBITFUNDING before Phase 176 deletes that engine. A truncated or failed realized or funding read refuses that key by name instead of publishing as complete; the Bybit derive counts Unified internal, sub-account and universal transfers as flows, not P&L; and a failing key is left out or flagged on its own while the rest of the book draws normally.
+**Requirements**: TBD
+**Depends on:** Phase 176
+**Plans:** 0 plans
+
+**Booking.** Founder 2026-11-01, AskUserQuestion, after a read-only check of the new curve's path (per-key `derive_broker_dailies` plus the compose) against the fixes the legacy engine got from ACCTREBUILD, TRADEPAGES, READCEILING, OKXANCHOR, OKXREWRITE and BYBITFUNDING, which Phase 176 deletes.
+- Gaps 1+2: "Book one fix phase (Recommended)": "One phase: (1) the derive refuses by name on a truncated or failed read, as the trade sync already does; (2) the Bybit derive also reads Unified internal/sub-account transfers, reversing 180's D-02. Each starts with a PROD count of how many keys are affected."
+- Gap 3: "Only that key (Recommended)": "Apply your 2026-10-28 rule: a failing key is left out or flagged on its own, and the rest of the book draws normally. Reverses D-03; goes into the fix phase."
+
+**Gap 1 (HIGH, data integrity) — a truncated or failed read is published as complete.** `fetch_daily_pnl` (`analytics-service/services/exchange.py`) caps its reads:
+- OKX: `OKX_BILLS_PAGE_CAP` and `OKX_ARCHIVE_PAGE_CAP`, 100 pages of 100 rows each, per instType.
+- Bybit: `BYBIT_PNL_PAGE_CAP`, 50 pages per 7-day window.
+
+On a cap hit it only records a DQ flag (`daily_pnl_truncated_okx` / `daily_pnl_truncated_bybit`). Its outer `except Exception` returns partial data and sets `daily_pnl_fetch_error`, and the Bybit inner arm returns [] on any non-rate-limit error. `run_derive_broker_dailies_job` (`analytics-service/services/job_worker.py`) never calls `exchange.get_and_clear_last_dq_flags()`; `sync_trades` does. So a truncated or failed realized read is published as a normal, trustworthy curve. OKX reads newest-first, so the oldest days lose their P&L.
+- The crawl timeout `_BROKER_CRAWL_TIMEOUT_S` (810 s) causes transient retries of the same read, with no resume.
+- Whether any PROD key exceeds the caps is unmeasured.
+- ⚠️ Possible side issue, not confirmed: the Bybit closed-pnl request sends `limit: 200`, and the venue max may be 100. Probe it.
+
+**Gap 2 (HIGH, user-visible) — Bybit internal funding is booked as P&L.** The derive's Bybit flow read uses only `fetch_ccxt_transfers` "deposits" and "withdrawals". Unified-edge internal, sub-account and universal transfers are not read, so funding moved that way is booked as P&L. This was by design under BYBITFUNDING 180 D-02, with a follow-up noted in plan 180-08 (now reversed by the founder answer above). The ready reader is `fetch_bybit_unified_flows` in `analytics-service/services/bybit_unified_flows.py`; keep it and wire it in. Example from PROD: one Bybit account had 0 on-chain deposits at every age.
+
+**Gap 3 (MEDIUM, user-visible) — one failing key refuses or downgrades the whole book.** A key in `error` or `sign_in_failed` stays eligible. With no returns and no `key_inputs` it refuses the whole book (`COMPOSE_INCOMPLETE`). If its series ended early, the blocking `FAILING_KEY_SERIES_ENDED` marks the whole curve untrustworthy (167.1.2.1.1 D-03, now reversed). Founder rule 2026-10-28: a dead key affects only itself.
+
+**Noted, not in scope.** Bybit P&L depth is 365 days in the new path, against 730 in the legacy engine. This is less history, not wrong history. Recorded for the founder.
+
+**Success Criteria** (what must be TRUE):
+1. A PROD count, read-only, of the keys affected by each gap is recorded before any code change.
+2. A truncated or failed realized or funding read refuses that key by name; it is never published as complete. A test goes RED on the current behaviour.
+3. The Bybit derive counts Unified internal and sub-account transfers as flows. A test with an internally funded account shows no P&L spike.
+4. A failing key no longer refuses or downgrades the rest of the book. It is excluded or flagged on its own, and the readers say which key.
+5. A post-deploy PROD reading confirms all three.
+6. Never invent data: an uncomputable day is null.
+
+Data integrity, user-facing. Relates to 180 BYBITFUNDING (reverses its D-02), 171 READCEILING and 167.1.2.1.1 (reverses its D-03).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7076,6 +7116,7 @@ kept verbatim.
 | 183 DUPCOUNT | 0/0 | Not started — booked 2026-10-31 from the Sentry check (QUANTALYZE-2H) | - |
 | 184 WALLETOFFSET | 0/0 | Not started — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 | - |
 | 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |
+| 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
