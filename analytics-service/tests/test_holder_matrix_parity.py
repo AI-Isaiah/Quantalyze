@@ -15,6 +15,12 @@ asserts the reader. Either side drifting fails CI.
 The counted set is read off the persisted curve: each key carries a distinct
 anchor, the returns are flat, so the terminal equity is the sum of the counted
 keys' anchors and ``n_keys`` is their number. A double count cannot hide.
+
+Phase 183 D-01: no cell refuses any more. A marked duplicate behind a working
+holder is counted once by the group resolution (through the holder when the
+first-return days tie) and its curve is drawn; only a real double count, two
+COUNTED keys on one account, is refused (``account_identity_collision``, pinned
+in ``test_derive_allocator_equity_job.py``).
 """
 
 from __future__ import annotations
@@ -28,7 +34,6 @@ import pytest
 from tests.test_derive_allocator_equity_job import (
     DERIVED_TABLE,
     LEGACY_TABLE,
-    _curve_deletes,
     _curve_upserts,
     _extract_payload,
     _FakeSupabase,
@@ -107,14 +112,9 @@ async def test_the_derive_resolves_each_cell_as_the_table_says(cell: dict[str, A
     fake = _book(alloc, cell)
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
     expected = cell["derive"]
-    if expected["outcome"] == "refuse":
-        assert _curve_upserts(fake) == [], "the table says the curve is refused"
-        # 167.1.2.1.1 SC-1 (D-04): a refusal is RECORDED in the row, not deleted.
-        # Exactly one refusal upsert, and it names the duplicate.
-        refusals = _refusal_upserts(fake)
-        assert [r["payload"]["refusal"] for _, r, _ in refusals] == ["account_duplicate"]
-        assert _curve_deletes(fake, alloc) == []
-        return
+    # Phase 183 D-01: no cell refuses. A marked duplicate is counted once by the
+    # group resolution and its curve is drawn, so no cell writes a refusal row.
+    assert _refusal_upserts(fake) == [], "the table has no refusing cell"
     upserts = _curve_upserts(fake)
     assert len(upserts) == 1, f"expected a composed curve, got {len(upserts)}"
     payload = _extract_payload(upserts[0][1])

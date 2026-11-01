@@ -5078,12 +5078,12 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 167.1.2 plan 04 (D-01, D-11) — the manager's key card names a key that
-// reads the same exchange account as another of the owner's live keys, beside
-// the Delete control that already exists, through the SAME accountShareNote
-// the allocator card uses. A composite_member pair (D-04) is legitimate and
-// shows nothing. Without the note the marker the daily poll writes is
-// invisible on this surface, and the owner has no named way to clean it up.
+// Phase 167.1.2 plan 04 (D-01, D-11) and Phase 183 D-02 — the manager's key
+// card names a key that reads the same exchange account as another of the
+// owner's live keys and says we count that account once, through the SAME
+// accountShareNote the allocator card uses. Nothing is asked of the owner
+// (one account behind several logins is intended), so there is nothing to
+// clean up. A composite_member pair (D-04) is legitimate and shows nothing.
 // ---------------------------------------------------------------------------
 describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
   function row(overrides: Record<string, unknown>) {
@@ -5108,7 +5108,7 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
     };
   }
 
-  it("renders the duplicate sentence on the marked key's card, beside its Delete control", async () => {
+  it("renders the counted-once sentence on the marked key card, in the muted tone, naming no remedy (Phase 183 D-02)", async () => {
     selectResultMock.mockReturnValue({
       data: [
         row({}),
@@ -5129,13 +5129,15 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
     const card = await screen.findByTestId("api-key-card-key-okx-dup");
     const note = within(card).getByRole("note");
     expect(note.textContent).toBe(
-      "This key reads the same exchange account as OKX — Main OKX. Delete one of them.",
+      "This key reads the same exchange account as OKX — Main OKX. We count that account once.",
     );
-    // 167.1.2 REVIEW WR-01: the sentence's verb is a control THIS card has.
-    // The manager card offers Delete and no Disconnect, so a note asking the
-    // owner to "Disconnect" pointed at a button that does not exist here.
-    expect(within(card).getByRole("button", { name: "Delete" })).toBeInTheDocument();
-    expect(within(card).queryByRole("button", { name: /Disconnect/ })).not.toBeInTheDocument();
+    // A neutral line: one account behind several logins is a steady state, so
+    // the note is muted, not the amber of a recoverable state (DESIGN.md).
+    expect(note).toHaveClass("text-text-muted");
+    expect(note).not.toHaveClass("text-warning");
+    // It states a fact and asks the owner for nothing.
+    expect(note.textContent).not.toMatch(/\b(disconnect|delete|remove)\b/i);
+    expect(note.textContent).not.toMatch(/one of them/i);
     expect(
       within(screen.getByTestId("api-key-card-key-okx-holder")).queryByRole("note"),
     ).not.toBeInTheDocument();
@@ -5165,12 +5167,12 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
 
   // D-18 (founder, 2026-09-27): the holder is WORKING only while it is active,
   // connected, and its last sync is not revoked, sign_in_failed or error. A
-  // holder that is not working does not count the account, so the marked key
-  // counts on its own and its card must not ask the owner to disconnect one of
-  // them. Judged inside the duplicate's own card, by the sentence text, because
-  // a failing holder renders a status line of its own.
+  // marked key reads through its holder only while that holder works, so once
+  // the holder is not working the marked key counts on its own and its card
+  // says nothing. Judged inside the duplicate's own card, by the sentence text,
+  // because a failing holder renders a status line of its own.
   const OKX_DUP_SENTENCE =
-    "This key reads the same exchange account as OKX — Main OKX. Delete one of them.";
+    "This key reads the same exchange account as OKX — Main OKX. We count that account once.";
 
   async function renderPair(holderOverrides: Record<string, unknown>) {
     selectResultMock.mockReturnValue({
@@ -5213,11 +5215,10 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
   });
 
   // 167.1.2 REVIEW WR-02: this card lists EVERY key the read returns, the
-  // disconnected ones included. A marked key the owner has already
-  // disconnected (the remedy the note asks for) is never polled again, so its
-  // marker never clears; the note must not keep asking for a remedy already
-  // applied. Same for a marked key that is inactive or failing (D-18 applied
-  // to the marked key itself).
+  // disconnected ones included. A marked key that is disconnected is never
+  // polled again, so its marker never clears; the note says nothing on it, as
+  // the key shows its own status. Same for a marked key that is inactive or
+  // failing (D-18 applied to the marked key itself).
   it.each([
     ["disconnected", { disconnected_at: "2026-09-21T00:00:00Z" }],
     ["inactive", { is_active: false }],

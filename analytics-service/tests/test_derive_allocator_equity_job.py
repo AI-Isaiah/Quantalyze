@@ -1409,9 +1409,10 @@ async def test_one_key_deposit_persists_version_2_returns() -> None:
 
 # ---------------------------------------------------------------------------
 # 167.1.2-05 task 2 — identity gate over the counted set, and one account once.
-# MUTATION-FALSIFIABLE: drop the duplicate branch (treat 'duplicate' as ordinary
-# when the holder is working, and the keys do not share a venue id) → the
-# duplicate test upserts a curve and goes RED.
+# MUTATION-FALSIFIABLE (Phase 183 D-01): neuter the collision branch of the
+# identity gate and the collision tests go RED; drop the marker-link union in
+# ``account_identity_tokens`` and the marker-pair unit goes RED. A marked
+# duplicate needs no gate of its own: the group loop already counts it once.
 # ---------------------------------------------------------------------------
 
 
@@ -1593,12 +1594,49 @@ def test_account_identity_collisions_intervals() -> None:
     assert len(mixed_case) == 1 and mixed_case[0].n_keys == 2
 
 
+def test_a_marker_pair_that_were_both_counted_collides_as_one_account() -> None:
+    """Phase 183 D-01 removed the marked-duplicate gate because the group loop
+    counts a marked pair once. This pins that the gate which stays covers what the
+    removed one guarded: a holder with a venue id and a key marked a duplicate of
+    it (no venue id of its own) read ONE account token, so a pair that were both
+    counted would still be refused as an ``account_identity_collision``, never
+    summed twice."""
+    from services.job_worker import account_identity_collisions, account_identity_tokens
+
+    keys = [
+        _gate_key("key-H", "alloc-pair", venue_account_id="venue-shared"),
+        _gate_key(
+            "key-M", "alloc-pair",
+            account_share_kind="duplicate",
+            account_shared_with_api_key_id="key-H",
+        ),
+    ]
+    tokens = account_identity_tokens(keys)
+    assert tokens["key-H"] is not None and tokens["key-H"] == tokens["key-M"]
+    groups = account_identity_collisions([
+        {
+            "id": key["id"],
+            "exchange": "account",
+            "venue_account_id": tokens.get(key["id"]),
+            "first_counted_day": "2026-06-01",
+            "last_counted_day": None,
+        }
+        for key in keys
+    ])
+    assert len(groups) == 1 and groups[0].n_keys == 2
+    # Counts only: the group carries no venue id and no key id a log could leak.
+    assert "venue-shared" not in repr(groups[0])
+    assert "key-H" not in repr(groups[0])
+
+
 @pytest.mark.asyncio
-async def test_duplicate_with_working_holder_records_refusal(caplog: pytest.LogCaptureFixture) -> None:
-    """A marked duplicate whose holder is still connected is not counted on its
-    own. The marker alone refuses the curve — the two keys need not share a
-    venue id — and the log is the token plus counts, never an id. 167.1.2.1.1
-    D-04: the refusal is recorded in the row (``account_duplicate``), not deleted."""
+async def test_duplicate_with_working_holder_is_counted_once_and_drawn(caplog: pytest.LogCaptureFixture) -> None:
+    """Phase 183 D-01: a marked duplicate whose holder is still connected is
+    counted ONCE by the group resolution (one kept key, the other excluded), so
+    the curve is drawn. The marker alone used to refuse the book, although the
+    group loop had already counted the account once; the book then showed the
+    rebuilding panel for a curve that was correct. The two keys need not share a
+    venue id. The log carries neither the retired refusal token nor an id."""
     import logging
 
     alloc = "alloc-dup"
@@ -1621,11 +1659,122 @@ async def test_duplicate_with_working_holder_records_refusal(caplog: pytest.LogC
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
-    _assert_refusal_recorded(fake, alloc, "account_duplicate")
-    assert "account_duplicate" in caplog.text
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1, "one account must be ONE counted key"
+    terminal = payload["curve"][-1]["equity_usd"]
+    assert terminal == pytest.approx(1_000.0, rel=1e-6), "the account must not be summed twice"
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "duplicate_shared_account_counted_once" in payload["flags"]
+    assert _refusal_upserts(fake) == []
+    assert _curve_deletes(fake, alloc) == []
+    assert "account_duplicate" not in caplog.text
     assert "account_identity_collision" not in caplog.text
     assert "key-D" not in caplog.text
     assert "venue-dup" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_marker_that_lands_mid_compose_is_recomposed_before_the_curve_is_saved() -> None:
+    """Phase 183 D-05: the stamper marks key B a duplicate of key H AFTER the
+    compose read the keys and BEFORE it saves its curve. Read as it was, the pair
+    is two accounts and the curve doubles the equity. The stamper's own recompose
+    enqueue cannot repair that (the running job absorbs it through the enqueue
+    dedup), so the job re-reads the markers before saving and redoes the compose
+    once. The only curve saved counts the account once."""
+    alloc = "alloc-midrun"
+    csv_h, ki_h = _series_rows(alloc, "key-H", 1_000.0)
+    csv_b, ki_b = _series_rows(alloc, "key-B", 1_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-shared"),
+            _gate_key("key-B", alloc),
+        ],
+        "csv_daily_returns": csv_h + csv_b,
+        DERIVED_TABLE: [ki_h, ki_b],
+        LEGACY_TABLE: [],
+    })
+    api_key_reads: list[int] = []
+    marked = False
+
+    def _stamper_marks_b_after_the_compose_read_its_returns(table: str) -> None:
+        # Fired from the returns read, the last read the compose makes after its
+        # key load, so a re-read placed anywhere earlier than the save misses it.
+        nonlocal marked
+        if table == "api_keys":
+            api_key_reads.append(1)
+        elif table == "csv_daily_returns" and not marked:
+            marked = True
+            for row in fake.rows["api_keys"]:
+                if row["id"] == "key-B":
+                    row["account_share_kind"] = "duplicate"
+                    row["account_shared_with_api_key_id"] = "key-H"
+
+    fake.on_read = _stamper_marks_b_after_the_compose_read_its_returns
+
+    result = await _run_gate(fake, alloc)
+
+    assert result.outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1, "the account must be ONE counted key"
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(1_000.0, rel=1e-6)
+    assert len(api_key_reads) == 4, (
+        "first load, the re-read that sees the marker, the redo's own load, then "
+        "the redo's re-read (which finds nothing new and lets the save through)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_marker_that_lands_during_the_redo_ends_transient_without_a_curve() -> None:
+    """Phase 183 D-05, round 3: a second marker lands while the REDO composes. The
+    job is still running, so that marker's own recompose enqueue is absorbed, and
+    a redo that did not look again would save a curve counting the second account
+    twice. The redo re-reads before saving; on a second change the job ends
+    transient and saves no curve, so the queue's retry (a fresh job) re-reads."""
+    alloc = "alloc-midredo"
+    csv_h, ki_h = _series_rows(alloc, "key-H", 1_000.0)
+    csv_b, ki_b = _series_rows(alloc, "key-B", 1_000.0)
+    csv_g, ki_g = _series_rows(alloc, "key-G", 500.0)
+    csv_c, ki_c = _series_rows(alloc, "key-C", 500.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-H", alloc, venue_account_id="venue-h"),
+            _gate_key("key-B", alloc),
+            _gate_key("key-G", alloc, venue_account_id="venue-g"),
+            _gate_key("key-C", alloc),
+        ],
+        "csv_daily_returns": csv_h + csv_b + csv_g + csv_c,
+        DERIVED_TABLE: [ki_h, ki_b, ki_g, ki_c],
+        LEGACY_TABLE: [],
+    })
+    api_key_reads: list[int] = []
+    marked: list[str] = []
+
+    def _mark(key_id: str, holder_id: str) -> None:
+        marked.append(key_id)
+        for row in fake.rows["api_keys"]:
+            if row["id"] == key_id:
+                row["account_share_kind"] = "duplicate"
+                row["account_shared_with_api_key_id"] = holder_id
+
+    def _stamper_marks_one_key_per_pass(table: str) -> None:
+        if table == "api_keys":
+            api_key_reads.append(1)
+        elif table == "csv_daily_returns":
+            if not marked:
+                _mark("key-B", "key-H")  # first pass: caught by the re-read
+            elif len(api_key_reads) >= 3 and len(marked) == 1:
+                _mark("key-C", "key-G")  # during the redo: the redo must catch it
+
+    fake.on_read = _stamper_marks_one_key_per_pass
+
+    result = await _run_gate(fake, alloc)
+
+    assert marked == ["key-B", "key-C"], "both markers must have landed mid-compose"
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "transient"
+    assert _curve_upserts(fake) == [], (
+        "no curve may be saved from markers that changed again during the redo"
+    )
 
 
 @pytest.mark.asyncio
@@ -1809,27 +1958,6 @@ def _refusal_case_returns_read_cap() -> dict[str, Any]:
     }
 
 
-def _refusal_case_duplicate() -> dict[str, Any]:
-    alloc = "alloc-refusal-dup"
-    csv, ki = _series_rows(alloc, "key-D", 1_000.0)
-    _, holder_ki = _series_rows(alloc, "key-H", 1_000.0)
-    fake = _FakeSupabase({
-        "api_keys": [
-            _gate_key(
-                "key-D", alloc,
-                venue_account_id="venue-dup",
-                account_share_kind="duplicate",
-                account_shared_with_api_key_id="key-H",
-            ),
-            _gate_key("key-H", alloc, venue_account_id="venue-holder"),
-        ],
-        "csv_daily_returns": csv,
-        DERIVED_TABLE: [ki, holder_ki, _stale_curve(alloc)],
-        LEGACY_TABLE: [],
-    })
-    return {"fake": fake, "alloc": alloc, "token": "account_duplicate", "outcome": "DONE"}
-
-
 def _refusal_case_input_corrupt() -> dict[str, Any]:
     seed = _seed_poison_with_stale_curve()
     # A NULL daily_return: float(None) raises, the M3 permanent disposition.
@@ -1994,7 +2122,6 @@ def _refusal_case_compose_refused() -> dict[str, Any]:
     "build",
     [
         _refusal_case_returns_read_cap,
-        _refusal_case_duplicate,
         _refusal_case_input_corrupt,
         _refusal_case_compose_incomplete,
         _refusal_case_compose_empty,
@@ -2285,18 +2412,6 @@ async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
     [
         pytest.param(
             [
-                _gate_key(
-                    "key-D", "alloc-refuse",
-                    account_share_kind="duplicate",
-                    account_shared_with_api_key_id="key-H",
-                ),
-                _gate_key("key-H", "alloc-refuse", venue_account_id="venue-holder"),
-            ],
-            "account_duplicate",
-            id="duplicate",
-        ),
-        pytest.param(
-            [
                 _gate_key("key-A", "alloc-refuse", venue_account_id="venue-shared"),
                 _gate_key("key-B", "alloc-refuse", venue_account_id="venue-shared"),
             ],
@@ -2336,18 +2451,6 @@ async def test_identity_refusal_is_a_warning_not_info(
 @pytest.mark.parametrize(
     ("keys", "token"),
     [
-        pytest.param(
-            [
-                _gate_key(
-                    "key-D", "alloc-refuse-sentry",
-                    account_share_kind="duplicate",
-                    account_shared_with_api_key_id="key-H",
-                ),
-                _gate_key("key-H", "alloc-refuse-sentry", venue_account_id="venue-holder"),
-            ],
-            "account_duplicate",
-            id="duplicate",
-        ),
         pytest.param(
             [
                 _gate_key("key-A", "alloc-refuse-sentry", venue_account_id="venue-shared"),
@@ -2635,15 +2738,87 @@ async def test_a_working_key_with_no_returns_yet_is_not_stitched_and_the_book_is
 
 
 @pytest.mark.asyncio
-async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
-    """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked
-    key whose holder is working is a duplicate, whatever the marked key's own
-    status. The curve is refused, as before (167.1.2.1.1 D-04: the refusal is
-    recorded in the row, not deleted)."""
+async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_counts_through_the_holder(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 183 D-01: an ELIGIBLE duplicate-marked key whose holder is working
+    is counted once, whatever the marked key's own status. With equal first-return
+    days the holder is kept (the marked key sorts after the unmarked one), so a
+    marked key that fails to sync adds nothing and the curve ends at the holder's
+    anchor. It used to refuse the book; no refusal row is written now."""
+    import logging
+
     alloc = "alloc-dup-marked-failing"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
     fake = _shared_pair(alloc, "duplicate", holder={}, marked={"sync_status": "error"})
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
-    _assert_refusal_recorded(fake, alloc, "account_duplicate")
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 1, "one account must be ONE counted key"
+    terminal = payload["curve"][-1]["equity_usd"]
+    assert terminal == pytest.approx(HOLDER_ANCHOR, rel=1e-6)
+    assert "duplicate_shared_account_counted_once" in payload["flags"]
+    assert _refusal_upserts(fake) == []
+    assert _curve_deletes(fake, alloc) == []
+    assert "account_duplicate" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_book_with_marked_deribit_and_mt5_duplicates_draws_one_curve_and_sends_no_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 183 D-01, the DUPCOUNT book's shape: a marked Deribit duplicate and a
+    marked MT5 duplicate, each beside a working holder that carries the venue id
+    (the marked key carries none). The group resolution counts each account once,
+    so the book composes ONE trustworthy curve ending at the sum of the two
+    holders' anchors, writes no refusal row and sends no Sentry event: the
+    nightly QUANTALYZE-2H message was a false refusal. The four anchors differ,
+    so a pair summed twice cannot hide behind the total."""
+    import logging
+    from unittest.mock import patch
+
+    alloc = "alloc-dupcount-book"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    anchors = {"key-HD": 100_000.0, "key-MD": 60_000.0, "key-HM": 40_000.0, "key-MM": 25_000.0}
+    exchange = {"key-HD": "deribit", "key-MD": "deribit", "key-HM": "mt5", "key-MM": "mt5"}
+    keys = [
+        _gate_key("key-HD", alloc, exchange="deribit", venue_account_id="venue-deribit"),
+        _gate_key(
+            "key-MD", alloc, exchange="deribit", venue_account_id=None,
+            account_share_kind="duplicate", account_shared_with_api_key_id="key-HD",
+            sync_status="error",
+        ),
+        _gate_key("key-HM", alloc, exchange="mt5", venue_account_id="venue-mt5"),
+        _gate_key(
+            "key-MM", alloc, exchange="mt5", venue_account_id=None,
+            account_share_kind="duplicate", account_shared_with_api_key_id="key-HM",
+        ),
+    ]
+    csv: list[dict[str, Any]] = []
+    derived: list[dict[str, Any]] = []
+    for key_id, anchor in anchors.items():
+        key_csv, ki = _series_rows(alloc, key_id, anchor)
+        ki["payload"]["venue"] = exchange[key_id]
+        csv.extend(key_csv)
+        derived.append(ki)
+    fake = _FakeSupabase({
+        "api_keys": keys,
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived + [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    with patch("services.job_worker.sentry_sdk") as sentry:
+        assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 2, "each account counts once: two keys"
+    terminal = payload["curve"][-1]["equity_usd"]
+    assert terminal == pytest.approx(140_000.0, rel=1e-9), "the two holders' anchors, nothing twice"
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "duplicate_shared_account_counted_once" in payload["flags"]
+    assert _refusal_upserts(fake) == []
+    assert _curve_deletes(fake, alloc) == []
+    assert sentry.capture_message.call_count == 0
+    for secret in ("account_duplicate", "key-HD", "key-MD", "key-HM", "key-MM", "venue-deribit", "venue-mt5"):
+        assert secret not in caplog.text
 
 
 @pytest.mark.asyncio

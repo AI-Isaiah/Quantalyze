@@ -13,7 +13,7 @@ import {
   PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
-import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
+import { NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import {
   curveMethodFromFlags,
   resolveDailyReturnSeries,
@@ -3279,8 +3279,9 @@ export interface MyAllocationDashboardPayload {
    * an honest "being rebuilt" state instead and are fail-closed: every value
    * other than an explicit `"ready"` (a missing field, `null`, `""`, a state
    * added later) reads as `"rebuilding"`. `"ready"` requires a version-2
-   * trustworthy series, no eligible key counted through a working holder, and
-   * a known account on every eligible ccxt key (sFOX and MT5 exempt). See
+   * trustworthy series and a known account on every eligible ccxt key (sFOX
+   * and MT5 exempt). A marked duplicate never blocks it from the key list
+   * (Phase 183 D-01: the derive counts that account once). See
    * `equityHistoryReadiness`.
    */
   equityHistoryState: "rebuilding" | "ready";
@@ -4503,10 +4504,12 @@ export type MissingSeriesReason = Extract<
  *      SC-2 (D-03, D-04): `failing_key_series_ended` (a lone failing key whose series
  *      stopped before the book's last day) shares this slot and this line, since it is
  *      the same fact and the same owner action.
- *   2. `account_duplicate` / `account_identity_collision`: the derive refused
- *      the book over two keys reading one exchange account (SC-1 persists the
- *      refusal instead of deleting the row), the line the key list already
- *      gives a marked duplicate: `duplicate_account`.
+ *   2. `account_identity_collision` / `account_duplicate`: the derive refused
+ *      the book (SC-1 persists the refusal instead of deleting the row) and the
+ *      line is `duplicate_account`. Since Phase 183 D-01 only
+ *      `account_identity_collision` is written, for two COUNTED keys on one
+ *      account; `account_duplicate` is a pre-Phase-183 refusal row, read until
+ *      the next derive replaces it.
  *   2b. `account_identity_pending` (167.1.2.1.1 SC-6, D-03/D-04): two or more unknown
  *      working keys on one stamping venue may be one account counted twice. The
  *      existing identity-pending line, after a duplicate and before the history lines.
@@ -4594,28 +4597,6 @@ function knownVenueAccountId(id: string | null | undefined): boolean {
 }
 
 /**
- * A duplicate blocks "ready" only while its holder is working. "Working" is
- * D-18's rule (`isWorkingHolder`, the column comment on account_share_kind
- * from migration 20260927180000), the same rule the Exchanges page note uses,
- * so the reason line and the note agree. A holder that is inactive,
- * disconnected, failing or absent from the key list leaves the marked key
- * ordinary. The marked key itself is judged by eligibility, as the derive job
- * judges it.
- */
-function countsAsDuplicate(
-  key: EquityHistoryKey,
-  byId: ReadonlyMap<string, EquityHistoryKey>,
-): boolean {
-  if (!isPerKeyDailiesEligibleKey(key)) return false;
-  if (key.account_share_kind !== "duplicate") return false;
-  const holderId = key.account_shared_with_api_key_id;
-  if (!holderId) return false;
-  const holder = byId.get(holderId);
-  if (!holder) return false;
-  return isWorkingHolder(holder);
-}
-
-/**
  * Whether an eligible ccxt key's account is still unknown.
  *
  * Review C2 CR-02 / SFH-04: a key marked `duplicate` keeps a NULL
@@ -4625,9 +4606,9 @@ function countsAsDuplicate(
  * left. Its account is still KNOWN: it is the holder's. So a marked duplicate
  * whose holder is in the key list with a known id is identity-known. Reading
  * it as unknown held the book in `account_identity_pending` for as long as a
- * dead holder stayed connected, and no sync could ever clear that. Whether the
- * pair then blocks "ready" is `countsAsDuplicate`'s question (a working
- * holder), not this one.
+ * dead holder stayed connected, and no sync could ever clear that. Since Phase
+ * 183 D-01 a marked pair never blocks "ready" from the key list; the derive
+ * counts it once.
  */
 function identityStillPending(
   key: EquityHistoryKey,
@@ -4656,8 +4637,8 @@ function failingToSync(key: EquityHistoryKey): boolean {
  * Review C2 round 2 IN-04. The keys a `key_not_syncing` reason is about:
  * identity-pending (the same `identityStillPending` rule the readiness check
  * uses) AND failing to sync. `equityHistoryReadiness` returns
- * `key_not_syncing` iff this list is non-empty and no duplicate blocks first,
- * so the renderer can name the key when there is exactly one.
+ * `key_not_syncing` iff this list is non-empty, so the renderer can name the
+ * key when there is exactly one.
  */
 export function notSyncingIdentityPendingKeyIds(
   apiKeys: readonly EquityHistoryKey[],
@@ -4670,18 +4651,22 @@ export function notSyncingIdentityPendingKeyIds(
 }
 
 /**
- * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
- * eligible key is a duplicate of a working holder, and every eligible key on
- * okx/bybit/binance/deribit has a venue account id, is a composite member, or
- * is a duplicate whose holder in the key list carries the shared id.
- * The reason names the first failing condition, in that order. An unknown
- * account on a key that is failing to sync is `key_not_syncing` (review C2
- * WR-02); on any other key it is `account_identity_pending`.
+ * Phase 167.1.2 plan 11. Ready iff the version-2 series is present and every
+ * eligible key on okx/bybit/binance/deribit has a venue account id, is a
+ * composite member, or is a duplicate whose holder in the key list carries the
+ * shared id. The reason names the first failing condition, in that order. An
+ * unknown account on a key that is failing to sync is `key_not_syncing` (review
+ * C2 WR-02); on any other key it is `account_identity_pending`.
  *
- * ⚠️ Review C2 fix coupling: a marked duplicate behind a NOT-working holder
- * reads as identity-known and ordinary here, so "ready" relies on the writers
- * counting that account once, through its working member (review CR-01's
- * holder-drop half, in the Python writers). Ship the two together.
+ * A marked duplicate is counted once by the derive's account-group resolution
+ * and never blocks here (Phase 183 D-01). A real double count, two COUNTED keys
+ * on one account, reaches the reader only as the stored
+ * `account_identity_collision` token (`untrustworthyRebuildReason`), because a
+ * key list alone cannot prove it: the writer needs the returns intervals.
+ *
+ * ⚠️ Phase 183 coupling: "ready" relies on the writer counting each marked
+ * pair once. Both runtimes assert the same table,
+ * `analytics-service/tests/fixtures/shared_account_resolution.json`.
  */
 export function equityHistoryReadiness(
   apiKeys: readonly EquityHistoryKey[],
@@ -4690,9 +4675,6 @@ export function equityHistoryReadiness(
 ): { state: "ready" | "rebuilding"; reason: EquityHistoryRebuildReason | null } {
   const byId = new Map<string, EquityHistoryKey>();
   for (const key of apiKeys) byId.set(key.id, key);
-  if (apiKeys.some((key) => countsAsDuplicate(key, byId))) {
-    return { state: "rebuilding", reason: "duplicate_account" };
-  }
   const pending = apiKeys.filter((key) => identityStillPending(key, byId));
   // Review C2 WR-02: the stamper runs only after a SUCCESSFUL poll, so a key
   // failing to sync (`error` / `sign_in_failed`; eligibility already excludes
@@ -4939,8 +4921,8 @@ export function derivePhase07Fields(
   const hasSyncing = freshness.syncing;
 
   // Phase 167.1.2 plan 11 — the ONE producer of the display series. Ready only
-  // when equityHistoryReadiness says so (v2 series, no working-holder
-  // duplicate, ccxt identity known). Otherwise both arrays are empty.
+  // when equityHistoryReadiness says so (v2 series, ccxt identity known).
+  // Otherwise both arrays are empty.
   // Snapshots are not a display fallback.
   const derivedReadFailed = derivedEquityRow === DERIVED_ROW_READ_FAILED;
   const derivedRow = derivedReadFailed ? null : derivedEquityRow;

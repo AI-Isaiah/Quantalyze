@@ -2792,8 +2792,9 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
   // Phase 167.1.2 plan 11 (T-167.1.2-20a). The readiness rule is pinned on the
   // pure helper in queries.test.ts; these two pin that the producer applies it
   // to the key list getMyAllocationDashboard actually reads. The same v2 row
-  // is ready with one identified key and rebuilding once a second key reads
-  // the same account, so the difference is the marker and nothing else.
+  // is ready with one identified key and still ready once a second key is
+  // marked a duplicate of it (Phase 183 D-01: the derive counts that account
+  // once), so the marker alone never holds the book.
   function v2Row() {
     const row = derivedRow(true);
     row.payload.version = 2;
@@ -2834,13 +2835,16 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     expect(result.equityDailyReturns).toHaveLength(3);
   });
 
-  it("plan 11: the same row with a second key marked a duplicate of a working holder is rebuilding, reason duplicate_account", async () => {
+  it("plan 11 + Phase 183 D-01: the same row with a second key marked a duplicate of a working holder reads ready, counted once by the derive", async () => {
     state.portfolios = [P1151_PORTFOLIO];
     state.apiKeys = [
       identifiedKey(),
       identifiedKey({
         id: "k-dup",
         label: "Binance copy",
+        // The production shape: the stamper leaves a marked key's id NULL while
+        // its holder holds the unique index slot.
+        venue_account_id: null,
         account_share_kind: "duplicate",
         account_shared_with_api_key_id: "k-holder",
       }),
@@ -2850,10 +2854,9 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    expect(result.equityHistoryState).toBe("rebuilding");
-    expect(result.equityHistoryRebuildReason).toBe("duplicate_account");
-    expect(result.equityDailyPoints).toEqual([]);
-    expect(result.equityDailyReturns).toEqual([]);
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityHistoryRebuildReason).toBeNull();
+    expect(result.equityDailyReturns).toHaveLength(3);
   });
 
   // Phase 176 (D-02, D-07, Discretion). The dashboard reads no legacy curve:

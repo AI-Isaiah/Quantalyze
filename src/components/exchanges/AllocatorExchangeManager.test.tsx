@@ -2594,9 +2594,10 @@ describe("AllocatorExchangeManager — round-2 review: state crossing sections",
 // Why: one exchange account behind two live keys is summed twice by every
 // consumer that adds keys together. The daily poll MARKS the second key
 // (`account_share_kind = 'duplicate'`) instead of acting on it, because the
-// founder's rule is "nothing is silently deleted". The card is the named
-// cleanup path: it must say which key already reads the account, next to the
-// Disconnect control the owner uses to fix it. And once ccxt keys carry an
+// founder's rule is "nothing is silently deleted". Since Phase 183 D-02 the
+// note is information: it says which key already reads the account and that we
+// count that account once, and nothing is asked of the owner (one account
+// behind several logins is intended). And once ccxt keys carry an
 // account id, a Reconnect into an occupied account is refused by the database
 // (SQLSTATE 23505, plan 03's migration); that refusal must read as words, not
 // as a raw database error or a generic "try again" that can never succeed.
@@ -2605,7 +2606,7 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
   const HOLDER = "key-binance-1";
   const DUP = "key-binance-2";
   const DUP_SENTENCE =
-    "This key reads the same exchange account as Binance — Primary Binance. Disconnect one of them.";
+    "This key reads the same exchange account as Binance — Primary Binance. We count that account once.";
   const RECONNECT_REFUSAL =
     "This exchange account is already connected through another of your keys. Disconnect that key first, then reconnect this one.";
 
@@ -2645,20 +2646,22 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
     );
   });
 
-  it("names the holder on the duplicate's row, beside its Disconnect control", () => {
+  it("names the holder on the duplicate row and says we count that account once, in the muted tone (Phase 183 D-02)", () => {
     render(
       <AllocatorExchangeManager hasHoldings={true} initialKeys={[holderKey(), dupKey()]} />,
     );
     const note = screen.getByRole("note");
     expect(note.textContent).toBe(DUP_SENTENCE);
-    // The note sits in the duplicate's own row, which carries the control the
-    // sentence asks the owner to use.
     const row = note.closest("[data-testid='allocator-key-row']") as HTMLElement;
     expect(row).not.toBeNull();
     expect(within(row).getByText("Second Binance")).toBeInTheDocument();
-    expect(
-      within(row).getByRole("button", { name: /Disconnect binance key/i }),
-    ).toBeInTheDocument();
+    // A neutral line: one account behind several logins is a steady state, so
+    // the note is muted, not the amber of a recoverable state (DESIGN.md).
+    expect(note).toHaveClass("text-text-muted");
+    expect(note).not.toHaveClass("text-warning");
+    // It states a fact and asks the owner for nothing.
+    expect(note.textContent).not.toMatch(/\b(disconnect|delete|remove)\b/i);
+    expect(note.textContent).not.toMatch(/one of them/i);
     // Only the marked key carries a note; the holder's row does not.
     expect(screen.getAllByRole("note")).toHaveLength(1);
     // Never an id: the holder is named by its own label.
@@ -2687,9 +2690,10 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
 
   // D-18 (founder, 2026-09-27): a holder is WORKING only while it is active,
   // connected, and its last sync is not revoked, sign_in_failed or error. A
-  // holder that is not working does not count the account, so the marked key
-  // counts on its own and must not be told to disconnect: telling the owner to
-  // drop the one key that still works would leave the account counted by nobody.
+  // marked key reads through its holder only while that holder works, so once
+  // the holder is not working the marked key counts on its own and the note
+  // says nothing: it would describe the account as read through a key that no
+  // longer reads it.
   it.each([
     ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
     ["revoked", { sync_status: "revoked" }],
@@ -2728,9 +2732,8 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
   );
 
   // 167.1.2 REVIEW SF-L1: a holder this list does not carry cannot be judged
-  // working under D-18, and an unjudged holder is not grounds for asking the
-  // owner to disconnect a key. Unknown says nothing (this used to name
-  // "another of your keys").
+  // working under D-18, and an unjudged holder cannot be named as the key that
+  // reads the account. Unknown says nothing.
   it("shows nothing when the holder is not in the list", () => {
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[dupKey()]} />);
     expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
@@ -2738,7 +2741,7 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
 
   // 167.1.2 REVIEW WR-02: an inactive row still renders in the active list, and
   // a marked key that is itself not working (D-18 applied to the marked key)
-  // counts for nothing, so the note must not ask for a disconnect.
+  // counts for nothing, so the note says nothing on it.
   it("shows nothing on a marked key that is itself inactive", () => {
     render(
       <AllocatorExchangeManager

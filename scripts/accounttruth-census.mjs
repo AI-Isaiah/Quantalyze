@@ -10,8 +10,8 @@
  *
  * The census sections, one SELECT each:
  *   (a) live keys by exchange, and those with venue_account_id NULL;
- *   (b) keys marked `duplicate` / `composite_member`, and the duplicates that
- *       still hold the book back (the reader's countsAsDuplicate rule);
+ *   (b) keys marked `duplicate` / `composite_member`, counted as information
+ *       (since Phase 183 D-01 no marked key holds a book back);
  *   (c) owners whose eligible keys lack csv_daily_returns or a key_inputs row;
  *   (d) equity_curve rows by payload version and is_trustworthy, and the
  *       degrade_reasons token frequencies;
@@ -175,23 +175,15 @@ SELECT 'all.live_keys_unstamped_unmarked', count(*) FROM unresolved
 ORDER BY 1`;
 
 // (b) The marker is never cleared when a key departs (D-18), so the raw counts
-// cannot reach 0 after a cleanup. `duplicate.blocking` mirrors queries.ts
-// countsAsDuplicate: the marked key is eligible and its holder, in the same
-// owner's keys, is working. That is the count the runbook's cleanup gate reads.
-const SQL_B = String.raw`WITH ${KEYS_CTE},
-blocking AS (
-  SELECT k.user_id
-    FROM keys k
-    JOIN keys h ON h.id = k.holder_id AND h.user_id = k.user_id
-   WHERE k.eligible AND k.share_kind = 'duplicate' AND h.working
-)
+// cannot reach 0 after a cleanup. Since Phase 183 D-01 a marked duplicate no
+// longer holds a book back: the derive's account-group resolution counts it once
+// and the reader says ready. Only two COUNTED keys on one account refuse, and
+// that is a stored-row state read in (e), not a key-list count. So (b) is
+// information only and has no runbook gate.
+const SQL_B = String.raw`WITH ${KEYS_CTE}
 SELECT 'duplicate.marked' AS bucket, count(*) FILTER (WHERE share_kind = 'duplicate') AS n FROM keys
 UNION ALL
 SELECT 'duplicate.marked_live', count(*) FILTER (WHERE share_kind = 'duplicate' AND eligible) FROM keys
-UNION ALL
-SELECT 'duplicate.blocking', count(*) FROM blocking
-UNION ALL
-SELECT 'duplicate.blocking_owners', count(DISTINCT user_id) FROM blocking
 UNION ALL
 SELECT 'composite_member.marked', count(*) FILTER (WHERE share_kind = 'composite_member') FROM keys
 UNION ALL
@@ -268,8 +260,10 @@ SELECT 'degrade_reason=' || CASE
  GROUP BY 1
 ORDER BY 1`;
 
-// (e) Mirrors queries.ts equityHistoryReadiness, in its order:
-//   duplicate_account        countsAsDuplicate (see (b));
+// (e) Mirrors queries.ts equityHistoryReadiness, in its order. Since Phase 183
+// D-01 no key-list arm holds an owner back over a marked duplicate: the derive
+// counts it once, so `duplicate_account` comes only from the stored row's token
+// (below), never from the keys:
 //   key_not_syncing          an identityStillPending key that is failing to
 //                            sync (NOT_WORKING_SYNC_STATUSES);
 //   account_identity_pending identityStillPending: eligible, on
@@ -291,12 +285,6 @@ ORDER BY 1`;
 const SQL_E = String.raw`WITH ${KEYS_CTE},
 owners AS (
   SELECT DISTINCT user_id FROM keys WHERE eligible
-),
-dup AS (
-  SELECT DISTINCT k.user_id
-    FROM keys k
-    JOIN keys h ON h.id = k.holder_id AND h.user_id = k.user_id
-   WHERE k.eligible AND k.share_kind = 'duplicate' AND h.working
 ),
 pending AS (
   SELECT k.user_id,
@@ -362,7 +350,6 @@ judged AS (
 state AS (
   SELECT o.user_id,
          CASE
-           WHEN dp.user_id IS NOT NULL THEN 'rebuilding:duplicate_account'
            WHEN pn.any_failing THEN 'rebuilding:key_not_syncing'
            WHEN pn.user_id IS NOT NULL THEN 'rebuilding:account_identity_pending'
            WHEN j.allocator_id IS NULL THEN 'rebuilding:awaiting_derivation'
@@ -373,7 +360,6 @@ state AS (
            ELSE 'rebuilding:derivation_rejected'
          END AS s
     FROM owners o
-    LEFT JOIN dup dp ON dp.user_id = o.user_id
     LEFT JOIN pending pn ON pn.user_id = o.user_id
     LEFT JOIN judged j ON j.allocator_id = o.user_id
 )
@@ -597,17 +583,10 @@ export const SECTIONS = Object.freeze([
   },
   {
     letter: "b",
-    title: "keys marked duplicate / composite_member, and duplicates that hold a book back",
+    title: "keys marked duplicate / composite_member",
     sql: SQL_B,
-    required: [
-      "duplicate.marked",
-      "duplicate.marked_live",
-      "duplicate.blocking",
-      "duplicate.blocking_owners",
-      "composite_member.marked",
-      "composite_member.marked_live",
-    ],
-    gate: ["duplicate.blocking"],
+    required: ["duplicate.marked", "duplicate.marked_live", "composite_member.marked", "composite_member.marked_live"],
+    gate: [],
   },
   {
     letter: "c",

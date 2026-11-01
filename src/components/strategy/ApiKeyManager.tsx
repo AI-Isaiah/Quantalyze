@@ -1726,17 +1726,16 @@ export function ApiKeyManager({
                     MT5 account {key.venue_account_id ?? "—"}
                   </p>
                 )}
-                {/* Phase 167.1.2 plan 04 (D-01, D-11): the same duplicate
-                    sentence the allocator card shows, from the same source,
-                    beside this card's Delete. The holder is looked up in every
-                    key this read returned, not only the listed ones, so a
-                    composite's filtered list still names it. The verb is
-                    this card's own control, Delete: the manager card has no
-                    Disconnect (167.1.2 REVIEW WR-01). */}
+                {/* Phase 167.1.2 plan 04 (D-01, D-11) and Phase 183 D-02: the
+                    same counted-once sentence the allocator card shows, from
+                    the same source and in the same muted tone. The holder is
+                    looked up in every key this read returned, not only the
+                    listed ones, so a composite's filtered list still names
+                    it. */}
                 {(() => {
-                  const shareNote = accountShareNote(key, keysById, "Delete");
+                  const shareNote = accountShareNote(key, keysById);
                   return shareNote ? (
-                    <p role="note" className="text-xs text-warning mt-0.5">
+                    <p role="note" className="text-xs text-text-muted mt-0.5">
                       {shareNote}
                     </p>
                   ) : null;

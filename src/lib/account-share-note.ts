@@ -5,8 +5,9 @@
  * The daily poll's identity stamper marks a key `account_share_kind =
  * 'duplicate'` when it reads the same exchange account as a live key of the
  * same owner (`account_shared_with_api_key_id`, the holder). Nothing is ever
- * disconnected or deleted for it (D-01): the card names the holder and points
- * at the Disconnect / Delete controls that already sit beside the note.
+ * disconnected or deleted for it (D-01): the card names the holder and says we
+ * count that account once, because one exchange account behind several logins
+ * is intended (Phase 183 D-02).
  *
  * Reader rule, D-18 (founder, 2026-09-27), stated in COMMENT ON COLUMN
  * api_keys.account_share_kind (migration 20260927180000): a marked key reads
@@ -26,16 +27,25 @@
  * The note shows the holder's own label (exchange and nickname, or a masked id
  * tail), never an account id and never a user id (T-167.1.2-17).
  *
- * 167.1.2 REVIEW WR-01 / WR-02 / SF-L1 — what the note may ask:
- *   - The caller names the verb of the control ITS card carries. The allocator
- *     card has Disconnect; the manager card has Delete and no Disconnect. The
- *     parameter is required so a new caller cannot inherit a verb it lacks.
- *   - The D-18 rule is applied to the MARKED key too. A marked key that is
- *     disconnected, inactive or failing counts for nothing, and it is never
- *     polled again, so its marker never clears. Asking the owner to remove one
- *     of the pair there asks for a remedy already applied, forever.
- *   - A holder absent from the caller's key list cannot be judged working, so
- *     the note says nothing rather than naming "another of your keys".
+ * Phase 183 D-02 — what the note says, and when it says nothing:
+ *   - The note states a fact and names no control, so 167.1.2 REVIEW WR-01's
+ *     per-card verb is retired with the remedy. The founder's reason: one
+ *     account behind several logins is intended, so telling the owner to
+ *     remove a key is wrong.
+ *   - It shows only where the derive's account-group resolution counts the
+ *     pair once: both keys work (D-18), a working key is always eligible, and
+ *     the marker puts the two in one group, of which exactly one key is
+ *     counted. So the sentence is true wherever it renders, on the strategy
+ *     key card as well as the Exchanges page: every owner's keys are composed
+ *     into that owner's book nightly whatever the owner's role, and no
+ *     strategy sums the pair.
+ *   - WR-02 is kept (D-18 applied to the MARKED key): a marked key that is
+ *     disconnected, inactive or failing shows its own status, not this note.
+ *   - SF-L1 is kept: a holder absent from the caller's key list cannot be
+ *     judged working, so the note says nothing.
+ *   - The Overview's rebuilding-panel line for two keys on one account is a
+ *     different sentence, for a real double count, and is not this note
+ *     (D-03 leaves it as is).
  */
 
 import { dataSourceLabel } from "@/lib/api-key-label";
@@ -51,9 +61,6 @@ export interface AccountShareNoteKey {
   account_shared_with_api_key_id: string | null;
   account_share_kind: string | null;
 }
-
-/** The remedy control each key card carries, named in the note's last sentence. */
-export type AccountShareNoteAction = "Disconnect" | "Delete";
 
 /**
  * Last-sync statuses that make a holder NOT working (D-18). The SQL twin is the
@@ -87,18 +94,16 @@ function holderLabel(holder: AccountShareNoteKey): string {
  * The duplicate sentence for `key`, or `null` when there is nothing to say:
  * the key is unmarked or marked `composite_member`, the key itself is not
  * working, its holder is not in `keysById`, or its holder is not working.
- * `keysById` is the caller's own key list, keyed by id. `action` is the label
- * of the remedy control on the caller's card.
+ * `keysById` is the caller's own key list, keyed by id.
  */
 export function accountShareNote(
   key: AccountShareNoteKey,
   keysById: ReadonlyMap<string, AccountShareNoteKey>,
-  action: AccountShareNoteAction,
 ): string | null {
   const holderId = key.account_shared_with_api_key_id;
   if (key.account_share_kind !== "duplicate" || holderId === null) return null;
   if (!isWorkingHolder(key)) return null;
   const holder = keysById.get(holderId);
   if (holder === undefined || !isWorkingHolder(holder)) return null;
-  return `This key reads the same exchange account as ${holderLabel(holder)}. ${action} one of them.`;
+  return `This key reads the same exchange account as ${holderLabel(holder)}. We count that account once.`;
 }

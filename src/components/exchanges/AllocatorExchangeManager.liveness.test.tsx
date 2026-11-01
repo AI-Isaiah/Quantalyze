@@ -246,7 +246,7 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
     for (const label of ["Dup One", "Dup Two"]) {
       expect(readOnlyLine(label)).toBe("Binance · Read-only");
       expect(within(keyRow(label)).getByRole("note").textContent).toBe(
-        "This key reads the same exchange account as Binance — Holder Binance. Disconnect one of them.",
+        "This key reads the same exchange account as Binance — Holder Binance. We count that account once.",
       );
     }
   });
@@ -554,7 +554,7 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
     expect(within(keyRow("Dup Binance")).getByRole("note").textContent).toBe(
-      "This key reads the same exchange account as Binance — Holder Binance. Disconnect one of them.",
+      "This key reads the same exchange account as Binance — Holder Binance. We count that account once.",
     );
     expect(elsewhereNote("Dup Binance")).toBe("Balance shown on Holder Binance");
   });

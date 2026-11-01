@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.14.0] - 2026-11-01 — DUPCOUNT: a book whose marked duplicate key is already counted once draws its curve
+
+### Root cause
+- The allocator derive's account-group resolution already counts a shared exchange account once, but a later identity gate (`duplicate_keys`: an eligible key marked `account_share_kind='duplicate'` with a working holder) refused the whole book with `account_duplicate` regardless. The reader mirrored it from the key list (`countsAsDuplicate`). One exchange account under several logins is intended (founder rule), so such books never drew a curve. PROD evidence, counts only: 1 equity curve refused `account_duplicate` nightly since 2026-10-20 (Sentry QUANTALYZE-2H), on a book with 2 marked duplicate keys (one Deribit, one MT5), each against a healthy holder.
+
+### Fixed
+- **D-01, writer.** The `duplicate_keys` gate in `derive_allocator_equity` is gone. A marked duplicate is counted once by the group loop and the book composes. A real double count (two counted keys on one account) still refuses as `account_identity_collision`.
+- **D-01, reader and census.** `equityHistoryReadiness` no longer holds a book back over a marked duplicate from the key list (`countsAsDuplicate` and its early return removed). `scripts/accounttruth-census.mjs` drops `duplicate.blocking` and the `dup` CTE. A stored `account_duplicate` row and a live collision still map to the `duplicate_account` rebuilding line.
+- **D-02, copy.** The per-key note on the Exchanges page and on the strategy key card now reads "This key reads the same exchange account as <holder>. We count that account once." in a muted tone, instead of asking the user to disconnect or delete a key.
+- **Review WR-01.** Writing a new `duplicate` or `composite_member` marker enqueues the owner's `derive_allocator_equity`, so a curve composed before the marker (which counted the account twice) is replaced at once instead of at the next nightly compose. A failed enqueue is logged at ERROR (reaches Sentry); the marker stands.
+- **D-05 (founder 2026-11-01, "Fix it in 183").** The compose re-reads the keys' share markers just before saving its curve. If one changed while it ran, it recomposes once from the new markers; if they change again during that redo, the job ends transient without saving and the queue's retry re-reads.
+
+### Removed
+- `DeriveRefusal.ACCOUNT_DUPLICATE` is retired from the closed refusal vocabulary. The old token is kept as a legacy refusal in the shared fixture so a stored row still reads correctly; `AccountShareNoteAction` is deleted.
+
+### Tests
+- Writer, reader, census and vocabulary tests went RED on the old rule first. They cover a PROD-shaped Deribit + MT5 book, a marker pair that was both counted (still collides), the stale-row transition, the marker-enqueue (new, unchanged, failing), and a marker landing mid-compose and during the redo. Mutations recorded in the phase review.
+
+### Notes
+- Known limit: a marker that commits after the compose's last re-read and before its own upsert is still saved double-counted until the next derive (one database round trip).
+- A stored `account_duplicate` row shows the rebuilding panel's "Disconnect one of them" line until the first derive after this deploy replaces it (D-03 leaves that panel line unchanged).
+- Operator records (the 167.1.2 recompute runbook and the C5 P6 item) still name the census's `duplicate.blocking`; they are corrected in the phase's records PR.
+
 ## [0.133.13.2] - 2026-11-01 — book Phase 185 DERIBITFLOWTIME
 
 ### Added

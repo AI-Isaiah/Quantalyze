@@ -254,20 +254,22 @@ describe("getMyAllocationDashboard — the BTC feed the Overview comparator read
 
   it("rebuilding book: btcBenchmarkPrices is null and no benchmark_prices query is issued", async () => {
     seedReadyBook();
-    // A second key reading the same exchange account through the working
-    // holder is a duplicate: the history is rebuilding, whatever the row says.
+    // A second binance key whose account is still unknown (no venue id, no
+    // marker) holds the book in account_identity_pending, whatever the row
+    // says. Phase 183 D-01: a marked duplicate no longer would, because the
+    // derive counts its account once.
     (state.tables.api_keys as Row[]).push({
       ...(state.tables.api_keys as Row[])[0],
-      id: "k-dup",
-      label: "Binance dup",
-      account_share_kind: "duplicate",
-      account_shared_with_api_key_id: "k-holder",
+      id: "k-unknown",
+      label: "Binance unstamped",
+      venue_account_id: null,
     });
     const { getMyAllocationDashboard } = await load();
 
     const result = await getMyAllocationDashboard("user-1");
 
     expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("account_identity_pending");
     expect(result.btcBenchmarkPrices).toBeNull();
     expect(state.benchCalls).toEqual([]);
   });
