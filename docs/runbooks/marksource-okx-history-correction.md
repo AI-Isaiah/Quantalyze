@@ -1,5 +1,7 @@
 # Runbook — OKX history correction (Phase 167.2.1.1.1.1 MARKSOURCE, D-05)
 
+> ⛔ **RETIRED 2026-10-31 (Phase 176 LEGACYRETIRE, D-02 and D-04):** the forced rebuild this runbook describes is retired. Since PR 2 of the phase the worker finishes a `reconstruct_allocator_history` job, forced (`force_rebuild`) or not, as a no-op, so the `enqueue` and `newjob` forms must not be run: they would be read as a correction that never happened. The legacy table this runbook rewrites (`allocator_equity_snapshots`) is dropped by the phase's last migration, and the history probe script cited below (`analytics-service/scripts/allocator_history_probe.py`) is deleted. Live reads of the allocator curve are in `docs/runbooks/legacyretire-go-live.md`. Original text kept below.
+
 **Owner:** the orchestrator runs the live steps under the standing PROD authorization and tells
 the founder what was written · **Audience:** whoever rebuilds an OKX-holding allocator's stored
 history, months from now, with no memory of this phase · **Risk:** a forced rebuild replaces the

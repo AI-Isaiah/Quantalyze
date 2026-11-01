@@ -231,6 +231,8 @@ is red. For the redeploy requirement and the `/health` `git_sha` convergence che
 `docs/runbooks/mt5-go-live.md` (Step 6, Pitfall 5) and `docs/runbooks/railway-worker.md`; for the
 sFOX equivalent, `docs/runbooks/sfox-go-live.md` (Step 3).
 
+> ⛔ **AMENDED 2026-10-31 (Phase 176 LEGACYRETIRE, D-04):** after PR 2 of the phase no new `refresh_allocator_equity_daily` job is created, so that row of the reading below is expected to stop growing; only `poll_allocator_positions` keeps counting. Original text kept below.
+
 **Part C — the behavioural probe, which is the one that actually proves it.** A declared flag plus
 a fresh deploy still does not prove the venue gateway answers. The authoritative evidence is
 mt5-keyed jobs **completing recently**, because those only complete when the running worker has the

@@ -557,43 +557,6 @@ async def test_stale_mark_has_no_residual_step() -> None:
     assert max(curve) == "2026-03-08", f"a level after the last mark: {sorted(curve)[-3:]}"
 
 
-@pytest.mark.asyncio
-async def test_stored_mark_anchor_is_no_empty_poll_proof(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Info 2 / T-167.2.1.1.1-57. A key_inputs row from the W7 case (a positive stored anchor
-    read at 00:10Z of D+1) beside a clean, empty holdings poll at 04:03Z of D+1 is neither a
-    proof of an empty account nor a contradiction: ``_polled_empty_since`` returns False and logs
-    no contradiction warning. Stamped with the derive's wall clock instead, the same payload reads
-    as a live read taken AFTER the empty poll and logs the false contradiction."""
-    from services.equity_reconstruction import _polled_empty_since
-    from tests.test_equity_reconstruction import ALLOCATOR_ID, FakeSupabaseClient
-    from tests.test_refresh_allocator_equity_carry_forward import _at, _seed_poll_outcome
-
-    db = KeyDb()
-    seed_okx_marks(db)
-    _result, capture = await derive_okx(db)
-    payload = _key_inputs_payload(capture, KEY)
-    assert payload["anchor_usd"] is not None
-
-    last_day = date(2026, 3, 10)
-    fake = FakeSupabaseClient()
-    fake.store[("allocator_equity_derived", (ALLOCATOR_ID, f"key_inputs:{KEY}"))] = {
-        "allocator_id": ALLOCATOR_ID, "kind": f"key_inputs:{KEY}", "payload": payload,
-        "computed_at": payload["anchor_asof"],
-    }
-    _seed_poll_outcome(fake, KEY, _at(last_day + timedelta(days=1), hour=4))
-    caplog.set_level(logging.INFO)
-    proven = await _polled_empty_since(
-        fake, ALLOCATOR_ID, [{"id": KEY, "exchange": "okx"}], last_day.isoformat()
-    )
-    assert proven is False
-    assert not [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING and "contradict" in r.getMessage()
-    ]
-
-
 # --------------------------------------------------------------------------------------
 # Task 2 - every other venue in key mode: writer basis, held-out flows, the race loser
 # --------------------------------------------------------------------------------------

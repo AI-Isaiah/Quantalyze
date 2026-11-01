@@ -26,13 +26,6 @@ import scripts.okx_chain_record as rec
 from services import okx_bills_chain as chain
 from services import okx_opening_balance as obal
 from tests._okx_bills import OkxBillsArchive, okx_bill, okx_bill_chain, okx_detail
-from tests.test_okx_anchor_rule import (
-    _TOTAL_EQ,
-    _bills,
-    _forced_window_call,
-    _okx_world,
-    _refusal_audit,
-)
 from tests.test_okx_opening_balance import OPENING_DAY, OPENING_MS, _exchange, _reach_bill, _row
 
 # a4's reading shape: a stable USDT chain, every interior link exact, the newest bal printed at
@@ -58,39 +51,6 @@ async def test_a4s_close_below_one_part_in_a_trillion_proves_the_opening() -> No
     assert reading.unavailable_reason == "none", reading
     assert reading.opening_usd == 60000.0
     assert reading.bills_read == 2
-
-
-@pytest.mark.asyncio
-async def test_a_forced_okx_rebuild_anchors_when_the_close_is_within_a_trillionth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The forced path, RED on exact equality: the same close, through ``_fetch_and_price_window``
-    with the anchor required. The opening check reads ``agreed`` and the last row lands on the
-    venue's own ``totalEq``. Before D-06/D-07 the forced call raised ``ForcedRebuildRefusedError``."""
-    exchange, _archive = await _okx_world(
-        _bills(usdt_opening="60000.0000000000000000"), usdt_cash="20000.00000000000000004"
-    )
-
-    rows, _complete, telemetry = await _forced_window_call(monkeypatch, exchange)
-
-    assert telemetry["anchor_opening_check"] == "agreed", telemetry
-    assert telemetry["anchor_opening_agreed"] is True, telemetry
-    assert rows[-1]["value_usd"] == pytest.approx(float(_TOTAL_EQ), abs=0.01)
-
-
-@pytest.mark.asyncio
-async def test_a_close_beyond_the_trillionth_bound_refuses_chain_break_on_the_forced_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Fail closed: a residual of 1e-7 is above 1e-12 relative (5e-12), so the chain is not proven. The forced rebuild refuses by the
-    existing token and the audit names the arm, ``chain_break``."""
-    exchange, _archive = await _okx_world(
-        _bills(usdt_opening="60000.0000000000000000"), usdt_cash="20000.0000001"
-    )
-
-    failed = await _refusal_audit(monkeypatch, exchange)
-
-    assert failed.get("anchor_opening_check") == "chain_break", failed
 
 
 # ---------------------------------------------------------------------------

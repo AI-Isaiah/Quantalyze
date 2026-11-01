@@ -7,9 +7,14 @@
 -- and read the marker (SC-5, D-13). This gate pins the columns, their grants,
 -- the CHECK, the backfill and the RPC, and (second migration, 20261014120100, D-18)
 -- the refusal of worker-only audit actions and entity types by public.log_audit_event.
--- 30 arms: C1, B1-B12, A1-A3, K1, F1, D1-D4, D6, D7, D5, R3, R1, R2, R4, R5 (file
--- order). The PR 1 review round added B9-B12 (SFH-2, WR-01, WR-02), D6-D7 (O-1) and
--- R5 (O-2).
+-- 27 arms: C1, B1-B12, A1-A3, K1, F1, D1-D4, D6, D7, D5, R3, R4 (file order). The
+-- PR 1 review round added B9-B12 (SFH-2, WR-01, WR-02) and D6-D7 (O-1).
+--
+-- Phase 176 LEGACYRETIRE plan 09 (D-04, 2026-10-31): the RPC no longer enqueues a
+-- history reconstruct (migration 20261103120000). R3 now proves it enqueues none
+-- and exactly one poll job; R1, R2 and R5 tested the removed per-key reconstruct
+-- gate (failed_retry, a set marker, a retained done job) and are retired with their
+-- subject; R4 is re-pointed at 20261103120000. The count was 30 before this plan.
 --
 -- pgTAP is not set up in this project, so every assertion RAISEs
 -- `TEST FAILED (<arm>)` on failure and a clean run prints NOTICEs only.
@@ -30,30 +35,28 @@
 -- ⭐ ORDER IS LOAD-BEARING. Each arm must be the FIRST failure under its own
 -- mutation (scripts/mutation-runner). File order, fixed:
 --   C1, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, A1, A2, A3, K1, F1, D1,
---   D2, D3, D4, D6, D7, D5, R3, R1, R2, R4, R5.
+--   D2, D3, D4, D6, D7, D5, R3, R4.
 -- C1 reads the catalogue only and runs first, so on a lane without the migration
 -- it fails as `TEST FAILED (C1)` instead of as a raw column error. The backfill
 -- is called ONCE, in SETUP B, after every B fixture is seeded. The R group runs
 -- the RPC as an owner (request.jwt.claims carries the owner's sub) and its SETUP
--- names NO M1 column, so a scratch copy holding SETUP R, R3 and R1 runs on the
--- 20260924233749 body, which is how SC-5 is proven RED on today's RPC. R2's
--- marker is set by an UPDATE inside R2's own segment for the same reason.
+-- names NO M1 column, so a scratch copy holding SETUP R and R3 runs on the
+-- 20261014120000 body (the new migration left out of the apply list), which is how
+-- D-04 is proven RED there: that body enqueues one reconstruct for R3's key.
 --
 -- MATCHED PAIRS: every negative-control key differs from a marked / enqueued key
 -- in exactly the ONE attribute its arm's mutation removes (B1: done job vs
 -- pending job vs a done job of another kind vs none; B3: a noop vs a complete
 -- outcome; B6: entity_type; B7: the short-circuit reason; B8: the audit row's
--- user_id (the key's owner vs another user); R1: failed_retry vs
--- none; R2: a set marker vs none).
+-- user_id (the key's owner vs another user)).
 --
 -- APPLY SURVIVAL (the 167.1.2-12 precedent). Every needle the migration's two
 -- self-verify blocks assert must still match after EVERY RED-UNDER-M edit, or
 -- the mutated apply RAISEs and the runner scores a defect with no arm identity.
--- C1 edits the default AND the verify's expected 'integer/NO/0'; R1 edits the
--- gate list AND the verify's failed_retry needle; R4 edits the poll prefetch list
--- AND c_pre_re. R2's edit leaves its needle satisfied by construction (the fold
--- statement stays, its effect is cancelled). A1, A2, A3, K1 and F1 are `sql`
--- steps, which run AFTER the apply and so cannot trip the verify.
+-- C1 edits the default AND the verify's expected 'integer/NO/0'. R3 and R4 edit
+-- migration 20261103120000, whose verify block asserts no body text (it reads the
+-- catalogue only), so each is ONE edit and neither can trip it. A1, A2, A3, K1 and
+-- F1 are `sql` steps, which run AFTER the apply and so cannot trip the verify.
 --
 -- Interference walk, each mutation against every EARLIER arm's fixture:
 --   C1   none earlier; the first assertion. Its default edit changes the attempts
@@ -98,24 +101,17 @@
 --        as service_role, which the deny never refuses.
 --   D7   D1-D6: likewise for verification_requests_legacy_write.
 --   D5   all: changes one function grant; no earlier arm reads it.
---   R3   all B/A/K/F/D: they never call the RPC. The label edit corrupts a suffix
---        the other R keys do not assert on.
---   R1   R3: R3's key has no failed_retry job, so the shortened list does not
---        change its answer (no job, no marker -> enqueue either way).
---   R2   R3, R1: R3 and R1 keys have no marker, so the neutered fold does not
---        change their answers.
---   R4   R3, R1, R2: their keys have no failed_retry POLL job, so adding
---        failed_retry to the prefetch list changes nothing for them.
---   R5   R3, R1, R2, R4: none seeds a done reconstruct job for a key with a NULL
---        marker, so putting 'done' back in the gate list changes none of their
---        answers (R1's key has failed_retry, R2's has a marker).
+--   R3   all B/A/K/F/D: they never call the RPC. The re-inserted enqueue only adds
+--        a reconstruct job for R3's own key, which no other arm reads.
+--   R4   R3: R3's key has no failed_retry POLL job, so adding failed_retry to the
+--        prefetch list changes nothing for it.
 -- A reviewer fix that adds an arm or changes a fixture adds its row here and
 -- re-walks the table before re-running.
 --
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_api_keys_history_reconstruct_marker.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","scripts/pg-lane/fixtures/39-fixture-audit-log.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260526095850_log_audit_event_null_auth_errcode.sql","supabase/migrations/20260924233749_allocator_sync_restore_inflight_prefetch.sql","supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","supabase/migrations/20261014120100_log_audit_event_deny_worker_only_actions.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","scripts/pg-lane/fixtures/39-fixture-audit-log.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260526095850_log_audit_event_null_auth_errcode.sql","supabase/migrations/20260924233749_allocator_sync_restore_inflight_prefetch.sql","supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","supabase/migrations/20261014120100_log_audit_event_deny_worker_only_actions.sql","supabase/migrations/20261103120000_request_allocator_holdings_sync_no_reconstruct.sql"]}
 
 BEGIN;
 
@@ -836,11 +832,7 @@ DECLARE
   v_run   text := replace(gen_random_uuid()::text, '-', '');
   u_r     uuid := gen_random_uuid();
   k_r3    uuid := gen_random_uuid();
-  k_r1    uuid := gen_random_uuid();
-  k_r2    uuid := gen_random_uuid();
   k_r4    uuid := gen_random_uuid();
-  k_r5    uuid := gen_random_uuid();
-  k_r5t   uuid := gen_random_uuid();
   v_res   jsonb;
   v_n     int;
   v_m     int;
@@ -853,11 +845,7 @@ BEGIN
   ON CONFLICT (id) DO NOTHING;
   INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active)
   VALUES (k_r3, u_r, 'okx', 'recon marker R3', 'enc', true),
-         (k_r1, u_r, 'okx', 'recon marker R1', 'enc', true),
-         (k_r2, u_r, 'okx', 'recon marker R2', 'enc', true),
-         (k_r4, u_r, 'okx', 'recon marker R4', 'enc', true),
-         (k_r5, u_r, 'okx', 'recon marker R5', 'enc', true),
-         (k_r5t, u_r, 'okx', 'recon marker R5 twin', 'enc', true);
+         (k_r4, u_r, 'okx', 'recon marker R4', 'enc', true);
   PERFORM set_config('request.jwt.claims', jsonb_build_object('sub', u_r)::text, true);
   -- SETUP R END
 
@@ -865,63 +853,27 @@ BEGIN
   v_res := public.request_allocator_holdings_sync(k_r3);
   -- SETUP R3 END
   -- ARM R3 BEGIN
-  -- ----- R3 (positive control): a key with NO reconstruct job and NO marker gets
-  --           exactly one reconstruct, under the correlation label
-  --           reconstruct-alloc-<key>-initial ----------------------------------
-  -- RED-UNDER: corrupt the reconstruct enqueue's idempotency label suffix in
-  --            migration 20261014120000. The row still exists (so no other arm
-  --            moves) but no longer carries the label the connect path writes.
-  -- RED-UNDER-M: {"arm":"R3","apply":[{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"'reconstruct-alloc-' || p_api_key_id::text || '-initial'","replace":"'reconstruct-alloc-' || p_api_key_id::text || '-initial-mutated'","occurrences":1}]}
+  -- ----- R3 (D-04): a key with NO reconstruct job and NO marker, synced by its
+  --           owner, gets {ok: true, job_id}, exactly ONE poll job and NO
+  --           reconstruct job: the RPC no longer enqueues a history reconstruct
+  --           (Phase 176 LEGACYRETIRE plan 09) --------------------------------
+  -- RED-UNDER: re-insert a reconstruct_allocator_history enqueue (idempotency label
+  --            reconstruct-alloc-<key>-initial) ahead of the sync_status UPDATE in
+  --            migration 20261103120000, so the RPC enqueues the retired job again
+  --            and the key gets one reconstruct job besides its poll job.
+  -- RED-UNDER-M: {"arm":"R3","apply":[{"kind":"edit","file":"supabase/migrations/20261103120000_request_allocator_holdings_sync_no_reconstruct.sql","find":"UPDATE api_keys SET sync_status = 'syncing' WHERE id = p_api_key_id;","replace":"PERFORM enqueue_compute_job(p_strategy_id := NULL, p_kind := 'reconstruct_allocator_history', p_idempotency_key := 'reconstruct-alloc-' || p_api_key_id::text || '-initial', p_api_key_id := p_api_key_id); UPDATE api_keys SET sync_status = 'syncing' WHERE id = p_api_key_id;","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_r3
-     AND kind = 'reconstruct_allocator_history'
-     AND idempotency_key = 'reconstruct-alloc-' || k_r3::text || '-initial';
-  IF v_n <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (R3): a key with no reconstruct job and no marker must get exactly one reconstruct_allocator_history job keyed reconstruct-alloc-<key>-initial from request_allocator_holdings_sync; it got % (result %).', v_n, v_res;
+     AND kind = 'reconstruct_allocator_history';
+  SELECT count(*) INTO v_m
+    FROM compute_jobs
+   WHERE api_key_id = k_r3
+     AND kind = 'poll_allocator_positions';
+  IF (v_res ->> 'ok')::boolean IS NOT TRUE OR (v_res ->> 'job_id') IS NULL OR v_n <> 0 OR v_m <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (R3): request_allocator_holdings_sync must answer {ok, job_id} and enqueue exactly one poll_allocator_positions job and NO reconstruct_allocator_history job (D-04, Phase 176: the history reconstruct is retired); it answered % with % poll job(s) and % reconstruct job(s). Likely cause: the reconstruct enqueue is back in the RPC body.', v_res, v_m, v_n;
   END IF;
   -- ARM R3 END
-
-  -- SETUP R1 BEGIN
-  INSERT INTO compute_jobs (kind, api_key_id, status)
-  VALUES ('reconstruct_allocator_history', k_r1, 'failed_retry');
-  v_res := public.request_allocator_holdings_sync(k_r1);
-  -- SETUP R1 END
-  -- ARM R1 BEGIN
-  -- ----- R1 (SC-5): a key whose reconstruct job sits in failed_retry gets NO
-  --           second reconstruct: the in-flight unique index omits failed_retry,
-  --           so a second pending row would double a 30-minute crawl ----------
-  -- RED-UNDER: remove 'failed_retry' from the RECONSTRUCT gate's status list in
-  --            migration 20261014120000 (LAYERED: and from the self-verify's
-  --            failed_retry needle, or the mutated apply RAISEs). That list
-  --            (without 'done', O-2) is what 20260924233749 had minus its 'done'.
-  -- RED-UNDER-M: {"arm":"R1","apply":[{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"'pending','running','done_pending_children','failed_retry'","replace":"'pending','running','done_pending_children'","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"''reconstruct_allocator_history''[^;]*''failed_retry''[^;]*INTO","replace":"''reconstruct_allocator_history''[^;]*INTO","occurrences":1}]}
-  SELECT count(*) INTO v_n
-    FROM compute_jobs
-   WHERE api_key_id = k_r1 AND kind = 'reconstruct_allocator_history';
-  IF v_n <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (R1): a key whose reconstruct job is in failed_retry must not get a second reconstruct from request_allocator_holdings_sync; it now has % reconstruct jobs, expected the 1 seeded.', v_n;
-  END IF;
-  -- ARM R1 END
-
-  -- SETUP R2 BEGIN
-  UPDATE api_keys SET history_reconstructed_at = now() WHERE id = k_r2;
-  v_res := public.request_allocator_holdings_sync(k_r2);
-  -- SETUP R2 END
-  -- ARM R2 BEGIN
-  -- ----- R2 (SC-1, D-04 decider): a key whose marker is set and which has no
-  --           reconstruct job gets NO reconstruct ------------------------------
-  -- RED-UNDER: cancel the marker fold in migration 20261014120000 (AND FALSE on
-  --            the v_prior_reconstruct assignment), so a marked key with no job is
-  --            enqueued again.
-  -- RED-UNDER-M: {"arm":"R2","apply":[{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"v_prior_reconstruct := v_prior_reconstruct OR v_reconstructed_at IS NOT NULL;","replace":"v_prior_reconstruct := v_prior_reconstruct OR v_reconstructed_at IS NOT NULL AND FALSE;","occurrences":1}]}
-  SELECT count(*) INTO v_n
-    FROM compute_jobs
-   WHERE api_key_id = k_r2 AND kind = 'reconstruct_allocator_history';
-  IF v_n <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (R2): a key whose history_reconstructed_at is set must get no reconstruct from request_allocator_holdings_sync; it got %.', v_n;
-  END IF;
-  -- ARM R2 END
 
   -- SETUP R4 BEGIN
   INSERT INTO compute_jobs (kind, api_key_id, status)
@@ -936,46 +888,17 @@ BEGIN
   --           poll enqueued, and the RPC does not return already_inflight: the
   --           poll prefetch list is unchanged ----------------------------------
   -- RED-UNDER: add 'failed_retry' to the poll prefetch list in migration
-  --            20261014120000 (LAYERED: and to the self-verify's c_pre_re, which
-  --            pins the list literally), so "Sync now" answers already_inflight
-  --            for up to an hour during a poll backoff.
-  -- RED-UNDER-M: {"arm":"R4","apply":[{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"AND status IN ('pending', 'running', 'done_pending_children')","replace":"AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"''done_pending_children''[[:space:]]*\\)'","replace":"''done_pending_children''[[:space:]]*,[[:space:]]*''failed_retry''[[:space:]]*\\)'","occurrences":1}]}
+  --            20261103120000, so "Sync now" answers already_inflight for up to an
+  --            hour during a poll backoff. One edit: the migration's verify block
+  --            asserts no body text, so nothing else needs to move (apply survival).
+  -- RED-UNDER-M: {"arm":"R4","apply":[{"kind":"edit","file":"supabase/migrations/20261103120000_request_allocator_holdings_sync_no_reconstruct.sql","find":"AND status IN ('pending', 'running', 'done_pending_children')","replace":"AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","occurrences":1}]}
   IF v_res ->> 'already_inflight' IS NOT NULL OR v_m <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (R4): a key whose poll job sits in failed_retry must get a fresh poll job and no already_inflight answer (D-13: the poll prefetch list is pending, running, done_pending_children only); the answer was % and the key has % poll jobs, expected 2.', v_res, v_m;
   END IF;
   -- ARM R4 END
 
-  -- SETUP R5 BEGIN
-  INSERT INTO compute_jobs (kind, api_key_id, status)
-  VALUES ('reconstruct_allocator_history', k_r5,  'done'),
-         ('reconstruct_allocator_history', k_r5t, 'done');
-  UPDATE api_keys SET history_reconstructed_at = now() WHERE id = k_r5t;
-  v_res := public.request_allocator_holdings_sync(k_r5);
-  v_res := public.request_allocator_holdings_sync(k_r5t);
-  SELECT count(*) INTO v_n
-    FROM compute_jobs
-   WHERE api_key_id = k_r5 AND kind = 'reconstruct_allocator_history';
-  SELECT count(*) INTO v_m
-    FROM compute_jobs
-   WHERE api_key_id = k_r5t AND kind = 'reconstruct_allocator_history';
-  -- SETUP R5 END
-  -- ARM R5 BEGIN
-  -- ----- R5 (O-2): the marker is authoritative: a key with a retained DONE
-  --           reconstruct job and a NULL marker (a D-15 key, newest outcome
-  --           reconstruct_unexpected_noop) gets a reconstruct enqueued; the twin,
-  --           identical but for a SET marker, gets none -------------------------
-  -- RED-UNDER: put 'done' back in the RECONSTRUCT gate's status list in migration
-  --            20261014120000 (LAYERED: and neuter the self-verify's no-done
-  --            needle, or the mutated apply RAISEs), so a retained done job alone
-  --            suppresses the reconstruct again.
-  -- RED-UNDER-M: {"arm":"R5","apply":[{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"AND status IN ('pending','running','done_pending_children','failed_retry')","replace":"AND status IN ('done','pending','running','done_pending_children','failed_retry')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","find":"''done''[^;]*INTO[[:space:]]+v_prior_reconstruct'","replace":"''donex''[^;]*INTO[[:space:]]+v_prior_reconstruct'","occurrences":1}]}
-  IF v_n <> 2 OR v_m <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (R5): a key with a retained done reconstruct job and a NULL marker must get a reconstruct enqueued by request_allocator_holdings_sync (2 reconstruct jobs expected, the done one plus the new one; % found), and the identical key with a set marker must get none (1 expected; % found). The marker is authoritative; a done job alone must not suppress the reconstruct.', v_n, v_m;
-  END IF;
-  -- ARM R5 END
-
   PERFORM set_config('request.jwt.claims', '', true);
-  RAISE NOTICE 'test_api_keys_history_reconstruct_marker: every arm passed, C1 through R5';
+  RAISE NOTICE 'test_api_keys_history_reconstruct_marker: every arm passed, C1 through R4';
 END $grpr$;
 
 ROLLBACK;

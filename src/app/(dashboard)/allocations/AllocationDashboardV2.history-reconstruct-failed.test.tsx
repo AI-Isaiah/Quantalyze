@@ -5,10 +5,8 @@ import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // ---------------------------------------------------------------------------
-// Phase 167.1.2.1 plan 06 (D-09, D-14). A key the daily fan-out gave up on
-// after five attempts is named on the Overview in one muted line. It is a
-// note, not a gate: it renders only over a ready curve and never while the
-// history is rebuilding (no curve is shown then).
+// Phase 167.1.2.1 plan 06 (D-09, D-14) named a capped key on the Overview in
+// one muted line. Phase 176 retired the note with the job (see below).
 // ---------------------------------------------------------------------------
 
 import { vi } from "vitest";
@@ -91,11 +89,15 @@ const baseProps = {
   hasSyncing: false,
 } as unknown as MyAllocationDashboardPayload;
 
-const LINE =
-  "The history of at least one connected account could not be rebuilt after repeated attempts. The curve shows what was recorded.";
+const NOTE = "dashboard-history-reconstruct-failed-note";
 
-describe("AllocationDashboardV2: a capped key's history could not be rebuilt (167.1.2.1 D-09, D-14)", () => {
-  it("says so on a ready curve when the payload flag is raised", () => {
+// Phase 176 LEGACYRETIRE PR 2 review fix round 1 (MD-01). The reconstruct job is
+// retired, so nothing can stamp the marker or reset the counter: a capped key
+// stays capped for ever, and "could not be rebuilt ... the curve shows what was
+// recorded" is false (the derived series IS the curve). The note must never
+// render, whatever the payload flag says.
+describe("AllocationDashboardV2: the retired 'history could not be rebuilt' note never renders (176 MD-01)", () => {
+  it("says nothing on a ready curve even when the payload flag is raised", () => {
     render(
       <AllocationDashboardV2
         {...baseProps}
@@ -103,10 +105,8 @@ describe("AllocationDashboardV2: a capped key's history could not be rebuilt (16
         historyReconstructFailed
       />,
     );
-    const note = screen.getByTestId("dashboard-history-reconstruct-failed-note");
-    expect(note.textContent).toBe(LINE);
-    expect(note.textContent).toContain("could not be rebuilt");
-    expect(note.getAttribute("role")).toBe("status");
+    expect(screen.queryByTestId(NOTE)).toBeNull();
+    expect(document.body.textContent).not.toContain("could not be rebuilt");
   });
 
   it("says nothing when the flag is not raised", () => {
@@ -118,7 +118,7 @@ describe("AllocationDashboardV2: a capped key's history could not be rebuilt (16
       />,
     );
     expect(
-      screen.queryByTestId("dashboard-history-reconstruct-failed-note"),
+      screen.queryByTestId(NOTE),
     ).toBeNull();
   });
 
@@ -131,7 +131,7 @@ describe("AllocationDashboardV2: a capped key's history could not be rebuilt (16
       />,
     );
     expect(
-      screen.queryByTestId("dashboard-history-reconstruct-failed-note"),
+      screen.queryByTestId(NOTE),
     ).toBeNull();
   });
 });

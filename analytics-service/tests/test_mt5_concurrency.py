@@ -1017,6 +1017,11 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: the probe a `busy_skip`, never a queue), the probe is credential-free (it logs
 #: nothing in, so it changes no account and the lease records NO handover row), and
 #: it is a different terminal key from the jobs heal's.
+#:
+#: ⭐ RE-CUT 2026-11-01 (Phase 176 D-04): `services/equity_reconstruction.py::
+#: _mt5_fetch_window`, the MT5 full-backfill arm added by the 2026-09-20 re-cut, was deleted
+#: with the reconstruct crawl. The roster loses that entry and no other; the 2026-09-20
+#: note above is kept as lineage.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -1026,9 +1031,6 @@ _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
         ("routers/exchange.py", "_validate_mt5_key_probe"),
         # Phase 164.6.2 / D-08 — the boot heal. See the re-cut note above.
         ("services/mt5_relogin.py", "heal_mt5_terminal_session"),
-        # Phase 164.5.4 / D-01 — the MT5 full-backfill arm. See the 2026-09-20
-        # re-cut note above, which answers the roster's own question.
-        ("services/equity_reconstruction.py", "_mt5_fetch_window"),
         # Phase 164.6.6.1 / D-08 — the validation terminal's post-verdict scrub.
         # See the 2026-10-04 re-cut note above.
         ("services/mt5_terminal_scrub.py", "scrub_validation_terminal"),
@@ -1113,7 +1115,7 @@ def test_no_production_function_holds_two_terminal_leases() -> None:
     function that takes the lease TWICE with one client spanning both — so this
     asserts the roster of lease sites is exactly the membership of the hand-typed
     literal above (five measured at 153.5, one added by 164.6.2, one added by
-    164.5.4) AND that their enclosing functions are all distinct.
+    164.5.4 and retired by Phase 176) AND that their enclosing functions are all distinct.
 
     Reds in both directions, and both reds are useful:
       * an ADDITIONAL site, or a lease that MOVED, reds the equality — read as "check

@@ -2,12 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261014120000_api_keys_history_reconstruct_marker.sql
--- ───────────────────────────── 5. request_allocator_holdings_sync, RE-BASED
+-- source migration: 20261103120000_request_allocator_holdings_sync_no_reconstruct.sql
 -- Schema-qualified deliberately: an unqualified CREATE OR REPLACE resolves
 -- against the SESSION search_path, and under one that does not put public first
 -- it CREATES a second function elsewhere, which arrives with default privileges.
--- The edits are listed in the header ("THE RPC RE-BASE").
 CREATE OR REPLACE FUNCTION public.request_allocator_holdings_sync(p_api_key_id UUID)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -20,8 +18,6 @@ DECLARE
   v_disconnected       TIMESTAMPTZ;
   v_job_id             UUID;
   v_next_attempt       TIMESTAMPTZ;
-  v_prior_reconstruct  BOOLEAN;
-  v_reconstructed_at   TIMESTAMPTZ;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'not_authenticated'
@@ -73,42 +69,6 @@ BEGIN
     p_kind        := 'poll_allocator_positions',
     p_api_key_id  := p_api_key_id
   );
-
-  -- Per-api_key reconstruction gate (replaces migration 070's allocator-
-  -- scoped snapshot-count check). Skip enqueue ONLY if THIS key's marker says it
-  -- was reconstructed (below) OR a reconstruct for it is currently in flight.
-  -- Phase 167.1.2.1 SC-5 / D-13: a job awaiting its retry (failed_retry) IS in
-  -- flight. The in-flight unique index omits it, so without it here a second
-  -- pending row would be inserted and a 30-minute crawl would run twice.
-  -- O-2: a finished (`done`) job is NOT listed. The marker is authoritative, and
-  -- a retained `done` job alone must not suppress a reconstruct (a D-15 key
-  -- keeps one for up to 30 days and is still owed).
-  SELECT EXISTS (
-    SELECT 1 FROM compute_jobs
-    WHERE api_key_id = p_api_key_id
-      AND kind = 'reconstruct_allocator_history'
-      AND status IN ('pending','running','done_pending_children','failed_retry')
-  ) INTO v_prior_reconstruct;
-
-  -- Phase 167.1.2.1 D-04 / O-2: the per-key marker is the decider. It outlives the
-  -- 30-day job retention, and a set marker counts as a prior reconstruct.
-  SELECT history_reconstructed_at INTO v_reconstructed_at
-    FROM api_keys
-    WHERE id = p_api_key_id;
-  v_prior_reconstruct := v_prior_reconstruct OR v_reconstructed_at IS NOT NULL;
-
-  IF NOT v_prior_reconstruct THEN
-    BEGIN
-      PERFORM enqueue_compute_job(
-        p_strategy_id     := NULL,
-        p_kind            := 'reconstruct_allocator_history',
-        p_idempotency_key := 'reconstruct-alloc-' || p_api_key_id::text || '-initial',
-        p_api_key_id      := p_api_key_id
-      );
-    EXCEPTION WHEN unique_violation THEN
-      NULL; -- racing first-connect call landed first; benign
-    END;
-  END IF;
 
   UPDATE api_keys SET sync_status = 'syncing' WHERE id = p_api_key_id;
   RETURN jsonb_build_object('ok', true, 'job_id', v_job_id);
