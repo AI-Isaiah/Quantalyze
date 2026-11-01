@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.16.2] - 2026-11-01 — WALLETOFFSET gap fix: the probe keeps each OKX bill's instrument
+
+### Root cause
+- The first PROD run of the Phase 184 walletoffset probe (2026-11-01) refused all 5 marked OKX keys as `malformed`. The window-bill parser `_parse_window_bill` kept only the bill id, time, currency, type, instrument type, P&L and fee. It dropped `instId`, so the funding check read a blank instrument on the first funding bill in every window and refused the key. The OKX data was fine. The tests missed it because they fed bills that already carried `instId` straight to the summing step and skipped the parser.
+
+### Fixed
+- `analytics-service/scripts/walletoffset_probe.py`: the parser keeps `instId` (one line). An OKX key holding a perpetual through the 00:00 UTC funding is now measured instead of refused.
+
+### Tests
+- A new test reads a funding bill from the archive fake through the whole OKX path and checks a hand-worked funding ratio. It goes RED with the fix removed.
+- The OKX parity test now parses each bill before summing (review WR-01), so a later parser change that drops or alters a field fails it. Measured RED with the fix removed and GREEN with it.
+- The blank-instrument test no longer has its one-space case. That case only passed because of this bug: the chain keeps an instrument named with a single space, and the probe now does the same.
+
+### Notes
+- The probe re-run on the backfill worker needs the founder's approval again. A repeat `malformed` would not by itself mean this bug survived: the same token also covers two funding bills on one instrument in the same hour, which the chain's own deduplication is routed to Phase 186 to examine.
+
 ## [0.133.16.1] - 2026-11-01 — book Phase 188 TINYBASE, extend 186 DERIVEGAPS
 
 ### Added

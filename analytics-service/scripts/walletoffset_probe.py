@@ -620,6 +620,7 @@ def _parse_window_bill(row: Any) -> dict[str, str]:
         "ccy": ccy,
         "type": str(row.get("type") or ""),
         "instType": str(row.get("instType") or ""),
+        "instId": str(row.get("instId") or ""),
         "pnl": str(row["pnl"]) if "pnl" in row else "0",
         "fee": str(row["fee"]) if "fee" in row else "0",
     }

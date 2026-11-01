@@ -632,7 +632,7 @@ async def test_okx_a_pnl_that_is_not_a_finite_number_makes_the_key_malformed(
     _assert_unmeasured(await _key_record_of(monkeypatch, capsys, venue), "malformed")
 
 
-@pytest.mark.parametrize("blank_inst_id", ["", " "])
+@pytest.mark.parametrize("blank_inst_id", [""])
 async def test_okx_a_funding_bill_with_a_blank_inst_id_makes_the_key_malformed(
     blank_inst_id: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -655,6 +655,36 @@ async def test_okx_two_funding_bills_on_one_instrument_in_one_hour_make_the_key_
         ]
     )
     _assert_unmeasured(await _key_record_of(monkeypatch, capsys, venue), "malformed")
+
+
+async def test_okx_a_funding_bill_read_from_the_archive_keeps_its_instrument_so_the_key_is_measured(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A funding bill read from the bills archive must keep its instrument, because the
+    chain-parity funding check in ``okx_window_terms`` reads ``instId``: the blank-instrument
+    refusal and the one-row-per-instrument-and-hour rule both mirror ``fetch_funding_okx``. A
+    parser that drops ``instId`` refuses every OKX key that held a perpetual through a funding
+    settlement in its window, which is what the first PROD run printed for all 5 marked OKX
+    keys (184-04, G-01). The older funding tests built bills that already carried ``instId`` and
+    handed them to ``okx_window_terms`` directly, past the parser, so they could not see it.
+    This one drives the bill from the archive fake through run(), the walk and the parser."""
+    venue = _OkxVenue([_reach_bill(), _funding_bill(2, "-3", "BTC-USDT-SWAP")])
+    code, lines, _ = await _run_one_okx_key(monkeypatch, capsys, venue)
+
+    record = lines[0]
+    assert record["record"] == "key"
+    assert record["measured"] is True
+    assert record["unmeasurable_reason"] == "none"
+    assert record["failure_class"] == "none"
+    assert record["partial"] is False
+    assert record["bills_in_window"] == 1
+    assert record["funding_rows_in_window"] == 1
+    # -0.00015 is the hand-computed -3 / 20000 (NAV 20000), never recomputed by the code under test.
+    assert record["pnl_trading_ratio"] == 0.0
+    assert record["pnl_funding_ratio"] == -0.00015
+    assert record["pnl_ratio"] == -0.00015
+    assert record["offset_ratio"] == -0.00015
+    assert code == wp.EXIT_OK
 
 
 async def test_okx_a_fee_that_is_not_a_finite_number_makes_the_key_malformed(
@@ -2613,7 +2643,7 @@ async def test_okx_parity_with_fetch_daily_pnl_and_fetch_funding_okx() -> None:
         if row["timestamp"].strftime("%Y-%m-%d") == read_day
     )
 
-    terms = wp.okx_window_terms(bills, _B_MS, _R_MS)
+    terms = wp.okx_window_terms([wp._parse_window_bill(b) for b in bills], _B_MS, _R_MS)
     assert terms.trading_usd == pytest.approx(chain_trading, abs=1e-9)
     assert terms.funding_usd == pytest.approx(chain_funding, abs=1e-9)
     # Hand-worked: 14.5 - 4.2 + 1.5 + 0.9, and -3 + 1.25.
