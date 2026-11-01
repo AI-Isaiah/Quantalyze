@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.16.3] - 2026-11-01 — book Phase 189 OPTIONREPLAY
+
+### Added
+- Phase 189 OPTIONREPLAY is booked in the ROADMAP (founder 2026-11-01: "Book its own phase"). The Phase 185 dry run built the smoothed options basis on one Deribit key but not on another: replaying that key's option history refuses with `LedgerValuationError` before any price is read. Under Phase 185 the key falls back to the cash basis with the amber caveat, so its three large cash-basis days stay on the book's curve. The code narrows the cause to an option exercise row or an expiry row of an unexpected shape. No stored data can settle it, so the phase starts with a read-only count in the worker, then fixes the replay.
+
 ## [0.133.16.2] - 2026-11-01 — WALLETOFFSET gap fix: the probe keeps each OKX bill's instrument
 
 ### Root cause

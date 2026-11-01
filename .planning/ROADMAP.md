@@ -221,6 +221,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
 - [ ] **Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
 - [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
+- [ ] **Phase 189: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6878,6 +6879,37 @@ Data integrity, user-facing. Relates to 185 DERIBITFLOWTIME (the 185-03 reading 
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 189: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values
+
+**Goal:** A Deribit allocator key whose option-book replay refuses today gets the smoothed options basis like the other options keys. Today it falls back to the cash basis with the amber caveat, and its large cash-basis days stay on the book's curve.
+**Requirements**: TBD
+**Depends on:** Phase 185
+**Plans:** 0 plans
+
+**Booking.** Founder 2026-11-01, AskUserQuestion, after the Phase 185 build: "Book its own phase (Recommended)": "A small follow-up phase: a worker count of key C's option exercise/expiry rows, then fix the replay so key C gets the smoothed values. Phase 185 ships and closes as it is."
+
+**Evidence (PROD 2026-11-01, `185-02-SUMMARY.md` and `185-03-SUMMARY.md`, key letters only).**
+- The Phase 185 dry run built the smoothed basis on key A, but on key C `replay_option_positions` raised `LedgerValuationError` after 1 s, before any marks fetch.
+- Key C's 3 cash-basis days above +50% (2026-02-28, 2026-03-02, 2026-09-06) stay under D-10.
+
+**What the code narrows it to.** The class printed was exactly `LedgerValuationError`, so a missing or non-numeric `position` on a trade, delivery or assignment row is ruled out (that raises the subclass `OptionRowFieldMissingError`). The cash basis built on key C, so an `expiry` or `exercise` row with a non-zero `change` is ruled out too. Three shapes remain:
+1. An option `exercise` row, which the replay refuses by name because its shape was never measured.
+2. An `expiry` row with a present, non-zero `position`.
+3. An `expiry` row with a non-numeric `change` or `position`.
+
+No stored data can settle it: the derive does not persist the raw transaction log.
+
+**Success Criteria** (what must be TRUE):
+1. A read-only count in the worker (founder approval each time) of key C's option `exercise` and `expiry` rows, by whether `change` is zero and whether `position` is absent, zero, non-zero or non-numeric, is recorded before any code change.
+2. The replay values the measured row shape by its real meaning, or refuses it by a named reason. Tests go RED on today's refusal of that shape.
+3. After deploy, key C's derive uses the smoothed basis and its caveat flag clears, or the named refusal is recorded. The days that move are listed.
+4. Never invent data: an uncomputable day is null.
+
+Data integrity, user-facing. Relates to 185 DERIBITFLOWTIME (D-10, the cash fallback) and 188 TINYBASE.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7186,6 +7218,7 @@ kept verbatim.
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 | 187 BINANCEINCOME | 0/0 | Not started — booked 2026-11-01 from the Phase 184 code review | - |
 | 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
+| 189 OPTIONREPLAY | 0/0 | Not started — booked 2026-11-01 after the 185 build | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
