@@ -27,6 +27,10 @@ PR 2 of three for Phase 176 (D-02 order, second step). PR 1 moved every reader t
 - **Left inert on purpose (D-04), booked as `176-RECONSTRUCT-CAP-MARKER-INERT` in `TODOS.md`.** These stay: the ten cap and marker helpers; the dispatch cap hook; `report_orphaned_capped_reconstructs`; the two retired kinds' timeouts and watchdog override; the `api_keys` history-reconstruct columns, their CHECK and grants; the backfill function; the TS cap and note symbols; and both `compute_job_kinds` rows, while a queued row can still exist. The entry also lists the modules and helpers the crawl's deletion orphaned. Among them, `fetch_bybit_unified_flows` is kept for the Bybit Unified-transfer gap that Phase 186 DERIVEGAPS owns.
 - The SQL enqueuer `enqueue_refresh_allocator_equity_for_all` and the legacy table stay until PR 3. Between the unschedule and this merge the hourly prober reports `cron.job` drift for the removed job, which is expected and is never answered by rescheduling.
 - Reviews before merge: migration-reviewer and rls-policy-auditor are clean after fix round 1, the code review and the silent-failure round 2 are clean, and the migration data-dependence lint reads 0 NEW.
+## [0.133.14.2] - 2026-11-01 — book Phase 187 BINANCEINCOME
+
+### Added
+- Phase 187 BINANCEINCOME is booked in the ROADMAP (founder 2026-11-01: "Book a fix phase"). The Phase 184 code review found that the Binance income reads call `fapiPrivate_get_income`, a method name the pinned ccxt does not have, so every call fails: Binance futures realized P&L silently falls back to spot trades with only a data-quality flag, and the funding read fails the per-key derive. The mark-price read uses a wrong name of the same kind and falls back to entry price. The mocks carried the same wrong names, so the tests passed. The phase uses the real names, adds a test that every exchange method the analytics service calls exists in ccxt, fixes the mocks, and counts Binance keys on PROD before and after. It changes published Binance numbers.
 
 ## [0.133.14.1] - 2026-11-01 — book Phase 186 DERIVEGAPS
 

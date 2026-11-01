@@ -219,6 +219,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity
 - [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
 - [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
+- [ ] **Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6811,6 +6812,43 @@ Data integrity, user-facing. Relates to 180 BYBITFUNDING (reverses its D-02), 17
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)
+
+**Goal:** Every Binance income read the analytics service makes calls a method that exists on the pinned ccxt, so Binance futures realized P&L reaches `daily_pnl` and Binance funding reaches the per-key derive, instead of the realized read silently falling back to spot trades and the funding read failing the derive. A test pins every ccxt method the service calls against the real ccxt classes, so a wrong name fails CI.
+**Requirements**: TBD
+**Depends on:** Nothing
+**Plans:** 0 plans
+
+**Booking.** Founder 2026-11-01, AskUserQuestion, after the Phase 184 code review found the wrong method name.
+- "Book a fix phase (Recommended)": "Book a phase: use the correct method name in the daily P&L and funding reads, add a test that every exchange method we call really exists in the library, fix the mocks, and run a PROD count of Binance keys before and after. The fix changes published Binance numbers, so it's its own phase."
+
+**Root cause (HIGH, data integrity).** The code calls `fapiPrivate_get_income`. On the pinned ccxt 4.5.89 the implicit method is `fapiprivate_get_income` (snake case) or `fapiPrivateGetIncome` (camel case); `hasattr(ccxt.async_support.binance(), "fapiPrivate_get_income")` is False. Mixed case is neither form, so every call raises AttributeError.
+- `fetch_daily_pnl`, Binance branch (`analytics-service/services/exchange.py`, about line 1658): catches the AttributeError and falls back to BTC/USDT spot trades, setting only a DQ flag. Futures realized P&L never reaches `daily_pnl`.
+- `fetch_funding_binance` (`analytics-service/services/funding_fetch.py`, about line 379): logs and re-raises. The per-key derive (`analytics-service/services/job_worker.py`, about line 7341) catches only timeouts, so a Binance key's derive fails at the funding read.
+- The mocks use the same wrong name, which is why the tests passed.
+- Possibly why no Binance key has `key_inputs` on PROD today. Unmeasured.
+
+**Every mixed-case ccxt implicit-method call in the repo** (grep of `analytics-service/` for `exchange.<name>(` implicit calls, 2026-11-01). Measured with `hasattr` on the local venv's ccxt 4.5.85, not the pinned 4.5.89; re-measure on 4.5.89.
+- `services/exchange.py` ~:1658 `fapiPrivate_get_income` (realized P&L): does not exist.
+- `services/funding_fetch.py` ~:379 `fapiPrivate_get_income` (funding): does not exist.
+- `services/exchange.py` ~:3222 `fapiPublic_get_premiumindex` (Binance branch of `fetch_mark_prices`): does not exist either (`fapipublic_get_premiumindex` does). Its `except Exception` logs a warning and returns no marks, so callers fall back to entry price. Same class, in scope.
+- `services/equity_reconstruction.py` ~:5074 `privateGetV5AccountInfo` (Bybit) and ~:5285 `privateGetAccountPositions` (OKX): pure camel case, both exist.
+- Mocks with the wrong name: `tests/test_exchange_harness.py` (income), `tests/test_exchange.py` (income and premiumindex), `tests/test_funding_fetch.py` (income). Prose mentions in `routers/cron.py` and `tests/test_cron_router.py`.
+- Every other implicit call is pure snake case (Bybit, OKX, Deribit, Binance `sapi_get_account_apirestrictions`). The existence test covers them too.
+
+**Success Criteria** (what must be TRUE):
+1. A read-only PROD count of Binance keys and their derive state (`key_inputs`, last derive outcome) is recorded before any code change, and again after deploy.
+2. Every ccxt method the analytics service calls exists on the real ccxt classes, pinned by a test that fails on a wrong name.
+3. Binance futures realized P&L and funding reach the derive. Tests go RED on the current code.
+4. The mocks use the real method names.
+5. A post-deploy PROD reading confirms the change.
+6. Never invent data: an uncomputable day is null.
+
+Data integrity, user-facing. The fix changes published Binance numbers. Relates to 186 DERIVEGAPS (silent read failures) and 184 WALLETOFFSET (where it was found).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7117,6 +7155,7 @@ kept verbatim.
 | 184 WALLETOFFSET | 0/0 | Not started — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 | - |
 | 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
+| 187 BINANCEINCOME | 0/0 | Not started — booked 2026-11-01 from the Phase 184 code review | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
