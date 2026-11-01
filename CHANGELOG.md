@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.13.2] - 2026-11-01 — book Phase 185 DERIBITFLOWTIME
+
+### Added
+- Phase 185 DERIBITFLOWTIME is booked in the ROADMAP (founder 2026-11-01: "Investigate root cause", then "Re-crawl, then fix", then "Book the fix now" after Railway SSH refused the read-only re-crawl). One allocator book shows days of +529% and -78% while BTC moved at most 2.2%; on the Deribit keys behind them the growth sits on days with a deposit or withdrawal the same or previous day. The leading cause: Deribit flows are netted per day and counted at the close, so a day's P&L is divided by the small overnight balance instead of the capital that was in the account. The phase first runs the read-only re-crawl to settle the cause, then stores each Deribit flow's time and splits the day at it, with a named caveat on the affected books until the fix ships.
+
 ## [0.133.13.1] - 2026-11-01 — book Phase 184 WALLETOFFSET
 
 ### Added
