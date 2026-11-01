@@ -68,9 +68,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // Review C4 SFH-C4-04: the ready curve left out at least one departed
     // account's history (its anchor balance is gone). False when absent.
     departedHistoryUnavailable = false,
-    // Phase 167.1.2.1 (D-09, D-14): a key the daily fan-out gave up on. A note
-    // beside the departed-history line, never a gate. False when absent.
-    historyReconstructFailed = false,
     // Phase 164.6.6.2.1 plan 17 (D-20): the native-unit accounts the total
     // leaves out on an unpriced day. Empty when absent.
     unpricedNativeAccounts = [],
@@ -190,12 +187,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           line a ready book reads as the whole book. Ready only: nothing is
           drawn while the history is rebuilding. */}
       {departedHistoryUnavailable && !isRebuilding && <DepartedHistoryNote />}
-      {/* Phase 167.1.2.1 (D-09, D-14): a key the fan-out gave up on after its
-          capped attempts. Non-gating, so a ready curve stays visible; ready
-          only, like the note above (nothing is drawn while rebuilding). */}
-      {historyReconstructFailed && !isRebuilding && (
-        <HistoryReconstructFailedNote />
-      )}
+      {/* Phase 176 (PR 2 review MD-01): the "history could not be rebuilt" note
+          of 167.1.2.1 is not rendered. The reconstruct job is retired, so a
+          capped key can never clear and the derived series is the curve. */}
       {/* Phase 164.6.6.2.1 plan 17 (D-09, D-20): the total in dollars drops an
           account whose BTC close is not stored for a day, so it is named here
           rather than left as an unexplained drop. Ready only, like the note
@@ -347,27 +341,6 @@ function DepartedHistoryNote() {
     >
       This curve leaves out the history of at least one disconnected account,
       because the balance that history is measured from is not available.
-    </p>
-  );
-}
-
-/**
- * Phase 167.1.2.1 (D-09, D-14). One muted line under the Overview's banners
- * when the daily fan-out gave up on at least one connected key's history after
- * its capped attempts. The payload flag carries no count and no key, so the
- * line says "at least one". It sits over an unchanged curve and says so:
- * the curve shows what was recorded. Muted, not a warning, same element, role
- * and classes as DepartedHistoryNote.
- */
-function HistoryReconstructFailedNote() {
-  return (
-    <p
-      role="status"
-      data-testid="dashboard-history-reconstruct-failed-note"
-      className="mb-3 px-1 text-sm text-text-secondary"
-    >
-      The history of at least one connected account could not be rebuilt after
-      repeated attempts. The curve shows what was recorded.
     </p>
   );
 }

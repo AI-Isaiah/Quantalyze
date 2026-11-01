@@ -11,8 +11,6 @@ from unittest.mock import AsyncMock
 import ccxt.async_support as ccxt
 import pytest
 
-import scripts.allocator_history_probe as hp
-import scripts.bybit_funding_record as bfr
 from services import bybit_unified_flows as buf
 from tests._trade_pages import DAY_MS, install_unified_log, unified_flow
 
@@ -312,39 +310,6 @@ async def test_venue_errors_pass_through_unchanged(err: Exception) -> None:
     with pytest.raises(type(err)) as excinfo:
         await buf.fetch_bybit_unified_flows(exchange, _SINCE, _SINCE + 3 * DAY_MS)
     assert excinfo.value is err
-
-
-async def test_the_probe_recorder_sees_the_unified_read_as_deposits_and_withdrawals() -> None:
-    """The probe wraps the rebuild's client; the rows this read pulls are recorded as the gate's kinds."""
-    exchange = _exchange()
-    exchange.fetch_my_trades = AsyncMock(return_value=[])
-    install_unified_log(
-        exchange,
-        [
-            unified_flow("fake-flow-in-1", "TRANSFER_IN", _SINCE + DAY_MS),
-            unified_flow("fake-flow-out-1", "TRANSFER_OUT", _SINCE + 2 * DAY_MS),
-        ],
-    )
-    recorder = hp._TradeRecorder(exchange)  # BEFORE the read, as the probe does
-    deposits, withdrawals = await buf.fetch_bybit_unified_flows(
-        exchange, _SINCE, _SINCE + 6 * DAY_MS
-    )
-    assert [d["id"] for d in deposits] == ["fake-flow-in-1"]
-    assert [w["id"] for w in withdrawals] == ["fake-flow-out-1"]
-    assert sorted((kind, str(rid)) for kind, rid, _ in recorder.unified) == [
-        ("deposits", "fake-flow-in-1"),
-        ("withdrawals", "fake-flow-out-1"),
-    ]
-    assert recorder.unified_state() == "read"
-
-
-def test_the_flow_types_are_the_probes_and_disjoint_from_the_census() -> None:
-    """The probe holds its own literals (it imports nothing from the rebuild): they must not drift."""
-    assert buf.UNIFIED_FLOW_TYPES == ("TRANSFER_IN", "TRANSFER_OUT")
-    assert set(buf.UNIFIED_FLOW_TYPES) == set(hp._UNIFIED_FLOW_KINDS)
-    assert hp._UNIFIED_FLOW_KINDS["TRANSFER_IN"] == "deposits"
-    assert hp._UNIFIED_FLOW_KINDS["TRANSFER_OUT"] == "withdrawals"
-    assert set(buf.UNIFIED_FLOW_TYPES).isdisjoint(bfr.CENSUS_LOG_TYPES)
 
 
 async def test_a_failed_page_logs_the_exception_class_never_the_venue_text(

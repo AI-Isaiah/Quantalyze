@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -116,22 +116,15 @@ async def test_a_stored_window_round_trips_to_the_same_trades() -> None:
         assert tuple(got) == store.PROJECTION_FIELDS
 
 
-async def test_the_projection_is_replay_equal_for_every_fee_shape() -> None:
-    """The stored form must replay exactly as the venue's rows: a dict fee with a None cost, a
-    dict fee with a cost, a float fee and no fee at all each give equal equity rows."""
+async def test_the_projection_keeps_every_fee_shape_as_the_replay_read_it() -> None:
+    """The stored form must read back exactly as the fee reduction the equity replay applied: a
+    dict fee with a None cost is 0.0, a dict fee with a cost is that cost, a float fee and no fee
+    at all are kept as they are. Phase 176 deleted the replay that used to be the oracle here, so
+    the expected fees are fixture constants and the trade fields are compared one by one."""
     from services import trade_read_store as store
-    from services.equity_reconstruction import _compute_daily_equity
 
-    day_1, day_2 = date(2026, 4, 15), date(2026, 4, 16)
     ts_1 = int(datetime(2026, 4, 15, 9, tzinfo=timezone.utc).timestamp() * 1000)
     ts_2 = int(datetime(2026, 4, 16, 9, tzinfo=timezone.utc).timestamp() * 1000)
-    ohlcv = {"BTC": [(day_1.isoformat(), 50_000.0), (day_2.isoformat(), 51_000.0)]}
-
-    def _replay(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return _compute_daily_equity(
-            trades=trades, deposits=[], withdrawals=[], ohlcv_by_symbol=ohlcv,
-            coingecko_by_symbol={}, start_date=day_1, end_date=day_2, venue="bybit",
-        )
 
     fee_shapes: dict[str, Any] = {
         "dict_cost_none": {"cost": None, "currency": "USDT"},
@@ -139,20 +132,38 @@ async def test_the_projection_is_replay_equal_for_every_fee_shape() -> None:
         "float": 3.5,
         "none": None,
     }
-    for name, fee in fee_shaped_cases(fee_shapes, ts_1, ts_2):
+    stored_fee = {"dict_cost_none": 0.0, "dict_with_cost": 7.25, "float": 3.5, "none": None}
+    for name, originals in fee_shaped_cases(fee_shapes, ts_1, ts_2):
         client = JsonFakeClient()
-        saved = await store.save_window(client, KEY, ts_1 - 1, ts_2 + 1, fee)
+        saved = await store.save_window(client, KEY, ts_1 - 1, ts_2 + 1, originals)
         assert saved is True, name
         state = await store.begin_claim(client, KEY, venue="bybit", since_ms=ts_1 - 1, job_id=JOB)
         assert state is not None, name
         loaded = await store.load_window(client, KEY, state.stored[ts_1 - 1])
         assert loaded is not None, name
-        assert _replay(loaded) == _replay(fee), name
+        assert len(loaded) == len(originals), name
+        for got, want in zip(loaded, originals, strict=True):
+            assert got["fee"] == stored_fee[name], name
+            for field in store.PROJECTION_FIELDS:
+                if field != "fee":
+                    assert got[field] == want[field], (name, field)
 
-    # The comparison can fail: a fee is not noise to the replay.
-    with_fee = _replay([_spot_trade(ts_1, "buy", 7.25)])
-    without_fee = _replay([_spot_trade(ts_1, "buy", None)])
+    # The comparison can fail: a fee is not noise to the stored form.
+    with_fee = await _stored_fee(7.25, ts_1)
+    without_fee = await _stored_fee(None, ts_1)
     assert with_fee != without_fee
+
+
+async def _stored_fee(fee: Any, ts_ms: int) -> Any:
+    from services import trade_read_store as store
+
+    client = JsonFakeClient()
+    assert await store.save_window(client, KEY, ts_ms - 1, ts_ms + 1, [_spot_trade(ts_ms, "buy", fee)])
+    state = await store.begin_claim(client, KEY, venue="bybit", since_ms=ts_ms - 1, job_id=JOB)
+    assert state is not None
+    loaded = await store.load_window(client, KEY, state.stored[ts_ms - 1])
+    assert loaded is not None
+    return loaded[0]["fee"]
 
 
 def _spot_trade(ts_ms: int, side: str, fee: Any) -> dict[str, Any]:

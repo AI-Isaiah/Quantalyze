@@ -16133,6 +16133,52 @@ async def report_orphaned_capped_reconstructs() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def run_retired_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
+    """Phase 176 D-04: the handler for the two retired legacy allocator kinds.
+
+    ``reconstruct_allocator_history`` and ``refresh_allocator_equity_daily``
+    once crawled venues and wrote ``allocator_equity_snapshots``. That curve is
+    retired, so both kinds route here and finish DONE: nothing is read, nothing
+    is written, and no replace RPC is called.
+
+    The kinds stay in ``compute_job_kinds`` because ``compute_jobs.kind``
+    references them, so a row already queued at deploy time must still be
+    claimable. An absent handler would turn that row into the ``Unknown job
+    kind`` permanent failure and raise alert noise; a DONE stub lets it finish.
+    ``dispatch`` no longer runs the capped-key Sentry hook for the reconstruct
+    kind (this stub can never stamp the marker, so the hook would always fire).
+
+    A row whose ``metadata.force_rebuild`` is truthy can only come from a manual
+    or operator enqueue (the old forced-rebuild runbook), and it asked for a
+    correction that will not run. It ends FAILED permanent with a WARNING instead
+    of DONE, so the correction does not look applied. A plain queued row still
+    ends DONE quietly.
+
+    The log line names the kind and the compute_job id only, never an
+    allocator or key id.
+    """
+    metadata = job.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("force_rebuild"):
+        logger.warning(
+            "retired allocator equity job %s asked for a forced rebuild and was "
+            "not run (compute_job %s)",
+            job.get("kind"), job.get("id"),
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "The allocator history rebuild is retired; a forced rebuild "
+                "was not run."
+            ),
+            error_kind="permanent",
+        )
+    logger.info(
+        "retired allocator equity job %s finished as a no-op (compute_job %s)",
+        job.get("kind"), job.get("id"),
+    )
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 async def dispatch(job: dict[str, Any]) -> DispatchResult:
     """Route a claimed job to its per-kind handler, wrap in timeout, classify.
 
@@ -16187,11 +16233,9 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
     elif kind == "poll_allocator_positions":
         handler = run_poll_allocator_positions_job
     elif kind == "reconstruct_allocator_history":
-        from services.equity_reconstruction import run_reconstruct_allocator_history_job
-        handler = run_reconstruct_allocator_history_job
+        handler = run_retired_allocator_equity_job
     elif kind == "refresh_allocator_equity_daily":
-        from services.equity_reconstruction import run_refresh_allocator_equity_daily_job
-        handler = run_refresh_allocator_equity_daily_job
+        handler = run_retired_allocator_equity_job
     elif kind == "process_key_long":
         # Phase 19 / BACKBONE-09 — long-fetch worker handler. Lazy import
         # mirrors the equity_reconstruction pattern above; the
@@ -16249,30 +16293,12 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         if is_final:
             await _mark_intro_snapshot_failed(job)
 
-    # Phase 167.1.2.1 D-09: a key that ends a TERMINAL reconstruct attempt
-    # capped and unmarked raises one Sentry event. Terminal = DONE, or FAILED
-    # that is final under the same rule as above (permanent, or the job's own
-    # attempts exhausted). A DEFERRED outcome, or a FAILED that will retry,
-    # raises nothing. The hook runs after a handler RAISE too (classified into
-    # FAILED above) and can never change `result`.
-    if kind == "reconstruct_allocator_history" and (
-        result.outcome == DispatchOutcome.DONE
-        or (
-            result.outcome == DispatchOutcome.FAILED
-            and (
-                result.error_kind == "permanent"
-                or job.get("attempts", 0) >= job.get("max_attempts", 3)
-            )
-        )
-    ):
-        try:
-            await _capture_history_reconstruct_capped(job)
-        except Exception as exc:  # noqa: BLE001
-            # Best-effort observability: the terminal result is already decided.
-            logger.warning(
-                "history reconstruct cap event failed for compute_job %s: %s",
-                job.get("id"), _read_failure_text(exc),
-            )
+    # Phase 167.1.2.1 D-09 ran the capped-key Sentry hook here for a terminal
+    # reconstruct attempt. Phase 176 PR 2 review fix round 1 (silent-failure 1):
+    # that kind is the retired no-op stub, which can never stamp the marker, so
+    # the hook would report "could not be rebuilt" for every capped key. It no
+    # longer runs from dispatch; `_capture_history_reconstruct_capped` stays
+    # inert (D-04) and the orphan sweep still calls it.
 
     # UI status bridge (DEFERRED-only). For TERMINAL outcomes the authoritative
     # status bridge is the in-RPC `PERFORM sync_strategy_analytics_status`

@@ -420,30 +420,8 @@ describe("marksource history-correction runbook", () => {
       }
     });
 
-    it("carries the operator's rendered P7 reading as the job's expectation, under the worker's own three literals (review CR-02, WR-R2-01, WR-R3-01)", () => {
-      const py = readFileSync(
-        join(process.cwd(), "analytics-service", "services", "equity_reconstruction.py"),
-        "utf8",
-      );
-      const dead = py.match(/RECONSTRUCT_EXPECTED_NON_WORKING_KEY: Final\[str\] = "([a-z_]+)"/);
-      const win = py.match(/RECONSTRUCT_EXPECTED_WINDOW_KEY: Final\[str\] = "([a-z_]+)"/);
-      const digest = py.match(/RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY: Final\[str\] = "([a-z_]+)"/);
-      expect(dead, "the worker module must define RECONSTRUCT_EXPECTED_NON_WORKING_KEY").not.toBeNull();
-      expect(win, "the worker module must define RECONSTRUCT_EXPECTED_WINDOW_KEY").not.toBeNull();
-      expect(digest, "the worker module must define RECONSTRUCT_EXPECTED_KEY_DIGEST_KEY").not.toBeNull();
-      expect(
-        sql.includes(`'${dead![1]}', j.expected_dead_accounts,`),
-        `enqueue: the metadata must carry ${dead![1]} as the rendered dead-account count, not a live recount and not typed by hand`,
-      ).toBe(true);
-      expect(
-        sql.includes(`'${win![1]}', j.expected_window_days,`),
-        `enqueue: the metadata must carry ${win![1]} as the rendered predicted window`,
-      ).toBe(true);
-      expect(
-        sql.includes(`'${digest![1]}', j.expected_key_digest`),
-        `enqueue: the metadata must carry ${digest![1]} as the rendered key-set digest, the worker's third pre-write check`,
-      ).toBe(true);
-    });
+    // Phase 176 (D-04): the `enqueue` form is retired by the runbook's banner and the worker that read
+    // its metadata keys is deleted, so the form's expectation literals are no longer pinned to a module.
 
     it("computes its key digest with the block okx-nonworking-keys.sql prints, byte for byte, so the rendered value and the live one are one expression (review WR-R3-01)", () => {
       const block = keyDigestBlock(read("okx-nonworking-keys.sql"));
@@ -567,87 +545,8 @@ describe("marksource history-correction runbook", () => {
   });
 });
 
-/**
- * Phase 178 OKXREWRITE plan 02: the operator's classification list in B'5 rule 3 is the closed
- * set the deployed rebuild can raise. The runbook said fifteen tokens after Phase 171 added a
- * sixteenth, and `account_key_read_stalled` sat in neither list, so an operator met it as a
- * token "outside the set" and stopped. The frozensets are parsed from the module, so a token
- * added to the code turns this RED until the runbook names it.
- */
-describe("the runbook's refusal vocabulary is the rebuild's own (Phase 178)", () => {
-  const MODULE = join(process.cwd(), "analytics-service", "services", "equity_reconstruction.py");
-
-  /** The double-quoted lower_snake tokens of one `NAME: Final[frozenset[str]] = frozenset(` literal. */
-  function frozensetTokens(py: string, name: string): string[] {
-    const start = anchorIndex(py, `${name}: Final[frozenset[str]] = frozenset(`);
-    const end = anchorIndex(py, "\n)\n", start);
-    return [...py.slice(start, end).matchAll(/"([a-z][a-z_]*)"/g)].map((m) => m[1]);
-  }
-
-  const py = readFileSync(MODULE, "utf8");
-  const codeTokens = new Set([
-    ...frozensetTokens(py, "FORCED_REBUILD_ANCHOR_REASONS"),
-    ...frozensetTokens(py, "FORCED_REBUILD_ACCOUNT_REASONS"),
-  ]);
-
-  const text = runbookText();
-  const ruleStart = anchorIndex(text, "3. **A refusal");
-  const rule3 = text.slice(ruleStart, anchorIndex(text, "\n4. **", ruleStart));
-  const reenqueueAt = anchorIndex(rule3, "**Re-enqueue ONCE**");
-  const recordAt = anchorIndex(rule3, "**Record only, no re-run**", reenqueueAt);
-  const anyOtherAt = anchorIndex(rule3, "Any other", recordAt);
-  const reenqueueText = rule3.slice(reenqueueAt, recordAt);
-  const recordText = rule3.slice(recordAt, anyOtherAt);
-
-  /** Backticked snake_case words with an underscore: token-shaped, so `t0` and plain words drop out. */
-  function tokenShaped(slice: string): string[] {
-    return [...slice.matchAll(/`([a-z]+(?:_[a-z0-9]+)+)`/g)].map((m) => m[1]);
-  }
-
-  it("has a non-empty code set (vacuity guard)", () => {
-    expect(codeTokens.size, "the frozensets parsed to nothing: the parser, not the runbook, is broken").toBeGreaterThan(0);
-  });
-
-  it("states the code's token count after FORCED_REBUILD_REFUSAL_REASONS", () => {
-    const m = rule3.match(/`FORCED_REBUILD_REFUSAL_REASONS`,\s*(\d+)\s*tokens/);
-    expect(m, "rule 3 must state the count as `FORCED_REBUILD_REFUSAL_REASONS`, N tokens").not.toBeNull();
-    expect(
-      Number(m![1]),
-      `rule 3 says ${m![1]} tokens, the code holds ${codeTokens.size}: ${[...codeTokens].sort().join(", ")}`,
-    ).toBe(codeTokens.size);
-  });
-
-  it("lists every code token in exactly one of the two lists and no token the code lacks", () => {
-    const reenqueue = tokenShaped(reenqueueText);
-    const record = tokenShaped(recordText);
-    const all = [...reenqueue, ...record];
-    const missing = [...codeTokens].filter((t) => !all.includes(t)).sort();
-    const extra = [...new Set(all)].filter((t) => !codeTokens.has(t)).sort();
-    const twice = [...codeTokens].filter((t) => reenqueue.includes(t) && record.includes(t)).sort();
-    expect(missing, `rule 3 names neither list for: ${missing.join(", ")}`).toEqual([]);
-    expect(extra, `rule 3 lists tokens the code does not raise: ${extra.join(", ")}`).toEqual([]);
-    expect(twice, `rule 3 lists these in both lists: ${twice.join(", ")}`).toEqual([]);
-  });
-
-  it("states each list's size and the size equals its length", () => {
-    for (const [name, slice] of [
-      ["Re-enqueue ONCE", reenqueueText],
-      ["Record only, no re-run", recordText],
-    ] as const) {
-      const m = slice.match(/for these (\d+)/);
-      expect(m, `${name}: the list must state its size as 'for these N'`).not.toBeNull();
-      const listed = new Set(tokenShaped(slice)).size;
-      expect(Number(m![1]), `${name} states ${m![1]} but lists ${listed} distinct tokens`).toBe(listed);
-    }
-  });
-
-  it("puts account_key_read_stalled in the re-enqueue-once list (Phase 171: the stored windows are kept)", () => {
-    expect(
-      tokenShaped(reenqueueText).includes("account_key_read_stalled"),
-      "account_key_read_stalled keeps the stored windows, so a later run can clear it: re-enqueue it once",
-    ).toBe(true);
-  });
-});
+// Phase 176 (D-04): the rebuild's refusal vocabulary was retired with the rebuild, so there is no
+// frozenset to compare against; B'5 rule 3 is history under the runbook's retirement banner.
 
 /**
  * Phase 178 OKXREWRITE plan 05: the operator's B'1 prediction and B'5 acceptance must follow the
@@ -757,7 +656,8 @@ describe("the runbook's B'1 rule, audit column and B'5 count check follow the de
 
   it("P7's audit-trace literals are the ones the holdings poll emits: the two actions, entity_type api_key, user_id the allocator, entity_id the key (silent-failure hunt R3-3)", () => {
     const worker = readFileSync(join(process.cwd(), "analytics-service", "services", "job_worker.py"), "utf8");
-    const recon = readFileSync(join(process.cwd(), "analytics-service", "services", "equity_reconstruction.py"), "utf8");
+    // Phase 176 (D-04): the reconstruct crawl's emptiness proof (its _POLL_COMPLETED_ACTION read) was retired
+    // with the crawl; the checks below pin the holdings poll's own audit literals.
     const sql = read("okx-nonworking-keys.sql");
 
     const literalStart = anchorIndex(worker, "AllocatorHoldingsAction = Literal[");
@@ -769,10 +669,8 @@ describe("the runbook's B'1 rule, audit column and B'5 count check follow the de
     );
     const emitStart = anchorIndex(worker, "\ndef _emit_audit(");
     const emitBody = worker.slice(emitStart, anchorIndex(worker, "\n# ---", emitStart));
-    const pollCompleted = recon.match(/^_POLL_COMPLETED_ACTION = "([a-z._]+)"/m);
     expect(taxonomy.size, "the AllocatorHoldingsAction literal parsed to nothing: the parser, not the SQL, is broken").toBeGreaterThan(1);
     expect(emitted.size, "no _emit_audit call site parsed: the parser, not the SQL, is broken").toBeGreaterThan(0);
-    expect(pollCompleted, "equity_reconstruction.py must define _POLL_COMPLETED_ACTION").not.toBeNull();
 
     const actionList = anchorIndex(sql, "al.action IN (");
     const sqlActions = [...sql.slice(actionList, anchorIndex(sql, ")", actionList)).matchAll(/'([^']+)'/g)].map((m) => m[1]);
@@ -781,7 +679,6 @@ describe("the runbook's B'1 rule, audit column and B'5 count check follow the de
       expect(taxonomy.has(action), `P7 reads ${action}, which AllocatorHoldingsAction no longer lists: a renamed action turns deleted_keys_seen_in_window to 0 for every label`).toBe(true);
       expect(emitted.has(action), `P7 reads ${action}, which no _emit_audit call site emits any more`).toBe(true);
     }
-    expect(sqlActions.includes(pollCompleted![1]), "P7's list must include the action the reconstruction's emptiness proof reads (_POLL_COMPLETED_ACTION)").toBe(true);
 
     const entityType = emitBody.match(/entity_type="([a-z_]+)"/);
     expect(entityType, "_emit_audit must pass a literal entity_type").not.toBeNull();
@@ -857,7 +754,8 @@ describe("the runbook's B'1 rule, audit column and B'5 count check follow the de
     const manifest = JSON.parse(readFileSync(join(process.cwd(), "scripts", "prod-prober", "cron-manifest.json"), "utf8")) as {
       jobs: Array<{ jobname: string; schedule: string }>;
     };
-    for (const name of ["poll-allocator-positions", "refresh-allocator-equity"]) {
+    // Phase 176 (D-04): the refresh cron is retired and B'3a describes a retired procedure, so only the poll job is pinned.
+    for (const name of ["poll-allocator-positions"]) {
       expect(
         manifest.jobs.some((j) => j.jobname === name),
         `the manifest has no job named ${name}: the runbook points the operator at a slot that is not there`,

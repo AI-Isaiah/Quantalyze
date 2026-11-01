@@ -179,11 +179,9 @@ def test_make_fill_dict_sample_list_is_bounded():
 # Re-export identity — consumers must share the registry's objects, not copies
 # ---------------------------------------------------------------------------
 def test_consumers_share_the_registry_objects():
+    # Phase 176 (D-04) deleted the history crawl, equity_reconstruction's only consumer of the
+    # registry, so its two identity assertions went with it.
     from services import closed_sets as cs
     from services import allocator_positions as ap
-    from services import equity_reconstruction as er
 
     assert ap.STABLECOINS is cs.STABLECOINS
-    assert er.STABLECOINS is cs.STABLECOINS
-    # The longest-first tuple equity reconstruction binds is the registry's.
-    assert er._STABLECOINS_LONGEST_FIRST is cs.STABLECOINS_LONGEST_FIRST

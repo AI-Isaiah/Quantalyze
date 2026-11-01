@@ -14,51 +14,6 @@ from __future__ import annotations
 import pytest
 
 from services import okx_opening_balance as obal
-from tests.test_okx_anchor_rule import (
-    _RESIDUAL_KEY,
-    _TOTAL_EQ,
-    _bills,
-    _forced_window_call,
-    _okx_world,
-    _refusal_audit,
-    _usdt_cash_after,
-)
-
-
-@pytest.mark.asyncio
-async def test_a_forced_okx_rebuild_whose_bills_sit_three_percent_above_the_implied_opening_refuses(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The whole forced job. The anchor-rule world has ``totalEq`` 70000 and a replay that ends at
-    10000, so the opening the anchor implies is 60000. The bills open at 62100: the residual is
-    (60000 - 62100) / 70000 = -0.03 of the anchor, 2100 against a 2% allowance of 1400. At the
-    old 5% the allowance was 3500, so the job anchored and ended DONE; at 2% it refuses
-    ``disagreed`` and writes nothing. RED at the old value."""
-    exchange, _archive = await _okx_world(
-        _bills(usdt_opening="62100"), usdt_cash=_usdt_cash_after("62100")
-    )
-
-    failed = await _refusal_audit(monkeypatch, exchange)
-
-    assert failed["anchor_opening_check"] == "disagreed", failed
-    assert failed[_RESIDUAL_KEY] == -0.03, failed
-
-
-@pytest.mark.asyncio
-async def test_a_forced_okx_rebuild_whose_bills_sit_three_percent_below_the_implied_opening_refuses(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The other side of the band. The implied opening is 60000; the bills open at 57900, so the
-    residual is (60000 - 57900) / 70000 = +0.03 of the anchor, 2100 against the 2% allowance of
-    1400. At the old 5% (3500) it anchored; at 2% it refuses ``disagreed``. RED at the old value."""
-    exchange, _archive = await _okx_world(
-        _bills(usdt_opening="57900"), usdt_cash=_usdt_cash_after("57900")
-    )
-
-    failed = await _refusal_audit(monkeypatch, exchange)
-
-    assert failed["anchor_opening_check"] == "disagreed", failed
-    assert failed[_RESIDUAL_KEY] == 0.03, failed
 
 
 @pytest.mark.parametrize("sign", [-1, 1], ids=["below", "above"])
@@ -83,22 +38,3 @@ def test_a4s_measured_residual_agrees_at_the_decided_tolerance() -> None:
     inside the 2000 allowance. RED if the tolerance tightens below a4's residual, which would
     refuse the one account the value rests on."""
     assert obal.opening_agrees(100000.0, 7660.0, 93700.0) is True
-
-
-@pytest.mark.asyncio
-async def test_a_forced_okx_rebuild_with_a4s_residual_anchors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """a4's residual through the forced path. The implied opening is 60000 and the bills open at
-    60952, so the residual is (60000 - 60952) / 70000 = -0.0136 of the anchor, 952 against the
-    1400 allowance. The check reads ``agreed`` and the curve anchors on the venue's ``totalEq``.
-    RED if the tolerance tightens below -0.0136: the forced call would refuse a4's shape."""
-    exchange, _archive = await _okx_world(
-        _bills(usdt_opening="60952"), usdt_cash=_usdt_cash_after("60952")
-    )
-
-    rows, _complete, telemetry = await _forced_window_call(monkeypatch, exchange)
-
-    assert telemetry["anchor_opening_check"] == "agreed", telemetry
-    assert telemetry[_RESIDUAL_KEY] == -0.0136, telemetry
-    assert rows[-1]["value_usd"] == pytest.approx(float(_TOTAL_EQ), abs=0.01)

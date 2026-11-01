@@ -37,18 +37,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from services.equity_reconstruction import (
     _NON_RETRYABLE_SYNC_STATUSES,
     _RECONSTRUCT_IN_FLIGHT_STATUSES,
     HISTORY_RECONSTRUCT_ATTEMPT_CAP,
-    _owed_reconstructs_for_zero_snapshot_book,
 )
 from tests.test_equity_reconstruction import (
     ALLOCATOR_ID,
     API_KEY_ID_1,
-    FakeSupabaseClient,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -201,22 +198,6 @@ _BASE_KEY: dict[str, Any] = {
 }
 
 
-def _store_with(key_overrides: dict[str, Any] | None = None) -> FakeSupabaseClient:
-    fake = FakeSupabaseClient()
-    fake.store[("api_keys", (API_KEY_ID_1,))] = {**_BASE_KEY, **(key_overrides or {})}
-    return fake
-
-
-async def _owed(fake: FakeSupabaseClient) -> int:
-    return await _owed_reconstructs_for_zero_snapshot_book(fake, ALLOCATOR_ID)
-
-
-@pytest.mark.asyncio
-async def test_control_the_unmutated_key_is_owed() -> None:
-    """The control every mutation below differs from in exactly one attribute."""
-    assert await _owed(_store_with()) == 1
-
-
 # term -> the one mutation of the control that the fan-out's query excludes.
 _ROW_MUTATIONS: dict[str, dict[str, Any]] = {
     "active": {"is_active": False},
@@ -226,110 +207,3 @@ _ROW_MUTATIONS: dict[str, dict[str, Any]] = {
     "marker_null": {"history_reconstructed_at": "2026-09-01T00:00:00+00:00"},
     "under_cap": {"history_reconstruct_attempts": HISTORY_RECONSTRUCT_ATTEMPT_CAP},
 }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("term", sorted(_ROW_MUTATIONS))
-async def test_a_key_the_fanout_query_excludes_is_not_owed_in_python(term: str) -> None:
-    assert term in _TERMS, term
-    assert await _owed(_store_with(_ROW_MUTATIONS[term])) == 0, (
-        f"the fan-out excludes a key on term {term} but the Python hold still counts it"
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_cap_boundary_matches_the_sql() -> None:
-    """One attempt under the SQL cap is owed, the cap itself is not."""
-    fake = _store_with({"history_reconstruct_attempts": HISTORY_RECONSTRUCT_ATTEMPT_CAP - 1})
-    assert await _owed(fake) == 1
-
-
-def _parametrize_literals(term: str) -> list[str]:
-    """The literals of ``term`` read from the migration, for parametrisation. A
-    migration that cannot be classified yields one sentinel instead of raising at
-    collection: the test body re-runs ``_classify`` and fails with the real
-    message, so drift is a named FAILED test and never a collection error."""
-    try:
-        _, matched = _classify()
-    except AssertionError:
-        return ["<migration drifted: see test_every_term_of_the_fanout_owed_query...>"]
-    return sorted(_literals(matched[term].group("lits")))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", _parametrize_literals("sync_status_exclusions"))
-async def test_every_sync_status_the_sql_excludes_is_not_owed_in_python(status: str) -> None:
-    """Parametrised from the migration's own list, so a status added to the SQL
-    reddens this test until the Python hold excludes it too."""
-    _classify()
-    assert await _owed(_store_with({"sync_status": status})) == 0, status
-
-
-@pytest.mark.asyncio
-async def test_a_null_sync_status_is_still_owed() -> None:
-    """``coalesce(sync_status, '') NOT IN (...)`` lets a NULL status through."""
-    assert await _owed(_store_with({"sync_status": None})) == 1
-
-
-def _link(fake: FakeSupabaseClient, kind: str, *, status: str = "published", owner: str = ALLOCATOR_ID) -> None:
-    if kind == "direct":
-        fake.store[("strategies", ("s1",))] = {
-            "id": "s1", "user_id": owner, "api_key_id": API_KEY_ID_1, "status": status,
-        }
-    else:
-        fake.store[("strategies", ("s1",))] = {
-            "id": "s1", "user_id": owner, "api_key_id": None, "status": status,
-        }
-        fake.store[("strategy_keys", ("s1", API_KEY_ID_1))] = {
-            "strategy_id": "s1", "api_key_id": API_KEY_ID_1,
-        }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "term, kind",
-    [("not_linked_direct", "direct"), ("not_linked_composite", "composite")],
-)
-async def test_a_linked_key_is_not_owed_in_python(term: str, kind: str) -> None:
-    assert term in _TERMS
-    fake = _store_with()
-    _link(fake, kind)
-    assert await _owed(fake) == 0, f"the fan-out excludes a linked key ({term}); the hold counts it"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["direct", "composite"])
-@pytest.mark.parametrize("variant", ["archived", "other_owner"])
-async def test_a_link_the_sql_ignores_is_ignored_in_python(kind: str, variant: str) -> None:
-    """``status <> 'archived'`` and ``user_id = key.user_id`` are both in the SQL
-    link terms; an archived or foreign strategy does not link the key."""
-    fake = _store_with()
-    if variant == "archived":
-        _link(fake, kind, status="archived")
-    else:
-        _link(fake, kind, owner="00000000-0000-0000-0000-0000000000ee")
-    assert await _owed(fake) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", _parametrize_literals("none_in_flight"))
-async def test_a_reconstruct_in_flight_is_waited_on_where_the_sql_skips_the_key(status: str) -> None:
-    """The deliberate inversion: the fan-out does not re-enqueue a key with a
-    reconstruct in these statuses (``none_in_flight``), and the hold WAITS on the
-    job instead, even for a never-attempted key."""
-    _classify()
-    fake = _store_with({"history_reconstruct_attempts": 0})
-    fake.store[("compute_jobs", ("j1",))] = {
-        "id": "j1", "kind": "reconstruct_allocator_history",
-        "api_key_id": API_KEY_ID_1, "status": status,
-    }
-    assert await _owed(fake) == 1, status
-
-
-@pytest.mark.asyncio
-async def test_a_never_attempted_key_is_the_one_documented_asymmetry() -> None:
-    """The SQL has no ``attempts >= 1`` term (every conjunct is classified above),
-    so it counts attempts 0 as owed; the hold does not, with nothing in flight."""
-    _, matched = _classify()
-    assert "under_cap" in matched
-    assert await _owed(_store_with({"history_reconstruct_attempts": 0})) == 0
