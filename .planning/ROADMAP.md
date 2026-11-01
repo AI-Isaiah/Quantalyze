@@ -216,7 +216,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book** — booked 2026-10-31 from MARKSOURCE plan 08 first-night reading (a) (founder "Book a phase, close plan 08 (Recommended)"); 3 allocators holding positions have no equity curve because their keys are strategy-linked; data integrity, user-facing
 - [ ] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing
 - [ ] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing
-- [ ] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity
+- [x] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity (completed 2026-11-01)
 - [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
 - [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
 - [ ] **Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
@@ -6727,7 +6727,7 @@ Plans:
 **Goal:** On each wallet-base venue (OKX and Bybit now; Binance and sFOX once their keys have marks), the first-mark offset is measured per key: the realized P&L plus flows between UTC midnight of the first mark day and the mark read, rebuilt read-only from fills and trade history and stated as a ratio of NAV. The founder then decides whether any venue moves to a writer-chain base.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.1
-**Plans:** 5/7 plans executed
+**Plans:** 7/7 plans complete
 
 Booked 2026-11-01 by the founder from NAVMTM 167.2.1.1.1 D-27 (AskUserQuestion "Book a measure phase": "Book a phase that rebuilds the realized P&L for that window from fills and measures the offset."). D-25 moved MT5 and Deribit to the writer-chain base (G-01, PR #1166). OKX, Bybit, Binance and sFOX keep the wallet base (NAVMTM REVIEW CR-01: the wallet is final on OKX), so their pre-mark levels sit off the realized chain by that offset; mark reads land about 5.5-6.7 h after the boundary. The stored rows cannot give it: PROD 2026-11-01 (counts only) has 5 OKX keys and 1 Bybit key with marked `key_inputs` since 2026-10-26, their `realized_terminal_usd` equals the mark NAV, and no Binance or sFOX key has inputs yet. Data integrity.
 
@@ -6755,10 +6755,10 @@ Plans:
 - [x] 184-06-PLAN.md — Gap G-01: the OKX window-bill parser keeps instId, so an in-window funding bill read from the archive is summed instead of refusing the key; one test through run() that fails without it, a neuter check, the deploy fingerprint and parser shape recomputed (wave 5, gap closure)
 
 **Wave 6** *(blocked on Wave 5 completion, the orchestrator's ship and deploy, and a fresh founder approval)*
-- [ ] 184-07-PLAN.md — Operator: the founder is asked again, then one read-only re-run of the fixed probe on the backfill worker, worker restored, records, readout lines and a fresh sc1-met copied and gated; 184-04 kept as the first-run history (wave 6, not autonomous, gap closure)
+- [x] 184-07-PLAN.md — Operator: the founder is asked again, then one read-only re-run of the fixed probe on the backfill worker, worker restored, records, readout lines and a fresh sc1-met copied and gated; 184-04 kept as the first-run history (wave 6, not autonomous, gap closure)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 184-05-PLAN.md — Operator: founder readout with the re-run's numbers, the five open questions and the ledger offer; D-02 recorded in 184-CONTEXT and this entry; any move booked as a follow-up; SC-3 proven from both merges (wave 7, not autonomous)
+- [x] 184-05-PLAN.md — Operator: founder readout with the re-run's numbers, the five open questions and the ledger offer; D-02 recorded in 184-CONTEXT and this entry; any move booked as a follow-up; SC-3 proven from both merges (wave 7, not autonomous)
 
 ### Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance
 
@@ -7234,7 +7234,7 @@ kept verbatim.
 | 181 SHAREDKEYS | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 08 | - |
 | 182 SPIKEREPAIR | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 14 | - |
 | 183 DUPCOUNT | 0/0 | Not started — booked 2026-10-31 from the Sentry check (QUANTALYZE-2H) | - |
-| 184 WALLETOFFSET | 0/0 | Not started — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 | - |
+| 184 WALLETOFFSET | 7/7 | Complete — shipped v0.133.16.0 and the OKX fix v0.133.16.2; every marked key measured, every venue keeps the wallet base (D-02) | 2026-11-01 |
 | 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 | 187 BINANCEINCOME | 0/0 | Not started — booked 2026-11-01 from the Phase 184 code review | - |
