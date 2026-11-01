@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.133.16.4] - 2026-11-01 — records: close 184 WALLETOFFSET
+
+### Notes
+- Phase 184 WALLETOFFSET is closed. Verification passed (all three success criteria) and the security check is SECURED with no open threats. The first PROD probe run refused every OKX key because of a probe parser bug (fixed in v0.133.16.2). The re-run measured all 6 marked keys. OKX's offset is about 0.008% of NAV, all funding; Bybit's is 0.054%. Both are under the founder's 0.1% threshold, so every venue keeps the wallet base (D-02) and no published number changed.
+- Binance and sFOX have no marked keys yet. The founder chose to track the wait as TODOS `[184-BINANCE-SFOX-OFFSET-WAIT]`, with a trigger, rather than a booked phase.
+
 ## [0.133.16.3] - 2026-11-01 — book Phase 189 OPTIONREPLAY
 
 ### Added
