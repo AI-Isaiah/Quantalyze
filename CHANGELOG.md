@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.15.1] - 2026-11-01 — BASELINE: automated re-dump after the PROD apply of 6c919f4f
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `41324221495`, after the PROD apply of merge `6c919f4f`: sha256 `30216c75…` → `28ff8853…`.
+- Shape, old → new: tables 67 → 67, policies 156 → 156, function statements 136 → 136, distinct function names 134 → 134, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261103120000_request_allocator_holdings_sync_no_reconstruct.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-01` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.15.0 → 0.133.15.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=313 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 136 — MATCH 133, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `41324221495` succeeded, and this entry was composed by the `redump-pr` job. Run `41324221495` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.15.0] - 2026-11-01 — 176 LEGACYRETIRE PR 2: the legacy writers stop and the old history engine is deleted
 
 PR 2 of three for Phase 176 (D-02 order, second step). PR 1 moved every reader to the derived curve. This PR stops everything that still writes the legacy allocator equity curve and deletes the engine that wrote it. PR 3 drops the legacy table and its fan-out function, and only after a day of readings shows that nothing wrote a legacy row once this PR's worker went live.

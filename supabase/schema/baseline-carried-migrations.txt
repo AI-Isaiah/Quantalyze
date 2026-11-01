@@ -15,7 +15,7 @@
 #
 # ⚠️ What this list vouches for: the founder's record of which migrations had applied to
 #    PRODUCTION when the dump was taken. It does NOT re-derive the dump's catalogue.
-baseline-sha256: 30216c7582592cda14ac5f36cff317d4abbcacd1d3c26c0794bd235e20ab1834
+baseline-sha256: 28ff8853ce1a58c913de377b89fbd3eae12674902258ac37d2388c2961ae31ed
 20260405061911_initial_schema.sql
 20260405061912_rls_policies.sql
 20260405093623_indexes_and_benchmark.sql
@@ -328,3 +328,4 @@ baseline-sha256: 30216c7582592cda14ac5f36cff317d4abbcacd1d3c26c0794bd235e20ab183
 20261031120000_allocator_trade_reads.sql
 20261101120000_api_key_flow_prices.sql
 20261102120000_bridge_outcome_holding_branch_derived.sql
+20261103120000_request_allocator_holdings_sync_no_reconstruct.sql

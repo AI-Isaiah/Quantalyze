@@ -9826,8 +9826,6 @@ DECLARE
   v_disconnected       TIMESTAMPTZ;
   v_job_id             UUID;
   v_next_attempt       TIMESTAMPTZ;
-  v_prior_reconstruct  BOOLEAN;
-  v_reconstructed_at   TIMESTAMPTZ;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'not_authenticated'
@@ -9880,42 +9878,6 @@ BEGIN
     p_api_key_id  := p_api_key_id
   );
 
-  -- Per-api_key reconstruction gate (replaces migration 070's allocator-
-  -- scoped snapshot-count check). Skip enqueue ONLY if THIS key's marker says it
-  -- was reconstructed (below) OR a reconstruct for it is currently in flight.
-  -- Phase 167.1.2.1 SC-5 / D-13: a job awaiting its retry (failed_retry) IS in
-  -- flight. The in-flight unique index omits it, so without it here a second
-  -- pending row would be inserted and a 30-minute crawl would run twice.
-  -- O-2: a finished (`done`) job is NOT listed. The marker is authoritative, and
-  -- a retained `done` job alone must not suppress a reconstruct (a D-15 key
-  -- keeps one for up to 30 days and is still owed).
-  SELECT EXISTS (
-    SELECT 1 FROM compute_jobs
-    WHERE api_key_id = p_api_key_id
-      AND kind = 'reconstruct_allocator_history'
-      AND status IN ('pending','running','done_pending_children','failed_retry')
-  ) INTO v_prior_reconstruct;
-
-  -- Phase 167.1.2.1 D-04 / O-2: the per-key marker is the decider. It outlives the
-  -- 30-day job retention, and a set marker counts as a prior reconstruct.
-  SELECT history_reconstructed_at INTO v_reconstructed_at
-    FROM api_keys
-    WHERE id = p_api_key_id;
-  v_prior_reconstruct := v_prior_reconstruct OR v_reconstructed_at IS NOT NULL;
-
-  IF NOT v_prior_reconstruct THEN
-    BEGIN
-      PERFORM enqueue_compute_job(
-        p_strategy_id     := NULL,
-        p_kind            := 'reconstruct_allocator_history',
-        p_idempotency_key := 'reconstruct-alloc-' || p_api_key_id::text || '-initial',
-        p_api_key_id      := p_api_key_id
-      );
-    EXCEPTION WHEN unique_violation THEN
-      NULL; -- racing first-connect call landed first; benign
-    END;
-  END IF;
-
   UPDATE api_keys SET sync_status = 'syncing' WHERE id = p_api_key_id;
   RETURN jsonb_build_object('ok', true, 'job_id', v_job_id);
 END;
@@ -9925,7 +9887,7 @@ $$;
 ALTER FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") IS 'Authenticated wrapper for a holdings sync request. Returns {already_inflight: true, next_attempt_at} when a poll_allocator_positions job for the key is already pending, running or done_pending_children; otherwise enqueues one and returns {ok: true, job_id}, and for an api_key whose history_reconstructed_at marker is NULL and with no reconstruct_allocator_history job in flight (pending, running, done_pending_children) or awaiting retry (failed_retry) also enqueues that; a finished (done) job alone does not suppress it, the marker is authoritative (O-2). Raises 42501 for an unauthenticated caller or a key the caller does not own, and P0001 api_key_disconnected for a soft-disconnected key. Phase 164.9.1: restores migration 067''s in-flight look-up and migration 075''s disconnected-key refusal on migration 076''s per-api_key reconstruct gate. Phase 167.1.2.1: the reconstruct gate counts failed_retry (SC-5, D-13) and a set marker (D-04) and no longer counts a done job (O-2); the poll look-up is unchanged.';
+COMMENT ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") IS 'Authenticated wrapper for a holdings sync request. Returns {already_inflight: true, next_attempt_at} when a poll_allocator_positions job for the key is already pending, running or done_pending_children; otherwise enqueues one and returns {ok: true, job_id}. Raises 42501 for an unauthenticated caller or a key the caller does not own, and P0001 api_key_disconnected for a soft-disconnected key. Phase 164.9.1: restores migration 067''s in-flight look-up and migration 075''s disconnected-key refusal. Phase 176 D-04: it no longer enqueues a reconstruct_allocator_history job; the history reconstruct is retired.';
 
 
 

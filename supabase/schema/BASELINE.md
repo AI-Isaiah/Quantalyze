@@ -84,10 +84,10 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-10-31 |
+| Taken | 2026-11-01 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `41239837180`) |
-| sha256 | `30216c7582592cda14ac5f36cff317d4abbcacd1d3c26c0794bd235e20ab1834` |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `41324221495`) |
+| sha256 | `28ff8853ce1a58c913de377b89fbd3eae12674902258ac37d2388c2961ae31ed` |
 | Shape | 67 tables, 156 policies, 136 function statements (134 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,26 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-11-01 — automated re-dump after Supabase Migrate run 41324221495
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `41324221495`, after that run's `apply` job applied merge `6c919f4f` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261103120000_request_allocator_holdings_sync_no_reconstruct.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-11-01 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 67 → 67, policies 156 → 156, function statements 136 → 136, distinct function names 134 → 134 |
+| Data statements | 0 → 0 |
+| sha256 | `30216c75…` → `28ff8853…` |
+| Currency gate | `baseline-currency: carried=313 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 136 — MATCH 133, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-10-31 — automated re-dump after Supabase Migrate run 41239837180
 
