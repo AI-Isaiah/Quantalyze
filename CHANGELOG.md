@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.13.1] - 2026-11-01 — book Phase 184 WALLETOFFSET
+
+### Added
+- Phase 184 WALLETOFFSET is booked in the ROADMAP (founder 2026-11-01, NAVMTM D-27: "Book a measure phase"). OKX, Bybit, Binance and sFOX keys keep the wallet base for their first mark, so their pre-mark levels sit off the realized chain by the realized P&L and flows between UTC midnight and the read. The stored rows cannot give that offset (on these venues the stored realized terminal equals the mark NAV), so the phase rebuilds it from fills, measures it as a ratio of NAV per key, and hands the numbers to the founder. No published number changes unless the founder decides so.
+
 ## [0.133.13.0] - 2026-11-01 — NAVMTM G-01: the first mark's base is the writer's own level
 
 ### Root cause
