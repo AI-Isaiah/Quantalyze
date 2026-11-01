@@ -6727,9 +6727,11 @@ Plans:
 **Goal:** On each wallet-base venue (OKX and Bybit now; Binance and sFOX once their keys have marks), the first-mark offset is measured per key: the realized P&L plus flows between UTC midnight of the first mark day and the mark read, rebuilt read-only from fills and trade history and stated as a ratio of NAV. The founder then decides whether any venue moves to a writer-chain base.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.1
-**Plans:** 0 plans
+**Plans:** 5/7 plans executed
 
 Booked 2026-11-01 by the founder from NAVMTM 167.2.1.1.1 D-27 (AskUserQuestion "Book a measure phase": "Book a phase that rebuilds the realized P&L for that window from fills and measures the offset."). D-25 moved MT5 and Deribit to the writer-chain base (G-01, PR #1166). OKX, Bybit, Binance and sFOX keep the wallet base (NAVMTM REVIEW CR-01: the wallet is final on OKX), so their pre-mark levels sit off the realized chain by that offset; mark reads land about 5.5-6.7 h after the boundary. The stored rows cannot give it: PROD 2026-11-01 (counts only) has 5 OKX keys and 1 Bybit key with marked `key_inputs` since 2026-10-26, their `realized_terminal_usd` equals the mark NAV, and no Binance or sFOX key has inputs yet. Data integrity.
+
+Founder readout decision 2026-11-01 (184-CONTEXT D-02): venue-decision: okx=keep bybit=keep binance=wait sfox=wait. OKX and Bybit keep the wallet base: the founder decided on the P&L part at 0.1% of NAV, venue-wide, and no measured key reaches it (OKX at most 0.0000786 over 5 keys, Bybit 0.000543 on its 1 key, per the 184-07 re-run). Binance and sFOX keep the wallet base until a key is marked and measured ("Wait for their own measurement (Recommended)"). No follow-up phase: the founder tracks the wait as TODOS `[184-BINANCE-SFOX-OFFSET-WAIT]` ("TODOS entry with a trigger (Recommended)"), triggered when a Binance or sFOX key gets its first stored mark.
 
 **Success Criteria** (what must be TRUE):
 1. For each key on those venues, the offset as a ratio of NAV is measured from fills and trade history for the first-mark window, read-only, and recorded with counts and ratios only.
@@ -6737,7 +6739,26 @@ Booked 2026-11-01 by the founder from NAVMTM 167.2.1.1.1 D-27 (AskUserQuestion "
 3. No published number changes in this phase unless the founder decides so.
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 184-01-PLAN.md — Read-only first-mark offset probe: tracer through run() for one marked OKX key (bills archive, chain terms, flows placed by rule 10, ratios of NAV and wallet); OKX edges, reader-level unmeasurable tokens through one exception-mapping place (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 184-02-PLAN.md — Refusals by name before any decrypt, with eligibility from the backfill's own filter so a key in sync_status error is read rather than refused; venue errors by class; read-only pins and redaction with failing controls (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 184-03-PLAN.md — Bybit reader with fetch_daily_pnl parity, Binance reader, sFOX refused by name (no realized-P&L chain), per-venue summary, deploy fingerprint, money-math mutations, full suite and mypy as final gates (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion and the orchestrator's ship and deploy)*
+- [x] 184-04-PLAN.md — Operator: one read-only run of the deployed probe on the backfill worker, worker restored, records and per-key readout lines copied and gated (wave 4, not autonomous)
+
+**Wave 5** *(blocked on Wave 4 completion; gap closure G-01)*
+- [x] 184-06-PLAN.md — Gap G-01: the OKX window-bill parser keeps instId, so an in-window funding bill read from the archive is summed instead of refusing the key; one test through run() that fails without it, a neuter check, the deploy fingerprint and parser shape recomputed (wave 5, gap closure)
+
+**Wave 6** *(blocked on Wave 5 completion, the orchestrator's ship and deploy, and a fresh founder approval)*
+- [ ] 184-07-PLAN.md — Operator: the founder is asked again, then one read-only re-run of the fixed probe on the backfill worker, worker restored, records, readout lines and a fresh sc1-met copied and gated; 184-04 kept as the first-run history (wave 6, not autonomous, gap closure)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 184-05-PLAN.md — Operator: founder readout with the re-run's numbers, the five open questions and the ledger offer; D-02 recorded in 184-CONTEXT and this entry; any move booked as a follow-up; SC-3 proven from both merges (wave 7, not autonomous)
 
 ### Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance
 
