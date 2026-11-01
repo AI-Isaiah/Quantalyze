@@ -217,6 +217,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing
 - [ ] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing
 - [ ] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity
+- [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6734,6 +6735,42 @@ Booked 2026-11-01 by the founder from NAVMTM 167.2.1.1.1 D-27 (AskUserQuestion "
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance
+
+**Goal:** A Deribit day with an external flow is measured against the capital that was in the account when the P&L was earned, not against the overnight cash wallet with the flow booked at end of day. Each Deribit flow's instant is stored and a flow day is split at its flows, so capital that arrives and leaves inside one UTC day enters the base. Until that ships, the affected allocator books say so on screen.
+**Requirements**: TBD
+**Depends on:** nothing open.
+**Plans:** 0 plans
+
+**Booking.** Founder 2026-11-01, AskUserQuestion, in two steps and one follow-up.
+- First question: "On /allocations, your book's curve has 6 days in 2025 with returns over 50% ... What should happen?" Answer: "Investigate root cause (Recommended)".
+- Second: "... To confirm it before fixing, I'd re-read those days' Deribit transaction log through the worker ... Go ahead?" Answer: "Re-crawl, then fix (Recommended)": "Run the read-only re-crawl for the two keys' big days. If it confirms the cause, book a fix phase: store each Deribit flow's time and split the day at it, with a caveat on the book until it ships."
+- Then, after Railway SSH refused connections twice: "Book the fix now (Recommended)": "Book the fix phase on the PROD evidence: store each Deribit flow's time and split the day at it, with a caveat on the book until it ships. The re-crawl moves into that phase as its first step, to run once SSH works."
+
+**Evidence (PROD 2026-11-01, ratios and counts only).** One founder allocator book reads cumulative ×3539 since 2023-06, 2025 at ×1007, and still ×54 without its 11 days of |r| > 30%. The best day is +529% and the worst −78%. BTC moved at most ±2.2% a day on those days.
+- All 22 `csv_daily_returns` days with |r| > 50% sit on 5 Deribit keys across 3 books.
+- Per key, growth sits on days with a flow the same or the previous day:
+  - key A, 2025: quiet days −24%, flow-adjacent days ×64;
+  - key B, 2025: quiet days +7%, flow-adjacent days ×29;
+  - key C, 2026: quiet days ×7, flow-adjacent days ×3855. Its key-level series is ×27306 in 2026 while the book shows ×2.07.
+- The book return is Σ day P&L / Σ prior wallet (`portfolio_returns` in `analytics-service/services/allocator_equity_compose.py`), so a key with a tiny overnight wallet barely moves the book, and the book inherits the defect whenever its total overnight wallet is small against the capital at work. No key has open options today.
+
+**Root cause (leading, mechanism A).** Deribit flows are netted per UTC day and currency before anything is stored (`deribit_dated_external_flows_usd` in `analytics-service/services/deribit_txn.py`). The per-row flow instants (`deribit_flow_instants`, same file) are built in memory for the marks seam and never stored, and no raw transaction-log store exists. `chain_linked_twr` in `analytics-service/services/nav_twr.py` then computes `(NAV_t − NAV_{t−1} − F_t) / NAV_{t−1}` with the flow at end of day: Deribit gets no `DayTiming` (FLOWTIMING-Q2 kept Deribit at day level; see the D-10 venue comment above `DayTiming`). Capital that arrives and leaves inside a day never enters the base. The D-15 `flow_timing_day_level_large` annotation counts such a day but never changes it.
+- Alternative still open: mechanism B, cash-basis option accounting in key mode. `DEFAULT_PNL_BASIS` is `cash_settlement` (`deribit_txn.py`), and `analytics-service/services/job_worker.py` gates the MTM and smoothed-MTM passes on `not is_key_mode`, so an allocator-book key is always cash basis. B is ruled out for open positions today but not for 2025.
+- ⚠️ For the planner: FLOWTIMING's `DayTiming` pairs each cash effect with its POSITION's open instant (D-02/D-04), which Deribit does not attribute. Criterion 2 splits the day at the FLOW instants. Whether that reuses `DayTiming` as it stands or needs a flow-split variant of it is open, not settled.
+
+**Success Criteria** (what must be TRUE):
+1. The read-only re-crawl (the debug session's scratch script; counts and ratios only) runs in the worker for the big days of keys A and C and settles mechanism A against mechanism B. The verdict is recorded before any code change. If it is B, the phase replans.
+2. Each Deribit flow's instant is stored, and a day with a flow is split at the flow, using the timed-day machinery FLOWTIMING built for MT5, so the day's return is measured against the capital in the account at the time. A start-of-day or Modified Dietz rule is not used: it makes withdrawal days worse.
+3. Until it ships, the affected books carry a named caveat (the existing large-flow-day label, `flow_timing_day_level_large`, reaching key mode) rather than a silent number.
+4. After deploy, a PROD reading shows the founder's book has no day with |r| > 50% that the re-crawl attributes to intraday capital, and the recomputed cumulative numbers are reported to the founder.
+5. Tests go RED on the current day-level rule. Never invent data: an uncomputable day is null.
+
+Data integrity, user-facing. Relates to 164.6.6.2.3 FLOWTIMING (its booked deferral `[164.6.6.2.3-DERIBIT-INTRADAY-TIMING]` in `TODOS.md`, which this phase answers for flow days), 167.2.1.1.1 NAVMTM, and 176 LEGACYRETIRE (the derived curve is the only curve, so there is no legacy series to fall back to).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7038,6 +7075,7 @@ kept verbatim.
 | 182 SPIKEREPAIR | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 14 | - |
 | 183 DUPCOUNT | 0/0 | Not started — booked 2026-10-31 from the Sentry check (QUANTALYZE-2H) | - |
 | 184 WALLETOFFSET | 0/0 | Not started — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 | - |
+| 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
