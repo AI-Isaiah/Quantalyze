@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.133.16.0] - 2026-11-01 — WALLETOFFSET: a read-only probe measures the first-mark offset on wallet-base venues
+
+### Added
+- **Plan 01, the probe.** `analytics-service/scripts/walletoffset_probe.py` is a read-only probe for Phase 184 (D-01). For every key on a wallet-base venue with a stored first mark, it takes R, the mark's `marked_at`, and B, UTC midnight of R's own day. It then measures the offset in [B, R]: the realized P&L the chain books plus the chain's own flows placed by `placed_flow_instants`. It prints the trading, funding, P&L, flow and total parts as ratios of the mark's NAV, and the total also as a ratio of the wallet (NAV minus open P&L). The OKX reader sums the bills archive by the chain's own rule. Trading is `pnl + fee` on SWAP, FUTURES, SPOT and MARGIN bills that are not type 8, and funding is the `pnl` of type-8 bills. A bill outside the stablecoin set is counted and summed nowhere, which marks the key `partial`. The key record is built by dict merge.
+- **It writes nothing and prints only tags, counts and ratios.** The only database handle is `ReadOnlySupabase`, whose table handle exposes `select` alone. Venue reads go through `BudgetedExchange`, which allows GET names only, under a per-key call ceiling. `emit_record` checks every record against a closed vocabulary and `assert_sanitized`. A per-key exception becomes a reason and class pair, and its message is never read. Logging is off for the run. No key id, uuid or raw amount is printed; keys are labelled `k1`, `k2` and so on.
+- **Plan 02, refusals by name.** A key the probe cannot measure is refused with a named reason before any decrypt (for example `no_mark`), and a venue error maps to a named failure class instead of a number. Every derived key is read.
+- **Plan 03, Bybit and Binance.** Bybit trading is the linear closed P&L in [B, R], rebuilt ex funding with the chain's own `fetch_daily_pnl` formula. Bybit funding is the SETTLEMENT rows `fetch_funding_bybit` books, and the Unified wallet's transfer-in and transfer-out rows are printed as a diagnostic that is summed nowhere. Binance is read from one futures-income call for [B, R]: `REALIZED_PNL` plus `COMMISSION` for trading and `FUNDING_FEE` for funding. A reply at the 1000-row maximum is `page_ceiling`, never a partial sum. A marked sFOX key prints `reader_not_built` and no number, because sFOX's chain has no realized-P&L definition to measure against. A `deploy_fingerprint` line lets the run confirm which probe build it imported, and a summary record rolls the keys up per venue.
+
+### Fixed
+- **Review CR-01.** The Binance reader called `fapiPrivate_get_income`, a name the pinned ccxt does not generate, so every marked Binance key would have read `read_failed`. The test fake carried the same wrong name. The probe now calls `fapiPrivateGetIncome`, the fake matches, and a new test reads every venue method name out of the probe source and checks it on the real `ccxt.async_support` okx, bybit and binance classes. It was RED on the old name.
+- **Review WR-02.** `fetch_funding_bybit` drops a malformed SETTLEMENT row with only a log line, and logging is off for the run, so a Bybit key could print a funding sum missing rows with `partial: false`. The probe now counts the raw rows each transaction-log reply carries, through the budgeted view. When that count differs from the rows the function returns, it refuses the key as `malformed`.
+- **Review WR-03.** The OKX funding sum differed from `fetch_funding_okx` in two cases: a type-8 bill with a blank `instId` (the chain drops it) and two type-8 bills on one instrument in one UTC hour (the chain keeps one per `match_key`). The probe now refuses the key as `malformed` in both cases. It uses the chain's own `normalize_symbol` and one-hour bucket, so no dedupe rule is copied.
+
+### Tests
+- `analytics-service/tests/test_walletoffset_probe.py` was written test-first for each plan. It covers the window edges, the offset arithmetic, the OKX, Bybit and Binance readers, the pre-decrypt refusals and venue-error arms, the mixed-venue summary and the deploy fingerprint. It also pins that a flow after R is never valued, so an unpriced one cannot fail the window.
+- The read-only and no-leak claims are proved by checks that can fail. The wrapper exposes `select` and nothing else, the hidden price-cache write becomes a caught failure, a full run leaves the fake database's writes empty (and the bare fake is shown to record a write, so that assertion can fail), and a source scan for writers is shown RED on a planted write. A full run leaves no planted needle in stdout or stderr, and the leak check is shown to find needles in a deliberately leaky string.
+- **Parity.** `test_bybit_parity_with_fetch_daily_pnl` drives the real `fetch_daily_pnl` on the same closed-pnl rows. **Review WR-01** adds `test_okx_parity_with_fetch_daily_pnl_and_fetch_funding_okx`, which drives the real chain functions on one set of bills. It went RED when the type-8 branch was moved into trading and when OPTION was added to the instType set. The probe did not change, because parity already held.
+- `analytics-service/tests/_okx_bills.py`: `okx_bill` takes optional `pnl` and `fee`, set only when given, so no earlier caller's bill changes.
+
+### Notes
+- **Running it needs the founder's approval each time.** The probe runs on the Railway backfill worker under a temporary start command, applied with one redeploy and restored with another. Founder rule: a start-command change or probe run needs explicit approval every time. The standing PROD-write authorization covers data reads and writes, not this. Plan 04 asks once before changing the start command and records the answer, and "Not now" stops the run. This PR ships the probe only; it runs nothing and changes no published number.
+- **Known limits (review IN items, LOW and INFO, recorded rather than fixed):**
+  - IN-01: `partial` also counts non-stablecoin bills the chain would never sum.
+  - IN-02: `keys_marked` includes a key whose marks could not be read.
+  - IN-03: the Bybit deposit and withdrawal record calls are not counted against the call ceiling. They are reads.
+  - IN-04: `deploy_fingerprint` hashes no logic. Plan 04's deployed-commit ancestry check is the staleness control.
+  - IN-05: Bybit and Binance reads have no 429 retry. A rate limit fails closed as `read_failed`.
+  - IN-06: only OKX has the `window_too_recent` guard.
+  - IN-07: an unvalued flow makes the whole key unmeasurable, even though its P&L part is computable.
+  - IN-08: an unused constant and an imprecise transfer-bill docstring.
+  - IN-09: a `BaseException` such as `CancelledError` escapes `main` with a traceback.
+  - IN-10: the WR-02 count spans B to now, so a row dropped after R refuses a clean window. It fails closed.
+  - IN-11: the ccxt-name scan goes RED on the valid lower-case alias.
+- **Out of scope, routed:** the chain itself calls the same wrong Binance income name, booked as Phase 187 BINANCEINCOME. The chain's OKX funding dedupe and the `funding_fees` `match_key` collapse are pre-existing chain behaviour and are not changed here.
+
 ## [0.133.14.2] - 2026-11-01 — book Phase 187 BINANCEINCOME
 
 ### Added
