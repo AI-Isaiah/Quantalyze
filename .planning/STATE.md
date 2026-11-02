@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 167.2.1.1.1
-current_phase_name: NAVMTM
+current_phase: 185
+current_phase_name: DERIBITFLOWTIME
 status: executing
-stopped_at: 183 DUPCOUNT closed; several phases in parallel
-last_updated: "2026-11-02T07:56:27.837Z"
+stopped_at: 167.2.1.1.1 NAVMTM closed; several phases in parallel
+last_updated: "2026-11-02T13:18:31.258Z"
 last_activity: 2026-11-02
-last_activity_desc: 183 DUPCOUNT closed (verification passed, SECURED; SC-4 met on PROD: 0 account_duplicate refusals, the book draws a counted-once curve)
-state_head: 6e01c254160bc6d5a2f3003670943cbf189320e2
+last_activity_desc: 167.2.1.1.1 NAVMTM closed (verification passed, SECURED; SC-4 week reading: 20 marked keys 7 of 7 days, no gaps)
+state_head: 58535c67fe479c0a3a6fc6edd04efdbdab2e5e18
 progress:
   total_phases: 144
-  completed_phases: 134
-  total_plans: 976
-  completed_plans: 969
-  percent: 93
+  completed_phases: 135
+  total_plans: 996
+  completed_plans: 989
+  percent: 94
 ---
 
 ## ⭐ STATE lineage
@@ -172,11 +172,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 167.2.1.1.1 (NAVMTM) — SHIPPED, NOT YET CLOSED
-Plan: plan 14 done (week readout answered 2026-11-02); verification and records pending
-Status: Executing — several phases in parallel. In build: 185 DERIBITFLOWTIME (plans 01-09 done, review clean after round 3; ship and plan 10 paused by the founder). Shipped, not yet closed: 167.2.1.1.1 NAVMTM (plan 14 done; verification and records pending), 175 MT5OFFSET (R2 pending), 176 LEGACYRETIRE (PR 2 shipped; PR 3 pending). Closed 2026-11-02: 183 DUPCOUNT (v0.133.14.0 #1169; SC-4 met on PROD). Closed 2026-11-01: 184 WALLETOFFSET. Booked, not planned: 181, 182, 186, 187, 188, 189.
-Last activity: 2026-11-02 — 183 DUPCOUNT closed
-Progress: [█████████░] 93%
+Phase: 185 (DERIBITFLOWTIME) — IN BUILD
+Plan: plans 01-09 done, review clean after round 3; ship and plan 10 paused by the founder
+Status: Executing — several phases in parallel. In build: 185 DERIBITFLOWTIME (plans 01-09 done, review clean after round 3; ship and plan 10 paused by the founder). Shipped, not yet closed: 175 MT5OFFSET (plan 02 done 2026-11-02, SC-1 config `us`; plans 03-06 wait for the founder), 176 LEGACYRETIRE (PR 2 shipped; PR 3 pending). Closed 2026-11-02: 167.2.1.1.1 NAVMTM, 183 DUPCOUNT. Closed 2026-11-01: 184 WALLETOFFSET. Booked, not planned: 181, 182, 186, 187, 188, 189.
+Last activity: 2026-11-02 — 167.2.1.1.1 NAVMTM closed
+Progress: [█████████░] 94%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1727,7 +1727,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 183 DUPCOUNT closed
+**Stopped At:** 167.2.1.1.1 NAVMTM closed
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z

@@ -13211,6 +13211,18 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 
 **Owner / Trigger:** founder routing, the history rebuild (ACCTREBUILD line). Trigger: any Bybit key whose `totalPerpUPL` differs from its USDT-linear position sum, as plan 11's pre-merge dry run or a forced-rebuild `positions_unreadable` shows. Closed when the unforced Bybit anchor either reads the account totals (as the mark does) or refuses or flags a partial uPnL by name, with a test that fails on today's silent partial read.
 
+### 167.2.1.1.1-REFUSAL-TOKEN-REDACTED — the worker's nav-mark refusal log line never shows its token (booked 2026-11-02, NAVMTM plan 14 SC-4 reading, DIAGNOSTIC)
+
+**Reading.** `derive_broker_dailies` logs a refused mark as `nav mark refused (token=%s venue=%s api_key=%s)`. The service's own log scrubber (`scrub_freeform_string`, applied by `analytics-service/services/logging_config.py`) treats `token` as a credential key, so every such line reaches Railway as `token: [REDACTED]`. Plan 14's week reading found 29 refusal lines over 2026-10-27..11-02 (MT5 22, OKX 7) and could not read a single token, so the weekly per-token counts are UNREADABLE. `key_inputs` keeps only the latest token per key, so it cannot replace the log. Plan 14 Task 1's "refusals by token: none found" was this same defect: the first night did have refusals.
+
+**Owner / Trigger:** founder routing (founder 2026-11-02, "Correct the record, book the fix (Recommended)"), the next phase that touches the derive's mark writer or the log scrubber. Trigger: any reading that needs refusal counts by token. Closed when the refusal line names its token under a key the scrubber leaves alone (for example `refusal=`), with a test that runs the line through the scrubber and asserts the token survives.
+
+### 167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS — no composite has been re-derived since marks started, so the composite marks path is unexercised on PROD (booked 2026-11-02, NAVMTM plan 14 SC-4 reading, DATA INTEGRITY)
+
+**Reading.** On 2026-11-02 both PROD composites had every member key marked 7 of 7 days, but neither had a compute job since 2026-10-27 (last computed 2026-10-20 and 2026-10-21), so neither publishes `marks_since`. Plan 09's composite application of marks has not run on PROD.
+
+**Owner / Trigger:** founder routing (founder 2026-11-02, "Book a re-derive check (Recommended)"). Trigger: now. First find out why no composite job was enqueued after marks started (which path is meant to re-stitch a composite when its members' series change), then confirm a composite re-derive reads its members' marks and publishes `marks_since`. Closed when a PROD composite carries `marks_since` from a re-derive, or the missing enqueue path is fixed with a test.
+
 ## Phase 167.2.1.1.2 (ACCTREBUILD) — routed items (logged 2026-10-22)
 
 ### 167.2.1.1.2-ACCOUNT-CRAWL-DIAGNOSTICS — a failed forced account crawl does not name the failing member or a code fault (booked 2026-10-22, 167.2.1.1.2 review round 3, DIAGNOSTIC, CLOSED 2026-10-23)
