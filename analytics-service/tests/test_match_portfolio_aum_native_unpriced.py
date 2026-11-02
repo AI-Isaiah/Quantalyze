@@ -59,7 +59,6 @@ def _book(marker_day: str | None) -> FakeDb:
                 _holding(MT5_KEY, "mt5", "BTC", "2026-10-09", BTC_USD),
                 _holding(OKX_KEY, "okx", "USDT", "2026-10-10", OKX_USD),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [_marker(MT5_KEY, marker_day)] if marker_day else [],
         }
     )

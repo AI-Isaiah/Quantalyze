@@ -435,6 +435,207 @@ describe("runCoverageCheck — exit-code contract", () => {
   });
 });
 
+// Phase 176 LEGACYRETIRE plan 14 (D-02): a later migration can DROP a table.
+// Before this, a dropped user-owned table stayed "declared" forever, and the
+// only way through was an EXCLUDED_TABLES key the script's header forbids as
+// a remedy. The fixtures feed migrations in filename order, exactly as the
+// filesystem scans do.
+describe("DROP TABLE modelling (Phase 176 LEGACYRETIRE plan 14)", () => {
+  const CREATE_T = `
+CREATE TABLE public.drop_fixture_t (
+  id UUID PRIMARY KEY,
+  allocator_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
+);
+`;
+  const DROP_T = "DROP TABLE public.drop_fixture_t;\n";
+
+  function userTablesAfter(files: Array<[string, string]>): Map<string, string> {
+    const declarations = new Map<string, string>();
+    for (const [name, sql] of files) {
+      extractUserTablesFromMigration(sql, name, declarations);
+    }
+    return declarations;
+  }
+
+  function declaredAfter(files: Array<[string, string]>): Set<string> {
+    const out = new Set<string>();
+    for (const [, sql] of files) extractAllDeclaredTablesFromContent(sql, out);
+    return out;
+  }
+
+  function runWith(
+    files: Array<[string, string]>,
+    manifest: Set<string>,
+  ): { code: number; errors: string[] } {
+    const errors: string[] = [];
+    const declared = userTablesAfter(files);
+    const allDeclared = declaredAfter(files);
+    const code = runCoverageCheck({
+      readManifest: () => manifest,
+      readManifestForParity: () =>
+        new Set([...manifest, ...Object.keys(SANITIZE_PARITY_ALLOWLIST)]),
+      readManifestEntries: () =>
+        [...manifest].map((table) => ({
+          table,
+          kind: "direct",
+          hasUserFilter: true,
+        })),
+      readProjectedEntries: () => [],
+      scanMigrations: () => declared,
+      scanSanitize: () => new Set(manifest),
+      scanAllDeclaredTables: () =>
+        new Set([...allDeclared, ...Object.keys(EXCLUDED_TABLES)]),
+      errorLog: (m) => errors.push(m),
+      log: () => {},
+    });
+    return { code, errors };
+  }
+
+  it("A: a user-owned table dropped by a later migration is not required of the manifest", () => {
+    const files: Array<[string, string]> = [
+      ["001_create.sql", CREATE_T],
+      ["002_drop.sql", DROP_T],
+    ];
+    expect(userTablesAfter(files).has("drop_fixture_t")).toBe(false);
+    const { code, errors } = runWith(files, new Set(["profiles"]));
+    expect(code, errors.join("\n")).toBe(0);
+  });
+
+  it("A (same file): a CREATE followed by a DROP in one migration leaves the table undeclared", () => {
+    const files: Array<[string, string]> = [["001_both.sql", CREATE_T + DROP_T]];
+    expect(userTablesAfter(files).has("drop_fixture_t")).toBe(false);
+    expect(declaredAfter(files).has("drop_fixture_t")).toBe(false);
+  });
+
+  it("B: a CREATE after the DROP brings the table back, and a manifest without it fails naming it", () => {
+    const files: Array<[string, string]> = [
+      ["001_create.sql", CREATE_T],
+      ["002_drop.sql", DROP_T],
+      ["003_recreate.sql", CREATE_T],
+    ];
+    const declared = userTablesAfter(files);
+    expect(declared.get("drop_fixture_t")).toBe("003_recreate.sql");
+    const { code, errors } = runWith(files, new Set(["profiles"]));
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toMatch(/drop_fixture_t/);
+    expect(errors.join("\n")).toMatch(/003_recreate\.sql/);
+  });
+
+  it("B (same file): a DROP followed by a CREATE in one migration keeps the table declared", () => {
+    const files: Array<[string, string]> = [
+      ["001_create.sql", CREATE_T],
+      ["002_swap.sql", DROP_T + CREATE_T],
+    ];
+    expect(userTablesAfter(files).has("drop_fixture_t")).toBe(true);
+    expect(declaredAfter(files).has("drop_fixture_t")).toBe(true);
+  });
+
+  it("C: the all-declared-tables scan treats a dropped table as not declared", () => {
+    const files: Array<[string, string]> = [
+      ["001_create.sql", CREATE_T],
+      ["002_drop.sql", DROP_T],
+    ];
+    expect(declaredAfter(files).has("drop_fixture_t")).toBe(false);
+    const recreated: Array<[string, string]> = [...files, ["003.sql", CREATE_T]];
+    expect(declaredAfter(recreated).has("drop_fixture_t")).toBe(true);
+  });
+
+  it("C: an EXCLUDED_TABLES-shaped key for a dropped table is reported stale", () => {
+    // Drive the stale check with the all-declared scan alone: the real
+    // EXCLUDED_TABLES key `trades` is declared, then dropped.
+    const files: Array<[string, string]> = [
+      ["001.sql", "CREATE TABLE trades (id UUID);\n"],
+      ["002.sql", "DROP TABLE trades;\n"],
+    ];
+    const errors: string[] = [];
+    const code = runCoverageCheck({
+      readManifest: () => new Set(["profiles"]),
+      readManifestForParity: () => new Set(["profiles"]),
+      readManifestEntries: () => [
+        { table: "profiles", kind: "direct", hasUserFilter: true },
+      ],
+      readProjectedEntries: () => [],
+      scanMigrations: () => new Map(),
+      scanSanitize: () => new Set(["profiles"]),
+      scanAllDeclaredTables: () => declaredAfter(files),
+      errorLog: (m) => errors.push(m),
+      log: () => {},
+    });
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toMatch(/EXCLUDED_TABLES has stale entry "trades"/);
+  });
+
+  it("parses IF EXISTS, quoted names, public-qualified names, CASCADE and comma lists", () => {
+    const create = (n: string) =>
+      `CREATE TABLE ${n} (\n  id UUID,\n  user_id UUID NOT NULL REFERENCES auth.users(id)\n);\n`;
+    const files: Array<[string, string]> = [
+      ["001.sql", ["d_one", "d_two", "d_three", "d_four", "d_keep"].map(create).join("")],
+      [
+        "002.sql",
+        'DROP TABLE IF EXISTS "public"."d_one", d_two CASCADE;\n' +
+          'DROP TABLE IF EXISTS "d_three" RESTRICT;\n' +
+          "drop table public.d_four;\n",
+      ],
+    ];
+    const u = userTablesAfter(files);
+    const a = declaredAfter(files);
+    for (const t of ["d_one", "d_two", "d_three", "d_four"]) {
+      expect(u.has(t), t).toBe(false);
+      expect(a.has(t), t).toBe(false);
+    }
+    expect(u.has("d_keep")).toBe(true);
+    expect(a.has("d_keep")).toBe(true);
+  });
+
+  it("a `/*` inside a line comment does not open a block comment that swallows the DROP", () => {
+    // The 20261104120000 migration carries `-- ... supabase/migrations/** ...`
+    // in its header and a `*/` further down. Block-first comment stripping
+    // read that as a block comment and deleted the DROP between them.
+    const files: Array<[string, string]> = [
+      ["001.sql", CREATE_T],
+      [
+        "002.sql",
+        "-- merging supabase/migrations/** to main applies it\n" +
+          DROP_T +
+          "SELECT regexp_replace(prosrc, '/\\*.*?\\*/', '', 'g');\n" +
+          "/* a real block comment */\n",
+      ],
+    ];
+    expect(userTablesAfter(files).has("drop_fixture_t")).toBe(false);
+    expect(declaredAfter(files).has("drop_fixture_t")).toBe(false);
+  });
+
+  it("does NOT honour a DROP that sits in a comment or names another schema's table", () => {
+    const files: Array<[string, string]> = [
+      ["001.sql", CREATE_T],
+      [
+        "002.sql",
+        "-- DROP TABLE public.drop_fixture_t;\n" +
+          "/* DROP TABLE public.drop_fixture_t; */\n" +
+          "DROP TABLE scratch.drop_fixture_t;\n",
+      ],
+    ];
+    expect(userTablesAfter(files).has("drop_fixture_t")).toBe(true);
+    expect(declaredAfter(files).has("drop_fixture_t")).toBe(true);
+  });
+
+  it("does NOT honour a DROP TABLE inside a dollar-quoted DO block or function body", () => {
+    // A conditional or never-called DROP is not proof the table is gone, and
+    // honouring it would silently drop a user-owned table from the required export set.
+    const files: Array<[string, string]> = [
+      ["001.sql", CREATE_T],
+      [
+        "002.sql",
+        "DO $$ BEGIN\n  DROP TABLE public.drop_fixture_t;\nEND $$;\n" +
+          "CREATE FUNCTION public.f() RETURNS void LANGUAGE plpgsql AS $fn$\n" +
+          "BEGIN DROP TABLE public.drop_fixture_t; END $fn$;\n",
+      ],
+    ];
+    expect(userTablesAfter(files).has("drop_fixture_t")).toBe(true);
+    expect(declaredAfter(files).has("drop_fixture_t")).toBe(true);
+  });
+});
+
 describe("real-repo integration smoke", () => {
   // The colocated test suite asserts the live repo state passes:
   // if these fail, a recent migration / manifest change has broken

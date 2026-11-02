@@ -852,7 +852,6 @@ async def _compose(keys: dict[str, Stretch]) -> dict:
         "api_keys": api_keys,
         "csv_daily_returns": csv_rows,
         DERIVED_TABLE: derived,
-        "allocator_equity_snapshots": [],
     })
     with patch("services.job_worker.get_supabase", return_value=fake):
         await run_derive_allocator_equity_job(

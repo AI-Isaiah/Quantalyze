@@ -970,13 +970,14 @@ def reconstruct_mt5_nav_levels(
     A LEVEL IS NOT A RETURN, and the distinction is the whole reason this function
     exists (A-01). ``combine_mt5_deal_ledger`` emits ``r_t``, a dimensionless daily
     fraction. This emits ``NAV_t``, an absolute USD balance at the close of day ``t``.
-    The consumer is ``allocator_equity_snapshots.value_usd`` — a LEVELS column, written
-    by ``run_reconstruct_allocator_history_job`` via
-    ``persist_equity_snapshots`` / ``replace_equity_snapshots``. Handing that column a
-    return series would write daily percentage changes into a dollar-balance field: a
-    silent money bug with no exception and no red test, on a number a founder
-    publishes. Nothing here may be passed to a returns consumer and nothing there may
-    be passed to a levels consumer; the names carry the difference on purpose.
+    Its consumer is a LEVELS reader: ``run_derive_broker_dailies_job`` reads the realized
+    NAV level at the last USD return day to price a native key's day P&L. (The other
+    consumer this docstring once named, the ``value_usd`` column of the legacy allocator
+    snapshots table, was retired by Phase 176.) Handing a levels reader a return series
+    would write daily percentage changes into a dollar-balance field: a silent money bug with no exception and no red test,
+    on a number a founder publishes. Nothing here may be passed to a returns consumer
+    and nothing there may be passed to a levels consumer; the names carry the
+    difference on purpose.
 
     REALIZED BASIS, and why there is no step at the anchor day. ``account_info().equity``
     = balance + the floating uPnL of open positions, while the deal ledger books CLOSED

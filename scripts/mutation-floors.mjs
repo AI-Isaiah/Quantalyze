@@ -1326,7 +1326,14 @@
 // `arms: 848/848/0`, `biting: 848`, `lane-invocations: 848 ... plus 83 baseline / 83 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
 // `lane-probe: pg_cron AVAILABLE`, `per-arm lane time: mean 2.6s over 848 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line:
 // `test_bridge_outcome_deltas_derived.sql: sections 11 / judged 19 / annotated 19 / waived 0 / biting 19`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 83;
+// LOWERED 83 -> 79 2026-11-02 (Phase 176 LEGACYRETIRE plan 13, D-02): the gate files whose subject the drop migration removes
+// were retired (test_replace_allocator_equity_snapshots_window.sql 15 arms, test_allocator_equity_pre_terminus_flag.sql 2,
+// test_refresh_fanout_zero_snapshot_bootstrap.sql 31, test_refresh_fanout_owed_key_reconstruct.sql 20); MEASURED by ONE full
+// `node scripts/mutation-runner/run.mjs`, no file edited during it: `scope: FULL 79/79 annotated files`, `lane-concurrency: 4`,
+// `coverage: files 79/106` (110 gate files before, 106 now), `arms: 791/791/0`, `biting: 791`, `lane-invocations: 791 ... plus 79 baseline / 79 restore leg(s)`
+// (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.6s over 791 arm run(s)`.
+// The stale-high direction was observed first: with the floor still at 83 the same run exited 1 with `FILES_FLOOR regression: 79 annotated file(s) < floor 83`. A second full run after the floors moved exited 0: `No defects. Every annotated arm bit its own arm first.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 79;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3360,7 +3367,14 @@ export const FILES_FLOOR = 83;
 // edited during it: `scope: FULL 83/83 annotated files`, `coverage: files 83/110`, `arms: 859/859/0`, `biting: 859`, `lane-invocations: 859 ... plus 83 baseline / 83 restore
 // leg(s)` (the two independent tallies AGREE); per-file `test_api_keys_history_reconstruct_marker.sql: sections 27 / judged 27 / annotated 27 / waived 0 / biting 27`. The
 // stale-high direction was observed first: with the floor still at 862 the same run exited 1 with `ARMS_FLOOR regression: 859 biting arm(s) < floor 862`.
-export const ARMS_FLOOR = 859;
+// LOWERED 859 -> 791 2026-11-02 (Phase 176 LEGACYRETIRE plan 13, D-02): -68 arms, the annotated arms of the four retired gate files:
+// test_replace_allocator_equity_snapshots_window.sql 15, test_allocator_equity_pre_terminus_flag.sql 2, test_refresh_fanout_zero_snapshot_bootstrap.sql 31 and
+// test_refresh_fanout_owed_key_reconstruct.sql 20 (859 - 68 = 791). Their subjects, the legacy equity table and the four functions that wrote or read it, are dropped
+// by migration 20261104120000. test_api_key_delete_atomicity.sql is unannotated and was rewritten, not retired. FILES_FLOOR moves 83 -> 79 and WAIVED_CEILING stays 0 -
+// no waiver was added. MEASURED by the same single run recorded under FILES_FLOOR: `scope: FULL 79/79 annotated files`, `coverage: files 79/106`, `arms: 791/791/0`,
+// `biting: 791`, `lane-invocations: 791 ... plus 79 baseline / 79 restore leg(s)` (the two independent tallies AGREE). The stale-high direction was observed first: with
+// the floor still at 859 the same run exited 1 with `ARMS_FLOOR regression: 791 biting arm(s) < floor 859`. A second full run after the floors moved exited 0 with the same tallies and `No defects.`
+export const ARMS_FLOOR = 791;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

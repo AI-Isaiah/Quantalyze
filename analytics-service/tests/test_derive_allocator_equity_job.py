@@ -1,7 +1,7 @@
 """Phase 115.1 (E2 display-repoint / BACKBONE-02 + BACKBONE-03) Wave-1 —
-compose-job persistence + no-legacy-write + recurring-enqueue-gap RED pins.
+compose-job persistence + recurring-enqueue-gap RED pins.
 
-Three concerns, each a REGRESSION-FIRST RED pin the later waves turn green:
+Two concerns, each a REGRESSION-FIRST RED pin the later waves turn green:
 
   * Pin 5 (compose-job persistence, plan 04): a new allocator-scoped
     ``run_derive_allocator_equity_job({"allocator_id": ...})`` handler reads per-key
@@ -10,11 +10,9 @@ Three concerns, each a REGRESSION-FIRST RED pin the later waves turn green:
     ``(allocator_id, 'equity_curve')`` row whose payload matches the phase-wide
     display-row contract (115.1-01-PLAN.md <interfaces>). RED: handler absent.
 
-  * Pin 6 (no-legacy-write, BACKBONE-03): the derived curve lands on the NEW keyed
-    surface ONLY — ANY write (insert/upsert/update/delete) to the legacy
-    ``allocator_equity_snapshots`` store is a two-writers race with the legacy
-    first-writer-wins jobs and must be a test failure, forever (T-115.1-01). RED:
-    handler absent.
+  * (Pin 6, retired by Phase 176 plan 15, D-02: the no-legacy-write guard. The legacy
+    store is dropped, and ``tests/test_legacy_table_not_named.py`` now pins the whole
+    service never to name it. The pin number is left unused so pin 7 keeps its name.)
 
   * Pin 7 (recurring key-mode enqueue gap, plan 04): the key-mode
     ``run_derive_broker_dailies_job`` EPILOGUE must enqueue one
@@ -23,9 +21,8 @@ Three concerns, each a REGRESSION-FIRST RED pin the later waves turn green:
     (T-115.1-02 / the T-115-16 pin). RED via assertion: no epilogue enqueue today.
 
 The fake PostgREST here follows the 115-04 in-memory-filtering pattern (the
-``_build_ctx`` capture from ``test_derive_broker_dailies_dualmode``, reused for pin 7;
-a raise-on-legacy-write table for pins 5/6). Network-free — every I/O primitive is a
-stub. NO importorskip / xfail — honest RED pins; the wave gate proves RED explicitly.
+``_build_ctx`` capture from ``test_derive_broker_dailies_dualmode``, reused for pin 7).
+Network-free — every I/O primitive is a stub. NO importorskip / xfail — honest RED pins; the wave gate proves RED explicitly.
 """
 from __future__ import annotations
 
@@ -43,17 +40,12 @@ from tests.test_derive_broker_dailies_dualmode import (
     _two_day_returns,
 )
 
-LEGACY_TABLE = "allocator_equity_snapshots"
 DERIVED_TABLE = "allocator_equity_derived"
 
 
 # ---------------------------------------------------------------------------
-# Fake PostgREST — in-memory rows + a HARD refusal on any legacy-store write.
+# Fake PostgREST — in-memory rows.
 # ---------------------------------------------------------------------------
-
-
-class _LegacyWriteError(AssertionError):
-    """Raised the instant any operation targets the legacy snapshots store."""
 
 
 class _FakeTable:
@@ -68,30 +60,19 @@ class _FakeTable:
         self._limit: int | None = None
         self._is_delete = False
 
-    # --- write ops: refuse the legacy store, record on the derived surface ------
-    def _guard_legacy(self, op: str) -> None:
-        if self._name == LEGACY_TABLE:
-            raise _LegacyWriteError(
-                f"BACKBONE-03: {op} on {LEGACY_TABLE!r} is forbidden — the derived "
-                "curve must land on the NEW keyed surface only (two-writers race)"
-            )
-
+    # --- write ops: record on the derived surface ------------------------------
     def upsert(self, payload: Any, **kw: Any) -> "_FakeTable":
-        self._guard_legacy("upsert")
         self._store.upserts.append((self._name, payload, kw.get("on_conflict")))
         return self
 
     def insert(self, payload: Any, **kw: Any) -> "_FakeTable":
-        self._guard_legacy("insert")
         self._store.upserts.append((self._name, payload, None))
         return self
 
     def update(self, payload: Any, **kw: Any) -> "_FakeTable":
-        self._guard_legacy("update")
         return self
 
     def delete(self, **kw: Any) -> "_FakeTable":
-        self._guard_legacy("delete")
         # Record a chainable delete whose eq-filters are captured on .execute()
         # so a test can assert exactly which (allocator_id, kind) row was deleted.
         self._is_delete = True
@@ -99,13 +80,6 @@ class _FakeTable:
 
     # --- read chain -------------------------------------------------------------
     def select(self, *_a: Any, **_k: Any) -> "_FakeTable":
-        # A read of the legacy store is the duplicate-writer date reaching the
-        # compose. Refuse it the same way a write is refused (BACKBONE-03).
-        if self._name == LEGACY_TABLE:
-            raise _LegacyWriteError(
-                f"BACKBONE-03: read of {LEGACY_TABLE!r} is forbidden — the compose "
-                "must not see the duplicate-writer date"
-            )
         if _a:
             self._store.selects.append((self._name, _a[0]))
         return self
@@ -262,7 +236,6 @@ def _seed_allocator_inputs() -> dict[str, list[dict]]:
     return {
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived,
-        LEGACY_TABLE: [],
         "api_keys": api_keys,
     }
 
@@ -301,32 +274,6 @@ async def test_pin5_compose_job_upserts_one_equity_curve_row() -> None:
     )
     assert "is_trustworthy" in payload
     assert "scalars" in payload and "computable" in payload["scalars"]
-
-
-# ---------------------------------------------------------------------------
-# Pin 6 — no legacy-store write (BACKBONE-03) — RED: handler absent
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_pin6_compose_job_never_writes_legacy_snapshots() -> None:
-    """The compose job must NEVER write allocator_equity_snapshots. The fake table
-    RAISES on any insert/upsert/update/delete to the legacy store, so a mis-routed
-    write fails the test loudly (T-115.1-01)."""
-    from services.job_worker import run_derive_allocator_equity_job
-
-    fake = _FakeSupabase(_seed_allocator_inputs())
-    job = {"id": "j-compose", "kind": "derive_allocator_equity", "allocator_id": "alloc-1"}
-
-    from unittest.mock import patch
-
-    with patch("services.job_worker.get_supabase", return_value=fake):
-        # A write to the legacy store raises _LegacyWriteError inside the handler.
-        await run_derive_allocator_equity_job(job)
-
-    # Belt-and-braces: no legacy upsert was recorded either.
-    legacy = [u for u in fake.upserts if u[0] == LEGACY_TABLE]
-    assert legacy == [], f"compose job wrote the legacy store: {legacy!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +352,6 @@ def _seed_poison_with_stale_curve() -> dict[str, list[dict]]:
     return {
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived,
-        LEGACY_TABLE: [],
         "api_keys": api_keys,
     }
 
@@ -439,7 +385,7 @@ def _seed_null_anchor_sibling(reason: str) -> dict[str, list[dict]]:
                      "is_trustworthy": True}},
     ]
     return {"csv_daily_returns": csv, DERIVED_TABLE: derived,
-            LEGACY_TABLE: [], "api_keys": api_keys}
+            "api_keys": api_keys}
 
 
 @pytest.mark.asyncio
@@ -603,7 +549,6 @@ def _seed_partial_backfill() -> dict[str, list[dict]]:
     return {
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived,
-        LEGACY_TABLE: [],
         "api_keys": api_keys,
     }
 
@@ -761,7 +706,6 @@ def _seed_zero_anchored_with_stale_curve() -> dict[str, list[dict]]:
     return {
         "csv_daily_returns": [],
         DERIVED_TABLE: [stale_curve],
-        LEGACY_TABLE: [],
         "api_keys": api_keys,
     }
 
@@ -826,7 +770,6 @@ def _seed_malformed_daily_return() -> dict[str, list[dict]]:
     return {
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived,
-        LEGACY_TABLE: [],
         "api_keys": api_keys,
     }
 
@@ -1357,7 +1300,6 @@ def _seed_one_key_deposit() -> dict[str, list[dict]]:
                 },
             },
         ],
-        LEGACY_TABLE: [],
     }
 
 
@@ -1655,7 +1597,6 @@ async def test_duplicate_with_working_holder_is_counted_once_and_drawn(caplog: p
         ],
         "csv_daily_returns": csv,
         DERIVED_TABLE: [ki, holder_ki, _stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
@@ -1691,7 +1632,6 @@ async def test_a_marker_that_lands_mid_compose_is_recomposed_before_the_curve_is
         ],
         "csv_daily_returns": csv_h + csv_b,
         DERIVED_TABLE: [ki_h, ki_b],
-        LEGACY_TABLE: [],
     })
     api_key_reads: list[int] = []
     marked = False
@@ -1744,7 +1684,6 @@ async def test_a_marker_that_lands_during_the_redo_ends_transient_without_a_curv
         ],
         "csv_daily_returns": csv_h + csv_b + csv_g + csv_c,
         DERIVED_TABLE: [ki_h, ki_b, ki_g, ki_c],
-        LEGACY_TABLE: [],
     })
     api_key_reads: list[int] = []
     marked: list[str] = []
@@ -1798,7 +1737,6 @@ async def test_duplicate_with_revoked_holder_is_a_collision(caplog: pytest.LogCa
         ],
         "csv_daily_returns": [],
         DERIVED_TABLE: [_stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
@@ -1841,7 +1779,6 @@ async def test_duplicate_with_disconnected_holder_is_a_collision(
         ],
         "csv_daily_returns": [],
         DERIVED_TABLE: [_stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
@@ -1868,7 +1805,6 @@ async def test_duplicate_with_revoked_holder_counts_when_alone() -> None:
         ],
         "csv_daily_returns": csv,
         DERIVED_TABLE: [ki],
-        LEGACY_TABLE: [],
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
@@ -1895,7 +1831,6 @@ async def test_two_keys_same_venue_without_marker_collide(caplog: pytest.LogCapt
         ],
         "csv_daily_returns": [],
         DERIVED_TABLE: [_stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
@@ -1926,7 +1861,6 @@ async def test_identity_collision_persists_its_refusal_reason() -> None:
         ],
         "csv_daily_returns": [],
         DERIVED_TABLE: [_stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
@@ -1990,7 +1924,6 @@ def _refusal_case_compose_empty() -> dict[str, Any]:
                          "anchor_null_reason": "dust"}},
             _stale_curve(alloc),
         ],
-        LEGACY_TABLE: [],
         "api_keys": [_gate_key("key-Z", alloc)],
     })
     return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
@@ -2010,7 +1943,6 @@ def _refusal_case_compose_empty_new_book() -> dict[str, Any]:
              "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "binance"}},
             _stale_curve(alloc),
         ],
-        LEGACY_TABLE: [],
         "api_keys": [_gate_key("key-Z", alloc)],
     })
     return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
@@ -2043,7 +1975,6 @@ def _new_book_beside_omitted_key(
                          "anchor_null_reason": reason}},
             _stale_curve(alloc),
         ],
-        LEGACY_TABLE: [],
         "api_keys": [
             _gate_key("key-A", alloc, venue_account_id="acct-A"),
             _gate_key("key-Z", alloc, venue_account_id="acct-Z"),
@@ -2101,7 +2032,6 @@ def _refusal_case_compose_empty_blocked() -> dict[str, Any]:
                          "anchor_null_reason": "balance_error"}},
             _stale_curve(alloc),
         ],
-        LEGACY_TABLE: [],
         "api_keys": [_gate_key("key-Z", alloc)],
     })
     return {
@@ -2199,7 +2129,6 @@ async def test_composite_member_counted_once_and_trustworthy() -> None:
         ],
         "csv_daily_returns": csv_h + csv_m,
         DERIVED_TABLE: [ki_h, ki_m],
-        LEGACY_TABLE: [],
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
@@ -2254,7 +2183,6 @@ def _shared_pair(alloc: str, kind: str, *, holder: dict[str, Any], marked: dict[
         ],
         "csv_daily_returns": csv_h + csv_m,
         DERIVED_TABLE: [ki_h, ki_m, _stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
 
 
@@ -2435,7 +2363,6 @@ async def test_identity_refusal_is_a_warning_not_info(
         "api_keys": keys,
         "csv_daily_returns": [],
         DERIVED_TABLE: [_stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
     # 167.1.2.1.1 SC-1 (D-04): recorded in the row, not deleted.
@@ -2477,7 +2404,6 @@ async def test_identity_refusal_reaches_sentry_as_an_event(
         "api_keys": keys,
         "csv_daily_returns": [],
         DERIVED_TABLE: [_stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     with patch("services.job_worker.sentry_sdk") as sentry:
         assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
@@ -2520,7 +2446,6 @@ async def test_composite_pair_keeps_the_key_whose_history_starts_first() -> None
         ],
         "csv_daily_returns": csv_h + csv_m,
         DERIVED_TABLE: [ki_h, ki_m],
-        LEGACY_TABLE: [],
     })
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
     payload = _composed_payload(fake)
@@ -2608,7 +2533,6 @@ def _rotation_pair(
         ],
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived,
-        LEGACY_TABLE: [],
     })
 
 
@@ -2804,7 +2728,6 @@ async def test_a_book_with_marked_deribit_and_mt5_duplicates_draws_one_curve_and
         "api_keys": keys,
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived + [_stale_curve(alloc)],
-        LEGACY_TABLE: [],
     })
     with patch("services.job_worker.sentry_sdk") as sentry:
         assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
@@ -2822,23 +2745,19 @@ async def test_a_book_with_marked_deribit_and_mt5_duplicates_draws_one_curve_and
 
 
 @pytest.mark.asyncio
-async def test_compose_does_not_read_legacy_snapshots() -> None:
-    """The fake raises on any read of allocator_equity_snapshots. The job still
-    composes — that table is not an input, so a duplicate-writer date cannot
-    reach the curve."""
+async def test_compose_reads_the_account_identity_columns() -> None:
+    """The compose reads the account-identity columns of ``api_keys`` and composes
+    one version-2 curve. (Named ``test_compose_does_not_read_legacy_snapshots`` until
+    Phase 176 plan 15, D-02: its fake-table refusal of the legacy store went with the
+    dropped table; the assertions about what the compose DOES read are unchanged.)"""
     alloc = "alloc-deposit"
     fake = _FakeSupabase(_seed_one_key_deposit())
-    # Prove the fake itself refuses the read, then that the job never trips it.
-    with pytest.raises(_LegacyWriteError):
-        fake.table(LEGACY_TABLE).select("date").execute()
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
     upserts = _curve_upserts(fake)
     assert len(upserts) == 1
     payload = _extract_payload(upserts[0][1])
     assert payload.get("version") == 2
-    selects = [name for name, _cols in fake.selects]
-    assert LEGACY_TABLE not in selects
     assert any(
         name == "api_keys" and "account_share_kind" in str(cols)
         and "venue_account_id" in str(cols)
@@ -2933,7 +2852,6 @@ def _seed_long_history() -> tuple[dict[str, list[dict]], str, str]:
                 },
             },
         ],
-        LEGACY_TABLE: [],
     }
     return rows, days[0], days[-1]
 
@@ -3063,7 +2981,6 @@ def _seed_race() -> dict[str, list[dict]]:
             }
             for k in _RACE_KEYS
         ],
-        LEGACY_TABLE: [],
     }
 
 
@@ -3826,7 +3743,7 @@ def _btc_book(b_payload: dict[str, Any], *, b_days: list[str]) -> dict[str, list
                      "realized_terminal_usd": 100_000.0, "realized_terminal_day": _BTC_DAYS[-1]}},
         {"allocator_id": _BTC_ALLOC, "kind": "key_inputs:key-B", "payload": b_payload},
     ]
-    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [], "api_keys": api_keys}
+    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, "api_keys": api_keys}
 
 
 def _btc_payload(**overrides: Any) -> dict[str, Any]:
@@ -4033,7 +3950,7 @@ def _no_capital_book(
                      "composed_flows": [],
                      "composed_day_pnl": [{"utc_day_iso": d, "pnl_usd": 0.0} for d in _BTC_DAYS[:3]]}},
     ]
-    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [], "api_keys": api_keys}
+    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, "api_keys": api_keys}
 
 
 async def _compose_no_capital_book(seed: dict[str, list[dict]]) -> dict:
@@ -4193,7 +4110,7 @@ def _nc_assemble(
         {"allocator_id": _NOCAP_ALLOC, "kind": f"key_inputs:{c['id']}", "payload": c["payload"]}
         for c in candidates
     ]
-    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [], "api_keys": api_keys}
+    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, "api_keys": api_keys}
 
 
 def _nc_payload(
@@ -4926,7 +4843,7 @@ def _sc2_book(
             },
         })
     return _FakeSupabase({
-        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [],
+        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived,
     })
 
 
@@ -5155,7 +5072,7 @@ def _sc6_book(keys: list[dict[str, Any]], alloc: str = "alloc-pending") -> _Fake
         ki["payload"]["venue"] = key["exchange"]
         derived.append(ki)
     return _FakeSupabase({
-        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [],
+        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived,
     })
 
 

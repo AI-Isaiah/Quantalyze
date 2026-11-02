@@ -441,7 +441,7 @@ describe("PURGE-01 / PURGE-06: demo constants confined to /demo + test fixtures"
 // add a second benign trigger on a different table and accidentally include
 // seed inserts. The co-occurrence check below is stricter: for every
 // `supabase/migrations/*.sql` file, fail if it contains BOTH `ON auth.users`
-// AND `INSERT INTO public.portfolios|allocator_holdings|allocator_equity_snapshots`.
+// AND `INSERT INTO public.portfolios|allocator_holdings`.
 //
 // Current codebase expectation: exactly one file contains `ON auth.users`
 // (migration 002, the benign `handle_new_user` trigger), and its handler
@@ -450,7 +450,7 @@ describe("PURGE-01 / PURGE-06: demo constants confined to /demo + test fixtures"
 
 describe("PURGE-05 / VOICES-ACCEPTED f4: no migration file co-occurs ON auth.users + seed-INSERT", () => {
   const SEED_INSERT_PATTERN =
-    /INSERT\s+INTO\s+(public\.)?(portfolios|allocator_holdings|allocator_equity_snapshots)/i;
+    /INSERT\s+INTO\s+(public\.)?(portfolios|allocator_holdings)/i;
   const AUTH_USERS_TRIGGER_PATTERN = /ON\s+auth\.users/i;
 
   it("no migration has both `ON auth.users` and a seed-table INSERT (co-occurrence)", () => {
@@ -477,9 +477,8 @@ describe("PURGE-05 / VOICES-ACCEPTED f4: no migration file co-occurs ON auth.use
     expect(content).toMatch(/CREATE\s+TRIGGER\s+on_auth_user_created/);
     expect(content).toMatch(/handle_new_user/);
     expect(content).toMatch(/INSERT\s+INTO\s+public\.profiles/);
-    // It should NOT reference portfolios/allocator_holdings/allocator_equity_snapshots:
+    // It should NOT reference portfolios/allocator_holdings:
     expect(content).not.toMatch(/INSERT\s+INTO\s+public\.portfolios/);
     expect(content).not.toMatch(/INSERT\s+INTO\s+allocator_holdings/);
-    expect(content).not.toMatch(/INSERT\s+INTO\s+allocator_equity_snapshots/);
   });
 });

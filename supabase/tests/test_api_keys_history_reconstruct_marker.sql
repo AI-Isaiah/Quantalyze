@@ -20,8 +20,8 @@
 -- `TEST FAILED (<arm>)` on failure and a clean run prints NOTICEs only.
 -- ⚠️ supabase/tests/test_*.sql is the ONLY DB assertion form that runs in CI.
 --
--- ISOLATION BY CONSTRUCTION (the precedent is
--- test_refresh_fanout_zero_snapshot_bootstrap.sql).
+-- ISOLATION BY CONSTRUCTION (the precedent file, test_refresh_fanout_zero_snapshot_bootstrap.sql,
+-- was retired by Phase 176 plan 13 with the function it tested).
 --   (i) The whole file is ONE transaction: it opens with BEGIN and closes with
 --       ROLLBACK, so no row it seeds, and no job its RPC calls enqueue, outlives
 --       it. A RAISE aborts the transaction with the same effect.

@@ -948,7 +948,6 @@ describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-tab
       user_favorites: "created_at",
       allocator_preferences: "updated_at",
       portfolio_strategies: "added_at",
-      allocator_equity_snapshots: "asof",
       // Phase 115.1: allocator_equity_derived PK (allocator_id, kind), no `id`
       // column — orders by `kind` (NOT NULL, unique within an allocator's rows).
       allocator_equity_derived: "kind",

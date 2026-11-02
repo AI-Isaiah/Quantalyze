@@ -101,7 +101,6 @@ def test_two_keys_on_different_accounts_holding_one_symbol_are_both_counted(
                 _holding("key-a", "BTC", 40000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
                 _holding("key-b", "BTC", 25000.0, "2026-10-11", "2026-10-11T04:01:00+00:00"),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -134,7 +133,6 @@ def test_two_keys_on_one_account_count_the_account_once(monkeypatch: pytest.Monk
                 _holding("key-b", "BTC", 30000.0, "2026-10-11", "2026-10-11T04:02:10.5+00:00"),
                 _holding("key-b", "ETH", 5000.0, "2026-10-11", "2026-10-11T04:02:10.5+00:00"),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -170,7 +168,6 @@ def test_a_keys_row_before_its_accounts_newest_day_is_not_counted(
                 _holding("key-c", "XRP", 9999.0, "2026-10-10", "2026-10-10T04:00:00+00:00"),
                 _holding("key-d", "SOL", 3000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -192,7 +189,6 @@ def test_the_key_read_is_owner_filtered_and_no_audit_log_is_read(
             "allocator_holdings": [
                 _holding("key-a", "BTC", 40000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -210,7 +206,6 @@ def test_a_row_without_a_parseable_updated_at_raises_like_any_failed_read(
         {
             "api_keys": [_key("key-a")],
             "allocator_holdings": [_holding("key-a", "BTC", 40000.0, "2026-10-11", None)],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -244,7 +239,6 @@ def test_a_disconnected_key_and_its_replacement_on_one_login_count_the_account_o
                 _holding("key-b", "BTC", 25000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
                 _holding("key-b", "ETH", 5000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -274,7 +268,6 @@ def test_one_venue_account_id_on_two_exchanges_is_two_accounts(
                     "key-c", "ETH", 7000.0, "2026-10-11", "2026-10-11T04:00:00+00:00", venue="okx"
                 ),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -304,7 +297,6 @@ def test_a_quiet_accounts_newest_day_is_read_although_the_history_exceeds_the_se
                 *key_a_rows,
                 _holding("key-q", "BTC", 9000.0, "2026-10-01", "2026-10-01T04:00:00+00:00"),
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -331,7 +323,6 @@ def test_a_capped_day_read_fails_instead_of_scoring_a_partial_book(
                 )
                 for n in range(1005)
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -347,7 +338,6 @@ def test_a_capped_key_read_fails_instead_of_grouping_a_partial_key_list(
         {
             "api_keys": [_key(f"key-{n:04d}") for n in range(1000)],
             "allocator_holdings": [],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )
@@ -369,7 +359,6 @@ def test_every_holdings_read_is_owner_filtered_and_scoped_to_one_key(
                     "allocator_id": "someone-else",
                 },
             ],
-            "allocator_equity_snapshots": [],
             "allocator_equity_derived": [],
         }
     )

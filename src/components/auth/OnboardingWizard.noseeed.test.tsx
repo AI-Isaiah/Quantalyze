@@ -9,16 +9,15 @@ import { OnboardingWizard } from "./OnboardingWizard";
  *
  * `handleComplete()` in OnboardingWizard must call ONLY
  * `supabase.from('profiles').update(...)` on the current user. It must
- * never insert a seed portfolio or seed allocator_holdings / seed
- * allocator_equity_snapshots row, directly or indirectly.
+ * never insert a seed portfolio or seed allocator_holdings row, directly or
+ * indirectly.
  *
  * This test drives handleComplete via the UI (click "Continue" → fill
  * step 2 → click "Get started") and asserts:
  *   1. supabase.from("profiles") was called and .update(...) fired.
  *   2. supabase.from("portfolios") was NEVER called.
  *   3. supabase.from("allocator_holdings") was NEVER called.
- *   4. supabase.from("allocator_equity_snapshots") was NEVER called.
- *   5. No mocked table ever received an .insert(...) call — the only
+ *   4. No mocked table ever received an .insert(...) call — the only
  *      permitted mutation is .update(...) on profiles.
  *
  * Migration-level audit (`ON auth.users` + seed-INSERT co-occurrence) is
@@ -142,11 +141,6 @@ describe("PURGE-05: OnboardingWizard.handleComplete does not seed a portfolio", 
   it("never calls supabase.from('allocator_holdings')", async () => {
     await renderAndCompleteWizard();
     expect(fromCalls).not.toContain("allocator_holdings");
-  });
-
-  it("never calls supabase.from('allocator_equity_snapshots')", async () => {
-    await renderAndCompleteWizard();
-    expect(fromCalls).not.toContain("allocator_equity_snapshots");
   });
 
   it("never calls .insert on any table", async () => {

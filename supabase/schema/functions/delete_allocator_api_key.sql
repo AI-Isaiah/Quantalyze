@@ -2,11 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261028120000_replace_allocator_equity_snapshots_window.sql
--- 2. delete_allocator_api_key: the last-key cascade wipes every snapshot row. Added:
---    the boundary row goes with them, under the SAME key-presence test (a second
---    statement; a key added between the two leaves a boundary row that the new key's
---    sole-key replace clears, so it cannot outlive a rebuild).
+-- source migration: 20261104120000_drop_allocator_equity_snapshots.sql
+-- ───────────── 1. Re-base delete_allocator_api_key: Step 4 moves off the snapshot statements.
+-- Schema-qualified CREATE: an unqualified CREATE OR REPLACE resolves against the
+-- SESSION search_path and can mint a second function with default privileges.
 CREATE OR REPLACE FUNCTION public.delete_allocator_api_key(
   p_api_key_id uuid,
   p_cascade_holdings boolean DEFAULT false
@@ -21,13 +20,14 @@ DECLARE
   v_owner              uuid;
   v_holdings_deleted   integer := 0;
 BEGIN
-  -- H-1186: serialize all per-allocator key-deletion + equity-replace work on
-  -- one transaction-scoped advisory lock (auto-released on commit/rollback).
-  -- replace_allocator_equity_snapshots takes the SAME key, so the worker's
-  -- sole-key replace cannot interleave with this cascade. auth.uid() is the
-  -- allocator id; follows the same pg_advisory_xact_lock(hashtext(...))
-  -- convention as sync_trades (migration 20260406065011), keyed here on the
-  -- allocator to match the worker's p_allocator_id key below.
+  -- H-1186: serialize all per-allocator key-deletion work on one
+  -- transaction-scoped advisory lock (auto-released on commit/rollback).
+  -- Phase 176 D-02: the equity-replace functions that shared this key are gone, so
+  -- the lock now serializes two deletes by the SAME allocator (a delete of the
+  -- last key cannot interleave with a delete of its sibling), and that is why it
+  -- stays. auth.uid() is the allocator id; follows the same
+  -- pg_advisory_xact_lock(hashtext(...)) convention as sync_trades (migration
+  -- 20260406065011).
   PERFORM pg_advisory_xact_lock(hashtext('alloc:' || auth.uid()::text));
 
   -- Step 1: verify caller owns the key (also covers "key does not exist"
@@ -52,30 +52,18 @@ BEGIN
   -- Step 3: delete the key.
   DELETE FROM api_keys WHERE id = p_api_key_id AND user_id = auth.uid();
 
-  -- Step 4: last-key equity cascade (migration 077 semantics, M-1020 fix).
-  -- Only wipe the equity series when the user explicitly asked for hard
-  -- delete (cascade=true) AND they have no other keys left. Multi-key users
-  -- keep their aggregated series intact.
+  -- Step 4: last-key derived-history cascade (Phase 176 D-09; migration 077 /
+  -- M-1020 semantics, re-homed from the dropped legacy table onto the derived
+  -- rows). Only when the user explicitly asked for hard delete (cascade=true)
+  -- AND no key is left: the allocator's equity_curve row and this key's
+  -- key_inputs row go. Multi-key users keep their series.
   --
-  -- M-1020: this is ONE statement — the NOT EXISTS key-presence check and the
-  -- snapshot DELETE share a single statement snapshot, eliminating the TOCTOU
-  -- window the prior `SELECT count(*); IF 0 THEN DELETE` had. A concurrent
-  -- "Add Key" INSERT committing here is either visible to the NOT EXISTS
-  -- (=> a sibling exists => no wipe) or not yet committed (=> this statement
-  -- already ran, and the new key's reconstruct repopulates) — never a stale
-  -- count=0 followed by a wipe of a now-multi-key series.
+  -- M-1020: ONE statement, so the NOT EXISTS key-presence check and the DELETE
+  -- share one statement snapshot (no count-then-delete TOCTOU window).
   IF p_cascade_holdings THEN
-    DELETE FROM allocator_equity_snapshots
-      WHERE allocator_id = auth.uid()
-        AND NOT EXISTS (
-          SELECT 1 FROM api_keys WHERE user_id = auth.uid()
-        );
-
-    -- WR-01: the snapshots the recorded rebuild seam separated are gone with the
-    -- last key, so clear the seam record under the same key-presence test.
-    DELETE FROM allocator_equity_derived ck
-      WHERE ck.allocator_id = auth.uid()
-        AND ck.kind = 'snapshot_rebuild_boundary'
+    DELETE FROM allocator_equity_derived d
+      WHERE d.allocator_id = auth.uid()
+        AND (d.kind = 'equity_curve' OR d.kind = 'key_inputs:' || p_api_key_id::text)
         AND NOT EXISTS (
           SELECT 1 FROM api_keys WHERE user_id = auth.uid()
         );

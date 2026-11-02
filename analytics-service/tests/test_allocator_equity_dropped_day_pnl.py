@@ -1048,7 +1048,6 @@ async def _compose_curve(
             for d, r in book.stored_returns.items()
         ],
         DERIVED_TABLE: [{"allocator_id": alloc, "kind": "key_inputs:key-D", "payload": ki_payload}],
-        "allocator_equity_snapshots": [],
     })
     with patch("services.job_worker.get_supabase", return_value=fake):
         await run_derive_allocator_equity_job(

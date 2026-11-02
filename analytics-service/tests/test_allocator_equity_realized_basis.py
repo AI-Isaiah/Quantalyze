@@ -596,7 +596,6 @@ async def test_the_compose_job_disposes_a_malformed_terminal_as_a_corrupt_input(
             "anchor_asof": f"{book.days[-1]}T06:00:00+00:00", "venue": "deribit",
             "realized_terminal_day": book.days[-1], "realized_terminal_usd": True,
         }}],
-        "allocator_equity_snapshots": [],
     })
     with patch("services.job_worker.get_supabase", return_value=fake):
         result = await run_derive_allocator_equity_job(

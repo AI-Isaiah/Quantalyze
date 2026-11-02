@@ -31,7 +31,6 @@ import pytest
 from services.allocator_equity_compose import compose_allocator_equity
 from tests.test_derive_allocator_equity_job import (
     DERIVED_TABLE,
-    LEGACY_TABLE,
     _curve_deletes,
     _curve_upserts,
     _extract_payload,
@@ -109,7 +108,6 @@ def _live_and_departed(departed: dict[str, Any], dep_days: list[str]) -> _FakeSu
             _key_inputs("key-L", LIVE_ANCHOR, DAYS[-1]),
             _key_inputs(departed["id"], DEP_ANCHOR, dep_days[-1]),
         ],
-        LEGACY_TABLE: [],
     })
 
 
@@ -214,7 +212,6 @@ async def test_a_departed_keys_inputs_survive_while_its_key_row_exists() -> None
             _key_inputs("key-N", DEP_ANCHOR, DAYS[4]),
             _key_inputs("key-gone", DEP_ANCHOR, DAYS[4]),
         ],
-        LEGACY_TABLE: [],
     })
     result = await _run(fake)
     assert result.outcome.name == "DONE"
@@ -311,7 +308,6 @@ async def test_a_departed_key_whose_inputs_are_gone_is_left_out_and_the_book_sta
         "api_keys": [_gate_key("key-L", ALLOC, venue_account_id="acct-live"), departed],
         "csv_daily_returns": _csv("key-L", DAYS, LIVE_R) + _csv("key-D", DAYS[:10], DEP_R),
         DERIVED_TABLE: [_key_inputs("key-L", LIVE_ANCHOR, DAYS[-1])],
-        LEGACY_TABLE: [],
     })
     result = await _run(fake)
     assert result.outcome.name == "DONE"
@@ -350,7 +346,6 @@ async def test_a_departed_key_whose_last_balance_read_failed_is_counted_apart(
         "api_keys": [_gate_key("key-L", ALLOC, venue_account_id="acct-live"), departed],
         "csv_daily_returns": _csv("key-L", DAYS, LIVE_R) + _csv("key-D", DAYS[:10], DEP_R),
         DERIVED_TABLE: [_key_inputs("key-L", LIVE_ANCHOR, DAYS[-1]), null_anchor],
-        LEGACY_TABLE: [],
     })
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
         result = await _run(fake)
@@ -401,7 +396,6 @@ async def test_an_unanchored_departed_key_does_not_zero_the_key_it_would_have_co
             + _csv("key-B", DAYS[4:10], DEP_R)
         ),
         DERIVED_TABLE: derived,
-        LEGACY_TABLE: [],
     })
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
         result = await _run(fake)
@@ -594,7 +588,6 @@ def _fixture_supabase(case: dict[str, Any]) -> _FakeSupabase:
         "api_keys": api_keys,
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived,
-        LEGACY_TABLE: [],
     })
 
 
@@ -710,7 +703,6 @@ def _two_unavailable_departed_keys() -> _FakeSupabase:
             + _csv("key-D2", DAYS[:10], DEP_R)
         ),
         DERIVED_TABLE: [_key_inputs("key-L", LIVE_ANCHOR, DAYS[-1]), null_anchor],
-        LEGACY_TABLE: [],
     })
 
 
