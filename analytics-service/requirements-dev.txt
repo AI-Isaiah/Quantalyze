@@ -50,4 +50,4 @@ pytest-mock
 # `--dist loadgroup`; unpinned resolves to 3.x, matching the surrounding style.
 pytest-xdist
 cryptography
-mypy==2.4.0
+mypy==2.4.1
