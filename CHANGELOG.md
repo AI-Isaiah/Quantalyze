@@ -12,6 +12,7 @@
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `41518895623` succeeded, and this entry was composed by the `redump-pr` job. Run `41518895623` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+- Reviewer additions: `BASELINE.md` now names what the drop migration adds. The four Phase 176 plan 13 `baseline-only` rows in `NAME_SET_RATCHET` are deleted, since this re-dump meets their clearing condition: `schema:functions:check` reported them `ratchet-stale`, and it passes after the deletion.
 
 ## [0.133.17.0] - 2026-11-02 — 176 LEGACYRETIRE PR 3: the legacy allocator equity curve is dropped
 

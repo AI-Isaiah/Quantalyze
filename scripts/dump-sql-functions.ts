@@ -392,58 +392,12 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-11-02: the four Phase 176 LEGACYRETIRE plan 13 rows (`baseline-only`,
-  // captured 2026-11-02). Each carries its own clearing condition: the re-dump taken
-  // after 20261104120000_drop_allocator_equity_snapshots.sql applies to PROD. They are
-  // DELETED by that re-dump, never earlier.
-  {
-    name: "replace_allocator_equity_snapshots",
-    side: "baseline-only",
-    capturedAt: "2026-11-02",
-    clearedBy:
-      "the AUTOREDUMP re-dump after the PROD apply of 20261104120000 makes the " +
-      "name absent on both sides; delete the row in that PR",
-    reason:
-      "Phase 176 LEGACYRETIRE plan 13 (D-02) drops replace_allocator_equity_snapshots with the legacy equity table it wrote. " +
-      "supabase/schema/baseline.sql is the PROD dump and still carries it until " +
-      "the migration applies to PROD, so the name is on the baseline side only.",
-  },
-  {
-    name: "replace_allocator_equity_snapshots_window",
-    side: "baseline-only",
-    capturedAt: "2026-11-02",
-    clearedBy:
-      "the AUTOREDUMP re-dump after the PROD apply of 20261104120000 makes the " +
-      "name absent on both sides; delete the row in that PR",
-    reason:
-      "Phase 176 LEGACYRETIRE plan 13 (D-02) drops replace_allocator_equity_snapshots_window with the legacy equity table it wrote. " +
-      "supabase/schema/baseline.sql is the PROD dump and still carries it until " +
-      "the migration applies to PROD, so the name is on the baseline side only.",
-  },
-  {
-    name: "extract_symbol_value_at",
-    side: "baseline-only",
-    capturedAt: "2026-11-02",
-    clearedBy:
-      "the AUTOREDUMP re-dump after the PROD apply of 20261104120000 makes the " +
-      "name absent on both sides; delete the row in that PR",
-    reason:
-      "Phase 176 LEGACYRETIRE plan 13 (D-02) drops extract_symbol_value_at with the legacy equity table it read. " +
-      "supabase/schema/baseline.sql is the PROD dump and still carries it until " +
-      "the migration applies to PROD, so the name is on the baseline side only.",
-  },
-  {
-    name: "enqueue_refresh_allocator_equity_for_all",
-    side: "baseline-only",
-    capturedAt: "2026-11-02",
-    clearedBy:
-      "the AUTOREDUMP re-dump after the PROD apply of 20261104120000 makes the " +
-      "name absent on both sides; delete the row in that PR",
-    reason:
-      "Phase 176 LEGACYRETIRE plan 13 (D-02) drops enqueue_refresh_allocator_equity_for_all with the legacy equity table its fan-out read. " +
-      "supabase/schema/baseline.sql is the PROD dump and still carries it until " +
-      "the migration applies to PROD, so the name is on the baseline side only.",
-  },
+  // ⭐ 2026-11-02: the four Phase 176 LEGACYRETIRE plan 13 rows
+  // (`replace_allocator_equity_snapshots`, `replace_allocator_equity_snapshots_window`,
+  // `extract_symbol_value_at` and `enqueue_refresh_allocator_equity_for_all`,
+  // `baseline-only`, captured 2026-11-02) are DELETED: their clearing condition, a
+  // re-dump taken after 20261104120000_drop_allocator_equity_snapshots.sql applied
+  // to PROD, was met by the re-dump after the PROD apply of ce9014d4.
   // ⭐ 2026-10-31: the Phase 176 LEGACYRETIRE plan 02 rows
   // (`derived_account_return_over` and `reset_holding_bridge_outcomes_to_derived_basis`,
   // `snapshot-only`, captured 2026-10-31) are DELETED: their clearing condition, a
