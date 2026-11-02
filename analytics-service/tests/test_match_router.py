@@ -1966,8 +1966,8 @@ class TestLoadAllocatorContextDeterministicOrder:
                     None
                 )
                 return t
-            # allocator_holdings / allocator_equity_snapshots → empty (no holdings).
-            if name in ("allocator_holdings", "allocator_equity_snapshots"):
+            # allocator_holdings → empty (no holdings).
+            if name == "allocator_holdings":
                 t.select.return_value.eq.return_value.order.return_value.execute.return_value = (
                     MagicMock(data=[])
                 )
@@ -2043,7 +2043,7 @@ class TestLoadAllocatorContextDeterministicOrder:
                     MagicMock(data=[{"strategy_id": "S1", "returns_series": None}])
                 )
                 return t
-            if name in ("allocator_holdings", "allocator_equity_snapshots"):
+            if name == "allocator_holdings":
                 t.select.return_value.eq.return_value.order.return_value.execute.return_value = (
                     MagicMock(data=[])
                 )
@@ -5908,7 +5908,7 @@ class TestLoadersCarryTheNativeUnitFromTheSameRow:
                     q.in_.return_value.execute.return_value = MagicMock(data=analytics)
                     return q
                 t.select.side_effect = _select
-            elif name in ("allocator_holdings", "allocator_equity_snapshots"):
+            elif name == "allocator_holdings":
                 t.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(data=[])
             elif name == "match_decisions":
                 t.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
@@ -5958,7 +5958,7 @@ def _allocator_supabase(ps_rows, analytics, selects):
                 return q
 
             t.select.side_effect = _select
-        elif name in ("allocator_holdings", "allocator_equity_snapshots"):
+        elif name == "allocator_holdings":
             t.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
                 data=[]
             )

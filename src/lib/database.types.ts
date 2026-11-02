@@ -23,7 +23,7 @@
  *
  * Examples in this codebase: `positions.funding_pnl`,
  * `positions.realized_pnl`, `positions.unrealized_pnl`, `positions.roi`,
- * `allocation_events.amount`, `allocator_equity_snapshots.value_usd`,
+ * `allocation_events.amount`, `allocator_holdings.mark_price`,
  * plus the analytics + portfolio NUMERIC columns.
  *
  * Mitigation: every read/write of a NUMERIC column on a path that needs
@@ -131,39 +131,6 @@ export type Database = {
           computed_at?: string
           kind?: string
           payload?: Json
-        }
-        Relationships: []
-      }
-      allocator_equity_snapshots: {
-        Row: {
-          allocator_id: string
-          asof: string
-          breakdown: Json | null
-          history_depth_months: number | null
-          pre_terminus_balance_unknown: boolean
-          reconstructed_at: string
-          source: string
-          value_usd: number
-        }
-        Insert: {
-          allocator_id: string
-          asof: string
-          breakdown?: Json | null
-          history_depth_months?: number | null
-          pre_terminus_balance_unknown?: boolean
-          reconstructed_at?: string
-          source?: string
-          value_usd: number
-        }
-        Update: {
-          allocator_id?: string
-          asof?: string
-          breakdown?: Json | null
-          history_depth_months?: number | null
-          pre_terminus_balance_unknown?: boolean
-          reconstructed_at?: string
-          source?: string
-          value_usd?: number
         }
         Relationships: []
       }
@@ -4038,10 +4005,6 @@ export type Database = {
         Args: never
         Returns: number
       }
-      enqueue_refresh_allocator_equity_for_all: {
-        Args: never
-        Returns: undefined
-      }
       extract_delta: {
         Args: { anchor: string; days: number; series: Json }
         Returns: number
@@ -4056,10 +4019,6 @@ export type Database = {
           bps: number
           days: number
         }[]
-      }
-      extract_symbol_value_at: {
-        Args: { p_allocator_id: string; p_asof: string; p_symbol: string }
-        Returns: number
       }
       fetch_strategy_lazy_metrics: {
         Args: { p_panel_id: string; p_strategy_id: string }
@@ -4324,10 +4283,6 @@ export type Database = {
       reconstruct_positions_atomic: {
         Args: { p_positions: Json; p_strategy_id: string }
         Returns: undefined
-      }
-      replace_allocator_equity_snapshots: {
-        Args: { p_allocator_id: string; p_depth_months: number; p_rows: Json }
-        Returns: number
       }
       request_allocator_holdings_sync: {
         Args: { p_api_key_id: string }

@@ -1474,6 +1474,7 @@ true for 146 and half of 142–145, and **false for 141**.
 - **[167.1.2.2.2-PUBLIC-REF-CLEANUP]** (logged 2026-10-13, TRADESYNC security re-audit residual R-8, low; owner: the next docs-hygiene pass or any phase touching these runbooks). The repo is public, and three older runbooks (`ci-hardening-permissions-c0293.md`, `flipretry-derived-equity-go-live.md`, `migration-failure.md`) plus two old CHANGELOG entries carry the literal PROD project ref. `flipretry-derived-equity-go-live.md` also carries the TEST ref, and `match-engine.md` carries a role mailbox address. Done when each is replaced with a placeholder or a symbol (as `src/lib/test-safety.ts` pins it), and a hygiene rule rejects the literal refs in tracked text. Never quote the refs in the fix's own commit message or CHANGELOG.
 - **[170.6.2-SHAREABLELINK-D05-RED]** (logged 2026-10-14, COPYPASS plan 04 gate run; owner: the next phase touching `ShareableLink`). `src/components/strategy/ShareableLink.test.tsx`, the arm "D-05: a confirmed live link reads Manage private link and opens the Private link Modal without a fetch", was measured failing on `main` at `c85c938e`, before Phase 170.6.2, with `Unable to find role="button" and name "Copy share link"`. Re-measured at the 170.6.2 head (`npx vitest run src/components/strategy/ShareableLink.test.tsx`, one file per invocation): it passed 24 of 24 once on a quiet machine, then failed 1 of 24 in each of 4 later isolated runs and in the first full-suite run, each at about 1.0 s, which is the `findByRole` default timeout, so at this head it is load-sensitive, not strictly deterministic, and the Private link Modal's "Copy share link" button is not present within 1 s when it fails. It passed in two later full-suite runs. Done when it passes on a loaded machine (await the modal content with an explicit timeout, or find why the button mounts late), or when it is rewritten with a dated reason. Never raise a global timeout to hide it.
 - **[166.3.1-NOCAP-MT5-A2-CIRCULAR]** (logged 2026-10-13, NAVBREACH review round 1, SFH F3, MEDIUM conf 5; owner: a future phase touching the allocator compose). For MT5 the stored realized terminal is the live balance, so the A2 check (stored terminal at or below `DUST_NAV_FLOOR`) does not independently confirm a live `dust`/`nonpositive` read. A transient zero balance without `balance_error` could make a funded MT5 key exit while the book stays trustworthy, and a negative equity exits under `nonpositive` with no sign recorded. `refresh_allocator_equity_daily` requires an independent clean-empty poll for the same reasons. Done when the no-capital exit requires independent proof (the poll-outcome audit or a terminal not derived from the live read) and `nonpositive` with negative equity degrades or records its sign.
+  ⭐ 2026-11-02 (Phase 176 LEGACYRETIRE): the `refresh_allocator_equity_daily` comparison no longer exists (its job body was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0)); the A2 check itself is unaffected. Stays open.
 - **[166.3.1-NOCAP-FALLBACK-TRACE]** (logged 2026-10-13, NAVBREACH review round 1, SFH F1, MEDIUM conf 6; owner: as above). When a no-capital candidate falls back to `dropped_key` (compose-level refusal, blocking reason, or the job-level revert), only a log line records it. The payload carries no flag or counter, so a regression in A3 would look like today's state. Done when a benign payload token (for example `no_capital_exit_refused`) with a counts-only field marks every fallback.
 - **[166.3.1-NOCAP-NONNAV-EXCEPTIONS]** (logged 2026-10-13, NAVBREACH review round 1, SFH F2, MEDIUM conf 5; owner: as above). The "a candidate never costs the book its stored row" revert covers `NavReconstructionError` only. A `KeyError`/`ValueError`/`TypeError` from a candidate's inputs in the compose or the apply loop escapes the job, leaving the row stale on every retry. Done when any exception while candidates are in play reverts to the stored inputs once, with the exception class logged.
 - **[166.3.1-NOCAP-SEGMENT-REASON-RESIDUE]** (logged 2026-10-13, NAVBREACH review round 2, WR-04, MEDIUM; owner: a future phase touching the allocator compose). When a no-capital candidate's interior hole lacks its stored segment terminals, the candidate falls back but the payload keeps `key_inputs_mismatch` as a blocking reason that today's payload never carries. The book is still untrustworthy either way, so it never reads wrongly trustworthy; only the reason differs. Done when a refused candidate leaves the payload byte-equal to the no-candidate payload, with a test on that shape.
@@ -10235,6 +10236,8 @@ The block below is kept as lineage.
 
 **Owner / Trigger:** the next phase touching `run_refresh_allocator_equity_daily_job`.
 
+2026-11-02 (Phase 176 LEGACYRETIRE): already closed in code. The refresh job it fixed (`run_refresh_allocator_equity_daily_job`) was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0), so the lineage above describes deleted code.
+
 ### 167.1.2.1.1-LEFTOUT-SENTRY-NO-WRITE — the `left_out_*` Sentry events never fire when no day is written (booked 2026-10-16, SFH M-2, MEDIUM, data-integrity visibility) — ✅ CLOSED IN CODE 2026-10-19 by the WRITERRESIDUALS fix round; ⚠️ NOT live until its PR merges and deploys
 
 ✅ **CLOSED 2026-10-19 by `65f176af2`.**
@@ -10252,6 +10255,8 @@ The block below is kept as lineage.
 **Fix.** Raise the left-out events before those early returns. Add an all-failing-book test.
 
 **Owner / Trigger:** with 167.1.2.1.1-HOLD-SENTRY-LEADER.
+
+2026-11-02 (Phase 176 LEGACYRETIRE): already closed in code. The refresh job it fixed (`run_refresh_allocator_equity_daily_job`) was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0), so the lineage above describes deleted code.
 
 ### 167.1.2.1.1-IDENTITY-HOLD-DERIBIT — the identity-pending refresh hold has no bound (booked 2026-10-16, SFH M-3 + code review LR-03/LR-06, MEDIUM; narrowed 2026-10-19 to the escalation half)
 
@@ -10275,6 +10280,8 @@ The block below is kept as lineage.
 
 **Owner / Trigger:** the next phase touching the refresh holds, or 167.1.2.1.2 HISTORYREADER (Bybit parse miss).
 ⭐ 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER, D-03): item (3) was closed by decision, no code. A Bybit key's identity comes from /v5/user/query-api result.userID, not the UTA wallet parse, and an unstamped key is already flagged by the stamper's no_id outcome, escalate_if_unchecked after UNSTAMPED_ESCALATION_DAYS, and the Overview's account_identity_pending hold. This entry's unbounded-hold half stays open under its first trigger.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the identity-pending refresh hold (`run_refresh_allocator_equity_daily_job`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. The derive's own identity hold is a different path, with its own escalation after `UNSTAMPED_ESCALATION_DAYS` (HISTORYREADER D-03, above).
 
 ### 167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED — a key that never yields two usable NAV days reads "being rebuilt" with no end (booked 2026-10-19, fix-round review MR-FR-02 + SFH #3, MEDIUM, USER-FACING, KNOWN LIMIT by founder decision)
 
@@ -10303,6 +10310,8 @@ The block below is kept as lineage.
 
 **Owner / Trigger:** the next phase touching `run_refresh_allocator_equity_daily_job`, together with `167.1.2.1.1-LEADER-STATUS-FLIP`.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the refresh job's leader election and its Sentry events (`run_refresh_allocator_equity_daily_job`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read.
+
 ### 167.1.2.1.1-LEADER-STATUS-FLIP — the refresh leader follows a mutable `sync_status`, so one fan-out can raise zero events (booked 2026-10-19, fix-round SFH #2, MEDIUM per SFH / LOW per code review, data-integrity visibility, introduced by the M-1 fix)
 
 **Scenario.**
@@ -10315,6 +10324,8 @@ The block below is kept as lineage.
 **Fix.** Same as `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT`: an event idempotent per (allocator, day, outcome).
 
 **Owner / Trigger:** with `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT`.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the refresh job's leader election and its Sentry events (`run_refresh_allocator_equity_daily_job`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
@@ -13060,6 +13071,8 @@ It runs the marker query first and reports counts only.
 
 **Owner:** the next phase that redefines `enqueue_refresh_allocator_equity_for_all` or touches either twin. **Trigger:** any new migration that contains `CREATE ... FUNCTION ... enqueue_refresh_allocator_equity_for_all`; until then the twins read the only definition there is.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE).** The trigger, a new migration that redefines the fan-out, cannot occur: `supabase/migrations/20261104120000_drop_allocator_equity_snapshots.sql` drops `enqueue_refresh_allocator_equity_for_all()`; it is closed by that migration's PROD apply, which Phase 176 plan 16 reads, and this paragraph does not claim the apply has happened. The surviving SQL-literal twin arms read the last definition before the drop, which is then the final one.
+
 ### 167.1.2.1-TRANSIENT-NEVER-CAPS — a key whose own enqueue hits a transient SQLSTATE every day never reaches the cap and nothing alerts (booked 2026-10-14, RECONMARKER PR 2 round-3 silent-failure review F1, MEDIUM, confidence 6; the three-round limit applied)
 
 **Scenario.** Round 2 (SFH R2-1) narrowed the per-book handler's attempt count so that an error that says nothing about the key (class 40, class 53, `lock_not_available` 55P03) counts nothing; without that, a deadlock on the day's batch could burn attempts on a healthy key. The inverse is open: a key whose own enqueue fails with such a SQLSTATE every day (a custom trigger or enqueue path that raises `40001` deterministically, a table held by a stuck session or prepared transaction under `lock_timeout`, persistent resource exhaustion on that key's data) stays owed with attempts below five. It is retried and fails each day for ever, never reaches the cap, and so never reaches the capped-key `cron_runs` row, the worker's Sentry event or the Overview note. The only trace is one `bootstrap_book_skipped` `cron_runs` row and a `RAISE WARNING` per day, and no worker, CI step or Sentry check reads those rows. A book with no snapshots keeps its first row withheld by the refresh hold. The migration header records the opposite residual (a non-transient error carrying a transient-looking SQLSTATE is counted) and not this one.
@@ -13068,6 +13081,8 @@ It runs the marker query first and reports counts only.
 
 **Owner:** the next phase that touches the prod prober or the daily fan-out. **Trigger:** the first `bootstrap_book_skipped` row naming the same key two days running, or the prober gaining a `cron_runs` reader.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE).** The daily fan-out and its per-book handler are the subject; `supabase/migrations/20261104120000_drop_allocator_equity_snapshots.sql` drops `enqueue_refresh_allocator_equity_for_all()`; it is closed by that migration's PROD apply, which Phase 176 plan 16 reads, and this paragraph does not claim the apply has happened.
+
 ### 167.1.2.1-CAPPED-KEY-STAYS-CAPPED — a key at the attempt cap stays capped after its owner fixes the cause (booked 2026-10-14, RECONMARKER D-16, out of scope by decision)
 
 **Scenario.** A key that reaches five attempts with the marker NULL is no longer enqueued by the fan-out (D-09). If the owner then reconnects the key or fixes the credential that made the rebuild fail, `history_reconstruct_attempts` is not reset, so the daily fan-out never retries it and the Overview note keeps saying the history could not be rebuilt. `request_allocator_holdings_sync` (the user's "Sync now") does not read the attempt count, so it can still enqueue a reconstruct for such a key by hand; that is the way out today.
@@ -13075,6 +13090,8 @@ It runs the marker query first and reports counts only.
 **Fix.** Reset `history_reconstruct_attempts` to 0 on a successful reconnect or credential update of the key, in the same write that clears the failed `sync_status`, with a gate arm that proves a capped key is retried the next day after a reconnect.
 
 **Owner:** the next phase that touches the reconnect path or the key-edit RPCs. **Trigger:** a user reports the "could not be rebuilt" note after reconnecting, or the first `history_reconstruct_capped` row on PROD.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE).** The cap gated the daily fan-out's retry of a key, and the Overview note that kept saying the history could not be rebuilt was removed in PR 2. `supabase/migrations/20261104120000_drop_allocator_equity_snapshots.sql` drops `enqueue_refresh_allocator_equity_for_all()`; it is closed by that migration's PROD apply, which Phase 176 plan 16 reads, and this paragraph does not claim the apply has happened. The `api_keys` attempt columns stay inert and are booked in `176-RECONSTRUCT-CAP-MARKER-INERT`.
 
 ## Phase 170.5 (FACTSHEETV2PANELS) — booked at close 2026-10-14
 
@@ -13168,11 +13185,15 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 
 **Owner / Trigger:** founder routing, candidate Phase 167.2.1.1.1 NAVMTM. Trigger: that WARNING in worker logs during an unforced reconstruct, or a `positions_unreadable` refusal in the D-02 recompute. Closed when a positions failure on an additive venue either skips the anchor with a named DQ flag or anchors from a stored uPnL on every path, and the default-path pins above are flipped to the new rule.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the unforced reconstruct anchor, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. `_fetch_current_equity` has one production caller left, the Binance mark read, which passes `refuse_unread_positions=True` and returns `positions_unreadable`, so no path anchors at the wallet figure after a failed positions read.
+
 ### 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR — the Bybit derive anchor reads the USDT coin only while the reconstruct anchor and the holdings poll read every coin (booked 2026-10-22, 167.2.1.1 plan 01 decision PD-E, DATA INTEGRITY)
 
 **Reading.** The derive anchor (`fetch_usdt_balance_with_status`) reads only the USDT coin. The reconstruct anchor and the holdings poll sum every stable coin. For an account holding a non-USDT coin the three paths disagree by that coin's balance. Pinned by `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin`. Exposure is unmeasured until the D-01 live read.
 
 **Owner / Trigger:** founder routing. Trigger: the D-01 probe reports `non_usdt_coins_present` true for any key. Closed when the derive anchor covers every coin as the reconstruct does, or the restriction is decided and documented, with the pinning test flipped.
+
+2026-11-02 (Phase 176 LEGACYRETIRE): unaffected. `_fetch_current_equity` survives for the Binance mark, so `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin` still compares the derive anchor with it. **Stays open.**
 
 ### 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY — Bybit positions are read for USDT-settled linear contracts only, so other settle categories carry uPnL the anchor does not add (booked 2026-10-22, 167.2.1.1 RESEARCH, DATA INTEGRITY)
 
@@ -13180,11 +13201,15 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 
 **Owner / Trigger:** founder routing, candidate Phase 167.2.1.1.1.1 MARKSOURCE. Trigger: the D-01 probe reports `non_usdt_upnl_present` true or `positions_upnl_matches_totalperpupl` false for any key. Closed when the anchor and holdings read every settle category (or the account `totalPerpUPL`), with a test.
 
+**NARROWED 2026-11-02 (Phase 176 LEGACYRETIRE).** The reconstruct anchor, the forced-rebuild `positions_unreadable` refusal and the D-01 probe were deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0), and the Bybit mark reads the Unified Trading Account totals. What stays is the holdings poll, which still lists USDT-settled linear positions only. **Stays open** for that half, with the trigger and owner unchanged.
+
 ### 167.2.1.1-BINANCE-FUTURES-WALLET-UNREAD — Binance is read with ccxt's default spot type, so a futures account's collateral never reaches any path (booked 2026-10-22, 167.2.1.1 plan 02 decision PD-D, DATA INTEGRITY)
 
 **Reading.** Binance is read with ccxt's default spot type, so `fetch_balance()` returns the spot wallet while `fetch_positions()` returns USD-M futures positions. A futures account's collateral never reaches the derive anchor, the reconstruct anchor or the holdings spot rows. If Binance is ever read with a futures type, `total` already includes uPnL and the reconstruct additive path double counts. No Binance key exists (2026-10-22 census), so no stored series is affected, and D-03 rules out a PROD step.
 
 **Owner / Trigger:** unowned until a Binance key connects. Trigger: the first active Binance key, or `test_binance_tripwire_repo_reads_the_spot_wallet_only` going red. Closed when the futures wallet is read and the skip set and the derive wedge change together, with real-parser tests.
+
+**NARROWED 2026-11-02 (Phase 176 LEGACYRETIRE).** The reconstruct anchor path this named was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); `_fetch_current_equity` now serves the Binance mark only. The derive anchor and the holdings spot rows still read the spot wallet. **Stays open** for those halves, with the trigger and owner unchanged.
 
 ### 167.2.1.1-MULTIKEY-RECOMPUTE — a forced reconstruct cannot re-anchor an allocator that has any other api_keys row (booked 2026-10-22, 167.2.1.1 plan 04, DATA INTEGRITY, FOUNDER DECISION, CLOSED 2026-10-22)
 
@@ -13210,6 +13235,8 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **Not fixed by NAVMTM.** D-17 (founder 2026-10-26, "Use Bybit's account total (Recommended)") moved only the MARK path to the Unified Trading Account totals (plan 18). The history rebuild's anchor is unchanged on both paths, by scope: it belongs to the history rebuild, not to NAVMTM.
 
 **Owner / Trigger:** founder routing, the history rebuild (ACCTREBUILD line). Trigger: any Bybit key whose `totalPerpUPL` differs from its USDT-linear position sum, as plan 11's pre-merge dry run or a forced-rebuild `positions_unreadable` shows. Closed when the unforced Bybit anchor either reads the account totals (as the mark does) or refuses or flags a partial uPnL by name, with a test that fails on today's silent partial read.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the unforced reconstruct anchor, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. The Bybit mark reads the Unified Trading Account totals (NAVMTM D-17), and `_fetch_current_equity` has no unforced production caller left.
 
 ### 167.2.1.1.1-REFUSAL-TOKEN-REDACTED — the worker's nav-mark refusal log line never shows its token (booked 2026-11-02, NAVMTM plan 14 SC-4 reading, DIAGNOSTIC)
 
@@ -13256,6 +13283,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **CLOSED 2026-10-23 for `account_key_not_working` (founder, verbatim: "Accept as recorded (Recommended)").** The four accounts keep their stored histories; a rebuild becomes possible once their Bybit key is reconnected. The remaining tokens were not hit, so nothing else is decided here.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the forced account rebuild and its refusal vocabulary (`_crawl_whole_account`, `FORCED_REBUILD_ACCOUNT_REASONS`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read.
+
 ### 167.2.1.1.2-WEALTH-RETURNS-CAPLOG-FLAKE — a wealth-returns test counts every WARNING on its worker, so a stray urllib3 retry reds the python job (booked 2026-10-23, CI)
 
 **Reading.** `test_malformed_records_are_skipped_with_one_warning_naming_the_series` in `analytics-service/tests/test_wealth_returns.py` asserts exactly one WARNING record from `caplog`, without filtering by logger. On PR #1119 (2026-10-23) a `urllib3.connectionpool` "Retrying" WARNING from another test's background connection on the same xdist worker landed inside its capture: `assert 2 == 1`. The re-run was green. The PR changed no Python.
@@ -13276,11 +13305,15 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Owner / Trigger:** unowned until a Binance key connects; related to `167.2.1.1-BINANCE-FUTURES-WALLET-UNREAD`. Trigger: the first active Binance key. Closed when the read iterates the account's symbols, with a test.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the rebuild's trade read (`_fetch_trades_paginated_one_pass`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read.
+
 ### 167.2.1.1.2.1-BYBIT-TRADES-LINEAR-ONLY — the rebuild reads Bybit executions in ccxt's default category only, so non-linear fills never reach the replay (booked 2026-10-23, 167.2.1.1.2.1 RESEARCH, DATA INTEGRITY)
 
 **Reading.** The allocator rebuild reads Bybit executions in ccxt's default category, linear, only: spot, inverse and option fills never reach the replay. The strategy sync reads linear only too (`_BYBIT_FILL_CATEGORIES` in `analytics-service/services/exchange.py`). Related, not the same: `167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY` (positions).
 
 **Owner / Trigger:** unowned. Trigger: a Bybit account holding non-linear fills, or a founder request. Closed when each category the account trades is read, with a test.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the allocator rebuild's Bybit execution read, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. The strategy sync's linear-only fill read (`_BYBIT_FILL_CATEGORIES` in `analytics-service/services/exchange.py`) is a different path, was named here only as related, and is unchanged.
 
 ### 167.2.1.1.2.1-READ-CEILING-STRANDS-ACCOUNT — an allocator account above a trade-read ceiling now refuses on every attempt and gets no history (booked 2026-10-26, 167.2.1.1.2.1 review round 2 WR-04, DATA INTEGRITY, user-facing)
 
@@ -13291,6 +13324,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 **Measured 2026-10-26 (post-deploy probe, counts only).** The trigger fired: account a6 (a Bybit member, 730-day window) read 127471 trades over 1378 calls and ended with failure class `truncated`; its probe record is not comparable and nothing was rebuilt (founder, "Rebuild none, book follow-ups"). Four of the probe's six accounts have no working key (`account_key_not_working`), so this ceiling is the only read problem seen on an account that has one working Bybit key.
 
 **Measured 2026-10-28 (Phase 171 SC-3, post-deploy probe, counts only).** a6 read-in-full, 203279 trades over 2158 calls in 1048 s, site none. Phase 171 (v0.133.4.0, #1138) continues a Bybit window past the 100-page ceiling inside one run and, for a book too big for one claim, resumes across claims; this probe read exercised the first layer only, and at 1048 s it is over the 900 s claim budget, so a real a6 job would resume across claims. Not closed: the OKX per-type ceiling and the one-millisecond group named in this entry are not changed by Phase 171.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the rebuild's trade read and its ceilings (`TruncatedTradeRead`, `TRUNCATED_READ_SITES`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. Phase 171's claim-budget machinery went with it. The measured readings above stand as the record.
 
 
 ### 167.2.1.1.2.1-OKX-ANCHOR-IMPLAUSIBLE — an OKX allocator account's forced read is refused `anchor_skipped_implausible`, so its history cannot be rebuilt (booked 2026-10-26, 167.2.1.1.2.1 plan 06 probe, DATA INTEGRITY, user-facing)
@@ -13308,6 +13343,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 **CLOSED 2026-10-28.**
 
 **Measured 2026-10-29 (Phase 179 OKXBILLSCHAIN, 0.02 deployed, counts only).** `sc3-deployed: a4 anchored (opening_check=measured residual=-0.0138)`, with `bills_read=1492`, `member_refusal=none` and the 5x advisory arm still `implausible` (`anchor_over_replay=11.2`). Confirms the paragraph above: a4 still anchors at 0.02. The entry stays closed.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the forced OKX read and its opening gate (`_okx_forced_opening_check`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. `services/okx_opening_balance.py` and `services/okx_bills_chain.py` stay as modules with no production caller (named in `176-RECONSTRUCT-CAP-MARKER-INERT`). The Phase 172, 173 and 179 readings above stand as the record, and a4's stored history stays as recorded.
 
 ### 167.2.1.1.2.1-OKX-ORDER-UNMEASURED — the live OKX fills ordering (newest first) has no reading on a multi-page read (booked 2026-10-26, 167.2.1.1.2.1 plan 06 probe, DATA INTEGRITY, gates any OKX rebuild, CLOSED 2026-10-28)
 
@@ -13329,6 +13366,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Measured 2026-10-29 (Phase 180 BYBITFUNDING, counts only).** `bybit-transfers-kinds: a6 deposits=0 withdrawals=0 gate=unmeasured cause=neither_older_365d`; `bybit-unified: a6 state=read in=4 out=2 sign_mismatch=0`; `bybit-transfers: unmeasured (a6)`. From Phase 180 the per-kind counts come from the Unified edge (D-01), so a per-kind 0 now means no Unified-edge move that old and the `cause=` names which: here `neither_older_365d`, no deposit and no withdrawal older than 365 days on the edge. The gate stays shut under carried Phase 173 D-02, because a6 has no move that old to measure, so it may never read `ok` on a re-probe alone; the entry stays open.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the 730-day Bybit rebuild this reading gated, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read.
+
 ## Phase 167.2.1.1.1.1 (MARKSOURCE) — routed items (logged 2026-10-27)
 
 ### 167.2.1.1.1.1-OKX-DOUBLE-COUNT-BEYOND-REBUILD-WINDOW — OKX open profit stays counted twice in the stored rows no product path can rewrite (booked 2026-10-27, Phase 167.2.1.1.1.1 MARKSOURCE D-05, DATA INTEGRITY, user-facing)
@@ -13341,11 +13380,15 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Measured 2026-10-31 (MARKSOURCE plan 14, counts only).** Suspect days in the 90-day window: a1 71, a2 71, a5 29; outside it: a1 43, a2 43, a5 0. All three read `recorded, not recomputed (D-06)`; nothing was written to PROD. a2's maximum share of 0.516 is a 2026-10-15 price-gap dip (BTC left out of that day's total), not a double count, and is booked as Phase 182 SPIKEREPAIR. **Stays open.**
 
+**NARROWED 2026-11-02 (Phase 176 LEGACYRETIRE).** Store (1), the `allocator_equity_snapshots` rows older than the 90-day rebuild window, goes with the table: `supabase/migrations/20261104120000_drop_allocator_equity_snapshots.sql` drops it, closed by that migration's PROD apply (Phase 176 plan 16 reads it), and the forced rebuild that was its only recompute path was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0). The snapshot-side census column has no table left to count. Store (2) stays: the `allocator_holdings` USDT rows of an OKX-holding allocator still carry the double count, and no product path rewrites them. Store (3) stays: the append-only scenario-commit audit sizes keep their figure. Trigger and owner are unchanged. **Stays open.**
+
 ### 167.2.1.1.1.1-MT5-BTC-MISSING-CLOSE-LEGACY-EXCLUSION — a BTC-unit MT5 account whose closed-day BTC close is missing is left out of the legacy snapshot row, so that row is short by the account (booked 2026-10-27, Phase 167.2.1.1.1.1 MARKSOURCE D-08, DATA INTEGRITY)
 
 **Reading.** When the stored daily BTC close for the mark day is missing, the poll declares the account unpriced (the `native_unpriced:<key>` marker) and `_fetch_latest_holdings_per_eligible_key` reads that marker through `read_native_unpriced_days`, leaves the account out of the day's legacy row and counts it as `native_unpriced_accounts` in the refresh audit. It is not a hold: the row is written without the account. Pinned by `test_excluded_native_unpriced_mt5_is_left_out`. The legacy row is therefore short by that account's value on those days, while the derived curve refuses that day's mark (NAVMTM D-07), so the two curves do not claim agreement there. Accepted by the founder 2026-10-27 ("Accept, named in runbook", D-08); the runbook names it in "What the legacy curve leaves out" and the first-night reading `reading-f` counts it.
 
 **Owner / Trigger:** unowned. Trigger: the legacy-curve retirement phase (CONTEXT deferred, booked by the orchestrator), or a readout where the stored daily close arrives too late for the night's refresh. Closed when the stored close is present for every mark day or the legacy curve is retired.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, SC-3).** The closing condition above, "the legacy curve is retired", is met by `supabase/migrations/20261104120000_drop_allocator_equity_snapshots.sql`, which drops `allocator_equity_snapshots`; it is closed by that migration's PROD apply, which Phase 176 plan 16 reads, and this paragraph does not claim the apply has happened. The legacy row that was short by the account has no table to live in, and the writer that left the account out was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0). The marked series has its own rule for the case: when the stored daily BTC close is missing, the NAV mark refuses that day by name (NAVMTM D-07) instead of writing a total that is short by the account, so nothing is left short on a curve that is shown.
 
 ### 167.2.1.1.1.1-SFOX-NONSTABLE-LEGACY-EXCLUSION — sFOX non-stable balances are skipped by the holdings poll, so the legacy snapshot row is short by them while sFOX's NAV mark counts them (booked 2026-10-27, Phase 167.2.1.1.1.1 MARKSOURCE D-08, DATA INTEGRITY)
 
@@ -13353,11 +13396,15 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Owner / Trigger:** unowned. Trigger: sFOX go-live with an account that holds a non-stable asset, or the legacy-curve retirement phase (CONTEXT deferred, booked by the orchestrator). Closed by the deferred sFOX `get_balance_history` NAV anchor named in that module's docstring, or by retiring the legacy curve.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, SC-3).** The closing condition above, "retiring the legacy curve", is met by `supabase/migrations/20261104120000_drop_allocator_equity_snapshots.sql`, which drops `allocator_equity_snapshots`; it is closed by that migration's PROD apply, which Phase 176 plan 16 reads, and this paragraph does not claim the apply has happened. The legacy row that was short by the non-stable balances has no table to live in, and its writer was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0). The marked series has its own rule for the case: sFOX's NAV mark counts those balances, so no curve that is shown is left short.
+
 ### 167.2.1.1.1.1-BINANCE-ANCHOR-UNPRICED-REFUSES — a Binance coin with no usable ticker price still refuses the reconstruct anchor, because the D-10 dust sizing covers the NAV mark only (booked 2026-10-28, Phase 167.2.1.1.1.1 MARKSOURCE review round, DATA INTEGRITY)
 
 **Reading.** The D-10 dust sizing (`_drop_binance_dust_unpriced`) sizes a Binance coin that has no usable ticker price from its newest priced `allocator_holdings` row, so a dust coin no longer refuses the daily NAV mark. `_fetch_and_price_window`, the reconstruct anchor path, is handed no allocator id and no key ids, so it cannot make that read and the anchor path was left alone: a Binance coin with no usable ticker price still refuses the anchor with `anchor_skipped_partial_ticker`, whatever its size. Related limit: a strategy-manager key has no `allocator_holdings` rows, so its unpriced coins fail closed on both paths, the mark and the anchor.
 
 **Owner / Trigger:** a follow-up phase, to be booked by the orchestrator. Trigger: the first anchor refusal `anchor_skipped_partial_ticker` on a Binance key, or that phase's booking. Closed when the anchor path sizes an unpriced Binance coin by the same rule as the mark, or the founder rules the refusal intended.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the reconstruct anchor path (`_fetch_and_price_window`), was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. The mark path's D-10 dust sizing is unchanged.
 
 ### 167.2.1.1.1.1-OKX-OPTION-READ-429-MASKED — a 429 on the OKX option-positions read is masked as `option_value_unreadable` with no cooldown stamp (booked 2026-10-28, Phase 167.2.1.1.1.1 MARKSOURCE final review round, OBSERVABILITY)
 
@@ -13373,6 +13420,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Owner / Trigger:** unowned. Trigger: a forced OKX rebuild whose replay ends at or below zero, or any plan to rebuild an OKX account. Closed when that case runs the bills check or is refused by name, with a test.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the forced OKX rebuild whose anchor offset went ungated, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read.
+
 ### 172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT — the OKX opening tolerance rests on one measured account (booked 2026-10-28, Phase 172 plan 03, DATA INTEGRITY)
 
 **Reading.** `OPENING_TOLERANCE_REL = 0.05` was chosen at plan 03 from a single account, a4, on a partial bills walk the shipped oracle refuses. Phase 172's post-deploy complete walk recorded `tolerance-basis: opening_check=unavailable reason=chain_break residual=field-absent bills_read=1489 bal_over_cashbal=1`, so no account has a measured residual yet: the residual is field-absent (unmeasured). Founder 2026-10-28: "Keep 0.05, re-decide later (Recommended)". The constant can only fire on a measured opening, so it has not decided any rebuild yet.
@@ -13382,6 +13431,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 **Measured 2026-10-28 (Phase 179 OKXBILLSCHAIN SC-3, counts only).** `tolerance-basis: opening_check=measured reason=none residual=-0.0136 bills_read=1490 bal_over_cashbal=1`, the first measured residual (a4, complete walk). Recommended by the 172-05 step 9b rule: keep 0.05. Founder 2026-10-28: "Tighten to 2%". After-value: 0.02, pending a Phase 179 replan that adds the change with its test (`OPENING_TOLERANCE_REL` stays 0.05 in code until it ships). Not closed: its condition needs a second OKX account's residual; a4 is still the only measured account.
 
 **Measured 2026-10-29 (Phase 179 OKXBILLSCHAIN, 0.02 deployed, counts only).** D-08's change shipped in Phase 179 plan 06 (v0.133.9.2, PR #1149): `OPENING_TOLERANCE_REL` is 0.02 and the deployed import check ends ` 0.02 1E-12 True False`, equal to the check computed from the deployed commit. The founder-approved read-only probe re-read a4 on that value: `sc3-deployed: a4 anchored (opening_check=measured residual=-0.0138)`, inside 0.02 with 0.0062 of room (it was -0.0136 on 2026-10-28; the 90-day window slid). Nothing was enqueued or written. Not closed: its condition needs a second OKX account's residual; a4 is still the only measured account.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the rebuild that `OPENING_TOLERANCE_REL` would have decided, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. The constant (0.02) lives in `services/okx_opening_balance.py`, whose only importers are the other orphaned chain module and a script, so it decides nothing.
 
 ## Phase 173 (REBUILDGATES) — routed items (logged 2026-10-28)
 
@@ -13401,6 +13452,8 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Measured 2026-10-29 (Phase 180 BYBITFUNDING, counts only).** `bybit-transfers: unmeasured (a6)`; a6 `cause=neither_older_365d`, `explained=explained`, `census=0`. Founder rebuild decision (2026-10-29, only `hold` and `as-recorded` offered): `rebuild-decision: Hold (Recommended)`, `rebuild-option: hold`. `rebuilds-enqueued: 0`. The entry stays open. Trigger: `bybit-transfers: ok` for a6 on a later probe (which needs a deposit and a withdrawal older than 365 days on the Unified edge), or the founder choosing `as-recorded`.
 
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the rebuild path a6's stored 730-day history was held back from, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. With no rebuild path, a6's history stays as recorded by construction; the founder's `go` of 2026-11-01 (D-08 in `176-CONTEXT.md`) is what removed the path.
+
 ## Phase 180 (BYBITFUNDING) — routed items (logged 2026-10-29)
 
 ### 180-BYBIT-LIVE-FLOW-KINDS — the live NAV / composite derive and broker-dailies Bybit readers keep their on-chain deposit and withdrawal kinds (booked 2026-10-29, Phase 180 D-02, DATA INTEGRITY)
@@ -13409,11 +13462,15 @@ The CONTEXT census (2026-10-22) counts okx, deribit and mt5 keys beside the Bybi
 
 **Owner / Trigger:** the follow-up phase the orchestrator books per D-02, with its own measurement (named here once booked; unowned until then). Trigger: that booking, or any Bybit account whose live NAV and rebuilt history disagree on a flow day. Closed when the live readers read the same kinds with their own measurement, or the founder rules otherwise.
 
+**NARROWED 2026-11-02 (Phase 176 LEGACYRETIRE).** The rebuilt-history half of the comparison is gone: the rebuild that read the Unified-edge kinds was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0). The live readers (`run_derive_broker_dailies_job`, `run_stitch_composite_job`) still read only the on-chain deposit and withdrawal pair through `fetch_ccxt_transfers`, so an account funded off-chain is still read from one set of flows only. The Unified-transfer gap the founder's pre-delete check found is the subject of a separate fix phase. **Stays open.**
+
 ### 180-BYBIT-EARN-FLOWS-UNREAD — Earn, staking, bonus and PEF transaction-log moves are not read as Bybit rebuild flows (booked 2026-10-29, Phase 180 orchestrator reading 3, DATA INTEGRITY)
 
 **Reading.** The rebuild reads only `TRANSFER_IN` and `TRANSFER_OUT` from the Unified transaction log (plan 04); the probe's census over the eight candidate types (`CENSUS_LOG_TYPES`, plan 02) read a6 census=0 census_state=read; a non-zero count means money moved through those types and the Unified-edge replay does not see it. Related limit, recorded here once: a sub-account key cannot read the master-only withdrawal endpoint (`withdraw_all` reads `not-master` on a6), so withdrawals of every type are not evidenced for such a key.
 
 **Owner / Trigger:** unowned. Trigger: a non-zero census on any Bybit account a rebuild is planned for. Closed when those types are classified as flows or not with their own measurement, or the founder rules them out of scope.
+
+**CLOSED 2026-11-02 (Phase 176 LEGACYRETIRE, triage).** Its subject, the Unified-edge rebuild replay that was blind to those log types, was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0); there is nothing left to refuse, measure or read. `fetch_bybit_unified_flows` stays in `services/bybit_unified_flows.py` with no production caller.
 
 ## Phase 176 (LEGACYRETIRE) — routed items (logged 2026-10-31)
 

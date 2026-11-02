@@ -39,6 +39,21 @@
  *      is missing from the manifest, exit 1 with a specific error message
  *      naming the missing table.
  *
+ * A TABLE DROPPED BY A LATER MIGRATION IS NOT DECLARED (2026-10-31, Phase 176
+ * LEGACYRETIRE plan 14)
+ * ---------------------------------------------------------------------------
+ * Both migration scans used to read CREATE TABLE only, so a table that a later
+ * migration dropped stayed "declared" forever: a dropped user-owned table kept
+ * demanding a USER_EXPORT_TABLES entry for a table no data subject has, and the
+ * only way through was an EXCLUDED_TABLES key, which the block above forbids as
+ * a remedy. Both scans now process migrations in filename order and keep, per
+ * table, its LAST DDL event: a `DROP TABLE [IF EXISTS] [public.]name` after the
+ * last CREATE removes it, and a CREATE after the drop brings it back (so a
+ * re-created user-owned table is required again). Only an unqualified or
+ * `public.`-qualified drop counts, a drop inside a SQL comment is ignored, and
+ * both rules err toward KEEPING a table in the required set, because the cost of
+ * a wrong "dropped" is a user-owned table silently missing from every export.
+ *
  * False-positive tolerance
  * ------------------------
  * The parser tolerates a small allowlist of tables that genuinely don't
@@ -370,19 +385,6 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
   allocator_equity_derived: {
     reason:
       "Derived allocator $-equity surface (migration 20260717233529). ON DELETE CASCADE from auth.users erases every row when the user is sanitized. No explicit sanitize_user matrix row needed; mirrors the csv_daily_returns_per_key / scenarios CASCADE-erasure allowlist pattern.",
-  },
-  // allocator_equity_snapshots: user-owned via allocator_id (=
-  // api_keys.user_id), the f5 owner-coherence trigger keeps the
-  // relationship inviolate. The sanitize_user PURGE on api_keys
-  // does NOT cascade to allocator_equity_snapshots (no FK ON DELETE
-  // CASCADE today); the table is intentionally PRESERVE so the
-  // anonymized profile's historical equity curve survives for any
-  // future audit. If a future PR adds a CASCADE FK or chooses
-  // PURGE, REMOVE this allowlist entry and add a matching row to
-  // the sanitize matrix.
-  allocator_equity_snapshots: {
-    reason:
-      "PRESERVE-historical: equity curve tied to the anonymized profile; no PII left after profiles anonymize. Matches the portfolio_analytics/weight_snapshots PRESERVE policy in the existing matrix.",
   },
   allocator_holdings: {
     reason:
@@ -780,7 +782,7 @@ export function extractManifestEntries(
  * real SQL parser when one is added to the dependency set.
  */
 function scanMigrationsForUserTables(): Map<string, string> {
-  const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql"));
+  const files = listMigrationFiles();
   const declarations = new Map<string, string>();
 
   for (const filename of files) {
@@ -861,6 +863,16 @@ export function extractUserTablesFromMigration(
   const userColumnRe =
     /(?:\b(user_id|allocator_id|invited_by|created_by|uploaded_by|decided_by|edited_by_user_id|processed_by|updated_by|granted_by)\s+UUID[^,]*REFERENCES\s+(?:auth\.users|profiles)\b|\b(user_id|allocator_id)\s+UUID\s+NOT\s+NULL\b)/i;
 
+  // Phase 176 LEGACYRETIRE plan 14: DECLARE/DROP events are applied in the
+  // order they sit in the file (`index`), so `DROP` then `CREATE` in one
+  // migration leaves the table declared and `CREATE` then `DROP` does not.
+  // A DROP removes the table from `declarations`; a later CREATE sets it again
+  // (first declaration AFTER the drop wins, so the error names the migration
+  // that brought the table back).
+  const events: Array<
+    { index: number; kind: "declare"; table: string } | { index: number; kind: "drop"; table: string }
+  > = [];
+
   createTableRe.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = createTableRe.exec(scrubbed)) !== null) {
@@ -870,10 +882,9 @@ export function extractUserTablesFromMigration(
     const body = match[3];
 
     if (tableName in EXCLUDED_TABLES) continue;
-    if (declarations.has(tableName)) continue; // first decl wins
 
     if (userColumnRe.test(body)) {
-      declarations.set(tableName, filename);
+      events.push({ index: match.index, kind: "declare", table: tableName });
     }
   }
 
@@ -908,14 +919,90 @@ export function extractUserTablesFromMigration(
     const columnSpec = match[3];
 
     if (tableName in EXCLUDED_TABLES) continue;
-    if (declarations.has(tableName)) continue; // first decl wins
 
     if (userColumnRe.test(columnSpec)) {
-      declarations.set(tableName, filename);
+      events.push({ index: match.index, kind: "declare", table: tableName });
+    }
+  }
+
+  for (const d of findDropTableEvents(scrubbed)) {
+    events.push({ index: d.index, kind: "drop", table: d.table });
+  }
+
+  events.sort((a, b) => a.index - b.index);
+  for (const ev of events) {
+    if (ev.kind === "drop") {
+      declarations.delete(ev.table);
+    } else if (!declarations.has(ev.table)) {
+      declarations.set(ev.table, filename); // first decl wins
     }
   }
 
   return declarations;
+}
+
+/**
+ * Phase 176 LEGACYRETIRE plan 14: a DROP TABLE event, with the offset of the
+ * statement in the text it was scanned from so callers can order it against
+ * CREATE/ALTER events in the same file.
+ */
+interface DropEvent {
+  table: string;
+  index: number;
+}
+
+/**
+ * Same text as `content` with every comment character replaced by a space, so
+ * offsets found in the masked text are valid offsets in `content`. Newlines
+ * survive so line structure is unchanged.
+ */
+function maskSqlComments(content: string): string {
+  // One pass, first opener wins (see stripSqlComments).
+  return content.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, (m) =>
+    m.replace(/[^\n]/g, " "),
+  );
+}
+
+/**
+ * Every `DROP TABLE [IF EXISTS] name[, name...] [CASCADE|RESTRICT];` in
+ * `commentFree` (text already scrubbed or masked of comments). Quoted and bare
+ * names are both accepted. A name qualified with a schema other than `public`
+ * is skipped: the CREATE scans key tables by bare name whatever their schema,
+ * so honouring `scratch.t` would drop an unrelated public `t` from the
+ * required set, which is the unsafe direction. A DROP inside a dollar-quoted
+ * body (a DO block or a function body) is skipped too: it may be conditional or
+ * never called, so it is no proof the table is gone.
+ */
+function findDropTableEvents(commentFree: string): DropEvent[] {
+  const events: DropEvent[] = [];
+  // Blank dollar-quoted bodies with spaces (newlines kept), so offsets still
+  // line up with `commentFree`.
+  const topLevel = commentFree.replace(
+    /\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$/g,
+    (b) => b.replace(/[^\n]/g, " "),
+  );
+  const dropRe = /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([^;]*);/gi;
+  const nameRe =
+    /^(?:(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\.\s*)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))$/i;
+  let m: RegExpExecArray | null;
+  while ((m = dropRe.exec(topLevel)) !== null) {
+    const list = m[1].replace(/\s+(?:CASCADE|RESTRICT)\s*$/i, "");
+    for (const raw of list.split(",")) {
+      const nm = nameRe.exec(raw.trim());
+      if (!nm) continue;
+      const schema = nm[1] ?? nm[2];
+      if (schema !== undefined && schema.toLowerCase() !== "public") continue;
+      events.push({ table: (nm[3] ?? nm[4]).toLowerCase(), index: m.index });
+    }
+  }
+  return events;
+}
+
+/** Migration filenames in the order Supabase applies them (filename order). */
+function listMigrationFiles(): string[] {
+  return readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
 }
 
 /**
@@ -926,9 +1013,15 @@ export function extractUserTablesFromMigration(
  * elsewhere keep their line structure.
  */
 function stripSqlComments(content: string): string {
-  const BLOCK_COMMENT = new RegExp("/\\*[\\s\\S]*?\\*/", "g");
-  const LINE_COMMENT = /--[^\n]*/g;
-  return content.replace(BLOCK_COMMENT, "\n").replace(LINE_COMMENT, "");
+  // Phase 176 LEGACYRETIRE plan 14: ONE pass, whichever comment opens first
+  // wins. The two-pass form (block comments first, then line comments) treated
+  // the `/*` inside a line comment such as `-- applies supabase/migrations/**
+  // to main` as the start of a block comment and deleted everything up to the
+  // next `*/` in the file, which hid the DROP TABLE of the 20261104120000
+  // migration from the scan. In SQL a `/*` after `--` is inert text.
+  return content.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, (m) =>
+    m.startsWith("/*") ? "\n" : "",
+  );
 }
 
 /**
@@ -942,7 +1035,7 @@ function stripSqlComments(content: string): string {
  */
 export function collectAllDeclaredTables(): Set<string> {
   const out = new Set<string>();
-  const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql"));
+  const files = listMigrationFiles();
   for (const filename of files) {
     const content = readFileSync(join(MIGRATIONS_DIR, filename), "utf8");
     extractAllDeclaredTablesFromContent(content, out);
@@ -959,9 +1052,22 @@ export function extractAllDeclaredTablesFromContent(
 ): Set<string> {
   const createTableRe =
     /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-z0-9_]+)\s*\(/gi;
+  // Phase 176 LEGACYRETIRE plan 14: CREATE and DROP events are applied in file
+  // order, so a table whose last event is a DROP is not declared. The CREATE
+  // scan keeps reading the raw `content` (unchanged behaviour); the DROP scan
+  // reads a comment-masked copy whose offsets line up with it.
+  const events: Array<{ index: number; kind: "declare" | "drop"; table: string }> = [];
   let m: RegExpExecArray | null;
   while ((m = createTableRe.exec(content)) !== null) {
-    out.add(m[1]);
+    events.push({ index: m.index, kind: "declare", table: m[1] });
+  }
+  for (const d of findDropTableEvents(maskSqlComments(content))) {
+    events.push({ index: d.index, kind: "drop", table: d.table });
+  }
+  events.sort((a, b) => a.index - b.index);
+  for (const ev of events) {
+    if (ev.kind === "drop") out.delete(ev.table);
+    else out.add(ev.table);
   }
   return out;
 }

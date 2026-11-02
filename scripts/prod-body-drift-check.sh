@@ -622,7 +622,10 @@ else
   # that "could not measure" never lands there. `set -e` would have caught it;
   # the `|| true` was what defeated `set -e`.
   set +e
-  git diff --diff-filter=ACMR --name-only "$MERGE_BASE"...HEAD -- 'supabase/migrations/*.sql' > "$TMP/changed.txt"
+  # `:(glob)` keeps `*` from crossing `/`. A plain pathspec `*` also matched
+  # supabase/migrations/down/*-rollback.sql, the manual off-path rollbacks, which
+  # re-create functions whose snapshots the forward migration deleted.
+  git diff --diff-filter=ACMR --name-only "$MERGE_BASE"...HEAD -- ':(glob)supabase/migrations/*.sql' > "$TMP/changed.txt"
   _diff_rc=$?
   set -e
   [ "$_diff_rc" -eq 0 ] || fail "MEASURE_FAIL: could not enumerate this PR's migration changes (git diff exited ${_diff_rc} against merge base ${MERGE_BASE}). An unreadable file list is not an empty one, and this gate must not read it as 'nothing changed'."

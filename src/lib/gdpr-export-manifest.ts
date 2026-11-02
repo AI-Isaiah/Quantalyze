@@ -614,8 +614,8 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // Phase 115.1 (migration 20260717233529): allocator_equity_derived is
   // user-owned via allocator_id (= api_keys.user_id at derive time). It stores
   // the derived allocator $-equity curve PLUS per-key real flows + USD magnitudes
-  // (payload.curve[].equity_usd, key_inputs:<id> flows) — the same sensitivity
-  // class as allocator_equity_snapshots.value_usd, which is already exported.
+  // (payload.curve[].equity_usd, key_inputs:<id> flows) — personal financial
+  // data of the same kind as the per-key api_key_nav_marks rows exported below.
   // GDPR Art. 15 requires it be part of the user's export. Erasure is the
   // ON DELETE CASCADE from auth.users (the sanitize path), so the sanitize_user
   // matrix needs no explicit row — recorded in SANITIZE_PARITY_ALLOWLIST in
@@ -625,11 +625,9 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // NOT NULL + unique within an allocator's rows) — without it getOrderColumn's
   // `.order("id")` fallback would raise 42703 and 500 the export (NEW-C16-01).
   { kind: "direct", table: "allocator_equity_derived", user_column: "allocator_id" },
-  // Phase 07 (migration 070): allocator_equity_snapshots is user-owned via
-  // allocator_id (= api_keys.user_id, enforced by the same owner-coherence
-  // trigger as allocator_holdings). Per-day equity history is personal data —
-  // GDPR Art. 15 requires it be part of the user's export.
-  { kind: "direct", table: "allocator_equity_snapshots", user_column: "allocator_id" },
+  // Phase 176 LEGACYRETIRE (D-02): the legacy per-day equity table that stood
+  // here was dropped by migration 20261104120000, so it is no longer exported.
+  // allocator_equity_derived above carries the allocator's equity history.
   // Phase 06 (migration 066): allocator_holdings is user-owned via
   // allocator_id (= api_keys.user_id, enforced by the f5 owner-coherence
   // trigger). Exchange positions + balances are personal data —
@@ -640,7 +638,7 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // user-owned via allocator_id (= api_keys.user_id, enforced by the
   // enforce_api_key_nav_marks_owner_coherence trigger). Each row is the
   // owner's marked-to-market NAV and open profit for one key and day, the same
-  // sensitivity class as allocator_equity_snapshots.value_usd, so GDPR Art. 15
+  // sensitivity class as allocator_equity_derived's payload.curve[].equity_usd, so GDPR Art. 15
   // requires it in the export. Erasure is the ON DELETE CASCADE from auth.users
   // and from api_keys (D-06), recorded in SANITIZE_PARITY_ALLOWLIST in
   // scripts/check-gdpr-export-coverage.ts. The table has a surrogate `id`
@@ -968,13 +966,12 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
  * NEW-C16-01 (audit 2026-05-26, CRITICAL): the previous
  * `getOrderColumn` returned `"id"` for every non-audit spec on the
  * stale assumption that "every user-owned table has an `id` UUID
- * column". Seven manifest tables have composite/natural PKs and NO `id`
+ * column". Six manifest tables have composite/natural PKs and NO `id`
  * column — verified against `src/lib/database.types.ts`:
  *   - `user_app_roles`          PK (user_id, role)              — order by granted_at
  *   - `user_favorites`          PK (user_id, strategy_id)       — order by created_at
  *   - `allocator_preferences`   keyed on user_id                — order by updated_at
  *   - `portfolio_strategies`    PK (portfolio_id, strategy_id)  — order by added_at
- *   - `allocator_equity_snapshots` PK (allocator_id, asof)      — order by asof
  *   - `investor_attestations`   PK (user_id)                    — order by attested_at
  *   - `organization_members`    PK (organization_id, user_id)   — order by joined_at
  * (`csv_daily_returns` USED to be here per NEW-C16-09, but the Phase 35
@@ -1008,7 +1005,6 @@ export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
   user_favorites: "created_at",
   allocator_preferences: "updated_at",
   portfolio_strategies: "added_at",
-  allocator_equity_snapshots: "asof",
   investor_attestations: "attested_at",
   organization_members: "joined_at",
   // csv_daily_returns is intentionally ABSENT: the Phase 35 per-key-axis

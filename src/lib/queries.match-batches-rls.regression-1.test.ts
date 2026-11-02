@@ -101,7 +101,6 @@ const authedRows: Record<string, unknown[]> = {
   portfolios: [],
   api_keys: [],
   portfolio_alerts: [],
-  allocator_equity_snapshots: [],
   allocator_holdings: [],
   // match_batches intentionally empty for authed — simulates RLS block.
   match_batches: [],

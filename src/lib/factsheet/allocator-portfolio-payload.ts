@@ -68,9 +68,9 @@ export interface AllocatorPortfolioMetadata {
  * This is the bridge that lets the existing factsheet v2 panel components
  * render against a portfolio aggregate without duplicating their math. The
  * blended `equityDailyPoints` is already the server's source of truth
- * (computed by the Python cron from `allocator_equity_snapshots.value_usd`),
- * so this converter just reshapes it; it does NOT re-aggregate from
- * per-strategy series.
+ * (the allocator's derived equity curve, `allocator_equity_derived` kind
+ * `equity_curve`), so this converter just reshapes it; it does NOT
+ * re-aggregate from per-strategy series.
  */
 export function buildAllocatorPortfolioFactsheetPayload(
   equityDailyPoints: DailyPoint[],

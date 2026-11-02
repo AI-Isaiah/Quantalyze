@@ -22,7 +22,6 @@ import pytest
 
 from tests.test_derive_allocator_equity_job import (
     DERIVED_TABLE,
-    LEGACY_TABLE,
     _composed_payload,
     _FakeSupabase,
     _gate_key,
@@ -64,7 +63,7 @@ def _book(alloc: str, cell: dict[str, Any]) -> _FakeSupabase:
             },
         })
     return _FakeSupabase({
-        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [],
+        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived,
     })
 
 

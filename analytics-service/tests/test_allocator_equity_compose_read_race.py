@@ -93,7 +93,6 @@ def _fake(book: Book, *, csv_last: int, ki_last: int) -> _FakeSupabase:
             {"allocator_id": ALLOC, "kind": "equity_curve",
              "payload": {"is_trustworthy": True, "curve": [], "marker": "yesterday"}},
         ],
-        "allocator_equity_snapshots": [],
     })
 
 

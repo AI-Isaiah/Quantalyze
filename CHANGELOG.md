@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.133.17.0] - 2026-11-02 — 176 LEGACYRETIRE PR 3: the legacy allocator equity curve is dropped
+
+### Removed
+- The legacy curve is gone. Migration `20261104120000` drops the table `public.allocator_equity_snapshots` and the functions `replace_allocator_equity_snapshots`, `replace_allocator_equity_snapshots_window`, `extract_symbol_value_at` and `enqueue_refresh_allocator_equity_for_all` (D-02). On PROD this is one-way: the rollback file re-creates an empty table only. The read before the drop counted 952 rows across 4 allocators, from 2025-11-14 to 2026-10-31, with 0 dependent objects and 0 cron jobs naming the table or the fan-out.
+- The My Allocation payload's `snapshotRebuildBoundary` field and its read of the `snapshot_rebuild_boundary` row (nothing rendered it). Also removed from `database.types.ts`: the legacy table and three function types.
+- The derive-compose `LEGACY_TABLE` fake guard (`_LegacyWriteError`, `_guard_legacy`, the legacy select refusal) and the dropped table's entry in 14 test fakes.
+
+### Changed
+- `delete_allocator_api_key(uuid, boolean)` is re-based without the legacy table, with the same ACL, lock and pins. A hard delete of an allocator's last key now also deletes that allocator's derived `equity_curve` row and the deleted key's `key_inputs` row (founder D-09, 2026-11-02: "Delete the derived rows"). So the Exchanges warning "Deleting also removes this account's history." holds. A multi-key delete and a soft disconnect keep the curve. `snapshot_rebuild_boundary` rows in `allocator_equity_derived` are deleted.
+- A data subject's GDPR export no longer includes the dropped table. The export's ordering map and the sanitize-parity allowlist drop it too.
+- `scripts/check-gdpr-export-coverage.ts` now models `DROP TABLE` in both migration scans: the last DDL event wins, in filename order, for public or unqualified names only. A table that is re-created and user-owned is required again.
+- The VAC-04 body-drift gate scans forward migrations only (`:(glob)supabase/migrations/*.sql`), so a `down/` rollback no longer counts as a changed function (review CR-01). The re-based `delete_allocator_api_key` carries its overwrite acknowledgement.
+- A docstring in `services/broker_dailies.py` named the dropped table's column as a consumer; it no longer does.
+
+### Fixed
+- The GDPR coverage checker's comment stripping read `/*` inside a `--` line comment as a block comment, which hid the DDL after it.
+- The checker no longer honours a `DROP TABLE` inside a dollar-quoted function body (review SFH-3).
+
+### Tests
+- New `analytics-service/tests/test_legacy_table_not_named.py`: a whole-service pin that no production code names the dropped table, its replace RPC, `extract_symbol_value_at` or the dropped fan-out. A drill on `services/job_worker.py` proved it bites.
+- `test_api_key_delete_atomicity.sql` is rewritten to prove the delete works with the table gone. Part 3 pins D-09: a last-key delete removes both derived rows, and another allocator's rows survive. A multi-key delete and a soft disconnect keep the curve. It went RED under three neuterings.
+- Four SQL gates are retired: window (15 arms), pre_terminus_flag (2), zero_snapshot_bootstrap (31) and owed_key_reconstruct (20). Retired TS tests include `allocator-equity-rls.test.ts`, `snapshot-rebuild-boundary-literal-pin.test.ts`, the migration 077 last-key snapshot block and the boundary-parser cases. New checker fixtures and a payload-absence test are added.
+- The 176 D-02/D-07 My Allocation block ("the payload reads no legacy curve; snapshotCount counts the drawn derived curve") is carried onto main. It was written for PR 1 but never reached main.
+- Floors lowered, each with its measured reason: mutation `FILES_FLOOR` 83 -> 79 and `ARMS_FLOOR` 859 -> 791; sql-tests `SENTINEL_FLOOR` 27 -> 26 and `ARMS_FLOOR` 408 -> 393; `COMPARED_FLOOR` 136 -> 132. `WAIVED_CEILING` stays 0.
+
+### Notes
+- `TODOS.md` closes the MT5-BTC and sFOX legacy-exclusion entries (by the drop's apply) and narrows the OKX double-count entry to the `allocator_holdings` USDT rows. It also closes, narrows or annotates 25 more legacy-curve entries (SC-3).
+- Expected red until the re-dump after the PROD apply: `baseline-content-drift-check` reports `DRIFT delete_allocator_api_key/2`, and four `baseline-only` `NAME_SET_RATCHET` rows stay until then.
+- Recorded, not fixed (review SFH-1): the drop migration neither unschedules nor checks a cron job that calls the dropped fan-out. D-04 keeps cron moves out of migrations, and PROD and TEST each read 0 such jobs.
+- Known limits (round 3, LOW): the `key_capture:`, `native_unpriced:` and `nav_mark_refusal:` rows outlive a hard delete, because D-09 names only `equity_curve` and `key_inputs`. A compose already running when the last key goes can write its curve once more after the delete.
+
 ## [0.133.16.6] - 2026-11-02 — records: close 167.2.1.1.1 NAVMTM
 
 ### Notes

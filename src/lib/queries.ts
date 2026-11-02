@@ -89,11 +89,6 @@ import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
 import { drainById } from "./drain-by-id";
 import { withPublishedOnly } from "./visibility";
-import {
-  parseSnapshotRebuildBoundary,
-  SNAPSHOT_REBUILD_BOUNDARY_KIND,
-  type SnapshotRebuildBoundary,
-} from "./snapshot-rebuild-boundary";
 import { departedHistoryInclusion, isDepartedKey, type DepartedHistoryKey } from "./departed-history";
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "./nav-marks-start";
 import {
@@ -3342,18 +3337,6 @@ export interface MyAllocationDashboardPayload {
    */
   unpricedNativeAccounts?: UnpricedNativeAccount[];
   /**
-   * Phase 167.2.1.1.2 plan 02 (D-03, AR-3). The date where a rebuilt window of
-   * `allocator_equity_snapshots` meets the older unchanged days, read from the
-   * owner's `allocator_equity_derived` row of kind `snapshot_rebuild_boundary`.
-   * The curve may jump by the open-position profit at that date; the jump is
-   * left in place and this field lets a chart or return name it. `null` means
-   * no row, or a malformed or unreadable one (logged, never a value). No UI
-   * reads it today (RESEARCH OQ-1): the curve on screen is the derived
-   * `equity_curve`, which does not carry the seam. Optional so legacy fixtures
-   * compile; the producer always sets it.
-   */
-  snapshotRebuildBoundary?: SnapshotRebuildBoundary | null;
-  /**
    * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 and the UI-SPEC planner check. The
    * first day recorded (marked-to-market) equity begins for the keys the DRAWN
    * curve includes: the earliest `mark_day` of the allocator-eligible live keys
@@ -4087,7 +4070,7 @@ const KEY_INPUTS_KIND_PREFIX = "key_inputs:";
  * key whose apply was refused names no start; the raw marks table would name one
  * the drawn curve does not contain (round-1 SFH F2).
  *
- * NON-FATAL by design, in the snapshot_rebuild_boundary read's voice: a failed
+ * NON-FATAL by design, in the voice of the dashboard's other non-fatal reads: a failed
  * read logs the reason, reports to Sentry at warning level and names no start,
  * leaving every other dashboard field as it was. Fail closed on
  * `departed_history_unavailable`: the derived payload does not say which departed
@@ -5256,11 +5239,6 @@ export const getMyAllocationDashboard = cache(
       // curve to fall back to; a failed read renders the history as
       // rebuilding with reason `history_read_failed` (review C2 SFH-06).
       phase115DerivedRow,
-      // Phase 167.2.1.1.2 D-03 — the stored rebuild boundary (kind
-      // 'snapshot_rebuild_boundary'). Same USER client + owner RLS + explicit
-      // `.eq` posture as the line above. NON-FATAL, never assertOk'd: a failed
-      // read yields null and leaves every other dashboard field as it was.
-      snapshotRebuildBoundary,
       // Phase 151 / 151-02 — the owner's OWN strategies and the composite
       // `strategy_keys` links (`deriveStrategyLinkedKeyIds`). Since Phase 176
       // (D-01) they no longer decide the allocator book; they still feed the
@@ -5444,37 +5422,6 @@ export const getMyAllocationDashboard = cache(
           }
         }
         return row;
-      })(),
-      // Phase 167.2.1.1.2 D-03 — the rebuild boundary the snapshot rebuild
-      // stored (AR-3). USER client + owner RLS + explicit `.eq("allocator_id",
-      // userId)`, in this batch so it costs no extra wave. NON-FATAL: a read
-      // failure is logged, reported to Sentry and yields null. The payload is
-      // worker/SQL-written JSONB, so it is parsed defensively.
-      (async (): Promise<SnapshotRebuildBoundary | null> => {
-        const res = await supabase
-          .from("allocator_equity_derived")
-          .select("payload")
-          .eq("allocator_id", userId)
-          .eq("kind", SNAPSHOT_REBUILD_BOUNDARY_KIND)
-          .maybeSingle();
-        if (res.error) {
-          console.error(
-            "[queries.getMyAllocationDashboard] allocator_equity_derived snapshot_rebuild_boundary read failed (naming no boundary):",
-            res.error,
-          );
-          scheduleDerivedRowCapture(
-            captureToSentry(res.error, {
-              tags: {
-                op: "getMyAllocationDashboard",
-                reason: "snapshot_rebuild_boundary_read_failed",
-              },
-              level: "warning",
-            }),
-          );
-          return null;
-        }
-        const row = (res.data ?? null) as { payload: unknown } | null;
-        return row === null ? null : parseSnapshotRebuildBoundary(row.payload);
       })(),
       // Phase 151 / AUM-04 — the owner's own strategies. `.eq("user_id",
       // userId)` (NOT allocator_id): on this table the owner column is
@@ -6061,7 +6008,6 @@ export const getMyAllocationDashboard = cache(
         mandateIsSet,
         ...phase07,
         btcBenchmarkPrices,
-        snapshotRebuildBoundary,
         marksStart,
         marksTrailingSince,
       };
@@ -6561,7 +6507,6 @@ export const getMyAllocationDashboard = cache(
       mandateIsSet,
       ...phase07,
       btcBenchmarkPrices,
-      snapshotRebuildBoundary,
       marksStart,
       marksTrailingSince,
     };

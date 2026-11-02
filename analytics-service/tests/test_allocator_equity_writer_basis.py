@@ -1027,7 +1027,6 @@ async def _run_compose(
     from services.job_worker import run_derive_allocator_equity_job
     from tests.test_derive_allocator_equity_job import (
         DERIVED_TABLE,
-        LEGACY_TABLE,
         _FakeSupabase,
         _gate_key,
     )
@@ -1046,7 +1045,6 @@ async def _run_compose(
             {"allocator_id": _ALLOC, "kind": f"key_inputs:{m['id']}", "payload": m["payload"]}
             for m in members
         ],
-        LEGACY_TABLE: [],
     })
 
     def _wrapped(ledger_flows, *a, **k):

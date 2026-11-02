@@ -306,7 +306,7 @@ def test_compose_passes_full_history_keys_to_the_replay() -> None:
 # ── job wiring: the key's exchange decides, read from api_keys ────────────────
 
 def _job_inputs(exchange: str) -> dict[str, list[dict]]:
-    from tests.test_derive_allocator_equity_job import DERIVED_TABLE, LEGACY_TABLE
+    from tests.test_derive_allocator_equity_job import DERIVED_TABLE
 
     flows = {-1: 100_000.0}
     start = _start_for_share(0.5e-4, 100_000.0)
@@ -336,7 +336,6 @@ def _job_inputs(exchange: str) -> dict[str, list[dict]]:
                 },
             }
         ],
-        LEGACY_TABLE: [],
     }
 
 

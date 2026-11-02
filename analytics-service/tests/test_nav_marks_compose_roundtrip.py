@@ -269,7 +269,6 @@ async def compose_curve(
         "api_keys": keys,
         "csv_daily_returns": csv,
         DERIVED_TABLE: derived,
-        "allocator_equity_snapshots": [],
     })
     with patch("services.job_worker.get_supabase", return_value=fake):
         result = await run_derive_allocator_equity_job(

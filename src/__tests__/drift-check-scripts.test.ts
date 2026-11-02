@@ -5063,9 +5063,14 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // RAISED 2026-10-31 (Phase 176 LEGACYRETIRE, fix round 1), 27/405 -> 27/408. The same file
     // goes from `ALL 11 ARMS EXECUTED` to `ALL 14 ARMS EXECUTED` (arms G2, H1, W1); no file
     // joined, so SENTINEL_FLOOR stays 27. 405 + 3 = 408 is the table's own sum.
+    // LOWERED 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02), 27/408 -> 26/393.
+    // test_replace_allocator_equity_snapshots_window.sql (`ALL 15 ARMS EXECUTED`) was retired with the
+    // function it tested, so its row left the table. MEASURED: this pin read `expected 1 to be +0` once
+    // ci.yml carried SENTINEL_FLOOR=26, and ci-anti-skip-gate.contract.test.ts re-derives the
+    // sentinel-bearing set from the corpus. 408 - 15 = 393 is the table's own sum.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=27", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=26", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5076,7 +5081,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=408", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=393", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

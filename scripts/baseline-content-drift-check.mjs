@@ -273,8 +273,24 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * finding is `compute_bridge_outcome_deltas/0`, which the same migration re-bases: the committed
  * dump still carries the per-symbol body. All three are EXPECTED until that re-dump. Raising this
  * floor records the functions joining the corpus; it does NOT suppress any finding.
+ *
+ * LOWERED 2026-11-02 (Phase 176 LEGACYRETIRE plan 13, D-02), 136 -> 132: four REMOVALS, not a parser
+ * blindness. Migration 20261104120000_drop_allocator_equity_snapshots.sql drops
+ * `public.replace_allocator_equity_snapshots(uuid, jsonb, integer)`,
+ * `public.replace_allocator_equity_snapshots_window(uuid, jsonb, integer, date)`,
+ * `public.extract_symbol_value_at(uuid, text, date)` and
+ * `public.enqueue_refresh_allocator_equity_for_all()` together with the legacy equity table, so the
+ * four snapshot files in supabase/schema/functions/ are gone and the chain side loses four
+ * comparable functions (they stay in the committed dump until the post-apply re-dump, recorded as
+ * four dated `baseline-only` rows in NAME_SET_RATCHET in scripts/dump-sql-functions.ts). MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 132 — MATCH 128,
+ * DRIFT 4, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, and the ratchet read `only 132
+ * function(s) were compared, below the pinned COMPARED_FLOOR of 136` first. The one finding that is
+ * not an allowlisted row is `DRIFT delete_allocator_api_key/2`, which the same migration re-bases
+ * (the committed dump still carries the body with the last-key snapshot DELETE); it is EXPECTED until
+ * the re-dump taken after the PROD apply, and no allowlist row was added for it.
  */
-export const COMPARED_FLOOR = 136;
+export const COMPARED_FLOOR = 132;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
