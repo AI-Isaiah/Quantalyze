@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.16.5] - 2026-11-02 — records: close 183 DUPCOUNT
+
+### Notes
+- Phase 183 DUPCOUNT is closed. The code shipped in v0.133.14.0 (#1169). Verification passed on all four success criteria, and the security check is SECURED with no open threats.
+- The PROD reading after the deploy meets SC-4. No derived book carries an `account_duplicate` refusal any more. The one affected book now draws a trustworthy, counted-once curve. The census reads 7/7 ready. Sentry QUANTALYZE-2H and QUANTALYZE-23 are resolved; neither has recurred since the deploy.
+- Known limit (review WR-R2-01): a duplicate marker that commits during the few seconds between a running compose's last key read and its save can still store one double-counted curve. The next per-key derive recomposes it, so the window closes within about a day at most.
+
+### Changed
+- ROADMAP: the Phase 183 entry now carries a dated correction. Its sentence about a TODOS line was wrong: `TODOS.md` has no such line. The line it meant is the Phase 166.5.1 out-of-scope bullet, which now carries a SUPERSEDED note pointing to Phase 183.
+- The 167.1.2 recompute runbook and its C5 verify checklist no longer tell anyone to disconnect a duplicate key (review WR-02). Census (b) no longer prints `duplicate.blocking`, and runbook steps 4 and 5 are retired. Both files carry dated notes, and the old text is kept as lineage.
+- STATE and the ROADMAP progress table record the close.
+
 ## [0.133.16.4] - 2026-11-01 — records: close 184 WALLETOFFSET
 
 ### Notes
