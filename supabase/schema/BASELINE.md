@@ -102,7 +102,9 @@ Taken read-only by the `redump-dump` job of Supabase Migrate run `41518895623`, 
 
 **Which migrations the new dump now carries** — from the marker diff:
 
-- `20261104120000_drop_allocator_equity_snapshots.sql`
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20261104120000_drop_allocator_equity_snapshots.sql` | Phase 176 PR 3 (D-02, D-09). It drops the legacy table `allocator_equity_snapshots` with its policies, and the functions `replace_allocator_equity_snapshots`, `replace_allocator_equity_snapshots_window`, `extract_symbol_value_at` and `enqueue_refresh_allocator_equity_for_all`. It is a `CREATE OR REPLACE` of `delete_allocator_api_key`, re-based without the table: a last-key hard delete removes the allocator's derived `equity_curve` row and that key's `key_inputs` row | tables -1, policies -3, function statements -4, distinct names -4 (matches the measured shape) |
 
 **MEASURED:**
 
