@@ -23,8 +23,14 @@ Neuter-falsifiability (test → mutation it kills):
     second pass, or re-fetching the anchor for it (identity assert).
   * ``test_perp_only_book_runs_single_pass`` — kills dropping the
     ``has_option_activity`` guard (would double every perp crawl).
-  * ``test_key_mode_never_runs_second_pass`` — kills dropping the
-    ``not is_key_mode`` guard.
+  * ``test_key_mode_options_book_assembles_the_options_basis_without_a_second_crawl`` —
+    185 D-04 reversed the old key-mode contract (key mode never ran a second pass). Key mode
+    now builds the options basis from the SAME crawl: ONE cash crawl, asked to retain its rows
+    (``retain_raw_rows=True``), and the options assembler awaited once with the first basis of
+    ``_KEY_MODE_OPTIONS_BASES``. Kills a second transaction-log crawl, and kills dropping the
+    retained rows (the assembler would raise on a report without them). The strategy-mode
+    ``not is_key_mode`` gates on the MTM and smoothed passes are untouched and pinned by the
+    strategy tests in this module.
   * ``test_structural_mtm_failure_degrades_with_reason`` — kills removing the
     inner structural catch (the error would escalate to FAILED).
   * ``test_transient_valueerror_on_mtm_propagates`` — kills widening the catch to
@@ -274,6 +280,16 @@ def _base_patches(
             "services.deribit_ingest.fetch_deribit_native_account_state",
             new=state_spy or AsyncMock(return_value=_account_state()),
         ),
+        # 185 D-04: a key-mode derive of an option-activity ledger asks for the options basis.
+        # This default refuses it structurally, which keeps every pre-existing key-mode
+        # option-activity test on the cash path it pins (the derive degrades to cash). The
+        # tests of this phase override it with their own assembler.
+        patch(
+            "services.deribit_ingest.build_deribit_options_basis_ledger",
+            new=AsyncMock(
+                side_effect=LedgerValuationError("harness default: no options ledger")
+            ),
+        ),
         patch("services.broker_dailies.combine_native_ledger", new=combine_mock),
         # 167.1.2.2 D-15: the key-mode epilogue also asks for the per-day P&L off the
         # same ledger. The combine is mocked here and the ledger is a stub that cannot
@@ -315,10 +331,17 @@ def _recording_ledger(
 
     # ``nav_twin``: an allocated-capital derive asks the CASH pass for the NAV twin (NAVMTM
     # plan 16, D-14) and passes the keyword only then; this stand-in builds none.
+    # ``retain_raw_rows``: the key-mode NAV path asks the CASH crawl to keep its rows so the
+    # options basis can be assembled from them (185 D-04); this stand-in builds none.
     async def _impl(exchange: Any, *, account_state: Any, pnl_basis: str,
-                    exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                    exclude_spot_extraction: bool, nav_twin: bool = False,
+                    retain_raw_rows: bool = False) -> Any:
         idx = len(calls)
-        calls.append({"pnl_basis": pnl_basis, "account_state": account_state})
+        calls.append({
+            "pnl_basis": pnl_basis,
+            "account_state": account_state,
+            "retain_raw_rows": retain_raw_rows,
+        })
         if side_effects is not None and idx < len(side_effects):
             eff = side_effects[idx]
             if isinstance(eff, BaseException):
@@ -382,19 +405,32 @@ async def test_perp_only_book_runs_single_pass() -> None:
 
 
 @pytest.mark.asyncio
-async def test_key_mode_never_runs_second_pass() -> None:
-    """Key-mode (api_key_id job) with options activity: still ONE crawl — key-mode
-    owns no strategy_analytics row to persist a by-basis object into."""
+async def test_key_mode_options_book_assembles_the_options_basis_without_a_second_crawl() -> None:
+    """185 D-04 (replaces the old key-mode "never a second pass" contract). Key mode (api_key_id job)
+    with option activity now measures the options at market, but from the SAME crawl: ONE cash
+    crawl, asked to retain its rows, and the options assembler awaited once with the first basis
+    of ``_KEY_MODE_OPTIONS_BASES``. A second transaction-log crawl would not fit the derive
+    budget (the v1.11 incident). Neuter: re-add a second ``build_deribit_native_ledger`` call
+    (``len(calls) == 2``) or drop ``retain_raw_rows=True`` -> RED."""
     ctx, _ = _ctx(strategy_row=None, key_mode=True)
     reports = [_report(has_option_activity=True)]
     ledger_mock, calls = _recording_ledger(reports)
     combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
+    options_mock = AsyncMock(return_value=(_stub_native_ledger(), reports[0]))
     with _apply(_base_patches(
         ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,
-    )):
+    ) + [patch(
+        "services.deribit_ingest.build_deribit_options_basis_ledger", new=options_mock
+    )]):
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.DONE
-    assert len(calls) == 1, "key-mode must NOT run a second mark_to_market pass"
+    assert len(calls) == 1, "key mode builds the options basis from the one crawl, never a second"
+    assert calls[0]["pnl_basis"] == "cash_settlement"
+    assert calls[0]["retain_raw_rows"] is True
+    options_mock.assert_awaited_once()
+    from services.job_worker import _KEY_MODE_OPTIONS_BASES
+
+    assert options_mock.await_args.kwargs["pnl_basis"] == _KEY_MODE_OPTIONS_BASES[0]
 
 
 @pytest.mark.asyncio

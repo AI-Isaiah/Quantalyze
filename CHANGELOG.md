@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.133.18.0] - 2026-11-02 — 185 DERIBITFLOWTIME: a Deribit allocator book values open options at market
+
+### Root cause
+- The extreme Deribit days on allocator books were not intraday capital (mechanism A). They were option trade and delivery rows booked at cash value against the cash wallet (mechanism B). The read-only re-crawl in plan 185-01 settled it, and the founder replanned the phase around options in key mode and dropped the flow-time split (D-04). In key mode, `job_worker.py` gated the mark-to-market and smoothed bases on `not is_key_mode`, so every allocator key ran on the cash basis.
+
+### Added
+- **Key mode values Deribit options at market (plans 185-07, 185-08).** An allocator key with option activity now gets its headline from the smoothed options basis (D-05, F1: "Smoothed (Recommended)"), through `_KEY_MODE_OPTIONS_BASES` in `run_derive_broker_dailies_job`. It ships live with no new switch (D-06, F6: "No new switch (Recommended)"), so a rollback is reverting the merge.
+  - `services/deribit_ingest.py`: the post-crawl assembly is extracted into `_assemble_deribit_native_ledger`, a pure move. `build_deribit_native_ledger(..., retain_raw_rows=True)` keeps the crawl's rows on `CompletenessReport.raw_rows`, and `build_deribit_options_basis_ledger` builds the second basis from them, so there is no second crawl.
+  - One ledger is rebound for returns, day P&L, composed flows, the realized terminal and the flow instants, so the options basis and the stored marks meet with no day counted twice.
+  - Perp-only keys and strategy mode are unchanged. A strategy's own headline stays on the cash basis (D-12, F5: "No, strategies stay cash (Recommended)").
+  - `key_inputs` gains a present-only `options_basis` string naming the basis that applied.
+- **The options step is bounded and degrades to cash (plan 185-09).** It runs under `wait_for` on a 0.7 slice of the remaining derive budget and refuses to start below a 60 s floor. A refusal, a timeout or a structural failure keeps the cash ledger and raises the caveat (D-10, "Smoothed, cash fallback (Recommended)"). Transient read errors still leave the job so the derive retries.
+- **The interim caveat (plans 185-04, 185-05).**
+  - Writer: a key-mode Deribit derive with option activity stores `options_cash_basis: true` in `key_inputs`, present only when true and set with a strict `is True`. It is raised while no options basis applied, or while the applied one left some option days at cash value, and it clears itself per key only once the options basis fully applies (D-09, F3: "Amber note, any options key (Recommended)").
+  - Reader: `src/lib/options-cash-basis-flag.ts` exports the key literal and a strict reader. `readMarksStart` in `src/lib/queries.ts` returns `optionsCashBasis` from the `key_inputs` rows it already reads, with no new read. `MyAllocationDashboardPayload.optionsCashBasis` reaches `dataQuality.optionsCashBasis` through `AllocationDashboardV2` and `buildAllocatorPortfolioFactsheetPayload`.
+  - Screen: `KpiStrip`'s one amber paragraph gains a third sentence arm, after the small-balance and large-flow arms, with the founder's sentence word for word: "Some days on a Deribit account were measured against its cash balance, which leaves out open option positions, so their returns can be extreme." Strategy factsheets, their sentences and their cache key are unchanged.
+- **Every Deribit key-mode row is classified (review WR-03, D-13).** The derive writes a boolean `options_activity` into every Deribit `key_inputs` payload. The reader raises the caveat for a drawn Deribit key whose row is missing or carries no such boolean, which covers departed keys and keys whose derive keeps failing (D-13, "Show the note, accept over-warning (Recommended)").
+
+### Changed
+- **Option days older than the option-price window keep their cash value (D-07, F2: "Cash basis + flag (Recommended)").** Such a day keeps its cash-basis return, is stamped, and keeps the caveat on the book. Nothing is interpolated or filled. This departs from ROADMAP criteria 2 and 5, and the ROADMAP entry carries the dated correction.
+
+### Fixed
+- **CR-01 (review round 1, blocker).** The smoothed and mark-to-market terminal wedge read `state.native_upnl`, which leaves out the futures session RPL. So an options key with perp P&L accrued since the 08:00 settlement failed the section 5 reconciliation and fell back to cash, and its published basis could change from night to night. The wedge is now `(equity - balance) - (options_value - options_session_upl)`, built on the cash branch's `_cash_basis_wedge`. The strategy MTM passes share this arm and are now correct too.
+- **WR-01.** The options step's budget slice is now taken from the budget left after `_DERIVE_POST_CRAWL_RESERVE_S` and the moved-flow price-read floor, so a slow step can no longer starve the price read, the mark write and the persist.
+- **WR-02.** The caveat now fails toward showing on the reader. A failed `key_inputs` read raises it when any drawn key is a Deribit key, and a departed key's flag counts whatever `departed_history_unavailable` says.
+
+### Tests
+- New: `test_deribit_options_basis_ledger.py` (the same-crawl ledger equals an independent build and adds no transaction-log call, plus guards, retention and straddler arms), `test_deribit_key_mode_options_basis.py` (the tracer, perp-only, structural fallback, transient, the bound and floor, bucketed days, and the seam test through the real derive and compose), `test_options_cash_basis_caveat.py` (strictness and the `options_activity` stamp), the shared fixture `tests/fixtures/deribit_option_round_trip.py`, `options-cash-basis-literal-pin.test.ts` (the key literal across Python and TS) and `AllocationDashboardV2.options-caveat.test.tsx`.
+- Extended: `queries.my-allocation.test.ts` (the reader, the WR-02 fail-open cases now assert `true`, and the WR-03 unclassified-key cases), `allocator-portfolio-payload.test.ts`, `FactsheetView.kpistrip.test.tsx` (the third sentence arm), `test_smoothed_mtm_core.py` and `test_derive_determinism.py` (scenario C under `smoothed_mtm`).
+- Rewritten: the key-mode contract in `test_mtm_single_key.py` (one crawl that keeps its rows, then the options assembler), and `test_mark_to_market_perp_member_behaves_like_cash` in `test_navbreach_anchor_probe.py`, which had pinned the wedge CR-01 fixes.
+- WR-04: two key-mode tests now drive the real `build_deribit_options_basis_ledger` through the derive's combine and section 5, one with nonzero futures session RPL and one with a pre-retention round trip. They replace a mock-assembler test that could not fail on the logic it claimed to pin.
+- Every RED test was committed before its fix, and the review neutered the CR-01, WR-01, WR-03 and WR-04 fixes and watched their tests go RED.
+
+### Notes
+- No migration. The new `key_inputs` fields are additive JSON keys.
+- Recompute: past curves update on the next nightly key-dailies derive, with no PROD write (D-08, F4: "Next nightly derive (Recommended)"). The PROD reading of the founder's book against the pre-change baseline is plan 185-10, run after this deploy.
+- Known limit, accepted by D-13: the deploy-window over-warning. Every `key_inputs` row written before this ship lacks `options_activity`, so from the web deploy until each key's first derive after the worker deploy, every Deribit book shows the amber note, perp-only books included. A skipped Railway deploy keeps that window open longer. A frozen perp-only Deribit key keeps the note for good.
+- Known limit: key C stays on cash with the caveat until its option-book replay refusal (`LedgerValuationError`) is fixed. Its 2026-10-28 day is a real move on a tiny remaining base, not a data defect, and the founder routed how such days are treated to Phase 188 TINYBASE (D-11, F7: "Book a fix phase").
+- Known limits (recorded, not fixed, below MEDIUM): the options `combine_native_ledger` runs on a thread and is neither bounded nor counted against the slice. A budget refusal and a structural degrade write the same stored row, so telling them apart needs the worker logs. `native_inception_diagnostics` holds the cash ledger's numbers even when the options basis applies. A departed Deribit key whose last stored day is older than the 730-day per-key read window is left out of the reader's key set, a gap that predates this phase.
+
 ## [0.133.17.1] - 2026-11-02 — BASELINE: automated re-dump after the PROD apply of ce9014d4
 
 ### Changed

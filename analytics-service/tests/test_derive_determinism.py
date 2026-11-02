@@ -27,6 +27,7 @@ import pytest
 from services import deribit_ingest as di
 from services.allocator_equity_derive import account_summary_payload, read_account_summary
 from services.broker_dailies import combine_native_ledger
+from tests.test_smoothed_mtm_core import _HELD_CHARTS, _HELD_ROWS, _run_options_ledger
 from tests.test_deribit_ingest import (
     _NativeAnchorStub,
     _btc_deposit,
@@ -134,6 +135,27 @@ async def test_live_state_drift_does_not_move_returns(monkeypatch: Any, name: st
     assert len(ret_a) >= 3  # the series is not trivially empty, so equality means something
     ret_x = await _derive_returns(monkeypatch, drifted, index=index)
     _assert_byte_equal(ret_a, ret_x)
+
+
+def test_smoothed_mtm_session_rpl_does_not_move_returns(monkeypatch: Any) -> None:
+    """Scenario C under ``smoothed_mtm`` (185 CR-01): realised PnL accruing in the session
+    (equity moves by it, ``balance`` does not until the 08:00 settlement) must not move the
+    returns of the headline basis either. Same open-book account as the cash cases, built
+    through the REAL options assembly and combined through the REAL ``combine_native_ledger``.
+    The wedge that left ``futures_session_rpl`` out made the accrued derive refuse in section 5
+    (and so fall back to cash) while the quiet one closed."""
+    quiet = {"currency": "BTC", "equity": 0.09, "session_upl": 0.01,
+             "options_value": 0.18, "options_session_upl": 0.02, "balance": -0.10}
+    accrued = {**quiet, "equity": 0.095, "session_rpl": 0.005, "futures_session_rpl": 0.005}
+    out = []
+    for summary in (quiet, accrued):
+        ledger, _report, _stub = _run_options_ledger(
+            monkeypatch, btc_rows=_HELD_ROWS, summaries=[summary], charts=_HELD_CHARTS,
+            pnl_basis="smoothed_mtm",
+        )
+        out.append(combine_native_ledger(ledger, frozenset({"BTC"}))[0])
+    assert len(out[0]) >= 3
+    _assert_byte_equal(out[0], out[1])
 
 
 async def test_identical_stub_twice_is_byte_equal(monkeypatch: Any) -> None:

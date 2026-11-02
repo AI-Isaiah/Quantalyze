@@ -4,6 +4,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/types";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/build-payload";
+import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
@@ -1050,5 +1051,71 @@ describe("FactsheetView KPI strip — 164.6.6.3.3 plan 09: tone and sign from th
     for (const label of ["Sharpe", "Sortino", "Calmar", "Ann. Vol"]) {
       expect(strip(label).color, label).toBe(PRIMARY);
     }
+  });
+});
+
+describe("FactsheetView hero strip — allocator book — 185 D-04 options caveat", () => {
+  // The founder's F3 sentence (D-09, plan 185-04), in the same amber paragraph the strategy
+  // caveats use. The payload comes from the REAL allocator builder, so this pins the last hop.
+  const OPTIONS_COPY =
+    "Some days on a Deribit account were measured against its cash balance, which leaves out open option positions, so their returns can be extreme.";
+  const SMALL_BASE_COPY =
+    "Some days were measured on a very small balance, so their returns can be extreme.";
+
+  function allocatorPayload(optionsCashBasis: unknown): FactsheetPayload {
+    const p = buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a1",
+      dailyReturns: makeReturnsSeries(300),
+      ...(optionsCashBasis === undefined ? {} : { optionsCashBasis }),
+    });
+    expect(p).not.toBeNull();
+    return p!;
+  }
+  const extremeParagraphs = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>("p")].filter((p) =>
+      (p.textContent ?? "").includes("their returns can be extreme"),
+    );
+
+  it("shows exactly one amber paragraph reading the founder's sentence", () => {
+    const { container } = renderComposite(allocatorPayload(true));
+    const found = extremeParagraphs(container);
+    expect(found).toHaveLength(1);
+    expect((found[0].textContent ?? "").trim()).toBe(`⚠ ${OPTIONS_COPY}`);
+    expect(found[0].tagName).toBe("P");
+    expect(found[0].className).toContain("text-micro");
+    expect(found[0].getAttribute("style") ?? "").toContain("var(--color-warning");
+  });
+
+  it("shows nothing without the flag", () => {
+    const { container } = renderComposite(allocatorPayload(undefined));
+    expect(container.textContent).not.toContain("open option positions");
+    expect(extremeParagraphs(container)).toHaveLength(0);
+  });
+
+  it("a strategy payload with the small-balance flag still shows its own sentence", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: makeReturnsSeries(300), benchmark: null });
+    const { container } = renderComposite({
+      ...p,
+      dataQuality: { composite: false, smallBaseMeasured: true },
+    } as unknown as FactsheetPayload);
+    const found = extremeParagraphs(container);
+    expect(found).toHaveLength(1);
+    expect((found[0].textContent ?? "").trim()).toBe(`⚠ ${SMALL_BASE_COPY}`);
+  });
+
+  it("with all three flags true exactly one paragraph prints, and the small-balance sentence wins", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: makeReturnsSeries(300), benchmark: null });
+    const { container } = renderComposite({
+      ...p,
+      dataQuality: {
+        composite: false,
+        smallBaseMeasured: true,
+        flowTimingDayLevelLarge: true,
+        optionsCashBasis: true,
+      },
+    } as unknown as FactsheetPayload);
+    const found = extremeParagraphs(container);
+    expect(found).toHaveLength(1);
+    expect((found[0].textContent ?? "").trim()).toBe(`⚠ ${SMALL_BASE_COPY}`);
   });
 });

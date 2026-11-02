@@ -2065,8 +2065,12 @@ function KpiStrip() {
           deposit or withdrawal was at least the balance before it. One paragraph, so both
           flags never print two caveats; the small-balance sentence keeps its copy and the
           large-flow case says what is different about its day. */}
+      {/* Phase 185 (DERIBITFLOWTIME) D-04, F3 (founder 2026-11-01, D-09): an allocator book with a
+          Deribit key whose options are valued at cash raises the same paragraph through
+          dataQuality.optionsCashBasis; its sentence is the third arm, after the two above. */}
       {(payload.dataQuality?.smallBaseMeasured === true ||
-        payload.dataQuality?.flowTimingDayLevelLarge === true) && (
+        payload.dataQuality?.flowTimingDayLevelLarge === true ||
+        payload.dataQuality?.optionsCashBasis === true) && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
@@ -2076,7 +2080,9 @@ function KpiStrip() {
         >
           {payload.dataQuality?.smallBaseMeasured === true
             ? "⚠ Some days were measured on a very small balance, so their returns can be extreme."
-            : "⚠ Some days carried a deposit or withdrawal at least as large as the balance before it, with no time of day, so their returns can be extreme."}
+            : payload.dataQuality?.flowTimingDayLevelLarge === true
+              ? "⚠ Some days carried a deposit or withdrawal at least as large as the balance before it, with no time of day, so their returns can be extreme."
+              : "⚠ Some days on a Deribit account were measured against its cash balance, which leaves out open option positions, so their returns can be extreme."}
         </p>
       )}
       {/* Phase 164.6.6.2.3 FLOWTIMING (D-07): server-truth flag from

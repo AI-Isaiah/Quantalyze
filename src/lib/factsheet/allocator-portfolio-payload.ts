@@ -3,6 +3,7 @@ import type { BenchmarkPricesOpt, FactsheetPayload } from "./types";
 import { buildFactsheetPayload } from "./build-payload";
 import { equityCurveToDailyReturns } from "./resolve-series";
 import { parseMarksStart } from "@/lib/nav-marks-start";
+import { isOptionsCashBasis } from "@/lib/options-cash-basis-flag";
 
 // Phase 147 / SC2 — ONE series-resolution mechanism. Both functions moved verbatim to the
 // leaf `./resolve-series` (which does NOT import ./build-payload) so the OG route and the
@@ -58,6 +59,14 @@ export interface AllocatorPortfolioMetadata {
    * on `payload.marksTrailingSince`; parsed by the same reader as `marksStart`.
    */
   marksTrailingSince?: unknown;
+  /**
+   * Phase 185 (DERIBITFLOWTIME) D-04, SC-3. The dashboard payload's
+   * `optionsCashBasis`: a key the drawn curve includes values its Deribit options
+   * at cash. Lands on `payload.dataQuality.optionsCashBasis`, which raises the
+   * interim caveat. Typed `unknown` and parsed by `isOptionsCashBasis`, so only
+   * the boolean `true` raises it.
+   */
+  optionsCashBasis?: unknown;
 }
 
 /**
@@ -135,10 +144,16 @@ export function buildAllocatorPortfolioFactsheetPayload(
   // keeps the payload it had before this field.
   const marksSince = parseMarksStart(meta.marksStart);
   const marksTrailingSince = parseMarksStart(meta.marksTrailingSince);
-  if (payload === null || (!marksSince && !marksTrailingSince)) return payload;
+  // 185 D-04: the interim options caveat, by spread and only when true, so a book
+  // without it keeps the payload (and its absent `dataQuality`) it had before.
+  const optionsCashBasis = isOptionsCashBasis(meta.optionsCashBasis);
+  if (payload === null || (!marksSince && !marksTrailingSince && !optionsCashBasis)) return payload;
   return {
     ...payload,
     ...(marksSince ? { marksSince } : {}),
     ...(marksTrailingSince ? { marksTrailingSince } : {}),
+    ...(optionsCashBasis
+      ? { dataQuality: { ...(payload.dataQuality ?? { composite: false }), optionsCashBasis: true } }
+      : {}),
   };
 }

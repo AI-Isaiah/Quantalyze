@@ -969,6 +969,34 @@ def test_smoothed_terminal_wedge_and_inception_closure_open_book(
     assert len(returns) > 0
 
 
+def test_smoothed_wedge_carries_futures_session_rpl_and_section5_closes(
+    monkeypatch: Any,
+) -> None:
+    """CR-01 (185): a perp's realised P&L accrued since the 08:00 settlement is in the
+    venue's ``equity`` but not in ``balance`` or in the ΔMTM-merged ``native_pnl``. Deribit's
+    identity is ``equity = balance + futures (session UPL + session RPL) + options_value``;
+    the open-book account of the test above, with 0.005 BTC of RPL accrued, so
+    equity = 0.09 + 0.005 and balance = cash = −0.10:
+      required wedge = (equity − balance) − (options_value − options_session_upl)
+                     = 0.195 − 0.16 = 0.035 = futures UPL 0.01 + RPL 0.005 + options UPL 0.02.
+    The wedge that left the RPL out stranded a 0.005 residual (breach ratio 300), so section 5
+    refused the options basis on a healthy account and the key fell back to cash. The oracle
+    is the identity, not the code's formula; the zero-RPL run is the control."""
+    base = {"currency": "BTC", "equity": 0.09, "session_upl": 0.01,
+            "options_value": 0.18, "options_session_upl": 0.02, "balance": -0.10}
+    accrued = {**base, "equity": 0.095, "session_rpl": 0.005, "futures_session_rpl": 0.005}
+    for summary, wedge in ((base, 0.03), (accrued, 0.035)):
+        ledger, _report, _stub = _run_options_ledger(
+            monkeypatch, btc_rows=_HELD_ROWS, summaries=[summary], charts=_HELD_CHARTS,
+            pnl_basis="smoothed_mtm",
+        )
+        assert ledger.terminal_upnl_native["BTC"] == pytest.approx(wedge, abs=1e-12)
+        returns, _meta = reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+        assert len(returns) > 0
+
+
 # --- Cash channel (strict, ALL currencies) -----------------------------------
 
 

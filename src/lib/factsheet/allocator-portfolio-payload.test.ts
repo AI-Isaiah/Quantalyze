@@ -398,3 +398,44 @@ describe("buildAllocatorPortfolioFactsheetPayload - marksTrailingSince (SFH-2 N1
     expect("marksTrailingSince" in build(value)!).toBe(false);
   });
 });
+
+// Phase 185 (DERIBITFLOWTIME) D-04, SC-3: the dashboard's interim options caveat
+// rides in as `optionsCashBasis` and lands on `payload.dataQuality`, only when it
+// is the boolean true. A book without it keeps the payload it had before.
+describe("buildAllocatorPortfolioFactsheetPayload - optionsCashBasis (185 D-04)", () => {
+  const isoDay = (startIso: string, i: number) =>
+    new Date(Date.parse(`${startIso}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10);
+  const book: DailyReturn[] = Array.from({ length: 30 }, (_, i) => ({
+    date: isoDay("2026-02-01", i),
+    value: i % 2 === 0 ? 0.004 : -0.002,
+  }));
+  const build = (extra: Record<string, unknown> = {}) =>
+    buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      computedAt: "2026-03-01T00:00:00Z",
+      dailyReturns: book,
+      ...extra,
+    });
+
+  it("the flag true lands on dataQuality, beside composite false", () => {
+    expect(build({ optionsCashBasis: true })!.dataQuality).toEqual({ composite: false, optionsCashBasis: true });
+  });
+
+  it.each([
+    ["the string \"true\"", "true"],
+    ["the number 1", 1],
+    ["false", false],
+    ["null", null],
+    ["absent", undefined],
+  ])("%s gives the payload the build without the key gives", (_label, value) => {
+    const expected = build();
+    expect(build(value === undefined ? {} : { optionsCashBasis: value })).toStrictEqual(expected);
+    expect(expected!.dataQuality).toBeUndefined();
+  });
+
+  it("with a start day the flag adds dataQuality and keeps marksSince", () => {
+    const withFlag = build({ marksStart: "2026-02-10", optionsCashBasis: true })!;
+    expect(withFlag.marksSince).toBe("2026-02-10");
+    expect(withFlag.dataQuality).toEqual({ composite: false, optionsCashBasis: true });
+  });
+});
