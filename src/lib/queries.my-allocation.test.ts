@@ -5747,3 +5747,221 @@ describe("getMyAllocationDashboard - marksStart names the first recorded-equity 
     expect((await read()).marksStart).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 185 (DERIBITFLOWTIME) plan 05, D-04 and SC-3: the interim options
+// caveat. A Deribit key whose derive ran on the cash basis with option activity
+// stores `options_cash_basis: true` in its `key_inputs:<id>` row (plan 04). The
+// dashboard reads it from the SAME rows and the SAME single read as `marks_since`
+// (no new read), so a caveat can never describe a key the drawn curve leaves out.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard - optionsCashBasis carries the key-mode options caveat (185 D-04, SC-3)", () => {
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+  });
+
+  const liveKey = (id: string) => ({
+    ...aum04Key(id, "binance"),
+    venue_account_id: `acct-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_inclusion: null,
+  });
+  const readyRow = () => {
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.flags = [];
+    row.payload.returns = [
+      { date: "2026-03-11", r: 0.0038 },
+      { date: "2026-03-12", r: 0.0011 },
+      { date: "2026-03-13", r: 0.0039 },
+    ];
+    return row;
+  };
+  /** A key's stored derive inputs, carrying whatever `options_cash_basis` value the test names. */
+  const inputs = (apiKeyId: string, extra: Record<string, unknown>, allocator_id = "user-1") => ({
+    allocator_id,
+    kind: `key_inputs:${apiKeyId}`,
+    payload: { marks_since: "2026-03-08", ...extra } as Record<string, unknown>,
+  });
+  async function read() {
+    const { getMyAllocationDashboard } = await import("./queries");
+    return getMyAllocationDashboard("user-1");
+  }
+  const keyInputsReads = () =>
+    chainAudit.entries.filter(
+      (e) => e.table === "allocator_equity_derived" && e.ins.some((i) => i.column === "kind"),
+    );
+
+  it("a live key's stored flag raises it, through the one existing read", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", { options_cash_basis: true })];
+
+    const result = await read();
+
+    expect(result.optionsCashBasis).toBe(true);
+    expect(keyInputsReads()).toHaveLength(1);
+  });
+
+  it("no flag in any row reads false, never absent", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), liveKey("k-live-2")];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", {}), inputs("k-live-2", {})];
+
+    expect((await read()).optionsCashBasis).toBe(false);
+  });
+
+  it.each([["the string \"true\"", "true"], ["the number 1", 1]])(
+    "%s raises nothing: only the JSON boolean true does (T-185-15)",
+    async (_label, value) => {
+      state.portfolios = [P1151_PORTFOLIO];
+      state.apiKeys = [liveKey("k-live")];
+      state.allocatorEquityDerived = [readyRow(), inputs("k-live", { options_cash_basis: value })];
+
+      expect((await read()).optionsCashBasis).toBe(false);
+    },
+  );
+
+  const departedKey = (id: string) => ({
+    ...aum04Key(id, "okx"),
+    is_active: false,
+    disconnected_at: "2026-04-20T00:00:00Z",
+    venue_account_id: `acct-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_inclusion: null,
+  });
+  const goneReturns = ["2026-03-01", "2026-03-02", "2026-04-10"].map((date) => ({
+    api_key_id: "k-gone",
+    allocator_id: "user-1",
+    date,
+    daily_return: 0.004,
+  }));
+
+  it("a departed key's flag counts whether or not the derive left a departed account out: a disclosure fails open (WR-02)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = goneReturns;
+    state.allocatorEquityDerived = [
+      readyRow(),
+      inputs("k-live", {}),
+      inputs("k-gone", { options_cash_basis: true }),
+    ];
+    // Positive control: the departed key is in the filter, so the flag is read.
+    const open = await read();
+    expect(open.departedHistoryUnavailable).toBeFalsy();
+    expect(open.optionsCashBasis).toBe(true);
+
+    resetState();
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = goneReturns;
+    const row = readyRow();
+    row.payload.flags = ["departed_history_unavailable"];
+    state.allocatorEquityDerived = [row, inputs("k-live", {}), inputs("k-gone", { options_cash_basis: true })];
+    const closed = await read();
+    expect(closed.departedHistoryUnavailable).toBe(true);
+    // The curve may still contain the departed key's cash-basis option days, so hiding
+    // the caveat is the unsafe direction.
+    expect(closed.optionsCashBasis).toBe(true);
+  });
+
+  it("a live key's flag still counts when the derive left a departed account out", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = goneReturns;
+    const row = readyRow();
+    row.payload.flags = ["departed_history_unavailable"];
+    state.allocatorEquityDerived = [row, inputs("k-live", { options_cash_basis: true }), inputs("k-gone", {})];
+
+    const result = await read();
+
+    expect(result.departedHistoryUnavailable).toBe(true);
+    expect(result.optionsCashBasis).toBe(true);
+  });
+
+  it("another owner's row carrying the flag never raises it (T-185-14: the explicit allocator filter)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [
+      readyRow(),
+      inputs("k-live", {}),
+      inputs("k-live", { options_cash_basis: true }, "user-2"),
+    ];
+
+    expect((await read()).optionsCashBasis).toBe(false);
+  });
+
+  it("a failed read raises the caveat for a drawn Deribit key, warns once with the existing message and names no start (WR-02)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [{ ...liveKey("k-live"), exchange: "deribit" }];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", {})];
+    state.tableErrors["allocator_equity_derived:key_inputs"] = { message: "connection reset (test)" };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+
+    const result = await read();
+
+    expect(result.optionsCashBasis).toBe(true);
+    expect(result.marksStart).toBeNull();
+    const warns = warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("key_inputs marks_since read failed"));
+    expect(warns).toHaveLength(1);
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  // 185 WR-03 / D-13 (founder 2026-11-01): a writer-untouched Deribit row fails open. The derive
+  // stamps a boolean `options_activity` on every Deribit key-mode payload, so a drawn Deribit key
+  // whose row lacks it was never classified (departed, or its derive keeps failing) and keeps its
+  // cash-basis option days with nothing to say so.
+  it("a departed Deribit key with an old row (no options_activity) raises the caveat (WR-03)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), { ...departedKey("k-gone"), exchange: "deribit" }];
+    state.csvDailyReturns = goneReturns;
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", {}), inputs("k-gone", {})];
+
+    expect((await read()).optionsCashBasis).toBe(true);
+  });
+
+  it("a drawn Deribit key with no key_inputs row at all raises the caveat (WR-03)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), { ...departedKey("k-gone"), exchange: "deribit" }];
+    state.csvDailyReturns = goneReturns;
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", {})];
+
+    expect((await read()).optionsCashBasis).toBe(true);
+  });
+
+  it("a stamped perp-only Deribit key (options_activity false, no options_cash_basis) raises nothing (WR-03 control)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [{ ...liveKey("k-live"), exchange: "deribit" }];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", { options_activity: false })];
+
+    expect((await read()).optionsCashBasis).toBe(false);
+  });
+
+  it("a non-boolean options_activity is unclassified and raises the caveat (strict read, WR-03)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [{ ...liveKey("k-live"), exchange: "deribit" }];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", { options_activity: "false" })];
+
+    expect((await read()).optionsCashBasis).toBe(true);
+  });
+
+  it("a failed read raises nothing for a book with no Deribit key", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", { options_cash_basis: true })];
+    state.tableErrors["allocator_equity_derived:key_inputs"] = { message: "connection reset (test)" };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+
+    expect((await read()).optionsCashBasis).toBe(false);
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+});

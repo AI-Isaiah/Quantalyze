@@ -100,6 +100,7 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     mt5_enabled_server,
     sfox_enabled_server,
 )
+from services.deribit_txn import PNL_BASIS_SMOOTHED_MTM as _OPTIONS_BASIS_SMOOTHED
 from services.db import (
     PaginatedSelectTruncated,
     db_execute,
@@ -1116,6 +1117,14 @@ _DERIVE_BUDGET_DEFAULT_S = 15 * 60
 # plausibly finish, the pass is skipped and DEGRADED loudly. Options books only.
 _MTM_SECOND_PASS_BUDGET_FRACTION = 0.7
 _MTM_SECOND_PASS_MIN_SECONDS = 60.0
+
+# 185 D-04 / F1 (founder 2026-11-01, D-05; plan 185-06 ``f1-answer: f1-a``): the options bases a
+# KEY-MODE Deribit derive tries for an option-activity key, in order. The first that builds
+# becomes the key's HEADLINE basis for every writer quantity; if every one fails structurally the
+# derive keeps the cash ledger and raises the 185-04 caveat. F1 chose the smoothed basis ("value
+# the option book at daily option prices, smoothed"), so the tuple has one entry; the tuple shape
+# is what lets a later founder choice name a second basis without touching the step.
+_KEY_MODE_OPTIONS_BASES: Final[tuple[str, ...]] = (_OPTIONS_BASIS_SMOOTHED,)
 
 # Phase 177 DERIBITFLOWS plan 04 (D-05, W2): the at-instant price prefetch of a key-mode Deribit
 # derive runs AFTER the full-history crawl, inside the same outer budget, and the day's mark is
@@ -5073,6 +5082,29 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # change. Same shape as above: ``{"ledger_digest": {...}}`` or ``{"ledger_digest_error":
         # <exception class>}``, deribit key-mode only.
         _ledger_digest: "dict[str, Any] | None" = None
+        # 185 SC-3 / D-04: True when this key-mode Deribit derive's options are measured at CASH
+        # value (the only key-mode basis today), i.e. the ledger has option activity. The epilogue
+        # stores it as the present-only ``options_cash_basis`` bool in ``key_inputs`` so My
+        # Allocation can say the returns leave out open option positions. Set ONLY by the deribit
+        # key-mode branch; plan 185-08 narrows it to "ended on the cash basis" and plan 185-09 keeps
+        # it while any option day is still at cash value (F2), so it clears per derive only once the
+        # options basis fully applies.
+        _options_cash_basis_caveat: bool = False
+        # 185 WR-03 / D-13: whether this key-mode Deribit derive's ledger has option activity, stamped
+        # on EVERY Deribit key-mode ``key_inputs`` payload (True or False) so a reader can tell a key
+        # this writer classified from a frozen row it never touched. None = not a Deribit key-mode
+        # derive (the ccxt payload never carries it).
+        _options_activity: bool | None = None
+        # 185 D-04: the options basis this key-mode Deribit derive's headline ended on, or None
+        # for the cash basis (a perp-only key, or an option-activity key whose options step
+        # degraded). The epilogue stores it as the present-only ``options_basis`` string in
+        # ``key_inputs``; the caveat above is raised only while this is None.
+        _options_basis_applied: str | None = None
+        # 185 F2 (f2-a, D-07): True when the applied options report left some option day at CASH value
+        # (a day older than the option-price window under smoothed, or before the summary rollout
+        # under mark-to-market). Such a day keeps its cash-basis return, stamped and caveated, so
+        # the caveat stays true while the options basis applies. Set by the options step below.
+        _options_bucketed_days: bool = False
         # 167.2.1.1.1 NAVMTM D-23: the instant of each raw flow row, in the unit of the day-keyed
         # flows the marks apply reads (event-time USD, or the account's own unit for MT5). The
         # branches below fill it where they already walk the rows; the apply places a flow made
@@ -5140,6 +5172,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 ScopeAuthError,
                 assert_ledger_complete,
                 build_deribit_native_ledger,
+                build_deribit_options_basis_ledger,
                 cash_basis_open_profit_native,
                 cash_basis_open_profit_usd,
                 fetch_deribit_native_account_state,
@@ -5320,6 +5353,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     mark_day_for(_utc_now()), denominator_config
                 )
                 _twin_kwargs["nav_twin"] = _want_nav_twin
+            if is_key_mode and denominator_config is None:
+                # 185 D-04: the key-mode NAV path builds the options basis for an option-activity
+                # key from THIS crawl's rows (never a second transaction-log crawl, which cannot
+                # fit the derive budget). The cash build keeps them on its report for that step
+                # and the step releases them. Passed on this path only: every other caller's
+                # call is the call it always made.
+                _twin_kwargs["retain_raw_rows"] = True
             try:
                 # v1.9 NATIVE SWITCH (80-03, NAT-05): every Deribit account —
                 # USD-native included — is reconstructed in NATIVE units through
@@ -5375,6 +5415,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                                 for _c in account_state.native_balance
                                 if _c in account_state.native_equity
                             }
+                            # 185 D-04: these are the CASH ledger's numbers also when the options
+                            # basis applies below. They are taken here, before anything can refuse
+                            # (MD-01), so a derive whose options step later degrades still stores
+                            # them; the cash combine and its section 5 gate run first on every
+                            # derive; no gate reads them. Never recomputed from the options ledger.
                             _diag = native_ledger_inception_diagnostics(
                                 native_ledger,
                                 _completeness.indexable_currencies,
@@ -5460,6 +5505,164 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # were just chained from, for the days the TWR drops. The allocated-capital
                 # path builds no NAV, so it has none to give.
                 if is_key_mode and denominator_config is None:
+                    # ── 185 D-04 (DERIBITFLOWTIME): the key-mode OPTIONS BASIS ─────────────────
+                    # The level a day's return divides by was the cash wallet, which leaves out an
+                    # open option book, so an option round trip printed -48 percent, then +333
+                    # percent (RESEARCH Q10). The founder (F1, D-05) chose the smoothed basis, and
+                    # D-04 makes it the key's HEADLINE, not an additive pass like the strategy
+                    # passes below (a key owns no by-basis table and the book needs ONE curve).
+                    #   * ONE crawl: the ledger is assembled from the SAME rows the cash build
+                    #     retained (``retain_raw_rows`` above), never a second transaction-log
+                    #     crawl (the v1.11 incident measured ~12 min for a large account).
+                    #   * Option-activity keys ONLY (Pitfall 1): a perp-only key built on an
+                    #     options basis takes a different terminal wedge, so its rows must not
+                    #     move. Strict ``is True``: a truthy non-bool never raises the step.
+                    #   * ONE ledger for every writer quantity (Pitfall 3): on success
+                    #     ``native_ledger`` is rebound, so the day P&L, the composed flows, the
+                    #     realized terminal, ``native_ledger.flow_instants`` and the apply seam's
+                    #     writer terminal all read it. A hybrid (options returns, cash terminal)
+                    #     would book the whole option book as a return on the first marked day.
+                    #   * LOCAL fallback (Pitfall 2): the SMTM-01 structural tuple below degrades
+                    #     to the cash ledger above (and the 185-04 caveat) and never reaches the
+                    #     cash pass's permanent arms, which would freeze the key's curve on its
+                    #     last row. A transient (DeribitTransientReadError, a bare ValueError,
+                    #     network errors) is NOT caught: the dispatcher retries the whole derive.
+                    #   * F5 (D-12): strategy mode is untouched; its MTM and smoothed passes keep
+                    #     their ``not is_key_mode`` gates.
+                    if _completeness.has_option_activity is True:
+                        for _options_basis in _KEY_MODE_OPTIONS_BASES:
+                            # 185-09 (RESEARCH Q4, Pitfall 4, HIGH-01 / FIX-2): bound the step to a
+                            # slice of what is LEFT of the derive budget. The strategy smoothed pass
+                            # bounds a SECOND crawl; key mode reuses the cash crawl, so it bounds
+                            # only the options step (one public chart request per held instrument
+                            # plus the dense index marks). Unbounded, a step that ran past the
+                            # fixed outer ``wait_for`` would be blamed on the cash pass and retry
+                            # the whole derive to ``failed_final``, sinking a healthy cash
+                            # headline. Computed per attempt: the budget only shrinks.
+                            _options_budget = float(
+                                TIMEOUT_PER_KIND.get(
+                                    "derive_broker_dailies", _DERIVE_BUDGET_DEFAULT_S
+                                )
+                            )
+                            # WR-01: size the slice from what is left AFTER the post-crawl reserve
+                            # and the moved-flow price-read floor, so the later at-instant read, the
+                            # mark write and the persist still start whatever the step uses.
+                            _options_remaining = (
+                                _options_budget
+                                - (asyncio.get_running_loop().time() - _derive_start)
+                                - _DERIVE_POST_CRAWL_RESERVE_S
+                                - _MOVED_FLOW_PRICE_MIN_SECONDS
+                            )
+                            _options_step_timeout = (
+                                _options_remaining * _MTM_SECOND_PASS_BUDGET_FRACTION
+                            )
+                            if _options_step_timeout < _MTM_SECOND_PASS_MIN_SECONDS:
+                                # Refuse to start: the cash crawl consumed most of the budget, and
+                                # a later basis would be refused too. Keep the cash ledger; the
+                                # caveat below follows from ``_options_basis_applied`` staying None.
+                                logger.warning(
+                                    "derive_broker_dailies: key-mode options basis %s not "
+                                    "started (venue=%s) - only %.0fs of the %.0fs derive budget "
+                                    "remained (below the %.0fs floor); keeping the cash ledger "
+                                    "with the caveat",
+                                    _options_basis,
+                                    venue,
+                                    _options_remaining,
+                                    _options_budget,
+                                    _MTM_SECOND_PASS_MIN_SECONDS,
+                                )
+                                break
+                            try:
+                                (
+                                    _options_ledger,
+                                    _options_completeness,
+                                ) = await asyncio.wait_for(
+                                    build_deribit_options_basis_ledger(
+                                        ctx.exchange,
+                                        report=_completeness,
+                                        account_state=account_state,
+                                        pnl_basis=_options_basis,
+                                    ),
+                                    timeout=_options_step_timeout,
+                                )
+                                # Off the shared loop, like the smoothed third pass: this is the
+                                # largest book's full combine.
+                                _options_returns, _options_meta = await asyncio.to_thread(
+                                    combine_native_ledger,
+                                    _options_ledger,
+                                    _completeness.indexable_currencies,
+                                    denominator_config=None,
+                                )
+                            except asyncio.TimeoutError:
+                                # HIGH-01: the bounded options step overran its slice. DEGRADE to
+                                # the cash ledger, attributed to the OPTIONS step: this arm MUST
+                                # precede the structural one and must never let the timeout escape
+                                # to the cash pass's outer ``except asyncio.TimeoutError`` (a
+                                # retryable transient that re-runs the WHOLE derive to
+                                # ``failed_final``). No further basis is tried: a second chart
+                                # crawl against a venue that was just too slow is the cost this
+                                # bound exists to refuse. The caveat follows from
+                                # ``_options_basis_applied`` staying None (185-08's rule).
+                                logger.warning(
+                                    "derive_broker_dailies: key-mode options basis %s exceeded "
+                                    "its bounded %.0fs budget (venue=%s) - keeping the cash "
+                                    "ledger with the caveat",
+                                    _options_basis,
+                                    _options_step_timeout,
+                                    venue,
+                                )
+                                break
+                            except (
+                                LedgerValuationError,
+                                NavReconstructionError,
+                                LedgerCompletenessError,
+                                LedgerTruncatedError,
+                                CurrencyEnumerationError,
+                                ScopeAuthError,
+                            ) as _options_exc:
+                                logger.warning(
+                                    "derive_broker_dailies: key-mode options basis %s degraded "
+                                    "(venue=%s, structural reconstruction failure) - trying the "
+                                    "next basis, else the cash ledger: %s",
+                                    _options_basis,
+                                    venue,
+                                    scrub_freeform_string(str(_options_exc)),
+                                )
+                                continue
+                            native_ledger = _options_ledger
+                            returns, meta = _options_returns, _options_meta
+                            # The options ledger's own warning buckets, the way the strategy
+                            # passes stamp them: option marks aged past retention fell back to
+                            # cash-basis for those (day, ccy) buckets, and option rows outside the
+                            # summary coverage window did too. The factsheet caveats them.
+                            if _options_completeness.pre_mark_retention_option_days:
+                                meta["pre_mark_retention_option_dailies"] = [
+                                    f"{ccy}:{day}"
+                                    for ccy, day in (
+                                        _options_completeness.pre_mark_retention_option_days
+                                    )
+                                ]
+                            if _options_completeness.pre_coverage_option_days:
+                                meta["pre_summary_rollout_option_dailies"] = [
+                                    f"{ccy}:{day}"
+                                    for ccy, day in _options_completeness.pre_coverage_option_days
+                                ]
+                            # F2 (f2-a, D-07, plan 185-09 ``f2-answer: f2-a``): those buckets are
+                            # option days the options basis could not value, so each KEEPS its
+                            # cash-basis return, stamped above and caveated below. SC-5: nothing is
+                            # interpolated or filled, the series is not touched. Each list is
+                            # populated only under its own basis (retention under smoothed,
+                            # coverage under mark-to-market), so either one non-empty means some
+                            # option day of the applied basis is at cash value.
+                            _options_bucketed_days = bool(
+                                _options_completeness.pre_mark_retention_option_days
+                                or _options_completeness.pre_coverage_option_days
+                            )
+                            _options_basis_applied = _options_basis
+                            break
+                    # The retained rows have done their one job; release them (held only for this
+                    # step, and never logged or persisted).
+                    _completeness.raw_rows = None
                     _day_pnl_usd = native_ledger_day_pnl(
                         native_ledger, _completeness.indexable_currencies
                     )
@@ -5470,6 +5673,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _composed_flows_usd = native_ledger_composed_flows(
                         native_ledger, _completeness.indexable_currencies
                     )
+                    # 185 SC-3 / D-04: an option-activity ledger measured at cash value leaves out
+                    # the open option book: the caveat. It is raised while NO options basis applied
+                    # (``_options_basis_applied`` is None: no basis, a budget refusal, a timeout, a
+                    # structural failure) and while the applied one left some option days at cash
+                    # value (``_options_bucketed_days``, F2 f2-a, D-07, SC-5). It clears itself per
+                    # derive only once the options basis fully applies (F3 removal=a); never clear
+                    # it while any option day is still at cash value (T-185-26).
+                    # Strict ``is True``: a truthy non-bool never raises the caveat. Set after the
+                    # options step and before the under-two-days short-circuit, so both epilogue
+                    # exits see it.
+                    _options_cash_basis_caveat = _completeness.has_option_activity is True and (
+                        _options_basis_applied is None or _options_bucketed_days
+                    )
+                    _options_activity = _completeness.has_option_activity is True
                     if native_ledger.full_history:
                         # D-15: the gate ran and passed (a breach raised above). The numbers
                         # behind it were captured before the gate, so a refusal stores them too.
@@ -8620,6 +8837,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # the key's last applied mark when that mark is older than the day this derive
                 # labels is carried here, present-only, for My Allocation to name (an ISO date).
                 _key_inputs_payload["marks_trailing_since"] = _marks_trailing_since
+        # 185 SC-3 / D-04 — ADDITIVE and present-only, in the 167.1.2.2 D-15 voice: a reader that
+        # does not know it, and a row written before it, are both fine. A bool only, never a count,
+        # amount, instrument or date. Deribit key mode only (the ccxt payload never carries it), and
+        # self-clearing per derive once plan 185-08 values the options at market.
+        if _options_cash_basis_caveat is True:
+            _key_inputs_payload["options_cash_basis"] = True
+        # 185 D-04 - ADDITIVE and present-only, same voice: the options basis this key's headline
+        # ended on (a basis name from ``_KEY_MODE_OPTIONS_BASES``). Absent for a perp-only key and
+        # for an option-activity key that fell back to cash, where the caveat above is raised
+        # instead, so exactly one of the two is ever written.
+        if _options_basis_applied is not None:
+            _key_inputs_payload["options_basis"] = _options_basis_applied
+        # 185 WR-03 / D-13 - ADDITIVE, same voice: written on every Deribit key-mode row, True or False
+        # (absent only for a row this writer never touched, which the reader treats as unclassified).
+        if _options_activity is not None:
+            _key_inputs_payload["options_activity"] = _options_activity
         # 167.1.2.2.1 D-03: Deribit-only and present-only (the ccxt payload keeps its 5 keys).
         if _account_summary_snapshot is not None:
             _key_inputs_payload.update(_account_summary_snapshot)

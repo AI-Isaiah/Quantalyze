@@ -78,6 +78,8 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     marksStart = null,
     // SFH-2 N1: the first day without a mark when marks stopped updating.
     marksTrailingSince = null,
+    // 185 D-04: a drawn key values its Deribit options at cash (the interim caveat).
+    optionsCashBasis = false,
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
@@ -117,6 +119,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             btcBenchmarkPrices,
             marksStart,
             marksTrailingSince,
+            optionsCashBasis,
           }),
     [
       isRebuilding,
@@ -125,6 +128,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       btcBenchmarkPrices,
       marksStart,
       marksTrailingSince,
+      optionsCashBasis,
       props.allocator_id,
       portfolio,
       analytics,

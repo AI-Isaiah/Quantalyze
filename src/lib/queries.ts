@@ -91,6 +91,7 @@ import { drainById } from "./drain-by-id";
 import { withPublishedOnly } from "./visibility";
 import { departedHistoryInclusion, isDepartedKey, type DepartedHistoryKey } from "./departed-history";
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "./nav-marks-start";
+import { OPTIONS_ACTIVITY_FLAG, OPTIONS_CASH_BASIS_FLAG, isOptionsCashBasis } from "./options-cash-basis-flag";
 import {
   PERCENTILE_METRICS,
   scoreAgainstPopulation,
@@ -3361,6 +3362,15 @@ export interface MyAllocationDashboardPayload {
    */
   marksTrailingSince?: string | null;
   /**
+   * Phase 185 (DERIBITFLOWTIME) D-04 and SC-3. `true` when at least one key the
+   * drawn curve includes stored `options_cash_basis: true` in its `key_inputs`
+   * row: its Deribit options are valued at cash, so a day's return can be
+   * extreme. Read from the same rows, with the same fail-closed rule, as
+   * `marksStart`. `false` otherwise, including a failed read. Optional so legacy
+   * fixtures compile; the producer always sets it.
+   */
+  optionsCashBasis?: boolean;
+  /**
    * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
    * written, on `asof`, by a poll that could not read their open positions
    * (`fetchLatestHoldingsPerKey`'s `partialReads`). Bound to the poll that
@@ -4080,6 +4090,20 @@ const KEY_INPUTS_KIND_PREFIX = "key_inputs:";
  * SFH-2 N1: the same rows also carry `marks_trailing_since`, the first day
  * without a mark when a key's marks stopped updating. The earliest across the
  * drawn keys is returned beside the start, under the same fail-closed rule.
+ *
+ * 185 D-04 / SC-3: the same rows also carry `options_cash_basis`, the interim
+ * options caveat. Same read, no new query. Strict (only the JSON `true` counts,
+ * `isOptionsCashBasis`). A disclosure fails OPEN, the reverse of `marks_since`
+ * (review WR-02): a departed key's flag counts whatever
+ * `departed_history_unavailable` says, because the curve may contain that key, and
+ * a failed read raises the caveat when a drawn key is a Deribit key
+ * (`drawsDeribit`), since the book then still draws its cash-basis option days.
+ *
+ * 185 WR-03 / D-13: the same fail-open rule for a row the writer never classified.
+ * Every Deribit key-mode derive stamps a boolean `options_activity`; a drawn Deribit
+ * key whose row is missing or lacks it (a departed key, or one whose derive keeps
+ * failing) keeps its cash-basis option days with nothing to say so, so the caveat
+ * shows. This over-warns for a frozen perp-only Deribit key, by decision.
  */
 async function readMarksStart(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -4087,9 +4111,12 @@ async function readMarksStart(
   includedKeyIds: string[],
   departedIncluded: ReadonlySet<string>,
   departedHistoryUnavailable: boolean,
-): Promise<{ start: string | null; trailingSince: string | null }> {
-  const none = { start: null, trailingSince: null };
-  if (includedKeyIds.length === 0) return none;
+  drawnDeribitKeyIds: ReadonlySet<string>,
+): Promise<{ start: string | null; trailingSince: string | null; optionsCashBasis: boolean }> {
+  const drawsDeribit = drawnDeribitKeyIds.size > 0;
+  if (includedKeyIds.length === 0) {
+    return { start: null, trailingSince: null, optionsCashBasis: false };
+  }
   const { data, error } = await supabase
     .from("allocator_equity_derived")
     .select("kind, payload")
@@ -4106,10 +4133,12 @@ async function readMarksStart(
         level: "warning",
       }),
     );
-    return none;
+    return { start: null, trailingSince: null, optionsCashBasis: drawsDeribit };
   }
   let earliest: { day: string; keyId: string } | null = null;
   let earliestTrailing: { day: string; keyId: string } | null = null;
+  let optionsCashBasis = false;
+  const classifiedKeyIds = new Set<string>();
   for (const row of data ?? []) {
     const payload = row.payload as Record<string, unknown> | null;
     const keyId = row.kind.slice(KEY_INPUTS_KIND_PREFIX.length);
@@ -4121,12 +4150,18 @@ async function readMarksStart(
     if (trailing !== null && (earliestTrailing === null || trailing < earliestTrailing.day)) {
       earliestTrailing = { day: trailing, keyId };
     }
+    if (isOptionsCashBasis(payload?.[OPTIONS_CASH_BASIS_FLAG])) optionsCashBasis = true;
+    if (typeof payload?.[OPTIONS_ACTIVITY_FLAG] === "boolean") classifiedKeyIds.add(keyId);
+  }
+  for (const id of drawnDeribitKeyIds) {
+    if (!classifiedKeyIds.has(id)) optionsCashBasis = true;
   }
   const failsClosed = (e: { keyId: string } | null) =>
     e === null || (departedHistoryUnavailable && departedIncluded.has(e.keyId));
   return {
     start: failsClosed(earliest) ? null : earliest!.day,
     trailingSince: failsClosed(earliestTrailing) ? null : earliestTrailing!.day,
+    optionsCashBasis,
   };
 }
 
@@ -5948,12 +5983,21 @@ export const getMyAllocationDashboard = cache(
       perKeyReturnsByApiKeyId,
       allocatorEligibleApiKeyIds,
     );
-    const { start: marksStart, trailingSince: marksTrailingSince } = await readMarksStart(
+    const {
+      start: marksStart,
+      trailingSince: marksTrailingSince,
+      optionsCashBasis,
+    } = await readMarksStart(
       supabase,
       userId,
       marksKeys.included,
       marksKeys.departedIncluded,
       phase07.departedHistoryUnavailable === true,
+      new Set(
+        apiKeys
+          .filter((k) => marksKeys.included.includes(k.id) && k.exchange.toLowerCase() === "deribit")
+          .map((k) => k.id),
+      ),
     );
 
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
@@ -6010,6 +6054,7 @@ export const getMyAllocationDashboard = cache(
         btcBenchmarkPrices,
         marksStart,
         marksTrailingSince,
+        optionsCashBasis,
       };
     }
 
@@ -6509,6 +6554,7 @@ export const getMyAllocationDashboard = cache(
       btcBenchmarkPrices,
       marksStart,
       marksTrailingSince,
+      optionsCashBasis,
     };
   },
 );

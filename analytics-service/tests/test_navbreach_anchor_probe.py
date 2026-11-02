@@ -198,10 +198,18 @@ async def test_quiet_session_every_verdict_passes_and_is_marked_quiet(
 
 
 async def test_mark_to_market_perp_member_behaves_like_cash(monkeypatch: Any) -> None:
+    """185 CR-01: the mark-to-market wedge carries the realized term the way the cash wedge
+    does (``equity - balance`` less the open book), so the SHIPPED ledger passes today's gate
+    and only the pre-fix wedge (session uPnL alone) breaches, as in the cash test above."""
     summaries = [_summary()]
-    ledger, indexable = await _ledger(
+    shipped, indexable = await _ledger(
         monkeypatch, summaries, _perp_rows(), basis="mark_to_market"
     )
+    (now_rec,) = nb.measure_member(
+        summaries, {"mark_to_market": shipped}, indexable, 0, _NOW
+    )
+    assert now_rec["gate_today"] == "pass"
+    ledger = _pre_wedgefix(shipped, {"BTC": _UPL})
     (rec,) = nb.measure_member(
         summaries, {"mark_to_market": ledger}, indexable, 0, _NOW
     )

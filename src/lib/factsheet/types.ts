@@ -883,6 +883,16 @@ export type FactsheetCommon = {
      * `smallBaseMeasured`.
      */
     flowTimingDayLevelLarge?: boolean;
+    /**
+     * Phase 185 (DERIBITFLOWTIME) D-04 and SC-3 — allocator book only, present only
+     * when true: a key the drawn curve includes stored `options_cash_basis: true`, so
+     * a Deribit day was measured against its cash balance, which leaves out open
+     * option positions, and its return can be extreme. INFORMATIONAL: the day is
+     * kept. Set by `buildAllocatorPortfolioFactsheetPayload` from the dashboard
+     * field, never by a strategy read path. It drives the third sentence of the same
+     * amber caveat as `smallBaseMeasured`.
+     */
+    optionsCashBasis?: boolean;
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;

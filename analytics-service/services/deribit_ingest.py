@@ -1194,6 +1194,15 @@ class CompletenessReport:
     # default ``None`` so every existing constructor stays valid.
     nav_twin_ledger: NativeLedger | None = None
     nav_twin_error: str | None = None
+    # Phase 185 (DERIBITFLOWTIME D-04) - the crawl's RAW transaction-log rows, retained ONLY by
+    # ``build_deribit_native_ledger(..., retain_raw_rows=True)`` and read ONLY by
+    # ``build_deribit_options_basis_ledger``, which assembles a second basis from the SAME crawl
+    # (a second full crawl cannot fit the derive budget). They carry instruments, sizes and
+    # amounts: ``repr=False`` keeps them out of any log line and ``compare=False`` out of report
+    # equality; never log or persist this field. ``None`` unless retention was asked for.
+    raw_rows: tuple[Mapping[str, Any], ...] | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def deribit_ledger_digest(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2674,90 +2683,30 @@ async def _build_smoothed_option_mtm(
     return delta_mtm, terminal_book, sorted(pre_retention)
 
 
-async def build_deribit_native_ledger(
+async def _assemble_deribit_native_ledger(
     exchange: Any,
-    since_ms: int | None = None,
     *,
-    account_state: DeribitNativeAccountState | None = None,
-    sleep: SleepFn = asyncio.sleep,
-    pnl_basis: str = DEFAULT_PNL_BASIS,
-    exclude_spot_extraction: bool = False,
-    nav_twin: bool = False,
-) -> tuple[NativeLedger, CompletenessReport]:
-    """Assemble a :class:`~services.native_nav.NativeLedger` for the landed Phase-79
-    native core from existing Deribit parts + the 80-01 siblings (NAT-04). It
-    writes NO reconstruction math — the core rolls, values, and refuses.
+    raw_rows: Sequence[Mapping[str, Any]],
+    indexable: frozenset[str],
+    report: CompletenessReport,
+    state_in: DeribitNativeAccountState | None,
+    pnl_basis: str,
+    exclude_spot_extraction: bool,
+    nav_twin: bool,
+    sleep: SleepFn,
+) -> NativeLedger:
+    """Everything ``build_deribit_native_ledger`` does AFTER the crawl and the digest: the
+    native aggregation, the smoothed ΔMTM merge, the dense marks, the balance-identity guard,
+    the basis-dependent terminal wedge, the ``NativeLedger`` and (``nav_twin``) its realized
+    twin.
 
-    Six fields, all per-currency native:
-      * ``native_pnl`` — ``txn_rows_to_native_daily`` over the crawl's RAW rows,
-        each ``{day: native_change}`` dict converted to a tz-naive midnight Series
-        (D9).
-      * ``terminal_native_equity`` / ``terminal_upnl_native`` — the per-currency
-        native anchor + wedge from the ONE ``get_account_summaries`` response
-        (:func:`fetch_deribit_native_account_state`). The caller threads its
-        already-read ``account_state`` in (D5 one-read: the core anchor + the
-        caller's materiality/C2 basis judge the SAME response); a standalone /
-        test caller omits it and this reads the anchor itself. The unmarkable-wedge
-        App A #6 refusal is delivered BY CONSTRUCTION — the raw native
-        ``session_upl`` is passed through and the core's value-gate refuses it.
-      * ``marks`` — a DENSE daily ``{ccy}_usd`` settlement-index Series per INDEXED
-        nonzero currency (:func:`_build_dense_native_marks`); USD-family absent.
-      * ``native_flows`` — the crawl's 4-field ``(day, ccy)`` dated flows, reused
-        verbatim from ``report.dated_external_flows`` (never recomputed).
-      * ``full_history=True`` — Deribit's txn-log reaches inception, so the §5
-        inception gate reconciles against a pre-history balance of 0.
-
-    Returns ``(NativeLedger, CompletenessReport)``; the caller still runs
-    :func:`assert_ledger_complete` on the report (the adapter never swallows it).
-    The collapsed USD anchor stays available via
-    :func:`fetch_deribit_native_account_state` for the 80-04 parity panel.
-
-    NAVMTM D-14 (``nav_twin=True``, ALLOCATED mode only): an allocated-capital account's
-    returns follow its key's marked NAV from the first mark, so the derive needs that
-    account's realized NAV LEVEL, and the allocated ledger cannot give it: Bug B drops both
-    legs of every net-extraction spot pair from ``native_pnl``, so its NAV roll fails the
-    section-5 inception gate and drifts by every extraction inside a roll span. The twin
-    re-aggregates the crawl's OWN raw rows with ``exclude_spot_extraction=False`` (and merges
-    the same smoothed ΔMTM book when that basis is on), runs ``assert_balance_identity`` on
-    it in NAV mode, and returns it as ``report.nav_twin_ledger``. It makes NO venue call and
-    no second crawl: the marks, flows, account state and terminal wedge are the allocated
-    ledger's own objects, reused and never rebuilt, so the allocated path cannot move. A twin
-    that cannot be built (a ``LedgerValuationError`` from its aggregation or identity) never
-    fails the build: ``nav_twin_ledger`` stays ``None`` and ``nav_twin_error`` names the class.
+    185 D-04: extracted so ANY basis can be assembled from one crawl's retained raw rows
+    (:func:`build_deribit_options_basis_ledger`) by the SAME statements the cash build runs.
+    It is a pure move: same statements, same order, same ``report`` assignments. It makes no
+    transaction-log call; it reads only public chart and index data and ``state_in`` (the
+    caller's already-read account state, or ``None`` to read it here). It mutates ``report``,
+    so a caller that must keep its report intact passes a copy.
     Leak: no raw balances/marks/flows logged."""
-    if nav_twin and not exclude_spot_extraction:
-        raise ValueError(
-            "nav_twin=True needs exclude_spot_extraction=True: the NAV path "
-            "(exclude_spot_extraction=False) already keeps the extraction legs and is its "
-            "own twin"
-        )
-    # WR-05: the smoothed replay reconstructs ABSOLUTE option positions from the
-    # signed post-trade ``position`` field, so it is only correct over the FULL
-    # history (Deribit's txn-log reaches inception — ``full_history=True``
-    # below). A ``since_ms``-cropped crawl would see positions only from the
-    # first in-window row: earlier held days silently unmarked, the first
-    # in-window day absorbing a book jump, and the option-activity gate (ANY
-    # option-evidence row) disagreeing with the replay (trade/delivery/assignment
-    # rows only, ``_OPTION_BOOK_EVENT_TYPES``) — terminal_book {} vs a nonzero
-    # venue anchor. Fail loud before crawling rather than misattribute; the other
-    # bases keep accepting ``since_ms`` (SC-4).
-    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and since_ms is not None:
-        raise LedgerValuationError(
-            "smoothed_mtm requires a full-history crawl (since_ms=None): the "
-            "option-book replay reconstructs absolute positions from the signed "
-            "post-trade position field and a cropped window would silently "
-            "mis-state the daily MTM"
-        )
-    _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
-        exchange, since_ms, sleep=sleep
-    )
-    # DERIBITWEDGE PR-1 (D-03): digest the crawled rows so a later diff can tell a ledger
-    # change from a wedge change. Additive: a failure here is recorded by class name on the
-    # report (the worker logs it and stores ``ledger_digest_error``) and never fails the build.
-    try:
-        report.ledger_digest = deribit_ledger_digest(raw_rows)
-    except Exception as exc:  # noqa: BLE001 - an additive digest must not fail the build
-        report.ledger_digest_error = type(exc).__name__
     # Keep the plain (day, ccy)-keyed native dict for the balance-identity guard
     # (which reconciles against Σchange over cash-bearing rows) BEFORE the
     # pd.Series conversion. ``pnl_basis`` (cash_settlement DEFAULT — zavara-
@@ -2807,8 +2756,8 @@ async def build_deribit_native_ledger(
     # materiality/C2 basis judge ONE response. Standalone / test callers pass
     # nothing → fall back to a self-contained read (no behaviour change for them).
     state = (
-        account_state
-        if account_state is not None
+        state_in
+        if state_in is not None
         else await fetch_deribit_native_account_state(exchange)
     )
     marks = await _build_dense_native_marks(
@@ -2928,16 +2877,27 @@ async def build_deribit_native_ledger(
     # ΔMTM merge already carries the SETTLED open book into native_pnl
     # (terminal_book == options_value − options_session_upl, book-channel-guarded
     # above), so re-adding options_value would double-count it and strand a §5
-    # residual ≈ options_value on every healthy open-book account. From the M5
-    # anchor identity (equity − combined_session_upl == cash + options_value −
-    # options_session_upl): Σnative_pnl = cash′ + options_value −
-    # options_session_upl ⇒ required wedge = equity − Σflow − Σnative_pnl =
-    # futures_session_upl + options_session_upl — exactly the COMBINED session
-    # uPnL that ``state.native_upnl`` already reads (the two legs the settled
-    # daily marks exclude). §5 then closes exactly (pinned by the open-book
-    # smoothed §5-through test).
+    # residual ≈ options_value on every healthy open-book account.
+    #
+    # CR-01 (185): the wedge must still carry the futures session RPL. From the documented
+    # identity equity = balance + futures (session UPL + RPL) + options_value, and
+    # Σnative_pnl = cash + options_value − options_session_upl, the required wedge is
+    #   (equity − balance) − (options_value − options_session_upl)
+    # = futures (session UPL + RPL) + options_session_upl.
+    # ``state.native_upnl`` (the combined session uPnL) omits the RPL, so an account with
+    # perp P&L accrued since the 08:00 settlement stranded a §5 residual equal to it and
+    # fell back to cash night to night. Built on ``_cash_basis_wedge`` so both arms read
+    # ``balance`` the same way; when ``balance`` is absent its component fallback cancels
+    # the options terms and this is exactly ``native_upnl``, as before.
     if pnl_basis in (PNL_BASIS_MARK_TO_MARKET, PNL_BASIS_SMOOTHED_MTM):
-        terminal_upnl_native: Mapping[str, float] = state.native_upnl
+        terminal_upnl_native: Mapping[str, float] = {
+            c: (
+                _cash_basis_wedge(state, c)
+                - float(state.native_options_value.get(c, 0.0))
+                + float(state.native_options_session_upl.get(c, 0.0))
+            )
+            for c in _cash_wedge_currencies(state)
+        }
     else:
         terminal_upnl_native = {
             c: _cash_basis_wedge(state, c) for c in _cash_wedge_currencies(state)
@@ -3005,7 +2965,174 @@ async def build_deribit_native_ledger(
                 "build_deribit_native_ledger: nav twin unbuildable (error=%s)",
                 type(exc).__name__,
             )
+    return ledger
+
+
+async def build_deribit_native_ledger(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    account_state: DeribitNativeAccountState | None = None,
+    sleep: SleepFn = asyncio.sleep,
+    pnl_basis: str = DEFAULT_PNL_BASIS,
+    exclude_spot_extraction: bool = False,
+    nav_twin: bool = False,
+    retain_raw_rows: bool = False,
+) -> tuple[NativeLedger, CompletenessReport]:
+    """Assemble a :class:`~services.native_nav.NativeLedger` for the landed Phase-79
+    native core from existing Deribit parts + the 80-01 siblings (NAT-04). It
+    writes NO reconstruction math — the core rolls, values, and refuses.
+
+    Six fields, all per-currency native:
+      * ``native_pnl`` — ``txn_rows_to_native_daily`` over the crawl's RAW rows,
+        each ``{day: native_change}`` dict converted to a tz-naive midnight Series
+        (D9).
+      * ``terminal_native_equity`` / ``terminal_upnl_native`` — the per-currency
+        native anchor + wedge from the ONE ``get_account_summaries`` response
+        (:func:`fetch_deribit_native_account_state`). The caller threads its
+        already-read ``account_state`` in (D5 one-read: the core anchor + the
+        caller's materiality/C2 basis judge the SAME response); a standalone /
+        test caller omits it and this reads the anchor itself. The unmarkable-wedge
+        App A #6 refusal is delivered BY CONSTRUCTION — the raw native
+        ``session_upl`` is passed through and the core's value-gate refuses it.
+      * ``marks`` — a DENSE daily ``{ccy}_usd`` settlement-index Series per INDEXED
+        nonzero currency (:func:`_build_dense_native_marks`); USD-family absent.
+      * ``native_flows`` — the crawl's 4-field ``(day, ccy)`` dated flows, reused
+        verbatim from ``report.dated_external_flows`` (never recomputed).
+      * ``full_history=True`` — Deribit's txn-log reaches inception, so the §5
+        inception gate reconciles against a pre-history balance of 0.
+
+    Returns ``(NativeLedger, CompletenessReport)``; the caller still runs
+    :func:`assert_ledger_complete` on the report (the adapter never swallows it).
+    The collapsed USD anchor stays available via
+    :func:`fetch_deribit_native_account_state` for the 80-04 parity panel.
+
+    NAVMTM D-14 (``nav_twin=True``, ALLOCATED mode only): an allocated-capital account's
+    returns follow its key's marked NAV from the first mark, so the derive needs that
+    account's realized NAV LEVEL, and the allocated ledger cannot give it: Bug B drops both
+    legs of every net-extraction spot pair from ``native_pnl``, so its NAV roll fails the
+    section-5 inception gate and drifts by every extraction inside a roll span. The twin
+    re-aggregates the crawl's OWN raw rows with ``exclude_spot_extraction=False`` (and merges
+    the same smoothed ΔMTM book when that basis is on), runs ``assert_balance_identity`` on
+    it in NAV mode, and returns it as ``report.nav_twin_ledger``. It makes NO venue call and
+    no second crawl: the marks, flows, account state and terminal wedge are the allocated
+    ledger's own objects, reused and never rebuilt, so the allocated path cannot move. A twin
+    that cannot be built (a ``LedgerValuationError`` from its aggregation or identity) never
+    fails the build: ``nav_twin_ledger`` stays ``None`` and ``nav_twin_error`` names the class.
+
+    185 D-04 (``retain_raw_rows=True``): keep the crawl's raw rows on ``report.raw_rows`` so
+    :func:`build_deribit_options_basis_ledger` can assemble a second basis from this SAME
+    crawl. It adds no venue call and no second crawl, changes no ledger value, and the default
+    (``False``) leaves ``report.raw_rows`` ``None``, so every existing caller is unchanged.
+    Leak: no raw balances/marks/flows logged."""
+    if nav_twin and not exclude_spot_extraction:
+        raise ValueError(
+            "nav_twin=True needs exclude_spot_extraction=True: the NAV path "
+            "(exclude_spot_extraction=False) already keeps the extraction legs and is its "
+            "own twin"
+        )
+    # WR-05: the smoothed replay reconstructs ABSOLUTE option positions from the
+    # signed post-trade ``position`` field, so it is only correct over the FULL
+    # history (Deribit's txn-log reaches inception — ``full_history=True``
+    # below). A ``since_ms``-cropped crawl would see positions only from the
+    # first in-window row: earlier held days silently unmarked, the first
+    # in-window day absorbing a book jump, and the option-activity gate (ANY
+    # option-evidence row) disagreeing with the replay (trade/delivery/assignment
+    # rows only, ``_OPTION_BOOK_EVENT_TYPES``) — terminal_book {} vs a nonzero
+    # venue anchor. Fail loud before crawling rather than misattribute; the other
+    # bases keep accepting ``since_ms`` (SC-4).
+    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and since_ms is not None:
+        raise LedgerValuationError(
+            "smoothed_mtm requires a full-history crawl (since_ms=None): the "
+            "option-book replay reconstructs absolute positions from the signed "
+            "post-trade position field and a cropped window would silently "
+            "mis-state the daily MTM"
+        )
+    _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
+        exchange, since_ms, sleep=sleep
+    )
+    if retain_raw_rows:
+        report.raw_rows = tuple(raw_rows)
+    # DERIBITWEDGE PR-1 (D-03): digest the crawled rows so a later diff can tell a ledger
+    # change from a wedge change. Additive: a failure here is recorded by class name on the
+    # report (the worker logs it and stores ``ledger_digest_error``) and never fails the build.
+    try:
+        report.ledger_digest = deribit_ledger_digest(raw_rows)
+    except Exception as exc:  # noqa: BLE001 - an additive digest must not fail the build
+        report.ledger_digest_error = type(exc).__name__
+    ledger = await _assemble_deribit_native_ledger(
+        exchange,
+        raw_rows=raw_rows,
+        indexable=indexable,
+        report=report,
+        state_in=account_state,
+        pnl_basis=pnl_basis,
+        exclude_spot_extraction=exclude_spot_extraction,
+        nav_twin=nav_twin,
+        sleep=sleep,
+    )
     return ledger, report
+
+
+async def build_deribit_options_basis_ledger(
+    exchange: Any,
+    *,
+    report: CompletenessReport,
+    account_state: DeribitNativeAccountState,
+    pnl_basis: str,
+    sleep: SleepFn = asyncio.sleep,
+) -> tuple[NativeLedger, CompletenessReport]:
+    """The OPTIONS-basis ledger of a key, assembled from the SAME crawl as its cash ledger.
+
+    185 D-04: the options basis a key-mode NAV needs is the existing smoothed or
+    mark-to-market assembly, not a new basis. ``report`` is the report of a
+    ``build_deribit_native_ledger(..., retain_raw_rows=True)`` build; its retained rows run
+    through :func:`_assemble_deribit_native_ledger`, the code path the cash build itself runs,
+    so the result equals what an independent second crawl would build. The key-mode NAV path
+    only (``exclude_spot_extraction=False``, no NAV twin).
+
+    It makes NO transaction-log call (a second full crawl cannot fit the derive budget): the
+    only venue reads are the public chart and index data the assembly already makes. The
+    caller's ``report`` is never mutated; the assembly runs on a copy, which is returned and
+    carries its own option-day lists. Any :class:`LedgerValuationError` (an in-retention hole,
+    a retention straddler, a balance-identity breach) propagates for the caller to degrade to
+    the cash basis; a transient read error propagates too.
+
+    Raises ``ValueError`` (a programming error, never a degrade) when ``report.raw_rows`` is
+    ``None`` or ``pnl_basis`` is not smoothed or mark-to-market.
+    Leak: no raw balances/marks/flows logged; classes and counts only."""
+    if report.raw_rows is None:
+        raise ValueError(
+            "build_deribit_options_basis_ledger needs a report from "
+            "build_deribit_native_ledger(..., retain_raw_rows=True)"
+        )
+    if pnl_basis not in (PNL_BASIS_SMOOTHED_MTM, PNL_BASIS_MARK_TO_MARKET):
+        raise ValueError(
+            "build_deribit_options_basis_ledger builds an options basis "
+            "(smoothed_mtm or mark_to_market), not the cash basis"
+        )
+    # The assembly writes the option-day lists and the NAV twin onto the report it is given;
+    # the copy starts them empty so the options report carries only its own.
+    options_report = replace(
+        report,
+        raw_rows=None,
+        pre_coverage_option_days=[],
+        pre_mark_retention_option_days=[],
+        nav_twin_ledger=None,
+        nav_twin_error=None,
+    )
+    ledger = await _assemble_deribit_native_ledger(
+        exchange,
+        raw_rows=report.raw_rows,
+        indexable=report.indexable_currencies,
+        report=options_report,
+        state_in=account_state,
+        pnl_basis=pnl_basis,
+        exclude_spot_extraction=False,
+        nav_twin=False,
+        sleep=sleep,
+    )
+    return ledger, options_report
 
 
 def assert_ledger_complete(report: CompletenessReport) -> None:
