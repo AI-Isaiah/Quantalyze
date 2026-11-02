@@ -178,7 +178,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — complete 2026-10-22 (v0.132.10.7 #1110; founder 2026-10-22; data-integrity)
 - [x] **Phase 167.2.1.1.2: ACCTREBUILD — a Bybit-backed account's past allocation history is rebuilt with open-position profit included, the whole account in one step or not at all** (INSERTED 2026-10-22) — complete 2026-10-23 (v0.133.0.0 #1116; founder 2026-10-22; data-integrity; SC-3: all 5 accounts refused by name, 1 routed to TRADEPAGES)
 - [x] **Phase 167.2.1.1.2.1: TRADEPAGES — the allocator history rebuild reads every trade the venue holds for its window on OKX and Bybit, not just the first page** (INSERTED 2026-10-23) — complete 2026-10-27 (v0.133.0.6 #1125; founder 2026-10-23; from ACCTREBUILD SC-3; data-integrity; SC-2 and SC-3 closed by founder decision 2026-10-26, rebuild none)
-- [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
+- [x] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — complete 2026-11-02 (v0.133.1.0 #1130, chain move #1132, G-01 v0.133.13.0 #1166; founder 2026-10-22; data-integrity; SC-4 week reading: 20 marked keys stored 7 of 7 days with no gaps)
 - [x] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — complete 2026-10-31 (v0.133.6.0 #1141; founder 2026-10-22; data-integrity; plan 08 legacy poll and refresh moved to 01:00Z and 01:30Z, PR #1159; plan 14 OKX rows recorded, not recomputed, via Phase 178; follow-ups 181 SHAREDKEYS and 182 SPIKEREPAIR)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
 - [x] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified (completed 2026-10-04)
@@ -5658,16 +5658,40 @@ Plans:
 
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 167.2.1.1 (UPNLVENUES)
+**Founder amendment 2026-10-26 (CONTEXT D-17, D-18):** Bybit marks come from Bybit's own unified-account totals (`totalEquity`, option value included), refused by name outside UTA 2.0, in isolated margin, with a borrow, or when Bybit's wallet disagrees with our own priced wallet. This replaces L4's "read the way the reconstruct anchor reads it" for Bybit only, because the position read covered only USDT-settled contracts. Open option value is part of the NAV on Bybit, OKX, Binance and Deribit (D-18 as extended by the founder).
 **Success Criteria** (what must be TRUE):
 1. Each daily sync, per key and venue, persists NAV-incl-uPnL plus uPnL plus the mark time, for OKX, Deribit, MT5, sFOX, and Bybit/Binance after UPNLVENUES.
 2. The strategy return series and the allocator equity curve use the stored marked NAV for every day it exists, and realized-basis only for days before storage began, with the boundary visible and no fabricated past marks.
 3. A test proves a day with stored marks reproduces the marked NAV.
 4. A PROD reading after a week shows stored marks accumulating per key.
 
-**Plans:** 0 plans
+**D-22 (founder 2026-10-26, "Move it to right after deploy (Recommended)"):** the venue dry run of plan 11 runs right after deploy on the worker over `railway ssh` (KEK and egress IP there), before the first nightly marks or by reading the first night's results; uncertain cases refuse that day's mark and write nothing (D-05). D-20's code is measured on that first run.
+
+**D-23 and D-24 (founder 2026-10-26, review round 2):** D-23 "Use the deposit's exact time (Recommended)": a flow dated the day after a mark is placed by its own instant against the mark's read time, and the round-1 read-day skip is removed. D-24 "Reverse the open profit (Recommended)": a realized tail kept after a closed member's or closed mandate's last mark first reverses that mark's open-profit step, so the tail is purely realized.
+
+**Plans:** 20/20 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 167.2.1.1.1-01-PLAN.md — marks table api_key_nav_marks: write-once grants, owner RLS, both cascades, label rule, 11-arm SQL gate, data-keeping rollback (wave 1)
+- [x] 167.2.1.1.1-02-PLAN.md — GDPR export and sanitize parity, table type, function snapshot, ratchets and sentinel census (wave 2)
+- [x] 167.2.1.1.1-03-PLAN.md — pure apply_marks rule (D-04, D-05, D-15, L3), the D-14 day-P&L roll, and derive_basis_series covered_days (wave 1)
+- [x] 167.2.1.1.1-04-PLAN.md — D-02: cron_sync derives every eligible strategy of a healthy key daily (wave 1)
+- [x] 167.2.1.1.1-05-PLAN.md — D-03/D-13: fan-out gate rule, benchmark refresh at 00:05Z, ADR row, chain-move runbook and window notes (wave 1)
+- [x] 167.2.1.1.1-06-PLAN.md — the derive writes the mark per venue for OKX, Deribit, MT5 and sFOX; D-07 native fields; the stored row is the authority (wave 2)
+- [x] 167.2.1.1.1-07-PLAN.md — strategy-mode derive applies the marks for every strategy whose returns are NAV changes, configured or not; marks_since prestamp; rows roll back to every mark (wave 4)
+- [x] 167.2.1.1.1-08-PLAN.md — compute: marks-aware reindex boundary, D-12 marks_since published, the simple-sum figure pinned (wave 2)
+- [x] 167.2.1.1.1-09-PLAN.md — composite members whose returns are NAV changes apply their keys' marks, configured composites included; covered days are not gaps (wave 7)
+- [x] 167.2.1.1.1-10-PLAN.md — D-08 start-of-marks note on the factsheet and My Allocation; needs a UI-SPEC from the UI design step first (wave 5)
+- [x] 167.2.1.1.1-11-PLAN.md — operator-only: the allocated-capital reading before the merge; right after deploy on the worker over railway ssh (D-22) the funding arrival, twin check and mark dry run with one stop rule; then the live chain move and manifest capture (wave 11)
+- [x] 167.2.1.1.1-12-PLAN.md — key-mode compose inputs coherent with the marks, anchored on the stored mark of the labelled day with its read time (SC-3, W7) (wave 5)
+- [x] 167.2.1.1.1-13-PLAN.md — D-14 groundwork: the Deribit NAV twin of the same crawl, isolated so a twin failure never fails the build (wave 1)
+- [x] 167.2.1.1.1-14-PLAN.md — operator-only: first 00:10Z run readings, SC-4 week reading, D-15 count and the founder readout, D-17 to D-21 included (wave 12)
+- [x] 167.2.1.1.1-15-PLAN.md — Bybit/Binance marks read exactly as the reconstruct anchor reads, once per key per day (L4, D-10 as amended by D-16) (wave 3)
+- [x] 167.2.1.1.1-16-PLAN.md — D-14: allocated-capital strategies follow marked NAV from the twin; mandate window and tail; the simple-sum rule (wave 6)
+- [x] 167.2.1.1.1-17-PLAN.md — D-14 for composites: an allocated-capital composite's Deribit member follows marked NAV from its twin (wave 8)
+- [x] 167.2.1.1.1-18-PLAN.md — D-17/D-18 Bybit: the mark is the Unified Trading Account total (totalEquity, option value included), refused by name; no positions read (wave 5)
+- [x] 167.2.1.1.1-19-PLAN.md — D-18/D-19/D-20 OKX and Binance: option holders refused until measured, a Binance key without options access counts as zero on the pinned code (wave 9)
+- [x] 167.2.1.1.1-20-PLAN.md — D-21 Deribit: stored open profit is NAV minus wallet, option value inside the NAV, the D-04 step books it (wave 10)
 
 ### Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open (INSERTED)
 
@@ -7207,7 +7231,7 @@ kept verbatim.
 | 167.2.1.1 UPNLVENUES | 6/6 | Complete — v0.132.10.7 #1110; D-01 live read confirmed on 1 of 1 informative key; the 5 multi-key allocators are owned by ACCTREBUILD | 2026-10-22 |
 | 167.2.1.1.2 ACCTREBUILD | 9/9 | Complete — v0.133.0.0 #1116; SC-3: 4 accounts refused `account_key_not_working` (accepted as recorded), 1 refused `account_key_read_failed` (routed to TRADEPAGES); nothing written | 2026-10-23 |
 | 167.2.1.1.2.1 TRADEPAGES | 6/6 | Complete — v0.133.0.6 #1125; SC-1 verified in code; SC-2 and SC-3 closed by founder decision 2026-10-26 (rebuild none, probe recorded: 0 of 6 accounts comparable, 4 have no working key); 4 follow-ups booked | 2026-10-27 |
-| 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
+| 167.2.1.1.1 NAVMTM | 20/20 | Complete — v0.133.1.0 #1130, chain moved to 00:10Z #1132, G-01 v0.133.13.0 #1166; SC-4 week 2026-10-26..11-01: 20 marked keys 7/7 days, 0 gaps, 3 eligible keys refused by name (2 MT5 `nonpositive`, 1 OKX `dust`); D-19 OKX option refusal kept until measured (founder); composite re-derive and refusal-token log booked in TODOS | 2026-11-02 |
 | 167.2.1.1.1.1 MARKSOURCE | 16/16 | Complete — v0.133.6.0 #1141; forward fix shipped earlier, plan 08 legacy poll and refresh moved to 01:00Z and 01:30Z (PR #1159), plan 14 OKX rows a1, a2 and a5 recorded not recomputed via Phase 178 (nothing written to PROD); follow-ups Phase 181 SHAREDKEYS and Phase 182 SPIKEREPAIR | 2026-10-31 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7/7 | Complete    | 2026-10-04 |

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.16.6] - 2026-11-02 — records: close 167.2.1.1.1 NAVMTM
+
+### Notes
+- Phase 167.2.1.1.1 NAVMTM is closed. The code shipped in v0.133.1.0 (#1130), the chain moved to 00:10Z in #1132, and the G-01 fix shipped in v0.133.13.0 (#1166). Verification passed on all four success criteria, and the security check is SECURED: all 72 threats are closed.
+- SC-4 week reading (mark days 2026-10-26 to 11-01, read-only on PROD): every one of the 20 marked keys stored a mark on all 7 days, 140 marks in all. No key has a gap day and no return spans a gap (D-15). Three keys that can be marked were refused every day with a named reason and nothing was written: 2 MT5 keys as `nonpositive` and 1 OKX key as `dust`. No strategy runs on allocated capital yet, so the D-14 rules apply to none.
+- Founder readout 2026-11-02:
+  - D-19: no OKX account held an option this week, so the OKX option refusal stays until an account holds one and it can be measured ("Keep refusing, measure later").
+  - The log scrubber hides the refusal token, so per-token refusal counts are recorded as unreadable, and the first-night record is corrected.
+  - The two composites have not been re-derived since marks started, so the marks path for composites has not run on PROD yet.
+- Plan 14's SUMMARY records the full week reading and the founder's answers.
+
+### Added
+- TODOS `167.2.1.1.1-REFUSAL-TOKEN-REDACTED` (diagnostic): rename the refusal log key so the scrubber leaves the token alone.
+- TODOS `167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS` (data integrity, trigger now): find out why no composite job was enqueued after marks started, then confirm that a composite re-derive reads its members' marks.
+
+### Changed
+- STATE and the ROADMAP progress table record the close.
+
 ## [0.133.16.5] - 2026-11-02 — records: close 183 DUPCOUNT
 
 ### Notes
