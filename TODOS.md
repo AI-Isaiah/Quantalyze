@@ -4598,6 +4598,23 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   The ROADMAP section stays as the spec.
   **Owner / Trigger:** the next milestone's planning, if the founder takes it up. The gate needs the founder's MT5 accounts.
 
+- [ ] **[189-OPTIONREPLAY-NEXT-MILESTONE] — a Deribit key whose option-book replay refuses gets the smoothed option values (retired from v1.20 2026-11-03).**
+  The founder moved every open phase that is purely about Deribit or SFOX out of v1.20 on 2026-11-03: "put all open phases that are purely about deribit or sfox into todos and not do them in this milestone".
+  Phase 189 OPTIONREPLAY was not planned and nothing shipped. Key C's replay still raises `LedgerValuationError`, so the key stays on the cash basis with the amber caveat, and its three cash-basis days above +50% stay on the book's curve (185 D-10, read again by 185 plan 10 on 2026-11-03).
+  The ROADMAP `### Phase 189` section stays as the spec, including the three row shapes the code narrows it to and the read-only worker count that comes first.
+  **Owner / Trigger:** the next milestone's planning. The first step needs the founder's approval for each worker run.
+
+- [ ] **[185-BOOK-CUMULATIVE-UNEXPLAINED] — the founder's Deribit book compounds to about x3836 over its history, and valuing options at market did not bring it down (logged 2026-11-03).**
+  185 plan 10 (PROD, 2026-11-03, after the 185 deploy): valuing options at market cut the book's days above +50% from 6 to 2. The cumulative did not come down: whole history x3516 to x3836, 2025 x1008 to x999, 2026 x2.07 to x2.09. So cash-basis options are not what drives the multi-year compounding, as the 185-01 debug session already suspected.
+  The founder chose a TODOS entry, not a phase (185 D-14, 2026-11-03), under the same day's rule that purely Deribit work leaves v1.20.
+  **Owner / Trigger:** the next milestone's planning. Start from the 185-01 debug session and the plan 10 `sc4-book:` and `sc4-report:` lines.
+
+- [ ] **[187-BINANCEINCOME-NEXT-MILESTONE] — Binance futures realized P&L and funding never reach the derive, because the income call uses a method name the pinned ccxt does not have (retired from v1.20 2026-11-03).**
+  The founder moved Phase 187 BINANCEINCOME out of v1.20 on 2026-11-03: "put binance into todos". Not planned, nothing shipped.
+  It is still true on main: `fapiPrivate_get_income` (realized P&L in `services/exchange.py`, funding in `services/funding_fetch.py`) and `fapiPublic_get_premiumindex` (Binance marks) do not exist on the pinned ccxt. So realized P&L falls back to spot trades with only a DQ flag, a Binance key's derive fails at the funding read, and Binance marks fall back to entry price. The mocks use the same wrong names, which is why the tests pass.
+  The ROADMAP `### Phase 187` section stays as the spec: the six success criteria and the full census of mixed-case implicit calls.
+  **Owner / Trigger:** the next milestone's planning, or sooner if a Binance key is connected to a published strategy or an allocator book. Data integrity: the fix changes published Binance numbers.
+
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
 - [x] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
