@@ -42,6 +42,12 @@ and the type list grows over time; the probe's census (`scripts/bybit_funding_re
 the candidates so the founder sees whether an account used them. `UNIFIED_FLOW_TYPES` is the one
 place a follow-up extends.
 
+Pairing (Phase 186 plan 03): `pair_onchain_with_unified` is the one rule for deciding that an
+on-chain deposit or withdrawal row and a Unified TRANSFER row are the same money. It is shared by
+the SC-1 probe (`scripts/derivegaps_probe.py`, whose overlap count decides REPLACE against UNION
+for D-02) and by any pair-aware Bybit flow source, so the two cannot drift. It is pure, and it has
+no production caller until plan 186-10 decides.
+
 Rate limiting: no `asyncio.sleep`; ccxt's `enableRateLimit` throttles raw calls by the API table's
 cost.
 """
@@ -50,8 +56,8 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Mapping
-from typing import Any, Final
+from collections.abc import Mapping, Sequence
+from typing import Any, Final, NamedTuple
 
 from services.exchange_pagination import (
     PageRequest,
@@ -218,3 +224,173 @@ async def fetch_bybit_unified_flows(
         seen.add(key)
         (deposits if row["type"] == "deposit" else withdrawals).append(row)
     return deposits, withdrawals
+
+
+#: A deposit reaches the Unified wallet within this long after it lands on chain, and a Unified
+#: transfer-out reaches the chain within this long. 30 days is Bybit's own deposit-record window.
+PAIRING_WINDOW_MS: Final[int] = 30 * 24 * 3600 * 1000
+
+
+class FlowPairing(NamedTuple):
+    """The result of pairing on-chain rows with Unified rows. ``matched_deposit_ids`` and
+    ``matched_withdrawal_ids`` hold the ids of the paired on-chain rows, one set per side because a
+    deposit id and a withdrawal id are different id spaces, in memory only, for a pair-aware derive.
+    ``unreadable_rows`` counts rows (either side) the rule cannot read, which can pair with nothing.
+    ``near_miss_rows`` counts unpaired on-chain rows that have an unused Unified row of the same
+    currency inside the window whose amount differs, so zero pairs can be told apart from an
+    overlap the rule could not see. A probe prints the counts and nothing else."""
+
+    paired_deposits: int
+    paired_withdrawals: int
+    unpaired_onchain_deposits: int
+    unpaired_onchain_withdrawals: int
+    matched_deposit_ids: frozenset[str]
+    matched_withdrawal_ids: frozenset[str]
+    unreadable_rows: int
+    near_miss_rows: int
+
+
+def _pair_view(row: Mapping[str, Any]) -> tuple[str, float, int] | None:
+    """(currency upper-cased, absolute amount, ms timestamp), or None when the row is unreadable.
+    An unreadable row can pair with nothing; it is counted unpaired, never raised on."""
+    currency = row.get("currency")
+    amount = row.get("amount")
+    stamp = row.get("timestamp")
+    if not isinstance(currency, str) or not currency:
+        return None
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount):
+        return None
+    if isinstance(stamp, bool) or not isinstance(stamp, int):
+        return None
+    return currency.upper(), abs(float(amount)), stamp
+
+
+def _same_currency_fee(row: Mapping[str, Any], currency: str) -> float:
+    """The row's fee when it is in ``currency`` and readable, else 0.0. A withdrawal debits the
+    account ``amount + fee`` (``ccxt_flows._fee_usd``), so its Unified transfer-out may carry the fee."""
+    fee = row.get("fee")
+    if not isinstance(fee, Mapping):
+        return 0.0
+    cost = fee.get("cost")
+    fee_currency = fee.get("currency")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost):
+        return 0.0
+    if not isinstance(fee_currency, str) or fee_currency.upper() != currency:
+        return 0.0
+    return abs(float(cost))
+
+
+def _pair_side(
+    onchain: Sequence[Mapping[str, Any]],
+    unified: Sequence[Mapping[str, Any]],
+    *,
+    onchain_after_unified: bool,
+    window_ms: int,
+) -> tuple[int, set[str], int, int]:
+    """A maximum-cardinality matching of the on-chain rows to the Unified rows, found by Kuhn's
+    augmenting paths over the on-chain rows in time order. An on-chain row has an edge to a Unified
+    row of the same currency, in range, whose amount equals its amount or, for a withdrawal with a
+    same-currency fee, its amount plus the fee. A row tries its exact edges before its fee edges,
+    each earliest first, so a tie between matchings of equal size prefers exact pairs. Returns the
+    number paired, the ids of the paired on-chain rows (a row with no id counts as paired but has no
+    id to report), the number of unreadable rows on both sides, and the number of unpaired on-chain
+    rows with an unused same-currency Unified row in range whose amount differs (a near miss)."""
+    unreadable = 0
+    pool: list[tuple[str, float, int]] = []
+    for row in unified:
+        view = _pair_view(row)
+        if view is None:
+            unreadable += 1
+        else:
+            pool.append(view)
+    pool.sort(key=lambda item: item[2])
+    chain: list[tuple[tuple[str, float, int], Any, float]] = []
+    for row in onchain:
+        view = _pair_view(row)
+        if view is None:
+            unreadable += 1
+        else:
+            fee = _same_currency_fee(row, view[0]) if onchain_after_unified else 0.0
+            chain.append((view, row.get("id"), fee))
+    chain.sort(key=lambda item: item[0][2])
+
+    def _edges(item: tuple[tuple[str, float, int], Any, float]) -> list[int]:
+        (currency, amount, stamp), _row_id, fee = item
+        in_range = [
+            slot for slot, (u_currency, _u_amount, u_stamp) in enumerate(pool)
+            if u_currency == currency
+            and 0 <= ((stamp - u_stamp) if onchain_after_unified else (u_stamp - stamp)) <= window_ms
+        ]
+        wanted = [amount] if fee <= 0.0 else [amount, amount + fee]
+        return [
+            slot for target in wanted for slot in in_range
+            if math.isclose(target, pool[slot][1], rel_tol=1e-9, abs_tol=1e-9)
+        ]
+
+    edges = [_edges(item) for item in chain]
+    owner: dict[int, int] = {}
+
+    def _augment(row_index: int, seen: set[int]) -> bool:
+        for slot in edges[row_index]:
+            if slot in seen:
+                continue
+            seen.add(slot)
+            if slot not in owner or _augment(owner[slot], seen):
+                owner[slot] = row_index
+                return True
+        return False
+
+    for row_index in range(len(chain)):
+        _augment(row_index, set())
+    used = [slot in owner for slot in range(len(pool))]
+    paired_rows = set(owner.values())
+    paired = len(paired_rows)
+    matched = {
+        str(chain[i][1]) for i in paired_rows if chain[i][1] is not None
+    }
+    left = [item for i, item in enumerate(chain) if i not in paired_rows]
+    near_miss = 0
+    for (currency, _amount, stamp), _row_id, _fee in left:
+        for slot, (u_currency, _u_amount, u_stamp) in enumerate(pool):
+            gap = (stamp - u_stamp) if onchain_after_unified else (u_stamp - stamp)
+            if not used[slot] and u_currency == currency and 0 <= gap <= window_ms:
+                near_miss += 1
+                break
+    return paired, matched, unreadable, near_miss
+
+
+def pair_onchain_with_unified(
+    onchain_deposits: Sequence[Mapping[str, Any]],
+    onchain_withdrawals: Sequence[Mapping[str, Any]],
+    unified_deposits: Sequence[Mapping[str, Any]],
+    unified_withdrawals: Sequence[Mapping[str, Any]],
+    *,
+    window_ms: int = PAIRING_WINDOW_MS,
+) -> FlowPairing:
+    """Which on-chain rows are the same money as a Unified TRANSFER row.
+
+    Deposits: the Unified row is at or after the on-chain row and within ``window_ms`` (money lands
+    on chain, then moves into Unified). Withdrawals: the on-chain row is at or after the Unified
+    row and within ``window_ms`` (money leaves Unified, then leaves the venue). Equal means the
+    same currency (upper-cased) and the same absolute amount to ``math.isclose`` with
+    ``rel_tol=abs_tol=1e-9``; a withdrawal also pairs when the Unified amount equals its amount
+    plus its same-currency fee. A maximum-cardinality matching per currency (exact amounts preferred
+    on a tie); each Unified row pairs at most one on-chain row. Pure: no I/O, no logging."""
+    paired_d, matched_d, unreadable_d, near_d = _pair_side(
+        onchain_deposits, unified_deposits,
+        onchain_after_unified=False, window_ms=window_ms,
+    )
+    paired_w, matched_w, unreadable_w, near_w = _pair_side(
+        onchain_withdrawals, unified_withdrawals,
+        onchain_after_unified=True, window_ms=window_ms,
+    )
+    return FlowPairing(
+        paired_deposits=paired_d,
+        paired_withdrawals=paired_w,
+        unpaired_onchain_deposits=len(onchain_deposits) - paired_d,
+        unpaired_onchain_withdrawals=len(onchain_withdrawals) - paired_w,
+        matched_deposit_ids=frozenset(matched_d),
+        matched_withdrawal_ids=frozenset(matched_w),
+        unreadable_rows=unreadable_d + unreadable_w,
+        near_miss_rows=near_d + near_w,
+    )

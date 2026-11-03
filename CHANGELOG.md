@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.133.18.6] - 2026-11-03 — DERIVEGAPS 186 tooling: a read-only probe that counts what each derive gap affects
+
+### Added
+- `analytics-service/scripts/derivegaps_probe.py`: a read-only operator probe for Phase 186 (plans 02 and 03). It is run once on the worker before the fix and once after it, both approved by the founder (186 D-09). It reads through a counted, read-only view of each exchange client with a per-key call ceiling: 3000 calls for the realized read, the limit probe and the continuation, plus 1000 held back for flows and funding. Any write method or non-GET call is refused before it reaches the venue. Its database handle is select-only. It prints only closed-vocabulary records and a summary, never key material or messages. What it measures:
+  - Gap 1: whether each key's realized read is truncated at today's page caps, and how many pages a full read would need.
+  - A Bybit `limit` 200-vs-100 probe.
+  - Gap 2: the Bybit account type, the on-chain and Unified flow read states, and how the two sets overlap.
+  - Gap 4: same-hour funding legs and malformed funding rows.
+- `services/bybit_unified_flows.pair_onchain_with_unified`: a pure pairing rule that matches on-chain deposits and withdrawals to Unified transfers within a time window. It uses a maximum matching per currency and tries exact amounts before amount plus a same-currency fee. It returns separate matched id sets for deposits and withdrawals and counts unreadable rows and near misses. Nothing in production calls it yet; plan 186-10 wires it into the derive.
+
+### Fixed (review rounds 1–3, before merge)
+- A failed, truncated or skipped read never reads as a zero or a "complete" count:
+  - Funding pair and malformed counts, and the six Bybit flow sums, print `field-absent` unless every measured key on that venue was read in full and no eligible key there was unmeasured.
+  - At-cap counts from a timed-out or failed realized read print `field-absent`.
+  - Every section skipped after the realized read records a closed reason (`call_ceiling`, `timeout` or the ccxt error class). Skipped sections are counted per venue and fail the run's exit code. So do a failed on-chain read, a Unified venue error and a funding fetch error.
+  - The per-state counts add up to the measured keys.
+- A spent budget or a late timeout no longer discards a key's measurements. The limit probe now runs before the continuation, so the busiest Bybit keys keep it. A section stopped by the deadline still records its elapsed time.
+- The limit probe calls itself informative only when the 200 read returned more than 100 rows, or when it was refused with `BadRequest` while the 100 read succeeded. A transient error or a generic `ExchangeError` is not evidence.
+- Pairing no longer lets an exact or fee-inclusive match take a row another withdrawal needed. It also no longer misses a withdrawal whose Unified transfer carries the fee.
+- The probe's `main()` test restores process logging, so it no longer breaks the stdlib redaction tests in the full suite.
+
+### Notes
+- No migration, no schema change and no change to any derive path. The deploy fingerprint plan 186-04 checks on the worker is `derivegaps 0 1 68 71 5 4 okx,bybit,binance`.
+- Gates: the full analytics suite passes (13,541 passed, 97 skipped). CI's strict mypy line is clean, and so is `mypy --strict` on the probe.
+
 ## [0.133.18.5] - 2026-11-03 — book Phase 190 FACTSHEETQUEUED
 
 ### Notes

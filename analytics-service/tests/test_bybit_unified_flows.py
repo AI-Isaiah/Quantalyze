@@ -325,3 +325,221 @@ async def test_a_failed_page_logs_the_exception_class_never_the_venue_text(
         await buf.fetch_bybit_unified_flows(exchange, _SINCE, _SINCE + 3 * DAY_MS)
     assert "exc_class=BadRequest" in caplog.text
     assert "fake-venue-text" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 186 plan 03: the pairing rule shared by the SC-1 probe and a pair-aware flow source.
+#
+# Why (Rule 9): D-02's replace-or-union choice for the Bybit flow source rests on how many
+# on-chain rows are the same money as a Unified TRANSFER row. A rule that pairs too loosely
+# (any amount, any date, one Unified row reused) overstates the overlap and would justify
+# REPLACE where UNION is right, double-counting nothing but also dropping real flows; a rule
+# that pairs too tightly understates it and would justify UNION and double-count a deposit.
+# ---------------------------------------------------------------------------
+
+_T0 = 1_700_000_000_000
+
+
+def _chain(row_id: str, kind: str, stamp: int, amount: float = 1000.0, currency: str = "USDT") -> dict[str, Any]:
+    """An on-chain row in the shape ``fetch_ccxt_transfers`` returns (only the keys the rule reads)."""
+    return {"id": row_id, "type": "deposit" if kind == "d" else "withdrawal",
+            "currency": currency, "amount": amount, "timestamp": stamp}
+
+
+def _uni(row_id: str, kind: str, stamp: int, amount: float = 1000.0, currency: str = "USDT") -> dict[str, Any]:
+    """A Unified row in the shape ``fetch_bybit_unified_flows`` returns."""
+    return {"id": row_id, "type": "deposit" if kind == "d" else "withdrawal",
+            "currency": currency, "amount": amount, "timestamp": stamp, "fee": None}
+
+
+def test_an_onchain_deposit_pairs_with_a_unified_deposit_two_days_later() -> None:
+    result = buf.pair_onchain_with_unified(
+        [_chain("c1", "d", _T0)], [], [_uni("u1", "d", _T0 + 2 * DAY_MS)], []
+    )
+    assert result.paired_deposits == 1
+    assert result.unpaired_onchain_deposits == 0
+    assert result.paired_withdrawals == 0
+    assert result.matched_deposit_ids == frozenset({"c1"})
+
+
+@pytest.mark.parametrize(
+    ("unified", "why"),
+    [
+        (_uni("u1", "d", _T0 + 31 * DAY_MS), "31 days is past the window"),
+        (_uni("u1", "d", _T0 + 2 * DAY_MS, currency="BTC"), "a different currency is other money"),
+        (_uni("u1", "d", _T0 + 2 * DAY_MS, amount=1000.01), "an amount off by more than the tolerance"),
+        (_uni("u1", "d", _T0 - DAY_MS), "a deposit reaches Unified AFTER it lands on chain"),
+    ],
+    ids=["too-late", "currency", "amount", "wrong-order"],
+)
+def test_a_deposit_pair_needs_window_currency_amount_and_order(unified: dict[str, Any], why: str) -> None:
+    result = buf.pair_onchain_with_unified([_chain("c1", "d", _T0)], [], [unified], [])
+    assert result.paired_deposits == 0, why
+    assert result.unpaired_onchain_deposits == 1, why
+    assert result.matched_deposit_ids == frozenset()
+
+
+def test_the_window_edge_is_inclusive_and_currency_case_is_ignored() -> None:
+    result = buf.pair_onchain_with_unified(
+        [_chain("c1", "d", _T0, currency="usdt")],
+        [],
+        [_uni("u1", "d", _T0 + buf.PAIRING_WINDOW_MS, currency="USDT")],
+        [],
+    )
+    assert result.paired_deposits == 1
+
+
+def test_a_withdrawal_pairs_the_other_way_round() -> None:
+    # Money leaves Unified first, then leaves the venue on chain.
+    paired = buf.pair_onchain_with_unified(
+        [], [_chain("c1", "w", _T0 + 3 * DAY_MS)], [], [_uni("u1", "w", _T0)]
+    )
+    assert paired.paired_withdrawals == 1
+    assert paired.unpaired_onchain_withdrawals == 0
+    assert paired.matched_withdrawal_ids == frozenset({"c1"})
+    # The on-chain withdrawal BEFORE the Unified transfer-out is not the same money.
+    before = buf.pair_onchain_with_unified(
+        [], [_chain("c1", "w", _T0)], [], [_uni("u1", "w", _T0 + 3 * DAY_MS)]
+    )
+    assert before.paired_withdrawals == 0
+    assert before.unpaired_onchain_withdrawals == 1
+    # And 31 days after is past the window.
+    late = buf.pair_onchain_with_unified(
+        [], [_chain("c1", "w", _T0 + 31 * DAY_MS)], [], [_uni("u1", "w", _T0)]
+    )
+    assert late.paired_withdrawals == 0
+
+
+def test_one_unified_row_pairs_at_most_one_onchain_row() -> None:
+    result = buf.pair_onchain_with_unified(
+        [_chain("c1", "d", _T0), _chain("c2", "d", _T0 + DAY_MS)],
+        [],
+        [_uni("u1", "d", _T0 + 2 * DAY_MS)],
+        [],
+    )
+    assert result.paired_deposits == 1
+    assert result.unpaired_onchain_deposits == 1
+    # The earlier on-chain row (visited first) takes the only Unified row.
+    assert result.matched_deposit_ids == frozenset({"c1"})
+
+
+def test_the_earliest_eligible_unified_row_is_used() -> None:
+    # u1 at +1d and u2 at +5d. If c1 took u2 (the latest) then c2 (+3d) would have nothing left
+    # in its window; taking the earliest leaves u2 for c2, so both pair.
+    result = buf.pair_onchain_with_unified(
+        [_chain("c1", "d", _T0), _chain("c2", "d", _T0 + 3 * DAY_MS)],
+        [],
+        [_uni("u1", "d", _T0 + DAY_MS), _uni("u2", "d", _T0 + 5 * DAY_MS)],
+        [],
+    )
+    assert result.paired_deposits == 2
+    assert result.matched_deposit_ids == frozenset({"c1", "c2"})
+
+
+def test_an_onchain_row_that_cannot_be_read_is_unpaired_and_never_raises() -> None:
+    bad_stamp = {"id": "c1", "type": "deposit", "currency": "USDT", "amount": 1000.0, "timestamp": None}
+    bad_amount = {"id": "c2", "type": "deposit", "currency": "USDT", "amount": None, "timestamp": _T0}
+    result = buf.pair_onchain_with_unified(
+        [bad_stamp, bad_amount], [], [_uni("u1", "d", _T0 + DAY_MS)], []
+    )
+    assert result.paired_deposits == 0
+    assert result.unpaired_onchain_deposits == 2
+
+
+def test_the_amount_is_compared_as_an_absolute_value() -> None:
+    # A venue may sign an on-chain withdrawal; the Unified reader already returns |change|.
+    result = buf.pair_onchain_with_unified(
+        [], [_chain("c1", "w", _T0 + DAY_MS, amount=-1000.0)], [], [_uni("u1", "w", _T0)]
+    )
+    assert result.paired_withdrawals == 1
+
+
+def test_a_withdrawal_pairs_on_amount_plus_a_same_currency_fee() -> None:
+    # The repo's own flow model (ccxt_flows._fee_usd) says a withdrawal debits amount + fee, so the
+    # Unified transfer-out is 1001 for an on-chain withdrawal of 1000 with a fee of 1. Paired on
+    # the bare amount it was unpaired, and a pair-aware union then counted it twice.
+    chain = _chain("c1", "w", _T0 + DAY_MS)
+    chain["fee"] = {"cost": 1.0, "currency": "usdt"}
+    result = buf.pair_onchain_with_unified([], [chain], [], [_uni("u1", "w", _T0, amount=1001.0)])
+    assert result.paired_withdrawals == 1
+    assert result.unpaired_onchain_withdrawals == 0
+    assert result.matched_withdrawal_ids == frozenset({"c1"})
+
+
+def test_a_fee_in_another_currency_or_on_a_deposit_does_not_change_the_amount() -> None:
+    other = _chain("c1", "w", _T0 + DAY_MS)
+    other["fee"] = {"cost": 1.0, "currency": "BTC"}
+    result = buf.pair_onchain_with_unified([], [other], [], [_uni("u1", "w", _T0, amount=1001.0)])
+    assert result.paired_withdrawals == 0
+    deposit = _chain("c2", "d", _T0)
+    deposit["fee"] = {"cost": 1.0, "currency": "USDT"}
+    result = buf.pair_onchain_with_unified([deposit], [], [_uni("u2", "d", _T0 + DAY_MS, amount=1001.0)], [])
+    assert result.paired_deposits == 0
+
+
+def test_a_deposit_id_and_a_withdrawal_id_that_collide_stay_in_their_own_sets() -> None:
+    # One mixed set let a deposit id equal to an unpaired withdrawal's id hide that withdrawal.
+    result = buf.pair_onchain_with_unified(
+        [_chain("same", "d", _T0)],
+        [_chain("same", "w", _T0 + 40 * DAY_MS)],
+        [_uni("u1", "d", _T0 + DAY_MS)],
+        [_uni("u2", "w", _T0)],
+    )
+    assert result.matched_deposit_ids == frozenset({"same"})
+    assert result.matched_withdrawal_ids == frozenset()
+
+
+def test_unreadable_rows_and_near_misses_are_counted_so_zero_pairs_can_be_explained() -> None:
+    bad_unified = {"id": "u0", "type": "deposit", "currency": "USDT", "amount": None, "timestamp": _T0}
+    bad_chain = {"id": "c0", "type": "deposit", "currency": "USDT", "amount": 5.0, "timestamp": None}
+    result = buf.pair_onchain_with_unified(
+        [_chain("c1", "d", _T0), _chain("c2", "d", _T0, currency="BTC"), bad_chain],
+        [],
+        [_uni("u1", "d", _T0 + DAY_MS, amount=999.0), bad_unified],
+        [],
+    )
+    assert result.paired_deposits == 0
+    # c1: same currency, in window, unused Unified row of a different amount. c2: other currency.
+    assert result.near_miss_rows == 1
+    assert result.unreadable_rows == 2
+
+
+def test_a_fee_match_does_not_take_the_unified_row_another_withdrawal_needs_as_an_exact_match() -> None:
+    # A: 100 + fee 1 (accepts 100 or 101). B: 101 + fee 1 (accepts 101 or 102). Unified rows 101
+    # then 100. Taking the earliest row that matches EITHER amount, A takes the 101 row through its
+    # fee and B is left with nothing, so the money of B is counted on chain AND as a Unified flow.
+    # One-to-one, A -> the 100 row and B -> the 101 row pairs both.
+    a = _chain("a", "w", _T0 + 10 * 3_600_000, amount=100.0)
+    b = _chain("b", "w", _T0 + 11 * 3_600_000, amount=101.0)
+    a["fee"] = b["fee"] = {"cost": 1.0, "currency": "USDT"}
+    result = buf.pair_onchain_with_unified(
+        [],
+        [a, b],
+        [],
+        [_uni("u1", "w", _T0 + 1 * 3_600_000, amount=101.0), _uni("u2", "w", _T0 + 2 * 3_600_000, amount=100.0)],
+    )
+    assert result.paired_withdrawals == 2
+    assert result.unpaired_onchain_withdrawals == 0
+    assert result.matched_withdrawal_ids == frozenset({"a", "b"})
+    assert result.near_miss_rows == 0
+
+
+def test_an_exact_match_does_not_take_the_unified_row_another_withdrawal_can_only_fee_match() -> None:
+    # The mirror of the test above (WR-06). A: 100 + fee 1 (accepts 100 or 101). B: 101 + fee 1
+    # (accepts 101 or 102). Unified rows 101 then 102. Exact-first gives B the 101 row and leaves A
+    # with nothing, though A -> 101 (fee) and B -> 102 (fee) pairs both. Both must pair, so A's money
+    # is not counted on chain AND again as a Unified flow.
+    a = _chain("a", "w", _T0 + 10 * 3_600_000, amount=100.0)
+    b = _chain("b", "w", _T0 + 11 * 3_600_000, amount=101.0)
+    a["fee"] = b["fee"] = {"cost": 1.0, "currency": "USDT"}
+    result = buf.pair_onchain_with_unified(
+        [],
+        [a, b],
+        [],
+        [_uni("u1", "w", _T0 + 1 * 3_600_000, amount=101.0), _uni("u2", "w", _T0 + 2 * 3_600_000, amount=102.0)],
+    )
+    assert result.paired_withdrawals == 2
+    assert result.unpaired_onchain_withdrawals == 0
+    assert result.matched_withdrawal_ids == frozenset({"a", "b"})
+    assert result.near_miss_rows == 0
+
