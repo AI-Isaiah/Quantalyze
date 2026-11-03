@@ -207,7 +207,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 172: OKXANCHOR — an OKX account's history rebuild gets a plausible balance anchor** — complete 2026-10-28 (v0.133.4.0 #1136; booked 2026-10-27 from TRADEPAGES; data-integrity; SC-3: a4 still refused, bills chain does not close (`chain_break`), routed to Phase 179 by the founder)
 - [x] **Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live** — complete 2026-10-28 (v0.133.7.0 #1143; booked 2026-10-27 from TRADEPAGES; data-integrity; SC-1 `okx-order: ok`, 1 reading; SC-2 not met, a6 reads 0 transfers at every age (on-chain only), routed to Phase 180 BYBITFUNDING by the founder; no rebuild)
 - [x] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — complete 2026-10-28 (v0.133.2.0 #1133, shipped 2026-10-27; booked 2026-10-27 from NAVMTM review)
-- [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
+- [x] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"); data integrity, user-facing (completed 2026-11-03: v0.133.3.0 #1135; verification passed 3/3, security 0 open; switched to the US rule 2026-11-03T13:38Z with the first derive clean; D-05 voided the legacy rebuild and D-06 switched without the live count; history-effect half of SC-2 unmeasured; the 2026-11-04 nightly check is TODOS `175-NIGHTLY-MT5-DERIVE-CHECK`)
 - [x] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — complete 2026-11-03 (v0.133.12.0 #1164, v0.133.15.0 #1172, v0.133.17.0 #1185, re-dump #1186; booked 2026-10-27 from MARKSOURCE D-01; data-integrity; verification passed 3/3, SECURED 55/55; absorbs 181 SHAREDKEYS and supersedes 182 SPIKEREPAIR (D-01); PROD re-read: legacy table gone, R1 7/7/7/7, R3 all 0, 3 allocator cron jobs)
 - [x] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — complete 2026-10-29 (v0.133.8.0 #1145, re-dump #1146; booked 2026-10-27 from MARKSOURCE plan 03; data-integrity; SC-1 first-night reading: moved=0 in all 8 derive runs, one night)
 - [x] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — complete 2026-10-29 (v0.133.11.0 #1154; booked 2026-10-27 from MARKSOURCE D-09; data-integrity; closed record-only by founder ruling D-09, zero rewrites, nothing written to PROD; census a1, a2 and a5 kept as stored)
@@ -6545,7 +6545,7 @@ Plans:
 **Goal:** MT5 deal days and instants use the broker's real UTC offset on each date, including daylight-saving changes, so a deposit near a nightly mark read is never placed on the wrong day.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.1
-**Plans:** 0 plans
+**Plans:** 6/6 plans complete
 
 Booked 2026-10-27 from NAVMTM 167.2.1.1.1 REVIEW-3 WR-02 (routed after three fixer rounds): with the fixed offset, a deposit in the hour after the read publishes a permanent wrong return outside summer time. Data integrity, user-facing.
 
@@ -6554,8 +6554,25 @@ Booked 2026-10-27 from NAVMTM 167.2.1.1.1 REVIEW-3 WR-02 (routed after three fix
 2. MT5 deal day bucketing and D-23 instant placement use the offset in force on the deal's date; tests go RED with the fixed `MT5_SERVER_UTC_OFFSET_S` across a DST change.
 3. Interim, at NAVMTM deploy: the broker's current offset is measured and `MT5_SERVER_UTC_OFFSET_S` set before the first nightly marks.
 
+CONTEXT D-03 note (2026-10-27): the history before/after runs after the integer-only deploy and before the rule id is switched on ("before the rule takes effect"), since that deploy changes no derived number.
+
+CONTEXT D-04 (founder 2026-10-27, "Transient, like backfill (Recommended)"): a derive clock configuration fault is `transient`, not `permanent`; it retries, then is stamped with the true retries-exhausted sentence. The status bridge stamps either way, so "no stamp" in plan 175-03 is superseded.
+
+⛔ **CORRECTED 2026-11-03 (D-05, D-06):** four statements above and below are departed from or void; the original text stays as lineage.
+1. D-03's read-only before/after on the live ledger (and the D-03 note above that repeats it) was not run. D-06 (founder, "Switch 175 without the count"): Railway SSH fails after authentication on both analytics services, so the live capture could not run. The evidence is the first derive after the switch.
+2. D-03's forced rebuild of allocator history is void. D-05: Phase 176 dropped `allocator_equity_snapshots` and retired the `reconstruct_allocator_history` kind; the allocator curve is the derived one and recomposes from the per-key dailies the nightly derive re-buckets.
+3. The plan line 175-06 below ("post-deploy live capture, dry run, rule switch, forced rebuild of approved keys only"): only the rule switch ran. Capture and dry run: D-06. Forced rebuild: D-05.
+4. The history-effect half of SC-2 (that stored history re-buckets as the rule says): the arithmetic is proven (code tests and an independent zoneinfo oracle, 443,232 instants, 0 wrong), but the number of live days that moved is unmeasured (D-06).
+
+**Closed 2026-11-03.** Verification passed 3/3 (`175-VERIFICATION.md`) and the security check is verified, 0 threats open (`175-SECURITY.md`). The code shipped as v0.133.3.0 #1135. The founder's readings were +3 h on 2026-10-27 and +2 h on 2026-11-02, so the broker follows the US rule; the rule was switched on for both worker services at 2026-11-03T13:38Z with `MT5_SERVER_UTC_OFFSET_S` deleted, and the first MT5 derive after it ended `done` on attempt 1 with no clock configuration fault. Only one MT5 key had derived under the rule at closure; the others re-bucket at the 2026-11-04 00:40Z derive (TODOS `175-NIGHTLY-MT5-DERIVE-CHECK`). Known limits: a broker that flips clocks at another weekend moment than the US rule is an hour off for deals stamped in between (A2), a flow in a transition hour keeps its day with no instant, and the live server-clock check stays with Phase 155 / MT5-06.
+
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 175-01-PLAN.md — broker clock module (EU/US/fixed rule), seam widened, WR-02 repro RED under the fixed offset (wave 1)
+- [x] 175-02-PLAN.md — founder clock readings R1/R2, interim offset on every worker service, additive runbook steps (wave 1, operator)
+- [x] 175-03-PLAN.md — derive resolves one clock and threads it to every MT5 site; config fault permanent, no stamp (wave 2)
+- [x] 175-04-PLAN.md — counts-only `scripts/mt5offset_dry_run.py` with a rebuild/none verdict (wave 2)
+- [x] 175-05-PLAN.md — allocator-history backfill on the same clock; single-reader pin (wave 3)
+- [x] 175-06-PLAN.md — post-deploy live capture, dry run, rule switch, forced rebuild of approved keys only (wave 4, operator); only the rule switch ran (D-05, D-06)
 
 ### Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series
 
@@ -7364,7 +7381,7 @@ kept verbatim.
 | 172 OKXANCHOR | 5/5 | Complete — v0.133.4.0 #1136; SC-1 and SC-2 verified in code; SC-3 recorded post-deploy: a4 refused `anchor_skipped_implausible` (`chain_break` over 1489 bills), not the expected anchoring; routed to 179 OKXBILLSCHAIN (founder); 0.05 tolerance kept, re-decided there; no rebuild | 2026-10-28 |
 | 173 REBUILDGATES | 3/3 | Complete — v0.133.7.0 #1143; the probe takes the OKX ordering read on a refused member and counts Bybit deposits and withdrawals per kind; post-deploy: `okx-order: ok` (1 reading, 0 violations), `bybit-transfers: unmeasured (a6)` (0 of each kind at every age), routed to 180 BYBITFUNDING (founder); no rebuild | 2026-10-28 |
 | 174 MARKPAUSE | 2/2 | Complete — v0.133.2.0 #1133 (re-dump #1134); weekly re-admit of a paused marked series after 3 days, mark refusals kept owner-only | 2026-10-28 |
-| 175 MT5OFFSET | 0/0 | Not started | - |
+| 175 MT5OFFSET | 6/6 | Complete — closed 2026-11-03; shipped v0.133.3.0 #1135 (broker clock module: EU, US or fixed rule per deal date); verification 3/3, security 0 open; switched both workers to the US rule 2026-11-03T13:38Z and the first derive was clean (done, attempt 1, no clock fault); D-05 voided the legacy allocator rebuild (176 dropped the table), D-06 switched without the live before-count (Railway SSH fails), so the days that moved are unmeasured | 2026-11-03 |
 | 176 LEGACYRETIRE | 17/17 | Complete — v0.133.12.0 #1164 (readers move to the derived curve), v0.133.15.0 #1172 (writers stop, old history engine deleted), v0.133.17.0 #1185 (table and four functions dropped, re-dump #1186); verification 3/3, SECURED 55/55; post-drop PROD re-read: legacy table gone, R1 7/7/7/7, R3 all 0, 3 allocator cron jobs; absorbs 181 and supersedes 182 (D-01) | 2026-11-03 |
 | 177 DERIBITFLOWS | 7/7 | Complete — v0.133.8.0 #1145 (re-dump #1146); a moved Deribit flow is priced at the open of its own 1-minute `{CCY}_USDC-PERPETUAL` candle and each price is stored once; post-deploy first night: `moved=0` in all 8 derive runs (one night's reading), no composite line in the window | 2026-10-29 |
 | 178 OKXREWRITE | 4/4 | Complete — v0.133.11.0 #1154; a forced rebuild skips an exchange account with no working key; post-deploy probe: all five OKX accounts read, `okx_order_gate` `ok`; closed record-only by founder ruling D-09 (zero rewrites, plan 04 closed without execution, nothing written to PROD; SC-2 not met by ruling) | 2026-10-29 |
