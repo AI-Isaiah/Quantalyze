@@ -584,6 +584,14 @@ export type FactsheetCommon = {
   markets: string[];
   computedAt: string;
   /**
+   * Phase 190 (D-02/D-03): true only while the analytics row is pending or
+   * computing over a stored success result, so every figure on this payload is
+   * that last success's and `computedAt` is its date. Row state, never lane
+   * state: it is decided in the resolve stage from the analytics row alone.
+   * Drives the factsheet's updating line.
+   */
+  analyticsUpdating: boolean;
+  /**
    * Phase 167.1.2.2.2 (TRADESYNC, D-06/D-07): when the trade ingest last
    * succeeded for this strategy (`strategy_analytics.trades_fetched_at`).
    * Distinct from `computedAt`, which is when analytics were last recomputed.

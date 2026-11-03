@@ -2064,6 +2064,11 @@ export function SyncPreviewStep({
             // allow-list — so it refuses. Contrast the counts above, where a
             // coerced null WOULD fabricate a measurement and is thrown on.
             seriesCompleteness: analytics?.series_completeness ?? null,
+            // Phase 190 D-02: this call is terminal-only (failed bails above,
+            // and the poller reaches here on a computed status), so the re-run
+            // arms cannot be reached. False keeps the wizard's verdict
+            // byte-identical and fails closed if that ever changes.
+            hasStoredResult: false,
           });
 
           if (!gate.passed) {

@@ -42,6 +42,7 @@ vi.mock("@/components/layout/Breadcrumb", () => ({
 // covered-from fields can be asserted without rendering recharts.
 type OverlayItem = {
   strategy: { id: string };
+  analytics: Record<string, unknown>;
   headlineCoversFrom?: string | null;
   headlineCoversFromStatus?: string;
 };
@@ -52,9 +53,18 @@ vi.mock("@/components/strategy/CompareEquityOverlay", () => ({
     return React.createElement("div", { "data-testid": "equity-overlay" });
   },
 }));
+// Phase 190 plan 07: also records the matrix's items, so the effective curve
+// method it is handed can be compared with the overlay's.
+let matrixItems: Array<{ strategy: { id: string }; analytics: Record<string, unknown> }> = [];
 vi.mock("@/components/strategy/CompareCorrelationMatrix", () => ({
-  CompareCorrelationMatrix: () =>
-    React.createElement("div", { "data-testid": "corr-matrix" }),
+  CompareCorrelationMatrix: ({
+    items,
+  }: {
+    items: Array<{ strategy: { id: string }; analytics: Record<string, unknown> }>;
+  }) => {
+    matrixItems = items;
+    return React.createElement("div", { "data-testid": "corr-matrix" });
+  },
 }));
 
 // ---------------------------------------------------------------------------
@@ -164,10 +174,13 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-// Phase 170.2 (SC-3, T-170.2-10): the service-role read of a chain-broken row's
-// stored cash_settlement series. `strategy_analytics_series` is deny-all RLS, so
-// the page reaches it through the admin client; the mock records which strategy
-// ids were read and answers per-id, so a read for any OTHER row is observable.
+// Phase 170.2 (SC-3, T-170.2-10) read a chain-broken row's stored cash_settlement
+// series through the admin client. Phase 190 plan 07 removed that read: the
+// covered-from date is the effective `headline_since`. The mock stays (the page
+// imports `@/lib/queries`, which imports the admin module) and now answers a
+// payload NAMING A DIFFERENT DATE than every fixture's `headline_since`, and
+// records every series read, so a regression back to the series row is
+// observable twice over: a read is recorded, and the wrong date appears.
 type AdminAnswer =
   | { kind: "payload"; payload: unknown }
   | { kind: "none" }
@@ -467,6 +480,23 @@ describe("ComparePage — a holding whose recorded price is a fixed value (CR-01
   });
 });
 
+// Phase 190 plan 07 (T-190-22): the seven scalar expressions over
+// `data_quality_flags` the compare projection may carry. Never the blob, the
+// `last_success_snapshot` object or its `flags` object.
+const ALLOWED_FLAG_ALIAS_EXPRESSIONS = [
+  "data_quality_flags->>cumulative_method",
+  "data_quality_flags->>twr_chain_broken",
+  "data_quality_flags->>headline_since",
+  "data_quality_flags->last_success_snapshot->>computed_at",
+  "data_quality_flags->last_success_snapshot->flags->>cumulative_method",
+  "data_quality_flags->last_success_snapshot->flags->>twr_chain_broken",
+  "data_quality_flags->last_success_snapshot->flags->>headline_since",
+];
+const ALLOWED_FLAG_ALIASES_RE = new RegExp(
+  ALLOWED_FLAG_ALIAS_EXPRESSIONS.map((e) => e.replace(/[>-]/g, (c) => `\\${c}`)).join("|"),
+  "g",
+);
+
 /**
  * Phase 159 (159-03, RANK-02 / decision D-02) — the compare read was the
  * fourth `strategy_analytics` wildcard embed. It is an AUTHED allocator
@@ -535,7 +565,9 @@ describe("ComparePage — RANK-02 explicit analytics projection", () => {
     // cross-tenant.
     // Phase 170.2 widened the lookahead to the second scalar alias; a bare blob
     // still reds it.
-    expect(embed).not.toMatch(/data_quality_flags(?!->>(?:cumulative_method|twr_chain_broken))/);
+    // Phase 190 plan 07 widened it again, to the seven allowed alias expressions
+    // (see the generation describe below): nothing else may follow the column.
+    expect(embed.replace(ALLOWED_FLAG_ALIASES_RE, "")).not.toContain("data_quality_flags");
     expect(embed).not.toMatch(/metrics_json(?!->)/);
   });
 
@@ -567,31 +599,58 @@ describe("ComparePage — the chain-break flag is projected as a scalar alias (S
   });
 
   it("the widened negative pin still rejects a bare blob (it can fail)", () => {
-    const pin = /data_quality_flags(?!->>(?:cumulative_method|twr_chain_broken))/;
-    expect("returns_series, data_quality_flags").toMatch(pin);
-    expect("data_quality_flags->>twr_chain_broken").not.toMatch(pin);
-    expect("data_quality_flags->>something_else").toMatch(pin);
+    const leaks = (cols: string) => cols.replace(ALLOWED_FLAG_ALIASES_RE, "").includes("data_quality_flags");
+    expect(leaks("returns_series, data_quality_flags")).toBe(true);
+    // The pre-190 aliases are still allowed.
+    expect(leaks("twr_chain_broken:data_quality_flags->>twr_chain_broken")).toBe(false);
+    expect(leaks("data_quality_flags->>something_else")).toBe(true);
+    // Phase 190: the snapshot object, its flags object and an unlisted key stay out.
+    expect(leaks("data_quality_flags->last_success_snapshot")).toBe(true);
+    expect(leaks("data_quality_flags->last_success_snapshot->flags")).toBe(true);
+    expect(leaks("data_quality_flags->last_success_snapshot->flags->>native_unit")).toBe(true);
+    expect(leaks("data_quality_flags->last_success_snapshot->>other")).toBe(true);
+    // ...and every allowed expression, alone, passes.
+    for (const alias of ALLOWED_FLAG_ALIAS_EXPRESSIONS) expect(leaks(alias)).toBe(false);
   });
 });
 
 /**
- * Phase 170.2 (SC-3, D-07, T-170.2-10). The overlay draws a chain-broken row
- * over the span its headline return compounds, which needs the covered-from date
- * out of the stored cash series. The page reads it (service role, deny-all RLS
- * table) ONLY for a row the visibility-gated read already returned AND whose
- * alias is exactly the string "true", and hands the overlay the DATE and a
- * status, never the series. The three non-clean outcomes stay distinct because
- * the reader's contract is that an outage is never rendered as "the span cannot
- * be named".
+ * Phase 190 plan 07 (D-02, SC-3, SC-6; 170.2 D-07 "chart and table always
+ * agree"). A chain-broken row is drawn over the span its stored headline
+ * compounds. Phase 170.2 read that span's first day from the stored
+ * cash_settlement series row and paired the curve with the LIVE flag aliases.
+ * Both are rewritten by the derive hop before the new run's success write: the
+ * series row by `_persist_cash_series`, the aliases by the prestamp. So between
+ * those writes the overlay could draw the last success's curve from the new
+ * derive's last-break date, under the old headline.
+ *
+ * Now the chain-broken flag, the curve method and the covered-from date of every
+ * row come from ONE flags generation (plan 03's effective flags, over scalar
+ * aliases), and the date is that generation's `headline_since`, the field the
+ * factsheet dates the same headline by. The page issues NO service-role read.
+ * The rule is status-independent: a chain-broken row is complete_with_warnings
+ * and keeps that status through the derive hop.
  */
-describe("ComparePage — covered-from read for chain-broken rows (SC-3, D-07)", () => {
+describe("ComparePage — one flags generation per row (phase 190 plan 07)", () => {
   const ID = "11111111-2222-4333-8444-555555555555";
   const OTHER = "22222222-3333-4444-8555-666666666666";
-  const chainBroken = (id: string, alias: unknown) => {
+  const COMPUTED_AT = "2026-10-30T10:00:00.123456+00:00";
+  // The same instant as COMPUTED_AT, spelled the way a JS Date writes it.
+  const SAME_INSTANT = "2026-10-30T10:00:00.123Z";
+  const ONE_SECOND_OFF = "2026-10-30T10:00:01.123Z";
+  const LEAKY_KEYS = [
+    "headline_since",
+    "last_success_computed_at",
+    "last_success_cumulative_method",
+    "last_success_twr_chain_broken",
+    "last_success_headline_since",
+  ];
+
+  const compareRow = (id: string, aliases: Record<string, unknown>) => {
     const base = makeSampleStrategy(id, `Strategy ${id.slice(0, 2)}`);
     return {
       ...base,
-      strategy_analytics: { ...base.strategy_analytics, twr_chain_broken: alias },
+      strategy_analytics: { ...base.strategy_analytics, computed_at: COMPUTED_AT, ...aliases },
     };
   };
   const render2 = async (ids: string) => {
@@ -599,89 +658,200 @@ describe("ComparePage — covered-from read for chain-broken rows (SC-3, D-07)",
     const Page = await ComparePage({ searchParams: Promise.resolve({ ids }) });
     render(Page as React.ReactElement);
   };
+  const overlayOf = (id: string) => overlayItems.find((it) => it.strategy.id === id)!;
 
   beforeEach(() => {
     adminReadIds.length = 0;
+    // The stored series row names 2026-08-22, which no fixture's headline_since
+    // does: a date taken from it would show.
     adminAnswer = { kind: "payload", payload: BROKER_NAN_PAYLOAD };
     overlayItems = [];
+    matrixItems = [];
     mockHoldingData = [];
     mockStrategyError = null;
   });
 
-  it('a row whose alias is "true" is read once and the overlay gets the date as "dated"', async () => {
-    mockStrategyData = [chainBroken(ID, "true")];
+  // ---- the projection ---------------------------------------------------
+  it("the compare projection carries computed_at and the five generation aliases, each exactly once, and no object", async () => {
+    strategySelectCalls.length = 0;
+    mockStrategyData = [compareRow(ID, {})];
     await render2(ID);
-    expect(adminReadIds).toEqual([ID]);
-    expect(overlayItems).toHaveLength(1);
-    expect(overlayItems[0].headlineCoversFrom).toBe("2026-08-22");
-    expect(overlayItems[0].headlineCoversFromStatus).toBe("dated");
-  });
-
-  it.each([["false"], [null], ["TRUE"], [true], ["1"]])(
-    "an alias of %j triggers no admin read and the overlay row carries no covered-from fields",
-    async (alias) => {
-      mockStrategyData = [chainBroken(ID, alias)];
-      await render2(ID);
-      expect(adminReadIds).toEqual([]);
-      expect(overlayItems).toHaveLength(1);
-      expect(overlayItems[0]).not.toHaveProperty("headlineCoversFrom");
-      expect(overlayItems[0]).not.toHaveProperty("headlineCoversFromStatus");
-    },
-  );
-
-  it("reads only the chain-broken row of a mixed pair", async () => {
-    mockStrategyData = [chainBroken(ID, "true"), chainBroken(OTHER, "false")];
-    await render2(`${ID},${OTHER}`);
-    expect(adminReadIds).toEqual([ID]);
-    const byId = new Map(overlayItems.map((it) => [it.strategy.id, it]));
-    expect(byId.get(ID)?.headlineCoversFromStatus).toBe("dated");
-    expect(byId.get(OTHER)).not.toHaveProperty("headlineCoversFromStatus");
-  });
-
-  it('a missing or undatable series is "undatable" with no date', async () => {
-    mockStrategyData = [chainBroken(ID, "true")];
-    adminAnswer = { kind: "none" };
-    await render2(ID);
-    expect(overlayItems[0].headlineCoversFrom).toBeNull();
-    expect(overlayItems[0].headlineCoversFromStatus).toBe("undatable");
-  });
-
-  it('a payload that echoes another densify convention is "undatable"', async () => {
-    mockStrategyData = [chainBroken(ID, "true")];
-    adminAnswer = {
-      kind: "payload",
-      payload: { ...BROKER_NAN_PAYLOAD, conventions: { densify: "zero_fill" } },
-    };
-    await render2(ID);
-    expect(overlayItems[0].headlineCoversFromStatus).toBe("undatable");
-  });
-
-  it('a failed read is "read_failed", logs the message only, and the page still renders', async () => {
-    mockStrategyData = [chainBroken(ID, "true")];
-    adminAnswer = { kind: "error" };
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      await render2(ID);
-      expect(overlayItems[0].headlineCoversFrom).toBeNull();
-      expect(overlayItems[0].headlineCoversFromStatus).toBe("read_failed");
-      expect(screen.getByTestId("equity-overlay")).toBeInTheDocument();
-      const logged = spy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
-      expect(logged).toContain("[compare/page] covered-from read failed");
-      // the database message rides only as the error's cause; it is not logged
-      expect(logged).not.toContain("pg-boom-secret");
-    } finally {
-      spy.mockRestore();
+    const cols = strategySelectCalls.find((c) => c.includes("strategy_analytics")) ?? "";
+    const embed = /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "";
+    const parts = embed.split(",").map((c) => c.trim());
+    for (const part of [
+      "computed_at",
+      "headline_since:data_quality_flags->>headline_since",
+      "last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at",
+      "last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method",
+      "last_success_twr_chain_broken:data_quality_flags->last_success_snapshot->flags->>twr_chain_broken",
+      "last_success_headline_since:data_quality_flags->last_success_snapshot->flags->>headline_since",
+    ]) {
+      expect(parts.filter((p) => p === part), part).toHaveLength(1);
     }
   });
 
-  it("never hands the overlay the series payload, only the date and a status", async () => {
-    mockStrategyData = [chainBroken(ID, "true")];
+  // ---- the live generation ----------------------------------------------
+  it('a live chain-broken row is dated by its live headline_since, never by the stored series row', async () => {
+    mockStrategyData = [
+      compareRow(ID, { cumulative_method: "geometric", twr_chain_broken: "true", headline_since: "2026-09-01" }),
+    ];
     await render2(ID);
-    const keys = Object.keys(overlayItems[0]).sort();
-    expect(keys).toEqual(
+    // The series-row mock names 2026-08-22; the headline compounds from 09-01.
+    expect(overlayOf(ID).headlineCoversFrom).toBe("2026-09-01");
+    expect(overlayOf(ID).headlineCoversFromStatus).toBe("dated");
+    expect(adminReadIds).toEqual([]);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["an impossible date", "2026-02-30"],
+    ["a timestamp", "2026-09-01T00:00:00Z"],
+    ["not a string", 20260901],
+  ])("a live chain-broken row whose headline_since is %s is undatable with no date", async (_l, since) => {
+    mockStrategyData = [
+      compareRow(ID, { cumulative_method: "geometric", twr_chain_broken: "true", headline_since: since }),
+    ];
+    await render2(ID);
+    expect(overlayOf(ID).headlineCoversFrom).toBeNull();
+    expect(overlayOf(ID).headlineCoversFromStatus).toBe("undatable");
+    expect(adminReadIds).toEqual([]);
+  });
+
+  it.each([["false"], [null], ["TRUE"], [true], ["1"]])(
+    "an alias of %j hands the overlay no covered-from fields",
+    async (alias) => {
+      mockStrategyData = [
+        compareRow(ID, { cumulative_method: "geometric", twr_chain_broken: alias, headline_since: "2026-09-01" }),
+      ];
+      await render2(ID);
+      expect(overlayItems).toHaveLength(1);
+      expect(overlayOf(ID)).not.toHaveProperty("headlineCoversFrom");
+      expect(overlayOf(ID)).not.toHaveProperty("headlineCoversFromStatus");
+    },
+  );
+
+  it("dates only the chain-broken row of a mixed pair", async () => {
+    mockStrategyData = [
+      compareRow(ID, { cumulative_method: "geometric", twr_chain_broken: "true", headline_since: "2026-09-01" }),
+      compareRow(OTHER, { cumulative_method: "geometric", twr_chain_broken: "false", headline_since: "2026-09-05" }),
+    ];
+    await render2(`${ID},${OTHER}`);
+    expect(overlayOf(ID).headlineCoversFromStatus).toBe("dated");
+    expect(overlayOf(OTHER)).not.toHaveProperty("headlineCoversFromStatus");
+  });
+
+  // ---- the window after the derive hop's prestamp ------------------------
+  it("post-derive, old success chain-broken and new derive clean: the overlay keeps the old success's date, flag and method", async () => {
+    // WHY (D-02, SC-6): the live aliases are the new derive's (clean, no marker),
+    // the stored curve and headline are the last success's (chain-broken). Pairing
+    // them draws a whole curve under a suffix headline.
+    mockStrategyData = [
+      compareRow(ID, {
+        cumulative_method: null,
+        twr_chain_broken: null,
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "simple",
+        last_success_twr_chain_broken: "true",
+        last_success_headline_since: "2026-08-22",
+      }),
+    ];
+    await render2(ID);
+    expect(overlayOf(ID).headlineCoversFrom).toBe("2026-08-22");
+    expect(overlayOf(ID).headlineCoversFromStatus).toBe("dated");
+    expect(overlayOf(ID).analytics.twr_chain_broken).toBe("true");
+    expect(overlayOf(ID).analytics.cumulative_method).toBe("simple");
+    expect(adminReadIds).toEqual([]);
+  });
+
+  it("post-derive, old success clean and new derive chain-broken: the overlay draws the old success as it drew it", async () => {
+    mockStrategyData = [
+      compareRow(ID, {
+        cumulative_method: null,
+        twr_chain_broken: "true",
+        headline_since: "2026-09-10",
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "geometric",
+      }),
+    ];
+    await render2(ID);
+    expect(overlayOf(ID)).not.toHaveProperty("headlineCoversFrom");
+    expect(overlayOf(ID)).not.toHaveProperty("headlineCoversFromStatus");
+    expect(overlayOf(ID).analytics.twr_chain_broken ?? null).toBeNull();
+    expect(overlayOf(ID).analytics.cumulative_method).toBe("geometric");
+  });
+
+  it("a last-success snapshot bound to ANOTHER success (one second off) is not used: the live aliases stand", async () => {
+    mockStrategyData = [
+      compareRow(ID, {
+        cumulative_method: null,
+        twr_chain_broken: "true",
+        last_success_computed_at: ONE_SECOND_OFF,
+        last_success_cumulative_method: "simple",
+        last_success_twr_chain_broken: "true",
+        last_success_headline_since: "2026-08-22",
+      }),
+    ];
+    await render2(ID);
+    expect(overlayOf(ID).analytics.twr_chain_broken).toBe("true");
+    expect(overlayOf(ID).headlineCoversFrom).toBeNull();
+    expect(overlayOf(ID).headlineCoversFromStatus).toBe("undatable");
+  });
+
+  it("the correlation matrix receives the same effective cumulative_method the overlay does", async () => {
+    mockStrategyData = [
+      compareRow(ID, {
+        cumulative_method: null,
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "simple",
+      }),
+    ];
+    await render2(ID);
+    expect(matrixItems).toHaveLength(1);
+    expect(matrixItems[0].analytics.cumulative_method).toBe("simple");
+    expect(overlayOf(ID).analytics.cumulative_method).toBe("simple");
+  });
+
+  // ---- what leaves the server -----------------------------------------------
+  it("no item handed to the overlay or the matrix carries an alias input, and the overlay keys stay exactly the five", async () => {
+    mockStrategyData = [
+      compareRow(ID, {
+        cumulative_method: "geometric",
+        twr_chain_broken: "true",
+        headline_since: "2026-09-01",
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "simple",
+        last_success_twr_chain_broken: "true",
+        last_success_headline_since: "2026-08-22",
+      }),
+    ];
+    await render2(ID);
+    for (const it of [...overlayItems, ...matrixItems]) {
+      for (const key of LEAKY_KEYS) expect(it.analytics, key).not.toHaveProperty(key);
+    }
+    expect(Object.keys(overlayItems[0]).sort()).toEqual(
       ["analytics", "headlineCoversFrom", "headlineCoversFromStatus", "kind", "strategy"].sort(),
     );
     expect(JSON.stringify(overlayItems[0])).not.toContain("gap_spans");
+  });
+
+  it("a row whose live aliases carry the marker hands the overlay its fetched flag and method unchanged", async () => {
+    mockStrategyData = [
+      compareRow(ID, {
+        cumulative_method: "geometric",
+        twr_chain_broken: "true",
+        headline_since: "2026-09-01",
+        // even a bound snapshot is not consulted while the live marker is present
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "simple",
+        last_success_twr_chain_broken: null,
+        last_success_headline_since: "2026-08-22",
+      }),
+    ];
+    await render2(ID);
+    expect(overlayOf(ID).analytics.twr_chain_broken).toBe("true");
+    expect(overlayOf(ID).analytics.cumulative_method).toBe("geometric");
+    expect(overlayOf(ID).headlineCoversFrom).toBe("2026-09-01");
   });
 });
 

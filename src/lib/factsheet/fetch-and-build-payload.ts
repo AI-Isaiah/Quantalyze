@@ -35,7 +35,13 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
-import { isComputedAnalytics } from "@/lib/closed-sets";
+import { isComputedAnalytics, isRecomputeOverStoredResult } from "@/lib/closed-sets";
+import {
+  effectiveDataQualityFlags,
+  hasStoredAnalyticsResult,
+  hasUnboundDerivePrestamp,
+  storedEntryCount,
+} from "@/lib/stored-analytics-result";
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "@/lib/nav-marks-start";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
@@ -151,35 +157,6 @@ function notBuildable(reason: NotBuildableReason, detail: NotBuildableDetail = {
   if (detail.gate !== undefined) out.gate = detail.gate;
   if (detail.source !== undefined) out.source = detail.source;
   return out;
-}
-
-/**
- * 167.2.1-REVIEW-SFH M-3 — how many dated return entries a stored series
- * column HOLDS, before any normalization drops a malformed one. An array
- * counts its distinct string dates, plus each entry with no string date on its
- * own (a malformed entry is still an entry the writer stored). A flat
- * `{date: value}` dict counts its keys, and a nested `{year: {MM-DD: value}}`
- * dict its inner keys. Anything else holds none.
- */
-function storedEntryCount(raw: unknown): number {
-  if (raw === null || typeof raw !== "object") return 0;
-  if (Array.isArray(raw)) {
-    const keys = new Set<string>();
-    raw.forEach((entry, i) => {
-      const date =
-        entry !== null && typeof entry === "object" ? (entry as { date?: unknown }).date : undefined;
-      keys.add(typeof date === "string" ? `date:${date}` : `entry:${i}`);
-    });
-    return keys.size;
-  }
-  let count = 0;
-  for (const value of Object.values(raw)) {
-    count +=
-      value !== null && typeof value === "object" && !Array.isArray(value)
-        ? Object.keys(value).length
-        : 1;
-  }
-  return count;
 }
 
 /**
@@ -414,9 +391,26 @@ async function resolveFactsheetInputs(
   // whose series has not been ingested. No new state, no new copy, nothing red
   // — and the owner lane inherits it, so an owner previewing their own draft
   // sees the same honest placeholder rather than a factsheet built on a dead
-  // run. `computing` is included for the reason `shapeRowAnalytics` gives:
-  // there is no honest date to show the previous run's numbers under.
-  if (!isComputedAnalytics(analytics?.computation_status)) {
+  // run.
+  //
+  // PHASE 190 (D-02, SC-3) — a pending or computing row that STORES a success
+  // result is not withheld. The earlier reading ("there is no honest date to
+  // show the previous run's numbers under") ended when Phase 166.5 made only the
+  // runner's success write stamp `computed_at`: the stored `computed_at` is the
+  // date of the last good compute. Admission needs three checks
+  // (`hasStoredAnalyticsResult`): a stored series, a finite stored headline, and
+  // success-written flags carrying `cumulative_method`. The third exists because
+  // the derive hop REPLACES `data_quality_flags` minutes before the compute
+  // hop's success write; plan 09 carries the last success's flags inside the
+  // prestamp as `last_success_snapshot`, which counts only when its computed_at
+  // is the row's. A `failed` row is never admitted, whatever it stores. D-04
+  // (below) withholds the mirror case: a terminal-success row whose derive
+  // prestamp left no bound snapshot.
+  const analyticsUpdating = isRecomputeOverStoredResult(
+    analytics?.computation_status,
+    hasStoredAnalyticsResult(analytics),
+  );
+  if (!isComputedAnalytics(analytics?.computation_status) && !analyticsUpdating) {
     console.warn(
       `[factsheet] resolve(${caller}) — analytics row is not a terminal success; withholding the payload`,
       { id, caller, computationStatus: analytics?.computation_status ?? null },
@@ -424,6 +418,30 @@ async function resolveFactsheetInputs(
     return notBuildable(
       "not_computed",
       analytics?.computation_status === "failed" ? { analyticsFailed: true } : {},
+    );
+  }
+  // PHASE 190 D-04 (founder 2026-11-03): the factsheet falls back to today's
+  // queued state instead of mixing old numbers with new flags. Two writers hold
+  // a terminal-success status through the derive hop, which REPLACES the flags
+  // with a prestamp: the status bridge (the complete_with_warnings arm, and the
+  // ledger-refresh keep arm, until the compute hop's `_mark_computing`) and a
+  // protected refresh's restore, which keeps the prestamp flags until the next
+  // success. Such a row is admitted above as a terminal success, but the live
+  // flags are the new derive's while the stored numbers are the last success's.
+  // The rule keys on the flags' STATE (the prestamp's snapshot key with no bound
+  // snapshot), never on the status name. A row at rest, a legacy row included,
+  // is untouched. No `analyticsFailed`: nothing failed.
+  if (isComputedAnalytics(analytics?.computation_status) && hasUnboundDerivePrestamp(analytics)) {
+    console.warn(
+      `[factsheet] resolve(${caller}) — terminal-success row carries a derive prestamp with no snapshot bound to its computed_at; withholding the payload (phase 190 D-04)`,
+      { id, caller, computationStatus: analytics?.computation_status ?? null },
+    );
+    return notBuildable("not_computed");
+  }
+  if (analyticsUpdating) {
+    console.info(
+      `[factsheet] resolve(${caller}) — analytics row is recomputing over a stored success result; building from the stored values`,
+      { id, caller, computationStatus: analytics?.computation_status ?? null },
     );
   }
 
@@ -437,7 +455,25 @@ async function resolveFactsheetInputs(
   // placeholder.
   // 164.6.6.2.2 D-05: the curve is read by the row's own method, so the flags
   // are read BEFORE the series is resolved.
-  const dqf = analytics?.data_quality_flags as
+  // Phase 190 (plan 09): the EFFECTIVE flags, not the live ones. During a
+  // derive-to-success window the live flags are the new derive's prestamp, while
+  // the stored series and headline are the last success's; the snapshot carries
+  // the flags that success wrote, so every flag the build reads below (composite
+  // discriminator, curve method, native unit, headline dating, guard notes, marks
+  // notes) comes from the run whose numbers are stored.
+  const effectiveFlags = effectiveDataQualityFlags(analytics);
+  if (effectiveFlags.source === "snapshot") {
+    console.info(
+      `[factsheet] resolve(${caller}) — building from the last success's flags snapshot (the live flags are a derive prestamp)`,
+      { id, caller },
+    );
+  }
+  // Review round 3 (SFH M1): the derive-to-success window. The conventions echo is
+  // rewritten by the in-flight derive in both cases, so an updating row and a held
+  // terminal-success row (live flags are the snapshot's) are one state: no echo
+  // read, no basis gate, and a build the public cache must not store.
+  const basisInFlight = analyticsUpdating || effectiveFlags.source === "snapshot";
+  const dqf = effectiveFlags.flags as
     | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; pnl_dominated_guard?: unknown; flow_timing_day_level?: unknown; flow_timing_day_level_large?: unknown; marks_since?: unknown; marks_trailing_since?: unknown }
     | null
     | undefined;
@@ -455,6 +491,14 @@ async function resolveFactsheetInputs(
   // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
   // the arithmetic running-cumulative curve, and thread the marker/basis fields.
   const isComposite = dqf?.composite === true;
+  // Phase 190 review round 1 (CR-01): a composite's curve (`csv_daily_returns`),
+  // its MTM and smoothed series and its conventions echo live outside
+  // `strategy_analytics`, and the in-flight stitch rewrites them before its one
+  // headline write. A recompute over a stored result cannot show them beside the
+  // last run's headline, so the composite falls back to today's queued state.
+  if (isComposite && analyticsUpdating) {
+    return notBuildable("not_computed");
+  }
   let compositeBuildOpts: BuildFactsheetOpts | undefined;
   // SFH HIGH-1 (169.1 review round 1): a failed `cash_settlement` conventions
   // read, on either arm. The build still runs on the config tier (D-30); this
@@ -549,6 +593,10 @@ async function resolveFactsheetInputs(
   //
   // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
   // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
+  // Phase 190: the F-4 DONE gate and every other inner gate of the owner follow
+  // this stage's one admission decision (`recomputeOverStoredResult:
+  // analyticsUpdating`, below), not the raw status. The note that follows
+  // describes the cache key the gate rides on.
   // The F-4 `computation_status`-DONE gate was documented as riding a
   // computed_at-bearing cache key; until 167.2.1-REVIEW WR-02 it did not (the
   // effective key was id-only). It does now: `computed_at` is a keyParts
@@ -586,9 +634,18 @@ async function resolveFactsheetInputs(
     // from the config tier. The read never throws: a failure logs and degrades to
     // the config tier, and (SFH HIGH-1) is carried to the success exit below.
     // Same service-role handle, behind the same visibility gate.
-    const cashRead = caller === "build" ? await readCashConventions(supabase, id) : null;
+    // Phase 190 review round 1 (WR-01): while a re-run is in flight the derive hop
+    // has already rewritten this echo, so it is not read; the stored numbers
+    // resolve on the effective flags and the config tier.
+    const cashRead = caller === "build" && !basisInFlight ? await readCashConventions(supabase, id) : null;
     if (cashRead?.failed) conventionsReadFailure = { code: cashRead.code, message: cashRead.message };
     const cashConventions = cashRead?.conventions ?? null;
+    // Phase 190 SC-6: the cash headline, the curve and every flag come from the
+    // last success (`dqf`, the snapshot's flags in the derive-to-success window).
+    // The derive hop writes the live `metrics_json_by_basis`, the MTM and smoothed
+    // series rows and `mtm_gated_reason` in ONE hop, so in that window (an updating
+    // row, or a held terminal-success status whose flags are the snapshot) no MTM or
+    // smoothed gate is built and no series is read (review round 2, WR-03, SFH M3).
     try {
       singleKeyOpts = await readSingleKeyBasisOpts(
         () => supabase,
@@ -602,7 +659,15 @@ async function resolveFactsheetInputs(
         strategy.returns_denominator_config,
         // A probe never captures (167.2.1-REVIEW-R2 WR-01); a build captures a
         // persisted-headline defect once.
-        { captureDefects: caller === "build", cashConventions },
+        // Phase 190 (SC-3): the inner gates (stored headline, MTM and smoothed
+        // reads, MTM and smoothed toggles) follow this stage's ONE admission
+        // decision, never the raw status on their own.
+        {
+          captureDefects: caller === "build",
+          cashConventions,
+          recomputeOverStoredResult: analyticsUpdating,
+          basisInFlight,
+        },
       );
     } catch (err) {
       if (!(err instanceof CompositeSeriesReadError)) throw err;
@@ -621,7 +686,9 @@ async function resolveFactsheetInputs(
   // probe's answer does not depend on the method. The build result carries
   // `conventionsDegraded`, and the public cached callback in `v2/page.tsx`
   // refuses to store it.
-  const conventionsDegraded = conventionsReadFailure !== undefined;
+  // Review round 2 (SFH M2): an updating row skips the conventions echo, so the day
+  // basis falls to the live config with no mark; the public cache must not store it.
+  const conventionsDegraded = conventionsReadFailure !== undefined || basisInFlight;
   if (conventionsReadFailure && caller === "build") {
     const { code, message } = conventionsReadFailure;
     captureToSentry(new Error(`factsheet resolve: cash_settlement conventions read failed (${code})`), {
@@ -649,6 +716,7 @@ async function resolveFactsheetInputs(
     compositeBuildOpts,
     singleKeyOpts,
     conventionsDegraded,
+    analyticsUpdating,
   };
 }
 
@@ -673,7 +741,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v19", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v20", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -814,7 +882,7 @@ async function buildFromResolved(
   id: string,
   resolved: ResolvedFactsheetInputs,
 ): Promise<FactsheetPayload> {
-  const { strategy, analytics, dqf, isComposite, dailyRaw, dailyReturns, singleKeyOpts } = resolved;
+  const { strategy, analytics, dqf, isComposite, dailyRaw, dailyReturns, singleKeyOpts, analyticsUpdating } = resolved;
 
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
   // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
@@ -911,6 +979,7 @@ async function buildFromResolved(
     types: strategy.strategy_types ?? [],
     markets: strategy.markets ?? [],
     computedAt,
+    analyticsUpdating,
     tradesFetchedAt,
     tradeFetchVenue,
     unrecoveredGaps,

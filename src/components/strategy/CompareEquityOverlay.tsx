@@ -28,9 +28,12 @@ const LINE_COLORS = ["#1B6B5A", "#3B82F6", "#8B5CF6", "#F97316"];
  * not on the item, kept apart because the reader's contract is that an outage is
  * never rendered as "the span cannot be named":
  *   - "dated":       `headlineCoversFrom` names the first day of the span.
- *   - "undatable":   the stored series names no such day (a missing row, or a
- *                    densify convention that echoes no gap).
- *   - "read_failed": the read itself failed.
+ *   - "undatable":   the row's flags name no valid `headline_since` (phase 190:
+ *                    the compare page dates the span by that field, the one the
+ *                    factsheet uses, and no longer reads the stored series).
+ *   - "read_failed": the read itself failed. The contract keeps the value though
+ *                    the compare page no longer issues a read that can fail
+ *                    (phase 190).
  */
 export type HeadlineCoversFromStatus = "dated" | "undatable" | "read_failed";
 

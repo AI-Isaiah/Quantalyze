@@ -44,6 +44,7 @@ instead of hammering the exchange.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import math
@@ -1061,6 +1062,43 @@ STRATEGY_ANALYTICS_REAP_THRESHOLD: Final[str] = "16 hours"
 STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
     {"complete", "complete_with_warnings"}
 )
+
+# Phase 190 FACTSHEETQUEUED plan 09 (D-02, SC-3, SC-6): the flags of the LAST SUCCESS, carried
+# across the derive hop's prestamp.
+#
+# THE PROBLEM. A single-key broker re-run's derive hop REPLACES
+# ``strategy_analytics.data_quality_flags`` wholesale (MED-3) minutes before the compute hop's
+# success write, and that replacement drops the success-written ``cumulative_method`` marker.
+# The factsheet shows the stored numbers beside the flags that describe them, so without a copy
+# the factsheet of a strategy that is only being RE-computed would disappear for the whole
+# window up to the success write.
+#
+# THE SHAPE. ``data_quality_flags.last_success_snapshot`` is
+# ``{"computed_at": <the row's computed_at string exactly as read>, "flags": <the row's
+# data_quality_flags as read, never containing this key>}``, or JSON null.
+#
+# WHO WRITES IT. Only the derive prestamp, and on EVERY strategy-mode prestamp: the snapshot
+# object, or null when the pre-read failed or the row held neither the marker nor a
+# well-formed snapshot. The key is present-with-null on purpose: the TypeScript reader
+# (``hasUnboundDerivePrestamp``, phase 190 D-04) uses the KEY as the evidence that a prestamp
+# replaced the success flags, and tells a prestamp that left no usable snapshot from a legacy
+# row at rest, which carries no key.
+#
+# WHY IT LIVES INSIDE ``data_quality_flags``. The prestamp replaces that column wholesale and
+# the success rebuild copies only named keys, so a key nested there lives exactly from one
+# derive to the next success, which is the lifetime the snapshot needs. A sibling column would
+# outlive the window and would need a migration that auto-applies to PROD on merge.
+#
+# ⛔ NEVER a member of ``NAV_TWR_GUARD_KEYS`` or ``ALLOCATED_CAPITAL_GUARD_KEYS``: membership
+# of the guard-key sets promotes ``computation_status`` to ``complete_with_warnings``, and a
+# display aid is not a warning.
+#
+# WHO READS IT. ``src/lib/stored-analytics-result.ts`` (``effectiveDataQualityFlags``) uses the
+# snapshot only when its ``computed_at`` is the same instant as the row's. The only writers of
+# ``strategy_analytics.computed_at`` are the two terminal-success writers, so a matching
+# ``computed_at`` means the snapshot was taken after the last success that stored the row's
+# numbers; any later success moves ``computed_at`` or writes a top-level marker.
+LAST_SUCCESS_SNAPSHOT_KEY: Final[str] = "last_success_snapshot"
 
 # Phase 161.1 / CR-03: the two `compute_jobs.metadata->>'source'` values that
 # mark a job as part of a RECURRING background maintenance refresh — the only
@@ -3365,6 +3403,47 @@ def _capture_read_failure(exc: BaseException, *, job_id: Any) -> None:
     with sentry_sdk.new_scope() as scope:
         scope.set_tag("compute_job_id", str(job_id))
         sentry_sdk.capture_exception(exc)
+
+
+def _non_empty_str(value: object) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _last_success_snapshot(row: object) -> dict[str, Any] | None:
+    """The ``last_success_snapshot`` a derive prestamp should write, from the
+    ``(data_quality_flags, computed_at)`` row it read just before replacing the flags.
+
+    Phase 190 plan 09 (see ``LAST_SUCCESS_SNAPSHOT_KEY``). Pure: ``isinstance`` checks
+    only, never raises, logs nothing, and returns deep copies so a later mutation of the
+    read row cannot reach the payload.
+
+    * flags carrying a top-level non-empty string ``cumulative_method`` (a success wrote
+      them) and a non-empty string ``computed_at``: a NEW snapshot ``{computed_at, flags}``
+      whose flags omit any nested snapshot key, so the snapshot never nests;
+    * otherwise flags carrying a well-formed snapshot (a non-empty string ``computed_at``,
+      flags that are an object with a marker): that snapshot, carried forward unchanged
+      (a retried derive, or a new chain after a failure arm replaced the flags);
+    * anything else, a non-dict row included: None. A snapshot is never invented, because
+      flags no success wrote would be shown beside numbers they do not describe (SC-6).
+    """
+    if not isinstance(row, dict):
+        return None
+    flags = row.get("data_quality_flags")
+    if not isinstance(flags, dict):
+        return None
+    computed_at = row.get("computed_at")
+    if _non_empty_str(flags.get("cumulative_method")) and _non_empty_str(computed_at):
+        kept = {k: v for k, v in flags.items() if k != LAST_SUCCESS_SNAPSHOT_KEY}
+        return {"computed_at": computed_at, "flags": copy.deepcopy(kept)}
+    prior = flags.get(LAST_SUCCESS_SNAPSHOT_KEY)
+    if not isinstance(prior, dict) or not _non_empty_str(prior.get("computed_at")):
+        return None
+    prior_flags = prior.get("flags")
+    if not isinstance(prior_flags, dict) or not _non_empty_str(
+        prior_flags.get("cumulative_method")
+    ):
+        return None
+    return copy.deepcopy({"computed_at": prior["computed_at"], "flags": prior_flags})
 
 
 def _flags_object_or_dropped(
@@ -9496,6 +9575,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # flag left by an earlier gapped run — a healed account returns to `complete`
     # rather than staying stuck warned. Were this conditional, the stale flag would
     # survive across the csv_daily_returns boundary and re-warn a clean series.
+    # Phase 190: a re-derive over a computed row ALSO carries ``last_success_snapshot``, the
+    # last success's flags, so the factsheet keeps its figures through the re-run.
     # SHOULD-1: pre-stamp the fired warn flags from the ONE shared
     # NAV_TWR_GUARD_KEYS source (the DQ-01 NAV guards + DQ-02 coverage + FLOW-04
     # materiality + MUST-2 unreadable-uPnL) so adding a guard propagates onto the
@@ -9599,6 +9680,55 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # write is series-first (self-healing partial-write window). `mtm_metrics_json`
     # is captured by the later assignment — its value is fixed before this point.
 
+    # Phase 190 plan 09 (D-02, SC-3, SC-6): carry the LAST SUCCESS's flags across this
+    # prestamp. Key-mode returned at its exit above, so this is strategy-mode only. The
+    # prestamp replaces ``data_quality_flags`` wholesale, which drops the success-written
+    # ``cumulative_method`` marker minutes before the compute hop's success write; the
+    # snapshot keeps the flags that go with the numbers still stored on the row (see
+    # ``LAST_SUCCESS_SNAPSHOT_KEY``). Read in ONE statement beside ``computed_at``, which
+    # is what the reader binds the snapshot to.
+    #
+    # ⚠️ This read FAILS the derive when it fails (review round 1, SFH MEDIUM-1). It used to
+    # swallow the failure and write ``last_success_snapshot = null``. The prestamp replaces
+    # ``data_quality_flags`` wholesale, so on a retry that null destroyed the snapshot the first
+    # attempt had already carried, and a systematic read bug silently put every re-run back on
+    # the hidden-factsheet behaviour. A failed read now logs, captures and propagates before
+    # anything is written, series rows included (review round 2, SFH M1: the read sits above the
+    # series persists, so a persistently failing read cannot leave fresh series beside old scalars):
+    # a ``_READ_PROGRAMMING_ERRORS`` member as itself (this file's rule for
+    # a bug in a required read), any other failure through the queue's normal retry, so the
+    # carried snapshot is never overwritten with a null it did not earn.
+    _last_success: dict[str, Any] | None = None
+
+    def _read_last_success_row() -> object:
+        res = (
+            ctx.supabase.table("strategy_analytics")
+            .select("data_quality_flags, computed_at")
+            .eq("strategy_id", strategy_id)
+            .maybe_single()
+            .execute()
+        )
+        return getattr(res, "data", None)
+
+    try:
+        _last_success = _last_success_snapshot(
+            await db_read_with_retry(_read_last_success_row)
+        )
+    except Exception as _snapshot_exc:  # noqa: BLE001 — logged, captured, re-raised
+        _log_snapshot_failure = (
+            logger.error
+            if isinstance(_snapshot_exc, _READ_PROGRAMMING_ERRORS)
+            else logger.warning
+        )
+        _log_snapshot_failure(
+            "derive_broker_dailies strategy=%s: could not read the last success's flags "
+            "for last_success_snapshot (%s); failing the job before the prestamp so the "
+            "carried snapshot is not overwritten",
+            strategy_id,
+            _read_failure_text(_snapshot_exc),
+        )
+        _capture_read_failure(_snapshot_exc, job_id=job.get("id"))
+        raise
     # Phase 103 (MTM-04): persist (or HEAL) the mark_to_market daily-return series
     # row from the SAME BasisSeriesResult the scalar cache above came from — the
     # dailies-canonical route Plans 03/04 read. The success matrix MIRRORS the
@@ -9793,6 +9923,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         _by_basis_obj["smoothed_mtm"] = smoothed_metrics_json
     _prestamp_payload["metrics_json_by_basis"] = _by_basis_obj or None
 
+    # ONE unconditional assignment, null included: every strategy-mode prestamp carries the
+    # key so the reader can tell a prestamp that left no usable snapshot from a legacy row at
+    # rest. ``_prestamp_payload["data_quality_flags"]`` is this same dict, so the upsert below
+    # writes it.
+    _prestamp_flags[LAST_SUCCESS_SNAPSHOT_KEY] = _last_success
+
     def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
         ctx.supabase.table("strategy_analytics").upsert(
             payload,
@@ -9882,6 +10018,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # ``complete`` row is rewritten to ``computing`` by the bridge's branch (a)
     # on the first ``failed_retry``, and is then un-published on exhaustion (see
     # the block comment above ``MarkerLiveState``).
+    # Phase 190: in that state the factsheet reads the snapshot's flags (the prestamp's
+    # ``last_success_snapshot``), so the row's figures and the flags shown beside them come
+    # from one success.
     if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
         # SFH-R3-02: the sibling that also hands back the failed read's
         # ``ExceptionClass: message``, so ``last_error`` says what failed.

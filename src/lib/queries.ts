@@ -10,9 +10,15 @@ import {
   deriveEmptySeriesState,
   isComputedAnalytics,
   isRankableAnalyticsRow,
+  isRecomputeOverStoredResult,
   PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
+import {
+  effectiveDataQualityFlags,
+  hasStoredAnalyticsResult,
+  usesLastSuccessSnapshot,
+} from "./stored-analytics-result";
 import { NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import {
   curveMethodFromFlags,
@@ -308,16 +314,32 @@ export { extractAnalytics, EMPTY_ANALYTICS };
  *         (`curveMethodFromFlags`).
  *       - `twr_chain_broken`, the `->>` scalar of the flag of the same name
  *         (Phase 170.2 SC-3, D-07): arrives as the string `"true"` (coerce strictly
- *         `=== "true"`). It tells the compare page which published rows need
- *         their covered-from date read, so the overlay draws the span the
- *         headline cumulative return compounds.
+ *         `=== "true"`). It tells the compare page which published rows are
+ *         chain-broken, so the overlay draws the span the headline cumulative
+ *         return compounds (dated by `headline_since` since phase 190).
+ *
+ *   - Phase 190 plan 07 (D-02, SC-6) — `computed_at` plus FIVE more scalars, so
+ *     the page can read every row's flag-derived fields from ONE flags
+ *     generation (plan 03's effective flags). The derive hop's prestamp rewrites
+ *     the live flags minutes before the new run writes its figures, while the
+ *     stored curve and headline stay the last success's.
+ *       - `headline_since` (the live flags' covered-from date, the field the
+ *         factsheet dates the same headline by).
+ *       - `last_success_computed_at`, `last_success_cumulative_method`,
+ *         `last_success_twr_chain_broken` and `last_success_headline_since`,
+ *         the same fields out of plan 09's `computed_at`-bound
+ *         `last_success_snapshot`.
+ *     All are scalars: the flags blob, the snapshot object and the snapshot's
+ *     `flags` object stay out of this cross-tenant projection, and the page
+ *     drops `headline_since` and the four `last_success_*` aliases before any
+ *     client component sees the row. `page.test.tsx` pins the exact set.
  *
  * Lives here (not in the page file) so every "which analytics columns may
  * leave the DB" list is auditable with one grep of this module, alongside
  * PUBLIC_ANALYTICS_COLUMNS and the STRATEGY_DETAIL_* constants.
  */
 export const COMPARE_ANALYTICS_COLUMNS =
-  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series, cumulative_method:data_quality_flags->>cumulative_method, twr_chain_broken:data_quality_flags->>twr_chain_broken";
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series, cumulative_method:data_quality_flags->>cumulative_method, twr_chain_broken:data_quality_flags->>twr_chain_broken, computed_at, headline_since:data_quality_flags->>headline_since, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_twr_chain_broken:data_quality_flags->last_success_snapshot->flags->>twr_chain_broken, last_success_headline_since:data_quality_flags->last_success_snapshot->flags->>headline_since";
 
 /**
  * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
@@ -415,6 +437,19 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * (`failed` / `computing`) is blanked by `shapeRowAnalytics` and so loses the
  * alias: such a row shows no figures to misread.
  *
+ * Phase 190 plan 07 (D-02) — FOUR more scalar aliases over the same column, so
+ * a row RE-COMPUTING over a stored success result can keep its last computed
+ * figures on the list (see `shapeRowAnalytics`). `cumulative_method` is the
+ * success marker: only the two terminal-success writers stamp it, so its
+ * presence proves the row's flags (and with them its figures) are a success's.
+ * The three `last_success_*` aliases carry plan 09's `computed_at`-bound
+ * snapshot across the derive hop's prestamp, which replaces the live flags
+ * (and drops the marker) minutes before the new run writes anything. All four
+ * are method names, a timestamp the row already exposes as `computed_at`, and a
+ * unit code: scalars, never the flags blob, the snapshot object or its `flags`
+ * object. `shapeRowAnalytics` drops the three `last_success_*` aliases, so they
+ * never reach a client component. `queries.test.ts` pins the exact set.
+ *
  * Phase 170.7 (D-09) — exported for a SECOND consumer, the manager's
  * `/strategies` owner list (plan 06), which embeds the same columns so its
  * rows are shaped by `shapeRowAnalytics` exactly like Discovery's. It stays an
@@ -422,7 +457,7 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * (RANK-02): a wildcard would put the private blobs above on the wire.
  */
 export const CATEGORY_RANKING_ANALYTICS_COLUMNS =
-  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit, trades_fetched_at";
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit, trades_fetched_at";
 
 /**
  * Phase 170.6.1.1 (ANONKEYID) review round 1 (WR-01, SFH-1, SFH-2). The three
@@ -585,6 +620,10 @@ async function shapeRankingRows(
  * last good compute. THE BEHAVIOUR BELOW IS KEPT UNCHANGED; whether a failed
  * or computing row should now show its last good figures beside that honest
  * date is a founder decision, booked as `[166.5-STALE01-PREMISE]` in TODOS.md.
+ * PHASE 190 ANSWERED IT FOR RE-RUNS (D-02): a `pending` / `computing` row that
+ * stores a success result now keeps its last computed figures (see the arm in
+ * `shapeRowAnalytics`); a `failed` row, and a re-run with nothing stored, stay
+ * blanked.
  *
  * Phase 159 / RANK-01 already drew exactly this line ONCE, for the percentile
  * cohort (`isRankableAnalyticsRow`, closed-sets.ts) — its docblock cites this
@@ -682,6 +721,47 @@ function withResolvedSeriesEnd(a: StrategyAnalytics): StrategyAnalytics {
   return { ...a, series_end: seriesEndOf(a) };
 }
 
+/**
+ * The unit a shaped list row carries, from the SAME flags generation as its
+ * figures (phase 190 plan 07). When the row's success marker is only satisfied
+ * through the derive hop's `computed_at`-bound snapshot (`usesLastSuccessSnapshot`),
+ * the live unit alias is gone with the live flags, so the unit comes from the
+ * snapshot: the last-success alias on a ranked-list row, the snapshot's flags
+ * on a blob row. Every other row reads it exactly as it always has, so a row at
+ * rest keeps its shape. Always passes `parseReturnsUnit`, so a malformed string
+ * never reaches the render as label text.
+ */
+function shapedNativeUnit(a: StrategyAnalytics) {
+  if (usesLastSuccessSnapshot(a)) {
+    const effective = effectiveDataQualityFlags(a);
+    return parseReturnsUnit(
+      effective.source === "snapshot" ? effective.flags?.native_unit : a.last_success_native_unit,
+    );
+  }
+  // Phase 164.6.6.2.1 (D-05, D-12): the unit the StrategyTable chip reads. The
+  // anon ranked read projects the scalar alias; the owner's wildcard embed
+  // carries the flags blob instead. Either way the unit leaves here as a parsed
+  // code or null, and only that ONE scalar is derived: the blob is never copied
+  // into the shape.
+  return parseReturnsUnit(a.native_unit ?? a.data_quality_flags?.native_unit);
+}
+
+/**
+ * Hand a row's stored figures through (terminal success, or a re-run over a
+ * stored success), with `series_end` resolved and its unit parsed. The three
+ * `last_success_*` aliases are evidence INPUTS of the admission rule; they are
+ * dropped here so no shaped object, and no client component, ever carries them.
+ */
+function shapeStoredAnalytics(a: StrategyAnalytics): StrategyAnalytics {
+  const native_unit = shapedNativeUnit(a);
+  const shaped = withResolvedSeriesEnd(a);
+  const out: StrategyAnalytics = { ...shaped, native_unit };
+  delete out.last_success_cumulative_method;
+  delete out.last_success_computed_at;
+  delete out.last_success_native_unit;
+  return out;
+}
+
 export function shapeRowAnalytics(
   a: StrategyAnalytics | null,
   strategyId: string,
@@ -694,38 +774,43 @@ export function shapeRowAnalytics(
   // describe a run that finished. Handed through with `series_end` resolved
   // (a no-op on the ranked anon path, which projects the alias already).
   if (isRankableAnalyticsRow(a)) {
-    // Phase 164.6.6.2.1 (D-05, D-12): the unit the StrategyTable chip reads.
-    // The anon ranked read projects the scalar alias; the owner's wildcard embed
-    // carries the flags blob instead. Either way the unit leaves here as a
-    // parsed code or null, and only that ONE scalar is derived: the blob is
-    // never copied into the shape. A non-rankable row (below) loses it: it
-    // shows no figures to misread.
-    const native_unit = parseReturnsUnit(a.native_unit ?? a.data_quality_flags?.native_unit);
-    return { ...withResolvedSeriesEnd(a), native_unit };
+    return shapeStoredAnalytics(a);
   }
 
-  // failed / pending / computing — a run that did not produce these numbers.
+  // Phase 190 (D-02, D-05) — a row RE-COMPUTING over a stored success result
+  // (`pending` / `computing` AND the evidence rule the factsheet uses) keeps the
+  // last computed figures: the values it carries are the previous success's, and
+  // `computed_at` is that success's date (Phase 166.5). Decided here ONCE, with
+  // the same two predicates the factsheet's resolve stage applies, so a list row
+  // and the factsheet of the same strategy can never disagree. The row is
+  // flagged so the table can keep its `#n`; it is NOT rankable (OQ-2 default),
+  // so it stays out of every percentile cohort until its run succeeds.
+  if (isRecomputeOverStoredResult(a.computation_status, hasStoredAnalyticsResult(a))) {
+    return { ...shapeStoredAnalytics(a), analytics_updating: true };
+  }
+
+  // failed, or pending / computing WITHOUT a stored success result — a run that
+  // did not produce these numbers, and none the row can vouch for.
   //
-  // `computing` is included DELIBERATELY, and it is the one arm with a real
-  // cost: a published row under recompute loses its figures for the ~10-15 min
-  // the job runs, rather than showing the previous run's. Three reasons it is
-  // still the right arm, in order of weight:
-  //   1. When this arm was written the bridge stamped `computed_at = now()` on
-  //      the `computing` branch too (migration :125), so keeping the values
-  //      would have rendered "Synced just now" over numbers from the PREVIOUS
-  //      run — the identical false pairing, merely shorter-lived. Since Phase
-  //      166.5 the analytics runner stamps `computed_at` on its success write
-  //      only, so a computing row carries the date of the last good compute and
-  //      that pairing is no longer false; the arm is kept as it was and its
-  //      premise is under review (see the STALE-01 block above).
-  //   2. `isRankableAnalyticsRow` is the ONE gate Phase 159 / RANK-01 already
-  //      drew for this exact question, and it already excludes `computing`
-  //      from every percentile cohort. Splitting the arms here would mean a
-  //      row could hold a rendered figure while being barred from the ranking
-  //      computed off that same figure — two predicates that drift.
-  //   3. Measured rarity: the 20260802120000 reaper's census recorded 0 rows
-  //      at `computing` in BOTH the test and production projects, so the
-  //      window this costs anything in is close to empty in practice.
+  // `computing` was blanked wholesale until Phase 190, and that rested on three
+  // reasons. Where they stand now:
+  //   1. RETIRED. The bridge once stamped `computed_at = now()` on the
+  //      `computing` branch, so keeping the values would have rendered "Synced
+  //      just now" over the PREVIOUS run's numbers. Since Phase 166.5 the
+  //      analytics runner stamps `computed_at` on its success write only, so a
+  //      computing row carries the date of the last good compute and that
+  //      pairing is no longer false. A computing row that STORES a success
+  //      result is admitted by the arm above.
+  //   2. NOW A DELIBERATE SPLIT, not a lockstep. `isRankableAnalyticsRow` still
+  //      excludes `computing` from every percentile cohort, and that is kept:
+  //      the admitted row shows its figures and its `#n` (a sort position over
+  //      the figures it shows) but takes no part in a percentile until its run
+  //      succeeds (phase 190 OQ-2 default, no migration).
+  //   3. Measured rarity (the 20260802120000 reaper's census recorded 0 rows at
+  //      `computing` in both projects) stays as context for how small the
+  //      window is.
+  // This arm still covers a `failed` row (SC-6) and a re-run with no stored
+  // evidence (a first-ever compute has nothing to keep: SC-4).
   //
   // ⚠️ `trades_fetched_at` IS THE ONE FIELD CARRIED OVER (167.1.2.2.2 plan 09,
   // D-06 / D-10). The three reasons above blank NUMBERS because a run that did

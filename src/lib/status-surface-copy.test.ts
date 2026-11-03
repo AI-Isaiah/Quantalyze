@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ComputeState } from "./compute-state";
 import {
+  ANALYTICS_UPDATING_LINE,
   KCS10_PUBLIC_SENTENCE,
   KEY_STATUS_UNREADABLE_NOTE,
   ownerRemedy,
@@ -826,5 +827,23 @@ describe("170.1 D-09 — grep invariant: no rendered status-surface string carri
     expect(KEY_STATUS_UNREADABLE_NOTE).toBe(
       "We could not check key status right now. Open a strategy to see its keys.",
     );
+  });
+});
+
+describe("FQ190 — the factsheet updating line (phase 190 D-03)", () => {
+  it("FQ190-UPDATING is exact, ASCII, and makes no time or state claim", () => {
+    // D-06 (founder, 2026-11-03): the wording is fixed. The literal is typed
+    // here, never imported, so a drift in the constant fails this pin.
+    const EXPECTED =
+      "Updating with the latest data. These figures are from the last completed computation.";
+    expect(ANALYTICS_UPDATING_LINE).toBe(EXPECTED);
+    expect(ANALYTICS_UPDATING_LINE).toHaveLength(85);
+    expect(ANALYTICS_UPDATING_LINE.endsWith(".")).toBe(true);
+    expect(ANALYTICS_UPDATING_LINE).not.toContain("\u2026");
+    expect(/[^\x00-\x7F]/.test(ANALYTICS_UPDATING_LINE)).toBe(false);
+    const lower = ANALYTICS_UPDATING_LINE.toLowerCase();
+    for (const banned of ["computing", "pending", "job", "queue", "minute", "%"]) {
+      expect(lower).not.toContain(banned);
+    }
   });
 });

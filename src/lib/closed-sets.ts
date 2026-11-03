@@ -784,6 +784,22 @@ export function isComputedAnalytics(
   return status === "complete" || status === "complete_with_warnings";
 }
 
+// Phase 190 (D-02) — a row that is pending or computing OVER a stored success
+// result (`hasStoredAnalyticsResult` in stored-analytics-result.ts decides the
+// second argument). A DISPLAY predicate: the factsheet keeps the last
+// successful numbers on screen, under the stored `computed_at`, while the
+// re-run is in flight. Deliberately separate from isComputedAnalytics above,
+// which progress consumers (pollers, keys/sync, SyncPreviewStep, csv-finalize,
+// ApiKeyManager) read as "a run ended": widening that terminal test would stop
+// them seeing a run end. Never widen isComputedAnalytics or
+// isRankableAnalyticsRow for this. A failed row is never admitted here.
+export function isRecomputeOverStoredResult(
+  status: string | null | undefined,
+  hasStoredResult: boolean,
+): boolean {
+  return hasStoredResult && (status === "pending" || status === "computing");
+}
+
 // --- RANK-01: the published-percentile rank gate (Phase 159) ---------------
 // The strategy_analytics column that decides whether a row may participate in a
 // PUBLIC ranking. Kept as its own constant, deliberately NOT a member of the KPI
@@ -821,6 +837,10 @@ export const PERCENTILE_GATE_COLUMN = "computation_status";
 // `IN ('complete','complete_with_warnings')` list mirrors isComputedAnalytics
 // exactly, which is what makes that migration's parity-by-construction claim a
 // true sentence. Change one, change the other.
+//
+// Phase 190 (OQ-2 default, no migration): a row recomputing over a stored result
+// (isRecomputeOverStoredResult) is DISPLAYED but stays out of every percentile
+// cohort until its run succeeds. The SQL twin is unchanged.
 export function isRankableAnalyticsRow(
   row: { computation_status?: string | null } | null | undefined,
 ): boolean {

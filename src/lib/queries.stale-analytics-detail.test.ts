@@ -98,7 +98,9 @@ import {
   getPublicStrategyDetail,
   getFactsheetDetail,
   getStrategyDetail,
+  shapeRowAnalytics,
 } from "./queries";
+import type { StrategyAnalytics } from "./types";
 
 // --- Fixtures -------------------------------------------------------------
 
@@ -390,5 +392,219 @@ describe("STALE-01 · getStrategyDetail withholds a failed run's figures", () =>
     expect(result!.analytics.sharpe).toBe(LIVE_KPIS.sharpe);
     expect(result!.analytics.daily_returns).toEqual(HEAVY.daily_returns);
     expect(result!.analytics.returns_series).toEqual(HEAVY.returns_series);
+  });
+});
+
+
+// =========================================================================
+// Group D — phase 190 (FACTSHEETQUEUED, D-02, D-05): a row RE-COMPUTING over a
+// stored success result keeps its last computed figures on every shaped
+// surface. The list rows, the owner's list and the detail shapers all share
+// `shapeRowAnalytics`, so one decision (the same `hasStoredAnalyticsResult` +
+// `isRecomputeOverStoredResult` the factsheet uses) serves them all.
+//
+// WHY it matters (Rule 9): an allocator browsing a category list during a
+// ten-minute re-run must see the figures the factsheet shows for the same
+// strategy, not a row of dashes. And a row that never computed (no stored
+// evidence) or a failed row must still be blanked, or the list would show an
+// empty or dead run's numbers as if they were live.
+// =========================================================================
+
+const SHAPE_ID = "5ta1e002-0000-4000-8000-000000000002".replace("t", "1");
+const ROW_COMPUTED_AT = "2026-10-30T10:00:00.123456+00:00";
+// The same instant as ROW_COMPUTED_AT, spelled the way a JS Date writes it.
+const SAME_INSTANT_OTHER_FORMAT = "2026-10-30T10:00:00.123Z";
+const ONE_SECOND_OFF = "2026-10-30T10:00:01.123Z";
+
+/** A ranked-list (scalar alias) row: it ships no flags blob and no series array. */
+function projectedRow(over: Record<string, unknown>): StrategyAnalytics {
+  return {
+    id: "aaaaaaaa-0000-4000-8000-00000000000b",
+    strategy_id: SHAPE_ID,
+    computed_at: ROW_COMPUTED_AT,
+    computation_status: "computing",
+    ...LIVE_KPIS,
+    series_end: "2026-10-29",
+    cumulative_method: "geometric",
+    native_unit: null,
+    ...over,
+  } as unknown as StrategyAnalytics;
+}
+
+/** An owner / detail (wildcard blob) row: the flags blob and the series array. */
+function blobRow(over: Record<string, unknown>): StrategyAnalytics {
+  return {
+    id: "aaaaaaaa-0000-4000-8000-00000000000c",
+    strategy_id: SHAPE_ID,
+    computed_at: ROW_COMPUTED_AT,
+    computation_status: "computing",
+    ...LIVE_KPIS,
+    returns_series: [
+      { date: "2026-10-28", value: 0.01 },
+      { date: "2026-10-29", value: 0.02 },
+    ],
+    data_quality_flags: { cumulative_method: "geometric" },
+    ...over,
+  } as unknown as StrategyAnalytics;
+}
+
+const shapeIt = (a: StrategyAnalytics) => shapeRowAnalytics(a, SHAPE_ID);
+
+describe("phase 190 · shapeRowAnalytics admits a re-run over a stored success result", () => {
+  it("D1: a computing list row with stored evidence keeps its figures, its series end and its unit, flagged analytics_updating", () => {
+    const out = shapeIt(projectedRow({ native_unit: "BTC" }));
+
+    for (const key of KPI_KEYS) {
+      expect(out[key], `${key} was blanked during a re-run`).toBe(LIVE_KPIS[key as keyof typeof LIVE_KPIS]);
+    }
+    expect(out.sparkline_returns).toEqual(LIVE_KPIS.sparkline_returns);
+    expect(out.series_end).toBe("2026-10-29");
+    expect(out.native_unit).toBe("BTC");
+    expect(out.analytics_updating).toBe(true);
+    // The REAL status survives: the owner list still knows a run is in flight.
+    expect(out.computation_status).toBe("computing");
+  });
+
+  it("D2: a pending list row with the same evidence is admitted likewise", () => {
+    const out = shapeIt(projectedRow({ computation_status: "pending" }));
+    expect(out.sharpe).toBe(LIVE_KPIS.sharpe);
+    expect(out.analytics_updating).toBe(true);
+    expect(out.computation_status).toBe("pending");
+  });
+
+  it("D3: an owner / detail blob row is admitted on its flags and its series array", () => {
+    const out = shapeIt(
+      blobRow({ data_quality_flags: { cumulative_method: "geometric", native_unit: "BTC" } }),
+    );
+    expect(out.sharpe).toBe(LIVE_KPIS.sharpe);
+    expect(out.series_end).toBe("2026-10-29");
+    expect(out.native_unit).toBe("BTC");
+    expect(out.analytics_updating).toBe(true);
+  });
+
+  it("D4: a FAILED row is blanked even when it carries full evidence (SC-6)", () => {
+    const out = shapeIt(projectedRow({ computation_status: "failed" }));
+    for (const key of KPI_KEYS) expect(out[key], `${key} leaked`).toBeNull();
+    expect(out.computation_status).toBe("failed");
+    expect(out.analytics_updating).toBeUndefined();
+    expect(out.computed_at).toBeFalsy();
+  });
+
+  it("D5: a computing row WITHOUT the success marker is blanked with its real status (a first-ever compute has no figures to keep)", () => {
+    const out = shapeIt(projectedRow({ cumulative_method: null }));
+    expect(out.sharpe).toBeNull();
+    expect(out.computation_status).toBe("computing");
+    expect(out.analytics_updating).toBeUndefined();
+  });
+
+  it("D6: a computing row without a stored series is blanked", () => {
+    const out = shapeIt(projectedRow({ series_end: null }));
+    expect(out.sharpe).toBeNull();
+    expect(out.analytics_updating).toBeUndefined();
+  });
+
+  it("D7: a terminal-success row carries no analytics_updating key at all (every existing shaped object keeps its exact shape)", () => {
+    for (const status of ["complete", "complete_with_warnings"]) {
+      const out = shapeIt(projectedRow({ computation_status: status }));
+      expect("analytics_updating" in out).toBe(false);
+      expect(out.sharpe).toBe(LIVE_KPIS.sharpe);
+    }
+  });
+});
+
+describe("phase 190 · after the derive hop's prestamp the list row follows its last-success snapshot", () => {
+  // The derive hop replaces the live flags (no marker) and carries the last
+  // success's flags in a snapshot bound to the success by computed_at.
+  const PRESTAMPED = {
+    cumulative_method: null,
+    native_unit: null,
+    last_success_cumulative_method: "geometric",
+    last_success_computed_at: SAME_INSTANT_OTHER_FORMAT,
+    last_success_native_unit: "BTC",
+  };
+
+  it("D8: a bound snapshot keeps the figures and shows the unit its OWN success recorded", () => {
+    const out = shapeIt(projectedRow(PRESTAMPED));
+    expect(out.sharpe).toBe(LIVE_KPIS.sharpe);
+    expect(out.analytics_updating).toBe(true);
+    expect(out.native_unit).toBe("BTC");
+  });
+
+  it("D9: a snapshot bound to ANOTHER success (one second off) is never used: the row is blanked", () => {
+    const out = shapeIt(projectedRow({ ...PRESTAMPED, last_success_computed_at: ONE_SECOND_OFF }));
+    expect(out.sharpe).toBeNull();
+    expect(out.analytics_updating).toBeUndefined();
+  });
+
+  it("D10: a blob row with live csv_source flags and a bound last_success_snapshot is admitted the same way", () => {
+    const out = shapeIt(
+      blobRow({
+        data_quality_flags: {
+          csv_source: true,
+          last_success_snapshot: {
+            computed_at: SAME_INSTANT_OTHER_FORMAT,
+            flags: { cumulative_method: "geometric", native_unit: "BTC" },
+          },
+        },
+      }),
+    );
+    expect(out.sharpe).toBe(LIVE_KPIS.sharpe);
+    expect(out.analytics_updating).toBe(true);
+    expect(out.native_unit).toBe("BTC");
+  });
+
+  it("D11: a blob row whose snapshot is null (a prestamp with nothing to carry) is blanked", () => {
+    const out = shapeIt(
+      blobRow({ data_quality_flags: { csv_source: true, last_success_snapshot: null } }),
+    );
+    expect(out.sharpe).toBeNull();
+  });
+
+  it("D12: a row HELD at a terminal-success status through the derive hop takes the snapshot's unit (terminal arm, no analytics_updating key)", () => {
+    // complete_with_warnings is where the status bridge holds a chain-broken
+    // row through the derive hop: its live unit alias is gone, its success's
+    // unit is not. Showing no BTC chip beside BTC figures would be a lie.
+    const out = shapeIt(projectedRow({ ...PRESTAMPED, computation_status: "complete_with_warnings" }));
+    expect(out.native_unit).toBe("BTC");
+    expect("analytics_updating" in out).toBe(false);
+  });
+
+  it("D13: the same terminal row with an unbound snapshot keeps its LIVE unit, as today", () => {
+    const out = shapeIt(
+      projectedRow({
+        ...PRESTAMPED,
+        computation_status: "complete_with_warnings",
+        last_success_computed_at: ONE_SECOND_OFF,
+        native_unit: "ETH",
+      }),
+    );
+    expect(out.native_unit).toBe("ETH");
+  });
+
+  it("D14: a terminal row whose live marker alias is present keeps its live unit (today's shape; the snapshot is not consulted)", () => {
+    const out = shapeIt(
+      projectedRow({
+        computation_status: "complete",
+        cumulative_method: "geometric",
+        native_unit: "ETH",
+        last_success_cumulative_method: "geometric",
+        last_success_computed_at: SAME_INSTANT_OTHER_FORMAT,
+        last_success_native_unit: "BTC",
+      }),
+    );
+    expect(out.native_unit).toBe("ETH");
+  });
+
+  it("D15: no shaped object, on any arm, carries a last_success_* alias (evidence inputs never leave the shaper)", () => {
+    const rows = [
+      projectedRow(PRESTAMPED),
+      projectedRow({ ...PRESTAMPED, computation_status: "complete" }),
+      projectedRow({ ...PRESTAMPED, computation_status: "failed" }),
+      projectedRow({ ...PRESTAMPED, last_success_computed_at: ONE_SECOND_OFF }),
+    ];
+    for (const row of rows) {
+      const keys = Object.keys(shapeIt(row));
+      expect(keys.filter((k) => k.startsWith("last_success_"))).toEqual([]);
+    }
   });
 });

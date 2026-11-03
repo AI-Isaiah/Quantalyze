@@ -2590,7 +2590,13 @@ class TestDeriveBrokerDailies:
         # `flow_timing_day_level`. That note is not a warning: every other key stays absent,
         # which is what "all warn flags cleared" means. (Before 164.6.6.2.3 this asserted
         # `clean == {"csv_source": True}`.)
-        assert clean == {"csv_source": True, "flow_timing_day_level": True}, (
+        # Phase 190 plan 09: every strategy-mode prestamp also carries `last_success_snapshot`
+        # (null here: the fake returns no row to snapshot). It is not a warn flag.
+        assert clean == {
+            "csv_source": True,
+            "flow_timing_day_level": True,
+            "last_success_snapshot": None,
+        }, (
             f"clean re-derive must clear all warn flags; got {clean!r}"
         )
         from services.allocated_capital import ALLOCATED_CAPITAL_GUARD_KEYS

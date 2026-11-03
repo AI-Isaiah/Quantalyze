@@ -393,7 +393,7 @@ export function isWindowFullWithoutFactsheetJob(
  * flipped to `pending` when the last one finishes, and counted non-terminal by
  * the SQL status bridge and the in-flight unique index.
  */
-const IN_FLIGHT_JOB_STATUSES = [
+export const IN_FLIGHT_JOB_STATUSES = [
   "pending",
   "running",
   "failed_retry",

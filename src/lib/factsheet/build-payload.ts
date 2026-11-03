@@ -535,6 +535,10 @@ type FactsheetStrategyInput = {
     types: string[];
     markets: string[];
     computedAt: string;
+    /** Phase 190 (D-02): true only while the row is recomputing over a stored
+     *  success result. Optional like `tradesFetchedAt` (the non-strategy callers
+     *  and test literals do not carry it); an absent value reads false. */
+    analyticsUpdating?: boolean;
     /** Phase 167.1.2.2.2 (D-06/D-07): last successful trade fetch. Optional like
      *  `ingestSource?` / `assetClass?` (about 60 test literals and the non-strategy
      *  callers do not carry it); the pass-through defaults an absent value to
@@ -864,6 +868,7 @@ function buildFromBuildableSeries(
     strategyTypes: strategy.types,
     markets: strategy.markets,
     computedAt: strategy.computedAt,
+    analyticsUpdating: strategy.analyticsUpdating ?? false,
     tradesFetchedAt: strategy.tradesFetchedAt ?? null,
     tradeFetchVenue: strategy.tradeFetchVenue ?? null,
     unrecoveredGaps: strategy.unrecoveredGaps ?? [],

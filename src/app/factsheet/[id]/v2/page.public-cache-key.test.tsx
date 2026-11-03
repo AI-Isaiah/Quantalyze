@@ -87,7 +87,7 @@ const CASH_DAILY = Array.from({ length: 10 }, (_, i) => ({
   value: ((i % 5) - 2) / 100,
 }));
 
-function adminRow(analytics: { computed_at: string; computation_status: string; daily_returns: unknown }) {
+function adminRow(analytics: { computed_at: string; computation_status: string; daily_returns: unknown } & Record<string, unknown>) {
   return {
     id: STRATEGY_ID,
     name: "Synthetic Published",
@@ -184,7 +184,7 @@ function findPayload(node: unknown): FactsheetPayload | null {
  * status), so a row with no status can be keyed without changing what the builder reads.
  */
 async function request(
-  analytics: { computed_at: string; computation_status: string; daily_returns: unknown },
+  analytics: { computed_at: string; computation_status: string; daily_returns: unknown } & Record<string, unknown>,
   adminError: unknown = null,
   tradeFacts: { trades_fetched_at?: string | null; series_provenance?: unknown } = {},
   probeStatus: string | null = analytics.computation_status,
@@ -285,7 +285,41 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
     // No stamp and no provenance on the row: both members read the literal "none".
     // 166.3.1 D-05: the row's status is the last member.
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v19", STRATEGY_ID, T0, "none", "none", "complete"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v20", STRATEGY_ID, T0, "none", "none", "complete"]]);
+  });
+});
+
+/**
+ * Phase 190 plan 05 (SC-3, T-190-10). WHY: the build now admits a computing row
+ * over a stored success result, so the SAME run (same computed_at, since only a
+ * success write stamps it) can be cached as an updating payload and then, once the
+ * run succeeds, as a complete one. If computation_status were not a keyPart the
+ * two would share an entry and the complete page would keep saying "updating" for
+ * the TTL. The pin is on the case this phase creates.
+ */
+describe("phase 190 - a re-run over a stored result keys on its computing status", () => {
+  const STORED_RUN = {
+    computed_at: T0,
+    daily_returns: CASH_DAILY,
+    cumulative_return: 0.0475,
+    volatility: 0.21,
+    max_drawdown: -0.03,
+    cagr: 0.9,
+    sharpe: 1.4,
+    sortino: 2.1,
+    calmar: 3.2,
+    data_quality_flags: { cumulative_method: "geometric" },
+  };
+
+  it("the key ends in computing, and the complete payload for the same run never shares that entry", async () => {
+    const updating = await request({ ...STORED_RUN, computation_status: "computing" });
+    expect(findPayload(updating)?.analyticsUpdating).toBe(true);
+    expect(cacheKeys.at(-1)?.at(-1)).toBe("computing");
+
+    const done = await request({ ...STORED_RUN, computation_status: "complete" });
+    expect(findPayload(done)?.analyticsUpdating, "the complete page was served the updating entry").toBe(false);
+    expect(cacheKeys.at(-1)?.at(-1)).toBe("complete");
+    expect(adminReads, "each status built once").toBe(2);
   });
 });
 
@@ -321,7 +355,7 @@ describe("167.1.2.2.2 plan 10 - a tick or a provenance write that leaves compute
     expect(cacheKeys).toHaveLength(1);
     const [version, id, computed, stamp, fingerprint, status] = cacheKeys[0] as string[];
     expect([version, id, computed, stamp, status]).toEqual([
-      "factsheet-v2-payload-v19",
+      "factsheet-v2-payload-v20",
       STRATEGY_ID,
       T0,
       FETCH_1,
@@ -342,7 +376,7 @@ describe("166.3.1 D-05 - the key's last member is the row's computation_status",
       {},
       null,
     );
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v19", STRATEGY_ID, T0, "none", "none", "none"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v20", STRATEGY_ID, T0, "none", "none", "none"]]);
   });
 });
 

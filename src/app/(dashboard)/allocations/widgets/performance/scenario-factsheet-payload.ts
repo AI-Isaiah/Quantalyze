@@ -485,6 +485,8 @@ export function buildScenarioFactsheetPayload(
     strategyTypes: [],
     markets: [],
     computedAt: "",
+    // Phase 190: a scenario blend is never a re-run of a stored strategy row.
+    analyticsUpdating: false,
     // Phase 167.1.2.2.2: a scenario blend has no trade fetch of its own.
     tradesFetchedAt: null,
     tradeFetchVenue: null,

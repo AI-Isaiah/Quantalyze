@@ -1,5 +1,10 @@
-import { annualizationPeriods, isComputedAnalytics } from "@/lib/closed-sets";
+import { annualizationPeriods, isComputedAnalytics, isRecomputeOverStoredResult } from "@/lib/closed-sets";
 import { dispersion } from "@/lib/return-stats";
+import {
+  effectiveDataQualityFlags,
+  hasStoredAnalyticsResult,
+  hasUnboundDerivePrestamp,
+} from "@/lib/stored-analytics-result";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
@@ -160,6 +165,8 @@ export async function readV2BenchmarkJoint(
     returns_series?: unknown;
     data_quality_flags?: unknown;
     computation_status?: string | null;
+    cumulative_return?: unknown;
+    computed_at?: unknown;
   };
   type Row = { asset_class?: string | null; strategy_analytics?: Analytics | Analytics[] | null };
 
@@ -168,7 +175,7 @@ export async function readV2BenchmarkJoint(
     const { data, error } = await withPublishedOnly(
       admin
         .from("strategies")
-        .select("id, asset_class, strategy_analytics ( daily_returns, returns_series, data_quality_flags, computation_status )")
+        .select("id, asset_class, strategy_analytics ( daily_returns, returns_series, data_quality_flags, computation_status, cumulative_return, computed_at )")
         .eq("id", strategyId),
     ).maybeSingle();
     if (error) {
@@ -183,9 +190,27 @@ export async function readV2BenchmarkJoint(
   if (!row) return withheld({ kind: "error" });
 
   const analytics = Array.isArray(row.strategy_analytics) ? row.strategy_analytics[0] : row.strategy_analytics;
-  if (!isComputedAnalytics(analytics?.computation_status)) return withheld({ kind: "not_computed" });
+  // Phase 190 (D-02): the joint admits what the factsheet admits. A terminal-
+  // success row, or a row re-computing over a stored success result (the same
+  // `hasStoredAnalyticsResult` + `isRecomputeOverStoredResult` pair the
+  // factsheet's resolve stage applies), is read; a failed row, and a re-run with
+  // nothing stored, are withheld as before.
+  const status = analytics?.computation_status;
+  if (!isComputedAnalytics(status) && !isRecomputeOverStoredResult(status, hasStoredAnalyticsResult(analytics))) {
+    return withheld({ kind: "not_computed" });
+  }
+  // Phase 190 D-04 (founder 2026-11-03): the same rule the factsheet's resolve
+  // stage applies. A terminal-success row whose derive prestamp left no bound
+  // snapshot carries a NEW derive's flags over the LAST success's series, so the
+  // joint never computes its figures from them. Its caller keeps its own
+  // terminal-status gate and live data-quality chips (outside D-05's reach).
+  if (isComputedAnalytics(status) && hasUnboundDerivePrestamp(analytics)) {
+    return withheld({ kind: "not_computed" });
+  }
 
-  const dqf = analytics?.data_quality_flags as { composite?: unknown; native_unit?: unknown } | null | undefined;
+  // The flags of the success whose series this joint shows: the live flags, or
+  // the derive hop's computed_at-bound snapshot after its prestamp.
+  const dqf = effectiveDataQualityFlags(analytics).flags as { composite?: unknown; native_unit?: unknown } | null | undefined;
   if (dqf?.composite === true) return withheld({ kind: "needs_builder" });
   const unit = parseReturnsUnit(dqf?.native_unit);
   if (unit !== null) return withheld({ kind: "native_unit", unit });

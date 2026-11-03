@@ -7,8 +7,8 @@ import {
   EMPTY_ANALYTICS,
   extractAnalytics,
 } from "@/lib/queries";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { readHeadlineCoversFrom } from "@/lib/factsheet/composite-read-path";
+import { readHeadlineBasis } from "@/lib/factsheet/headline-basis";
+import { usesLastSuccessSnapshot } from "@/lib/stored-analytics-result";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { CompareTable } from "@/components/strategy/CompareTable";
@@ -22,6 +22,18 @@ import {
 } from "./lib/holding-compare-adapter";
 
 export const metadata: Metadata = { title: "Compare strategies" };
+
+/**
+ * One compare row as the projection returns it: the analytics columns, plus the
+ * phase 190 alias INPUTS (`COMPARE_ANALYTICS_COLUMNS`) that pick the row's flags
+ * generation. They are consumed in the page and never placed on an item.
+ * `src/lib/types.ts` carries the two shared ones; the other two are compare-only.
+ */
+type CompareProjectedRow = Partial<StrategyAnalytics> & {
+  headline_since?: string | null;
+  last_success_twr_chain_broken?: string | null;
+  last_success_headline_since?: string | null;
+};
 
 // Phase 51 NAV-02 — the back-path crumb is identical across all three render
 // branches (empty-selection, not-available, results), so it lives in one place.
@@ -106,11 +118,46 @@ export default async function ComparePage({
     throw new Error("compare strategies load failed");
   }
 
+  // Phase 190 plan 07 (D-02, SC-6): the effective covered-from date per strategy
+  // id, taken from the same flags generation as the row's chain-broken flag and
+  // curve method. It is kept here, outside the item, because `headline_since` is
+  // an alias INPUT that never reaches a client component.
+  const effectiveHeadlineSince = new Map<string, unknown>();
+
   const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
     const strat = s as Strategy & { strategy_analytics: unknown };
     const row = extractAnalytics(strat.strategy_analytics) as
-      | Partial<StrategyAnalytics>
+      | CompareProjectedRow
       | null;
+
+    // One flags generation per row (plan 03's effective flags, over scalar
+    // aliases). The derive hop's prestamp replaces the LIVE flags before the new
+    // run writes its figures, while the stored curve and headline stay the last
+    // success's. When the live marker is gone and the last-success aliases are
+    // bound to this row's `computed_at`, the whole row (chain-broken flag, curve
+    // method, covered-from date) reads from the last success. Otherwise it reads
+    // from the live aliases, as fetched. Never a mix of the two.
+    const fromSnapshot = usesLastSuccessSnapshot(row);
+    effectiveHeadlineSince.set(
+      strat.id,
+      fromSnapshot ? row?.last_success_headline_since : row?.headline_since,
+    );
+    const generation: Partial<StrategyAnalytics> = fromSnapshot
+      ? {
+          twr_chain_broken: row?.last_success_twr_chain_broken ?? null,
+          cumulative_method: row?.last_success_cumulative_method ?? null,
+        }
+      : {};
+
+    // The alias inputs are consumed above and dropped here, before the row is
+    // placed on any item a client component can receive.
+    const fetched: CompareProjectedRow = { ...(row ?? {}) };
+    delete fetched.headline_since;
+    delete fetched.last_success_computed_at;
+    delete fetched.last_success_cumulative_method;
+    delete fetched.last_success_twr_chain_broken;
+    delete fetched.last_success_headline_since;
+
     return {
       kind: "strategy" as const,
       strategy: strat as Strategy,
@@ -121,10 +168,13 @@ export default async function ComparePage({
       // projection omits. This is the same fallback shape an ABSENT analytics
       // row already produced; the spread simply also covers the present-row
       // case. Fetched values always win — no fetched column is defaulted over.
+      // The effective generation, when it is the snapshot's, wins over the
+      // fetched live aliases for exactly the two fields it names.
       analytics: {
         ...EMPTY_ANALYTICS,
         strategy_id: strat.id,
-        ...(row ?? {}),
+        ...fetched,
+        ...generation,
       } as StrategyAnalytics,
     };
   });
@@ -174,45 +224,36 @@ export default async function ComparePage({
   );
 
   // Phase 170.2 (SC-3, D-07): the overlay draws a chain-broken row over the span
-  // its headline cumulative return compounds, which starts on the day the stored
-  // cash series names. That series sits behind deny-all RLS, so it is read with
-  // the service role (T-170.2-10), and ONLY for a row the visibility-gated read
-  // above already returned whose flag alias is exactly the string "true". Only
-  // the derived DATE and a status leave this function; the series never does.
+  // its headline cumulative return compounds, which starts on the day the
+  // headline's own run names. Since phase 190 that day is the row's effective
+  // `headline_since`, the field and validator (`readHeadlineBasis`) the factsheet
+  // dates the same headline by; Python writes it in the same run as the headline.
   //
-  // The reader keeps two non-dated outcomes apart (a missing or undatable series
-  // is `null`; a FAILED read throws CompositeSeriesReadError, "so an outage is
-  // never rendered as 'the span cannot be named'"), and so does the page. A failed
-  // read degrades that ONE row's chart, never the whole page: one chart must not
-  // hide the comparison table, and the row is never drawn as a bridged curve.
-  const overlayItems = await Promise.all(
-    strategyOnlyItems.map(async (it) => {
-      if (it.analytics.twr_chain_broken !== "true") return it;
-      try {
-        const headlineCoversFrom = await readHeadlineCoversFrom(
-          createAdminClient(),
-          it.strategy.id,
-        );
-        return {
-          ...it,
-          headlineCoversFrom,
-          headlineCoversFromStatus:
-            headlineCoversFrom === null ? ("undatable" as const) : ("dated" as const),
-        };
-      } catch (err) {
-        // House rule: the message, never the error object.
-        console.error(
-          "[compare/page] covered-from read failed:",
-          err instanceof Error ? err.message : String(err),
-        );
-        return {
-          ...it,
-          headlineCoversFrom: null,
-          headlineCoversFromStatus: "read_failed" as const,
-        };
-      }
-    }),
-  );
+  // The stored cash series row is NOT read: the derive hop rewrites it
+  // (`_persist_cash_series`) before the success write, so it can name a new
+  // derive's last-break date over the last success's curve. For the same reason
+  // the flag and method come from the effective generation above, not the live
+  // aliases, which the derive hop's prestamp rewrites. The rule does not depend
+  // on computation_status: a chain-broken row is `complete_with_warnings` and
+  // the status bridge holds it there through the derive hop, so a rule keyed on
+  // pending or computing would miss the window this exists for.
+  //
+  // Nothing is left that can fail: no read, no outage state. A chain-broken row
+  // with no valid `headline_since` (a legacy mixed-basis row, which the factsheet
+  // Withholds) is "undatable": the overlay draws no curve for it.
+  const overlayItems = strategyOnlyItems.map((it) => {
+    if (it.analytics.twr_chain_broken !== "true") return it;
+    const { headlineSince } = readHeadlineBasis({
+      twr_chain_broken: true,
+      headline_since: effectiveHeadlineSince.get(it.strategy.id),
+    });
+    return {
+      ...it,
+      headlineCoversFrom: headlineSince,
+      headlineCoversFromStatus:
+        headlineSince === null ? ("undatable" as const) : ("dated" as const),
+    };
+  });
 
   return (
     <>

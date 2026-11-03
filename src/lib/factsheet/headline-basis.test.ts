@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   GUARD_REASON_PHRASES,
   headlineVerdict,
+  isStoredResultReadable,
   joinGuardPhrases,
   readHeadlineBasis,
   storedCashHeadlineGate,
@@ -274,5 +275,49 @@ describe("storedCashHeadlineGate", () => {
 
   it("a key present with an undefined VALUE is projected (presence, as the page reads it)", () => {
     expect(storedCashHeadlineGate({ ...ROW, cagr: undefined }, null, "complete")).toEqual({ applicable: true });
+  });
+});
+
+/**
+ * Phase 190 plan 05 (SC-3). WHY: plan 03 admits a pending or computing row over a
+ * stored success result, and every single-key inner gate must follow that ONE
+ * decision. `isStoredResultReadable` is the shared test; without the flag it must
+ * equal today's terminal-success test for every status, because the OG card calls
+ * the gate without the flag and must keep refusing a computing row.
+ */
+describe("isStoredResultReadable (phase 190)", () => {
+  const STATUSES = ["complete", "complete_with_warnings", "computing", "pending", "failed", null, undefined, "garbage", 7];
+
+  it("without the flag it is exactly the terminal-success test", () => {
+    for (const status of STATUSES) {
+      expect(isStoredResultReadable(status, false), String(status)).toBe(
+        status === "complete" || status === "complete_with_warnings",
+      );
+    }
+  });
+
+  it("with the flag a pending or computing status is also readable, a failed or unknown one never", () => {
+    expect(isStoredResultReadable("computing", true)).toBe(true);
+    expect(isStoredResultReadable("pending", true)).toBe(true);
+    expect(isStoredResultReadable("complete", true)).toBe(true);
+    for (const status of ["failed", null, undefined, "garbage", 7]) {
+      expect(isStoredResultReadable(status, true), String(status)).toBe(false);
+    }
+  });
+});
+
+describe("storedCashHeadlineGate recompute argument (phase 190)", () => {
+  const SEVEN = { cumulative_return: 1, volatility: 1, max_drawdown: 1, cagr: 1, sharpe: 1, sortino: 1, calmar: 1 };
+  const ROW = { ...SEVEN, computation_status: "computing" };
+
+  it("the OG card's three-argument call still refuses a computing row", () => {
+    expect(storedCashHeadlineGate(ROW, null, "computing")).toEqual({ applicable: false, reason: "not_rankable" });
+    expect(storedCashHeadlineGate(ROW, null, "pending")).toEqual({ applicable: false, reason: "not_rankable" });
+  });
+
+  it("with the fourth argument a computing or pending row is applicable, a failed one still is not", () => {
+    expect(storedCashHeadlineGate(ROW, null, "computing", true)).toEqual({ applicable: true });
+    expect(storedCashHeadlineGate(ROW, null, "pending", true)).toEqual({ applicable: true });
+    expect(storedCashHeadlineGate(ROW, null, "failed", true)).toEqual({ applicable: false, reason: "not_rankable" });
   });
 });
