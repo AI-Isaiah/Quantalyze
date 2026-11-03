@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.133.19.0] - 2026-11-03 — FACTSHEETQUEUED 190: finalize queues no redundant re-run, and a re-compute never hides an already-computed factsheet
+
+### Fixed
+- **Finishing the wizard no longer queues a second analytics run behind a finished one.** A strategy that had already shown its factsheet went back to "UNPUBLISHED … queued" because finalize queued another `sync_trades` run after the first computation was done. The new `decideFinalizeRerun` (`src/lib/finalize-rerun.ts`) decides from database rows inside `after()`, and both legacy finalize arms consult it (single key and composite). It skips only when the stored result is provably current for its inputs, or a live chain job is already in flight. It queues when finalize moved `asset_class`, when there is no terminal success, when the result is older than the linked key or the newest composite member, and on every read error. It never throws. The measured count behind the phase (plan 01): 4 of 4 finalize-sourced `sync_trades` jobs landed after a finished computation.
+- **A pending or computing re-run over a stored success result keeps its factsheet.** Before, the strategy gate hid analytics that had already been computed for the whole re-compute window. Now a `pending` or `computing` row whose stored result passes a three-part evidence rule (`hasStoredAnalyticsResult` in the new `src/lib/stored-analytics-result.ts`: a stored series, a finite cumulative return and the success marker in the flags) is shown with its last completed figures. A `failed` row is never admitted. Every single-key inner gate follows the one admission decision, and the admin strategy review approves on stored-result evidence on both passes.
+- **A terminal-success row whose derive prestamp left no bound snapshot is withheld (D-04)**, and falls back to the queued state, instead of showing figures next to flags that belong to a newer run.
+
+### Added
+- **The updating line.** While a re-run runs over stored figures, the factsheet header shows one muted line after the recency line: "Updating with the latest data. These figures are from the last completed computation." (`ANALYTICS_UPDATING_LINE`, pinned character for character by a test). It renders from the payload alone, so the public page, the owner view, the share link and the discovery detail show it identically. Strategy lists (`StrategyTable`, the ranked projection) and `/compare` follow the same stored-result rule; `/compare` draws every row from one flags generation and dates a chain-broken row by its `headline_since`, and no longer uses the service-role client.
+- **The derive's last-success snapshot.** In strategy mode, `run_derive_broker_dailies_job` reads the row's last success before its prestamp and writes it back as `data_quality_flags.last_success_snapshot` (the flags and `computed_at` of that success, or JSON null when there is none). The factsheet keeps its stored numbers beside the flags that describe them through the whole re-run window. No migration: the key lives inside `data_quality_flags`, which the prestamp replaces wholesale and the success rebuild never copies, and nothing the compute hop reads changed.
+
+### Changed
+- The public factsheet cache key moves to v20, and the snapshot key is pinned across the TypeScript and Python sides. `FactsheetCommon.analyticsUpdating` is a required boolean, false on terminal success.
+
+### Fixed (review rounds 1-3, before merge)
+- **CR-01.** A composite re-stitch showed the in-flight stitch's curve under the last success's headline and date, because a composite builds its curve, MTM and smoothed series and day basis outside the `strategy_analytics` row, and the stitch rewrites them before its headline write. An updating composite factsheet is now withheld. On a single-key row the MTM and smoothed gates and the conventions echo are closed while a re-run is in flight (WR-01, WR-03), and an updating build is marked `conventionsDegraded` (SFH-M2, SFH-M3, SFH-M1).
+- **CR-02.** The finalize skip compared composite member `created_at` with the stitch's `computed_at`, so a member change made while a stitch was already running was never repaired. Composite members are now compared with the start of the stitch that produced the result.
+- **WR-02.** The stored annualization is compared with the current asset class, and the finalize decision no longer reads the dark `cash_settlement` series row (a regression the first fix introduced). The comments that called `cron/reconcile-strategies` a backstop that re-enqueues analytics were false and are corrected: that cron enqueues fills checks only.
+- **WR-04.** The `asset_class` change signal existed only inside one request, so a retry after a failed first finalize dropped a needed annualization re-run. The retry check is restored through `readCashConventions`. (A first fix for it rested on a false dark-row premise and was reworked.)
+- **SFH items.** The derive now fails on a failed last-success read instead of prestamping a null snapshot (SFH MEDIUM-1), and reads the last success before any series persist, so a failed read aborts before a series row is rewritten (SFH-M1). The conventions echo is skipped, and the build marked `conventionsDegraded`, in the held-success snapshot window.
+
+### Tests
+- New: `finalize-rerun.test.ts`, `stored-analytics-result.test.ts` and its TS/Python parity test, `FactsheetView.updating-line.test.tsx`, `test_derive_last_success_snapshot.py`. Extended: the finalize route, admin strategy review, factsheet payload, composite read path, joint, headline basis, `StrategyTable`, `queries` (stale-analytics detail), `/compare`, `strategyGate`, `closed-sets`, the public cache-key and cache-isolation tests, and the existing whole-dict prestamp assertions (they gain the null `last_success_snapshot` key).
+
+### Notes
+- Known limits, recorded and not fixed:
+  - The SC-5 PROD reading and the UI check are still to come; this PR does not claim them.
+  - The SC-4 guard `analytics-service/tests/test_cash_basis_series_sc4.py` matches only the literal and is stale. Retiring it is the founder's call, so it is untouched.
+  - Two `compute.conventions.test.ts` snapshot failures happen locally on `origin/main` as well and are unrelated to this change.
+  - The unified (manager single-key) arm still sends `onboard` to `process_key_long` unconditionally. RESEARCH open question 3 kept it out of scope, and plan 08 hands it to the founder.
+- No migration and no schema change.
+
 ## [0.133.18.6] - 2026-11-03 — DERIVEGAPS 186 tooling: a read-only probe that counts what each derive gap affects
 
 ### Added
