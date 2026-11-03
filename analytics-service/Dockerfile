@@ -35,7 +35,10 @@ RUN pip install --no-cache-dir --no-deps mt5linux==0.1.9
 # Copy application code (changes frequently, but deps layer is cached)
 COPY . .
 
-RUN adduser --disabled-password --no-create-home app
+# The app user gets a home directory. Railway SSH (and its container file tools) stopped
+# reaching these two services while it still works on the root-run mt5-gateway; the only
+# difference found was this user having no home. Still non-root.
+RUN adduser --disabled-password --home /home/app app
 USER app
 
 EXPOSE 8000
