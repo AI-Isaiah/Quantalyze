@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.18.2] - 2026-11-03 — records: close 185 DERIBITFLOWTIME, retire 189 and 187 to TODOS
+
+### Notes
+- Phase 185 DERIBITFLOWTIME is closed. The code shipped as one PR, v0.133.18.0 (#1187). Verification passed 5/5 success criteria (criterion 4 and the option-day half of criteria 2 and 5 stand on founder-accepted, dated deviations: D-14, D-10, D-07). The security check is verified: all 30 threats are closed and 0 are open. T-185-20 (the structural-degrade warning in `job_worker.py` logs `scrub_freeform_string(str(exc))`, which redacts credential shapes only, so a message can carry a transaction-log row id or instrument name) is closed by acceptance and booked as AR-185-01: Railway operational logs only, below the block threshold, no code change.
+- The plan 10 PROD reading (2026-11-03, after the first post-deploy nightly derive; read-only, marker query first). The book's days above 50% went from 6 to 2, and the largest, +529%, is gone. The whole-history cumulative went from x3516 to x3836, 2025 from x1008 to x999 and 2026 from x2.07 to x2.09. SC-3 reads as flagged: key A is valued at market (smoothed basis, the cash flag absent) and key C stays on the cash basis with the amber caveat shown on /allocations, because its option-book replay refuses with `LedgerValuationError`. Key C's 2026-10-28 day (-52.7%) is a real move on the small base left after a near-total withdrawal, no defect, routed to Phase 188 TINYBASE (D-11).
+- SC-4 read FAIL against the rule as written (two key A days above 50% remain: 2025-07-13 at +62.3%, was +333.6%, and 2025-08-05 at +64.8%, was +66.6%, both now on the smoothed basis). The founder accepted the named days (D-14, 2026-11-03: "Accept the named days (Recommended)"), the survivors D-10 listed in advance. The ROADMAP carries the dated correction against criterion 4.
+- The cumulative did not come down, so cash-basis options are not what drives the multi-year compounding. The founder chose a TODOS entry, not a phase: `185-BOOK-CUMULATIVE-UNEXPLAINED`.
+- Phases 189 OPTIONREPLAY and 187 BINANCEINCOME are retired from v1.20 by founder decision, 2026-11-03: "put all open phases that are purely about deribit or sfox into todos and not do them in this milestone" and "put binance into todos". Neither was planned and nothing shipped. They move to TODOS as `189-OPTIONREPLAY-NEXT-MILESTONE` and `187-BINANCEINCOME-NEXT-MILESTONE`, and their ROADMAP sections stay as the spec. Their Progress rows are removed by design: retired phases carry a struck-through bullet and no row.
+- Known limit, recorded and not fixed: key C stays on cash with the caveat until the replay refusal is fixed, which is now TODOS work (`189-OPTIONREPLAY-NEXT-MILESTONE`).
+
+### Added
+- TODOS: `[189-OPTIONREPLAY-NEXT-MILESTONE]`, `[185-BOOK-CUMULATIVE-UNEXPLAINED]` and `[187-BINANCEINCOME-NEXT-MILESTONE]`, each with an owner and a trigger, before the Phase 164.9 section.
+- `.planning/phases/185-*`: the phase records (CONTEXT with D-01 to D-14, plans and summaries 01 to 10, RESEARCH, PATTERNS, REVIEW, VALIDATION, COVERAGE, VERIFICATION and SECURITY).
+
+### Changed
+- The ROADMAP Phase 185 entry now carries the replanned goal with its lineage, the corrected criteria and the dated notes (D-04, D-07, D-14), the decisions D-05 to D-13 quoted, and the plan list ticked 10/10. Its overview bullet and Progress row read complete. The Phase 187 and 189 overview bullets are struck through as RETIRED, each section opens with a RETIRED note, and their Progress rows are removed.
+- STATE and the progress counts record the close and the two retirements. Open work is now 175 MT5OFFSET (plan 06 pending), 186 DERIVEGAPS and 188 TINYBASE.
+
 ## [0.133.18.1] - 2026-11-03 — records: close 176 LEGACYRETIRE
 
 ### Notes

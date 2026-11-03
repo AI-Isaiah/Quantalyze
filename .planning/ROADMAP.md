@@ -217,11 +217,11 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing (closed 2026-11-03: superseded by Phase 176 per 176 CONTEXT D-01, founder 2026-10-31 "176 absorbs both (Recommended)"; no plans of its own)
 - [x] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing (completed 2026-11-02)
 - [x] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity (completed 2026-11-01)
-- [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
+- [x] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing (completed 2026-11-03: v0.133.18.0 #1187; verification passed 5/5, SECURED 30/30; replanned to value options at market in allocator books (D-04); PROD days above 50% 6 to 2, SC-4 met with key A's two days named (D-14); key C stays on cash with the caveat; the cumulative to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED`)
 - [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
-- [ ] **Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
+- [x] **~~Phase 187~~: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put binance into todos"): moved out of this milestone, not delivered; TODOS `[187-BINANCEINCOME-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
 - [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
-- [ ] **Phase 189: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
+- [x] **~~Phase 189~~: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put all open phases that are purely about deribit or sfox into todos and not do them in this milestone"): moved out of this milestone, not delivered; TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -6850,15 +6850,20 @@ Plans:
 
 ### Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance
 
-**Goal:** A Deribit day with an external flow is measured against the capital that was in the account when the P&L was earned, not against the overnight cash wallet with the flow booked at end of day. Each Deribit flow's instant is stored and a flow day is split at its flows, so capital that arrives and leaves inside one UTC day enters the base. Until that ships, the affected allocator books say so on screen.
+**Goal:** A Deribit allocator book values open options at market, so an option premium or payout no longer prints as a day of several hundred percent against the cash wallet. The mark-to-market and smoothed bases that strategies already use also run in allocator (key) mode. Until that ships, the affected allocator books say so on screen.
+⛔ **CORRECTED 2026-11-01 (D-04, replan on verdict B).** The re-crawl (185-01-SUMMARY, `gate: B`) found mechanism B, not A, so the founder replanned the phase around valuing options at market in key mode and dropped the flow-time split. The phase's short name, DERIBITFLOWTIME, is kept so its id, directory and citations stay stable. The booking goal is kept here as lineage: *"A Deribit day with an external flow is measured against the capital that was in the account when the P&L was earned, not against the overnight cash wallet with the flow booked at end of day. Each Deribit flow's instant is stored and a flow day is split at its flows, so capital that arrives and leaves inside one UTC day enters the base. Until that ships, the affected allocator books say so on screen."*
 **Requirements**: TBD
 **Depends on:** nothing open.
-**Plans:** 0 plans
+**Plans:** 10/10 plans complete
 
 **Booking.** Founder 2026-11-01, AskUserQuestion, in two steps and one follow-up.
 - First question: "On /allocations, your book's curve has 6 days in 2025 with returns over 50% ... What should happen?" Answer: "Investigate root cause (Recommended)".
 - Second: "... To confirm it before fixing, I'd re-read those days' Deribit transaction log through the worker ... Go ahead?" Answer: "Re-crawl, then fix (Recommended)": "Run the read-only re-crawl for the two keys' big days. If it confirms the cause, book a fix phase: store each Deribit flow's time and split the day at it, with a caveat on the book until it ships."
 - Then, after Railway SSH refused connections twice: "Book the fix now (Recommended)": "Book the fix phase on the PROD evidence: store each Deribit flow's time and split the day at it, with a caveat on the book until it ships. The re-crawl moves into that phase as its first step, to run once SSH works."
+
+**Replan (D-04).** Founder 2026-11-01, AskUserQuestion, after the re-crawl verdict: "Replan 185 for options (Recommended)": "Replan 185 around valuing options at market in allocator books. The mark-to-market and smoothed bases already exist for strategies, but are switched off in allocator (key) mode. Keep the interim caveat on the book. Drop the flow-time split, which barely helps."
+- Re-crawl verdict (185-01-SUMMARY): on 20 of the 23 readable days with |r| > 0.3 for keys A and C, splitting the day at its flows gives the stored return within 1%. 1 day is lower: key A 2025-08-04, which splits to 3.93 against 5.29 stored, with a same-day inflow and outflow. 2 days are higher, so the split makes them worse. The big days are option trade and delivery rows booked at cash value against the cash wallet. Key A 2025-08-03 (−78%) is 3 option trades with no flow, and key C 2026-02-28 (+169%) is 1840 option trades with no flow.
+- Still to explain: key C 2026-10-28, a NAV-marked day, reads −52.7% from a single `negative_balance_fee` row, and its day rows account for none of the stored P&L.
 
 **Evidence (PROD 2026-11-01, ratios and counts only).** One founder allocator book reads cumulative ×3539 since 2023-06, 2025 at ×1007, and still ×54 without its 11 days of |r| > 30%. The best day is +529% and the worst −78%. BTC moved at most ±2.2% a day on those days.
 - All 22 `csv_daily_returns` days with |r| > 50% sit on 5 Deribit keys across 3 books.
@@ -6873,16 +6878,58 @@ Plans:
 - ⚠️ For the planner: FLOWTIMING's `DayTiming` pairs each cash effect with its POSITION's open instant (D-02/D-04), which Deribit does not attribute. Criterion 2 splits the day at the FLOW instants. Whether that reuses `DayTiming` as it stands or needs a flow-split variant of it is open, not settled.
 
 **Success Criteria** (what must be TRUE):
-1. The read-only re-crawl (the debug session's scratch script; counts and ratios only) runs in the worker for the big days of keys A and C and settles mechanism A against mechanism B. The verdict is recorded before any code change. If it is B, the phase replans.
-2. Each Deribit flow's instant is stored, and a day with a flow is split at the flow, using the timed-day machinery FLOWTIMING built for MT5, so the day's return is measured against the capital in the account at the time. A start-of-day or Modified Dietz rule is not used: it makes withdrawal days worse.
-3. Until it ships, the affected books carry a named caveat (the existing large-flow-day label, `flow_timing_day_level_large`, reaching key mode) rather than a silent number.
-4. After deploy, a PROD reading shows the founder's book has no day with |r| > 50% that the re-crawl attributes to intraday capital, and the recomputed cumulative numbers are reported to the founder.
-5. Tests go RED on the current day-level rule. Never invent data: an uncomputable day is null.
+1. The read-only re-crawl (the debug session's scratch script; counts and ratios only) runs in the worker for the big days of keys A and C and settles mechanism A against mechanism B. The verdict is recorded before any code change. If it is B, the phase replans. *(Met 2026-11-01: verdict B, `gate: B`, 185-01-SUMMARY.)*
+2. In allocator (key) mode, a Deribit key's daily returns are computed on a basis that values open options at market: the existing mark-to-market or smoothed basis that strategy mode runs, which `job_worker.py` switches off with `not is_key_mode` today. An option trade or delivery day is then measured against equity that includes the option book, not the cash wallet. The plan states how history from before the marks and the days already NAV-marked join, and a test shows no day is counted twice where they meet.
+3. Until it ships, the affected books carry a named caveat on screen rather than a silent number.
+4. After deploy, a PROD reading shows the founder's book has no day with |r| > 50% that the re-crawl attributes to cash-basis options. The recomputed cumulative numbers are reported to the founder, and the key C 2026-10-28 marked-day reading is explained.
+5. Tests go RED on today's cash basis in key mode. Never invent data: an uncomputable day is null.
+⛔ **CORRECTED 2026-11-03 (D-14):** criterion 4 is met with named days. The founder accepted the SC-4 FAIL reading of plan 10: two days above 50% remain, both key A (2025-07-13 and 2025-08-05) on the smoothed basis, and key C stays on cash with the caveat shown. These are the survivors D-10 named in advance. The cumulative was reported, and it did not come down: x3516 became x3836. It goes to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED`, not a phase.
+⛔ **CORRECTED 2026-11-01 (D-04):** criteria 2 to 5 were rewritten for mechanism B. Criterion 1 is unchanged. The booking criteria 2 to 5 are kept here as lineage:
+- Booking criterion 2: *"Each Deribit flow's instant is stored, and a day with a flow is split at the flow, using the timed-day machinery FLOWTIMING built for MT5, so the day's return is measured against the capital in the account at the time. A start-of-day or Modified Dietz rule is not used: it makes withdrawal days worse."*
+- Booking criterion 3: *"Until it ships, the affected books carry a named caveat (the existing large-flow-day label, `flow_timing_day_level_large`, reaching key mode) rather than a silent number."* That label fires only on a day with a large flow, and most of the big days carry no flow, so which label the caveat uses and what raises it are open again.
+- Booking criterion 4: *"After deploy, a PROD reading shows the founder's book has no day with |r| > 50% that the re-crawl attributes to intraday capital, and the recomputed cumulative numbers are reported to the founder."*
+- Booking criterion 5: *"Tests go RED on the current day-level rule. Never invent data: an uncomputable day is null."*
+
+⛔ **CORRECTED 2026-11-01 (D-07):** criterion 5's "an uncomputable day is null" and criterion 2's "a Deribit key's daily returns are computed on a basis that values open options at market" no longer cover an option day the options basis cannot value (older than the option-price window): that day keeps its cash-basis return, stamped and caveated, and the caveat stays on the book. The criteria's text above is kept as lineage.
+
+**Founder decisions D-05 to D-13** (added 2026-11-02 from `185-CONTEXT.md` `<decisions>`, quoted verbatim; review round 3 found D-13 recorded in CONTEXT only, and D-05, D-06 and D-08 to D-12 were not named here either). Each was asked through AskUserQuestion.
+- **D-05 — F1: Smoothed.** Founder 2026-11-01, plan 185-06 Task 1: "Which options basis does an allocator book use?" Answer: "Smoothed (Recommended)": "Value the option book at daily option prices, smoothed. This basis already exists for strategies."
+- **D-06 — F6: No new switch.** Founder 2026-11-01, plan 185-06 Task 2: "Rollout switch." Answer: "No new switch (Recommended)": "It ships live. The cash fallback and the caveat already handle failure."
+- **D-07 — F2: Cash basis + flag.** Founder 2026-11-01, plan 185-09 Task 1: "What does a day older than the option-price window show?" Answer: "Cash basis + flag (Recommended)": "Keep today's cash value for those days and flag them. The caveat stays on the book." (Its departure from criteria 2 and 5 is the ⛔ CORRECTED (D-07) note above.)
+- **D-08 — F4: Next nightly derive.** Founder 2026-11-01, plan 185-10 Task 1: "Recompute timing." Answer: "Next nightly derive (Recommended)": "No PROD write. The curves update in the next night's run."
+- **D-09 — F3: Amber note, any options key.** Founder 2026-11-01, plan 185-04 Task 2: "The interim caveat's sentence, where it shows on /allocations, what raises it, and how it is removed." Answer: "Amber note, any options key (Recommended)": "Shows in the existing amber note on the /allocations Overview for any book with a Deribit key that trades options. It clears itself per key once the fix ships. Text: \"Some days on a Deribit account were measured against its cash balance, which leaves out open option positions, so their returns can be extreme.\""
+- **D-10 — Dry-run gate: Smoothed, cash fallback.** Founder 2026-11-01, plan 185-02 Task 3: "Phase 185 dry run: valuing options at market removes most of the extreme Deribit days, but not all, and fails on one key. Which way should the phase go?" Answer: "Smoothed, cash fallback (Recommended)". Failed condition: key C smoothed_error=LedgerValuationError (5 of 9 days remain on smoothed). Days that remain under proceed: key A 2025-07-13 and 2025-08-05 (smoothed); key C 2026-02-28, 2026-03-02 and 2026-09-06 (cash, flagged).
+- **D-11 — F7: Book a fix phase.** Founder 2026-11-01, plan 185-03 Task 2: "Key C's −52.7% day (2026-10-28) is explained. On 10-26 the owner withdrew almost everything, leaving about 0.4% of the account, mostly a small option position. That option rose +47% of NAV on 10-27 and fell −53% on 10-28 while the rest of the account didn't move. The marks are consistent and no data defect was found. What should happen?" Answer: "Book a fix phase". The fix phase is 188 TINYBASE.
+- **D-12 — F5: No, strategies stay cash.** Founder 2026-11-01, plan 185-06 Task 3: "Phase 185 F5: after the fix, allocator books value Deribit options at smoothed market prices, but a strategy's own headline return stays on the cash basis. No strategy sits on your Deribit logins today. Should strategy headlines move to the option basis too?" Answer: "No, strategies stay cash (Recommended)"
+- **D-13 — Frozen keys: Show the note, accept over-warning.** Founder 2026-11-01, review round 2 WR-03: "Phase 185: a Deribit options key that has left the book (or whose nightly recompute keeps failing) is never recomputed. So it never gets the new amber-note flag, and its extreme cash-value days stay on the curve with no note, permanently. How should that be handled?" Answer: "Show the note, accept over-warning (Recommended)": "The recompute stamps every Deribit key with whether it trades options. A drawn Deribit key whose row was never stamped shows the amber note. This also warns on frozen Deribit keys that never traded options (perp-only). Same 'warn rather than hide' rule as a failed read."
+  - Accepted consequence (review round 3): from the web deploy until each key's first derive after the worker deploy, every drawn Deribit key's row is unstamped, so every Deribit book shows the amber note, perp-only books included.
 
 Data integrity, user-facing. Relates to 164.6.6.2.3 FLOWTIMING (its booked deferral `[164.6.6.2.3-DERIBIT-INTRADAY-TIMING]` in `TODOS.md`, which this phase answers for flow days), 167.2.1.1.1 NAVMTM, and 176 LEGACYRETIRE (the derived curve is the only curve, so there is no legacy series to fall back to).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 185-01-PLAN.md — operator, read-only: the re-crawl in the worker settles mechanism A against B for keys A and C; verdict and gate recorded before any code (SC-1, D-02, D-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 185-02-PLAN.md — operator, read-only dry run in the worker: cash, smoothed and mark-to-market ledgers of keys A and C from one crawl each, pre-change book baseline; the gate for the options-basis code (SC-2, SC-4, D-04)
+- [x] 185-03-PLAN.md — operator, read-only: explain key C's 2026-10-28 marked-day reading; founder question F7 checkpoint and routing (SC-4)
+- [x] 185-04-PLAN.md — caveat writer: new `options_cash_basis` flag in `key_inputs`, literal pin across languages; founder question F3 checkpoint (SC-3, SC-5)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 185-05-PLAN.md — caveat reader: the flag reaches the existing amber paragraph on /allocations with the founder's sentence (SC-3)
+- [x] 185-06-PLAN.md — operator: founder questions F1 (basis), F6 (rollout switch) and F5 (strategy agreement) with the dry run's readings (SC-2)
+- [x] 185-07-PLAN.md — ingest seam: an options-basis ledger from the same crawl, no second crawl, shared SC-5 fixture (SC-2, SC-5)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 185-08-PLAN.md — tracer: key mode values Deribit options at market from one crawl, all writer quantities from one ledger, cash fallback with the caveat, seam test against the marks (SC-2, SC-5)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 185-09-PLAN.md — the options step is bounded and degrades to cash; founder question F2 checkpoint for days outside the option-price window (SC-2, SC-3, SC-5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 185-10-PLAN.md — operator, read-only: the caveat read on PROD between the PR-1 and PR-2 deploys; after deploy the founder's book against the dry run's baseline, cumulatives and the 2026-10-28 explanation reported; founder question F4 checkpoint (SC-3, SC-4). ⛔ CORRECTED 2026-11-02: all code ships as one PR, so there is no window between two deploys; see the plan's dated note
+
+---
 
 ### Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself
 
@@ -6928,6 +6975,8 @@ Plans:
 - [ ] TBD — plans not listed yet
 
 ### Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)
+
+⛔ **RETIRED from v1.20 2026-11-03 (founder):** "put binance into todos". Not planned, nothing shipped. TODOS `[187-BINANCEINCOME-NEXT-MILESTONE]` carries it. The section below stays as the spec.
 
 **Goal:** Every Binance income read the analytics service makes calls a method that exists on the pinned ccxt, so Binance futures realized P&L reaches `daily_pnl` and Binance funding reaches the per-key derive, instead of the realized read silently falling back to spot trades and the funding read failing the derive. A test pins every ccxt method the service calls against the real ccxt classes, so a wrong name fails CI.
 **Requirements**: TBD
@@ -6989,6 +7038,8 @@ Plans:
 - [ ] TBD — plans not listed yet
 
 ### Phase 189: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values
+
+⛔ **RETIRED from v1.20 2026-11-03 (founder):** "put all open phases that are purely about deribit or sfox into todos and not do them in this milestone". Not planned, nothing shipped. TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. The section below stays as the spec.
 
 **Goal:** A Deribit allocator key whose option-book replay refuses today gets the smoothed options basis like the other options keys. Today it falls back to the cash basis with the amber caveat, and its large cash-basis days stay on the book's curve.
 **Requirements**: TBD
@@ -7323,11 +7374,9 @@ kept verbatim.
 | 182 SPIKEREPAIR | 0/0 | Complete — superseded by Phase 176 (D-01); the 22 spike days lived only in the legacy table, which v0.133.17.0 #1185 dropped; nothing repaired, nothing written to PROD | 2026-11-03 |
 | 183 DUPCOUNT | 5/5 | Complete — v0.133.14.0 #1169; a marked duplicate the derive already counts once no longer refuses the book, a real double count still does; post-deploy: 0 `account_duplicate` rows, the book draws a counted-once curve, QUANTALYZE-2H and 23 resolved | 2026-11-02 |
 | 184 WALLETOFFSET | 7/7 | Complete — shipped v0.133.16.0 and the OKX fix v0.133.16.2; every marked key measured, every venue keeps the wallet base (D-02) | 2026-11-01 |
-| 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |
+| 185 DERIBITFLOWTIME | 10/10 | Complete — shipped v0.133.18.0 #1187 (a Deribit allocator book values open options at market, smoothed basis, cash fallback with the amber caveat); verification 5/5, security 30/30; PROD reading: days above 50% 6 to 2, SC-3 flags shown (key A valued at market, key C on cash with the caveat); SC-4 met with key A's two days named (D-14); the cumulative x3516 to x3836 booked to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED` | 2026-11-03 |
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
-| 187 BINANCEINCOME | 0/0 | Not started — booked 2026-11-01 from the Phase 184 code review | - |
 | 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
-| 189 OPTIONREPLAY | 0/0 | Not started — booked 2026-11-01 after the 185 build | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 

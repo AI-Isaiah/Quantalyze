@@ -1,0 +1,1 @@
+No external API integration: the phase reuses Deribit endpoints the ingest already integrates (`private/get_transaction_log` for the one crawl, and the public chart and index reads that `fetch_deribit_option_daily_marks` and `_build_dense_native_marks` already make for the smoothed basis) and adds no new endpoint, SDK or service.
