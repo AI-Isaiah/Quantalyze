@@ -208,13 +208,13 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 173: REBUILDGATES — OKX trade ordering and Bybit transfer depth are measured live** — complete 2026-10-28 (v0.133.7.0 #1143; booked 2026-10-27 from TRADEPAGES; data-integrity; SC-1 `okx-order: ok`, 1 reading; SC-2 not met, a6 reads 0 transfers at every age (on-chain only), routed to Phase 180 BYBITFUNDING by the founder; no rebuild)
 - [x] **Phase 174: MARKPAUSE — a paused marked series stops re-crawling and keeps a private refusal record** — complete 2026-10-28 (v0.133.2.0 #1133, shipped 2026-10-27; booked 2026-10-27 from NAVMTM review)
 - [ ] **Phase 175: MT5OFFSET — MT5 deal times follow the broker's daylight-saving offset** — booked 2026-10-27 from NAVMTM review (founder 2026-10-27 "You can use add"), not planned yet
-- [ ] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — booked 2026-10-27 from MARKSOURCE D-01 (founder 2026-10-27 "Retire legacy curve"), not planned yet
+- [x] **Phase 176: LEGACYRETIRE — the legacy allocator equity curve is retired and every reader moves to the marked series** — complete 2026-11-03 (v0.133.12.0 #1164, v0.133.15.0 #1172, v0.133.17.0 #1185, re-dump #1186; booked 2026-10-27 from MARKSOURCE D-01; data-integrity; verification passed 3/3, SECURED 55/55; absorbs 181 SHAREDKEYS and supersedes 182 SPIKEREPAIR (D-01); PROD re-read: legacy table gone, R1 7/7/7/7, R3 all 0, 3 allocator cron jobs)
 - [x] **Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close** — complete 2026-10-29 (v0.133.8.0 #1145, re-dump #1146; booked 2026-10-27 from MARKSOURCE plan 03; data-integrity; SC-1 first-night reading: moved=0 in all 8 derive runs, one night)
 - [x] **Phase 178: OKXREWRITE — stored OKX snapshot rows that double-counted open profit are rebuilt** — complete 2026-10-29 (v0.133.11.0 #1154; booked 2026-10-27 from MARKSOURCE D-09; data-integrity; closed record-only by founder ruling D-09, zero rewrites, nothing written to PROD; census a1, a2 and a5 kept as stored)
 - [x] **Phase 179: OKXBILLSCHAIN — the OKX bills chain closes for a4, or the break is named** — complete 2026-10-29 (v0.133.9.1 #1148, v0.133.9.2 #1149; booked 2026-10-28 from OKXANCHOR plan 05; data-integrity; SC-3 deployed re-read: a4 anchored on the 0.02 tolerance, residual -0.0138)
 - [x] **Phase 180: BYBITFUNDING — read Bybit internal and sub-account transfers so a6's funding is explained and the Bybit transfer-depth gate can be measured** — booked 2026-10-28 from REBUILDGATES plan 03 (founder 2026-10-28 "Record, book follow-up") (shipped v0.133.10.0 #1151; closed 2026-10-29: SC-1 and SC-2 met live, a6 funded by sub-account transfers; SC-3 gate stays `unmeasured`, cause `neither_older_365d`; nothing rebuilt)
-- [ ] **Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book** — booked 2026-10-31 from MARKSOURCE plan 08 first-night reading (a) (founder "Book a phase, close plan 08 (Recommended)"); 3 allocators holding positions have no equity curve because their keys are strategy-linked; data integrity, user-facing
-- [ ] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing
+- [x] **Phase 181: SHAREDKEYS — a strategy-linked key also counts in its owner's allocator book** — booked 2026-10-31 from MARKSOURCE plan 08 first-night reading (a) (founder "Book a phase, close plan 08 (Recommended)"); 3 allocators holding positions have no equity curve because their keys are strategy-linked; data integrity, user-facing (closed 2026-11-03: absorbed into Phase 176 per 176 CONTEXT D-01, founder 2026-10-31 "176 absorbs both (Recommended)"; no plans of its own)
+- [x] **Phase 182: SPIKEREPAIR — one-day spikes and dips in stored allocator curves are repaired** — booked 2026-10-31 from MARKSOURCE plan 14 (founder "Book a repair phase, close 14 (Recommended)"); 22 stored days across 4 books spike or dip against both neighbours, written before the price-gap fix; data integrity, user-facing (closed 2026-11-03: superseded by Phase 176 per 176 CONTEXT D-01, founder 2026-10-31 "176 absorbs both (Recommended)"; no plans of its own)
 - [x] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing (completed 2026-11-02)
 - [x] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity (completed 2026-11-01)
 - [ ] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing
@@ -6562,17 +6562,66 @@ Plans:
 **Goal:** The legacy allocator equity curve (the snapshot series written by the holdings poll and the daily refresh) is retired: every reader moves to the marked series, and the poll and refresh writers stop or are repurposed.
 **Requirements**: TBD
 **Depends on:** Phase 167.2.1.1.1.1
-**Plans:** 0 plans
+**D-05 amended 2026-10-31 (founder, "Accept amendment (Recommended)"):** in a bridge holding outcome an absent derived day counts as no change, and the outcome is NULL only when the curve does not cover the window; PROD curves omit about 23% of calendar days. Refined the same day (founder "At least one day"): a spanned window with no return inside it is NULL. Recorded in `176-CONTEXT.md` D-05.
+
+**Plans:** 17/17 plans complete
 
 Booked 2026-10-27 by MARKSOURCE 167.2.1.1.1.1 CONTEXT D-01 ("Retiring the legacy curve is booked as its own phase"; founder 2026-10-27 "Retire legacy curve (Recommended)"). Until then MARKSOURCE keeps both curves and aligns them.
+
+**Decided 2026-10-31 (176 CONTEXT D-01..D-03, founder):** "176 absorbs both (Recommended)": 176 moves the four legacy readers (warm-up gate, depth/baseline, bridge outcomes, zero-history bootstrap) to the derived series, does Phase 181's shared-key reader rule, and supersedes Phase 182. "Drop the table": `allocator_equity_snapshots` and its writers are removed, last and in its own migration, after the readers move is live. "Derived account total": bridge outcomes measure the account's derived equity.
+
+**Decided 2026-10-31 after research (176 CONTEXT D-04..D-07, founder, all Recommended):** the history reconstruct job retires with the table; bridge outcomes compound the derived flow-neutral daily returns; stored holding outcomes are reset and recomputed once; the history-depth copy and the "Limited equity history" banner are removed (the 30-day countdown stays, on derived days).
+
+**Decided 2026-11-01 at plan 11's go/no-go (176 CONTEXT D-08, founder):** first "Check the new path, then go (Recommended)": "First check whether the new curve's path has the problems those phases fixed in the old engine (Bybit above the trade-read limit, OKX opening balance, trade pages, multi-key accounts). Report any gap, then delete the old engine in full." Then "Go (Recommended)": "Delete the old engine in full. The REBUILDGATES/BYBITFUNDING probe script, which imports it, is retired with it. The Bybit Unified-transfer reader is not on the delete list and stays, ready for the gap below." The new path's gaps are booked as a separate fix phase, not 176's work.
+
+**Decided 2026-11-02 at PR 3's review (176 CONTEXT D-09, founder):** "Delete the derived rows (Recommended)": "The re-based delete removes the allocator's derived curve and that key's input row when its last key goes, so the UI's promise holds. The atomicity gate is flipped to require it. One more fix round, then re-review."
 
 **Success Criteria** (what must be TRUE):
 1. A census lists every reader of the legacy curve (MARKSOURCE CONTEXT names `src/lib/queries.ts` snapshot count, depth months and baseline flag, `compute_bridge_outcome_deltas`, the zero-snapshot bootstrap gate, `delete_allocator_api_key` and the ACCTREBUILD window replace as starting points), and each one is moved to the marked series or removed.
 2. The holdings poll and daily refresh writers stop writing the legacy curve, or are repurposed with the new job named; the cron manifest matches.
 3. The two TODOS entries MARKSOURCE plan 07 names as closed by the legacy curve's retirement, `167.2.1.1.1.1-MT5-BTC-MISSING-CLOSE-LEGACY-EXCLUSION` and `167.2.1.1.1.1-SFOX-NONSTABLE-LEGACY-EXCLUSION`, are closed.
 
+**Closed 2026-11-03.** Verification passed 3/3 (`176-VERIFICATION.md`, 9 of 9 founder decisions honoured) and the security check is SECURED, 55 of 55 threats closed (`176-SECURITY.md`). The code shipped as PR 1 v0.133.12.0 #1164, PR 2 v0.133.15.0 #1172 and PR 3 v0.133.17.0 #1185 (re-dump #1186, v0.133.17.1). The confirming read-only PROD re-read after the first post-drop nightly: the legacy table and the four dropped functions are gone, no public function body names them, R1 7/7/7/7, R3 all 0, and the allocator cron group is 3 jobs with `refresh-allocator-equity` absent. Phase 181 SHAREDKEYS is absorbed and Phase 182 SPIKEREPAIR is superseded (D-01). The bridge compounding arithmetic has no PROD exercise yet (PROD holds no holding-branch bridge rows); the SQL gate in CI proves it.
+
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 176-01-PLAN.md — runbook: the phase's PROD and TEST forms (R0-R6, cron state, guarded unschedule and its rollback, ledger-row, body-check), statically pinned
+- [x] 176-02-PLAN.md — migration: bridge holding outcomes on the account's compounded derived returns (D-03, D-05), one-time reset (D-06), CHECK-window guard; new SQL gate
+- [x] 176-03-PLAN.md — the shared-key rule: every eligible key counts in its owner's book (D-01, absorbs 181)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 176-04-PLAN.md — live-DB bridge test on the derived curve; bridge runbook and ADR-0023 say per account (D-03, D-05)
+- [x] 176-05-PLAN.md — dashboard readers move to the derived curve: no legacy read, warm-up on derived days, depth copy and baseline banner removed (D-02, D-07)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 176-06-PLAN.md — callers, fixtures and the e2e seed follow the new payload; typecheck, suite and lint green
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 176-07-PLAN.md — operator: R0 and R3 before merge, ship PR 1, apply, first-night read on PROD
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 176-08-PLAN.md — both legacy job kinds finish as DONE no-ops in the worker (D-04)
+- [x] 176-09-PLAN.md — migration: a holdings sync no longer enqueues a reconstruct (D-04); marker gate R group rewritten
+- [x] 176-10-PLAN.md — retirement banners on the forced-rebuild, cron and census runbooks; census test loosened
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 176-11-PLAN.md — founder go/no-go on the completed-phase tooling, then the legacy writers, job bodies, bootstrap twin, chosen crawl set and two operator scripts deleted; D-04 cap and marker helpers kept and pinned; inert machinery booked
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 176-17-PLAN.md — tests move with the deleted code (cross-module prune); the crawl's text readers re-pointed; full Python suite green under CI's flags
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 176-12-PLAN.md — operator: refresh cron unscheduled, manifest re-captured, ship PR 2, R4 read next day from the worker deploy
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 176-13-PLAN.md — migration: the table and its four functions dropped, delete RPC re-based (D-02); four gates retired; censuses lowered with reasons
+- [x] 176-15-PLAN.md — Python legacy guard replaced by a whole-service pin; SC-3 TODOS closed, OKX entry narrowed
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [x] 176-14-PLAN.md — GDPR export and checker (DROP TABLE modelling), generated types, dead boundary reader and the dropped table's tests removed
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [x] 176-16-PLAN.md — operator: R5 preflight and pre-drop count, ship PR 3, R6 read back, post-drop reads
 
 ### Phase 177: DERIBITFLOWS — Deribit flow instants are valued at the mark day's close
 
@@ -6698,11 +6747,13 @@ Plans:
 Booked 2026-10-31 from MARKSOURCE 167.2.1.1.1.1 plan 08's first-night reading (a) (founder 2026-10-31 "Book a phase, close plan 08 (Recommended)"). Founder rule 2026-10-31: "An allocator and a manager can use the same key, even several managers or several allocator. The idea is that one manager creates the strategy. But many want to have a look. Often the manager will share one key among many peers and allocators". Data integrity and user-facing.
 Evidence (PROD 2026-10-31, counts only): 7 allocators hold non-Deribit positions; 3 have no `allocator_equity_snapshots` row ever, because every live non-Deribit key they hold is linked to a non-archived strategy and `enqueue_refresh_allocator_equity_for_all` (latest body `supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql`) leaves linked keys out of both its reconstruct bootstrap and its zero-snapshot refresh arm. Python `_strategy_linked_key_ids` (`analytics-service/services/equity_reconstruction.py`) and TS `deriveStrategyLinkedKeyIds` (`src/lib/queries.ts`) apply the same exclusion. Two inconsistencies to resolve in the same rule: a book that already has history refreshes its linked keys daily (the snapshot branch), and SQL and Python count any linked strategy as manager-side while TS exempts `own_capital` strategies. No data loss: the 2026-10-23 refused forced rebuilds wrote and deleted nothing.
 
+**Absorbed 2026-10-31 by Phase 176 (176 CONTEXT D-01, founder "176 absorbs both (Recommended)"):** the derive already counts strategy-linked keys; 176 changes the TS reader rule and drops the legacy bootstrap. ⭐ CLOSED 2026-11-03 with Phase 176 (verification passed 3/3): the TS reader rule `allocatorEligibleApiKeyIds` no longer subtracts strategy-linked keys, and the legacy bootstrap is gone with its table. SC-4 as rewritten by D-01 (every such allocator has a derived curve point for the closed day) is met: after the drop, 7 of 7 allocators holding non-Deribit positions have a derived `equity_curve` row, computed after the drop.
+
 **Success Criteria** (what must be TRUE):
 1. One rule, stated once and applied in SQL, Python and TS: a key linked to a strategy is also part of its owner's allocator book.
 2. The three zero-snapshot books get their first curve through the product's own path, and a multi-key book is never stored as one key's partial total.
 3. Tests go RED on the current exclusion.
-4. After deploy, a PROD reading shows every allocator holding non-Deribit positions has a snapshot for the closed day.
+4. After deploy, a PROD reading shows every allocator holding non-Deribit positions has a snapshot for the closed day. ⭐ REWRITTEN 2026-10-31 by 176 CONTEXT D-01: every such allocator has a derived curve point for the closed day (the original wording stays above as lineage).
 
 Plans:
 - [ ] TBD — plans not listed yet
@@ -6716,6 +6767,8 @@ Plans:
 
 Booked 2026-10-31 from MARKSOURCE 167.2.1.1.1.1 plan 14 (founder 2026-10-31 "Book a repair phase, close 14 (Recommended)"). Data integrity and user-facing: each such day draws a one-day crash or jump on the allocator's equity and drawdown charts.
 Evidence (PROD 2026-10-31, read-only, ratios only): 22 stored `allocator_equity_snapshots` days across 4 books sit more than 20% below or above both neighbours. On 2026-10-15 one OKX book's refresh left BTC out of the total (0.041 of the day before, 0.039 of the day after), and the same book has a BTC-only dip on 2026-05-15. Three books lose every perpetual position on 2026-05-29, 2026-06-01 and 2026-06-03, with a matching jump on 2026-06-02. One book alternates between exchange accounts present and missing on 2026-09-11 to 2026-09-17, and another dips on 2026-10-05. All of these were written before MARKSOURCE's price-gap fix (D-06), which holds or names such a day instead of writing it. The MARKSOURCE Task 3 reading on 2026-10-31 found 0 price-gap rows on the new clock.
+
+**Superseded 2026-10-31 by Phase 176 (176 CONTEXT D-01, founder "176 absorbs both (Recommended)"):** the spike days exist only in the legacy table, which 176 removes (D-02); the chart already draws the derived series. ⭐ CLOSED 2026-11-03 with Phase 176 (verification passed 3/3): migration `20261104120000` dropped the legacy table, so no stored legacy spike or dip remains to repair and the chart reads the derived series only. Nothing was repaired and nothing was written to PROD for this phase.
 
 **Success Criteria** (what must be TRUE):
 1. A census, committed as a read-only SQL file, lists every stored one-day spike or dip with its cause class (positions missing from the breakdown, an account missing, or no breakdown difference), in counts and ratios only.
@@ -7261,13 +7314,13 @@ kept verbatim.
 | 173 REBUILDGATES | 3/3 | Complete — v0.133.7.0 #1143; the probe takes the OKX ordering read on a refused member and counts Bybit deposits and withdrawals per kind; post-deploy: `okx-order: ok` (1 reading, 0 violations), `bybit-transfers: unmeasured (a6)` (0 of each kind at every age), routed to 180 BYBITFUNDING (founder); no rebuild | 2026-10-28 |
 | 174 MARKPAUSE | 2/2 | Complete — v0.133.2.0 #1133 (re-dump #1134); weekly re-admit of a paused marked series after 3 days, mark refusals kept owner-only | 2026-10-28 |
 | 175 MT5OFFSET | 0/0 | Not started | - |
-| 176 LEGACYRETIRE | 0/0 | Not started | - |
+| 176 LEGACYRETIRE | 17/17 | Complete — v0.133.12.0 #1164 (readers move to the derived curve), v0.133.15.0 #1172 (writers stop, old history engine deleted), v0.133.17.0 #1185 (table and four functions dropped, re-dump #1186); verification 3/3, SECURED 55/55; post-drop PROD re-read: legacy table gone, R1 7/7/7/7, R3 all 0, 3 allocator cron jobs; absorbs 181 and supersedes 182 (D-01) | 2026-11-03 |
 | 177 DERIBITFLOWS | 7/7 | Complete — v0.133.8.0 #1145 (re-dump #1146); a moved Deribit flow is priced at the open of its own 1-minute `{CCY}_USDC-PERPETUAL` candle and each price is stored once; post-deploy first night: `moved=0` in all 8 derive runs (one night's reading), no composite line in the window | 2026-10-29 |
 | 178 OKXREWRITE | 4/4 | Complete — v0.133.11.0 #1154; a forced rebuild skips an exchange account with no working key; post-deploy probe: all five OKX accounts read, `okx_order_gate` `ok`; closed record-only by founder ruling D-09 (zero rewrites, plan 04 closed without execution, nothing written to PROD; SC-2 not met by ruling) | 2026-10-29 |
 | 179 OKXBILLSCHAIN | 7/7 | Complete — v0.133.9.0 #1147, v0.133.9.1 #1148, v0.133.9.2 #1149; the OKX bills oracle's close passes within 1e-12 of the larger balance, the opening tolerance is 0.02 (founder D-08); post-deploy: a4 anchored (`opening_check=measured`, residual -0.0138, 0.02 deployed), nothing enqueued | 2026-10-29 |
 | 180 BYBITFUNDING | 8/8 | Complete — v0.133.10.0 #1151; the probe and the rebuild read the Bybit Unified edge and page by cursor; post-deploy: a6 `explained` (funded by universal transfers, 8 rows), Unified state `read`, `bybit-transfers: unmeasured (a6)` cause `neither_older_365d`; nothing rebuilt | 2026-10-29 |
-| 181 SHAREDKEYS | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 08 | - |
-| 182 SPIKEREPAIR | 0/0 | Not started — booked 2026-10-31 from MARKSOURCE plan 14 | - |
+| 181 SHAREDKEYS | 0/0 | Complete — absorbed into Phase 176 (D-01); the TS reader rule counts a strategy-linked key in its owner's allocator book, SC-4 rewritten to the derived curve and met on PROD (7 of 7 allocators with a derived curve point); no plans of its own | 2026-11-03 |
+| 182 SPIKEREPAIR | 0/0 | Complete — superseded by Phase 176 (D-01); the 22 spike days lived only in the legacy table, which v0.133.17.0 #1185 dropped; nothing repaired, nothing written to PROD | 2026-11-03 |
 | 183 DUPCOUNT | 5/5 | Complete — v0.133.14.0 #1169; a marked duplicate the derive already counts once no longer refuses the book, a real double count still does; post-deploy: 0 `account_duplicate` rows, the book draws a counted-once curve, QUANTALYZE-2H and 23 resolved | 2026-11-02 |
 | 184 WALLETOFFSET | 7/7 | Complete — shipped v0.133.16.0 and the OKX fix v0.133.16.2; every marked key measured, every venue keeps the wallet base (D-02) | 2026-11-01 |
 | 185 DERIBITFLOWTIME | 0/0 | Not started — booked 2026-11-01 from the Deribit implausible-returns debug session | - |

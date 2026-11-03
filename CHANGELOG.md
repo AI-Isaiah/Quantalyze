@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.18.1] - 2026-11-03 — records: close 176 LEGACYRETIRE
+
+### Notes
+- Phase 176 LEGACYRETIRE is closed. The code shipped as PR 1 v0.133.12.0 (#1164), PR 2 v0.133.15.0 (#1172) and PR 3 v0.133.17.0 (#1185), with the baseline re-dump v0.133.17.1 (#1186). Verification passed on all 3 success criteria and all 9 founder decisions (D-01 to D-09) are honoured in code. The security check is SECURED: all 55 threats are closed.
+- The confirming read-only PROD re-read after the first post-drop nightly: the legacy table and the four dropped functions are gone, and no public function body names them. R1 reads 7/7/7/7 and R3 reads all 0; 7 allocators carry a derived `equity_curve` row, the newest computed after the drop. The allocator cron group is 3 jobs (derive 00:40, poll 01:00, bridge batch 03:00) with `refresh-allocator-equity` absent. No open job of the two retired kinds.
+- Phase 181 SHAREDKEYS is closed as absorbed into 176 and Phase 182 SPIKEREPAIR as superseded (176 CONTEXT D-01, founder 2026-10-31 "176 absorbs both (Recommended)"). 181's success criterion 4 was rewritten to the derived curve and is met. 182's spike days lived only in the dropped table; nothing was repaired and nothing was written to PROD for it.
+- Known limits, recorded and not fixed: the bridge compounding arithmetic has no PROD exercise (PROD holds no holding-branch bridge rows), so the SQL gate in CI is its proof. Vestigial names (`equityCurveSource: "legacy"`, the inert `historyReconstructFailed` field, the reconstruct cap and marker machinery) are kept on purpose and booked as `176-RECONSTRUCT-CAP-MARKER-INERT`.
+
+### Changed
+- The ROADMAP Phase 176 entry now carries its plan list ticked 17/17, the decisions D-01 to D-09 and a closure paragraph; the Phase 181 and 182 entries, overview bullets and Progress rows read closed with their D-01 notes.
+- TODOS: the two SC-3 closure paragraphs (`167.2.1.1.1.1-MT5-BTC-MISSING-CLOSE-LEGACY-EXCLUSION` and `167.2.1.1.1.1-SFOX-NONSTABLE-LEGACY-EXCLUSION`) each get a dated note that the apply has happened (PR #1185, read back by R6 on 2026-11-02), because the sentence "does not claim the apply has happened" was stale.
+- STATE and the ROADMAP progress table record the close.
+
 ## [0.133.18.0] - 2026-11-02 — 185 DERIBITFLOWTIME: a Deribit allocator book values open options at market
 
 ### Root cause

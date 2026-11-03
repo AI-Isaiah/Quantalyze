@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 185
 current_phase_name: DERIBITFLOWTIME
 status: executing
-stopped_at: 167.2.1.1.1 NAVMTM closed; several phases in parallel
-last_updated: "2026-11-02T13:18:31.258Z"
-last_activity: 2026-11-02
-last_activity_desc: 167.2.1.1.1 NAVMTM closed (verification passed, SECURED; SC-4 week reading: 20 marked keys 7 of 7 days, no gaps)
-state_head: 58535c67fe479c0a3a6fc6edd04efdbdab2e5e18
+stopped_at: 176 LEGACYRETIRE closed; several phases in parallel
+last_updated: "2026-11-03T10:30:54.817Z"
+last_activity: 2026-11-03
+last_activity_desc: 176 LEGACYRETIRE closed (verification passed 3/3, SECURED 55/55; 181 SHAREDKEYS absorbed and 182 SPIKEREPAIR superseded by D-01)
+state_head: 099a9f1669474acd75464a9e3bf340ec35565d5c
 progress:
   total_phases: 144
-  completed_phases: 135
-  total_plans: 996
-  completed_plans: 989
-  percent: 94
+  completed_phases: 138
+  total_plans: 1013
+  completed_plans: 1006
+  percent: 96
 ---
 
 ## ⭐ STATE lineage
@@ -172,11 +172,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 185 (DERIBITFLOWTIME) — IN BUILD
-Plan: plans 01-09 done, review clean after round 3; ship and plan 10 paused by the founder
-Status: Executing — several phases in parallel. In build: 185 DERIBITFLOWTIME (plans 01-09 done, review clean after round 3; ship and plan 10 paused by the founder). Shipped, not yet closed: 175 MT5OFFSET (plan 02 done 2026-11-02, SC-1 config `us`; plans 03-06 wait for the founder), 176 LEGACYRETIRE (PR 2 shipped; PR 3 pending). Closed 2026-11-02: 167.2.1.1.1 NAVMTM, 183 DUPCOUNT. Closed 2026-11-01: 184 WALLETOFFSET. Booked, not planned: 181, 182, 186, 187, 188, 189.
-Last activity: 2026-11-02 — 167.2.1.1.1 NAVMTM closed
-Progress: [█████████░] 94%
+Phase: 185 (DERIBITFLOWTIME) — SHIPPED, NOT YET CLOSED
+Plan: v0.133.18.0 (#1187) merged; closure records pending
+Status: Executing — several phases in parallel. Shipped, not yet closed: 185 DERIBITFLOWTIME (v0.133.18.0 #1187), 175 MT5OFFSET (plan 02 done 2026-11-02, SC-1 config `us`; plans 03-06 wait for the founder). Closed 2026-11-03: 176 LEGACYRETIRE (v0.133.12.0 #1164, v0.133.15.0 #1172, v0.133.17.0 #1185, re-dump #1186), with 181 SHAREDKEYS absorbed and 182 SPIKEREPAIR superseded (D-01). Closed 2026-11-02: 167.2.1.1.1 NAVMTM, 183 DUPCOUNT. Closed 2026-11-01: 184 WALLETOFFSET. Booked, not planned: 186, 187, 188, 189.
+Last activity: 2026-11-03 — 176 LEGACYRETIRE closed
+Progress: [█████████░] 96%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1727,7 +1727,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 167.2.1.1.1 NAVMTM closed
+**Stopped At:** 176 LEGACYRETIRE closed
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
