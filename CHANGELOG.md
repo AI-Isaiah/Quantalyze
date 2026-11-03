@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.18.3] - 2026-11-03 — analytics container: the app user has a home directory
+
+### Fixed
+- **Railway SSH into the analytics services (quantalyze-analytics, quantalyze-analytics-backfill).** `railway ssh` authenticated and then failed with "An error occurred connecting to your service" on both services. Railway's own container file tools failed the same way, while the same key reached mt5-gateway, which runs as root. `analytics-service/Dockerfile` created its non-root `app` user with `--no-create-home`. It now uses `--home /home/app`, and the service still runs as `app`. Measured 2026-11-03: the key is registered and matches, memory sits at 0.6 of 24 GB, and the target is the service instance id. SSH into the backfill worker worked on 2026-10-12 with the same Dockerfile, so the trigger was a platform-side change in how a session starts. The missing home directory is the only difference found. It is not proven until SSH works after this deploy.
+
+### Notes
+- Phase 175 MT5OFFSET plan 06 needs this. Its before-count captures the live MT5 ledgers through `railway ssh` into the backfill worker before the workers switch to the measured daylight-saving rule (175 D-05).
+- If SSH still fails after this deploy, the cause is on Railway's side and goes to Railway support.
+
 ## [0.133.18.2] - 2026-11-03 — records: close 185 DERIBITFLOWTIME, retire 189 and 187 to TODOS
 
 ### Notes
