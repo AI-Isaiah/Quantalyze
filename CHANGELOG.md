@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.18.4] - 2026-11-03 — records: close 175 MT5OFFSET
+
+### Notes
+- Phase 175 MT5OFFSET is closed. The code shipped as one PR, v0.133.3.0 (#1135): a broker clock module with an EU, a US and a fixed rule, one resolver call per derive, and every MT5 deal day and instant bucketed by the offset in force on the deal's date. Verification passed 3/3 success criteria. The independent `zoneinfo` oracle (a scratch script, not the phase's tests) found 0 wrong days and 0 wrong instants over 443,232 instants around March, October and November for rules `eu` and `us` (324 instants are `None`, exactly the repeated or skipped broker hours). The security check is verified: `threats_open` is 0.
+- The switch (plan 06, 2026-11-03). The founder's clock readings were +3 h on 2026-10-27 and +2 h on 2026-11-02, so the broker follows the US rule. Both worker services now read `MT5_SERVER_TIME_RULE=us` (switch lines at 13:38:28Z and 13:38:36Z) and `MT5_SERVER_UTC_OFFSET_S` is deleted on both. The rule was set first with deploys skipped, so no instance booted with both settings.
+- The first derive after the switch. One MT5 key's `derive_broker_dailies` ended `done` on attempt 1 with no error text and no clock configuration fault in either service's logs. `attempts=1` rules out a fault that a retry healed. Only one MT5 key had derived under the rule when 175 closed; the others re-bucket at the 2026-11-04 00:40Z derive.
+- D-05 (founder 2026-11-03, "Count, then switch"): the forced rebuild of allocator history in D-03 is void. Phase 176 dropped `allocator_equity_snapshots` and retired the `reconstruct_allocator_history` kind, and the allocator curve is the derived one, recomposed from the per-key dailies the nightly derive re-buckets.
+- D-06 (founder 2026-11-03, "Switch 175 without the count"): the live before/after count of D-03 was not run, because Railway SSH fails after authentication on both analytics services. The evidence for the switch is the first derive after it. Verification reports this as passed by founder override, not as a gap.
+- The ROADMAP `### Phase 175` section carries a dated `CORRECTED 2026-11-03 (D-05, D-06)` note with the four statements the verifier listed: D-03's before/after was not run, D-03's forced rebuild is void, plan line 175-06 ran only its switch, and the history-effect half of SC-2 is proven in arithmetic but the number of live days that moved is unmeasured. The original text stays as lineage.
+- Known limits, recorded and not fixed: a broker that flips clocks at another weekend moment than the US rule is an hour off for deals stamped in between (A2); a flow in a transition hour keeps its day with no instant; and the live server-clock check stays with Phase 155 / MT5-06, which 175 does not close.
+- v0.133.18.3's home directory for the analytics container user did not fix Railway SSH. SSH still fails after authentication on both analytics services, and Railway's container file tools fail the same way, while mt5-gateway works with the same key. The founder kept the change (it is harmless), and the cause is on Railway's side.
+
+### Added
+- TODOS: `[175-NIGHTLY-MT5-DERIVE-CHECK]`, with an owner and a trigger, before the Phase 164.9 section. After the 2026-11-04 00:40Z derive, check that every MT5 `derive_broker_dailies` job is `done` with `attempts=1` and that no `compute_jobs.last_error` carries a clock configuration text.
+- `.planning/phases/175-*`: the phase records (CONTEXT with D-01 to D-06, plans and summaries 01 to 06, RESEARCH, PATTERNS, REVIEW, VALIDATION, VERIFICATION and SECURITY).
+
+### Changed
+- The ROADMAP Phase 175 entry now carries its plan list ticked 6/6, the D-03 and D-04 notes that the feature branch held, the dated correction and a closure paragraph. Its overview bullet and Progress row read complete.
+- STATE and the progress counts record the close. Open work is now 186 DERIVEGAPS and 188 TINYBASE.
+
 ## [0.133.18.3] - 2026-11-03 — analytics container: the app user has a home directory
 
 ### Fixed

@@ -4615,6 +4615,11 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   The ROADMAP `### Phase 187` section stays as the spec: the six success criteria and the full census of mixed-case implicit calls.
   **Owner / Trigger:** the next milestone's planning, or sooner if a Binance key is connected to a published strategy or an allocator book. Data integrity: the fix changes published Binance numbers.
 
+- [ ] **[175-NIGHTLY-MT5-DERIVE-CHECK] — after the 2026-11-04 00:40Z derive, check that every MT5 derive ended clean under the US rule (logged 2026-11-03).**
+  Phase 175 closed with only one MT5 key derived under the rule (done on attempt 1, no clock configuration fault). The 2026-11-04 00:40Z nightly is the first run that derives all MT5 keys under it.
+  Check that every MT5 `derive_broker_dailies` job is `done` with `attempts=1` and that no `compute_jobs.last_error` carries a clock-configuration text. A job that is `done` with `attempts>1` can hide a fault a retry healed, so `attempts=1` is the test, not `done` alone. Read-only, marker query first.
+  **Owner / Trigger:** the first session after 2026-11-04 00:40Z. Not a phase; if a key fails, it is a fix against `analytics-service/services/mt5_server_clock.py` and the worker's rule setting.
+
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
 - [x] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
