@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.18.5] - 2026-11-03 — book Phase 190 FACTSHEETQUEUED
+
+### Notes
+- Booked Phase 190 FACTSHEETQUEUED (founder 2026-11-03, "New phase, start now (Recommended)"). A strategy that had shown its factsheet went back to "UNPUBLISHED … queued" after the wizard's finalize step queued a second `sync_trades` run once the first computation had already finished. While a re-compute is pending or computing, the strategy gate also hides analytics that were already computed. The phase stops the redundant re-run and keeps a computed factsheet visible with an "updating" note. STATUSBRIDGE 164.6.6.3.4 closed on 2026-10-08, so it could not absorb this. Planning records only; no code changed.
+
 ## [0.133.18.4] - 2026-11-03 — records: close 175 MT5OFFSET
 
 ### Notes

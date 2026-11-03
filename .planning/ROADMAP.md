@@ -222,6 +222,7 @@ phases below carry the corrections, not the bullets.
 - [x] **~~Phase 187~~: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put binance into todos"): moved out of this milestone, not delivered; TODOS `[187-BINANCEINCOME-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
 - [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
 - [x] **~~Phase 189~~: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put all open phases that are purely about deribit or sfox into todos and not do them in this milestone"): moved out of this milestone, not delivered; TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
+- [ ] **Phase 190: FACTSHEETQUEUED — finishing the wizard does not queue a redundant re-run, and a re-compute never hides a strategy's computed factsheet** — booked 2026-11-03 from the founder's factsheet report (founder "New phase, start now (Recommended)"); the finalize step queued a second sync_trades after the first computation finished, and a pending or computing status hides analytics already computed; user-facing
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -7087,6 +7088,32 @@ Data integrity, user-facing. Relates to 185 DERIBITFLOWTIME (D-10, the cash fall
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 190: FACTSHEETQUEUED — finishing the wizard does not queue a redundant re-run, and a re-compute never hides a strategy's computed factsheet
+
+**Goal:** Finishing the strategy wizard does not queue a second analytics run that is not needed. A queued or running re-compute never hides a strategy's already-computed factsheet: it keeps showing with a small "updating" note. A strategy with no analytics yet still shows the queued or computing state.
+**Requirements**: TBD
+**Depends on:** Nothing
+**Plans:** 0 plans
+
+**Booking.** Founder 2026-11-03, AskUserQuestion: "New phase, start now (Recommended)". STATUSBRIDGE 164.6.6.3.4 closed on 2026-10-08, so it cannot absorb this.
+
+**Evidence (PROD 2026-11-03, seen by the founder).** A strategy showed its factsheet. After a rename, it showed "UNPUBLISHED" with "A computation for this strategy is queued and has not started yet." The rename was unrelated.
+- Defect 1: the wizard's finalize step (`src/app/api/strategies/finalize-wizard/route.ts`) queued a second `sync_trades` job (source `finalize-wizard`) after the strategy's first computation had already finished, which put the strategy back to pending.
+- Defect 2: while `computation_status` is `pending` or `computing`, the strategy gate (`src/lib/strategyGate.ts`, codes `ANALYTICS_PENDING` and `ANALYTICS_COMPUTING`) fails, and the page hides analytics that were already computed.
+
+**Success Criteria** (what must be TRUE):
+1. A read-only PROD count of strategies whose finalize step queued a re-run after their first computation had already finished is recorded before any code change.
+2. The finalize step queues a re-run only when one is needed. A test goes RED on today's behaviour.
+3. A strategy with stored analytics keeps showing them while a re-compute is pending or computing, with a small "updating" note. A test goes RED on today's behaviour.
+4. A strategy with no analytics yet still shows the queued or computing state, as it does today.
+5. After deploy, a PROD reading or a UI check confirms SC-2 and SC-3.
+6. Never invent data.
+
+User-facing. Relates to 164.6.6.3.4 STATUSBRIDGE (closed).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7394,6 +7421,7 @@ kept verbatim.
 | 185 DERIBITFLOWTIME | 10/10 | Complete — shipped v0.133.18.0 #1187 (a Deribit allocator book values open options at market, smoothed basis, cash fallback with the amber caveat); verification 5/5, security 30/30; PROD reading: days above 50% 6 to 2, SC-3 flags shown (key A valued at market, key C on cash with the caveat); SC-4 met with key A's two days named (D-14); the cumulative x3516 to x3836 booked to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED` | 2026-11-03 |
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 | 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
+| 190 FACTSHEETQUEUED | 0/0 | Not started — booked 2026-11-03 from the founder's factsheet report (redundant finalize re-run; pending status hides computed analytics) | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
