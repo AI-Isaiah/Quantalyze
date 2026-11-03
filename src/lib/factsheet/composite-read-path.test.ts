@@ -1899,3 +1899,96 @@ describe("169 SFH H-1 — the span a chain-broken headline covers, named by head
     expect(getAdmin).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 190 plan 05 (SC-3, SC-6). WHY: plan 03 admits a pending or computing
+ * single-key row over a stored success result. Every inner gate must ask the same
+ * readability question with the resolve stage's ONE decision, or a re-computing
+ * options strategy shows a disabled toggle whose "unavailable" reason is false
+ * (RESEARCH Pattern 2: no half-raw-status gates). Without the argument every gate
+ * is byte-identical to before, which the existing status-loop tests above pin.
+ */
+describe("190 recompute-over-stored-result — the single-key inner gates follow one decision", () => {
+  const FULL = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+
+  it("should-read predicates admit computing and pending only with the argument; failed never", () => {
+    for (const status of ["computing", "pending"]) {
+      expect(shouldReadSingleKeyMtmSeries({ mark_to_market: FULL }, status)).toBe(false);
+      expect(shouldReadSingleKeyMtmSeries({ mark_to_market: FULL }, status, true)).toBe(true);
+      expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: FULL }, status)).toBe(false);
+      expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: FULL }, status, true)).toBe(true);
+    }
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: FULL }, "failed", true)).toBe(false);
+    expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: FULL }, "failed", true)).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries({}, "computing", true)).toBe(false);
+  });
+
+  it("singleKeyBasisOpts marks both gates available for a computing row only with the argument", () => {
+    const by = { mark_to_market: FULL, smoothed_mtm: FULL };
+    const off = singleKeyBasisOpts({}, by, "computing");
+    expect(off.mtmGate?.available).toBe(false);
+    expect(off.smoothedGate?.available).toBe(false);
+    expect(off.metricsByBasis).toBeUndefined();
+    const on = singleKeyBasisOpts({}, by, "computing", null, null, true);
+    expect(on.mtmGate).toEqual({ available: true, reason: undefined });
+    expect(on.smoothedGate).toEqual({ available: true, reason: undefined });
+    expect(on.metricsByBasis).toEqual({ mark_to_market: FULL, smoothed_mtm: FULL });
+    // A failed row stays closed whatever the argument says.
+    expect(singleKeyBasisOpts({}, by, "failed", null, null, true).mtmGate?.available).toBe(false);
+  });
+
+  it("readSingleKeyBasisOpts overlays the stored seven scalars as the cash headline for a computing row only with the option", async () => {
+    const STORED = { cumulative_return: 0.42, volatility: 0.31, max_drawdown: -0.22, cagr: 0.12, sharpe: 1.5, sortino: 2.0, calmar: 0.55 };
+    const row = { ...STORED, computation_status: "computing", metrics_json_by_basis: null, data_quality_flags: {} };
+    const noAdmin = () =>
+      vi.fn((): SupabaseClient => {
+        throw new Error("no series read expected");
+      });
+    expect(await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, null, "computing", row)).toEqual({});
+    const out = await readSingleKeyBasisOpts(noAdmin(), "s-1", {}, null, "computing", row, undefined, {
+      recomputeOverStoredResult: true,
+    });
+    expect(out.metricsByBasis).toEqual({ cash_settlement: STORED });
+  });
+
+  // Review round 1 (WR-01): the MTM and smoothed series and scalars are the
+  // in-flight derive's generation, so the option opens the stored CASH headline
+  // only; neither basis series is read and both toggles stay closed.
+  it("readSingleKeyBasisOpts with the option reads no basis series and keeps both toggles closed for a computing options row", async () => {
+    const reads: string[] = [];
+    const payload = { dailyReturns: [{ date: "2024-01-02", value: 0.01 }, { date: "2024-01-03", value: 0.02 }], gapSpans: [] };
+    const from = () => {
+      let kind: string | undefined;
+      const chain = {
+        select: () => chain,
+        eq: (col: string, val: string) => {
+          if (col === "kind") kind = val;
+          return chain;
+        },
+        maybeSingle: () => {
+          if (kind) reads.push(kind);
+          return Promise.resolve({ data: { payload: { ...payload, kind } }, error: null });
+        },
+      };
+      return chain;
+    };
+    const admin = { from } as unknown as SupabaseClient;
+    const by = { mark_to_market: FULL, smoothed_mtm: FULL };
+    await readSingleKeyBasisOpts(() => admin, "s-1", {}, by, "computing");
+    expect(reads).toEqual([]);
+    const out = await readSingleKeyBasisOpts(() => admin, "s-1", {}, by, "computing", null, undefined, {
+      recomputeOverStoredResult: true,
+    });
+    expect(reads).toEqual([]);
+    // Review round 2 (WR-03): no gate is built, so no control claims anything.
+    expect(out.mtmGate).toBeUndefined();
+    expect(out.smoothedGate).toBeUndefined();
+    // SFH M3: the same closure for a held terminal-success row, through `basisInFlight`.
+    const held = await readSingleKeyBasisOpts(() => admin, "s-1", {}, by, "complete", null, undefined, {
+      basisInFlight: true,
+    });
+    expect(reads).toEqual([]);
+    expect(held.mtmGate).toBeUndefined();
+    expect(held.smoothedGate).toBeUndefined();
+  });
+});

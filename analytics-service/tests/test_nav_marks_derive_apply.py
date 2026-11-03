@@ -299,7 +299,10 @@ async def test_no_marks_strategy_series_is_unchanged() -> None:
     assert result.outcome == DispatchOutcome.DONE, result.error_message
     assert db.marks == {}
     assert db.rows() == REALIZED_THROUGH_0305
-    assert prestamp(capture) == {"csv_source": True}
+    # Phase 190 plan 09: every strategy-mode prestamp also carries ``last_success_snapshot``,
+    # null here because this fake returns no strategy_analytics row to snapshot. It is a display
+    # aid and says nothing about marks, so "nothing about marks" still holds.
+    assert prestamp(capture) == {"csv_source": True, "last_success_snapshot": None}
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,8 @@ import { revalidateTag } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
-import { isComputedAnalytics } from "@/lib/closed-sets";
+import { isComputedAnalytics, isRecomputeOverStoredResult } from "@/lib/closed-sets";
+import { hasStoredAnalyticsResult } from "@/lib/stored-analytics-result";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
@@ -154,7 +155,10 @@ export async function POST(req: NextRequest) {
       // `series_completeness` rides this existing select — the gate's
       // daily-returns branch is decided by the persisted completeness verdict,
       // so it must be read wherever the gate is called. Zero new queries.
-      admin.from("strategy_analytics").select("computation_status, computation_error, series_completeness").eq("strategy_id", id).single(),
+      // Phase 190 D-02: the stored-result evidence (series, headline, flags and
+      // the computed_at the last-success snapshot binds to) rides the same row,
+      // so `hasStoredResult` below is read off the row the status came from.
+      admin.from("strategy_analytics").select("computation_status, computation_error, series_completeness, daily_returns, returns_series, cumulative_return, data_quality_flags, computed_at").eq("strategy_id", id).single(),
       // CSV-uploaded strategies keep their history in csv_daily_returns, not
       // `trades`. Count it so the gate recognizes it as a valid data source
       // (else every CSV strategy is un-approvable — NO_DATA_SOURCE).
@@ -257,6 +261,10 @@ export async function POST(req: NextRequest) {
         computationError: analytics?.computation_error ?? null,
         csvRowCount: csvRowCount ?? 0,
         seriesCompleteness: analytics?.series_completeness ?? null,
+        // Phase 190 D-02: the same rule the factsheet resolve stage uses, over
+        // the same row the status was read from, so a re-run over computed
+        // figures passes and everything else refuses as before.
+        hasStoredResult: hasStoredAnalyticsResult(analytics),
       });
     } catch (err) {
       if (!(err instanceof StrategyGateUnevaluableError)) throw err;
@@ -318,7 +326,9 @@ export async function POST(req: NextRequest) {
         .eq("strategy_id", id),
       admin
         .from("strategy_analytics")
-        .select("computation_status, series_completeness")
+        // Phase 190 D-02: same evidence columns as the first pass, so the
+        // re-check applies the factsheet's own stored-result rule.
+        .select("computation_status, series_completeness, daily_returns, returns_series, cumulative_return, data_quality_flags, computed_at")
         .eq("strategy_id", id)
         .single(),
     ]);
@@ -382,7 +392,16 @@ export async function POST(req: NextRequest) {
     // complete_with_warnings is a terminal success the first-pass gate
     // (strategyGate.ts, a deny-list) admits; the re-check must too, or a warned
     // strategy passes the gate then 409s here — un-approvable (mig 20260707120000).
-    if (!isComputedAnalytics(recheckAnalytics?.computation_status)) {
+    // Phase 190 D-02: a pending or computing row passes too when it holds a
+    // stored success result (a re-run over computed figures), by the factsheet's
+    // own evidence rule. failed and missing rows still 409.
+    if (
+      !isComputedAnalytics(recheckAnalytics?.computation_status) &&
+      !isRecomputeOverStoredResult(
+        recheckAnalytics?.computation_status,
+        hasStoredAnalyticsResult(recheckAnalytics),
+      )
+    ) {
       return NextResponse.json(
         { error: "Cannot approve: analytics no longer complete.", code: "REVIEW_RECHECK_FAILED" },
         { status: 409 },

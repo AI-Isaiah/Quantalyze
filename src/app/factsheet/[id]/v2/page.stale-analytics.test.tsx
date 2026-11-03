@@ -80,7 +80,31 @@ const CASH_DAILY = [
   { date: "2025-08-10", value: 0.01 },
 ];
 
-function strategyRow(computationStatus: string) {
+/** The row's `computed_at`: the date of the last SUCCESSFUL compute. */
+const STORED_AT = "2026-08-25T09:15:00.000Z";
+
+/**
+ * Phase 190: the seven stored headline scalars a success write leaves in place.
+ * Every one finite, so the "finite stored headline" evidence check holds.
+ */
+const STORED_HEADLINE = {
+  cumulative_return: 0.0475,
+  volatility: 0.21,
+  max_drawdown: -0.03,
+  cagr: 0.9,
+  sharpe: 1.4,
+  sortino: 2.1,
+  calmar: 3.2,
+};
+
+/**
+ * Per-test overrides of the analytics embed. Default `{}` keeps today's fixture
+ * (CASH_DAILY, empty flags, no stored headline) byte-identical for V1, V2, V2b,
+ * V4 and V5.
+ */
+type AnalyticsOverrides = Record<string, unknown>;
+
+function strategyRow(computationStatus: string, overrides: AnalyticsOverrides = {}) {
   return {
     id: STRATEGY_ID,
     name: "Orpheus",
@@ -104,10 +128,11 @@ function strategyRow(computationStatus: string) {
       daily_returns: CASH_DAILY,
       returns_series: null,
       // Re-stamped to the moment of FAILURE by the SQL status bridge.
-      computed_at: "2026-08-25T09:15:00.000Z",
+      computed_at: STORED_AT,
       data_quality_flags: {},
       metrics_json_by_basis: null,
       computation_status: computationStatus,
+      ...overrides,
     },
   };
 }
@@ -177,8 +202,8 @@ function collectText(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
-async function renderPage(status: string) {
-  vi.mocked(createAdminClient).mockReturnValue(mockAdmin(strategyRow(status)));
+async function renderPage(status: string, overrides: AnalyticsOverrides = {}) {
+  vi.mocked(createAdminClient).mockReturnValue(mockAdmin(strategyRow(status, overrides)));
   return FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) });
 }
 
@@ -256,10 +281,208 @@ describe("STALE-01 · /factsheet/[id]/v2 — the page both PDF wrappers screensh
     expect(text).toContain("is not available yet");
   });
 
-  it("V3: a live `computing` run is withheld the same way", async () => {
-    const ui = await renderPage("computing");
+  // Phase 190 SC-3 (D-02). WHY this changed: the founder's computed factsheet
+  // vanished behind the queued placeholder while a redundant re-run sat in the
+  // queue. The previous V3 premise ("no honest date to show the previous run's
+  // numbers under") ended when Phase 166.5 made ONLY the runner's success write
+  // stamp computed_at: the stored computed_at is now the date of the last good
+  // compute, so the numbers can be shown under it. The payload must carry the
+  // flag that tells the reader the figures predate the running computation.
+  it("V3: a `computing` run over a stored success result keeps the factsheet and flags it as updating (phase 190 SC-3)", async () => {
+    const ui = await renderPage("computing", {
+      ...STORED_HEADLINE,
+      data_quality_flags: { cumulative_method: "geometric" },
+    });
+    const payload = findPayload(ui);
+
+    expect(
+      payload,
+      "a re-run over a stored success result must not hide the computed factsheet",
+    ).not.toBeNull();
+    expect(payload!.analyticsUpdating).toBe(true);
+    // SC-6: the date shown is the stored last-good one, never a new time.
+    expect(payload!.computedAt).toBe(STORED_AT);
+  });
+
+  // Phase 190 SC-3 across the derive hop. WHY: the derive hop REPLACES
+  // data_quality_flags minutes before the compute hop's success write, with a
+  // prestamp that never carries cumulative_method. Without plan 09's
+  // last_success_snapshot, the founder's factsheet would vanish halfway through
+  // the SAME re-run (the plan-check finding behind plan 09). The build must read
+  // the snapshot's flags, so the figures sit beside the flags their own success
+  // wrote: `small_base_measured` exists only in the snapshot here.
+  it("V3b: a `computing` run after the derive prestamp reads the bound snapshot's flags (phase 190 SC-3, D-02)", async () => {
+    const ui = await renderPage("computing", {
+      ...STORED_HEADLINE,
+      data_quality_flags: {
+        csv_source: true,
+        last_success_snapshot: {
+          computed_at: STORED_AT,
+          flags: { cumulative_method: "geometric", small_base_measured: true },
+        },
+      },
+    });
+    const payload = findPayload(ui);
+
+    expect(payload, "the derive prestamp must not hide the factsheet").not.toBeNull();
+    expect(payload!.analyticsUpdating).toBe(true);
+    expect(payload!.computedAt).toBe(STORED_AT);
+    expect(
+      payload!.dataQuality?.smallBaseMeasured,
+      "the build read the live prestamp flags, not the flags the stored numbers' own success wrote",
+    ).toBe(true);
+  });
+
+  // Phase 190 SC-4. WHY: a strategy with NO analytics yet has nothing honest to
+  // show, so it must keep today's queued/computing placeholder. These rows carry
+  // the headline and the success flags, so the missing stored series is the ONLY
+  // reason they are withheld (anti-vacuity: V3 proves the same row builds when a
+  // series is present).
+  it.each(["computing", "pending"])(
+    "SC-4: a `%s` row with no stored series stays withheld (the first-ever compute keeps the queued state)",
+    async (status) => {
+      const ui = await renderPage(status, {
+        daily_returns: null,
+        returns_series: null,
+        ...STORED_HEADLINE,
+        data_quality_flags: { cumulative_method: "geometric" },
+      });
+
+      expect(findPayload(ui)).toBeNull();
+    },
+  );
+
+  // Phase 190 SC-6. WHY: shown numbers must never sit beside flags a different
+  // run wrote. A derive prestamp written by code without plan 09 replaces the
+  // flags with csv_source only and carries no snapshot, so the series and
+  // headline are the last success's while the flags are the new derive's.
+  it("SC-6: a `computing` row whose flags are csv_source only and carry no snapshot stays withheld", async () => {
+    const ui = await renderPage("computing", {
+      ...STORED_HEADLINE,
+      data_quality_flags: { csv_source: true },
+    });
 
     expect(findPayload(ui)).toBeNull();
+  });
+
+  it("SC-6: a snapshot bound to a different success than the row's computed_at is never used", async () => {
+    const ui = await renderPage("computing", {
+      ...STORED_HEADLINE,
+      data_quality_flags: {
+        csv_source: true,
+        last_success_snapshot: {
+          computed_at: "2026-08-25T09:15:01.000Z",
+          flags: { cumulative_method: "geometric" },
+        },
+      },
+    });
+
+    expect(findPayload(ui)).toBeNull();
+  });
+
+  // Phase 190 D-02: "the existing failed-status rules apply". A failed run
+  // leaves the previous run's data in place (A2), so a failed row with a full
+  // stored result and a bound snapshot must STILL be withheld, never flagged as
+  // updating.
+  it("SC-6: a `failed` row with a full stored result and a bound snapshot stays withheld", async () => {
+    const ui = await renderPage("failed", {
+      ...STORED_HEADLINE,
+      data_quality_flags: {
+        csv_source: true,
+        last_success_snapshot: { computed_at: STORED_AT, flags: { cumulative_method: "geometric" } },
+      },
+    });
+
+    expect(findPayload(ui)).toBeNull();
+  });
+
+  // ── Phase 190 D-04 (founder 2026-11-03, SC-6) ─────────────────────────────
+  // WHY: the status bridge keeps a warned row's terminal status (and a ledger
+  // refresh holds `complete`) while the derive hop REPLACES its flags with a
+  // prestamp, until the compute hop's mark-computing. Without D-04 that factsheet
+  // draws the last success's figures under the NEW run's warnings. The founder
+  // chose the queued state over that mix. The prestamp is detected POSITIVELY by
+  // its last_success_snapshot key, never by the missing marker alone.
+  const PRESTAMP_FLAGS = { csv_source: true, twr_chain_broken: true, last_success_snapshot: null };
+
+  it("D04-1: a `complete_with_warnings` row holding a derive prestamp and no bound snapshot is withheld, with no analyticsFailed", async () => {
+    const ui = await renderPage("complete_with_warnings", {
+      ...STORED_HEADLINE,
+      data_quality_flags: PRESTAMP_FLAGS,
+    });
+
+    expect(findPayload(ui), "the last success's figures were drawn under the new derive's flags").toBeNull();
+    const text = collectText(ui).join(" ").toLowerCase();
+    expect(text).not.toContain("could not be computed");
+  });
+
+  it("D04-2: the same row with a snapshot one second off the row's computed_at is withheld", async () => {
+    const ui = await renderPage("complete_with_warnings", {
+      ...STORED_HEADLINE,
+      data_quality_flags: {
+        ...PRESTAMP_FLAGS,
+        last_success_snapshot: {
+          computed_at: "2026-08-25T09:15:01.000Z",
+          flags: { cumulative_method: "geometric" },
+        },
+      },
+    });
+
+    expect(findPayload(ui)).toBeNull();
+  });
+
+  it("D04-3: a `complete` row (a ledger refresh holds it through the derive hop) holding the same prestamp is withheld", async () => {
+    const ui = await renderPage("complete", {
+      ...STORED_HEADLINE,
+      data_quality_flags: PRESTAMP_FLAGS,
+    });
+
+    expect(findPayload(ui)).toBeNull();
+  });
+
+  // The controls carry the opposite WHY: a row AT REST must keep its factsheet,
+  // and a legacy row that predates the marker must not vanish because of a rule
+  // meant for a re-run. They are green before and after the D-04 withhold, so
+  // they pin the at-rest guarantee, not the new code.
+  it("D04-4: CONTROL — a `complete_with_warnings` row at rest (marker plus a warning flag, no snapshot key) builds, not updating", async () => {
+    const ui = await renderPage("complete_with_warnings", {
+      ...STORED_HEADLINE,
+      data_quality_flags: { cumulative_method: "geometric", small_base_measured: true },
+    });
+    const payload = findPayload(ui);
+
+    expect(payload).not.toBeNull();
+    expect(payload!.analyticsUpdating).toBe(false);
+  });
+
+  it("D04-5: CONTROL — a terminal-success legacy row (no marker, no snapshot key) still builds", async () => {
+    const ui = await renderPage("complete", {
+      ...STORED_HEADLINE,
+      data_quality_flags: { csv_source: true },
+    });
+
+    expect(findPayload(ui)).not.toBeNull();
+  });
+
+  it("D04-6: CONTROL — a `complete_with_warnings` prestamp WITH a bound snapshot builds from the snapshot's flags, not updating", async () => {
+    const ui = await renderPage("complete_with_warnings", {
+      ...STORED_HEADLINE,
+      data_quality_flags: {
+        ...PRESTAMP_FLAGS,
+        last_success_snapshot: {
+          computed_at: STORED_AT,
+          flags: { cumulative_method: "geometric", small_base_measured: true },
+        },
+      },
+    });
+    const payload = findPayload(ui);
+
+    expect(payload).not.toBeNull();
+    expect(payload!.analyticsUpdating).toBe(false);
+    expect(
+      payload!.dataQuality?.smallBaseMeasured,
+      "the build read the new derive's prestamp flags, not the flags the stored numbers' own success wrote",
+    ).toBe(true);
   });
 
   it("V4: CONTROL — a `complete` row builds the full payload with real metrics", async () => {
@@ -274,6 +497,8 @@ describe("STALE-01 · /factsheet/[id]/v2 — the page both PDF wrappers screensh
     ).not.toBeNull();
     expect(payload!.strategyName).toBe("Orpheus");
     expect(Number.isFinite(payload!.strategyMetrics.sharpe)).toBe(true);
+    // Phase 190: a terminal-success payload is never flagged as updating.
+    expect(payload!.analyticsUpdating).toBe(false);
   });
 
   it("V5: CONTROL — `complete_with_warnings` is a terminal SUCCESS and builds too", async () => {

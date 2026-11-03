@@ -1,9 +1,12 @@
 /**
  * Shared strategy review gate. Used by the admin approval route and
  * the wizard's SyncPreviewStep so both enforce the same thresholds
- * (>=5 trades, >=7 days, analytics complete, key or trades present).
+ * (>=5 trades, >=7 days, analytics complete, or re-computing over a stored
+ * success result (phase 190 D-02), key or trades present).
  * Boundary case: EXACTLY 7.0 days passes (historic `< 7` semantics).
  */
+
+import { isRecomputeOverStoredResult } from "./closed-sets";
 
 export const STRATEGY_GATE_MIN_TRADES = 5;
 export const STRATEGY_GATE_MIN_DAYS = 7;
@@ -75,6 +78,20 @@ export interface StrategyGateInput {
    * NULL means never-examined, and never-examined MUST refuse (fail closed).
    */
   seriesCompleteness: string | null;
+  /**
+   * Phase 190 D-02: true when the strategy's `strategy_analytics` row already
+   * holds a stored success result (series, finite headline, success-written
+   * flags), so a `pending` or `computing` status is a RE-RUN over computed
+   * figures rather than a first run.
+   *
+   * REQUIRED, not optional, so a caller that forgot to compute it is a compile
+   * error rather than a silent default. Computed by the caller with
+   * `hasStoredAnalyticsResult` over the SAME analytics row it read
+   * `computationStatus` from. A caller that did not read the evidence passes
+   * false, which fails closed: the pending and computing arms refuse as before.
+   * It never rescues a `failed` or missing row.
+   */
+  hasStoredResult: boolean;
 }
 
 /**
@@ -516,7 +533,15 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     };
   }
 
-  if (input.computationStatus === "pending") {
+  // Phase 190 D-02: a re-run over a stored success result passes the gate. The
+  // evidence is the caller's (see StrategyGateInput.hasStoredResult); `failed`
+  // and a missing row are never admitted by it.
+  const recomputeOverStoredResult = isRecomputeOverStoredResult(
+    input.computationStatus,
+    input.hasStoredResult,
+  );
+
+  if (input.computationStatus === "pending" && !recomputeOverStoredResult) {
     return {
       passed: false,
       code: "ANALYTICS_PENDING",
@@ -525,7 +550,7 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     };
   }
 
-  if (input.computationStatus === "computing") {
+  if (input.computationStatus === "computing" && !recomputeOverStoredResult) {
     return {
       passed: false,
       code: "ANALYTICS_COMPUTING",

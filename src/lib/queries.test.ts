@@ -450,7 +450,19 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
     // lookahead below allows exactly that one `->>native_unit` key and nothing
     // else (not the bare column, not `->` object access, not another key). The
     // positive pin for the alias is the test after the 3M one below.
-    expect(cols).not.toMatch(/data_quality_flags(?!->>native_unit\b)/);
+    //
+    // AMENDED 2026-11-03, Phase 190 plan 07 (D-02): THREE more scalars cross, all
+    // `->`/`->>` paths over the same column, so a re-running row can show its
+    // last computed figures and its unit. The allowed set is exactly the four
+    // alias expressions below. The bare column, the `last_success_snapshot`
+    // object, its `flags` object and any other `->>` key still fail the pin.
+    const withoutAllowed = cols
+      .replace("data_quality_flags->>native_unit", "")
+      .replace("data_quality_flags->>cumulative_method", "")
+      .replace("data_quality_flags->last_success_snapshot->flags->>cumulative_method", "")
+      .replace("data_quality_flags->last_success_snapshot->>computed_at", "")
+      .replace("data_quality_flags->last_success_snapshot->flags->>native_unit", "");
+    expect(withoutAllowed).not.toContain("data_quality_flags");
     // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
     // projected column (which would ship the entire blob to an anon reader).
     expect(embed).not.toMatch(/metrics_json(?!->)/);
@@ -500,7 +512,25 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
     // a private blob, like `three_month` and `series_end`.
     expect(embed).toContain("native_unit:data_quality_flags->>native_unit");
     // Every occurrence of the column is that one alias: strip it and nothing is left.
-    expect(cols.replace("data_quality_flags->>native_unit", "")).not.toContain("data_quality_flags");
+    // Phase 190 amended the "every occurrence" claim: the other allowed aliases
+    // are pinned by the test below, and the exact-set pin above.
+    expect(cols.split("data_quality_flags->>native_unit").length - 1).toBe(1);
+  });
+
+  it("carries the success marker and the last-success snapshot as FOUR scalar aliases, each exactly once, never an object (phase 190 plan 07)", async () => {
+    const { cols } = await captureSelect();
+    // WHY: a re-running row keeps its figures only when the list can prove they
+    // belong to a success (the marker, or a snapshot bound to its computed_at
+    // through the derive hop's prestamp). These are method names, a timestamp
+    // the row already exposes as computed_at, and a unit code: never the blob.
+    for (const alias of [
+      "cumulative_method:data_quality_flags->>cumulative_method",
+      "last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method",
+      "last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at",
+      "last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit",
+    ]) {
+      expect(cols.split(alias).length - 1, alias).toBe(1);
+    }
   });
 });
 

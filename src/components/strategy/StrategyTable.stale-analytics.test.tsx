@@ -96,7 +96,7 @@ vi.mock("@/components/discovery/SimulateImpactButton", () => ({
   SimulateImpactButton: () => null,
 }));
 
-import { getStrategiesByCategory } from "@/lib/queries";
+import { getStrategiesByCategory, getPercentiles } from "@/lib/queries";
 import { StrategyTable } from "./StrategyTable";
 
 // --- Fixtures ------------------------------------------------------------
@@ -261,7 +261,7 @@ function renderedOrder(): string[] {
   return Array.from(document.querySelectorAll("tbody tr"))
     .map((tr) => tr.textContent ?? "")
     .map((t) =>
-      [NAME_LIVE, NAME_DEAD, NAME_DEAD_2].find((n) => t.includes(n)) ?? "",
+      [NAME_LIVE, NAME_DEAD, NAME_DEAD_2, NAME_RERUN, NAME_FIRST].find((n) => t.includes(n)) ?? "",
     )
     .filter(Boolean);
 }
@@ -700,5 +700,208 @@ describe("HONEST-03 / C-6 — is_example rows never claim a sync recency", () =>
     );
     expect(exampleCard).toBeTruthy();
     expect(exampleCard!.textContent).not.toMatch(/Trades fetched/);
+  });
+});
+
+// =========================================================================
+// Group E — phase 190 (FACTSHEETQUEUED, D-02, SC-3/SC-4/SC-6): a row
+// RE-COMPUTING over a stored success result keeps its figures, its sparklines
+// and its `#n` exactly like a computed row, with no added line, chip or marker
+// (UI-SPEC: list rows carry no updating line). It stays out of the percentile
+// cohort until its run succeeds (OQ-2 default). A row with no stored result,
+// and a failed row, behave as before.
+//
+// WHY it matters (Rule 9): an allocator browsing a category during a ten-minute
+// re-run must see the strategy where it stood, not a row of dashes that drops
+// it out of the ranking. And the never-computed row must still say Syncing to
+// its owner, or the owner is told nothing is happening.
+// =========================================================================
+
+const ID_RERUN = "51a10001-0000-4000-8000-000000000004";
+const ID_FIRST = "51a10001-0000-4000-8000-000000000005";
+const NAME_RERUN = "Halcyon Rerun";
+const NAME_FIRST = "Pegasus First";
+
+/** Its last success's figures: the best sharpe, so it leads the default sort. */
+const RERUN_KPIS: Metrics = {
+  cumulative_return: 0.77,
+  cagr: 0.31,
+  sharpe: 2.5,
+  max_drawdown: -0.09,
+  volatility: 0.14,
+  six_month_return: 0.21,
+};
+const RERUN_TEXT = ["+77.00%", "+31.00%", "2.50", "-9.00%", "+14.00%", "+21.00%"];
+
+/** A list row re-computing over a stored success: marker and series end projected. */
+function rerunDbRow(id: string, name: string, status = "computing"): Record<string, unknown> {
+  const r = dbRow(id, name, status, RERUN_KPIS);
+  Object.assign(r.strategy_analytics as Record<string, unknown>, {
+    series_end: "2026-10-29",
+    cumulative_method: "geometric",
+  });
+  return r;
+}
+
+/** A first-ever compute: no stored result, the figures are not there. */
+function firstComputeDbRow(id: string, name: string): Record<string, unknown> {
+  const r = dbRow(id, name, "computing", { ...STALE });
+  Object.assign(r.strategy_analytics as Record<string, unknown>, {
+    cumulative_return: null,
+    cagr: null,
+    sharpe: null,
+    max_drawdown: null,
+    volatility: null,
+    six_month_return: null,
+    sparkline_returns: null,
+    sparkline_drawdown: null,
+    calmar: null,
+  });
+  return r;
+}
+
+describe("phase 190 seam — a re-running row on the discovery list", () => {
+  async function renderPublicCategory() {
+    const rows = await getStrategiesByCategory("stale-spec");
+    render(<StrategyTable strategies={rows} categorySlug="stale-spec" />);
+    return rows;
+  }
+
+  it("prints the re-running row's last computed figures and gives it a contiguous #n", async () => {
+    seeded.rows = [
+      dbRow(ID_LIVE, NAME_LIVE, "complete", LIVE),
+      rerunDbRow(ID_RERUN, NAME_RERUN),
+    ];
+
+    await renderPublicCategory();
+
+    const rerun = rowFor(NAME_RERUN);
+    for (const text of RERUN_TEXT) {
+      expect(rerun.textContent, `the re-running row lost "${text}"`).toContain(text);
+    }
+    // Default sort is sharpe-desc: 2.5 leads 0.6, and both are ranked, so no hole.
+    expect(rankText(rerun)).toBe("#1");
+    expect(rankText(rowFor(NAME_LIVE))).toBe("#2");
+    expect(renderedOrder()).toEqual([NAME_RERUN, NAME_LIVE]);
+  });
+
+  it("adds no line, chip or marker to the public row (nothing grows on /discovery)", async () => {
+    seeded.rows = [rerunDbRow(ID_RERUN, NAME_RERUN)];
+
+    await renderPublicCategory();
+
+    const rerun = rowFor(NAME_RERUN);
+    expect(rerun.textContent).not.toMatch(/Syncing|No data|updating|re-?comput/i);
+    expect(rerun.innerHTML).not.toContain("bg-warning-bg");
+    expect(rerun.innerHTML).not.toContain("bg-track");
+  });
+
+  it("a computing row WITHOUT a stored result keeps em-dashes and no #n, ranked last in both directions", async () => {
+    seeded.rows = [
+      firstComputeDbRow(ID_FIRST, NAME_FIRST),
+      dbRow(ID_LIVE, NAME_LIVE, "complete", LIVE),
+      rerunDbRow(ID_RERUN, NAME_RERUN),
+    ];
+
+    const { container } = (await (async () => {
+      const rows = await getStrategiesByCategory("stale-spec");
+      return render(<StrategyTable strategies={rows} categorySlug="stale-spec" />);
+    })());
+
+    const first = rowFor(NAME_FIRST);
+    expect(rankText(first)).toBe(EM_DASH);
+    for (const i of [2, 3, 4, 5, 6, 7]) {
+      expect((first.querySelectorAll("td")[i]?.textContent ?? "").trim()).toContain(EM_DASH);
+    }
+    expect(renderedOrder()).toEqual([NAME_RERUN, NAME_LIVE, NAME_FIRST]);
+
+    // Flip the direction: the no-evidence row must not march to the top (the
+    // null-coerced-to-0 artifact) and the re-running row sorts by its figures.
+    const sharpeHeader = within(container).getByRole("columnheader", { name: /Sharpe/ });
+    fireEvent.click(sharpeHeader.querySelector("button") ?? sharpeHeader);
+    expect(renderedOrder()).toEqual([NAME_LIVE, NAME_RERUN, NAME_FIRST]);
+    expect(rankText(rowFor(NAME_LIVE))).toBe("#1");
+    expect(rankText(rowFor(NAME_RERUN))).toBe("#2");
+    expect(rankText(rowFor(NAME_FIRST))).toBe(EM_DASH);
+  });
+
+  it("a FAILED row that carries the full evidence is still blanked (SC-6)", async () => {
+    seeded.rows = [
+      dbRow(ID_LIVE, NAME_LIVE, "complete", LIVE),
+      rerunDbRow(ID_DEAD, NAME_DEAD, "failed"),
+    ];
+
+    await renderPublicCategory();
+
+    for (const text of RERUN_TEXT) {
+      expect(document.body.textContent ?? "", `a failed run's "${text}" leaked`).not.toContain(text);
+    }
+    expect(rankText(rowFor(NAME_DEAD))).toBe(EM_DASH);
+  });
+});
+
+describe("phase 190 owner mount — the Syncing chip belongs to the row with nothing to show", () => {
+  function owner(rows: Record<string, unknown>[]) {
+    seeded.rows = rows;
+    return getStrategiesByCategory("stale-spec").then((shaped) =>
+      render(
+        <StrategyTable
+          strategies={shaped}
+          categorySlug="stale-spec"
+          visibility="owner-all-statuses"
+        />,
+      ),
+    );
+  }
+
+  it("a re-running row shows its figures and #n and no Syncing chip; a first-ever compute still says Syncing", async () => {
+    await owner([
+      rerunDbRow(ID_RERUN, NAME_RERUN),
+      firstComputeDbRow(ID_FIRST, NAME_FIRST),
+    ]);
+
+    const rerun = rowFor(NAME_RERUN);
+    expect(rerun.textContent).not.toMatch(/Syncing/);
+    expect(rerun.textContent).toContain("2.50");
+    expect(rankText(rerun)).toBe("#1");
+
+    // The existing SC-4 behaviour: the owner of a never-computed strategy is
+    // told a run is under way.
+    expect(rowFor(NAME_FIRST).textContent).toMatch(/Syncing/);
+    expect(rankText(rowFor(NAME_FIRST))).toBe(EM_DASH);
+  });
+});
+
+describe("phase 190 ordinal layer — one displayed-row decision feeds #n, sort and chip", () => {
+  it("a mounted analytics_updating row ranks; the same row without the flag does not", () => {
+    // Group C-style direct mount: the component's own predicate is under test.
+    const flagged = clientRow(ID_RERUN, NAME_RERUN, "computing", RERUN_KPIS);
+    flagged.analytics = { ...flagged.analytics, analytics_updating: true };
+    const unflagged = clientRow(ID_FIRST, NAME_FIRST, "computing", RERUN_KPIS);
+
+    render(
+      <StrategyTable strategies={[unflagged, flagged]} categorySlug="stale-spec" />,
+    );
+
+    expect(rankText(rowFor(NAME_RERUN))).toBe("#1");
+    expect(rankText(rowFor(NAME_FIRST))).toBe(EM_DASH);
+  });
+});
+
+describe("phase 190 percentile cohort — a re-running row displays but does not rank (OQ-2 default)", () => {
+  it("getPercentiles scores five computed peers and gives the re-running row no entry, so it carries no suffix", async () => {
+    // WHY: the row shows figures and a #n, but a percentile is a claim against a
+    // cohort of FINISHED runs. If this row joined the cohort, the figures it
+    // shows from a run that is being replaced would shift everyone else's rank.
+    const peers = [0.1, 0.2, 0.3, 0.4, 0.5].map((sharpe, i) =>
+      dbRow(`51a10001-0000-4000-8000-0000000001${i}0`, `Peer ${i}`, "complete", { ...LIVE, sharpe }),
+    );
+    seeded.rows = [...peers, rerunDbRow(ID_RERUN, NAME_RERUN)];
+
+    const map = await getPercentiles("stale-spec");
+
+    expect(map).not.toBeNull();
+    expect(Object.keys(map!).length).toBe(5);
+    expect(map![ID_RERUN]).toBeUndefined();
   });
 });

@@ -69,29 +69,6 @@ const PUBLISHED_STRATEGY = {
 // chain-broken row can be served; reset to the clean row before each case.
 let strategyRows: unknown[] = [PUBLISHED_STRATEGY];
 
-// Phase 170.2 (SC-3): the page reads a chain-broken row's covered-from date
-// through the admin client (deny-all RLS table). Answers a broker_nan cash
-// series whose last gap ends 2026-08-21.
-vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => {
-    const builder: Record<string, unknown> = {
-      select: () => builder,
-      eq: () => builder,
-      maybeSingle: async () => ({
-        data: {
-          payload: {
-            conventions: { densify: "broker_nan" },
-            gap_spans: [{ start: "2026-08-10", end: "2026-08-21" }],
-            rows: [{ date: "2026-08-22" }, { date: "2026-08-23" }],
-          },
-        },
-        error: null,
-      }),
-    };
-    return { from: () => builder };
-  },
-}));
-
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
@@ -211,7 +188,17 @@ describe("ComparePage — UAT-03 strategy-only charts regression", () => {
 
   it("hands the overlay (and only the overlay) the covered-from date of a chain-broken row (SC-3, D-07)", async () => {
     strategyRows = [
-      { ...PUBLISHED_STRATEGY, strategy_analytics: { twr_chain_broken: "true" } },
+      {
+        ...PUBLISHED_STRATEGY,
+        strategy_analytics: {
+          cumulative_method: "geometric",
+          twr_chain_broken: "true",
+          // Phase 190 plan 07: the covered-from date is the row's effective
+          // headline_since, not the stored cash series row.
+          headline_since: "2026-08-22",
+          last_success_headline_since: "2026-07-01",
+        },
+      },
     ];
     const ComparePage = await getComparePage();
     const Page = await ComparePage({
@@ -232,6 +219,22 @@ describe("ComparePage — UAT-03 strategy-only charts regression", () => {
       for (const it of callItems(other)) {
         expect(it).not.toHaveProperty("headlineCoversFrom");
         expect(it).not.toHaveProperty("headlineCoversFromStatus");
+      }
+    }
+    // Phase 190 plan 07: the alias INPUTS of the generation choice never reach a
+    // client component, the table included (the table is the third consumer).
+    for (const consumer of [CompareEquityOverlay, CompareCorrelationMatrix, CompareTable]) {
+      for (const it of callItems(consumer)) {
+        const analytics = (it.analytics ?? {}) as Record<string, unknown>;
+        for (const key of [
+          "headline_since",
+          "last_success_computed_at",
+          "last_success_cumulative_method",
+          "last_success_twr_chain_broken",
+          "last_success_headline_since",
+        ]) {
+          expect(analytics, key).not.toHaveProperty(key);
+        }
       }
     }
   });

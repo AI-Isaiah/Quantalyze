@@ -264,15 +264,34 @@ function rowChipStatus(s: StrategyWithAnalytics): string | null {
 
 // STALE-01 — may this row occupy a POSITION in the ranking, i.e. carry a `#n`?
 //
-// Same predicate, same helper, as the one deciding whether its metric cells
-// hold values (`shapeRowAnalytics` in lib/queries.ts) and whether it enters a
-// percentile cohort (`isRankableAnalyticsRow`, Phase 159 / RANK-01). A row
-// whose figures we may not show cannot be ordered by those figures either —
-// otherwise the ordinal survives as a standalone claim ("this is the 3rd best
-// strategy here") sourced from numbers the page just refused to print, which
-// is the more authoritative half of the lie, not the lesser one.
+// The ONE displayed-row decision. The row that SHOWS its figures, the row that
+// carries a `#n`, the row that sorts by those figures, the row that may claim a
+// sync recency and the row that is spared the owner's Syncing / No data chip are
+// the same row, decided here once (the hoist's rule: a second inline copy is the
+// drift). A row whose figures we may not show cannot be ordered by those figures
+// either, otherwise the ordinal survives as a standalone claim ("this is the 3rd
+// best strategy here") sourced from numbers the page just refused to print.
+//
+// Two ways in. A terminal-success row (`isComputedAnalytics`, the helper the
+// percentile cohort gate also builds on, Phase 159 / RANK-01). And, since phase
+// 190 (D-02), a row RE-COMPUTING over a stored success result: the server-side
+// shaper (`shapeRowAnalytics`, lib/queries.ts) decided that with the factsheet's
+// own evidence rule and flagged the shaped row `analytics_updating`; this reads
+// that flag and never re-derives the evidence.
+//
+// DELIBERATE SPLIT (phase 190 OQ-2 default, no migration): STALE-01 used to
+// keep "shown figures and #n" and "percentile cohort" in lockstep. During a
+// re-run they part. The row shows its last computed figures and keeps its `#n`
+// (a sort position over the figures it shows), but it takes no part in a
+// percentile cohort until its run succeeds: `getPercentiles` and
+// `getOwnRowPercentiles` stay on `isRankableAnalyticsRow` (terminal success
+// only), so the row carries no percentile suffix.
+function isDisplayedRow(s: StrategyWithAnalytics): boolean {
+  return isComputedAnalytics(rowChipStatus(s)) || s.analytics.analytics_updating === true;
+}
+
 function isRankedRow(s: StrategyWithAnalytics): boolean {
-  return isComputedAnalytics(rowChipStatus(s));
+  return isDisplayedRow(s);
 }
 
 // Every column is always rendered, at every container width (2026-10-13 Phase
@@ -1304,7 +1323,7 @@ export function StrategyTable({
                       chipStatus,
                       s.created_at ?? null,
                     );
-                    const hasComputedAnalytics = isComputedAnalytics(chipStatus);
+                    const hasComputedAnalytics = isDisplayedRow(s);
                     // Phase 162 / HONEST-03, UI-SPEC C-6 — an `is_example` row
                     // NEVER claims a sync recency, whatever its status. The
                     // "Example" chip already carries the row's identity, and a

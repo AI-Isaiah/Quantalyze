@@ -5,7 +5,7 @@ import { MTM_DAILY_RETURNS_SERIES_KIND, SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND }
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { BASIS_KPI_MAP, hasBasisHeadline } from "./basis-metrics";
-import { headlineVerdict, readHeadlineBasis, storedCashHeadlineGate } from "./headline-basis";
+import { headlineVerdict, isStoredResultReadable, readHeadlineBasis, storedCashHeadlineGate } from "./headline-basis";
 import type { StoredCashHeadlineGate } from "./headline-basis";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
@@ -698,7 +698,9 @@ export async function readHeadlineCoversFrom(admin: SupabaseClient, strategyId: 
  *
  * Two load-bearing invariants (falsifiable in composite-read-path.test.ts):
  *   - F-4 (T-102-01): `available` is gated on `computationStatus ∈ {complete,
- *     complete_with_warnings}` — the EXACT terminal-success literals the runner
+ *     complete_with_warnings}` or, since phase 190, on a recompute over a stored
+ *     success result (`recomputeOverStoredResult`, the resolve stage's one
+ *     admission decision, see `isStoredResultReadable`) — the EXACT terminal-success literals the runner
  *     writes (the `csv_status` assignment in
  *     `analytics_runner.run_csv_strategy_analytics`; the same pair the PDF route
  *     admits — grep `complete_with_warnings` in
@@ -725,6 +727,7 @@ export function singleKeyBasisOpts(
   computationStatus: unknown,
   mtmSeries?: ParsedMtmSeries | null,
   smoothedSeries?: ParsedMtmSeries | null,
+  recomputeOverStoredResult = false,
 ): Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries"> {
   // Extract a non-null non-array by-basis object under `key` from the untrusted jsonb.
   const extractBasisObject = (key: string): Record<string, number | null> | undefined => {
@@ -758,7 +761,7 @@ export function singleKeyBasisOpts(
   //
   // 4. F-4 DONE gate — exact runner terminal-success literals (no third success
   //    literal exists; verified against analytics_runner.py).
-  const done = isComputedAnalytics(computationStatus as string | null | undefined);
+  const done = isStoredResultReadable(computationStatus, recomputeOverStoredResult);
   // 5. Available iff DONE and the object carries a trustworthy headline. A degraded
   //    row still reports "complete" (Phase 101-02), so BOTH gates apply per basis.
   const available = done && hasBasisHeadline(mtm);
@@ -878,7 +881,23 @@ export async function readSingleKeyBasisOpts(
   computationStatus: unknown,
   persistedRow?: Record<string, unknown> | null,
   returnsDenominatorConfig?: unknown,
-  options: { captureDefects?: boolean; cashConventions?: Record<string, unknown> | null } = {},
+  options: {
+    captureDefects?: boolean;
+    cashConventions?: Record<string, unknown> | null;
+    /**
+     * Phase 190 (SC-3): the resolve stage's ONE admission decision
+     * (`analyticsUpdating`), threaded to every inner gate below so none reads the
+     * raw status on its own. Default false: every other caller is unchanged.
+     */
+    recomputeOverStoredResult?: boolean;
+    /**
+     * Phase 190 review round 2 (SFH M3): the row's MTM and smoothed numbers belong
+     * to a derive that is in flight although the status is held at a terminal
+     * success (the flags are the last success's snapshot). Closes the MTM and
+     * smoothed basis exactly as `recomputeOverStoredResult` does, and nothing else.
+     */
+    basisInFlight?: boolean;
+  } = {},
 ): Promise<
   Pick<
     BuildFactsheetOpts,
@@ -901,15 +920,29 @@ export async function readSingleKeyBasisOpts(
   // are independent; fire them concurrently (each still gated so a skipped read stays
   // skipped — resolves to null without a roundtrip). resolveAdmin memoizes
   // synchronously, so a shared client is created at most once.
-  const [mtmSeries, smoothedSeries] = await Promise.all([
-    shouldReadSingleKeyMtmSeries(metricsJsonByBasis, computationStatus)
-      ? readMtmSeries(resolveAdmin(), strategyId)
-      : Promise.resolve(null),
-    shouldReadSingleKeySmoothedSeries(metricsJsonByBasis, computationStatus)
-      ? readSmoothedSeries(resolveAdmin(), strategyId)
-      : Promise.resolve(null),
-  ]);
-  const basisOpts = singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
+  const recompute = options.recomputeOverStoredResult ?? false;
+  // Phase 190 review round 1 (WR-01) and round 2 (WR-03): only the stored CASH
+  // headline (the `storedCashHeadlineGate` below) may be read while a re-run is
+  // in flight. The MTM and smoothed scalars, series rows and toggles are written
+  // by the running derive hop before the compute hop's success write, so they
+  // belong to the in-flight run, not the last completed one. Building the gates
+  // closed would still render a disabled control with copy that is false of the
+  // strategy, so while in flight no gate is built and no series is read: the
+  // control does not render and nothing about MTM is claimed.
+  const basisInFlight = recompute || (options.basisInFlight ?? false);
+  const [mtmSeries, smoothedSeries] = basisInFlight
+    ? [null, null]
+    : await Promise.all([
+        shouldReadSingleKeyMtmSeries(metricsJsonByBasis, computationStatus)
+          ? readMtmSeries(resolveAdmin(), strategyId)
+          : Promise.resolve(null),
+        shouldReadSingleKeySmoothedSeries(metricsJsonByBasis, computationStatus)
+          ? readSmoothedSeries(resolveAdmin(), strategyId)
+          : Promise.resolve(null),
+      ]);
+  const basisOpts = basisInFlight
+    ? {}
+    : singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
   // Phase 169.1 (D-83, D-30): the method and day basis come from the ONE resolver
   // the composite path uses, the frozen echo before the live config. Each is added
   // only when it is not the default (D-83 (b)), so a default row's opts are unchanged.
@@ -939,7 +972,7 @@ export async function readSingleKeyBasisOpts(
   // SFH-R2-01: the structural gate is decided ONCE, by the helper the OG card also
   // asks (`storedCashHeadlineGate`), and its answer feeds both the headline built
   // from the row and the Withheld verdict below.
-  const gate = storedCashHeadlineGate(persistedRow, metricsJsonByBasis, computationStatus);
+  const gate = storedCashHeadlineGate(persistedRow, metricsJsonByBasis, computationStatus, recompute);
   const cashHeadline = persistedCashHeadline(
     strategyId,
     persistedRow,
@@ -1252,8 +1285,9 @@ function persistedCashHeadline(
 export function shouldReadSingleKeyMtmSeries(
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
+  recomputeOverStoredResult = false,
 ): boolean {
-  const done = isComputedAnalytics(computationStatus as string | null | undefined);
+  const done = isStoredResultReadable(computationStatus, recomputeOverStoredResult);
   if (!done) return false;
   if (
     metricsJsonByBasis === null ||
@@ -1277,8 +1311,9 @@ export function shouldReadSingleKeyMtmSeries(
 export function shouldReadSingleKeySmoothedSeries(
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
+  recomputeOverStoredResult = false,
 ): boolean {
-  const done = isComputedAnalytics(computationStatus as string | null | undefined);
+  const done = isStoredResultReadable(computationStatus, recomputeOverStoredResult);
   if (!done) return false;
   if (
     metricsJsonByBasis === null ||

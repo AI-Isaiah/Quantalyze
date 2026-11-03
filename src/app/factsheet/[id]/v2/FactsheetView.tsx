@@ -144,6 +144,7 @@ import { venueLabel as venueDisplayName } from "@/lib/display-labels";
 import { resolvePalette, paletteToCssVars } from "./palette";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { CHART_CONFIGS, applyChartUnit } from "./chart-configs";
+import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
 
 /**
  * Editorial layout — refined-minimalism inside the institutional/utilitarian
@@ -1304,6 +1305,22 @@ function FactsheetHeader({
           <div>
             <FreshnessChip computedAt={payload.computedAt} seriesDates={payload.dates} />
             <SeriesRecencyLine seriesDates={payload.dates} />
+            {/* Phase 190 D-03 / D-06 (FQ190-UPDATING): a re-run is in progress
+                over a stored result, so the figures below are from the last
+                completed computation. It sits after the recency line so the
+                chip + recency pair stays adjacent (F-1/F-4 above), and before
+                the trade-fetch line. No live region: it is server-rendered and
+                present at load, like OwnerUnpublishedNotice, so there is
+                nothing to announce. Renders from the payload alone, so every
+                lane (public, owner, share link, discovery) shows it. */}
+            {payload.analyticsUpdating === true && (
+              <p
+                data-testid="factsheet-analytics-updating"
+                className="mt-1 text-caption text-text-muted"
+              >
+                {ANALYTICS_UPDATING_LINE}
+              </p>
+            )}
             {/* Phase 167.1.2.2.2 (TRADESYNC, D-06/D-10): the last successful
                 trade fetch, a sentence of its own directly after the series
                 line, shown to EVERY viewer (anon on a published strategy,

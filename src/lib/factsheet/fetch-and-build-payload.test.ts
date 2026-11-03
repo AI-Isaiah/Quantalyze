@@ -1332,3 +1332,255 @@ describe("167.2.1.1.1 plan 10 - marks_since on the analytics row becomes payload
     expect(src).not.toContain("api_key_nav_marks");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 190 plan 05 (SC-3, SC-4, SC-6) — every inner gate follows plan 03's one
+// admission decision, on the build and on the probe alike.
+// ---------------------------------------------------------------------------
+
+describe("phase 190 plan 05 — a re-run over a stored success result builds from the stored figures", () => {
+  /**
+   * A stored cumulative return clearly different from what `points(30)` compounds
+   * to (a few tenths of a percent), so a green assertion can only come from the
+   * stored-headline overlay, never from a TypeScript recompute of the series.
+   */
+  const STORED = { ...FULL_CASH, cumulative_return: 0.777 };
+  const MARKER = { cumulative_method: "geometric" };
+  const MTM_FULL = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+
+  async function buildAndProbe(row: Row | null, csv: { date: string; daily_return: number }[] = []) {
+    seed(row, csv);
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    seed(row, csv);
+    const probe = await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+    return { payload, probe };
+  }
+
+  it.each(["computing", "pending"])(
+    "SC-3: a single-key `%s` row overlays the stored seven scalars, not a recompute, and the probe agrees",
+    async (status) => {
+      const { payload, probe } = await buildAndProbe(
+        single({ computation_status: status, daily_returns: thirty, ...STORED, data_quality_flags: MARKER }),
+      );
+      expect(payload).not.toBeNull();
+      expect(payload!.analyticsUpdating).toBe(true);
+      expect(payload!.strategyMetrics.cum_ret).toBe(0.777);
+      expect(probe).toEqual({ buildable: true });
+    },
+  );
+
+  // Review round 1 (CR-01). A composite's curve is read from csv_daily_returns,
+  // which the in-flight stitch rewrites BEFORE it writes the headline, so a
+  // recompute over a stored composite result would draw the new run's curve under
+  // the last run's headline and date. It falls back to today's queued state, on
+  // the build and the probe alike, and the csv table is never read.
+  it.each(["computing", "pending"])(
+    "CR-01: a composite `%s` row over a stored success result is withheld (not_computed) on both lanes, and reads no csv series",
+    async (status) => {
+      const { payload, probe } = await buildAndProbe(
+        composite({
+          computation_status: status,
+          returns_series: wealthCurve(31),
+          cumulative_return: 0.05,
+          metrics_json_by_basis: { cash_settlement: FULL_CASH },
+          data_quality_flags: { composite: true, ...MARKER },
+        }),
+        csvRows(30),
+      );
+      expect(payload).toBeNull();
+      expect(probe).toEqual({ buildable: false, reason: "not_computed" });
+      expect(fake.tablesSeen).not.toContain("csv_daily_returns");
+    },
+  );
+
+  it("SC-4: a `computing` row with series and scalars but flags lacking the success marker stays not_computed on both lanes", async () => {
+    const { payload, probe } = await buildAndProbe(
+      single({ computation_status: "computing", daily_returns: thirty, ...STORED, data_quality_flags: { csv_source: true } }),
+    );
+    expect(payload).toBeNull();
+    expect(probe).toMatchObject({ buildable: false, reason: "not_computed" });
+  });
+
+  // D-04 parity. Plan 03 withholds this row in the shared resolve stage before
+  // any inner gate runs, so the probe must answer exactly what the build does.
+  // Green on arrival: it pins plan 03's rule where this plan's gates read it.
+  it("D-04: a terminal-success row left with an unbound derive prestamp is not_computed on the probe and the build, with no analyticsFailed", async () => {
+    const { payload, probe } = await buildAndProbe(
+      single({
+        computation_status: "complete_with_warnings",
+        daily_returns: thirty,
+        ...STORED,
+        data_quality_flags: { csv_source: true, last_success_snapshot: null },
+      }),
+    );
+    expect(payload).toBeNull();
+    expect(probe).toEqual({ buildable: false, reason: "not_computed" });
+    expect("analyticsFailed" in probe).toBe(false);
+  });
+
+  it("D-04: the same row at rest, its live flags carrying the marker, is buildable on both lanes", async () => {
+    const { payload, probe } = await buildAndProbe(
+      single({
+        computation_status: "complete_with_warnings",
+        daily_returns: thirty,
+        ...STORED,
+        data_quality_flags: { csv_source: true, ...MARKER, small_base_measured: true },
+      }),
+    );
+    expect(payload).not.toBeNull();
+    expect(payload!.analyticsUpdating).toBe(false);
+    expect(probe).toEqual({ buildable: true });
+  });
+
+  // SC-6. The derive hop writes metrics_json_by_basis, the MTM and smoothed
+  // series rows and mtm_gated_reason in ONE hop, so the basis gates must read
+  // that generation together, while the cash headline's flags stay the last
+  // success's (the snapshot). Reading the snapshot's mtm_gated_reason beside the
+  // live by-basis object would pair a reason from one run with a gate from another.
+  const SNAP_AT = "2024-03-01T00:00:00Z";
+
+  // Review round 2 (WR-03): while a re-run is in flight no MTM or smoothed gate is
+  // built, so the control does not render and neither the live derive's degrade
+  // reason nor a false "unavailable" line is claimed. The cash headline is kept.
+  it("WR-03: snapshot flags give the cash headline, and the in-flight derive's mtm_gated_reason builds no MTM gate", async () => {
+    const { payload } = await buildAndProbe(
+      single({
+        computation_status: "computing",
+        daily_returns: thirty,
+        computed_at: SNAP_AT,
+        ...STORED,
+        metrics_json_by_basis: {},
+        data_quality_flags: {
+          csv_source: true,
+          mtm_gated_reason: "X",
+          last_success_snapshot: { computed_at: SNAP_AT, flags: MARKER },
+        },
+      }),
+    );
+    expect(payload).not.toBeNull();
+    expect(payload!.analyticsUpdating).toBe(true);
+    expect(payload!.strategyMetrics.cum_ret).toBe(0.777);
+    expect(payload!.mtmGate).toBeUndefined();
+    expect(payload!.smoothedGate).toBeUndefined();
+  });
+
+  it("SC-6 (mirror): a live trustworthy MTM object is not shown while the run is in flight, and the snapshot's stale mtm_gated_reason is never used", async () => {
+    const { payload } = await buildAndProbe(
+      single({
+        computation_status: "computing",
+        daily_returns: thirty,
+        computed_at: SNAP_AT,
+        ...STORED,
+        metrics_json_by_basis: { mark_to_market: MTM_FULL, smoothed_mtm: MTM_FULL },
+        data_quality_flags: {
+          csv_source: true,
+          last_success_snapshot: { computed_at: SNAP_AT, flags: { ...MARKER, mtm_gated_reason: "Y" } },
+        },
+      }),
+    );
+    expect(payload).not.toBeNull();
+    // Review round 1 (WR-01), round 2 (WR-03): the MTM and smoothed objects are the
+    // in-flight derive's, so while a re-run is in flight no gate is built at all.
+    expect(payload!.mtmGate).toBeUndefined();
+    expect(payload!.smoothedGate).toBeUndefined();
+    expect(payload!.metricsByBasis?.mark_to_market).toBeUndefined();
+    expect(payload!.metricsByBasis?.smoothed_mtm).toBeUndefined();
+  });
+
+  it("WR-01: a single-key `computing` row never reads the cash_settlement conventions echo or a basis series", async () => {
+    fake.analyticsSelects = [];
+    await buildAndProbe(
+      single({
+        computation_status: "computing",
+        daily_returns: thirty,
+        ...STORED,
+        metrics_json_by_basis: { mark_to_market: MTM_FULL, smoothed_mtm: MTM_FULL },
+        data_quality_flags: MARKER,
+      }),
+    );
+    expect(fake.analyticsSelects).toEqual([]);
+    expect(fake.tablesSeen).not.toContain("strategy_analytics_series");
+  });
+
+  it("WR-03: a `computing` options row whose stored by-basis object carries mark_to_market and smoothed_mtm yields no mtmGate and no smoothedGate", async () => {
+    const { payload } = await buildAndProbe(
+      single({
+        computation_status: "computing",
+        daily_returns: thirty,
+        ...STORED,
+        metrics_json_by_basis: { mark_to_market: MTM_FULL, smoothed_mtm: MTM_FULL },
+        data_quality_flags: { ...MARKER, mtm_gated_reason: "Z" },
+      }),
+    );
+    expect(payload!.mtmGate).toBeUndefined();
+    expect(payload!.smoothedGate).toBeUndefined();
+  });
+
+  // Review round 2 (SFH M3). The held-through-derive row: a terminal-success status
+  // held while the derive has replaced the live flags with a prestamp whose snapshot
+  // is bound. `analyticsUpdating` is false and D-04 withholds nothing, yet the live
+  // by-basis object and the rewritten series rows are the in-flight run's.
+  it("SFH M3: a held terminal-success row with a bound snapshot builds no MTM or smoothed gate and reads no basis series", async () => {
+    fake.analyticsSelects = [];
+    const { payload } = await buildAndProbe(
+      single({
+        computation_status: "complete_with_warnings",
+        daily_returns: thirty,
+        computed_at: SNAP_AT,
+        ...STORED,
+        metrics_json_by_basis: { mark_to_market: MTM_FULL, smoothed_mtm: MTM_FULL },
+        data_quality_flags: {
+          csv_source: true,
+          mtm_gated_reason: "Y",
+          last_success_snapshot: { computed_at: SNAP_AT, flags: MARKER },
+        },
+      }),
+    );
+    expect(payload).not.toBeNull();
+    expect(payload!.analyticsUpdating).toBe(false);
+    expect(payload!.strategyMetrics.cum_ret).toBe(0.777);
+    expect(payload!.mtmGate).toBeUndefined();
+    expect(payload!.smoothedGate).toBeUndefined();
+    expect(payload!.metricsByBasis?.mark_to_market).toBeUndefined();
+    // Only the cash conventions echo may be read; no basis series row is.
+    expect(fake.analyticsSelects.filter((sel) => sel !== "conventions:payload->conventions")).toEqual([]);
+  });
+
+  // Review round 2 (SFH M2). An updating row skips the conventions echo, so its day
+  // basis falls to the live config with no degrade mark; the public cache must not
+  // store that payload.
+  it("SFH M2: an updating row's build is marked conventionsDegraded, and a row at rest is not", async () => {
+    seed(single({ computation_status: "computing", daily_returns: thirty, ...STORED, data_quality_flags: MARKER }));
+    expect(await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility)).toMatchObject({
+      reason: null,
+      conventionsDegraded: true,
+    });
+    seed(single({ computation_status: "complete", daily_returns: thirty, ...STORED, data_quality_flags: MARKER }));
+    const rest = await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility);
+    expect(rest).toMatchObject({ reason: null });
+    expect("conventionsDegraded" in rest).toBe(false);
+  });
+
+  // Review round 3 (SFH M1). A held terminal-success row with a bound snapshot is
+  // inside the derive-to-success window too: the in-flight derive has rewritten the
+  // conventions echo, so it is not read, and the build falls to the live config with
+  // no other mark, which the public cache must not store.
+  it("SFH M1: a held terminal-success row with a bound snapshot reads no conventions echo and is marked conventionsDegraded", async () => {
+    fake.analyticsSelects = [];
+    seed(
+      single({
+        computation_status: "complete_with_warnings",
+        daily_returns: thirty,
+        computed_at: SNAP_AT,
+        ...STORED,
+        data_quality_flags: {
+          csv_source: true,
+          last_success_snapshot: { computed_at: SNAP_AT, flags: MARKER },
+        },
+      }),
+    );
+    const built = await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility);
+    expect(built).toMatchObject({ reason: null, conventionsDegraded: true });
+    expect(fake.analyticsSelects).not.toContain("conventions:payload->conventions");
+  });
+});

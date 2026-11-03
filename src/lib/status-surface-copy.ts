@@ -616,6 +616,24 @@ export const SHARE_CARD_COPY = {
 export const KCS10_PUBLIC_SENTENCE =
   "The detailed factsheet for this strategy is not available yet.";
 
+// ── Phase 190 — the factsheet updating line ───────────────────────────────
+
+/**
+ * The one quiet line in the factsheet header while a re-run is in progress
+ * over a stored result (phase 190 D-03: it sits after the recency line, so
+ * the chip and recency pair stays intact). The wording is the founder's
+ * decision D-06 (2026-11-03); UI-SPEC id FQ190-UPDATING.
+ *
+ * "the latest", not "new": a re-run can recompute unchanged inputs, so
+ * "new data" would claim a change nobody measured (SC-6 applied to copy).
+ * No trailing ellipsis: in this codebase the ellipsis marks in-flight button
+ * labels that resolve on screen, and this line does not. No date or
+ * duration: the FreshnessChip beside it already shows the last good
+ * computed_at, and promising a time is exactly what SC-6 forbids.
+ */
+export const ANALYTICS_UPDATING_LINE =
+  "Updating with the latest data. These figures are from the last completed computation.";
+
 // ── Review-fix round 1 (2026-09-24) — /strategies read failures ───────────
 
 /**

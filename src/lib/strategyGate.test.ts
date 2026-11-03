@@ -41,6 +41,9 @@ const BASE: StrategyGateInput = {
   // Never examined. The trade-branch cases below do not depend on it, and the
   // honest default for a strategy nobody has stamped is absence.
   seriesCompleteness: null,
+  // Phase 190 D-02: the honest default is "no stored result evidence", which is
+  // today's behaviour (pending and computing refuse).
+  hasStoredResult: false,
 };
 
 describe("checkStrategyGate", () => {
@@ -621,6 +624,87 @@ describe("checkStrategyGate", () => {
   it("rejects when analytics are still computing", () => {
     const result = checkStrategyGate({ ...BASE, computationStatus: "computing" });
     expect(result.code).toBe("ANALYTICS_COMPUTING");
+  });
+
+  // --- Phase 190 D-02: a re-run over a stored success result ---------------
+  // WHY: a re-sync flips a computed strategy's status to pending/computing while
+  // its last computed figures are still stored and still displayed. Refusing the
+  // gate during that window would unpublish a strategy whose numbers exist. A
+  // run that FAILS keeps today's rule, and so does a strategy that never had a
+  // result.
+
+  it("D-02: pending with a stored result PASSES (a re-run must not unpublish computed figures)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      computationStatus: "pending",
+      hasStoredResult: true,
+    });
+    expect(result).toEqual({ passed: true, code: null, reason: null, detail: null });
+  });
+
+  it("D-02: computing with a stored result PASSES", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      computationStatus: "computing",
+      hasStoredResult: true,
+    });
+    expect(result).toEqual({ passed: true, code: null, reason: null, detail: null });
+  });
+
+  it("D-02: pending and computing WITHOUT a stored result keep refusing (first run is not a re-run)", () => {
+    expect(
+      checkStrategyGate({ ...BASE, computationStatus: "pending", hasStoredResult: false }).code,
+    ).toBe("ANALYTICS_PENDING");
+    expect(
+      checkStrategyGate({ ...BASE, computationStatus: "computing", hasStoredResult: false }).code,
+    ).toBe("ANALYTICS_COMPUTING");
+  });
+
+  it("D-02: failed refuses whatever the evidence (the existing failed-status rules apply as today)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      computationStatus: "failed",
+      computationError: "boom",
+      hasStoredResult: true,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("ANALYTICS_FAILED");
+  });
+
+  it("D-02: a missing row still refuses with ANALYTICS_MISSING even with the evidence flag set", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      computationStatus: null,
+      hasStoredResult: true,
+    });
+    expect(result.code).toBe("ANALYTICS_MISSING");
+  });
+
+  it("D-02: complete with no evidence still passes (terminal success never needed the evidence)", () => {
+    expect(
+      checkStrategyGate({ ...BASE, computationStatus: "complete", hasStoredResult: false })
+        .passed,
+    ).toBe(true);
+  });
+
+  it("D-02: a re-run row that fails an earlier gate returns that earlier code (data-source arms come first)", () => {
+    const tooFew = checkStrategyGate({
+      ...BASE,
+      tradeCount: 2,
+      computationStatus: "computing",
+      hasStoredResult: true,
+    });
+    expect(tooFew.code).toBe("INSUFFICIENT_TRADES");
+    const noSource = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      computationStatus: "pending",
+      hasStoredResult: true,
+    });
+    expect(noSource.code).toBe("NO_DATA_SOURCE");
   });
 
   it("rejects and surfaces the error detail when analytics failed", () => {

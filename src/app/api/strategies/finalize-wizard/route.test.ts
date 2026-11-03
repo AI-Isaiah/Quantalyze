@@ -73,6 +73,11 @@ const STATE = vi.hoisted(() => ({
   strategyRow: null as {
     api_key_id: string | null;
     wizard_session_id?: string | null;
+    // Phase 190 / SC-2 — the draft's asset_class, read so finalize can tell
+    // whether its own write CHANGED the annualization clock. OPTIONAL: every
+    // pre-existing case omits it (reads as absent, so the write counts as a
+    // change and the re-run is queued, exactly as before the phase).
+    asset_class?: string | null;
   } | null,
   strategyError: null as { message: string } | null,
   // C-0119/H-0329 — capture user-scoped strategies SELECT filters so we
@@ -185,6 +190,33 @@ const STATE = vi.hoisted(() => ({
   // rather than only inside the loop. `null` means the route issued the read
   // with no `.limit()` at all, which is the pre-cap (unbounded) shape.
   strategyKeysListLimit: null as number | null,
+  // Phase 190 / SC-2 — the two reads `decideFinalizeRerun` issues in after().
+  // `analyticsStatusRow` answers strategy_analytics.select("computation_status")
+  // (null = no row); `chainJobs` answers the compute_jobs in-flight read. Both
+  // have a forced-error twin so the fail-toward-queueing branch is reachable.
+  analyticsStatusRow: null as {
+    computation_status: string | null;
+    computed_at?: string | null;
+  } | null,
+  // The inputs' creation stamps the "provably current" check compares with
+  // computed_at: the linked key (single-key) and the composite members.
+  apiKeyCreatedAt: "2026-11-01T00:00:00Z" as string | null,
+  memberCreatedAts: ["2026-11-01T00:00:00Z"] as string[],
+  // The latest done stitch_composite job's created_at (the START of the run that
+  // produced the stored composite result); null = no such job.
+  stitchJobCreatedAt: "2026-11-01T12:00:00Z" as string | null,
+  // The annualization the stored result's cash_settlement echo carries
+  // (365 crypto / 252 traditional); null = no echo stored.
+  storedPeriodsPerYear: 365 as number | null,
+  analyticsStatusReadError: null as { message: string } | null,
+  chainJobs: [] as Array<Record<string, unknown>>,
+  chainJobsReadError: null as { message: string } | null,
+  // The `.in(column, values)` calls the jobs read carried, so a test can assert
+  // WHICH kinds the in-flight filter named (composite adds stitch_composite).
+  chainJobsInArgs: [] as Array<{ column: string; values: unknown }>,
+  // Phase 190 / SC-2 — every logAuditEventAsUser event, so a skipped composite
+  // run can be shown to leave no sync.start behind.
+  auditEvents: [] as Array<{ action: string }>,
   // F3 / F5(b) — capture strategy_analytics upserts the after() fail-closed
   // branch stamps (terminal 'failed' so the wizard poller reaches a gate; the
   // reconcile cron does NOT re-drive composites) so tests can assert the
@@ -327,6 +359,11 @@ vi.mock("@/lib/supabase/admin", () => ({
           // after() last_sync_at touch uses update().eq().
           select: () => ({
             eq: () => ({
+              // Phase 190 / SC-2 — decideFinalizeRerun's input-stamp read.
+              maybeSingle: async () => ({
+                data: { created_at: STATE.apiKeyCreatedAt },
+                error: null,
+              }),
               single: async () => ({
                 data: STATE.adminApiKeysSelectError
                   ? null
@@ -404,7 +441,19 @@ vi.mock("@/lib/supabase/admin", () => ({
               data: null,
             }).then(onFulfilled),
         };
-        return { select: () => chain };
+        return {
+          // Phase 190 / SC-2 — select("created_at") is decideFinalizeRerun's
+          // member-stamp read; every other projection keeps the count/list chain.
+          select: (columns: string) =>
+            columns === "created_at"
+              ? {
+                  eq: async () => ({
+                    data: STATE.memberCreatedAts.map((created_at) => ({ created_at })),
+                    error: null,
+                  }),
+                }
+              : chain,
+        };
       }
       if (table === "strategy_analytics") {
         // F3 / F5(b) — the fail-closed branch stamps a terminal 'failed' row via
@@ -414,6 +463,35 @@ vi.mock("@/lib/supabase/admin", () => ({
             STATE.strategyAnalyticsUpserts.push(patch);
             return { data: null, error: null };
           },
+          // Phase 190 / SC-2 — decideFinalizeRerun's status read.
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: STATE.analyticsStatusReadError
+                  ? null
+                  : STATE.analyticsStatusRow,
+                error: STATE.analyticsStatusReadError,
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === "strategy_analytics_series") {
+        // Review round 1 (WR-02): decideFinalizeRerun's stored-annualization read.
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data:
+                    STATE.storedPeriodsPerYear === null
+                      ? null
+                      : { conventions: { periods_per_year: STATE.storedPeriodsPerYear } },
+                  error: null,
+                }),
+              }),
+            }),
+          }),
         };
       }
       if (table === "compute_jobs") {
@@ -421,12 +499,56 @@ vi.mock("@/lib/supabase/admin", () => ({
         // the retraction's read throws and lands in its own best-effort catch.
         return {
           select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: STATE.computeJobsReadError ? null : STATE.computeJobsRow,
-                error: STATE.computeJobsReadError,
-              }),
-            }),
+            eq: () => {
+              // Phase 190 / SC-2 — `.in()` chains are decideFinalizeRerun's
+              // in-flight read: select().eq(strategy).in(kind).in(status),
+              // awaited at the last link. `.maybeSingle()` stays the marker
+              // retraction's single-row read.
+              const jobsResult = () => ({
+                data: STATE.chainJobsReadError ? null : STATE.chainJobs,
+                error: STATE.chainJobsReadError,
+              });
+              const inChain: {
+                in: (column: string, values: unknown) => typeof inChain;
+                then: (onFulfilled: (v: unknown) => unknown) => Promise<unknown>;
+              } = {
+                in: (column, values) => {
+                  STATE.chainJobsInArgs.push({ column, values });
+                  return inChain;
+                },
+                then: (onFulfilled) =>
+                  Promise.resolve(jobsResult()).then(onFulfilled),
+              };
+              // Review round 1 (CR-02): select().eq(strategy).eq(kind).eq(status)
+              // .order().limit().maybeSingle() is the producing-stitch read.
+              const stitchChain: {
+                eq: () => typeof stitchChain;
+                order: () => typeof stitchChain;
+                limit: () => typeof stitchChain;
+                maybeSingle: () => Promise<unknown>;
+              } = {
+                eq: () => stitchChain,
+                order: () => stitchChain,
+                limit: () => stitchChain,
+                maybeSingle: async () => ({
+                  data: STATE.stitchJobCreatedAt
+                    ? { created_at: STATE.stitchJobCreatedAt }
+                    : null,
+                  error: null,
+                }),
+              };
+              return {
+                eq: stitchChain.eq,
+                order: stitchChain.order,
+                limit: stitchChain.limit,
+                maybeSingle: async () => ({
+                  data: STATE.computeJobsReadError ? null : STATE.computeJobsRow,
+                  error: STATE.computeJobsReadError,
+                }),
+                in: inChain.in,
+                then: inChain.then,
+              };
+            },
           }),
           update: (patch: Record<string, unknown>) => ({
             eq: (col: string, val: unknown) => {
@@ -453,6 +575,21 @@ vi.mock("@/lib/supabase/admin", () => ({
     },
   }),
 }));
+
+vi.mock("@/lib/audit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/audit")>();
+  return {
+    ...actual,
+    // Record, then run the real function: pre-existing cases keep the exact
+    // behaviour they had before the recorder existed.
+    logAuditEventAsUser: (
+      ...args: Parameters<typeof actual.logAuditEventAsUser>
+    ) => {
+      STATE.auditEvents.push({ action: args[2].action });
+      return actual.logAuditEventAsUser(...args);
+    },
+  };
+});
 
 vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: (
@@ -568,6 +705,12 @@ vi.mock("next/server", async () => {
   };
 });
 
+// Phase 190 / SC-2 — a finished computation that postdates the default input
+// stamps (key and members created 2026-11-01).
+const COMPUTED_ROW = {
+  computation_status: "complete",
+  computed_at: "2026-11-02T00:00:00Z",
+};
 const STRATEGY_ID = "11111111-1111-4111-8111-111111111111";
 const API_KEY_ID = "22222222-2222-4222-8222-222222222222";
 const CATEGORY_ID = "33333333-3333-4333-8333-333333333333";
@@ -628,6 +771,16 @@ beforeEach(async () => {
   STATE.strategyKeysListError = null;
   STATE.strategyKeysListLimit = null;
   STATE.strategyAnalyticsUpserts = [];
+  STATE.analyticsStatusRow = null;
+  STATE.analyticsStatusReadError = null;
+  STATE.apiKeyCreatedAt = "2026-11-01T00:00:00Z";
+  STATE.memberCreatedAts = ["2026-11-01T00:00:00Z"];
+  STATE.stitchJobCreatedAt = "2026-11-01T12:00:00Z";
+  STATE.storedPeriodsPerYear = 365;
+  STATE.chainJobs = [];
+  STATE.chainJobsReadError = null;
+  STATE.chainJobsInArgs = [];
+  STATE.auditEvents = [];
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
@@ -3453,6 +3606,100 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
     fetchSpy.mockRestore();
   });
 
+  // Phase 190 / SC-2. WHY this test exists: on 2026-11-03 the founder finished
+  // the wizard for a strategy the SyncPreviewStep chain had ALREADY computed;
+  // finalize then queued a second sync_trades that re-ran the whole chain and
+  // put the complete row back to pending. enqueue_compute_job dedupes only onto
+  // an in-flight job of the SAME kind, so nothing absorbed it. A test that
+  // passes whether or not finalize queues here would not protect that sequence.
+  it("SC-2 RED: a contribution finalize over a computed strategy queues no sync_trades re-run", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    // The draft already carries the value finalize will write ("crypto" for the
+    // attested okx venue), so finalize changes no annualization clock.
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "crypto" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusRow = COMPUTED_ROW;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(
+      STATE.adminRpcCalls.find(
+        (c) =>
+          c.name === "enqueue_compute_job" &&
+          (c.args as { p_kind?: string }).p_kind === "sync_trades",
+      ),
+    ).toBeUndefined();
+    // The after() log says why (SC-2).
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining("no re-run queued"),
+    );
+    fetchSpy.mockRestore();
+  });
+
+  // Review round 1 (WR-02). The first finalize committed asset_class "crypto" and
+  // was then rejected; on the retry the draft already holds "crypto", so the
+  // request-local change flag is false. The stored result was annualized on the
+  // traditional clock (252), so the run is still needed.
+  it("WR-02: a retry whose draft already holds the new asset_class still queues sync_trades when the stored result used the other clock", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "crypto" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusRow = COMPUTED_ROW;
+    STATE.storedPeriodsPerYear = 252;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(
+      STATE.adminRpcCalls.find(
+        (c) =>
+          c.name === "enqueue_compute_job" &&
+          (c.args as { p_kind?: string }).p_kind === "sync_trades",
+      ),
+    ).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("SC-2 neutrality: the same contribution finalize with NO analytics row still queues sync_trades (KPIs must reach the composer)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "crypto" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusRow = null;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(
+      STATE.adminRpcCalls.find(
+        (c) =>
+          c.name === "enqueue_compute_job" &&
+          (c.args as { p_kind?: string }).p_kind === "sync_trades",
+      ),
+    ).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
   it("neutrality: a MANAGER composite (default entry_context) STILL fires the founder review-notify — proving the suppression is contribution-specific, not a global removal", async () => {
     const fetchSpy = mockProbeReadOnly();
     routeThroughLegacyFinalize(); // composite, default (manager) entry_context
@@ -5307,6 +5554,207 @@ describe("[SUBMITFIX-R2] a dispatch failure after the promotion says the submiss
     expect(STATE.processKeyCalls).toHaveLength(1);
     consoleInfo.mockRestore();
     consoleError.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 190 / SC-2 — the re-run decision on both legacy arms. The unit truth
+ * table (src/lib/finalize-rerun.test.ts) pins the rule; these cases pin that
+ * the route CONSULTS it, in the right place, and that a skipped run leaves no
+ * side effect behind.
+ */
+describe("POST /api/strategies/finalize-wizard — [190 SC-2] re-run decision wiring", () => {
+  function enqueued(kind: string) {
+    return STATE.adminRpcCalls.find(
+      (c) =>
+        c.name === "enqueue_compute_job" &&
+        (c.args as { p_kind?: string }).p_kind === kind,
+    );
+  }
+
+  it("a composite finalize over a complete row queues no stitch_composite, retracts no marker and writes no sync.start (a skipped run leaves nothing behind)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
+    // The draft already holds the "crypto" a composite finalize writes.
+    STATE.strategyRow = { api_key_id: null, asset_class: "crypto" };
+    // A marker that WOULD be retracted if the enqueue path ran.
+    STATE.computeJobsRow = { metadata: { source: "ledger-refresh-composite" } };
+    STATE.analyticsStatusRow = COMPUTED_ROW;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(enqueued("stitch_composite")).toBeUndefined();
+    expect(STATE.computeJobsUpdates).toEqual([]);
+    expect(STATE.auditEvents.filter((e) => e.action === "sync.start")).toEqual([]);
+    fetchSpy.mockRestore();
+  });
+
+  it("a composite finalize with no analytics row still queues stitch_composite and audits sync.start", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    routeThroughLegacyFinalize();
+    STATE.strategyRow = { api_key_id: null, asset_class: "crypto" };
+    STATE.analyticsStatusRow = null;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(enqueued("stitch_composite")).toBeDefined();
+    expect(STATE.auditEvents.filter((e) => e.action === "sync.start")).toHaveLength(1);
+    // The composite read names stitch_composite among the kinds it checks.
+    const kinds = STATE.chainJobsInArgs.find((i) => i.column === "kind")
+      ?.values as string[];
+    expect(kinds).toContain("stitch_composite");
+    fetchSpy.mockRestore();
+  });
+
+  it("a single-key contribution over a complete row whose draft asset_class DIFFERS from the written value still queues sync_trades (the annualization clock moved)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    // okx is crypto, finalize writes "crypto"; the draft carried "traditional".
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "traditional" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusRow = COMPUTED_ROW;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(enqueued("sync_trades")).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
+  // WHY: "analytics exist" is not "analytics are current". A key linked after
+  // the last computation is an input the stored result never saw; skipping on
+  // terminal success alone would leave the strategy computed without it.
+  it("a contribution finalize over a complete row whose linked key was created AFTER computed_at still queues sync_trades", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "crypto" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusRow = COMPUTED_ROW;
+    STATE.apiKeyCreatedAt = "2026-11-02T06:00:00Z";
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(enqueued("sync_trades")).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("a composite finalize over a complete row with a member added AFTER computed_at still queues stitch_composite", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    routeThroughLegacyFinalize();
+    STATE.strategyRow = { api_key_id: null, asset_class: "crypto" };
+    STATE.analyticsStatusRow = COMPUTED_ROW;
+    STATE.memberCreatedAts = ["2026-11-01T00:00:00Z", "2026-11-02T06:00:00Z"];
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(enqueued("stitch_composite")).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("an analytics read error queues sync_trades and captures one warning tagged rerun_decision_read", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "crypto" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusReadError = { message: "permission denied" };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // A read that failed is not "already current": the run is queued anyway.
+    expect(enqueued("sync_trades")).toBeDefined();
+    const captures = STATE.captureToSentryCalls.filter(
+      (c) => c.options.tags.side_effect === "rerun_decision_read",
+    );
+    expect(captures).toHaveLength(1);
+    expect(captures[0].options.level).toBe("warning");
+    expect(captures[0].options.tags.surface).toBe("finalize-wizard-after");
+    expect(captures[0].options.tags.read).toBe("strategy_analytics");
+    fetchSpy.mockRestore();
+  });
+
+  it("a live in-flight sync_trades row over a computing row suppresses the enqueue", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "crypto" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusRow = { computation_status: "computing" };
+    STATE.chainJobs = [
+      {
+        kind: "sync_trades",
+        status: "running",
+        attempts: 1,
+        max_attempts: 5,
+        created_at: new Date().toISOString(),
+      },
+    ];
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(enqueued("sync_trades")).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("the request body gains no field: a client-supplied skip hint is ignored and the run is still queued", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID, asset_class: "crypto" };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID;
+    STATE.analyticsStatusRow = null;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        skip_rerun: true,
+        already_computed: true,
+      }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // T-190-03: the decision reads database rows only.
+    expect(enqueued("sync_trades")).toBeDefined();
     fetchSpy.mockRestore();
   });
 });

@@ -38,6 +38,7 @@ import {
 // (The `ProcessKeyOnboardResponse` type is exported alongside it and is
 // applied here implicitly, by the predicate's `body is` narrowing — importing
 // the name explicitly would be an unused binding.)
+import { decideFinalizeRerun } from "@/lib/finalize-rerun";
 import { isProcessKeyOnboardResponse } from "@/lib/process-key-onboard-contract";
 import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 // 140.3-03 / SEAMUX-07 — the publish gate's contract. ONE schema, shared with
@@ -1122,7 +1123,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // lineage.
   const { data: strategyRow, error: strategyErr } = await supabase
     .from("strategies")
-    .select("api_key_id, wizard_session_id")
+    .select("api_key_id, wizard_session_id, asset_class")
     .eq("id", fields.strategy_id)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -1316,6 +1317,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // merely cautious. Only write when the server itself vouched for the venue (or
   // on the composite/CSV paths, where apiKeyId is absent).
   const skipAssetClassWrite = Boolean(apiKeyId) && attestedVenue === null;
+  // Phase 190 / SC-2 — true only when THIS finalize wrote an asset_class that
+  // differs from the draft's. The annualization clock moved, so the analytics
+  // re-run is needed even over a computed strategy (see decideFinalizeRerun).
+  // The skip branch writes nothing and leaves it false.
+  let assetClassChanged = false;
+  // Phase 190 review round 1 (WR-02): the asset class the strategy holds after
+  // this request. `assetClassChanged` lives in one request, so the re-run
+  // decision also compares THIS with the annualization stored with the result.
+  let finalAssetClass: string | null =
+    typeof strategyRow.asset_class === "string" ? strategyRow.asset_class : null;
   if (skipAssetClassWrite) {
     console.warn(
       `[strategies/finalize-wizard] asset_class venue unattested for a single-key ` +
@@ -1339,6 +1350,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // mis-annualization of a crypto strategy the swap exists to prevent. Land the
     // two together or not at all.
     //
+    // Phase 190 / SC-2 — the value written, named so the draft comparison below
+    // reads the SAME expression the update sends (moved verbatim, not re-derived).
+    const assetClassToWrite = apiKeyId
+      ? isCryptoExchange(attestedVenue)
+        ? "crypto"
+        : "traditional"
+      : isCompositeForAssetClass
+        ? "crypto"
+        : fields.asset_class;
+    //
     // ⛔ THE PRAGMA BELOW MUST STAY WITHIN 8 LINES OF THE MUTATION —
     // `audit-coverage.test.ts` scans that window, so prose inserted BETWEEN them
     // silently un-instruments the site (measured: this note, on its first
@@ -1349,17 +1370,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
     const { error: assetClassErr } = await supabase
       .from("strategies")
-      .update({
-        asset_class: apiKeyId
-          ? isCryptoExchange(attestedVenue)
-            ? "crypto"
-            : "traditional"
-          : isCompositeForAssetClass
-            ? "crypto"
-            : fields.asset_class,
-      })
+      .update({ asset_class: assetClassToWrite })
       .eq("id", fields.strategy_id)
       .eq("user_id", user.id);
+    if (!assetClassErr && typeof assetClassToWrite === "string") {
+      assetClassChanged = strategyRow.asset_class !== assetClassToWrite;
+      finalAssetClass = assetClassToWrite;
+    }
     if (assetClassErr) {
       console.warn(
         `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubSeamError(assetClassErr)}`,
@@ -1699,7 +1716,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // the backbone flag. terminalStatus threads the CONTRIB-02 branch: a
       // composite contribution finalizes 'private' here (no per-source fork —
       // locked decision), a manager composite stays 'pending_review'.
-      return await runLegacyFinalize({ supabase, user, fields, terminalStatus });
+      return await runLegacyFinalize({ supabase, user, fields, terminalStatus, assetClassChanged, assetClass: finalAssetClass });
     }
     // compositeMemberCountN === 0 (CSV / no-member draft with api_key_id NULL)
     // → fall through to the existing unified-vs-legacy split byte-unchanged.
@@ -1718,7 +1735,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // already run, so the contribution key is re-checked identically to the manager
   // key. Composite contributions were already diverted in the hoist above.
   if (fields.entryContext === "contribution") {
-    return await runLegacyFinalize({ supabase, user, fields, terminalStatus });
+    return await runLegacyFinalize({ supabase, user, fields, terminalStatus, assetClassChanged, assetClass: finalAssetClass });
   }
 
   // Phase 106 Stage B (D2): single-key finalize now delegates UNCONDITIONALLY
@@ -2031,8 +2048,14 @@ async function runLegacyFinalize(args: {
   // 'pending_review' (manager flow, byte-identical to pre-phase behavior); the
   // contribution branch passes 'private'. The RPC RAISEs on anything else.
   terminalStatus?: "pending_review" | "private";
+  // Phase 190 / SC-2 — REQUIRED (no default) so a missed call site is a compile
+  // error: whether this finalize moved the annualization clock decides re-run.
+  assetClassChanged: boolean;
+  // Phase 190 review round 1 (WR-02) — REQUIRED: the asset class after this
+  // finalize's write, compared with the annualization stored with the result.
+  assetClass: string | null;
 }): Promise<NextResponse> {
-  const { supabase, user, fields, terminalStatus = "pending_review" } = args;
+  const { supabase, user, fields, terminalStatus = "pending_review", assetClassChanged, assetClass } = args;
   const finalized = await callFinalizeWizardRpc({
     supabase,
     userId: user.id,
@@ -2228,11 +2251,22 @@ async function runLegacyFinalize(args: {
       // /api/keys/sync behind a manual "Sync now" button. Removing that
       // button on cutover would orphan every new wizard submission.
       //
-      // Phase 106 Stage B: the enqueue is now unconditional (the former
-      // compute-jobs queue flag gate was retired). The partial unique index
-      // on compute_jobs handles double-submit, and the after()
-      // Promise.allSettled wrapper means a failed enqueue does not block the
-      // 200 response or reverse the finalize.
+      // Phase 106 Stage B: the compute-jobs queue flag gate was retired. The
+      // partial unique index on compute_jobs handles double-submit, and the
+      // after() Promise.allSettled wrapper means a failed enqueue does not
+      // block the 200 response or reverse the finalize.
+      //
+      // Phase 190 / SC-2: the enqueue is no longer unconditional. It is decided
+      // by decideFinalizeRerun from database rows (never a request field): the
+      // wizard's SyncPreviewStep has usually run the whole chain already, and
+      // enqueue_compute_job dedupes only onto an in-flight job of the SAME
+      // kind, so an unconditional sync_trades here re-ran a finished chain and
+      // bounced a complete row back to computing. A needed run is never
+      // dropped: every uncertain branch (read error, asset_class change, dead
+      // in-flight job) queues. Nothing re-enqueues analytics for a row left
+      // pending afterwards (cron/reconcile-strategies enqueues
+      // reconcile_strategy fills checks only), so a skipped run must always
+      // be justified by a live job or a current terminal-success row.
       {
         label: "enqueue_sync_trades_job",
         run: async () => {
@@ -2252,11 +2286,41 @@ async function runLegacyFinalize(args: {
           // unknowable count (W-4 / F3 / F5(b)).
           const memberCount = await compositeMemberCount(admin, resolvedId);
           if (memberCount > 0) {
+            // Phase 190 / SC-2 — AFTER the fail-closed count above, BEFORE the
+            // rpc, the marker retraction and the sync.start audit: a skipped
+            // run must leave none of the three behind.
+            const decision = await decideFinalizeRerun(admin, resolvedId, {
+              assetClassChanged,
+              assetClass,
+              composite: true,
+              apiKeyId: null,
+              nowMs: Date.now(),
+            });
+            if (decision.reason === "read_failed") {
+              console.warn(
+                `[strategies/finalize-wizard] re-run decision read failed (${decision.failedRead}), queueing the run: ${scrubSeamError(decision.error)}`,
+              );
+              captureToSentry(decision.error, {
+                tags: {
+                  surface: "finalize-wizard-after",
+                  side_effect: "rerun_decision_read",
+                  read: decision.failedRead,
+                },
+                extra: { strategy_id: resolvedId, correlation_id: correlationId },
+                level: "warning",
+              });
+            }
+            if (!decision.enqueue) {
+              console.info(
+                `[strategies/finalize-wizard] no re-run queued for ${resolvedId}: ${decision.reason}`,
+              );
+              return;
+            }
             // Phase 106 Stage B (D2): the compute-jobs queue is now the sole
             // path — the former flag-off arm (stamp 'failed' + throw when the
             // queue flag was not "true") was deleted; that guard is dormant
-            // with the ratified prod pins. Enqueue stitch_composite
-            // unconditionally.
+            // with the ratified prod pins. Enqueue stitch_composite once
+            // decideFinalizeRerun (above, phase 190) says a run is needed.
             const { data: jobId, error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
               p_strategy_id: resolvedId,
               p_kind: "stitch_composite",
@@ -2316,9 +2380,37 @@ async function runLegacyFinalize(args: {
           // Single-key path (zero strategy_keys members). Phase 106 Stage B
           // (D2): the former flag-off early-return (button-driven legacy sync
           // fallback, when the queue flag was not "true") was deleted —
-          // dormant with the ratified prod pins. Enqueue sync_trades
-          // unconditionally.
+          // dormant with the ratified prod pins. Enqueue sync_trades when
+          // decideFinalizeRerun says a run is needed (phase 190).
           if (!keyLink?.api_key_id) return;
+          // Phase 190 / SC-2 — queue only when a run is needed.
+          const decision = await decideFinalizeRerun(admin, resolvedId, {
+            assetClassChanged,
+            assetClass,
+            composite: false,
+            apiKeyId: keyLink.api_key_id,
+            nowMs: Date.now(),
+          });
+          if (decision.reason === "read_failed") {
+            console.warn(
+              `[strategies/finalize-wizard] re-run decision read failed (${decision.failedRead}), queueing the run: ${scrubSeamError(decision.error)}`,
+            );
+            captureToSentry(decision.error, {
+              tags: {
+                surface: "finalize-wizard-after",
+                side_effect: "rerun_decision_read",
+                read: decision.failedRead,
+              },
+              extra: { strategy_id: resolvedId, correlation_id: correlationId },
+              level: "warning",
+            });
+          }
+          if (!decision.enqueue) {
+            console.info(
+              `[strategies/finalize-wizard] no re-run queued for ${resolvedId}: ${decision.reason}`,
+            );
+            return;
+          }
           const { error: enqueueErr } = await admin.rpc(
             "enqueue_compute_job",
             {
@@ -2330,10 +2422,10 @@ async function runLegacyFinalize(args: {
           if (enqueueErr) {
             // Throw so Promise.allSettled marks this side effect as
             // rejected and the Sentry capture below picks it up.
-            // Backstop: cron/reconcile-strategies re-enqueues stuck
-            // computation_status='pending' rows so worst-case latency is
-            // ~24h, not "forever". Disabling that cron removes the safety
-            // net for this throw.
+            // No backstop: cron/reconcile-strategies enqueues
+            // reconcile_strategy fills checks only and never re-enqueues
+            // analytics, so a row left pending by this throw stays pending
+            // until the user re-syncs or re-finalizes.
             throw new Error(
               `enqueue_compute_job failed: ${enqueueErr.message}`,
             );

@@ -160,17 +160,150 @@ describe("readV2BenchmarkJoint — the light path", () => {
     expect(bench.read.mock.calls[0][3]).toBe(ID);
   });
 
-  it("the read asks for asset_class and the four series columns, by id, behind the published-only predicate (T-170.5-09)", async () => {
+  it("the read asks for asset_class, the four series columns and the two evidence columns (phase 190), by id, behind the published-only predicate (T-170.5-09)", async () => {
     admin.result = row(COMPLETE);
     bench.read.mockResolvedValue({ unavailable: true });
     await readV2BenchmarkJoint(fakeAdmin(), ID);
     const select = admin.calls.find((c) => c[0] === "select")![1] as string;
     expect(select.replace(/\s+/g, " ")).toContain(
-      "asset_class, strategy_analytics ( daily_returns, returns_series, data_quality_flags, computation_status )",
+      "asset_class, strategy_analytics ( daily_returns, returns_series, data_quality_flags, computation_status, cumulative_return, computed_at )",
     );
     expect(admin.calls).toContainEqual(["from", "strategies"]);
     expect(admin.calls).toContainEqual(["eq", "id", ID]);
     expect(admin.calls).toContainEqual(["eq", "status", "published"]);
+  });
+});
+
+// ── phase 190: the joint follows the factsheet's stored-result rule ──────────
+// WHY (Rule 9): the strategy page shows the joint beside the factsheet's own
+// figures. During a re-run the factsheet shows the last success; a joint that
+// said "not computed" beside it would contradict the page, and a joint computed
+// from a NEW derive's flags over the LAST success's series would mix two runs.
+describe("readV2BenchmarkJoint — a re-run over a stored success result (phase 190, D-02)", () => {
+  const COMPUTED_AT = "2026-10-30T10:00:00.123456+00:00";
+  const SAME_INSTANT = "2026-10-30T10:00:00.123Z";
+  const ONE_SECOND_OFF = "2026-10-30T10:00:01.123Z";
+  const STORED = {
+    daily_returns: ROWS,
+    returns_series: null,
+    cumulative_return: 0.12,
+    computed_at: COMPUTED_AT,
+  };
+  const MARKED = { cumulative_method: "geometric" };
+  const PRICES = opt(closes("2025-12-31", "2026-06-30", 99));
+  const prestamp = (snapshot: unknown) => ({ csv_source: true, last_success_snapshot: snapshot });
+
+  it("a computing row with a series, a finite headline and the marker in its flags is not withheld", async () => {
+    admin.result = row({ ...STORED, computation_status: "computing", data_quality_flags: MARKED });
+    bench.read.mockResolvedValue(PRICES);
+    const got = await readV2BenchmarkJoint(fakeAdmin(), ID);
+    expect(got.status.kind).toBe("computed");
+    expect(got).toEqual(computeV2Joint(ROWS, PRICES, "crypto"));
+  });
+
+  it("the same row after the derive prestamp, with a snapshot bound to its computed_at, is not withheld and reads the snapshot's flags", async () => {
+    // The snapshot's flags say the last success was BTC-denominated: the native
+    // unit check must see THAT, because the stored series is that success's.
+    admin.result = row({
+      ...STORED,
+      computation_status: "computing",
+      data_quality_flags: prestamp({ computed_at: SAME_INSTANT, flags: { ...MARKED, native_unit: "BTC" } }),
+    });
+    const got = await readV2BenchmarkJoint(fakeAdmin(), ID);
+    expect(got.status).toEqual({ kind: "native_unit", unit: "BTC" });
+    expect(bench.read).not.toHaveBeenCalled();
+  });
+
+  it("a computing row after the prestamp whose snapshot is bound is computed from the snapshot's series flags", async () => {
+    admin.result = row({
+      ...STORED,
+      computation_status: "computing",
+      data_quality_flags: prestamp({ computed_at: SAME_INSTANT, flags: MARKED }),
+    });
+    bench.read.mockResolvedValue(PRICES);
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status.kind).toBe("computed");
+  });
+
+  it("a snapshot bound to ANOTHER success (one second off) withholds not_computed", async () => {
+    admin.result = row({
+      ...STORED,
+      computation_status: "computing",
+      data_quality_flags: prestamp({ computed_at: ONE_SECOND_OFF, flags: { ...MARKED, native_unit: "BTC" } }),
+    });
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status).toEqual({ kind: "not_computed" });
+    expect(bench.read).not.toHaveBeenCalled();
+  });
+
+  it("a computing row whose flags lack the marker is withheld not_computed, as today", async () => {
+    admin.result = row({ ...STORED, computation_status: "computing", data_quality_flags: { csv_source: true } });
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status).toEqual({ kind: "not_computed" });
+  });
+
+  it("a FAILED row is withheld even with full evidence", async () => {
+    admin.result = row({ ...STORED, computation_status: "failed", data_quality_flags: MARKED });
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status).toEqual({ kind: "not_computed" });
+    expect(bench.read).not.toHaveBeenCalled();
+  });
+});
+
+describe("readV2BenchmarkJoint — D-04: a terminal-success row whose derive prestamp left no bound snapshot", () => {
+  // WHY (founder 2026-11-03): the live flags are then a NEW derive's while the
+  // series is the last success's. Computing a joint from both would draw old
+  // figures under new flags, the mix the factsheet itself refuses.
+  const COMPUTED_AT = "2026-10-30T10:00:00.123456+00:00";
+  const SAME_INSTANT = "2026-10-30T10:00:00.123Z";
+  const ONE_SECOND_OFF = "2026-10-30T10:00:01.123Z";
+  const TERMINAL = {
+    computation_status: "complete_with_warnings",
+    daily_returns: ROWS,
+    returns_series: null,
+    cumulative_return: 0.12,
+    computed_at: COMPUTED_AT,
+  };
+  const PRICES = opt(closes("2025-12-31", "2026-06-30", 99));
+
+  it("D04-1: a null snapshot withholds not_computed and never reaches the BTC read", async () => {
+    bench.read.mockResolvedValue(PRICES);
+    admin.result = row({ ...TERMINAL, data_quality_flags: { csv_source: true, last_success_snapshot: null } });
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status).toEqual({ kind: "not_computed" });
+    expect(bench.read).not.toHaveBeenCalled();
+  });
+
+  it("D04-2: a snapshot bound to another success (one second off) withholds not_computed", async () => {
+    bench.read.mockResolvedValue(PRICES);
+    admin.result = row({
+      ...TERMINAL,
+      data_quality_flags: {
+        csv_source: true,
+        last_success_snapshot: { computed_at: ONE_SECOND_OFF, flags: { cumulative_method: "geometric" } },
+      },
+    });
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status).toEqual({ kind: "not_computed" });
+    expect(bench.read).not.toHaveBeenCalled();
+  });
+
+  it("D04-3: a bound snapshot proceeds, and the native-unit check reads the snapshot's flags", async () => {
+    bench.read.mockResolvedValue(PRICES);
+    admin.result = row({
+      ...TERMINAL,
+      data_quality_flags: {
+        csv_source: true,
+        last_success_snapshot: { computed_at: SAME_INSTANT, flags: { cumulative_method: "geometric", native_unit: "BTC" } },
+      },
+    });
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status).toEqual({ kind: "native_unit", unit: "BTC" });
+  });
+
+  it("D04-4: a complete_with_warnings row AT REST (the marker in its live flags) proceeds exactly as today", async () => {
+    admin.result = row({ ...TERMINAL, data_quality_flags: { cumulative_method: "geometric" } });
+    bench.read.mockResolvedValue(PRICES);
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status.kind).toBe("computed");
+  });
+
+  it("D04-5: a legacy terminal row whose flags carry neither the marker nor the key proceeds (hiding it would blank every legacy row at rest)", async () => {
+    admin.result = row({ ...TERMINAL, data_quality_flags: { csv_source: true } });
+    bench.read.mockResolvedValue(PRICES);
+    expect((await readV2BenchmarkJoint(fakeAdmin(), ID)).status.kind).toBe("computed");
   });
 });
 

@@ -17,7 +17,7 @@
  * magnitudes and job vocabulary never leave this module.
  */
 
-import { isRankableAnalyticsRow } from "@/lib/closed-sets";
+import { isComputedAnalytics, isRecomputeOverStoredResult } from "@/lib/closed-sets";
 import { BASIS_KPI_MAP } from "./basis-metrics";
 
 /**
@@ -180,6 +180,26 @@ function withholdCauseOf(
   return "unmeasured";
 }
 
+/**
+ * Phase 190 (SC-3) — the ONE readability test every single-key inner gate asks of a
+ * row's stored result: the should-read predicates for the MTM and smoothed series,
+ * the MTM and smoothed toggle availability, and the stored cash headline gate.
+ *
+ * Without the flag it is exactly the terminal-success test, so a caller that never
+ * passes it (the OG card) behaves as before. `recomputeOverStoredResult` is set only
+ * by the factsheet resolve stage, after plan 03's three evidence checks admitted the
+ * row (`isRecomputeOverStoredResult` adds the pending and computing statuses; a
+ * failed row is never readable). One decision, passed down, so no gate reads the raw
+ * status on its own.
+ */
+export function isStoredResultReadable(
+  computationStatus: unknown,
+  recomputeOverStoredResult: boolean,
+): boolean {
+  const status = typeof computationStatus === "string" ? computationStatus : null;
+  return isComputedAnalytics(status) || isRecomputeOverStoredResult(status, recomputeOverStoredResult);
+}
+
 /** Whether a stored cash headline can be overlaid, and if not, why. */
 export type StoredCashHeadlineGate =
   | { applicable: true }
@@ -204,9 +224,10 @@ export function storedCashHeadlineGate(
   persistedRow: Record<string, unknown> | null | undefined,
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
+  recomputeOverStoredResult = false,
 ): StoredCashHeadlineGate {
   if (persistedRow == null) return { applicable: false, reason: "no_row" };
-  if (!isRankableAnalyticsRow({ computation_status: typeof computationStatus === "string" ? computationStatus : null })) {
+  if (!isStoredResultReadable(computationStatus, recomputeOverStoredResult)) {
     return { applicable: false, reason: "not_rankable" };
   }
   if (metricsJsonByBasis !== null && typeof metricsJsonByBasis === "object" && !Array.isArray(metricsJsonByBasis)) {

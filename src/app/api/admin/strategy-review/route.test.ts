@@ -243,6 +243,16 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     recheckTradeCountNull?: boolean;
     /** TOCTOU re-check `strategy_analytics` read returns a read error. */
     recheckAnalyticsError?: boolean;
+    /**
+     * Phase 190 D-02: computation_status the FIRST-PASS read returns, when it
+     * differs from `recheckStatus` (the re-check read). Default: same as
+     * `recheckStatus`, which is what every pre-190 case relies on.
+     */
+    firstPassStatus?: RecheckMock["recheckStatus"];
+    /** Phase 190 D-02: stored-result evidence columns merged into the first-pass row. */
+    firstPassEvidence?: Record<string, unknown>;
+    /** Phase 190 D-02: stored-result evidence columns merged into the re-check row. */
+    recheckEvidence?: Record<string, unknown>;
   };
 
   /**
@@ -409,7 +419,12 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
                         opts.recheckStatus === null
                           ? null
                           : {
-                              computation_status: opts.recheckStatus,
+                              ...(firstPass
+                                ? opts.firstPassEvidence
+                                : opts.recheckEvidence),
+                              computation_status: firstPass
+                                ? (opts.firstPassStatus ?? opts.recheckStatus)
+                                : opts.recheckStatus,
                               computation_error: null,
                               // MT5-11/12 — the completeness verdict rides this
                               // same read at both passes (the route widened the
@@ -1086,6 +1101,182 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).success).toBe(true);
     expect(tracker.computeJobsQueried).toBe(false);
+  });
+
+  /**
+   * Phase 190 D-02 — approving a strategy that is RE-COMPUTING over a stored
+   * success result.
+   *
+   * WHY: a re-sync flips a computed strategy's analytics row to pending or
+   * computing while its last figures are still stored and still on display. The
+   * gate must not unpublish-by-refusal such a strategy, at the first pass or at
+   * the TOCTOU re-check. These cases run the REAL gate (the stub above passes
+   * everything and would prove nothing about the first pass) and rest on the
+   * same evidence rule the factsheet uses, `hasStoredAnalyticsResult`. A failed
+   * run, a first run with no stored result, and a composite whose stitch is not
+   * done all keep today's refusal.
+   */
+  describe("Phase 190 D-02 — re-run over a stored result", () => {
+    beforeEach(() => {
+      // Undo the suite's gate stub so the real checkStrategyGate and the real
+      // evidence rule run end to end.
+      vi.doUnmock("@/lib/strategyGate");
+      vi.resetModules();
+    });
+
+    // A keyless CSV strategy: the daily-returns branch, so the trade-span arms
+    // are not in play and only the analytics arms decide.
+    const CSV_STRATEGY = {
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      mockSeriesCompleteness: "user_supplied",
+      updateAffected: [{ id: "strat-1" }],
+    };
+
+    // The three evidence checks, satisfied through the row's own live flags.
+    const STORED_LIVE = {
+      returns_series: [{ date: "2026-01-02", value: 0.01 }],
+      cumulative_return: 0.12,
+      data_quality_flags: { cumulative_method: "compounded" },
+      computed_at: "2026-01-03T10:00:00.000Z",
+    };
+
+    // The derive hop's prestamp: live flags replaced, the last success's flags
+    // carried in a snapshot bound to the row's computed_at.
+    const storedViaSnapshot = (snapshotComputedAt: string) => ({
+      returns_series: [{ date: "2026-01-02", value: 0.01 }],
+      cumulative_return: 0.12,
+      data_quality_flags: {
+        csv_source: true,
+        last_success_snapshot: {
+          computed_at: snapshotComputedAt,
+          flags: { cumulative_method: "compounded" },
+        },
+      },
+      computed_at: "2026-01-03T10:00:00.000Z",
+    });
+
+    it("computing at both passes with a stored result -> 200 and the publish UPDATE is issued", async () => {
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        recheckStatus: "computing",
+        firstPassEvidence: STORED_LIVE,
+        recheckEvidence: STORED_LIVE,
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(200);
+      expect(tracker.publishUpdateIssued).toBe(true);
+    });
+
+    it("after the derive prestamp, a snapshot bound to computed_at counts -> 200", async () => {
+      const bound = storedViaSnapshot("2026-01-03T10:00:00.000Z");
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        recheckStatus: "computing",
+        firstPassEvidence: bound,
+        recheckEvidence: bound,
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(200);
+      expect(tracker.publishUpdateIssued).toBe(true);
+    });
+
+    it("a snapshot one second off the row's computed_at is not bound -> 400 GUARD_BLOCKED with the computing reason", async () => {
+      // An unbound snapshot belongs to some other success, so the stored numbers
+      // cannot be vouched for and the gate refuses exactly as before.
+      const unbound = storedViaSnapshot("2026-01-03T10:00:01.000Z");
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        recheckStatus: "computing",
+        firstPassEvidence: unbound,
+        recheckEvidence: unbound,
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("GUARD_BLOCKED");
+      expect(body.error).toMatch(/still running/i);
+      expect(tracker.publishUpdateIssued).toBe(false);
+    });
+
+    it("computing with NO stored series -> 400 GUARD_BLOCKED with the computing reason (a first run is not a re-run)", async () => {
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        recheckStatus: "computing",
+        firstPassEvidence: { ...STORED_LIVE, returns_series: [] },
+        recheckEvidence: { ...STORED_LIVE, returns_series: [] },
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("GUARD_BLOCKED");
+      expect(body.error).toMatch(/still running/i);
+      expect(tracker.publishUpdateIssued).toBe(false);
+    });
+
+    it("first pass complete, re-check computing over a stored result -> 200 (the TOCTOU re-check admits a re-run too)", async () => {
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        firstPassStatus: "complete",
+        recheckStatus: "computing",
+        firstPassEvidence: STORED_LIVE,
+        recheckEvidence: STORED_LIVE,
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(200);
+      expect(tracker.publishUpdateIssued).toBe(true);
+    });
+
+    it("first pass complete, re-check computing WITHOUT evidence -> 409 REVIEW_RECHECK_FAILED, never published", async () => {
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        firstPassStatus: "complete",
+        recheckStatus: "computing",
+        firstPassEvidence: STORED_LIVE,
+        recheckEvidence: { ...STORED_LIVE, cumulative_return: null },
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("REVIEW_RECHECK_FAILED");
+      expect(tracker.publishUpdateIssued).toBe(false);
+    });
+
+    it("first pass FAILED with full evidence -> 400 GUARD_BLOCKED with the failed reason (a failed re-run keeps today's rule)", async () => {
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        firstPassStatus: "failed",
+        recheckStatus: "failed",
+        firstPassEvidence: STORED_LIVE,
+        recheckEvidence: STORED_LIVE,
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("GUARD_BLOCKED");
+      expect(body.error).toContain("Analytics computation failed");
+      expect(tracker.publishUpdateIssued).toBe(false);
+    });
+
+    it("PUB-01 is NOT relaxed: a composite re-running over stored figures whose latest stitch is pending still 409s", async () => {
+      // Explicit assumption for the phase VERIFICATION: the composite stitch
+      // check guards against a laundered composite status by reading terminal
+      // queue state, and relaxing it is a separate decision. A composite
+      // approval during a re-stitch therefore still answers 409.
+      const tracker = mockAdminClient({
+        ...CSV_STRATEGY,
+        mockSeriesCompleteness: "composite_stitched",
+        recheckStatus: "computing",
+        firstPassEvidence: STORED_LIVE,
+        recheckEvidence: STORED_LIVE,
+        strategyKeysCount: 1,
+        latestStitchJobStatus: "pending",
+      });
+      const res = await postApprove();
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/composite computation is not complete/i);
+      expect(tracker.publishUpdateIssued).toBe(false);
+    });
   });
 });
 

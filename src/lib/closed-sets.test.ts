@@ -16,6 +16,7 @@ import {
   MAGNITUDE_CAPS,
   STRATEGY_ANALYTICS_COMPUTATION_STATUSES,
   isComputedAnalytics,
+  isRecomputeOverStoredResult,
   isRankableAnalyticsRow,
   PERCENTILE_GATE_COLUMN,
   isCryptoExchange,
@@ -58,6 +59,46 @@ describe("closed-sets registry", () => {
         isComputedAnalytics,
       );
       expect(computed).toEqual(["complete", "complete_with_warnings"]);
+    });
+  });
+
+  describe("isRecomputeOverStoredResult (phase 190 D-02 display predicate)", () => {
+    // WHY: a strategy re-computing over a stored success result keeps its
+    // factsheet (the founder's computed factsheet vanished behind a queued
+    // placeholder). It is a DISPLAY predicate, separate from the terminal-success
+    // gate, because progress consumers (pollers, keys/sync, SyncPreviewStep) must
+    // keep seeing a run end, and ranking must not admit a row mid-run (OQ-2).
+    it("is true only for pending and computing WITH a stored result", () => {
+      expect(isRecomputeOverStoredResult("pending", true)).toBe(true);
+      expect(isRecomputeOverStoredResult("computing", true)).toBe(true);
+    });
+
+    it("is false for every terminal status and failed, even with a stored result", () => {
+      for (const s of ["complete", "complete_with_warnings", "failed"]) {
+        expect(isRecomputeOverStoredResult(s, true)).toBe(false);
+      }
+    });
+
+    it("is false for any status without a stored result (a first-ever compute keeps the queued state)", () => {
+      for (const s of STRATEGY_ANALYTICS_COMPUTATION_STATUSES) {
+        expect(isRecomputeOverStoredResult(s, false)).toBe(false);
+      }
+    });
+
+    it("is false for a null, undefined or unknown status", () => {
+      expect(isRecomputeOverStoredResult(null, true)).toBe(false);
+      expect(isRecomputeOverStoredResult(undefined, true)).toBe(false);
+      expect(isRecomputeOverStoredResult("stale", true)).toBe(false);
+      expect(isRecomputeOverStoredResult("", true)).toBe(false);
+    });
+
+    it("does not widen the terminal-success gate or the rank gate during a re-run", () => {
+      // OQ-2 default: a recomputing row is displayed but stays out of every
+      // percentile cohort until its run succeeds.
+      expect(isComputedAnalytics("computing")).toBe(false);
+      expect(isComputedAnalytics("pending")).toBe(false);
+      expect(isRankableAnalyticsRow({ computation_status: "computing" })).toBe(false);
+      expect(isRankableAnalyticsRow({ computation_status: "pending" })).toBe(false);
     });
   });
 

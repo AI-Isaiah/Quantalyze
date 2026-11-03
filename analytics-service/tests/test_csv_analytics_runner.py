@@ -2109,3 +2109,29 @@ async def test_terminal_failure_heals_cash_series_row() -> None:
     )
     assert deletes[0]["filters"].get("eq:kind") == "cash_settlement"
     assert deletes[0]["filters"].get("eq:strategy_id") == "s"
+
+
+@pytest.mark.asyncio
+async def test_success_rebuild_drops_the_last_success_snapshot() -> None:
+    """Phase 190 plan 09 (D-02, SC-3, SC-6). A derive prestamp carries
+    ``data_quality_flags.last_success_snapshot`` (the last success's flags, bound to its
+    ``computed_at``) so the factsheet can show the stored numbers beside the flags that
+    describe them while a re-run is in flight. The snapshot must live ONLY from a derive
+    hop to the next success: a success writes a top-level ``cumulative_method`` and the
+    reader then prefers the live flags. If the success rebuild copied the snapshot
+    forward it would nest one snapshot inside the next on every re-run and a stale copy
+    would outlive the window it exists for. Neuter (copy ``existing_flags`` snapshot into
+    the rebuild) -> the key survives -> this reddens."""
+    prestamp = {
+        "csv_source": True,
+        "last_success_snapshot": {
+            "computed_at": "2026-11-01T10:00:00.123456+00:00",
+            "flags": {"csv_source": True, "cumulative_method": "geometric"},
+        },
+    }
+    payload, dq = await _run_single_key_completed_flags(_make_metrics_result(), prestamp)
+    assert "last_success_snapshot" not in dq, (
+        "the success rebuild must drop the snapshot; it lives from a derive to the next success"
+    )
+    assert isinstance(dq.get("cumulative_method"), str) and dq["cumulative_method"]
+    assert "last_success_snapshot" not in payload

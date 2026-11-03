@@ -391,6 +391,29 @@ export interface StrategyAnalytics {
    * project it stay valid, and an absent value reads as not chain-broken.
    */
   twr_chain_broken?: string | null;
+  /**
+   * Phase 190 (D-02) — NOT a column. Set to `true` ONLY by `shapeRowAnalytics`
+   * on a row that is re-computing (`pending` / `computing`) over a stored
+   * success result, which the shaper then hands through with its last computed
+   * figures. It is ABSENT on every other row (terminal success, failed, no
+   * evidence), so every existing shaped object keeps its exact shape.
+   * StrategyTable reads it to keep such a row's figures and `#n` on screen; the
+   * percentile cohorts never read it (`isRankableAnalyticsRow` stays terminal
+   * success only, OQ-2 default).
+   */
+  analytics_updating?: true;
+  /**
+   * Phase 190 plan 07 — NOT columns. Projection aliases of the derive hop's
+   * `data_quality_flags.last_success_snapshot` (plan 09), read by the ranked
+   * list projection and the compare projection so a row past the derive hop's
+   * prestamp can still be asked which success its stored figures belong to.
+   * They are evidence INPUTS only: `shapeRowAnalytics` and the compare page
+   * drop them, so no shaped object and no client component ever carries them.
+   * OPTIONAL like `cumulative_method`: reads that do not project them stay valid.
+   */
+  last_success_cumulative_method?: string | null;
+  last_success_computed_at?: string | null;
+  last_success_native_unit?: string | null;
   drawdown_series: { date: string; value: number }[] | null;
   monthly_returns: Record<string, Record<string, number>> | null;
   daily_returns: Record<string, Record<string, number>> | null;
