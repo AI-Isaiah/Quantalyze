@@ -104,6 +104,10 @@ Taken read-only by the `redump-dump` job of Supabase Migrate run `41932983784`, 
 
 - `20261106120000_refusalrace_metadata_merge_rpcs.sql`
 
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20261106120000_refusalrace_metadata_merge_rpcs.sql` | Phase 191 (D-01, D-03, D-07). Two new service-role-only `SECURITY DEFINER` functions with `search_path = public, pg_catalog`: `mark_compute_job_kept_figures(uuid) RETURNS boolean` merges the derive's refusal marker into `compute_jobs.metadata` in one UPDATE, and `retract_ledger_refresh_marker(uuid, text) RETURNS jsonb` retracts an inherited ledger-refresh marker in one UPDATE. EXECUTE revoked from PUBLIC, anon and authenticated, granted to service_role | function statements +2, distinct function names +2; no table or policy added or dropped (matches the measured shape) |
+
 **MEASURED:**
 
 | | |

@@ -9,6 +9,8 @@
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-04` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.22.0 → 0.133.22.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=316 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
 
+- `scripts/dump-sql-functions.ts`: the two Phase 191 REFUSALRACE `NAME_SET_RATCHET` rows (`retract_ledger_refresh_marker`, `mark_compute_job_kept_figures`) are deleted, their own clearing condition (a re-dump taken after `20261106120000` applied to PROD). `supabase/schema/BASELINE.md` gets the "what it adds" row for that migration.
+
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `41932983784` succeeded, and this entry was composed by the `redump-pr` job. Run `41932983784` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
