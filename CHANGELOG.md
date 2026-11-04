@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.133.19.1] - 2026-11-04 — records: close FACTSHEETQUEUED 190
+
+Records only. The code shipped in v0.133.19.0 (#1194); this release changes no source file, no migration and no schema. It closes Phase 190 in `.planning/`, books the readings that are still open, and carries the phase artifacts onto `main`.
+
+### Changed
+- **Phase 190 is closed.** `190-VERIFICATION.md` moves from `human_needed` to `passed` (frontmatter holds `status`, `verified_at_sha` and `drift_subjects` only), with a dated section "Founder acceptance 2026-11-03". ROADMAP (overview bullet, `Plans:` count, Progress row) and STATE (`## Current Position`, frontmatter, Session) record the close; 186 and 188 stay open and are named as such.
+- **Success-criteria verdicts as closed:**
+  - SC-1 verified with a PROD reading taken before any code change: all 4 finalize-sourced `sync_trades` jobs in the 30-day retention window landed after a finished computation.
+  - SC-2 verified by code and tests; its PROD reading is VOID (no wizard finalize happened after the deploy, so the zeros prove nothing).
+  - SC-3 verified by code and tests and confirmed on PROD at the pre-derive and post-derive captures (figures and the updating line present mid-run, absent at rest).
+  - SC-4 verified by code and tests; its PROD reading is VOID (part of the controlled run that was not performed).
+  - SC-5 partial: SC-3 confirmed, SC-2 VOID, the updating line at 390 px not measured on PROD (component test only).
+  - SC-6 verified by code (no invented data: admission needs a stored series, a finite headline and success-written flags; a failed row is never admitted).
+- **`190-UAT.md`** marks its three items as carried to the TODOS entry below, not passed.
+
+### Added
+- **`190-SECURITY.md`**: gsd-security-auditor verdict SECURED, 25 of 25 threat ids closed, `threats_open: 0` (ASVS 1, block_on high). Two entries rest on a documented decision rather than the plan's wording: `T-190-19` (the derive's last-success pre-read re-raises instead of dropping a failure, changed on purpose in review round 2; accepted risk `AR-190-01`) and `T-190-21` (accepted in plan 09, `AR-190-02`).
+- **`TODOS.md` `[190-SC5-POSTDEPLOY-REREAD]`** (unowned; trigger: the next wizard contribution finalized on PROD). Carries the three open items: re-run `190-MEASUREMENT-postdeploy.sql` after that finalize (it counts only when `wizard_contributions_finalized_after_deploy` is at least 1), SC-4 on PROD, and the updating line at 390 px.
+- **`TODOS.md` `[190-RERUN-SURFACES-NOT-HOLDING]`**: the surfaces D-05 leaves out (share card, tear sheet and PDF routes, returns API, recommendations, portfolios, scenario composer, the strategy page's own panels, three detail reads, composite approval during a re-stitch). Its ship PR merged before it was written, so it lands here.
+- The phase directory (plans, summaries, context, research, review, validation, measurement SQL, UAT, verification, security) is now on `main`.
+
+### Notes
+- **Founder decision, 2026-11-03 (AskUserQuestion), answer "Read it from real use later (Recommended)":** "Close 190 with the finalize check recorded as VOID. The post-deploy query is already saved, so it gets re-run after the next real contribution and the result added. The TODO already tracks it." No entry tracked it at that time, so `[190-SC5-POSTDEPLOY-REREAD]` was booked at close.
+- Known limits, recorded and not fixed:
+  - The PROD finalize reading, SC-4 on PROD and the 390 px check stay open until the TODOS entry is closed.
+  - In the derive-to-success window a row without a bound snapshot is withheld on the factsheet and the joint (the lists do not apply D-04); the public cache can serve a pre-prestamp entry for up to its 1 h TTL; chains derived before plan 09 have no snapshot; legacy rows without the `cumulative_method` marker; /compare has no status gate.
+  - Review round 3's last two fixes (WR-04 and the SFH-M1 conventions echo) were not re-reviewed in a fourth round.
+  - `190-09-SUMMARY.md` still describes the old never-raises pre-read; `190-REVIEW.md` and the code are authoritative. `190-VALIDATION.md` is still `draft` (the Nyquist audit was not run).
+  - The unified (manager single-key) arm still sends `onboard` unconditionally (RESEARCH open question 3); the founder decides whether to book it.
+- Records PR: one commit, the 190 changes applied as edits onto the current `main` files. `.planning/` changes for 186 and 188 are not in it.
+
 ## [0.133.19.0] - 2026-11-03 — FACTSHEETQUEUED 190: finalize queues no redundant re-run, and a re-compute never hides an already-computed factsheet
 
 ### Fixed

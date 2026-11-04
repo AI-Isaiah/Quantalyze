@@ -222,7 +222,7 @@ phases below carry the corrections, not the bullets.
 - [x] **~~Phase 187~~: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put binance into todos"): moved out of this milestone, not delivered; TODOS `[187-BINANCEINCOME-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
 - [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
 - [x] **~~Phase 189~~: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put all open phases that are purely about deribit or sfox into todos and not do them in this milestone"): moved out of this milestone, not delivered; TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
-- [ ] **Phase 190: FACTSHEETQUEUED — finishing the wizard does not queue a redundant re-run, and a re-compute never hides a strategy's computed factsheet** — booked 2026-11-03 from the founder's factsheet report (founder "New phase, start now (Recommended)"); the finalize step queued a second sync_trades after the first computation finished, and a pending or computing status hides analytics already computed; user-facing
+- [x] **Phase 190: FACTSHEETQUEUED — finishing the wizard does not queue a redundant re-run, and a re-compute never hides a strategy's computed factsheet** — booked 2026-11-03 from the founder's factsheet report (founder "New phase, start now (Recommended)"); the finalize step queued a second sync_trades after the first computation finished, and a pending or computing status hides analytics already computed; user-facing (completed 2026-11-04: shipped v0.133.19.0 #1194; verification passed with the PROD finalize reading VOID by founder decision, carried to TODOS `190-SC5-POSTDEPLOY-REREAD`; security 25/25)
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -7093,7 +7093,7 @@ Plans:
 **Goal:** Finishing the strategy wizard does not queue a second analytics run that is not needed. A queued or running re-compute never hides a strategy's already-computed factsheet: it keeps showing with a small "updating" note. A strategy with no analytics yet still shows the queued or computing state.
 **Requirements**: TBD
 **Depends on:** Nothing
-**Plans:** 0 plans
+**Plans:** 9/9 plans complete
 
 **Booking.** Founder 2026-11-03, AskUserQuestion: "New phase, start now (Recommended)". STATUSBRIDGE 164.6.6.3.4 closed on 2026-10-08, so it cannot absorb this.
 
@@ -7112,7 +7112,26 @@ Plans:
 User-facing. Relates to 164.6.6.3.4 STATUSBRIDGE (closed).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+
+- [x] 190-01-PLAN.md — `npm ci`, pre-change baseline, SC-1 read-only PROD count (marker first, counts only) and code verdicts that stop the phase on a failed premise (SC-1) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion — SC-1 is recorded before any code change)*
+
+- [x] 190-02-PLAN.md — `decideFinalizeRerun`: finalize queues a re-run only when one is needed, failing toward enqueue (SC-2) [Wave 2]
+- [x] 190-03-PLAN.md — Factsheet tracer: stored-result admission during a re-run, required `analyticsUpdating`, `effectiveDataQualityFlags`, D-04 fail-closed withhold (SC-3, SC-4, SC-6) [Wave 2]
+- [x] 190-09-PLAN.md — Derive prestamp writes `data_quality_flags.last_success_snapshot` (analytics-service) (SC-3, SC-6) [Wave 2]
+
+**Wave 3** *(blocked on 190-03; 190-05 also on 190-09)*
+
+- [x] 190-04-PLAN.md — `ANALYTICS_UPDATING_LINE` (D-06) and the factsheet header line per UI-SPEC (SC-3, SC-6) [Wave 3]
+- [x] 190-05-PLAN.md — Inner basis/headline gates follow the one admission decision; cache key v20 (SC-3, SC-4, SC-6) [Wave 3]
+- [x] 190-06-PLAN.md — `checkStrategyGate` D-02: stored result passes during a re-run (admin approval, SyncPreviewStep) (SC-3, SC-6) [Wave 3]
+- [x] 190-07-PLAN.md — Lists, detail shapers, benchmark joint and /compare follow the same rule (SC-3, SC-4, SC-6) [Wave 3]
+
+**Wave 4** *(blocked on all other plans — post-deploy)*
+
+- [x] 190-08-PLAN.md — TODOS booking for the D-05 surfaces, ship gate, SC-5 post-deploy PROD reading and live UI captures (SC-5) [Wave 4]
 
 ---
 
@@ -7421,7 +7440,7 @@ kept verbatim.
 | 185 DERIBITFLOWTIME | 10/10 | Complete — shipped v0.133.18.0 #1187 (a Deribit allocator book values open options at market, smoothed basis, cash fallback with the amber caveat); verification 5/5, security 30/30; PROD reading: days above 50% 6 to 2, SC-3 flags shown (key A valued at market, key C on cash with the caveat); SC-4 met with key A's two days named (D-14); the cumulative x3516 to x3836 booked to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED` | 2026-11-03 |
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 | 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
-| 190 FACTSHEETQUEUED | 0/0 | Not started — booked 2026-11-03 from the founder's factsheet report (redundant finalize re-run; pending status hides computed analytics) | - |
+| 190 FACTSHEETQUEUED | 9/9 | Complete — shipped v0.133.19.0 #1194 (finalize queues a re-run only when one is needed; a re-compute over a stored result keeps its factsheet with an updating line); verification passed (SC-2 and SC-4 by code and tests with their PROD readings VOID, the 390 px check unmeasured, accepted by the founder 2026-11-03 and carried to TODOS `190-SC5-POSTDEPLOY-REREAD`), SC-3 confirmed on PROD; security 25/25; D-05 surfaces booked to `190-RERUN-SURFACES-NOT-HOLDING` | 2026-11-04 |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
