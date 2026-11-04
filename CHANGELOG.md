@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.133.21.0] - 2026-11-04 — DERIVEGAPS 186: a truncated or failed exchange read refuses that key by name, Bybit internal transfers are flows, and a failing key affects only itself
+
+### Why
+The per-key derive could publish a number built on a read that was cut short or had failed, and one failing key could stop the whole book from advancing. Before this release a realized-P&L read that hit a page cap or errored was treated as a complete read of fewer days. Now it is refused by name, the figures already published stay, and the other keys carry on. Phase 186's probe (shipped in v0.133.18.6) measured how many keys each gap touched before any of this was built.
+
+### Founder decisions (`186-CONTEXT.md`, AskUserQuestion)
+- **D-02**: Bybit Unified internal transfers count as capital flows. This **reverses 180 D-02** (on-chain flows only).
+- **D-03**: a failing key affects only itself. This **reverses 167.1.2.1.1 D-03** (a failing key blocks the curve). D-07 carries it into the compose.
+- **D-10**: the Bybit closed-pnl page size is the documented maximum of 100.
+- **D-11**: a refused derive keeps the strategy's published figures and its status. The status updater treats the refusal like a ledger refresh, which is a small migration (below).
+- **D-12**: a malformed realized row is flagged (`daily_pnl_malformed`), not refused.
+- **D-13 and D-14**: the two narrow fix rounds (rounds 4 and 5) past the fix-round cap. Both are scoped to the refusal marker's write path, nothing else.
+- **Note copy**: the wording of the failing-key note on My Allocation was approved by the founder (plan 08).
+
+### Added
+- **Refusal by name (plans 09, 06)**: the per-key derive refuses a realized read, a funding read or a Unified-flow read that was truncated, hit a page cap, timed out or errored. The refusal names the key and the reason and writes a sentence ("these numbers stay at the last complete read"); a clean derive clears the read-incomplete marker. Funding fetchers can refuse a walk that dropped a malformed row.
+- **Bybit Unified internal transfers as flows (plan 10, D-02)**: `analytics-service/services/bybit_unified_flows.py` feeds `TRANSFER_IN` and `TRANSFER_OUT` into the Bybit derive. A failing Unified flow read is named and refuses the key. Earn, staking and PEF types are still not flows (recorded limit in the module).
+- **Failing-key exit naming (plans 07, 11)**: the allocator compose payload carries `failing_key_exits` behind the benign flag `failing_key_exited`, and a failing or refused key leaves the book on its last good day and is named. `failing_key_series_ended` is retired from the writer and the shared fixtures; a stored legacy row still reads as rebuilding through the TypeScript reader.
+- **A muted note on My Allocation (plan 08)**: names each key the total stopped counting or holds at its last read, and the day it counts it through. The reader (`readFailingKeyExits` in `src/lib/queries.ts`) drops a malformed entry or a key the owner does not hold, and says so.
+- **Opt-in read deadline (plan 05, SFH-4)**: the OKX and Bybit realized walks take `read_deadline_s`, and only the per-key derive passes it. A hit sets its own flag `daily_pnl_deadline_<venue>` and is refused as transient on the first attempt only (R2-05), so a retry can read the key in full. The trade sync and the older readers pass nothing and walk unbounded, as before.
+- **Sized caps (plan 05)**: the OKX bills and archive caps are module constants, and a shared daily-pnl read verdict names the walk that was cut.
+- **Migration `20261105120000_sync_status_protect_refused_derive.sql`**: `sync_strategy_analytics_status` protects a refused derive that kept the figures (D-11). The worker records its decision as the key `read_refusal_kept_figures` in the failing job's own metadata, and the bridge reads it off the failed job (kind-scoped, over a row with headline figures), so the strategy keeps its figures and its status and shows the sentence instead of reading `failed` over numbers that are still there. Rollback: `supabase/migrations/down/20261105120000-rollback.sql`. ⚠️ **This migration auto-applies to TEST, then to PROD, on merge**: `apply-test` runs first and PROD's apply needs it, with no human stop between. Its ACL, SECURITY DEFINER and `search_path` are unchanged.
+
+### Changed
+- **Bybit closed-pnl cap raised to 200 pages per 7-day window (WR-05, D-10)** at 100 rows a page. The probe measured 44 pages for the busiest week; `DAILY_PNL_READ_DEADLINE_S` still bounds the whole walk.
+- **Same-hour funding pairs (plan 06)**: Bybit funding keeps both same-hour legs; a test pins it.
+- **A failing key affects only itself (D-03, D-07)**: a failing or refused key exits the book on its last good day and the others advance. A marked counted member of a shared account exits the book and is named (WR-04); an unmarked sibling with no returns does not take a shared account from a marked one (SFH M2), and a marked member does not hold a shared account away from a working sibling (R2-03).
+- **Which timeouts are transient**: a funding, Unified-flow or derive-budget timeout is marked `read_timeout` and tells the compose (WR-03, SFH-1). A key marked on a funding or Unified-flow failure also enqueues the compose (WR-02, SFH-3). A refusal whose marker did not land is transient so the retry names the key (SFH-2, R2-06).
+- **Probe tooling (`analytics-service/scripts/derivegaps_probe.py`)**: reads the Bybit page cap off `services.exchange` instead of a copy; the continuation replays the walk's own page size.
+- **Merged with `main`** (Phase 188 TINYBASE, Phase 190 FACTSHEETQUEUED): the probe files are taken from this branch because they are a strict later evolution of what #1193 shipped; `bybit_unified_flows.py` keeps this branch's wording that the derive no longer calls the pairing rule; `TODOS.md` keeps both sides' entries. The code in `job_worker.py`, `analytics_runner.py`, `queries.ts` and `AllocationDashboardV2.tsx` merged without a conflict and kept 188's `undefined_return_days` and tiny-base logic and 190's `last_success_snapshot`.
+
+### Fixed (five review rounds)
+- **Round 1 (code review and silent-failure hunt)**: WR-01 the strategy-mode refusal keeps stored numbers and stamps its sentence only where numbers exist. SFH-5 a realized read that dropped a malformed row stamps a flag and the derive refuses it by name; later narrowed by D-12 to a flag. WR-06 a read deadline hit has its own flag and token.
+- **Round 2 (D-11, D-12)**: R2-01 the status bridge keeps the figures and status of a refused derive. R2-02 the no-numbers refusal writes no sentence and no writer provenance. R2-04 a malformed realized row is flagged, not refused. R2-01 follow-ups keep the marked-refresh predicate text intact and a retracted marked refresh stays loud.
+- **Round 3**: R3-01 the protection reads the headline figures (`metrics_json`), not the by-basis column, and the pg-lane fixture declares it. R3-02 the protection is a marker on the failing job, not the row's provenance, so a second consecutive refusal stays protected. R3-03 the `daily_pnl_malformed` flag D-12 promised is persisted. R3-04 a refusal on a job a user's Sync now took over keeps the figures. The migration's function comment no longer claims branch b-prime writes no status.
+- **Round 4 (D-13)**: PR3-01 the refusal marker is written only when the refusal is final, and the bridge returns a marked refusal's row from computing without its sentence.
+- **Round 5 (D-14)**: R4-01 a retryable refusal over published figures writes nothing to the row.
+
+### Tests
+- New suites: `test_daily_pnl_read_verdict.py`, `test_allocator_equity_failing_key_exit.py`, `AllocationDashboardV2.failing-key.test.tsx`; extended: `test_derive_refusal_rows.py`, `derive-refusal-rows.test.ts`, `test_job_worker*.py`, `test_funding_fetch.py`, `test_bybit_unified_flows.py`, `test_derivegaps_probe.py`, the Bybit and OKX harness tests, and the TypeScript parity twins (`writer-residual-parity.test.ts`).
+- **SQL**: `supabase/tests/test_sync_status_marked_refresh_protected.sql` goes from 23 to 35 arms (P1 to P12). `SENTINEL_FLOOR` stays 26 and `ARMS_FLOOR` moves 393 to 405, read off the file's own `ALL 35 ARMS EXECUTED` sentinel; the mutation runner's floors do not move. The corpus ran on a fresh local stack with the migration replayed on top of the dump.
+
+### Notes (recorded, not fixed)
+- `[186-COMPOSITE-MEMBER-READ-GAPS]`: the composite member derive does not get the read refusal or the Unified flow source; the PROD count found no composite strategy with a ccxt member, so the plan 04 gate booked it.
+- `[186-OTHER-FUNDING-CALLERS-DROP]` and `[186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED]`: two round-1 items left unfixed and booked.
+- The marker write and a user's Sync now retraction are two read-modify-write updates of the same JSONB column; a write between the other's read and write can undo it. Founder 2026-11-04 (D-13) sent it to a follow-up phase; closure is a merge arm in `enqueue_compute_job` and a JSONB merge write for the marker (`[186-REFUSAL-MARKER-RMW-RACE]`).
+- Also booked in `TODOS.md`: `[186-SHARED-ACCOUNT-NO-WORKING-KEY]` (a shared account whose keys all fail), `[186-REALIZED-MALFORMED-COUNT]` (count the keys whose realized history carries a malformed row, for D-12) and `[186-REFUSAL-MARKER-NAME-CONTRACT]` (no test pins the worker's marker key equal to the SQL literal).
+
 ## [0.133.20.0] - 2026-11-04 — TINYBASE 188: a day measured against a near-empty account is left out and named, never a fake return
 
 ### Why
