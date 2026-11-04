@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.21.1] - 2026-11-04 — BASELINE: automated re-dump after the PROD apply of 8f452313
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `41823381066`, after the PROD apply of merge `8f452313`: sha256 `bddcf273…` → `02dc52f8…`.
+- Shape, old → new: tables 66 → 66, policies 153 → 153, function statements 132 → 132, distinct function names 130 → 130, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261105120000_sync_status_protect_refused_derive.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-04` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.21.0 → 0.133.21.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=315 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 132 — MATCH 129, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `41823381066` succeeded, and this entry was composed by the `redump-pr` job. Run `41823381066` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.21.0] - 2026-11-04 — DERIVEGAPS 186: a truncated or failed exchange read refuses that key by name, Bybit internal transfers are flows, and a failing key affects only itself
 
 ### Why
