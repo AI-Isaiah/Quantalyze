@@ -102,7 +102,9 @@ Taken read-only by the `redump-dump` job of Supabase Migrate run `41823381066`, 
 
 **Which migrations the new dump now carries** — from the marker diff:
 
-- `20261105120000_sync_status_protect_refused_derive.sql`
+| migration | what it adds | expected shape delta |
+|---|---|---|
+| `20261105120000_sync_status_protect_refused_derive.sql` | Phase 186 (D-11, D-13). A `CREATE OR REPLACE` of `sync_strategy_analytics_status(uuid, uuid)`, re-based on `20261023120000`: a final derive refusal that kept the last complete figures (marker `read_refusal_kept_figures` on the `derive_broker_dailies` job) protects the strategy's published status instead of overwriting it, and a computing row returns to complete or complete_with_warnings by that job's provenance. ACL, SECURITY DEFINER and search_path unchanged; its COMMENT is replaced | none: one function body changes, no table, policy or function added or dropped (matches the measured shape) |
 
 **MEASURED:**
 
