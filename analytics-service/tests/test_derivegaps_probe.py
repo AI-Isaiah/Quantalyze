@@ -34,7 +34,7 @@ import ccxt
 import pytest
 
 import scripts.derivegaps_probe as dp
-from services.exchange import get_and_clear_last_dq_flags
+from services.exchange import BYBIT_PNL_PAGE_CAP, get_and_clear_last_dq_flags
 from services.okx_bills_chain import CallCeilingReached
 
 _PROBE_SRC = Path(dp.__file__).read_text(encoding="utf-8")
@@ -922,26 +922,31 @@ async def test_a_complete_key_prints_field_absent_for_every_continuation_reading
 
 
 async def test_continuation_sizes_a_bybit_window_past_its_page_cap() -> None:
-    client = _FakeBybit(hot_pages=51)
+    cap = BYBIT_PNL_PAGE_CAP  # the derive's own cap, read off the module (review WR-05 raised it)
+    client = _FakeBybit(hot_pages=cap + 1)
     view = _view(client)
     realized = await dp.measure_realized(view, "bybit", _RUN_DAY)
     assert realized["realized_state"] == "truncated"
     assert realized["flag_truncated_bybit"] is True
-    assert realized["bybit_pages_max_in_window"] == 50
+    assert realized["bybit_pages_max_in_window"] == cap
     assert realized["bybit_windows_at_cap"] == 1
 
     values = await dp.measure_past_cap(view, "bybit", view.realized_walks, _RUN_DAY)
 
-    assert values["pages_needed_bybit_window"] == 51
+    assert values["pages_needed_bybit_window"] == cap + 1
     assert values["past_cap_reached_end"] is True
     assert values["past_cap_oldest_age"] in dp.AGE_BUCKETS
     assert values["pages_needed_okx_bills"] == dp.FIELD_ABSENT
     # The 51st page continued the hot window's own cursor, in the same window.
     hot = client._windows[0]
     hot_requests = [r for r in client.requests if r["startTime"] == hot]
-    assert len(hot_requests) == 51
-    assert hot_requests[50]["cursor"] == "50"
-    assert hot_requests[50]["limit"] == 200
+    assert len(hot_requests) == cap + 1
+    assert hot_requests[cap]["cursor"] == str(cap)
+    # The continuation replays the walk's own recorded request, so it carries the page size
+    # the derive sends (Phase 186 D-10: the documented maximum of 100, no longer 200).
+    from services.exchange import BYBIT_CLOSED_PNL_LIMIT
+
+    assert hot_requests[cap]["limit"] == BYBIT_CLOSED_PNL_LIMIT
 
 
 async def test_a_bybit_that_clamps_every_reply_to_100_rows_reads_the_same_at_both_limits() -> None:
@@ -2186,8 +2191,8 @@ async def test_the_bybit_limit_probe_runs_before_the_continuation_and_the_flows_
     # The continuation spends whatever budget is left, and the keys that need it are the busiest
     # Bybit accounts: a limit probe that ran after it was skipped on exactly those keys.
     monkeypatch.setattr(dp, "_utc_now", lambda: _RUN_AT)
-    client = _FakeBybit(hot_pages=51)
-    first = _view(_FakeBybit(hot_pages=51))
+    client = _FakeBybit(hot_pages=BYBIT_PNL_PAGE_CAP + 1)
+    first = _view(_FakeBybit(hot_pages=BYBIT_PNL_PAGE_CAP + 1))
     await dp.measure_realized(first, "bybit", _RUN_DAY)
     realized_calls = first.calls
     # The realized read fits and the limit probe takes two calls; the continuation then has one
@@ -2197,7 +2202,7 @@ async def test_the_bybit_limit_probe_runs_before_the_continuation_and_the_flows_
     values = _as_record(await dp._measure_key(view, "bybit", _RUN_DAY))
 
     limit_100 = next(i for i, r in enumerate(client.requests) if r["limit"] == 100)
-    continued = next(i for i, r in enumerate(client.requests) if r.get("cursor") == "50")
+    continued = next(i for i, r in enumerate(client.requests) if r.get("cursor") == str(BYBIT_PNL_PAGE_CAP))
     assert limit_100 < continued
     assert values["bybit_limit_skip"] == "none"
     assert values["bybit_limit100_rows"] != dp.FIELD_ABSENT

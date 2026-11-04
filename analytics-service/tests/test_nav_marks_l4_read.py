@@ -255,6 +255,7 @@ async def _derive(
         patch("services.funding_fetch.fetch_funding_binance", new=AsyncMock(return_value=[])),
         patch("services.funding_fetch.fetch_funding_bybit", new=AsyncMock(return_value=[])),
         patch("services.ccxt_flow_fetch.fetch_ccxt_transfers", new=AsyncMock(return_value=[])),
+        patch("services.job_worker.fetch_bybit_unified_flows", new=AsyncMock(return_value=([], []))),
         patch("services.job_worker._resolve_ccxt_flow_price_index", new=AsyncMock(return_value={})),
         patch("services.broker_dailies.combine_realized_and_funding", new=combine),
         patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),

@@ -83,6 +83,10 @@ _NATIVE_UNPRICED_KEY_OMITTED = "native_unpriced_key_omitted"
 _NATIVE_UNPRICED_REASON = "native_unpriced"
 # 166.3.1 D-08: a key whose live read found no capital left the book after its last measured day.
 _NO_CAPITAL_KEY_EXITED = "no_capital_key_exited"
+# 186 D-03 / D-05 / D-07: the closed reasons a key can be named as having left the book because it
+# was failing or its read was incomplete. The name travels with the exit, never as a degrade reason.
+FAILING_KEY_EXIT_REASONS: frozenset[str] = frozenset({"sync_failing", "read_incomplete"})
+_FAILING_KEY_EXITED = "failing_key_exited"
 
 
 class PortfolioReturns(NamedTuple):
@@ -438,6 +442,7 @@ def compose_allocator_equity(
     unpriced_days_by_key: Mapping[str, Collection[str]] | None = None,
     segment_terminals_by_key: Mapping[str, Mapping[str, float]] | None = None,
     no_capital_exit_by_key: Mapping[str, tuple[str, str]] | None = None,
+    failing_key_exit_by_key: Mapping[str, tuple[str, str | None]] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -567,7 +572,32 @@ def compose_allocator_equity(
     candidates only; every other key's refusal still raises. A candidate is a KEY: one replayed in
     segments across an interior hole (``k#hole0 ... k``) falls back as a whole when ANY of its
     segments is refused or flagged blocking (WR-02), so none of its segments stays in the curve,
-    the ledger, the exit seams or the hole listing."""
+    the ledger, the exit seams or the hole listing.
+
+    ``failing_key_exit_by_key`` (186 D-03 / D-05 / D-07) NAMES the keys the job removed from the
+    book because they were failing (``sync_failing``) or their read was incomplete
+    (``read_incomplete``): ``{key: (reason, day)}`` with ``day`` the last ISO day the book counts
+    the key, or ``None`` when it never counted one. It changes no math. The exit itself is the
+    existing departed-key path (``departed_end_by_key``: history up to the last good day, then the
+    key's capital leaves as a flow, never a loss or a gain), which the job sends alongside. The
+    name is additive and present only when non-empty: the benign flag ``failing_key_exited`` and
+    ``payload["failing_key_exits"]``, a list sorted by key id of ``{"api_key_id", "reason",
+    "day"}``; no amount, level or venue enters it. It is never a degrade reason, so it never makes
+    the curve untrustworthy. A reason outside ``FAILING_KEY_EXIT_REASONS`` or a day that is not an
+    ISO ``YYYY-MM-DD`` string raises ``ValueError``: a caller bug, loud. The no-capital fallback
+    above touches only the keys in ``no_capital_exit_by_key``, so it leaves these names alone."""
+    failing_key_exits: list[dict[str, Any]] = []
+    for fk, (freason, fday) in sorted((failing_key_exit_by_key or {}).items()):
+        if freason not in FAILING_KEY_EXIT_REASONS:
+            raise ValueError("failing_key_exit_by_key: reason is not a known failing-key reason")
+        if fday is not None:
+            try:
+                well_formed = date.fromisoformat(fday).isoformat() == fday
+            except (TypeError, ValueError):
+                well_formed = False
+            if not well_formed:
+                raise ValueError("failing_key_exit_by_key: day is neither None nor an ISO day")
+        failing_key_exits.append({"api_key_id": fk, "reason": freason, "day": fday})
     departed_end = dict(departed_end_by_key or {})
     writer_basis = dict(writer_basis_by_key or {})
     unpriced_close_day = dict(unpriced_close_day_by_key or {})
@@ -1066,6 +1096,8 @@ def compose_allocator_equity(
     ]
     if no_capital_exited:
         flag_tokens.add(_NO_CAPITAL_KEY_EXITED)
+    if failing_key_exits:
+        flag_tokens.add(_FAILING_KEY_EXITED)
     returns_rows = book_returns.rows
     skipped_days = book_returns.skipped_nonpositive_days
     if book_returns.nonfinite_days:
@@ -1133,4 +1165,8 @@ def compose_allocator_equity(
     if no_capital_exited:
         # Additive, present only when a no-capital key exited (an older reader never sees it).
         payload["no_capital_exited_keys"] = no_capital_exited
+    if failing_key_exits:
+        # Additive, present only when the job named an exited failing key (an older reader never
+        # sees it). Key id, closed reason and ISO day only: no amount, level or venue.
+        payload["failing_key_exits"] = failing_key_exits
     return payload

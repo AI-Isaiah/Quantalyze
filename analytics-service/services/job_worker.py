@@ -49,6 +49,7 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -117,9 +118,12 @@ from services.exchange import (
     fetch_all_trades,
     fetch_raw_trades,
     fetch_usdt_balance,
+    DAILY_PNL_READ_DEADLINE_S,
+    daily_pnl_read_verdict,
     get_and_clear_last_dq_flags,
     parse_since_ms,
 )
+from services.exchange_pagination import PaginationCeilingExceeded
 from services.positions import fetch_positions, persist_position_snapshots
 from services.sfox_client import SfoxClient  # type annotations only
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
@@ -170,9 +174,9 @@ from services.mt5_concurrency import (
 )
 # Phase 164.6.6 criterion 1 — the lease-site names the handover record carries.
 from services.mt5_handover import SITE_BALANCE, SITE_DERIVE
-# Phase 180 BYBITFUNDING: the Unified flow reader's error class, for the
-# classify_exception arm only (the reader is called by the rebuild alone, D-02).
-from services.bybit_unified_flows import BybitUnifiedFlowReadError
+# Phase 180 BYBITFUNDING: the Unified flow reader's error class (the classify_exception arm)
+# and, since Phase 186 D-02, the reader itself: the per-key Bybit derive reads it.
+from services.bybit_unified_flows import BybitUnifiedFlowReadError, fetch_bybit_unified_flows
 # 153.6 / A3 — the operator-fault type + its curated copy, for the
 # classify_exception arm. worker -> services leaf, the correct direction (D-07):
 # `services/mt5_probe.py` imports only mt5_client + mt5_validation and can never
@@ -3607,6 +3611,14 @@ _STAMP_OP_STATUS_READ = "read strategy_analytics for the stamp"
 _STAMP_OP_MARKER_READ = "re-read the refresh marker"
 _STAMP_OP_ERROR_ONLY_WRITE = "write the D-15 error-only stamp"
 _STAMP_OP_LOUD_WRITE = "write the terminal failed stamp"
+_STAMP_OP_REFUSAL_MARKER_WRITE = "mark the refused job as having kept the figures"
+
+#: The key a strategy-mode ``derive_broker_dailies`` writes into its OWN job's ``compute_jobs.metadata``
+#: when it refuses an incomplete exchange read over a row that already carries figures (Phase 186
+#: R3-02, founder D-11). The status bridge (migration 20261105120000, ``is_protected``) reads it off the
+#: failed job, scoped to that kind, so the failure keeps the figures and the status for as long as it
+#: is a live failure. ⛔ The literal is a CROSS-LANGUAGE CONTRACT with that migration.
+READ_REFUSAL_KEPT_FIGURES_KEY: Final[str] = "read_refusal_kept_figures"
 
 
 async def _stamp_io(
@@ -3949,6 +3961,225 @@ async def _clear_nav_mark_refusal(
     except Exception as exc:  # noqa: BLE001 - additive; the derive's outcome must not change
         logger.warning(
             "derive_broker_dailies: nav mark refusal not cleared (api_key_id=%s, error=%s)",
+            api_key_id,
+            type(exc).__name__,
+        )
+
+
+#: Phase 186 D-05: the ``allocator_equity_derived`` row family that names a key whose realized or
+#: funding read came back truncated or failed. ``kind = READ_INCOMPLETE_KIND_PREFIX + <api_key_id>``.
+#: The compose (plan 186-11) reads it so a refused-but-working key leaves the book instead of being
+#: carried flat. The ``kind`` column has no CHECK, so this family needs no migration.
+READ_INCOMPLETE_KIND_PREFIX: Final[str] = "read_incomplete:"
+
+#: The closed set of reasons a key's read is refused by name: the four ``fetch_daily_pnl`` reasons
+#: (``services.exchange.daily_pnl_read_verdict``), the three funding reasons and the Bybit Unified
+#: flow read (plan 186-10; the exception CLASS NAME rides beside it). A token outside the
+#: set is never written, so a venue message cannot reach the row.
+READ_INCOMPLETE_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "daily_pnl_fetch_error",
+        "daily_pnl_truncated_okx",
+        "daily_pnl_truncated_bybit",
+        "daily_pnl_binance_income_fallback",
+        "read_deadline",
+        "read_timeout",
+        "funding_truncated",
+        "funding_fetch_error",
+        "funding_rows_malformed",
+        "bybit_unified_flow_error",
+    }
+)
+
+#: The order the realized read's reasons are named in when more than one is set. The deadline is
+#: last on purpose: a cap hit is deterministic and is refused permanently, so it wins over a
+#: deadline hit, which is refused as transient and retried.
+_DAILY_PNL_REFUSAL_ORDER: Final[tuple[str, ...]] = (
+    "daily_pnl_fetch_error",
+    "daily_pnl_truncated_okx",
+    "daily_pnl_truncated_bybit",
+    "daily_pnl_binance_income_fallback",
+    "read_deadline",
+)
+
+#: A refusal with these tokens is retried (the next attempt may read the key in full); every other
+#: realized or funding refusal is permanent, because the same history fails the same way. The one
+#: exception to the exception: ``read_deadline`` is retried on the first attempt only (review R2-05).
+_TRANSIENT_REFUSAL_TOKENS: Final[frozenset[str]] = frozenset(
+    {"daily_pnl_fetch_error", "read_deadline"}
+)
+
+
+def _realized_refusal_token(reason: str) -> str:
+    """The closed token a ``daily_pnl_read_verdict`` reason is recorded under."""
+    if reason.startswith("daily_pnl_deadline_"):
+        return "read_deadline"
+    return reason
+
+#: A recorded exception class name is kept only when it is a plain identifier (never venue text).
+_READ_INCOMPLETE_CLASS_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+async def _record_read_incomplete(
+    supabase: Any,
+    *,
+    allocator_id: str,
+    api_key_id: str,
+    token: str,
+    error_class: str | None,
+    day: str,
+) -> bool:
+    """Name why a key's read was refused, and since which day, where only its owner can read it
+    (Phase 186 D-05: "the key is marked read incomplete by name").
+
+    ``allocator_equity_derived`` ``kind = READ_INCOMPLETE_KIND_PREFIX + <api_key_id>``, payload
+    ``{token, error_class, first_seen_day, last_seen_day}`` and nothing else: the token is from the
+    closed set ``READ_INCOMPLETE_TOKENS``, the class is an exception CLASS NAME that matches the
+    identifier regex (never a message, which can carry a signed URL), and the days are ISO UTC days.
+    A later refusal of the same key keeps the row's ``first_seen_day`` and moves ``last_seen_day``.
+    The row is owner-only (RLS on ``allocator_equity_derived``): it is NEVER written to
+    ``strategy_analytics.data_quality_flags``, which is publicly readable for a published strategy.
+
+    NEVER raises (the refusal that called this must stand): a failure logs one WARNING carrying the
+    api key id and the exception class name only. Returns whether the marker landed, so a caller
+    that refuses the key can tell a named refusal from an unnamed one (review SFH-2)."""
+    if token not in READ_INCOMPLETE_TOKENS:
+        logger.warning("derive_broker_dailies: read incomplete not recorded (token outside the set)")
+        return False
+    kind = READ_INCOMPLETE_KIND_PREFIX + api_key_id
+    safe_class = (
+        error_class
+        if isinstance(error_class, str) and _READ_INCOMPLETE_CLASS_RE.match(error_class)
+        else None
+    )
+
+    def _persist() -> None:
+        existing = (
+            supabase.table("allocator_equity_derived")
+            .select("payload")
+            .eq("allocator_id", allocator_id)
+            .eq("kind", kind)
+            .limit(1)
+            .execute()
+            .data
+        )
+        first_seen = day
+        if isinstance(existing, list) and existing:
+            payload = existing[0].get("payload")
+            carried = payload.get("first_seen_day") if isinstance(payload, dict) else None
+            if isinstance(carried, str) and carried:
+                first_seen = carried
+        supabase.table("allocator_equity_derived").upsert(
+            {
+                "allocator_id": allocator_id,
+                "kind": kind,
+                "payload": {
+                    "token": token,
+                    "error_class": safe_class,
+                    "first_seen_day": first_seen,
+                    "last_seen_day": day,
+                },
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="allocator_id,kind",
+        ).execute()
+
+    try:
+        await db_execute(_persist)
+    except Exception as exc:  # noqa: BLE001 - additive; the refusal must stand
+        logger.warning(
+            "derive_broker_dailies: read incomplete marker not recorded (api_key_id=%s, error=%s)",
+            api_key_id,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+async def _clear_read_incomplete(
+    supabase: Any, *, allocator_id: str, api_key_id: str
+) -> None:
+    """Delete the key's read-incomplete row once a derive stores its inputs (Phase 186 D-05).
+
+    NEVER raises: a failure logs one WARNING carrying the api key id and the exception class name only."""
+
+    def _delete() -> None:
+        supabase.table("allocator_equity_derived").delete().eq(
+            "allocator_id", allocator_id
+        ).eq("kind", READ_INCOMPLETE_KIND_PREFIX + api_key_id).execute()
+
+    try:
+        await db_execute(_delete)
+    except Exception as exc:  # noqa: BLE001 - additive; the derive's outcome must not change
+        logger.warning(
+            "derive_broker_dailies: read incomplete marker not cleared (api_key_id=%s, error=%s)",
+            api_key_id,
+            type(exc).__name__,
+        )
+
+
+def _enqueue_allocator_compose(supabase: Any, allocator_id: str) -> None:
+    """Enqueue the crawl-free compose for ``allocator_id`` (the AUTHORITATIVE owner,
+    ``api_keys.user_id`` - never a job-payload value).
+
+    ``p_strategy_id`` is passed EXPLICITLY as NULL: it is the RPC's first positional parameter and
+    has NO SQL DEFAULT, so a PostgREST named-notation call that omits it cannot resolve the overload
+    ("function does not exist") and the compose would never enqueue. Every SQL caller mirrors this
+    (``p_strategy_id := NULL``). The allocator-scoped inflight dedup (``allocator_id, kind``) makes a
+    collision benign, so no ``p_idempotency_key`` is needed. Sync: callers run it under ``db_execute``."""
+    supabase.rpc(
+        "enqueue_compute_job",
+        {
+            "p_strategy_id": None,
+            "p_allocator_id": allocator_id,
+            "p_kind": "derive_allocator_equity",
+        },
+    ).execute()
+
+
+async def _name_key_whose_derive_overran(job: dict[str, Any]) -> None:
+    """A key-mode ``derive_broker_dailies`` that overran its outer budget (the dispatcher's
+    ``wait_for``) left no marker, so the key was carried flat and unnamed once its retries ran out
+    (Phase 186 review WR-03). Mark it ``read_timeout`` and enqueue the compose, as the per-crawl
+    timeouts inside the handler do. The owner is read from ``api_keys.user_id``, never the job
+    payload. NEVER raises: the dispatcher's own timeout classification must stand."""
+    api_key_id = job.get("api_key_id")
+    if not api_key_id:
+        return
+    try:
+        supabase = get_supabase()
+        key_row = await db_execute(
+            lambda: one(
+                supabase.table("api_keys")
+                .select("user_id")
+                .eq("id", api_key_id)
+                .maybe_single()
+                .execute()
+            )
+        )
+        if not key_row:
+            return
+        allocator_id = key_row["user_id"]
+        if not await _record_read_incomplete(
+            supabase,
+            allocator_id=allocator_id,
+            api_key_id=api_key_id,
+            token="read_timeout",
+            error_class="TimeoutError",
+            day=datetime.now(timezone.utc).date().isoformat(),
+        ):
+            # Review SFH M1: the dispatcher's timeout is transient and retried, but a marker that
+            # never lands on the last attempt leaves the key unnamed. ERROR, not the WARNING the
+            # marker writer already logged, so the unnamed key is visible.
+            logger.error(
+                "derive_broker_dailies: overrun key not named, the marker did not land "
+                "(api_key_id=%s)",
+                api_key_id,
+            )
+        await db_execute(lambda: _enqueue_allocator_compose(supabase, allocator_id))
+    except Exception as exc:  # noqa: BLE001 - additive; the timeout classification must stand
+        logger.error(
+            "derive_broker_dailies: overrun key not named (api_key_id=%s, error=%s)",
             api_key_id,
             type(exc).__name__,
         )
@@ -4569,6 +4800,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     from services.ccxt_flow_fetch import fetch_ccxt_transfers
     from services.ccxt_flows import ccxt_rows_to_dated_flows
     from services.funding_fetch import (
+        FundingRowsMalformed,
         fetch_funding_binance,
         fetch_funding_okx,
         fetch_funding_bybit,
@@ -4623,6 +4855,119 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             error_kind="permanent",
         )
 
+    async def _name_refused_key(token: str, error_class: str | None) -> bool:
+        """Key mode: mark the key ``read_incomplete`` by name and tell the allocator compose at
+        once, so the book names it (D-05) instead of naming it a day late, or never for a
+        single-key book. Returns whether the marker landed. Best effort: the refusal that called
+        this must stand, so a failed enqueue logs one WARNING."""
+        marked = await _record_read_incomplete(
+            ctx.supabase,
+            allocator_id=allocator_id,
+            api_key_id=api_key_id,
+            token=token,
+            error_class=error_class,
+            day=datetime.now(timezone.utc).date().isoformat(),
+        )
+        try:
+            await db_execute(lambda: _enqueue_allocator_compose(ctx.supabase, allocator_id))
+        except Exception as _enq_exc:  # noqa: BLE001 - the refusal must stand
+            logger.warning(
+                "derive_broker_dailies: compose enqueue after a refused read failed "
+                "(api_key %s, error=%s)",
+                api_key_id, type(_enq_exc).__name__,
+            )
+        return marked
+
+    async def _refuse_incomplete_read(
+        token: str, error_class: str | None, *, permanent: bool, read: str = "realized"
+    ) -> DispatchResult:
+        """Phase 186 D-05 / SC-2: refuse a truncated or failed realized or funding read BY NAME.
+
+        The run writes nothing for the key (the caller returns this before any series, key_inputs,
+        nav mark or compute enqueue), so its last good stored days stay as they are (SC-6). In key
+        mode the key is marked ``read_incomplete:<api_key_id>`` (owner-only, never raises) and the
+        compose is enqueued so the book names it at once. ``allocator_id`` is the key row's owner,
+        never a job-payload value. Only the closed ``token`` and a class NAME reach the log, the
+        marker and the result: never a venue message, which can carry a signed URL."""
+        logger.warning(
+            "derive_broker_dailies: %s read incomplete (venue=%s, token=%s, class=%s) - "
+            "refusing the key, nothing written",
+            read, venue, token, error_class,
+        )
+        marked = True
+        if is_key_mode:
+            marked = await _name_refused_key(token, error_class)
+        else:
+            # Strategy mode: the existing refused-derive convention. The founder-approved sentence
+            # (186-08 ``copy-answer-strategy``) is the curated column; the token is the detail,
+            # which never reaches a subscriber. ``heal_series=False``: a published series is never
+            # deleted by a refusal. The literal stays inline and unsplit on purpose.
+            #
+            # Review WR-01: that sentence is true only when numbers exist to stay. Where a stored
+            # row carries published numbers it is written ERROR-ONLY (status, metrics and flags
+            # untouched, as the marked refresh already does); where none exist the failed stamp
+            # carries NO sentence, because the approved one would promise numbers that were never
+            # there. A read that fails here propagates and nothing is written; the queue retries.
+            #
+            # Review R3-01: "published numbers exist" is a success status, or a 'computing' row
+            # (the sync_trades job that queued this derive bounced it there) with its headline
+            # ``metrics_json``. NEVER the by-basis column: the prestamp writes it NULL on every path
+            # but a Deribit options book, so a perp-only, ccxt or key-mode strategy has it NULL over
+            # published figures. The status bridge reads the same test (migration 20261105120000).
+            def _published_numbers_exist() -> bool:
+                res = (
+                    ctx.supabase.table("strategy_analytics")
+                    .select("computation_status, metrics_json")
+                    .eq("strategy_id", strategy_id)
+                    .maybe_single()
+                    .execute()
+                )
+                row = getattr(res, "data", None) or {}
+                return isinstance(row, dict) and (
+                    row.get("computation_status") in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+                    or (
+                        row.get("computation_status") == "computing"
+                        and row.get("metrics_json") is not None
+                    )
+                )
+
+            _has_numbers = await db_read_with_retry(_published_numbers_exist)
+            # Review PR3-01: the job marker means a FINAL refusal. A retryable one (a transient
+            # token, a first-attempt deadline) writes the sentence only, which the bridge's branch
+            # (a) clears on the retry; a marker written then would outlive the attempt and protect
+            # the job's later failure over a sentence that is no longer on the row. Final means
+            # permanent, or the last attempt (``mark_compute_job_failed`` makes a transient failure
+            # final at ``attempts >= max_attempts``).
+            _refusal_attempts = job.get("attempts")
+            _refusal_max_attempts = job.get("max_attempts")
+            _refusal_is_final = permanent or (
+                isinstance(_refusal_attempts, int)
+                and isinstance(_refusal_max_attempts, int)
+                and _refusal_attempts >= _refusal_max_attempts
+            )
+            # Review R4-01: the sentence follows the marker. A retryable refusal over published
+            # figures writes NOTHING to the row (no sentence, no provenance), because on a warned
+            # row branch (a) keeps a sentence through the retry and a later non-refusal failure
+            # would then keep "these numbers stay" over ``failed``. The retry decides alone.
+            if not (_has_numbers and not _refusal_is_final):
+                await _stamp_strategy_analytics_failed(
+                    "We could not read this account's full history from the exchange, so these numbers stay at the last complete read."
+                    if _has_numbers
+                    else "",
+                    detail=token,
+                    heal_series=False,
+                    keep_numbers=_has_numbers,
+                    final_refusal=_refusal_is_final,
+                )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"derive_broker_dailies: {read} read incomplete ({token})",
+            # A refusal whose marker did not land names nobody and, as a permanent failure, is
+            # never retried, so the key would stay unnamed until the next day's derive (review
+            # SFH-2). Transient: the retry writes the marker.
+            error_kind="permanent" if permanent and marked else "transient",
+        )
+
     # MTM-01 (Phase 101): the additive single-key mark_to_market SECOND pass
     # (Deribit options books only). Initialized at the branch-OUTER scope so the
     # post-branch persist reads them unconditionally on EVERY path — ccxt venues,
@@ -4635,6 +4980,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     #     _completeness, which is undefined on the ccxt branch).
     mtm_returns: pd.Series | None = None
     mtm_gated_reason: str | None = None
+    # Phase 186 D-12 / review R3-03: the ``daily_pnl_malformed_<venue>`` flags a realized read left
+    # in the DQ buffer (a row the walk dropped because it could not be read). Not a refusal reason
+    # (``daily_pnl_read_verdict`` ignores them), so they are drained into this list and persisted:
+    # strategy mode through the prestamp flags, key mode on the key's ``key_inputs`` record. Empty
+    # on every path that does not read the realized history through ``fetch_all_trades``.
+    _daily_pnl_malformed: list[str] = []
     mtm_attempted: bool = False
     # SMTM-01 (Phase 132): the additive single-key smoothed_mtm THIRD pass (Deribit
     # options books only). Initialized at the branch-OUTER scope like the MTM pair so
@@ -4763,7 +5114,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # the wrapped form turned four gates RED against a correct file, which is
         # the good failure mode; a laxer extractor would have turned them
         # vacuously GREEN, which is the one this repo keeps getting bitten by.
-        async def _stamp_strategy_analytics_failed(message: str, *, detail: str | None = None, heal_series: bool = True) -> None:
+        async def _stamp_strategy_analytics_failed(message: str, *, detail: str | None = None, heal_series: bool = True, keep_numbers: bool = False, final_refusal: bool = False) -> None:
             if is_key_mode:
                 return
             scrubbed = str(scrub_freeform_string(message))
@@ -4865,7 +5216,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # still enqueues and this still compiles, and the only symptom is that
             # the next failed refresh silently un-publishes a funded account. Plan
             # 05 gate 8 asserts the two literals are equal.
-            if job_source == "ledger-refresh":
+            # Phase 186 review WR-01: ``keep_numbers`` is the incomplete-read refusal (its
+            # sentence promises the numbers stay at the last complete read). The CALLER has already
+            # established that published numbers exist, so this takes the error-only write below
+            # whatever the job's source, and never the destructive stamp.
+            if job_source == "ledger-refresh" or keep_numbers:
                 # ⛔ F2: the ENTRY snapshot, never a re-read here. This closure can
                 # run minutes into the venue crawl, and any sibling job that
                 # reached mark_compute_job_done in that window put the row through
@@ -4938,7 +5293,39 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         _lost_protection_of = existing_status
                         existing_status = None
 
-                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                if keep_numbers or existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                    if keep_numbers and final_refusal:
+                        # Review R3-02: the refusal is final for as long as it is a live failure, and
+                        # the row's provenance (written below) is overwritten by the next sync and the
+                        # next refusal. The bridge keeps the figures and the status off a marker on
+                        # THIS job instead. Written BEFORE the sentence and through ``_stamp_io``: a
+                        # marker that did not land fails the job TRANSIENT with nothing written, so
+                        # the retry refuses again, rather than leaving a sentence the bridge stamps
+                        # ``failed`` over. A read-modify-write, because PostgREST replaces the column.
+                        def _mark_job_kept_figures() -> None:
+                            _live = (
+                                ctx.supabase.table("compute_jobs")
+                                .select("metadata")
+                                .eq("id", job.get("id"))
+                                .maybe_single()
+                                .execute()
+                            )
+                            _row = getattr(_live, "data", None)
+                            _meta = _row.get("metadata") if isinstance(_row, dict) else None
+                            ctx.supabase.table("compute_jobs").update(
+                                {
+                                    "metadata": {
+                                        **(_meta if isinstance(_meta, dict) else {}),
+                                        READ_REFUSAL_KEPT_FIGURES_KEY: True,
+                                    }
+                                }
+                            ).eq("id", job.get("id")).execute()
+
+                        await _stamp_io(
+                            lambda: db_execute(_mark_job_kept_figures),
+                            op=_STAMP_OP_REFUSAL_MARKER_WRITE,
+                            **_stamp_io_args,
+                        )
 
                     def _upsert_error_only() -> None:
                         _error_only_payload: dict[str, Any] = {
@@ -4982,8 +5369,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     # strip a live factsheet's series even though the status
                     # survived.
                     logger.warning(
-                        "derive_broker_dailies: a MARKED ledger refresh failed for "
-                        "strategy %s; recorded computation_error and left the "
+                        "derive_broker_dailies: a MARKED ledger refresh (or a refused "
+                        "incomplete read) failed for strategy %s; recorded computation_error and left the "
                         "publish state and both basis series intact (D-15). The "
                         "failure is still visible in compute_jobs, in "
                         "computation_error, in this line, and in the staleness view.",
@@ -4994,6 +5381,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # ``_stamp_io`` wrapper around the write and the landed-stamp ERROR
             # line after it (Phase 164.6.7 round 4).
 
+            # Review R2-02: an EMPTY message is the no-numbers refusal. It writes no sentence and
+            # no writer provenance, so the bridge's per-kind curated copy is what the page shows;
+            # a writer sentence of "" would be kept over it and render as a bare "failed".
+            _failed_job_id = job.get("id") if scrubbed else None
+
             def _upsert() -> None:
                 _derive_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
@@ -5002,12 +5394,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_warned": False,
                         # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
                         "computing_started_at": None,
-                        "computation_error": scrubbed,
+                        "computation_error": scrubbed or None,
                         # Phase 164.2 / criterion 2. `scrubbed` is the D-162-4
                         # message half — curated copy, never the raw exception —
                         # and it renders VERBATIM on the account surface.
-                        "computation_error_source": provenance_source(job.get("id")),
-                        "computation_error_job_id": job.get("id"),
+                        "computation_error_source": provenance_source(_failed_job_id),
+                        "computation_error_job_id": _failed_job_id,
                         "data_quality_flags": {"csv_source": True},
                         # F-4 (Fable): authoritative-clear the by-basis column so a
                         # prior object can't render on a now-FAILED row.
@@ -7636,30 +8028,116 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
                 # bills, Binance inception, Bybit last 365 days).
                 realized = await asyncio.wait_for(
-                    fetch_all_trades(ctx.exchange, since_ms=None),
+                    fetch_all_trades(
+                        ctx.exchange,
+                        since_ms=None,
+                        read_deadline_s=DAILY_PNL_READ_DEADLINE_S,
+                    ),
                     timeout=_BROKER_CRAWL_TIMEOUT_S,
                 )
-                if venue == "binance":
-                    funding = await asyncio.wait_for(
-                        fetch_funding_binance(ctx.exchange, funding_label, None),
-                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                # Phase 186 D-05 / SC-2 (RESEARCH Pitfall 1): drain the DQ buffer on the NEXT
+                # statement. ``fetch_daily_pnl`` resets it at its entry and records into it while
+                # it walks, so any later crawl (funding, flows) can reset or leak it. A truncated
+                # or failed realized read is refused here, before any funding call and before any
+                # write; a swallowed venue rate limit is re-raised for the outer 429 arm.
+                _realized_dq_flags = get_and_clear_last_dq_flags()
+                _realized_verdict = daily_pnl_read_verdict(_realized_dq_flags)
+                _daily_pnl_malformed = sorted(
+                    key
+                    for key, value in _realized_dq_flags.items()
+                    if key.startswith("daily_pnl_malformed_") and value
+                )
+                if _realized_verdict.rate_limited:
+                    raise ccxt.RateLimitExceeded(
+                        "derive_broker_dailies: realized read was rate limited"
                     )
-                elif venue == "okx":
-                    funding = await asyncio.wait_for(
-                        fetch_funding_okx(ctx.exchange, funding_label, None),
-                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                if _realized_verdict.reasons:
+                    _refusal_tokens = [
+                        _realized_refusal_token(r) for r in _realized_verdict.reasons
+                    ]
+                    _refusal_token = next(
+                        (t for t in _DAILY_PNL_REFUSAL_ORDER if t in _refusal_tokens),
+                        _refusal_tokens[0],
                     )
-                elif venue == "bybit":
-                    funding = await asyncio.wait_for(
-                        fetch_funding_bybit(ctx.exchange, funding_label, None),
-                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    # Review R2-05: a deadline hit is latency on the FIRST attempt only. Volume
+                    # (two heavy weeks of pages) hits the same deadline on every retry, so from the
+                    # second attempt it is refused as permanent instead of burning every attempt
+                    # of every day. ``attempts`` counts the running attempt (1 on the first).
+                    _attempts_so_far = job.get("attempts")
+                    _deadline_is_a_repeat = (
+                        _refusal_token == "read_deadline"
+                        and isinstance(_attempts_so_far, int)
+                        and _attempts_so_far >= 2
                     )
-                else:
-                    return DispatchResult(
-                        outcome=DispatchOutcome.FAILED,
-                        error_message=f"derive_broker_dailies: venue {venue} not supported",
-                        error_kind="permanent",
+                    return await _refuse_incomplete_read(
+                        _refusal_token,
+                        _realized_verdict.error_class,
+                        permanent=_refusal_token not in _TRANSIENT_REFUSAL_TOKENS
+                        or _deadline_is_a_repeat,
                     )
+                # Phase 186 D-05 ("realized or funding read"): a funding read that hit its page
+                # ceiling or dropped a malformed row (``on_malformed="raise"``, 186-04
+                # ``g1-malformed-final: refuse``) is refused by name, like a truncated realized
+                # read. Every other non-rate-limit exception is recorded by class name (key mode)
+                # and re-raised as the SAME object, so the dispatcher classifies it exactly as it
+                # did before this phase; a timeout reaches the arm below unchanged.
+                try:
+                    if venue == "binance":
+                        funding = await asyncio.wait_for(
+                            fetch_funding_binance(
+                                ctx.exchange, funding_label, None, on_malformed="raise"
+                            ),
+                            timeout=_BROKER_CRAWL_TIMEOUT_S,
+                        )
+                    elif venue == "okx":
+                        funding = await asyncio.wait_for(
+                            fetch_funding_okx(
+                                ctx.exchange, funding_label, None, on_malformed="raise"
+                            ),
+                            timeout=_BROKER_CRAWL_TIMEOUT_S,
+                        )
+                    elif venue == "bybit":
+                        funding = await asyncio.wait_for(
+                            fetch_funding_bybit(
+                                ctx.exchange, funding_label, None, on_malformed="raise"
+                            ),
+                            timeout=_BROKER_CRAWL_TIMEOUT_S,
+                        )
+                    else:
+                        return DispatchResult(
+                            outcome=DispatchOutcome.FAILED,
+                            error_message=f"derive_broker_dailies: venue {venue} not supported",
+                            error_kind="permanent",
+                        )
+                except (ccxt.RateLimitExceeded, ccxt.DDoSProtection):
+                    raise
+                except PaginationCeilingExceeded:
+                    return await _refuse_incomplete_read(
+                        "funding_truncated", None, permanent=True, read="funding"
+                    )
+                except FundingRowsMalformed:
+                    return await _refuse_incomplete_read(
+                        "funding_rows_malformed", None, permanent=True, read="funding"
+                    )
+                except asyncio.TimeoutError:
+                    raise
+                except Exception as _funding_exc:
+                    if is_key_mode and not await _name_refused_key(
+                        "funding_fetch_error", type(_funding_exc).__name__
+                    ):
+                        # Review R2-06 (SFH-2 at the remaining marker sites): the failure may
+                        # classify permanent, and a permanent failure whose marker did not land
+                        # names nobody and is never retried. Transient, so the retry writes it.
+                        return DispatchResult(
+                            outcome=DispatchOutcome.FAILED,
+                            error_message=(
+                                "derive_broker_dailies: funding read failed "
+                                f"({type(_funding_exc).__name__}) and the key could not be named; "
+                                "retrying"
+                            ),
+                            error_kind="transient",
+                        )
+                    raise
             except asyncio.TimeoutError:
                 logger.warning(
                     "derive_broker_dailies: ccxt equity/trades/funding crawl exceeded "
@@ -7667,6 +8145,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "transient, retrying (FLIPRETRY-01)",
                     _BROKER_CRAWL_TIMEOUT_S, venue, funding_label,
                 )
+                # Review WR-03: a timed-out read is a read that did not complete. Named like any
+                # other refusal (D-05), or a key that keeps timing out is carried flat and unnamed.
+                if is_key_mode:
+                    await _name_refused_key("read_timeout", "TimeoutError")
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
@@ -7720,18 +8202,56 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # (its own try below) is untouched. Mirrors the sfox block (:2680): one
             # shared TimeoutError arm, static scrubbed text, never logger.exception.
             try:
-                _deposits = await asyncio.wait_for(
-                    fetch_ccxt_transfers(
-                        ctx.exchange, "deposits", _flow_since_ms, now_ms
-                    ),
-                    timeout=_BROKER_CRAWL_TIMEOUT_S,
-                )
-                _withdrawals = await asyncio.wait_for(
-                    fetch_ccxt_transfers(
-                        ctx.exchange, "withdrawals", _flow_since_ms, now_ms
-                    ),
-                    timeout=_BROKER_CRAWL_TIMEOUT_S,
-                )
+                if venue == "bybit":
+                    # Phase 186 D-02 (founder 2026-11-01) reverses Phase 180 D-02: the Bybit
+                    # derive anchors on the Unified wallet balance, so the capital flows are the
+                    # transfers crossing ITS edge (internal, sub-account and universal
+                    # transfers), read by the ready Unified reader. Source by the SC-1 overlap
+                    # count (186-04 ``g2-flow-final: replace``; PROD held no on-chain rows):
+                    # Unified rows REPLACE the on-chain deposit and withdrawal reads for Bybit,
+                    # never beside them, so a deposit that reaches the Unified wallet counts
+                    # exactly once. Nothing else in this block needs the on-chain rows.
+                    try:
+                        _deposits, _withdrawals = await asyncio.wait_for(
+                            fetch_bybit_unified_flows(ctx.exchange, _flow_since_ms, now_ms),
+                            timeout=_BROKER_CRAWL_TIMEOUT_S,
+                        )
+                    except (ccxt.RateLimitExceeded, ccxt.DDoSProtection):
+                        raise
+                    except asyncio.TimeoutError:
+                        raise  # the per-crawl bound arm below owns it
+                    except Exception as _unified_exc:
+                        # A failed Unified read is named (key mode, class name only), never
+                        # silent; the SAME object propagates, so ``classify_exception`` keeps
+                        # ``BybitUnifiedFlowReadError`` permanent exactly as before.
+                        if is_key_mode and not await _name_refused_key(
+                            "bybit_unified_flow_error", type(_unified_exc).__name__
+                        ):
+                            # Review R2-06: ``BybitUnifiedFlowReadError`` is permanent, so a
+                            # marker that did not land would leave the key unnamed and unretried.
+                            return DispatchResult(
+                                outcome=DispatchOutcome.FAILED,
+                                error_message=(
+                                    "derive_broker_dailies: Bybit Unified flow read failed "
+                                    f"({type(_unified_exc).__name__}) and the key could not be "
+                                    "named; retrying"
+                                ),
+                                error_kind="transient",
+                            )
+                        raise
+                else:
+                    _deposits = await asyncio.wait_for(
+                        fetch_ccxt_transfers(
+                            ctx.exchange, "deposits", _flow_since_ms, now_ms
+                        ),
+                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    )
+                    _withdrawals = await asyncio.wait_for(
+                        fetch_ccxt_transfers(
+                            ctx.exchange, "withdrawals", _flow_since_ms, now_ms
+                        ),
+                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    )
                 _flow_rows = list(_deposits) + list(_withdrawals)
                 # Resolve the same-UTC-day close for every NON-STABLE flow currency
                 # (I/O — reuses the existing OHLCV/CoinGecko/token_price_history
@@ -7759,6 +8279,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "retrying (FLIPRETRY-01)",
                     _BROKER_CRAWL_TIMEOUT_S, venue, funding_label,
                 )
+                if is_key_mode:
+                    await _name_refused_key("read_timeout", "TimeoutError")
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
@@ -9045,6 +9567,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # self-clearing per derive once plan 185-08 values the options at market.
         if _options_cash_basis_caveat is True:
             _key_inputs_payload["options_cash_basis"] = True
+        # Phase 186 D-12 / review R3-03 - ADDITIVE and present-only, in the same voice: the closed
+        # ``daily_pnl_malformed_<venue>`` names of the realized rows this read dropped because they
+        # could not be read. The key still publishes (a flag, not a refusal). The record is
+        # owner-only (RLS on ``allocator_equity_derived``), which is why it is NOT written to the
+        # publicly readable ``strategy_analytics.data_quality_flags``, and it is rewritten whole on
+        # every derive, so a clean re-read clears it. The production count is a SELECT over it.
+        if _daily_pnl_malformed:
+            _key_inputs_payload["daily_pnl_malformed"] = list(_daily_pnl_malformed)
         # 185 D-04 - ADDITIVE and present-only, same voice: the options basis this key's headline
         # ended on (a basis name from ``_KEY_MODE_OPTIONS_BASES``). Absent for a perp-only key and
         # for an option-activity key that fell back to cash, where the caveat above is raised
@@ -9081,6 +9611,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # idempotent, and the compose enqueue below is dedup-safe) — no silent
         # swallow, no outcome downgrade.
         await db_execute(_persist_key_inputs)
+        # Phase 186 D-05: the key's inputs are stored from a complete read, so its read-incomplete
+        # marker (if a refusal left one) is cleared. Never raises; the derive's outcome is unchanged.
+        await _clear_read_incomplete(
+            ctx.supabase, allocator_id=allocator_id, api_key_id=api_key_id
+        )
 
         # Enqueue the crawl-free compose for the AUTHORITATIVE owner — read from
         # ctx.key_row['user_id'] via `allocator_id`, NEVER a job-payload
@@ -9090,24 +9625,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # persisted and the next key refresh re-enqueues cleanly, so a compose
         # enqueue hiccup must never fail an already-done per-key derive.
         try:
-            def _enqueue_compose(target: str = allocator_id) -> None:
-                # p_strategy_id is passed EXPLICITLY as NULL — it is the RPC's
-                # first positional param and has NO SQL DEFAULT, so a PostgREST
-                # named-notation call that omits it cannot resolve the overload
-                # ("function does not exist") and the compose would never enqueue.
-                # Every SQL caller mirrors this (`p_strategy_id := NULL`); the
-                # allocator-scoped inflight dedup (allocator_id,kind) makes a
-                # collision benign, so no p_idempotency_key is required here.
-                ctx.supabase.rpc(
-                    "enqueue_compute_job",
-                    {
-                        "p_strategy_id": None,
-                        "p_allocator_id": target,
-                        "p_kind": "derive_allocator_equity",
-                    },
-                ).execute()
-
-            await db_execute(_enqueue_compose)
+            await db_execute(
+                lambda: _enqueue_allocator_compose(ctx.supabase, allocator_id)
+            )
         except Exception as _enq_exc:  # noqa: BLE001
             logger.warning(
                 "derive_broker_dailies: compose enqueue for allocator %s failed "
@@ -9716,6 +10236,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     for _flag in NAV_TWR_GUARD_KEYS:
         if meta.get(_flag):
             _prestamp_flags[_flag] = True
+    # Phase 186 D-12 / review R3-03 — a realized row the walk dropped because it could not be read
+    # is FLAGGED, not refused: the strategy keeps publishing and the factsheet's data-quality
+    # flags say a row is missing. BOOL per venue (``daily_pnl_malformed_okx`` ...), present-only,
+    # and NEVER a member of NAV_TWR_GUARD_KEYS: membership promotes a row to
+    # complete_with_warnings, and the founder decided this is a flag, not a warning. The prestamp
+    # replaces data_quality_flags wholesale, so a clean re-read clears it; the analytics runner
+    # carries it through its own rebuild. The production count reads it from this column.
+    for _flag in _daily_pnl_malformed:
+        _prestamp_flags[_flag] = True
     # S3 — the allocated-capital warn flags ride the SAME bridge via the ONE shared
     # ALLOCATED_CAPITAL_GUARD_KEYS source, iterated exactly like NAV_TWR_GUARD_KEYS.
     # Kept OUT of NAV_TWR_GUARD_KEYS (they originate in the allocated_capital meta,
@@ -15248,6 +15777,28 @@ async def run_derive_allocator_equity_job(
 
     ki_rows = await db_execute(_load_key_inputs)
 
+    # 186 plan 11 (D-05 coupling, RESEARCH Pitfall 3): the keys whose last derive was refused by
+    # name (``read_incomplete:<api_key_id>`` rows, written by ``_record_read_incomplete``). Such a
+    # key's ``sync_status`` can still say working while its stored series stopped, so the exit
+    # below treats it like a failing key. Only the key ids are read; the orphan cleanup stays on
+    # the ``key_inputs:`` rows alone.
+    def _load_read_incomplete_markers() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("allocator_equity_derived")
+            .select("kind")
+            .eq("allocator_id", allocator_id)
+            .like("kind", READ_INCOMPLETE_KIND_PREFIX + "%")
+            .execute()
+            .data
+            or []
+        )
+
+    marked_ids: set[str] = {
+        str(_m["kind"])[len(READ_INCOMPLETE_KIND_PREFIX):]
+        for _m in await db_execute(_load_read_incomplete_markers)
+    }
+
     # D-01 / D-04 / D-18: one exchange account is ONE counted key. Keys that read
     # one account form a group (account_groups: a holder plus every key marked
     # against it). Of a group's ELIGIBLE members exactly one is counted: a
@@ -15351,10 +15902,23 @@ async def run_derive_allocator_equity_job(
         if len(members) < 2:
             continue
         group_ids = {str(row["id"]) for row in group}
-        working = [row for row in members if working_holder_predicate(row)]
-        if not working:
+        working_all = [row for row in members if working_holder_predicate(row)]
+        if not working_all:
             no_working_groups += 1
-        pool = working or members
+        # Review R2-03 / D-18: a MARKED member stopped returning, so a working sibling login of
+        # the same account that is NOT marked counts the account instead ("counted by a working
+        # sibling instead of by nobody"). Only when every working member is marked does the
+        # account stay with the marked one, and the WR-04 exit below names it.
+        # Review SFH M2: an unmarked sibling with NO daily returns yet (a key whose first derive has
+        # not stored a day) cannot count the account, and choosing it over a marked sibling that has
+        # history leaves the account with a key that composes nothing. It is not a working counter,
+        # so the pool falls back to the marked one.
+        working = [
+            row
+            for row in working_all
+            if row["id"] not in marked_ids and row["id"] in first_return_day
+        ]
+        pool = working or working_all or members
 
         def _is_marked_in_group(row: Mapping[str, Any]) -> bool:
             holder_id = row.get("account_shared_with_api_key_id")
@@ -16102,48 +16666,76 @@ async def run_derive_allocator_equity_job(
             allocator_id,
         )
 
-    # 167.1.2.1.1 SC-2 (D-03): a SINGLE eligible key that is failing (not
-    # ``working_holder_predicate``) and whose series ends before the book's last return
-    # day. It is still counted, so the compose carries it flat at r = 0 (the benign
-    # ``stale_mark_carry``) while the rest of the book moves, and the book's return is
-    # diluted by frozen capital. Decided HERE, after the no-capital exit rule has run,
-    # because that rule puts a key in ``departed_end_by_key``: such a key leaves the
-    # book on purpose after its end day and carries nothing past it, so ending early is
-    # its intended shape (RESEARCH Pitfall 7). A WORKING key that ends early is a sync
-    # lag the daily recompute answers; a failing key that reaches the book's last day
-    # dilutes nothing. A key with no return day at all (a ``key_inputs`` row and no csv
-    # rows) is NOT flagged: the compose already classifies it anchored-without-returns,
-    # which is the blocking ``dropped_key``, so it is not silent and ``last_return_day``
-    # has no entry to index. A shared group (two or more eligible members) is
-    # ``shared_account_no_working_key``'s concern, not this one's. The derive does not
-    # test that the account id is known; a failing key with an unknown id is named
-    # earlier by the reader as ``key_not_syncing``, so this flag is a harmless superset
-    # of D-03's wording. Counts only (no key id, no day, no USD - T-167.1.2-22).
-    failing_series_ended_keys = 0
+    # 186 plan 11, SC-4 (D-03, D-07; they replace 167.1.2.1.1 D-03's blocking token): a SINGLE
+    # eligible key that is failing (not ``working_holder_predicate``) OR whose last derive was
+    # refused by name (a ``read_incomplete:`` marker), and whose series ends before the book's
+    # last return day. Carried flat it would dilute the book with frozen capital, so it LEAVES
+    # the book on its last good day through the existing departed path
+    # (``departed_end_by_key``; no sibling exit): its history counts up to that day, its capital
+    # then leaves as a flow, and the rest of the curve draws and stays trustworthy. It is named in
+    # ``failing_key_exit_by_key`` (reason ``sync_failing`` or ``read_incomplete``, with that day).
+    # No degrade reason is raised: a dead key affects only itself (founder rule 2026-10-28).
+    # Decided HERE, after the no-capital exit rule has run, because that rule puts a key in
+    # ``departed_end_by_key``: such a key already leaves on purpose and ending early is its
+    # intended shape (RESEARCH Pitfall 7), so it is skipped. The exit is applied to BOTH compose
+    # inputs, the primary one and the no-capital fallback's stored copy, so a re-compose after a
+    # no-capital refusal cannot re-admit the key flat. The anchor is the key's level on its last
+    # return day (RESEARCH Pitfall 4: a refused or failed derive writes neither returns nor
+    # inputs, so they stay a matched pair). A WORKING, unmarked key that ends early is a sync lag
+    # the daily recompute answers, and a failing key that reaches the book's last day dilutes
+    # nothing; a MARKED key that reaches it stays in and is named with that day. A key with no
+    # return day at all is handled at the compose-incomplete gate and the inputs-without-returns
+    # drop below. A shared group (two or more eligible members) is
+    # ``shared_account_no_working_key``'s concern, not this one's, unless its counted member is
+    # marked (review WR-04). Counts only in the log (no key
+    # id, no day, no USD - T-167.1.2-22).
+    failing_key_exit_by_key: dict[str, tuple[str, str | None]] = {}
+    failing_key_exits_applied = 0
     _book_last_days = [last_return_day[k] for k in counted_ids if k in last_return_day]
     if _book_last_days:
         _book_last_day = max(_book_last_days)
         for _group in account_groups(key_rows):
             _eligible_members = [row for row in _group if row["id"] in eligible_ids]
-            if len(_eligible_members) != 1:
-                continue
-            _member = _eligible_members[0]
+            if len(_eligible_members) == 1:
+                _member = _eligible_members[0]
+            else:
+                # Review WR-04. A shared group with no working member is
+                # ``shared_account_no_working_key``'s concern. A group whose COUNTED member is
+                # refused by name (a marker) is not: that member stopped returning while its
+                # sibling login works, so the account is carried flat at r = 0 unless the counted
+                # member leaves like any other failing key (D-07: it affects only itself).
+                _marked_counted = [
+                    row for row in _eligible_members
+                    if row["id"] in counted_ids and row["id"] in marked_ids
+                ]
+                if len(_marked_counted) != 1:
+                    continue
+                _member = _marked_counted[0]
             _member_id = _member["id"]
             if _member_id not in counted_ids or _member_id in departed_end_by_key:
                 continue
-            if working_holder_predicate(_member):
+            _member_marked = _member_id in marked_ids
+            if working_holder_predicate(_member) and not _member_marked:
                 continue
             _member_last = last_return_day.get(_member_id)
-            if _member_last is not None and _member_last < _book_last_day:
-                failing_series_ended_keys += 1
-    if failing_series_ended_keys:
+            if _member_last is None:
+                continue
+            _member_reason = "read_incomplete" if _member_marked else "sync_failing"
+            if _member_last < _book_last_day:
+                departed_end_by_key[_member_id] = _member_last
+                if no_capital_stored is not None:
+                    no_capital_stored.departed_end[_member_id] = _member_last
+                failing_key_exit_by_key[_member_id] = (_member_reason, _member_last)
+                failing_key_exits_applied += 1
+            elif _member_marked:
+                failing_key_exit_by_key[_member_id] = (_member_reason, _book_last_day)
+    if failing_key_exits_applied:
         logger.warning(
-            "derive_allocator_equity: %d failing key(s) of allocator %s stopped "
-            "returning before the book's last day - each is carried flat while the "
-            "rest of the book moves; the curve is untrustworthy (%s)",
-            failing_series_ended_keys,
+            "derive_allocator_equity: %d failing or refused key(s) of allocator %s stopped "
+            "returning before the book's last day - each leaves the book on its last good "
+            "day and is named; the rest of the curve is unaffected",
+            failing_key_exits_applied,
             allocator_id,
-            DegradeReason.FAILING_KEY_SERIES_ENDED.value,
         )
 
     # 167.1.2.1.1 SC-6 (D-03): venues holding two or more eligible WORKING keys whose
@@ -16229,7 +16821,55 @@ async def run_derive_allocator_equity_job(
     # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
     # the strictly-invisible key (no returns AND no key_inputs — its derive has not
     # run yet). Self-healing: each sibling derive re-enqueues the compose.
-    missing_ids = counted_ids - (set(returns_by_key) | key_inputs_ids)
+    # 186 plan 11, D-03 (founder 2026-11-01) and D-08 (founder 2026-11-03): a failing or refused
+    # key affects only itself. RESEARCH "Gap 3 detail" recommended keeping today's blocking
+    # ``dropped_key`` for a key with inputs and no returns; the locked decision wins over that
+    # recommendation (Rule 7), and the change is recorded in the SUMMARY.
+    #  - A failing or marked key with NEITHER returns NOR inputs (never derived) is exempt from
+    #    the incomplete-compose refusal. A WORKING unmarked one is not: its backfill window is
+    #    self-healing.
+    #  - A failing or marked key with a ``key_inputs`` row and NO return day has no history to
+    #    keep, so it is left out of the compose: dropped from every per-key map of BOTH compose
+    #    inputs, so no ``dropped_key`` is raised for it. A WORKING unmarked one keeps
+    #    ``dropped_key`` (real capital with no history, honestly untrustworthy).
+    # Each is named with ``day: None`` (SC-6: no day is invented). Counts only in the log.
+    _no_history_exempt = 0
+    _no_history_dropped = 0
+    for _k in sorted(counted_ids - set(returns_by_key)):
+        _row_k = rows_by_id.get(_k)
+        if _row_k is None or (working_holder_predicate(_row_k) and _k not in marked_ids):
+            continue
+        _reason_k = "read_incomplete" if _k in marked_ids else "sync_failing"
+        if _k in key_inputs_ids:
+            for _map in (
+                anchors_by_key, null_anchor_reasons, flows_by_key, dropped_pnl_by_key,
+                realized_terminal_by_key, writer_basis_by_key,
+            ):
+                _map.pop(_k, None)
+            if no_capital_stored is not None:
+                for _map in (
+                    no_capital_stored.anchors, no_capital_stored.null_reasons,
+                    no_capital_stored.flows, no_capital_stored.dropped_pnl,
+                    no_capital_stored.realized_terminal, no_capital_stored.writer_basis,
+                ):
+                    _map.pop(_k, None)
+            _no_history_dropped += 1
+        else:
+            _no_history_exempt += 1
+        failing_key_exit_by_key[_k] = (_reason_k, None)
+    if _no_history_exempt or _no_history_dropped:
+        logger.warning(
+            "derive_allocator_equity: allocator %s has %d failing or refused key(s) with no "
+            "returns and no saved inputs, and %d with saved inputs and no returns - each is "
+            "left out of the book and named; the rest of the curve is unaffected",
+            allocator_id,
+            _no_history_exempt,
+            _no_history_dropped,
+        )
+
+    missing_ids = (counted_ids - (set(returns_by_key) | key_inputs_ids)) - set(
+        failing_key_exit_by_key
+    )
     if missing_ids:
         await _persist_refusal(DeriveRefusal.COMPOSE_INCOMPLETE.value)
         logger.info(
@@ -16272,7 +16912,6 @@ async def run_derive_allocator_equity_job(
                 for reason, raised in (
                     (DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED, truncated_accounts > 0),
                     (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
-                    (DegradeReason.FAILING_KEY_SERIES_ENDED, failing_series_ended_keys > 0),
                     (DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE, flows_disagree_accounts > 0),
                     (DegradeReason.ACCOUNT_IDENTITY_PENDING, identity_pending_venue_count > 0),
                 )
@@ -16280,6 +16919,10 @@ async def run_derive_allocator_equity_job(
             ]
             or None,
             departed_end_by_key=inputs.departed_end or None,
+            # 186 D-03 / D-07: the failing or refused keys that left the book (or never
+            # counted), named. The exit itself is ``departed_end_by_key`` above; this only
+            # names it. One call serves both the primary and the fallback compose.
+            failing_key_exit_by_key=failing_key_exit_by_key or None,
             # D-13: the venue is known here and not in the pure compose. A key on a
             # venue whose history reaches the account's start gets the zero-start
             # check on its opening flows instead of the positional rule.
@@ -16832,6 +17475,8 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         else:
             result = await asyncio.wait_for(handler(job), timeout=timeout)
     except Exception as exc:  # noqa: BLE001
+        if kind == "derive_broker_dailies" and isinstance(exc, asyncio.TimeoutError):
+            await _name_key_whose_derive_overran(job)
         error_kind, sanitized = classify_exception(exc)
         result = DispatchResult(
             outcome=DispatchOutcome.FAILED,

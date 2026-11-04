@@ -43,6 +43,7 @@ type Table = {
   refusals: RefusalRow[];
   legacy_refusals: { token: string; reader_reason: string }[];
   blocking: { token: string; reader_reason: string }[];
+  legacy_blocking: { token: string; reader_reason: string }[];
   precedence: { degrade_reasons: string[]; reader_reason: string }[];
 };
 
@@ -105,6 +106,25 @@ describe("every blocking DegradeReason keeps its line, and a wait token is a wai
     "%s -> its fixture reader_reason",
     (_token, row) => {
       expect(readRow(untrusted([row.token])).equityHistoryRebuildReason).toBe(row.reader_reason);
+    },
+  );
+
+  it("legacy_blocking is not empty and shares no token with blocking (a fixture that lost it would pass on nothing)", () => {
+    expect(TABLE.legacy_blocking.length).toBeGreaterThanOrEqual(1);
+    const live = new Set(TABLE.blocking.map((b) => b.token));
+    for (const row of TABLE.legacy_blocking) expect(live.has(row.token)).toBe(false);
+  });
+
+  // Phase 186 D-07: the derive no longer raises these (a failing key now leaves
+  // the book by name instead), but a payload stored before the retirement carries
+  // one until the daily recompute replaces it, and must render as it did.
+  it.each(TABLE.legacy_blocking.map((b) => [b.token, b] as const))(
+    "%s (a stored pre-Phase-186 payload) -> its fixture reader_reason",
+    (_token, row) => {
+      const result = readRow(untrusted([row.token]));
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe(row.reader_reason);
+      expect(result.equityDailyPoints).toEqual([]);
     },
   );
 

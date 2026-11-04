@@ -92,6 +92,7 @@ from services.bybit_unified_flows import (
     fetch_bybit_unified_flows,
     pair_onchain_with_unified,
 )
+from services import exchange as _exchange_mod
 from services.ccxt_flow_fetch import fetch_ccxt_transfers
 from services.closed_sets import STABLECOINS
 from services.exchange import (
@@ -132,12 +133,12 @@ EQUITY_READ_TIMEOUT_S: float = 120.0
 #: Pages the continuation reads past today's cap, per endpoint and instType (or per Bybit window).
 CONTINUATION_PAGE_CEILING: Final[int] = 400
 
-#: Today's caps, copied from ``fetch_daily_pnl`` where they are function-local constants (plan
-#: 186-05 hoists them to module level). A cap hit needs ALL of: the last allowed page was read,
+#: Today's OKX caps, copied from ``fetch_daily_pnl`` where they are function-local constants (plan
+#: 186-05 hoists them to module level). The Bybit cap is read off ``services.exchange`` at the use
+#: site, because the fix PR raised it (review WR-05) and a copy here would drift. A cap hit needs ALL of: the last allowed page was read,
 #: and it was full (OKX) or still had a next cursor (Bybit), exactly the derive's own test.
 TODAY_OKX_PAGE_CAP: Final[int] = 100
 TODAY_OKX_PAGE_ROWS: Final[int] = 100
-TODAY_BYBIT_PAGE_CAP: Final[int] = 50
 
 REALIZED_STATES: Final[tuple[str, ...]] = ("complete", "truncated", "fetch_error", "timeout")
 
@@ -649,7 +650,7 @@ def _walks_for(
             # The derive's own test: the last allowed page was read, was not empty and still
             # had a cursor that moved.
             at_cap = (
-                len(indices) >= TODAY_BYBIT_PAGE_CAP
+                len(indices) >= _exchange_mod.BYBIT_PNL_PAGE_CAP
                 and bool(rows)
                 and bool(next_cursor)
                 and next_cursor != sent

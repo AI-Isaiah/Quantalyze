@@ -3433,6 +3433,21 @@ export interface MyAllocationDashboardPayload {
    */
   unpricedNativeAccounts?: UnpricedNativeAccount[];
   /**
+   * Phase 186 plan 08 (D-03, D-05, D-07, SC-4). The keys the stored total
+   * stopped counting, or holds at their last complete read, named: the
+   * compose's `failing_key_exits` list (plan 186-07) behind its benign flag
+   * `failing_key_exited`. Each entry is the owner's own key (the trimmed label,
+   * else its exchange), why it left the total ("sync_failing": its exchange key
+   * is failing to sync; "read_incomplete": the latest read of its history came
+   * back incomplete) and the last day the total counts it, or `null` when it
+   * never counted. Sorted ascending by label, then key id. An entry that is not
+   * well formed or names a key the owner does not hold is dropped, and the drop
+   * is logged with counts only. `[]` whenever the curve is not shown
+   * (rebuilding) or nothing exited. Optional so legacy fixtures compile; the
+   * producer always sets it.
+   */
+  failingKeyExits?: FailingKeyExit[];
+  /**
    * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 and the UI-SPEC planner check. The
    * first day recorded (marked-to-market) equity begins for the keys the DRAWN
    * curve includes: the earliest `mark_day` of the allocator-eligible live keys
@@ -4493,6 +4508,73 @@ function readUnpricedNativeAccounts(
   );
 }
 
+/** The benign flag the compose raises when it names a key in `failing_key_exits` (plan 186-07). */
+export const FAILING_KEY_EXITED_FLAG = "failing_key_exited";
+
+/**
+ * Phase 186 plan 08. One key the stored total stopped counting or holds at its
+ * last complete read. `reason` is the compose's closed set; `day` is the last
+ * day the total counts the key, `null` when it never counted.
+ */
+export type FailingKeyExit = {
+  apiKeyId: string;
+  label: string;
+  reason: "sync_failing" | "read_incomplete";
+  day: string | null;
+};
+
+/**
+ * Phase 186 plan 08 (D-03, D-05, D-07, SC-4). The keys named by the compose's
+ * `failing_key_exits`, resolved against the owner's own key list. Pure: `[]`
+ * unless `flags` (undefined when the curve is not shown) holds
+ * `failing_key_exited`. Modelled on `readUnpricedNativeAccounts`.
+ */
+export function readFailingKeyExits(
+  flags: unknown,
+  derivedPayload: unknown,
+  apiKeys: ReadonlyArray<{ id: string; exchange: string; label?: string | null }>,
+): FailingKeyExit[] {
+  if (!Array.isArray(flags) || !flags.includes(FAILING_KEY_EXITED_FLAG)) {
+    return [];
+  }
+  const raw =
+    derivedPayload !== null && typeof derivedPayload === "object"
+      ? (derivedPayload as Record<string, unknown>).failing_key_exits
+      : undefined;
+  const entries: unknown[] = Array.isArray(raw) ? raw : [];
+  const byId = new Map(apiKeys.map((k) => [k.id, k]));
+  const out: FailingKeyExit[] = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { api_key_id: id, reason, day } = entry as Record<string, unknown>;
+    // T-186-18: only a key the OWNER holds is named. T-186-19: a reason from the
+    // closed set, and a day that is a real calendar day or an honest null.
+    if (typeof id !== "string") continue;
+    const k = byId.get(id);
+    if (k === undefined) continue;
+    if (reason !== "sync_failing" && reason !== "read_incomplete") continue;
+    if (day !== null && !isCalendarDay(day)) continue;
+    const trimmed = typeof k.label === "string" ? k.label.trim() : "";
+    out.push({ apiKeyId: id, label: trimmed !== "" ? trimmed : k.exchange, reason, day });
+  }
+  if (!Array.isArray(raw) || out.length < entries.length) {
+    // T-186-20: counts only, never a key id, label or day.
+    const message =
+      `[queries.readFailingKeyExits] the derive flagged ${FAILING_KEY_EXITED_FLAG} ` +
+      `but its list could not all be named: received ${entries.length}, kept ${out.length}` +
+      (Array.isArray(raw) ? "" : " (the list is missing or not an array)");
+    console.error(message);
+    captureToSentry(new Error(message), {
+      tags: { op: "readFailingKeyExits" },
+      level: "warning",
+    });
+  }
+  return out.sort(
+    (a, b) =>
+      a.label.localeCompare(b.label) || (a.apiKeyId < b.apiKeyId ? -1 : a.apiKeyId > b.apiKeyId ? 1 : 0),
+  );
+}
+
 /**
  * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
  * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
@@ -5103,6 +5185,7 @@ export function derivePhase07Fields(
   | "departedHistoryUnavailable"
   | "historyReconstructFailed"
   | "unpricedNativeAccounts"
+  | "failingKeyExits"
   | "partialPositionReads"
   | "holdingsFingerprintRows"
   | "activeVenues"
@@ -5189,6 +5272,13 @@ export function derivePhase07Fields(
   // worker-written and untrusted, so only a string key id the owner holds and a
   // real `YYYY-MM-DD` day get through, and only for the curve on screen.
   const unpricedNativeAccounts = readUnpricedNativeAccounts(
+    equityHistoryState === "ready" ? payloadFlags : undefined,
+    derivedPayload,
+    apiKeys,
+  );
+  // Phase 186 plan 08 (D-03, D-05, D-07): the keys the total stopped counting
+  // or holds at their last complete read, named. Same defences, same gate.
+  const failingKeyExits = readFailingKeyExits(
     equityHistoryState === "ready" ? payloadFlags : undefined,
     derivedPayload,
     apiKeys,
@@ -5324,6 +5414,7 @@ export function derivePhase07Fields(
     departedHistoryUnavailable,
     historyReconstructFailed,
     unpricedNativeAccounts,
+    failingKeyExits,
     partialPositionReads: partialReads
       .filter((p) => shownKeyIds.has(p.api_key_id))
       .map((p) => ({ ...p })),

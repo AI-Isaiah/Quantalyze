@@ -38,7 +38,7 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 import ccxt.async_support as ccxt
 from supabase import Client
@@ -105,6 +105,28 @@ class FundingFetchCeilingExceeded(PaginationCeilingExceeded):
     Raising here lets ``run_sync_funding_job`` classify the job as
     transient-failed and Sentry surfaces the trace.
     """
+
+
+class FundingRowsMalformed(RuntimeError):
+    """Raised, only when a fetcher is called with ``on_malformed="raise"``,
+    when its walk dropped at least one malformed row.
+
+    186 D-05 (funding half): a funding read that dropped a row is incomplete,
+    and the per-key derive must refuse that key by name instead of computing
+    returns from the short read. The message carries the venue and the count
+    only, never a symbol, amount, row id or strategy id, so it is safe to
+    log and to persist as a refusal reason. Every other caller keeps the
+    default ``on_malformed="drop"`` and today's drop-and-warn behaviour.
+    """
+
+
+def _raise_if_malformed(
+    venue: str, dropped: int, on_malformed: Literal["drop", "raise"]
+) -> None:
+    if on_malformed == "raise" and dropped > 0:
+        raise FundingRowsMalformed(
+            f"{venue} funding read dropped {dropped} malformed row(s)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +370,8 @@ async def fetch_funding_binance(
     exchange: ccxt.Exchange,
     strategy_id: str,
     since_ms: int | None,
+    *,
+    on_malformed: Literal["drop", "raise"] = "drop",
 ) -> list[FundingFeeRow]:
     """Fetch signed funding fees from Binance fapiPrivate_get_income.
 
@@ -454,6 +478,7 @@ async def fetch_funding_binance(
             "strategy %s (kept %d)",
             dropped, strategy_id, len(rows),
         )
+    _raise_if_malformed("binance", dropped, on_malformed)
     logger.info(
         "binance funding_fetch: %d rows for strategy %s", len(rows), strategy_id
     )
@@ -468,6 +493,8 @@ async def fetch_funding_okx(
     exchange: ccxt.Exchange,
     strategy_id: str,
     since_ms: int | None,
+    *,
+    on_malformed: Literal["drop", "raise"] = "drop",
 ) -> list[FundingFeeRow]:
     """Fetch signed funding fees from OKX private_get_account_bills type=8.
 
@@ -610,6 +637,7 @@ async def fetch_funding_okx(
             "strategy %s (kept %d, after dedup %d)",
             nonlocal_dropped[0], strategy_id, len(rows), len(deduped),
         )
+    _raise_if_malformed("okx", nonlocal_dropped[0], on_malformed)
     logger.info(
         "okx funding_fetch: %d rows (%d after dedup) for strategy %s",
         len(rows), len(deduped), strategy_id,
@@ -625,6 +653,8 @@ async def fetch_funding_bybit(
     exchange: ccxt.Exchange,
     strategy_id: str,
     since_ms: int | None,
+    *,
+    on_malformed: Literal["drop", "raise"] = "drop",
 ) -> list[FundingFeeRow]:
     """Fetch signed funding fees from Bybit v5/account/transaction-log.
 
@@ -770,6 +800,9 @@ async def fetch_funding_bybit(
                     "field for strategy %s; skipping. symbol=%s id=%s",
                     strategy_id, item.get("symbol"), item.get("id"),
                 )
+                # 186 D-05: a skipped settlement leaves the walk short, so it
+                # counts as dropped for ``on_malformed="raise"``.
+                dropped[0] += 1
                 continue
             row = _normalize_funding_row(
                 strategy_id=strategy_id,
@@ -823,6 +856,7 @@ async def fetch_funding_bybit(
             "(kept %d)",
             dropped[0], strategy_id, len(rows),
         )
+    _raise_if_malformed("bybit", dropped[0], on_malformed)
     logger.info(
         "bybit funding_fetch: %d rows for strategy %s", len(rows), strategy_id
     )

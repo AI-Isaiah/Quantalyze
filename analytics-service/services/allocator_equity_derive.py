@@ -151,14 +151,14 @@ class DegradeReason(str, Enum):
     # ``dropped_day_pnl_ignored_days``; blocking because the curve is suspect, not
     # because any one number is wrong.
     KEY_INPUTS_MISMATCH = "key_inputs_mismatch"
-    # 167.1.2.1.1 SC-2 (D-03, 2026-10-16): a single eligible key that is FAILING (not
-    # ``working_holder_predicate``) and whose last return day is before the book's last
-    # return day. It stays counted, but its series stopped the day it began to fail and
-    # the compose carries it flat at r = 0 (the benign ``stale_mark_carry``) while the
-    # rest of the book moves, so the book's return is diluted by frozen capital. The
-    # shared-account case already had ``shared_account_no_working_key`` for the same
-    # dilution; a lone failing key did not, and the book read "ready". The reader maps
-    # it onto that same existing line (D-04: no new copy).
+    # RETIRED by Phase 186 (D-03, D-07): never raised, and not in ``_BLOCKING_REASONS``. It
+    # stays a member because PROD ``equity_curve`` rows written before Phase 186 carry the token
+    # until the daily recompute replaces them, and the readers (TS reader, SQL census) keep
+    # mapping a stored one. It was 167.1.2.1.1 SC-2 (D-03, 2026-10-16): a single eligible key
+    # that is FAILING (not ``working_holder_predicate``) whose last return day is before the
+    # book's last return day, carried flat at r = 0 while the rest of the book moved. A dead
+    # key now affects only itself: the job exits it on its last good day through the departed
+    # path and names it (``failing_key_exits`` in the payload), so the curve stays trustworthy.
     FAILING_KEY_SERIES_ENDED = "failing_key_series_ended"
     # 167.1.2.1.1 SC-3 (D-03, 2026-10-16): the members of a stitched shared account list
     # DIFFERENT flow totals for a day the older member owns (see
@@ -190,7 +190,6 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
         DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY,
         DegradeReason.KEY_INPUTS_MISMATCH,
-        DegradeReason.FAILING_KEY_SERIES_ENDED,
         DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE,
         DegradeReason.ACCOUNT_IDENTITY_PENDING,
     }

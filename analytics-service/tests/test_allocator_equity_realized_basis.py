@@ -753,6 +753,7 @@ async def _run_ccxt_key_mode(
         patch("services.funding_fetch.fetch_funding_bybit", new=AsyncMock(return_value=[])),
         patch("services.funding_fetch.fetch_funding_binance", new=AsyncMock(return_value=[])),
         patch("services.ccxt_flow_fetch.fetch_ccxt_transfers", new=AsyncMock(return_value=[])),
+        patch("services.job_worker.fetch_bybit_unified_flows", new=AsyncMock(return_value=([], []))),
         patch("services.job_worker._resolve_ccxt_flow_price_index", new=AsyncMock(return_value={})),
         patch("services.ccxt_flows.ccxt_rows_to_dated_flows", new=MagicMock(return_value=book.flows)),
         # The book is dated in February 2026; the retention window is a different test.
