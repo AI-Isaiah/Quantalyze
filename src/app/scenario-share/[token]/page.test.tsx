@@ -134,13 +134,20 @@ vi.mock("@/lib/factsheet/benchmark-source", async (importOriginal) => ({
   readBtcCloses: (client: unknown) => readBtcClosesMock(client),
 }));
 
+// 188 round 2 (SFH-2): a rejected tiny_base_days list is reported by strategy id.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
+
 // getMyAllocationDashboard must NEVER be reached — count any call.
 const dashboardMock = vi.hoisted(() => vi.fn());
+// 188 round 3: the once-per-window throttle for a rejected tiny_base_days list.
+const throttleMock = vi.hoisted(() => vi.fn((_id: string, _token: string) => true));
 vi.mock("@/lib/queries", () => ({
   getMyAllocationDashboard: () => {
     dashboardMock();
     return Promise.resolve(null);
   },
+  shouldCaptureDerivedRowRejection: throttleMock,
 }));
 
 // Client components are stubbed to plain markup so renderToStaticMarkup works
@@ -965,6 +972,60 @@ describe("ScenarioSharePage — BTC leg shares blend in USD (164.6.6.2 D-22)", (
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
     const unconvertedHtml = await renderPage("btc-unit-missing");
     expect(unconvertedHtml).not.toBe(sharedHtml);
+  });
+
+  // 188 D-07 round 1 (MEDIUM-4): the page reads each leg's tiny-base days off the same flags and
+  // the resolver sits the leg out of them. A leg that names two of its own days drops them from
+  // the axis, so the rendered projection differs; a malformed list names nothing and renders as
+  // the flag-less share does.
+  it("reads data_quality_flags.tiny_base_days into the resolver, and a malformed list changes nothing", async () => {
+    const series = makeSeries();
+    const named = [series[5].date, series[6].date];
+    const render = async (flags: unknown, token: string) => {
+      analyticsReadMock.mockResolvedValueOnce({
+        data: [{ strategy_id: STRAT_A, returns_series: null, data_quality_flags: flags }],
+        error: null,
+      });
+      rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+      return renderPage(token);
+    };
+    const plain = await render(null, "tiny-none");
+    const named_ = await render({ tiny_base_days: named }, "tiny-named");
+    const malformed = await render({ tiny_base_days: [named[0], "not-a-day"] }, "tiny-malformed");
+
+    expect(named_).not.toBe(plain);
+    expect(malformed).toBe(plain);
+  });
+
+  it("188 round 2 (SFH-2): a rejected tiny_base_days list is reported by strategy id and never by value; a good, null or empty list is silent", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    captureSpy.mockClear();
+    const render = async (flags: unknown, token: string) => {
+      analyticsReadMock.mockResolvedValueOnce({
+        data: [{ strategy_id: STRAT_A, returns_series: null, data_quality_flags: flags }],
+        error: null,
+      });
+      rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+      return renderPage(token);
+    };
+    await render({ tiny_base_days: [makeSeries()[5].date] }, "tiny-quiet-1");
+    await render({ tiny_base_days: [] }, "tiny-quiet-2");
+    await render(null, "tiny-quiet-3");
+    expect(captureSpy).not.toHaveBeenCalled();
+
+    await render({ tiny_base_days: ["2026-03-03", "nope-value"] }, "tiny-reported");
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [, opts] = captureSpy.mock.calls[0]!;
+    expect(opts.tags).toMatchObject({ reason: "tiny_base_days_malformed", strategy_id: STRAT_A });
+    expect(JSON.stringify(captureSpy.mock.calls[0])).not.toContain("nope-value");
+
+    // Round 3: a throttled strategy is warned about but not captured again.
+    expect(throttleMock).toHaveBeenCalledWith(STRAT_A, "tiny_base_days_strategy_malformed");
+    captureSpy.mockClear();
+    throttleMock.mockReturnValueOnce(false);
+    await render({ tiny_base_days: ["2026-03-03", "nope-value"] }, "tiny-throttled");
+    expect(captureSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it("reads the conversion closes server-side ONLY when a leg has a unit: an all-USD share never calls readBtcCloses", async () => {

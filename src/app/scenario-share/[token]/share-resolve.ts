@@ -210,6 +210,14 @@ export function resolveSharedScenario(
    * -> geometric, byte-identical to before.
    */
   returnsMethodById?: Record<string, CurveMethod>,
+  /**
+   * 188 D-07 (round 1, MEDIUM-4) — strategy id -> the days the tiny-base rule left out of that
+   * leg's stored series (`readTinyBaseDays(data_quality_flags.tiny_base_days)`). Caller-side for
+   * the same reason as the lookups above (the RPC cannot be widened). A leg that names days sits
+   * out of them in the blend, as in the owner's composer, instead of reading a flat 0%. Absent id
+   * / undefined lookup -> no named days, byte-identical to before.
+   */
+  tinyBaseDaysById?: Record<string, readonly string[]>,
 ): ResolvedSharedScenario {
   // The codec's `decode` takes a raw STRING (localStorage shape). The RPC hands
   // us a parsed jsonb object, so re-serialize it to drive the same trichotomy.
@@ -287,6 +295,9 @@ export function resolveSharedScenario(
       // PROJECTION GAP → the conservative √365 clock, not √252. Feeds the blend
       // basis below.
       asset_class: assetClassById?.[id] ?? null,
+      ...(tinyBaseDaysById?.[id]?.length
+        ? { undefined_return_days: tinyBaseDaysById[id] }
+        : {}),
     });
     // An added strategy is "selected" when its ref is toggled on (default true
     // when the toggle entry is absent — added strategies enter enabled). This

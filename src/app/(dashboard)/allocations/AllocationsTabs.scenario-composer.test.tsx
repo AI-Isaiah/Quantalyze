@@ -154,21 +154,33 @@ vi.mock("./components/ScenarioComposer", () => ({
 // wiring test asserts they mount (and are handed the list rows / payload)
 // without exercising their internals (covered by their own tests).
 vi.mock("./components/SavedScenariosList", () => ({
-  SavedScenariosList: (props: { rows: unknown[] }) => (
+  SavedScenariosList: (props: {
+    rows: unknown[];
+    onCompare?: (selection: { rows: unknown[]; includeLiveBook: boolean }) => void;
+  }) => (
     <div
       data-testid="saved-scenarios-list-body"
       data-row-count={props.rows.length}
     >
       SAVED_SCENARIOS_LIST_BODY
+      <button
+        type="button"
+        data-testid="saved-list-fire-compare"
+        onClick={() => props.onCompare?.({ rows: [], includeLiveBook: true })}
+      >
+        fire-compare
+      </button>
     </div>
   ),
 }));
 
 vi.mock("./components/ScenarioComparePanel", () => ({
-  ScenarioComparePanel: () => (
-    <div data-testid="scenario-compare-panel-body">
-      SCENARIO_COMPARE_PANEL_BODY
-    </div>
+  ScenarioComparePanel: vi.fn(
+    (_props: { payload: Record<string, unknown> }) => (
+      <div data-testid="scenario-compare-panel-body">
+        SCENARIO_COMPARE_PANEL_BODY
+      </div>
+    ),
   ),
 }));
 
@@ -176,6 +188,7 @@ vi.mock("./components/ScenarioComparePanel", () => ({
 
 import { AllocationsTabs } from "./AllocationsTabs";
 import { ScenarioComposer } from "./components/ScenarioComposer";
+import { ScenarioComparePanel } from "./components/ScenarioComparePanel";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { EMPTY_EXPOSURE, type ExposureSectionData } from "./lib/exposure-props";
 
@@ -399,6 +412,27 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
     // A composer save fires onScenarioSaved → the host refetches.
     fireEvent.click(screen.getByTestId("composer-fire-saved"));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  // -------------------------------------------------------------------------
+  // T_AT5d (188 round 1, MEDIUM-6) — the compare panel's payload carries the dashboard's
+  //          `tinyBaseDaysByApiKeyId`. The panel declares the field OPTIONAL, so the compiler
+  //          cannot catch the line being deleted; this arm can: without the field the live-book
+  //          and saved-draft columns 0-fill the tiny days the composer next to them leaves out.
+  // -------------------------------------------------------------------------
+  it("T_AT5d the compare panel payload carries the dashboard's tinyBaseDaysByApiKeyId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => [] }) as Response),
+    );
+    const lists = { "key-binance": ["2026-10-27", "2026-10-28"] };
+    setSearchParams("tab=scenario");
+    vi.mocked(ScenarioComparePanel).mockClear();
+    render(<AllocationsTabs {...STUB_PROPS} tinyBaseDaysByApiKeyId={lists} />);
+    fireEvent.click(await screen.findByTestId("saved-list-fire-compare"));
+    await screen.findByTestId("scenario-compare-panel-body");
+    const payload = vi.mocked(ScenarioComparePanel).mock.calls.at(-1)![0].payload;
+    expect(payload.tinyBaseDaysByApiKeyId).toEqual(lists);
   });
 
   // -------------------------------------------------------------------------

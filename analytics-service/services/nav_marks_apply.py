@@ -97,6 +97,48 @@ Further rules
 14. ``covered_days`` is every calendar day from ``covered_from`` through the last mark day
     that has no output row. Callers pass it to ``derive_basis_series(covered_days=...)``.
 
+15. TINY BASE (188 TINYBASE, founder 2026-11-03: D-02 "Leave out, show the day flagged", D-03 the
+    threshold, D-05 a base at or below zero is never tiny). A mark whose usable ``base`` is tiny
+    by ``services.tiny_base.is_tiny_base`` (positive and under the fraction of the highest level
+    over the previous 30 days) gets NO return row. "Starting NAV" is the ``base`` of rule 5, so a
+    gap-day deposit counts in it (T-A1). The day's real P&L ``M_d - base - F_d`` is kept in
+    ``writer_day_pnl`` (rule 8), its level is still pinned so the next mark chains from it, and
+    it is listed in ``tiny_base_days``. It is neither in ``covered_days`` nor in
+    ``mark_gap_days``: it is a flagged gap, not a day the next mark's return covers. The level
+    map the peaks come from holds EVERY mark's level, plus the S-1 level whenever it was
+    computed and is finite, usable as a base or not (T-LM), so a series with no input day before
+    its first mark and one whose S-1 base is unusable are judged too. A mark with no usable base
+    keeps the rule 4 outcome; only a usable base is then judged.
+
+    T-GAP (188-03, SC-5): the days a withheld mark's single return (rule 5) would have covered
+    are part of that one withheld measurement, so they are left out with it. For a mark after the
+    first these are its gap days, the days strictly between the previous mark and it. Each is
+    listed in ``tiny_base_days`` (ascending, before the mark), kept out of ``covered_days`` and
+    ``mark_gap_days``, and given ``writer_day_pnl`` 0.0 when it holds no entry yet (rule 8: the
+    measured period's whole P&L lands on the mark day; a gap day with a flow already holds 0.0).
+    Why: rule 14 says covered means "inside the next return", and no return covers them any more;
+    a multi-key book would read them as ``missing_return_days`` at r = 0 at the key's carried
+    level, an invented flat day. Listed, they reach ``key_inputs.dropped_day_pnl`` through the
+    derive and the compose makes the key sit out every day of the withheld period. A gap-day
+    withdrawal that produced the tiny base is left out too: the account ends nearly empty and
+    its move is inside the withheld return. A gap day before a MEASURED mark stays covered.
+
+    A withheld FIRST mark (reachable once the window sees the pre-start peak, T-OQ4) takes the
+    days from ``covered_from`` through S-1 the same way: they have no output row by construction
+    and no return covers them. They hold 0.0 in ``writer_day_pnl`` because the writer's own NAV
+    days all lie at or before the last input day, so the key-mode join of the pre-start writer
+    P&L with ``writer_day_pnl`` never meets a day twice.
+
+    T-OQ4 (``_pre_start_levels``): the 30-day window reaches before S-1. The end-of-day levels of
+    ``S-1-30`` through ``S-2`` are rolled backward from the S-1 level (T-LM: whenever it was
+    computed and is finite, usable as a base or not), on the writer's identity
+    ``L(d-1) = L(d) - P_d - F_d`` for a writer terminal, ``(L(d) - F_d) / (1 + r_d)`` for the
+    wallet ``roll_basis="returns"`` (an absent day r = 0) and ``L(d) - P_d - F_d`` for
+    ``roll_basis="day_pnl"``. KL-3 (recorded, not fixed): the roll stops where an input is unknown
+    (a NaN day without day P&L, a factor at or below 0, a non-finite level), so on a ccxt venue
+    (no day P&L) a peak beyond a guard day or a quiet day is not seen by the first marks' windows.
+    Rolling through an unknown day would invent a level (SC-5); nothing here raises (rule 4).
+
 D-14: a second roll basis for an allocated-capital input
 --------------------------------------------------------
 ``roll_basis="returns"`` (the default) rolls day ``S`` back through its realized return, which
@@ -130,6 +172,7 @@ from typing import Final, Literal, NamedTuple
 import pandas as pd
 
 from services.external_flows import FlowInstant
+from services.tiny_base import TINY_BASE_WINDOW_DAYS, is_tiny_base, window_peaks
 
 MARK_APPLY_REFUSAL_TOKENS: Final[frozenset[str]] = frozenset(
     {
@@ -177,6 +220,9 @@ class MarkedSeries(NamedTuple):
     covered_from: str | None
     covered_days: tuple[str, ...]
     flow_moves_out: dict[str, float]
+    # 188 TINYBASE rule 15: the mark days left out of ``returns`` because their base was a sliver
+    # of the 30-day peak. Last, with a default, so every positional constructor still works.
+    tiny_base_days: tuple[str, ...] = ()
 
 
 def _input_days(returns: pd.Series) -> list[tuple[date, float]]:
@@ -294,6 +340,66 @@ def _writer_level_before(
     return level
 
 
+def _pre_start_levels(
+    start: date,
+    level_s1: float | None,
+    pre: Sequence[tuple[date, float]],
+    flows: Mapping[date, float],
+    pnl: Mapping[date, float],
+    roll_basis: Literal["returns", "day_pnl"],
+    parsed_terminal: tuple[date, float] | None,
+    writer_flows: Mapping[date, float],
+) -> dict[date, float]:
+    """End-of-day levels of the days ``start - 1 - TINY_BASE_WINDOW_DAYS`` through ``start - 2``,
+    rolled backward one day at a time from ``level_s1`` (rule 15, T-OQ4).
+
+    The tiny-base window of a mark reaches back 30 days, so the first marks must see a peak that
+    sits before the first mark. ``level_s1`` is the S-1 level whenever it was computed and is
+    finite, usable as a base or not (T-LM), so an unusable S-1 base does not hide an earlier peak.
+    An empty dict when ``level_s1`` is None or non-finite.
+
+    Writer chain (``parsed_terminal`` given): ``L(d-1) = L(d) - P_d - F_d`` over ``pnl`` and
+    ``writer_flows`` (the ``_writer_level_before`` identity, an absent day 0.0). Wallet with
+    ``roll_basis="returns"``: ``L(d-1) = (L(d) - F_d) / (1 + r_d)`` over the input days and
+    ``flows`` (an absent day is r = 0; a NaN ``r_d`` uses ``L(d) - P_d - F_d`` when ``pnl`` holds
+    ``d`` and otherwise stops; a factor at or below 0 stops). Wallet with ``roll_basis="day_pnl"``:
+    ``L(d-1) = L(d) - P_d - F_d``.
+
+    KL-3 (recorded, not fixed): where an input is unknown (a NaN day with no day P&L, a factor at
+    or below 0, a non-finite level) the roll STOPS and the levels already rolled are what the
+    window sees; a peak beyond the stop is not seen. Rolling through an unknown day would invent a
+    level (SC-5). Nothing here raises: marks and flows are history, so a refusal would repeat on
+    every later derive (rule 4)."""
+    levels: dict[date, float] = {}
+    if level_s1 is None or not math.isfinite(level_s1):
+        return levels
+    returns_by_day = dict(pre)
+    level = level_s1
+    day = start - timedelta(days=1)
+    for _ in range(TINY_BASE_WINDOW_DAYS):
+        f_d = writer_flows.get(day, 0.0) if parsed_terminal is not None else flows.get(day, 0.0)
+        p_d = pnl.get(day, 0.0)
+        if parsed_terminal is not None or roll_basis == "day_pnl":
+            prior = level - p_d - f_d
+        else:
+            r_d = returns_by_day.get(day, 0.0)
+            if math.isnan(r_d):
+                if day not in pnl:
+                    break
+                prior = level - p_d - f_d
+            else:
+                factor = 1.0 + r_d
+                if not factor > 0.0:
+                    break
+                prior = (level - f_d) / factor
+        if not math.isfinite(prior):
+            break
+        day -= timedelta(days=1)
+        levels[day] = prior
+        level = prior
+    return levels
+
+
 def apply_marks(
     returns: pd.Series,
     flows_by_day: Mapping[str, float],
@@ -381,6 +487,9 @@ def apply_marks(
     # when the caller gave its terminal (G-01, D-25, D-26), else the first mark's own wallet. A
     # mark with no usable base is pinned but has no return (rule 4).
     base0: float | None = None
+    # 188 TINYBASE T-LM: the S-1 level, kept before the usability check below nulls it, so the
+    # tiny-base level map holds it whether or not it is usable as a base.
+    level_s1: float | None = None
     if pre:
         if parsed_terminal is not None:
             base0 = _writer_level_before(start, parsed_terminal, pnl, writer_flows)
@@ -397,12 +506,33 @@ def apply_marks(
                         base0 = (wallet - flow_s) / factor
                 elif start in pnl:
                     base0 = wallet - pnl[start] - flow_s
+        level_s1 = base0
         if base0 is not None and not usable(base0):
             base0 = None
 
+    # Rule 15 (188 D-03, T-LM): each mark's base is judged against the highest level of the
+    # previous 30 days, from the level map of EVERY mark's level plus the S-1 level whenever it
+    # was computed and is finite, usable as a base or not. The map is never gated on ``base0``:
+    # a marks-only series and one whose S-1 base is unusable must still be judged.
+    level_map: dict[str, float] = {
+        md.isoformat(): nav for md, nav in zip(mark_days, navs)
+    }
+    if level_s1 is not None and math.isfinite(level_s1):
+        level_map[(start - timedelta(days=1)).isoformat()] = level_s1
+    # T-OQ4: the window reaches before S-1, so the earlier days are rolled back from ``level_s1``.
+    level_map.update({
+        d.isoformat(): lvl
+        for d, lvl in _pre_start_levels(
+            start, level_s1, pre, flows, pnl, roll_basis, parsed_terminal, writer_flows
+        ).items()
+    })
+    peaks = window_peaks(level_map, [md.isoformat() for md in mark_days])
+
+    covered_from = (pre[-1][0] + timedelta(days=1)) if pre else start
     level_prev: float | None = base0
     prev_day = start - timedelta(days=1)
     rows: list[tuple[date, float]] = []
+    tiny: list[date] = []
     writer_day_pnl: dict[str, float] = {}
     for md, nav in zip(mark_days, navs):
         gap = _days_between(prev_day, md)
@@ -411,8 +541,26 @@ def apply_marks(
             base = level_prev + sum(flows.get(g, 0.0) for g in gap)
             if usable(base):
                 day_result = nav - base - flows.get(md, 0.0)
-                rows.append((md, day_result / base))
                 writer_day_pnl[md.isoformat()] = day_result
+                if is_tiny_base(base, peaks.get(md.isoformat())):
+                    # Rule 15: a measured day with NO return row. Its real P&L is kept above,
+                    # its level is pinned below, and it counts as measured for the flow rule.
+                    # T-GAP: the gap days this return would have covered leave with it. No
+                    # return spans them any more, so they are named (ascending, before ``md``)
+                    # and carry rule 8's 0.0, the period's whole P&L landing on ``md``.
+                    # A withheld FIRST mark takes the days from ``covered_from`` through S-1
+                    # with it: no output row exists there, and no return covers them any more.
+                    withheld_gap = (
+                        _days_inclusive(covered_from, start - timedelta(days=1))
+                        if md == start
+                        else gap
+                    )
+                    for g in withheld_gap:
+                        tiny.append(g)
+                        writer_day_pnl.setdefault(g.isoformat(), 0.0)
+                    tiny.append(md)
+                else:
+                    rows.append((md, day_result / base))
                 has_row = True
         # A flow on a day with no return steps the compose's level by the flow (rule 8).
         for g in gap if has_row else [*gap, md]:
@@ -427,8 +575,7 @@ def apply_marks(
         values, index=_output_index(returns, labels), dtype="float64", name=returns.name
     )
 
-    emitted = {d for d, _ in rows}
-    covered_from = (pre[-1][0] + timedelta(days=1)) if pre else start
+    emitted = {d for d, _ in rows} | set(tiny)
     covered_days = tuple(
         d.isoformat()
         for d in _days_inclusive(covered_from, last_mark)
@@ -448,6 +595,7 @@ def apply_marks(
         covered_from=covered_from.isoformat(),
         covered_days=covered_days,
         flow_moves_out={d.isoformat(): amount for d, amount in moves_out.items()},
+        tiny_base_days=tuple(d.isoformat() for d in tiny),
     )
 
 

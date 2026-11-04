@@ -42,6 +42,7 @@ the same ``t`` as the pnl it offsets — Pitfall #11).
 import bisect
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from datetime import timedelta
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -52,6 +53,7 @@ import pandas as pd
 # the wrong day and silently mis-attribute a return (Pitfall #11).
 from services.account_unit import USD_FLOORS, UnitFloors
 from services.deribit_txn import _row_utc_day
+from services.tiny_base import is_tiny_base, window_peaks
 
 # ReturnsComputationMeta is imported READ-ONLY — the core extends it additively
 # via NavTWRMeta (below); it does NOT modify the transforms.py contract. The two
@@ -252,6 +254,23 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # assert in ``job_worker``, which refuses to write a series whose combiner
     # returned no verdict. Do not claim the type checker enforces presence.
     series_completeness: str
+    # Phase 188 TINYBASE (D-02, D-03) — the FOURTH member of the "this day has no return" family:
+    # at least one day's starting NAV was positive and under 5% of the previous 30 calendar days'
+    # peak (``services.tiny_base``), so one ordinary move on what was left would read as +47%.
+    # The day is NaN (never substituted), the chain breaks there exactly like a dust or
+    # P&L-dominated day (D-04: before a key's first stored mark a left-out day restarts the
+    # headline the day after), and the real P&L is kept. ``tiny_base_guard`` is a BOOL and a
+    # member of ``NAV_TWR_GUARD_KEYS`` (it promotes to ``complete_with_warnings`` like the dust
+    # guard). ``tiny_base_days`` is the ascending list of ISO days left out; ``tiny_base_day_pnl``
+    # maps each of them to that day's P&L, ``cur - prev - F_t``. Both are ANNOTATIONS in
+    # ``NAV_TWR_ANNOTATION_KEYS``, never guard keys, so no pre-stamp or lift loop persists them.
+    # ⛔ ``tiny_base_day_pnl`` holds AMOUNTS and is in-process only (the
+    # ``small_base_measured_min_nav`` precedent, T-73-02): it is handed to
+    # ``key_inputs.dropped_day_pnl`` (the field that already stores day P&L) and nowhere else,
+    # and never logged.
+    tiny_base_guard: bool
+    tiny_base_days: list[str]
+    tiny_base_day_pnl: dict[str, float]
 
 
 # SHOULD-1 (specialist-types): the ONE source of truth for the additive
@@ -274,6 +293,8 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "twr_chain_broken",
     "pre_summary_rollout_option_dailies",
     "pre_mark_retention_option_dailies",
+    # 188 D-02: a day whose starting NAV is a sliver of the 30-day peak has no return.
+    "tiny_base_guard",
 )
 
 # 164.6.6.2.3 D-05 / D-14: guard keys that are RETIRED. CARRY-ONLY: no code emits them after
@@ -298,6 +319,11 @@ NAV_TWR_ANNOTATION_KEYS: tuple[str, ...] = (
     "flow_timing_timed_days",
     "flow_timing_day_level_large",
     "flow_timing_day_level_large_days",
+    # 188 D-02: the days the tiny-base guard left out, and their P&L (an amount, in-process
+    # only, T-188-06). Deliberately NOT in NAV_TWR_GUARD_KEYS: no loop that persists or lifts
+    # guard keys may ever iterate an amount.
+    "tiny_base_days",
+    "tiny_base_day_pnl",
 )
 
 # A carry-only key must not also be an emitted guard or an annotation: it would then be
@@ -716,10 +742,36 @@ def chain_linked_twr(
     NAV under 100 is dust-guarded first); for the BTC row ``dust_nav`` (1e-7) is below ``material_equity``
     (1e-4), which is the zone it covers.
 
+    Phase 188 D-02/D-03 (``tiny_base_guard``, the fourth member of the "this day has no
+    return" family): a day whose starting NAV ``prev`` (the base the return divides by) is
+    positive and under 5% of the highest NAV over the previous 30 calendar days
+    (``services.tiny_base``, the one definition) has no return: NaN, never substituted, the
+    chain breaks there like every guard day (D-04, founder 2026-11-03 "Split by era": in the
+    realized era the headline restarts the day after the last tiny day). The flags then carry
+    ``tiny_base_guard`` (``True``), ``tiny_base_days`` (ascending ISO days) and
+    ``tiny_base_day_pnl`` ({ISO day: ``cur - prev - F_t``}, amounts, in-process only). Precedence:
+    it is checked LAST. A base at or below zero and a dust base are named by
+    ``_guard_denominator`` first (D-05), a P&L-dominated day by ``pnl_dominated_guard`` next, and
+    a day that is also tiny keeps that earlier name. On a timed day (``DayTiming``) the test
+    runs after ``_timed_day_return``'s own cohort guards and is judged on ``prev``, never on a
+    cohort base (T-A1). The peak window sees the day-0 base as the level the day before the
+    first index entry, so day 0 itself is never tiny. A day with no NAV entry at all (the
+    sparse index) never reaches this loop; the combiners gap-fill it afterwards.
+
+    188 D-03 judges EVERY day by its starting NAV, and D-08 (founder 2026-11-03, "Yes, leave
+    them out too") includes a day with no activity. The realized-era index is sparse (a day with
+    no P&L and no flow is absent), so such a day has no loop iteration of its own: its starting
+    NAV is the level carried into it, the earlier index day's NAV, and it is judged against the
+    same 30-day peak. A tiny one is listed in ``tiny_base_days`` (merged ascending with the
+    measured ones) with ``tiny_base_day_pnl`` 0.0 and raises ``tiny_base_guard``. ``returns``
+    keeps ``nav.index`` exactly (no label is added; a day before the first or after the last
+    index day is never judged), because the combiners would otherwise gap-fill the quiet day to
+    0.0, a flat day counted on a near-empty account (plan 04 Task 2 leaves it NaN there).
+
     Returns ``(returns, flags)`` where ``returns`` is a ``"returns"``-named
     Series on the NAV DatetimeIndex (broken days are NaN) and ``flags`` maps the
     DQ flag keys that fired to ``True`` (plus the two D-25 counts above when that
-    annotation fired, plus the D-07 annotations above).
+    annotation fired, plus the D-07 annotations above, plus the two 188 tiny-base lists).
     """
     index = nav.index
     flows = _align_flows(flows_by_day, index).to_numpy(dtype=float)
@@ -736,6 +788,37 @@ def chain_linked_twr(
     n = len(index)
     flags: dict[str, Any] = {}
     returns = np.full(n, np.nan)
+
+    # 188 D-02/D-03 (the tiny-base guard): the 30-day peak each day is judged against, computed
+    # ONCE here, never per row. The level map is every FINITE NAV level (an unobserved sFOX day
+    # is NaN and stays out: the peak helper refuses a non-finite level) plus the day-0 base on
+    # the calendar day before the first index entry, which is the capital the account held
+    # going in (a day-0 withdrawal leaving a sliver therefore makes day 1 tiny). The index is
+    # sparse (a no-activity day is absent); the helper carries the last level before a gap.
+    day_isos = [pd.Timestamp(ts).date().isoformat() for ts in index]
+    level_map: dict[str, float] = {
+        iso: float(level) for iso, level in zip(day_isos, nav_vals) if np.isfinite(level)
+    }
+    base_day0 = (nav_vals[0] - pnl0 - flows[0]) if prev0_val is None else prev0_val
+    if np.isfinite(base_day0):
+        day_before = (pd.Timestamp(index[0]).date() - timedelta(days=1)).isoformat()
+        level_map[day_before] = float(base_day0)
+    # 188 D-03/D-08 (quiet days): every calendar day strictly between two consecutive index
+    # days has no activity, so its starting NAV is the level carried into it (the earlier index
+    # day's NAV). The same peak call judges them, together with the index days, in ONE call.
+    # A day before the first or after the last index day is never judged, and an unobserved
+    # (non-finite) or non-positive carried level judges nothing (D-05).
+    quiet_carried: dict[str, float] = {}
+    for t in range(1, n):
+        carried = nav_vals[t - 1]
+        if not np.isfinite(carried) or carried <= 0.0:
+            continue
+        first_day = pd.Timestamp(index[t - 1]).date()
+        for step in range(1, (pd.Timestamp(index[t]).date() - first_day).days):
+            quiet_carried[(first_day + timedelta(days=step)).isoformat()] = float(carried)
+    peaks = window_peaks(level_map, day_isos + list(quiet_carried))
+    tiny_day_pnl: dict[str, float] = {}
+
     small_base_days = 0
     small_base_min_nav = float("inf")
     timed_days = 0
@@ -784,6 +867,13 @@ def chain_linked_twr(
                 continue
             if np.isnan(timed_return):
                 continue
+            # 188 D-02/D-03 on a timed day: judged on ``prev``, the day's STARTING NAV (T-A1),
+            # never on a cohort base. A cohort may legitimately be small (a withdrawal then a
+            # trade); only a day that OPENED on a sliver of the 30-day peak has no return.
+            if is_tiny_base(prev, peaks.get(day_isos[t])):
+                flags["tiny_base_guard"] = True
+                tiny_day_pnl[day_isos[t]] = float(cur - prev - flow_t)
+                continue
             returns[t] = timed_return
             timed_days += 1
             # D-25 on a timed day: the smallest base any measured cohort used.
@@ -819,6 +909,15 @@ def chain_linked_twr(
             flags["pnl_dominated_guard"] = True
             continue
 
+        # 188 D-02/D-03 — the fourth guard, checked LAST (negative and dust, then P&L-dominated,
+        # then this): a day whose starting NAV is positive and under 5% of the previous 30
+        # calendar days' peak has no return. NaN, never substituted, and the day's real P&L is
+        # kept (it is already inside NAV_t). D-05: a non-positive base never reaches here.
+        if is_tiny_base(prev, peaks.get(day_isos[t])):
+            flags["tiny_base_guard"] = True
+            tiny_day_pnl[day_isos[t]] = float(pnl_t)
+            continue
+
         returns[t] = (cur - prev - flow_t) / prev
 
         # D-15: a MEASURED day-level flow day whose flow is at least the prior NAV (the retired
@@ -847,6 +946,19 @@ def chain_linked_twr(
     if large_flow_days:
         flags["flow_timing_day_level_large"] = True
         flags["flow_timing_day_level_large_days"] = large_flow_days
+    # 188 D-03/D-08: a quiet day (no index entry) on a near-empty account is left out like a
+    # measured tiny day. Nothing happened on it, so its P&L is 0.0; the combiners' gap fill
+    # would otherwise write it as a flat r = 0.0 (plan 04 Task 2 leaves it NaN there). It has no
+    # computation of its own, so it is never also a guard day.
+    for quiet_iso, carried in quiet_carried.items():
+        if is_tiny_base(carried, peaks.get(quiet_iso)):
+            flags["tiny_base_guard"] = True
+            tiny_day_pnl[quiet_iso] = 0.0
+    if tiny_day_pnl:
+        # 188: annotations next to the guard bool. Days ascending; the P&L map is amounts
+        # and stays in-process (T-188-06).
+        flags["tiny_base_days"] = sorted(tiny_day_pnl)
+        flags["tiny_base_day_pnl"] = {day: tiny_day_pnl[day] for day in sorted(tiny_day_pnl)}
 
     return pd.Series(returns, index=index, name="returns"), flags
 
@@ -1021,6 +1133,15 @@ def _build_nav_meta(flags: Mapping[str, Any]) -> NavTWRMeta:
             meta["flow_timing_day_level_large_days"] = int(
                 flags["flow_timing_day_level_large_days"]
             )
+    # 188 D-02: the tiny-base guard BOOL rode the guard loop above. The day list and the P&L map
+    # are annotations on their own present-only carry (the status promoted on the bool, never on
+    # these). The P&L map is amounts, in-process only (T-188-06).
+    if flags.get("tiny_base_days"):
+        meta["tiny_base_days"] = [str(day) for day in flags["tiny_base_days"]]
+        if flags.get("tiny_base_day_pnl"):
+            meta["tiny_base_day_pnl"] = {
+                str(day): float(amount) for day, amount in flags["tiny_base_day_pnl"].items()
+            }
     return meta
 
 

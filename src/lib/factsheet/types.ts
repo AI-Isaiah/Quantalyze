@@ -882,6 +882,17 @@ export type FactsheetCommon = {
      */
     flowTimingDayLevel?: boolean;
     /**
+     * Phase 188 (TINYBASE) D-02, D-06 (founder 2026-11-03: "A short muted note under the chart
+     * naming the near-empty days") - the days the tiny-base rule left out because the account
+     * was nearly empty (under 5% of its highest balance over the previous 30 days): ascending
+     * distinct `YYYY-MM-DD` days, present only when non-empty. DAYS ONLY, never an amount or the
+     * peak. Single-key: `data_quality_flags.tiny_base_days` through `readTinyBaseDays`
+     * (`src/lib/tiny-base-flag.ts`, the strict reader); the allocator book feeds the same field
+     * from its dashboard payload (plan 08). INFORMATIONAL: the factsheet names the days as a
+     * muted note under the chart and the chart line is unchanged.
+     */
+    tinyBaseDays?: string[];
+    /**
      * Phase 164.6.6.2.3 (D-15, founder 2026-10-12, silent-failure hunt F1) — single-key
      * only, present only when true: `data_quality_flags.flow_timing_day_level_large`. At
      * least one MEASURED day-level flow day carried a deposit or withdrawal at least as

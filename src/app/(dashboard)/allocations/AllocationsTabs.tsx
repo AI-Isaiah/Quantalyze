@@ -1154,8 +1154,10 @@ function ScenarioTabContent({
   // (the same live fields the composer's book-mode engine reads). Construct it
   // explicitly, sourced from `props`, and annotate with
   // ScenarioComparePanelProps["payload"] so the compiler is the standing
-  // contract gate — deleting a required field here (or the panel widening its
-  // requirement) fails the build. Replaces the prior `props`→panel double-cast
+  // contract gate — deleting a REQUIRED field here (or the panel widening its
+  // requirement) fails the build. An OPTIONAL field (`tinyBaseDaysByApiKeyId`)
+  // is not gated by the compiler; `AllocationsTabs.scenario-composer.test.tsx`
+  // (T_AT5d) pins it. Replaces the prior `props`→panel double-cast
   // (an unchecked type erasure) that silently masked any payload/panel drift
   // (T-66-08). No zod schema — the data is server-trusted
   // SSR props, so a structural narrow is proportionate (Don't-Hand-Roll).
@@ -1172,6 +1174,8 @@ function ScenarioTabContent({
     // phase exists to serve.
     bookEntryGateSatisfied: props.bookEntryGateSatisfied,
     contributingApiKeyIds: props.contributingApiKeyIds,
+    // 188 D-07: the compare panel and the composer read the same tiny-base days.
+    tinyBaseDaysByApiKeyId: props.tinyBaseDaysByApiKeyId,
   };
 
   return (

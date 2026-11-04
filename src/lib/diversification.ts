@@ -74,8 +74,15 @@ export interface AlignedConstituents {
   ids: string[];
   /** The union-of-dates axis (sorted ascending) — the engine's `commonDates`. */
   commonDates: string[];
-  /** Per-id RAW (un-levered) returns aligned on `commonDates`, zero-filled
-   *  before each strategy's include-from. All arrays length === commonDates.length. */
+  /** 188 D-07 (T-KL1-CORR) — present ONLY when some member names an axis day in
+   *  `undefined_return_days`: the axis days NO member names, the engine's one
+   *  correlation day set. When present, every `returnsById` array aligns on
+   *  these days (length === correlationDates.length); when absent, on
+   *  `commonDates`, exactly as before. */
+  correlationDates?: string[];
+  /** Per-id RAW (un-levered) returns aligned on `correlationDates` when present,
+   *  else on `commonDates`, zero-filled before each strategy's include-from. All
+   *  arrays share one length. */
   returnsById: Record<string, number[]>;
 }
 
@@ -142,7 +149,17 @@ export interface DiversificationResult {
  * In both paths per-id values are `d >= from ? (map.get(d) ?? 0) : 0` — RAW
  * (un-levered); leverage is applied ONLY to portfolio_daily_returns by the
  * engine, never to the per-constituent series the correlation matrix is built
- * from. The engine emits the resulting aligned series only as a transient local
+ * from.
+ *
+ *   ── 188 D-07 (T-KL1-AXIS, T-KL1-CORR): days a member has NO return on ──
+ *   A member may name days in `undefined_return_days` (the tiny-base days the
+ *   rule left out of its stored series). Mirroring `computeScenario`, the axis
+ *   is built without a member's named days, and — only when some member names a
+ *   day that is on the axis — every `returnsById` array is aligned on
+ *   `correlationDates`, the axis days no member names, so one covariance matrix
+ *   reproduces the engine's `correlation_matrix`. A named day is therefore never
+ *   a 0 inside a member's array. With no named axis day the output is exactly
+ *   the shape and values it had before this field existed. The engine emits the resulting aligned series only as a transient local
  * (`strategyReturns`) and discards it, so this is the single frozen-safe way to
  * reconstruct the exact window the displayed ρ was computed on. The consistency
  * pin (rebuilt ρ ≡ engine correlation_matrix to 3dp, union AND windowed) catches
@@ -172,10 +189,20 @@ export function alignConstituentReturns(
     );
   }
 
+  // 188 D-07: a member's named days are not on its axis (engine parity).
+  const namedDays = new Map<string, ReadonlySet<string>>();
+  for (const s of members) {
+    if (s.undefined_return_days && s.undefined_return_days.length > 0) {
+      namedDays.set(s.id, new Set(s.undefined_return_days));
+    }
+  }
+
   const allDateSet = new Set<string>();
   for (const s of members) {
     const from = includeFrom.get(s.id)!;
+    const named = namedDays.get(s.id);
     for (const d of s.daily_returns) {
+      if (named?.has(d.date)) continue;
       if (window) {
         if (d.date >= window.start && d.date <= window.end) allDateSet.add(d.date);
       } else if (d.date >= from) {
@@ -185,18 +212,33 @@ export function alignConstituentReturns(
   }
   const commonDates = Array.from(allDateSet).sort();
 
+  // 188 D-07 (T-KL1-CORR): the engine measures every pair on the axis days no
+  // member names. Applied only when a named day is actually on the axis, so a
+  // book without one keeps today's output byte for byte.
+  const isNamedByAny = (d: string) =>
+    members.some((m) => namedDays.get(m.id)?.has(d));
+  const correlationDates = commonDates.some(isNamedByAny)
+    ? commonDates.filter((d) => !isNamedByAny(d))
+    : null;
+  const alignOn = correlationDates ?? commonDates;
+
   const returnsById: Record<string, number[]> = {};
   for (const s of members) {
     const map = new Map<string, number>(
       s.daily_returns.map((d: DailyPoint) => [d.date, d.value]),
     );
     const from = includeFrom.get(s.id)!;
-    returnsById[s.id] = commonDates.map((d) =>
+    returnsById[s.id] = alignOn.map((d) =>
       d >= from ? (map.get(d) ?? 0) : 0,
     );
   }
 
-  return { ids: members.map((s) => s.id), commonDates, returnsById };
+  return {
+    ids: members.map((s) => s.id),
+    commonDates,
+    ...(correlationDates ? { correlationDates } : {}),
+    returnsById,
+  };
 }
 
 /**

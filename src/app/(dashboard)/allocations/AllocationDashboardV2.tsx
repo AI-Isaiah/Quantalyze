@@ -80,6 +80,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     marksTrailingSince = null,
     // 185 D-04: a drawn key values its Deribit options at cash (the interim caveat).
     optionsCashBasis = false,
+    // 188 D-02, D-06: the days a drawn key was left out as a nearly empty account, which
+    // the embedded factsheet's note names. Empty when absent (the file's list-prop convention,
+    // as `equityDailyReturns = []`).
+    tinyBaseDays = [],
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
@@ -120,6 +124,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             marksStart,
             marksTrailingSince,
             optionsCashBasis,
+            tinyBaseDays,
           }),
     [
       isRebuilding,
@@ -129,6 +134,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       marksStart,
       marksTrailingSince,
       optionsCashBasis,
+      tinyBaseDays,
       props.allocator_id,
       portfolio,
       analytics,

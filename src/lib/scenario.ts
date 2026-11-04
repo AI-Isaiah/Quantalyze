@@ -70,6 +70,19 @@
  *      size, with the final point always included so the curve touches
  *      the effective_end date.
  *
+ *   6. 188 D-07 — a unit may name days on which it has NO return
+ *      (`StrategyForBuilder.undefined_return_days`: the days the tiny-base rule
+ *      left out of that key's stored series). This is the TypeScript mirror of
+ *      the compose's `portfolio_returns(dropped_days_by_key=...)`: on a named
+ *      day the unit sits out the day's numerator AND its weight in
+ *      `activeWeightSum`, and the date axis is built without the unit's named
+ *      days, so a day on which no unit has a return is absent, never written as
+ *      0%. Correlation uses ONE day set for every pair (the axis days no unit
+ *      names), so the diversification panel's single covariance matrix still
+ *      reproduces `correlation_matrix`. ONLY named days change; every other
+ *      absent day keeps the 0-fill above, and a unit without the field (or with
+ *      an empty list) is byte-identical to before.
+ *
  * Any change to these behaviors is a regression — unit tests in
  * `src/lib/scenario.test.ts` pin them (PR 3 scope).
  */
@@ -103,6 +116,16 @@ export interface StrategyForBuilder {
    * `periodsPerYear` argument is the single knob.
    */
   asset_class?: string | null;
+  /**
+   * 188 D-07 — the days this unit has NO return because the tiny-base rule left
+   * them out of its stored series (a day measured against a nearly empty
+   * account). The engine sits the unit out of those days: it adds nothing to
+   * the day's numerator or weight sum, and the date axis is built without them,
+   * so the day is never read as a flat 0% return. OPTIONAL + additive: absent or
+   * empty is byte-identical to a unit without the field. Set only by the two
+   * per-key builders; a value is a day to leave out, never a return.
+   */
+  undefined_return_days?: readonly string[];
 }
 
 export interface ScenarioState {
@@ -391,10 +414,22 @@ export function computeScenario(
   //     added — 0-fill can never leak past the window (Pitfall 3).
   //   - ABSENT window: the legacy UNION of every active strategy's dates >= its
   //     own include-from (byte-identical).
+  //
+  // 188 D-07 (T-KL1-AXIS): a unit's named days are not on its axis. A named day
+  // that no other unit has a return on is therefore absent from the axis, so
+  // the `activeWeightSum > 0 ? … : 0` guard below can never write it as 0.
+  const namedDays = new Map<string, ReadonlySet<string>>();
+  for (const s of activeStrategies) {
+    if (s.undefined_return_days && s.undefined_return_days.length > 0) {
+      namedDays.set(s.id, new Set(s.undefined_return_days));
+    }
+  }
   const allDateSet = new Set<string>();
   if (window) {
     for (const s of members) {
+      const named = namedDays.get(s.id);
       for (const d of s.daily_returns) {
+        if (named?.has(d.date)) continue;
         if (d.date >= window.start && d.date <= window.end) {
           allDateSet.add(d.date);
         }
@@ -403,7 +438,9 @@ export function computeScenario(
   } else {
     for (const s of activeStrategies) {
       const from = strategyStart.get(s.id)!;
+      const named = namedDays.get(s.id);
       for (const d of s.daily_returns) {
+        if (named?.has(d.date)) continue;
         if (d.date >= from) allDateSet.add(d.date);
       }
     }
@@ -455,6 +492,9 @@ export function computeScenario(
     for (const s of members) {
       const from = strategyStart.get(s.id)!;
       if (commonDates[i] < from) continue;
+      // 188 D-07: a named day is a day with no return: the unit adds neither
+      // its return nor its weight (the mirror of the compose's dropped day).
+      if (namedDays.get(s.id)?.has(commonDates[i])) continue;
       const w = normWeight(s.id);
       // R4 — leverage AMPLIFIES exposure: scale the return by Lᵢ in the
       // numerator but renormalize by the (un-levered) weight mass, so a 2x
@@ -616,6 +656,20 @@ export function computeScenario(
   // has no correlation: the cell is left out (the heatmap renders a missing
   // cell as "—", clusterOrder reads it as distance 1, tooSimilarPairs skips
   // it) and the pair is left out of the average (D7, WR-03 / SFH-M2).
+  //
+  // 188 D-07 (T-KL1-CORR): when any member names days, EVERY pair is measured
+  // on the same day set, the axis days no member names (one covariance matrix
+  // for the diversification panel). With none named this is the full series,
+  // unchanged.
+  const corrKeep: boolean[] | null = members.some((m) => namedDays.has(m.id))
+    ? commonDates.map((d) => !members.some((m) => namedDays.get(m.id)?.has(d)))
+    : null;
+  const corrSeries: Record<string, number[]> = {};
+  for (const m of members) {
+    corrSeries[m.id] = corrKeep
+      ? strategyReturns[m.id].filter((_, k) => corrKeep[k])
+      : strategyReturns[m.id];
+  }
   const correlation_matrix: Record<string, Record<string, number>> = {};
   let absCorrSum = 0;
   let corrCount = 0;
@@ -628,7 +682,7 @@ export function computeScenario(
         correlation_matrix[idA][idB] = 1;
         continue;
       }
-      const corr = pearson(strategyReturns[idA], strategyReturns[idB]);
+      const corr = pearson(corrSeries[idA], corrSeries[idB]);
       if (corr === null) continue;
       correlation_matrix[idA][idB] = Number(corr.toFixed(3));
       if (j > i) {

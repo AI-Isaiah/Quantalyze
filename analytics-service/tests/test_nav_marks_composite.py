@@ -170,6 +170,7 @@ async def run_ccxt_composite(
     venue: str = "okx",
     spy_scalar: bool = False,
     now: dt.datetime | None = None,
+    member_meta: list[dict[str, Any]] | None = None,
 ) -> Run:
     """Run the real composite job over ``len(windows)`` ccxt members (key-1, key-2, ...).
 
@@ -232,7 +233,12 @@ async def run_ccxt_composite(
         patch("services.nav_twr.flow_coverage_terminus_day", new=MagicMock(return_value=None)),
         patch(
             "services.broker_dailies.combine_realized_and_funding",
-            new=MagicMock(side_effect=[(day_series(s), dict(meta)) for s in series]),
+            new=MagicMock(
+                side_effect=[
+                    (day_series(s), {**meta, **(member_meta[i] if member_meta else {})})
+                    for i, s in enumerate(series)
+                ]
+            ),
         ),
         patch("services.benchmark.get_benchmark_returns", new=AsyncMock(return_value=(None, True))),
     ]
@@ -342,6 +348,100 @@ async def test_covered_day_is_not_zero_filled_in_the_headline_scalar_input() -> 
     assert [days[d] for d in gap_days] == [0.0] * 9
     assert days["2026-03-09"] == pytest.approx(R_0309, abs=1e-12)
     assert days["2026-03-06"] == pytest.approx(0.05, abs=1e-12)
+
+
+#: 188 round 1 (HIGH-1, D-02, D-09). Member 1 is the marked one, in a larger book than the module's
+#: 1000.0 one so the 100.0 dust floor does not decide the arm: the equity read puts its realized
+#: terminal at 101000.0 - 1000.0 = 100000.0. Its marks: 03-01 = 105000.0 (r = +0.05), 03-02 =
+#: 4000.0 (r = (4000 - 105000) / 105000), 03-03 = 4100.0 and 03-04 = 4200.0, each measured against
+#: a base that is under 5% of the 105000.0 peak (5250.0): no row, two tiny-base days. Member 2
+#: starts on 03-05, so both days sit INSIDE the stitched span, where a 0.0 fill would reach them.
+_TINY_WINDOWS = [("2026-01-01", "2026-03-05"), ("2026-03-05", None)]
+_TINY_M2 = {"2026-03-05": 0.004, "2026-03-06": 0.001, "2026-03-07": 0.002}
+MARKS_KEY1_TINY = [
+    stored("2026-03-01", 105000.0, open_pnl=5000.0),
+    stored("2026-03-02", 4000.0),
+    stored("2026-03-03", 4100.0),
+    stored("2026-03-04", 4200.0),
+]
+
+
+@pytest.mark.asyncio
+async def test_a_marked_era_tiny_day_is_neither_a_flat_day_nor_unnamed_in_a_composite() -> None:
+    """A composite member with a mark on a near-empty base leaves that day out of its series.
+    The stitch must not 0.0-fill it in the scalar input (a flat 0% observation is the fake
+    return D-02 forbids), and the composite flags must name it so the factsheet prints the note."""
+    run = await run_ccxt_composite(
+        windows=_TINY_WINDOWS, series=[M1_FULL, _TINY_M2], marks={"key-1": MARKS_KEY1_TINY},
+        equity=(101000.0, False, 1000.0, False), spy_scalar=True,
+    )
+    assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
+    assert run.scalar_inputs, "compute_all_metrics was never reached"
+    days = {ts.date().isoformat(): float(v) for ts, v in run.scalar_inputs[0].items()}
+    assert days["2026-03-01"] == pytest.approx(0.05, abs=1e-12)
+    assert days["2026-03-05"] == pytest.approx(0.004, abs=1e-12)
+    for tiny in ("2026-03-03", "2026-03-04"):
+        assert tiny not in days, f"{tiny} is a tiny-base day, not a 0.0 observation"
+        assert tiny not in run.csv_rows()
+    assert run.flags()["tiny_base_days"] == ["2026-03-03", "2026-03-04"]
+
+
+@pytest.mark.asyncio
+async def test_a_members_realized_era_tiny_day_is_named_for_the_leg_readers() -> None:
+    """Round 2 (R2-01). Member 1 had a realized-era tiny-base day on 02-27, before its first mark
+    (03-01): a NaN in its series, so the stitched series has no row for it (a chain break, D-04).
+    A scenario leg reader sits out only the days the flags name, so a composite that names just the
+    marked-era days (03-03, 03-04) leaves 02-27 to be scored at 0% beside another leg that has the
+    date. The list must name it. Two meta days must NOT be named: 03-02 on member 1, which is at or
+    after its first mark (the marked era owns every day from there), and 02-20 on member 2, which
+    is before its window opens on 03-05."""
+    m1 = {**M1_FULL, "2026-02-27": float("nan")}
+    run = await run_ccxt_composite(
+        windows=_TINY_WINDOWS, series=[m1, _TINY_M2], marks={"key-1": MARKS_KEY1_TINY},
+        equity=(101000.0, False, 1000.0, False), spy_scalar=True,
+        member_meta=[
+            {"tiny_base_days": ["2026-02-27", "2026-03-02"]},
+            {"tiny_base_days": ["2026-02-20"]},
+        ],
+    )
+    assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
+    assert "2026-02-27" not in run.csv_rows(), "the realized tiny day has no stored row"
+    assert run.flags()["tiny_base_days"] == ["2026-02-27", "2026-03-03", "2026-03-04"]
+
+
+@pytest.mark.asyncio
+async def test_a_closed_members_tail_tiny_day_is_named_for_the_leg_readers() -> None:
+    """Round 3 (R3-01). Member 1's window closed on 03-09 and its last stored mark is 03-02, so the
+    realized rows dated 03-03 .. 03-08 are kept verbatim as its W2 tail. 03-06 in that tail is a
+    tiny-base day: a NaN in its series, so the stitched series has no row for it (a chain break,
+    D-04). It is AFTER the member's first mark, so a list that cuts at ``marks_since`` drops it, and
+    a scenario leg reader that does not sit it out scores the composite at 0% beside another leg
+    that has the date. The list must name it. 02-20 on member 2 stays unnamed: it is before that
+    member's window opens on 03-09."""
+    m1 = {
+        **M1_FULL,
+        "2026-03-05": 0.004, "2026-03-06": float("nan"),
+        "2026-03-07": 0.003, "2026-03-08": 0.002,
+    }
+    m2 = {"2026-03-09": 0.004, "2026-03-10": 0.001}
+    run = await run_ccxt_composite(
+        windows=[("2026-01-01", "2026-03-09"), ("2026-03-09", None)],
+        series=[m1, m2],
+        marks={"key-1": [
+            stored("2026-03-01", 105000.0, open_pnl=5000.0),
+            stored("2026-03-02", 106000.0, open_pnl=5000.0),
+        ]},
+        equity=(101000.0, False, 1000.0, False), spy_scalar=True,
+        member_meta=[
+            {"tiny_base_days": ["2026-03-06"]},
+            {"tiny_base_days": ["2026-02-20"]},
+        ],
+    )
+    assert run.result.outcome == DispatchOutcome.DONE, run.result.error_message
+    rows = run.csv_rows()
+    assert "2026-03-05" in rows and "2026-03-07" in rows, "the tail keeps its other realized rows"
+    assert "2026-03-06" not in rows, "the tail tiny day has no stored row"
+    assert run.flags()["tiny_base_days"] == ["2026-03-06"]
 
 
 @pytest.mark.asyncio

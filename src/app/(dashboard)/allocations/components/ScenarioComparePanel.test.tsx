@@ -449,6 +449,89 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // 188 D-07 — the tiny-base days reach EVERY engine call: the panel copies the payload's
+  // `tinyBaseDaysByApiKeyId` into the inputs it hands the compute, for the saved columns and the
+  // live-book column alike. Dropping the copy in deriveCompareInputs keeps the engine-side suite
+  // green while the panel reads the days as 0 again.
+  // -------------------------------------------------------------------------
+  it("T_188_09 passes the payload's tinyBaseDaysByApiKeyId to every compute call, and undefined when the payload has none", () => {
+    mockComputeMetricsForDraft.mockReturnValue(metrics({}));
+    const lists = { "key-b": ["2026-03-07"] };
+    const rows = [row("a", "Alpha", v2Draft("fp-a")), row("b", "Beta", v2Draft("fp-b"))];
+
+    const { unmount } = render(
+      <ScenarioComparePanel
+        selectedRows={rows}
+        includeLiveBook={true}
+        payload={{
+          ...(PAYLOAD as Record<string, unknown>),
+          tinyBaseDaysByApiKeyId: lists,
+        } as unknown as ScenarioComparePanelProps["payload"]}
+      />,
+    );
+    expect(mockComputeMetricsForDraft.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of mockComputeMetricsForDraft.mock.calls) {
+      expect((call[1] as ScenarioCompareInputs).tinyBaseDaysByApiKeyId).toEqual(lists);
+    }
+    unmount();
+
+    mockComputeMetricsForDraft.mockClear();
+    render(
+      <ScenarioComparePanel selectedRows={rows} includeLiveBook={true} payload={PAYLOAD} />,
+    );
+    expect(mockComputeMetricsForDraft.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of mockComputeMetricsForDraft.mock.calls) {
+      expect((call[1] as ScenarioCompareInputs).tinyBaseDaysByApiKeyId).toBeUndefined();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // T_188_R1 — round 1 (MEDIUM-4, D-07): a BOOK STRATEGY's tiny-base days reach the engine as the
+  //            added leg's `undefined_return_days`. The key legs already carry theirs
+  //            (T_188_09); a strategy leg without them is 0-filled on the days it lacks.
+  // -------------------------------------------------------------------------
+  it("T_188_R1 carries a strategy's tiny_base_days into the added-strategy metadata lookup", () => {
+    mockComputeMetricsForDraft.mockReturnValue(metrics({}));
+    const payload = {
+      ...(PAYLOAD as Record<string, unknown>),
+      strategies: [
+        {
+          strategy: {
+            id: "strat-x",
+            disclosure_tier: "public",
+            asset_class: "crypto",
+            tiny_base_days: ["2026-03-03", "2026-03-04"],
+            strategy_analytics: { daily_returns: [], cagr: null, sharpe: null },
+          },
+        },
+        {
+          strategy: {
+            id: "strat-y",
+            disclosure_tier: "public",
+            asset_class: "crypto",
+            strategy_analytics: { daily_returns: [], cagr: null, sharpe: null },
+          },
+        },
+      ],
+    } as unknown as ScenarioComparePanelProps["payload"];
+
+    render(
+      <ScenarioComparePanel
+        selectedRows={[row("a", "Alpha", v2Draft("fp-a")), row("b", "Beta", v2Draft("fp-b"))]}
+        includeLiveBook={false}
+        payload={payload}
+      />,
+    );
+
+    const inputs = mockComputeMetricsForDraft.mock.calls[0][1] as ScenarioCompareInputs;
+    expect(inputs.addedStrategyMetadataLookup["strat-x"].undefined_return_days).toEqual([
+      "2026-03-03",
+      "2026-03-04",
+    ]);
+    expect("undefined_return_days" in inputs.addedStrategyMetadataLookup["strat-y"]).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
   // T_CP7 — A THROWING compute for one column does NOT crash the tab: that
   //         column falls back to a NULL-metrics ("—") column and the others
   //         still render. The panel is mounted outside an error boundary, so an

@@ -1480,7 +1480,7 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
     # pre-coverage option-dailies flag + the Phase 92 HARD-01 P&L-dominated guard +
     # the Phase 132 smoothed_mtm pre-mark-retention bucket are all present (regression
     # pin on the closed set).
-    # 164.6.6.2.3 D-05: nine keys. The flow-dominance guard is retired and lives only in
+    # 164.6.6.2.3 D-05: nine keys, 188 D-02 adds the tenth. The flow-dominance guard is retired and lives only in
     # NAV_TWR_LEGACY_GUARD_KEYS (pinned below).
     assert set(NAV_TWR_GUARD_KEYS) == {
         "dust_nav_guard",
@@ -1492,8 +1492,9 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
         "twr_chain_broken",
         "pre_summary_rollout_option_dailies",
         "pre_mark_retention_option_dailies",
+        "tiny_base_guard",  # 188 D-02: the fourth member of the "this day has no return" family
     }
-    assert len(NAV_TWR_GUARD_KEYS) == 9
+    assert len(NAV_TWR_GUARD_KEYS) == 10
 
 
 def test_retired_flow_dominated_key_is_carry_only_and_disjoint() -> None:

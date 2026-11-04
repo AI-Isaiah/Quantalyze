@@ -1146,8 +1146,12 @@ def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
     withdrawal, then small-balance trading ending at ``terminal`` with per-trade P&L down to
     2e-5 (scaled with the balance in the two lower variants).
 
-    Every day after the first ledger day must be MEASURED (never ``dust_nav_guard`` NaN) at
-    the 1e-7 floor and equal ``pnl / prior NAV`` computed in exact Fraction arithmetic to
+    Phase 188 D-09 (founder 2026-11-03) SUPERSEDES 164.6.6.2 D-25 for the days under the
+    tiny-base threshold: the ten small-balance days after the near-total withdrawal
+    (2025-10-25..2025-11-03) each start under 5% of the previous 30 calendar days' peak NAV,
+    so they are LEFT OUT (NaN, named in ``tiny_base_days``), in BTC as in USD. Every OTHER
+    day after the first ledger day is still MEASURED (never ``dust_nav_guard`` NaN) at the
+    1e-7 floor and equals ``pnl / prior NAV`` computed in exact Fraction arithmetic to
     1e-12. The first ledger day is NaN by design and is asserted as such, not skipped: it is
     the account's INCEPTION (164.6.6.2.3 D-01/D-12, every MT5 ledger is full-history), so it
     has no opening capital, no return and, whatever sign the float residue of the backward
@@ -1170,13 +1174,22 @@ def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
     # measured, and exactly flat: the Fraction oracle in ``expected`` carries it, and this
     # pins the value by hand too (no P&L on a deposit-only day, so 0 / 0.1).
     assert returns.iloc[1] == pytest.approx(0.0, abs=1e-12)
+    # 188 D-09: the small-balance days are left out (NaN) and named; every other day keeps
+    # its exact measured return, asserted exactly as before.
+    left_out = set(small_days)
+    assert small_days[0] == date(2025, 10, 25) and small_days[-1] == date(2025, 11, 3)
     for day, exact in expected.items():
         got = returns.loc[pd.Timestamp(day)]
+        if day in left_out:
+            assert math.isnan(got), f"{day} was measured on a sliver of the 30-day peak"
+            continue
         assert not math.isnan(got), f"{day} was guarded, not measured"
         assert got == pytest.approx(float(exact), abs=1e-12), f"{day}"
     assert all(pd.Timestamp(d) in returns.index for d in small_days)
-    # No guard of any kind and no retired flow flag, and no NaN beyond the first: the count of
-    # NaN is exactly 1 (the inception day carries NO dust or negative flag any more, D-01).
+    assert meta.get("tiny_base_guard") is True
+    assert meta["tiny_base_days"] == [d.isoformat() for d in small_days]
+    # No other guard and no retired flow flag. NaN count: the inception day (D-01, no dust or
+    # negative flag) plus exactly the ten tiny-base days (188 D-09).
     for guard in ("pnl_dominated_guard", "flow_dominated_guard", "dust_nav_guard",
                   "negative_nav_guard"):
         assert guard not in meta
@@ -1188,17 +1201,17 @@ def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
     assert meta.get("flow_timing_day_level") is True
     assert meta["flow_timing_day_level_days"] == 1
     assert meta["flow_timing_timed_days"] == 1
-    assert int(returns.isna().sum()) == 1
+    assert int(returns.isna().sum()) == 1 + len(small_days)
 
-    # D-25: the measured days whose EXACT prior NAV is under the BTC material equity (1e-4)
-    # are flagged, and only those. The expectation comes from the Fraction forward ledger,
-    # which shares no code with the float backward roll. MM-2x today (scale 1) never goes
-    # under ~0.0096, so it carries no flag at all; the 3e-6 variant lives under 1e-4.
+    # D-25 (188 D-09: now applies only to a MEASURED day above the tiny-base threshold): the
+    # measured days whose EXACT prior NAV is under the BTC material equity (1e-4) are flagged,
+    # and only those. The expectation comes from the Fraction forward ledger, which shares no
+    # code with the float backward roll. In this fixture every day under 1e-4 is also a
+    # tiny-base day (left out, never measured), so no measured day carries the flag in any
+    # variant: `small` is empty and the flag must be absent. A measured day under 1e-4 would
+    # still have to be flagged.
     prior = _exact_prior_navs(events)
-    small = [d for d in expected if prior[d] < Fraction(1, 10000)]
-    if scale == 1:
-        assert not small
-        assert "small_base_measured" not in meta
+    small = [d for d in expected if d not in left_out and prior[d] < Fraction(1, 10000)]
     if small:
         assert meta.get("small_base_measured") is True
         assert meta["small_base_measured_days"] == len(small)
@@ -1380,6 +1393,9 @@ def test_legacy_deals_without_position_ids_keep_the_day_level_rule() -> None:
 
 
 # ---------------------------------------------------------------------------
+# SUPERSEDED IN PART by Phase 188 D-09 (founder 2026-11-03): a day under 5% of its 30-day peak is
+# now LEFT OUT in every unit (the WR-01 case below); the keep-exact-and-flag rule that follows
+# still holds for a small-balance day ABOVE that threshold.
 # D-25 (founder, 2026-10-08, after plan 14 review WR-01 / SFH M1): with the dust floor at
 # 1e-7 a day measured on a tiny base (a near-total withdrawal while a winning position is
 # open: +500%) is kept EXACT and flagged "measured on a very small balance" whenever its
@@ -1393,7 +1409,7 @@ def _d25_events(day_offset_events):
     return [(d + timedelta(off - 1), kind, Fraction(amount)) for off, kind, amount in day_offset_events]
 
 
-def test_wr01_post_withdrawal_tiny_base_is_measured_exactly_and_flagged() -> None:
+def test_wr01_post_withdrawal_tiny_base_day_is_left_out_and_the_rest_measured_exactly() -> None:
     """The reviewer's +500% case (WR-01), exactly. All amounts in BTC, built in Fraction:
       day 1: deposit 0.01          NAV 0.01
       day 2: trade +0.0001         NAV 0.0101
@@ -1403,10 +1419,14 @@ def test_wr01_post_withdrawal_tiny_base_is_measured_exactly_and_flagged() -> Non
     Exact returns (pnl / prior NAV): day 2 = 0.0001 / 0.01 = 1/100, day 3 = 0 (the
     withdrawal is a flow, not P&L), day 4 = 0.00005 / 0.00001 = 5 (+500%).
 
-    D-25: day 4 is MEASURED EXACTLY (+500% is kept, not dropped, not clamped) AND flagged,
-    because its prior NAV 1e-5 is under the 1e-4 material equity. It is the only such day
-    (day 2's 0.01 and day 3's 0.0101 are well above it), the smallest prior NAV is 1e-5, and
-    the chain is not broken: the only NaN is the deposit day, a leading one."""
+    Phase 188 D-09 (founder 2026-11-03) SUPERSEDES 164.6.6.2 D-25 here. D-25 kept day 4
+    exact and flagged it "measured on a very small balance"; the reviewer's +500% is exactly
+    the artefact the tiny-base rule exists to stop. Day 4's prior NAV 1e-5 is under 5% of the
+    previous 30 days' peak (0.0101), so day 4 is LEFT OUT: NaN, named in ``tiny_base_days``,
+    its real P&L (+5e-5) kept in ``tiny_base_day_pnl``, in BTC exactly as in USD. Days 2 and 3
+    (prior NAV 0.01 and 0.0101, at or near the peak) stay MEASURED EXACTLY as before. D-25's
+    keep-and-flag survives only for a small-balance day ABOVE the threshold (the test below);
+    here no day is measured under 1e-4, so no ``small_base_measured`` annotation exists."""
     events = _d25_events([
         (1, "flow", "0.01"), (2, "pnl", "0.0001"),
         (3, "flow", "-0.01009"), (4, "pnl", "0.00005"),
@@ -1424,12 +1444,16 @@ def test_wr01_post_withdrawal_tiny_base_is_measured_exactly_and_flagged() -> Non
         server_utc_offset_s=0,
     )
     for day, value in exact.items():
+        if day == date(2025, 6, 4):
+            continue  # left out under 188 D-09, asserted NaN below
         assert returns.loc[pd.Timestamp(day)] == pytest.approx(float(value), abs=1e-9), day
-    assert returns.loc[pd.Timestamp("2025-06-04")] == pytest.approx(5.0, abs=1e-9)
-    assert int(returns.isna().sum()) == 1 and math.isnan(returns.iloc[0])
-    assert meta.get("small_base_measured") is True
-    assert meta["small_base_measured_days"] == 1
-    assert meta["small_base_measured_min_nav"] == pytest.approx(1e-5, rel=1e-6)
+    assert exact[date(2025, 6, 2)] == Fraction(1, 100) and exact[date(2025, 6, 3)] == 0
+    assert math.isnan(returns.loc[pd.Timestamp("2025-06-04")])  # the +500% day is left out
+    assert int(returns.isna().sum()) == 2 and math.isnan(returns.iloc[0])
+    assert meta.get("tiny_base_guard") is True
+    assert meta["tiny_base_days"] == ["2025-06-04"]
+    assert meta["tiny_base_day_pnl"]["2025-06-04"] == pytest.approx(5e-5, rel=1e-6)
+    assert "small_base_measured" not in meta
     assert "twr_chain_broken" not in meta
     assert "pnl_dominated_guard" not in meta  # +5e-5 is under 10 x 1e-5: not P&L-dominated
 

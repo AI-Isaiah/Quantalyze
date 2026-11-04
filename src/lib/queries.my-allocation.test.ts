@@ -4989,6 +4989,33 @@ describe("getMyAllocationDashboard — 164.6.6.2 BTC-native book rows convert to
     expect(btcCloses.read).not.toHaveBeenCalled();
   });
 
+  it("188 D-07 round 1 (MEDIUM-4): a book row ships the strategy's tiny_base_days (present only when non-empty, malformed reads as none and is reported once)", async () => {
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+    const result = await dashboardFor([
+      {
+        strategy_id: "t1",
+        daily_returns: BTC_SERIES,
+        data_quality_flags: { tiny_base_days: ["2026-03-04", "2026-03-03"] },
+      },
+      { strategy_id: "t2", daily_returns: BTC_SERIES, data_quality_flags: { tiny_base_days: ["2026-03-03", "nope"] } },
+      { strategy_id: "t3", daily_returns: BTC_SERIES, data_quality_flags: null },
+    ]);
+    const tiny = (id: string) =>
+      result.strategies.find((s) => s.strategy_id === id)!.strategy as unknown as Record<string, unknown>;
+    expect(tiny("t1").tiny_base_days).toEqual(["2026-03-03", "2026-03-04"]);
+    expect("tiny_base_days" in tiny("t2")).toBe(false);
+    expect("tiny_base_days" in tiny("t3")).toBe(false);
+    expect(JSON.stringify(result.strategies)).not.toContain("data_quality_flags");
+    const reported = captureSpy.mock.calls.filter((c) => c[1].tags.reason === "tiny_base_days_malformed");
+    expect(reported).toHaveLength(1);
+    expect(JSON.stringify(reported[0])).toContain("t2");
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
   it("reads the closes ONCE for a book with several native rows", async () => {
     await dashboardFor([
       { strategy_id: "n1", daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
@@ -5963,5 +5990,443 @@ describe("getMyAllocationDashboard - optionsCashBasis carries the key-mode optio
     expect((await read()).optionsCashBasis).toBe(false);
     warnSpy.mockRestore();
     captureSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 188 (TINYBASE) plan 08, D-02 and D-06: the days a drawn key was left out because its
+// account was nearly empty. The worker stores them in the key's `key_inputs:<id>` row under
+// `tiny_base_days` (plan 05). The dashboard reads them from the SAME rows and the SAME single
+// read as `marks_since` and `options_cash_basis` (no new read), through `readTinyBaseDays`, so
+// the note on the book names only days a drawn key really had. It fails CLOSED (SC-5): a false
+// disclosure is worse than a missing one, the reverse of the options caveat.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard - tinyBaseDays names the days a drawn key was left out (188 D-02)", () => {
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+  });
+
+  const liveKey = (id: string) => ({
+    ...aum04Key(id, "binance"),
+    venue_account_id: `acct-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_inclusion: null,
+  });
+  const readyRow = () => {
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.flags = [];
+    row.payload.returns = [
+      { date: "2026-03-11", r: 0.0038 },
+      { date: "2026-03-12", r: 0.0011 },
+      { date: "2026-03-13", r: 0.0039 },
+    ];
+    return row;
+  };
+  /** A key's stored derive inputs, carrying whatever `tiny_base_days` value the test names. */
+  const inputs = (apiKeyId: string, extra: Record<string, unknown>, allocator_id = "user-1") => ({
+    allocator_id,
+    kind: `key_inputs:${apiKeyId}`,
+    payload: { marks_since: "2026-03-08", ...extra } as Record<string, unknown>,
+  });
+  const departedKey = (id: string) => ({
+    ...aum04Key(id, "okx"),
+    is_active: false,
+    disconnected_at: "2026-04-20T00:00:00Z",
+    venue_account_id: `acct-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_inclusion: null,
+  });
+  const goneReturns = ["2026-03-01", "2026-03-02", "2026-04-10"].map((date) => ({
+    api_key_id: "k-gone",
+    allocator_id: "user-1",
+    date,
+    daily_return: 0.004,
+  }));
+  async function read() {
+    const { getMyAllocationDashboard } = await import("./queries");
+    return getMyAllocationDashboard("user-1");
+  }
+  const keyInputsReads = () =>
+    chainAudit.entries.filter(
+      (e) => e.table === "allocator_equity_derived" && e.ins.some((i) => i.column === "kind"),
+    );
+
+  it("two drawn keys' lists are united: distinct days, ascending, through the one existing read", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-a"), liveKey("k-b")];
+    state.allocatorEquityDerived = [
+      readyRow(),
+      inputs("k-a", { tiny_base_days: ["2026-10-28", "2026-10-27"] }),
+      inputs("k-b", { tiny_base_days: ["2026-10-28", "2026-10-29"] }),
+    ];
+
+    const result = await read();
+
+    expect(result.tinyBaseDays).toEqual(["2026-10-27", "2026-10-28", "2026-10-29"]);
+    expect(keyInputsReads()).toHaveLength(1);
+  });
+
+  it.each([
+    ["a bare string", "2026-10-27"],
+    ["an impossible date", ["2026-02-30"]],
+    ["one good day and one impossible date", ["2026-10-27", "2026-02-30"]],
+    ["a number", 3],
+    ["null", null],
+  ])("a key whose list is %s contributes no day while the other key's days still appear (T-188-15)", async (_label, bad) => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-a"), liveKey("k-b")];
+    state.allocatorEquityDerived = [
+      readyRow(),
+      inputs("k-a", { tiny_base_days: bad }),
+      inputs("k-b", { tiny_base_days: ["2026-10-28"] }),
+    ];
+
+    expect((await read()).tinyBaseDays).toEqual(["2026-10-28"]);
+  });
+
+  it.each([
+    ["a bare string", "2026-10-27"],
+    ["one good day and one impossible date", ["2026-10-27", "2026-02-30"]],
+    ["a number", 3],
+  ])("188 round 1 (MEDIUM-5): a key whose list is %s is reported once with a reason tag and no value; null and [] are not", async (_label, bad) => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-a"), liveKey("k-b"), liveKey("k-c")];
+    state.allocatorEquityDerived = [
+      readyRow(),
+      inputs("k-a", { tiny_base_days: bad }),
+      inputs("k-b", { tiny_base_days: null }),
+      inputs("k-c", { tiny_base_days: [] }),
+    ];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+
+    await read();
+
+    const reported = captureSpy.mock.calls.filter((c) => c[1].tags.reason === "tiny_base_days_malformed");
+    expect(reported).toHaveLength(1);
+    expect(JSON.stringify(reported[0])).not.toContain("2026-02-30");
+    expect(JSON.stringify(reported[0])).toContain("k-a");
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  it("188 round 2 (SFH-3): a rejected key list and a rejected strategy list are each reported, one throttle slot per site", async () => {
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-a")];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-a", { tiny_base_days: ["2026-02-30"] })];
+    state.portfolioStrategies = [
+      psProvenance({ strategy_id: "t2", data_quality_flags: { tiny_base_days: ["nope"] } }),
+    ] as typeof state.portfolioStrategies;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+
+    await read();
+
+    const reported = captureSpy.mock.calls.filter((c) => c[1].tags.reason === "tiny_base_days_malformed");
+    expect(reported.map((c) => JSON.stringify(c[1].extra)).sort()).toEqual([
+      JSON.stringify({ api_key_id: "k-a" }),
+      JSON.stringify({ strategy_id: "t2" }),
+    ]);
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  it("a failed read gives no tinyBaseDays (fail closed), warns once, and leaves the options caveat's own fail-open value", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [{ ...liveKey("k-live"), exchange: "deribit" }];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", { tiny_base_days: ["2026-10-27"] })];
+    state.tableErrors["allocator_equity_derived:key_inputs"] = { message: "connection reset (test)" };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+
+    const result = await read();
+
+    expect("tinyBaseDays" in result).toBe(false);
+    expect(result.optionsCashBasis).toBe(true);
+    const warns = warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("key_inputs marks_since read failed"));
+    expect(warns).toHaveLength(1);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  it("a departed key's days appear when the derive did not leave a departed account out, and not when it did", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = goneReturns;
+    state.allocatorEquityDerived = [
+      readyRow(),
+      inputs("k-live", {}),
+      inputs("k-gone", { tiny_base_days: ["2026-03-02"] }),
+    ];
+    // Positive control: the departed key is in the filter and the curve contains it.
+    const open = await read();
+    expect(open.departedHistoryUnavailable).toBeFalsy();
+    expect(open.tinyBaseDays).toEqual(["2026-03-02"]);
+
+    resetState();
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live"), departedKey("k-gone")];
+    state.csvDailyReturns = goneReturns;
+    const row = readyRow();
+    row.payload.flags = ["departed_history_unavailable"];
+    state.allocatorEquityDerived = [
+      row,
+      inputs("k-live", { tiny_base_days: ["2026-10-27"] }),
+      inputs("k-gone", { tiny_base_days: ["2026-03-02"] }),
+    ];
+    const closed = await read();
+    expect(closed.departedHistoryUnavailable).toBe(true);
+    // The curve may not contain the departed key, so naming its days could be false; the live
+    // key's own day still appears.
+    expect(closed.tinyBaseDays).toEqual(["2026-10-27"]);
+  });
+
+  it("another owner's row carrying days never names them (T-188-14: the explicit allocator filter)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [
+      readyRow(),
+      inputs("k-live", {}),
+      inputs("k-live", { tiny_base_days: ["2026-10-27"] }, "user-2"),
+    ];
+
+    expect("tinyBaseDays" in (await read())).toBe(false);
+  });
+
+  it("no row carries the field: the payload has no tinyBaseDays key at all, and an empty list adds none", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("k-a"), liveKey("k-b")];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-a", {}), inputs("k-b", { tiny_base_days: [] })];
+
+    const result = await read();
+
+    expect("tinyBaseDays" in result).toBe(false);
+    // The fields the payload already carried are as they were.
+    expect(result.marksStart).toBe("2026-03-08");
+    expect(result.optionsCashBasis).toBe(false);
+  });
+
+  it("the fresh-allocator branch (no portfolio) carries the days too", async () => {
+    state.portfolios = [];
+    state.apiKeys = [liveKey("k-live")];
+    state.allocatorEquityDerived = [readyRow(), inputs("k-live", { tiny_base_days: ["2026-10-28", "2026-10-27"] })];
+
+    expect((await read()).tinyBaseDays).toEqual(["2026-10-27", "2026-10-28"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 188 (TINYBASE) plan 09, D-07: the SSR live baseline sits a key out of the days the
+// tiny-base rule left out of its stored series, instead of reading them as r = 0. The days come
+// from the SAME `key_inputs` read plan 08 added (`readMarksStart`), moved ahead of the baseline.
+// The independent oracle for the expected return is the typed per-day arithmetic of
+// `src/lib/scenario.tiny-base.test.ts` (weights 10000 / 30000 normalise to 0.25 / 0.75, the same
+// 1 : 3 blend), not a run of the code under test on its own input.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard - the live baseline sits a key out of its tiny-base days (188 D-07)", () => {
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+  });
+
+  const DAYS = Array.from({ length: 12 }, (_, i) => `2026-03-${String(i + 1).padStart(2, "0")}`);
+  const NAMED = ["2026-03-07", "2026-03-08"];
+  const A = [0.01, -0.005, 0.02, 0.0, 0.015, -0.01, 0.02, -0.01, 0.005, 0.01, -0.02, 0.012];
+  const B_DAYS = DAYS.filter((d) => !NAMED.includes(d));
+  const B = [0.03, -0.02, 0.01, 0.005, -0.015, 0.025, 0.02, -0.01, 0.015, -0.005];
+  // (rA + 3 rB) / 4 on a shared day, A alone on a named day; typed beside its sum in the engine test.
+  const EXPECTED_DAILY = [
+    0.025, -0.01625, 0.0125, 0.00375, -0.0075, 0.01625, 0.02, -0.01, 0.01625, -0.005, 0.00625,
+    -0.00075,
+  ];
+  const EXPECTED_TWR = EXPECTED_DAILY.reduce((c, r) => c * (1 + r), 1) - 1;
+  const aSeries = DAYS.map((date, i) => ({ date, value: A[i] }));
+  const bSeries = B_DAYS.map((date, i) => ({ date, value: B[i] }));
+  const returns = { "key-a": aSeries, "key-b": bSeries };
+  const LISTS = { "key-b": NAMED };
+
+  type Holding =
+    Awaited<ReturnType<typeof import("./queries")["getMyAllocationDashboard"]>>["holdingsSummary"][number];
+  const spot = (api_key_id: string, value_usd: number): Holding => ({
+    symbol: "BTC",
+    quantity: 1,
+    mark_price_usd: 50_000,
+    value_usd,
+    venue: "binance",
+    holding_type: "spot",
+    api_key_id,
+    side: "flat",
+    entry_price: null,
+    unrealized_pnl_usd: null,
+  });
+  const holdings = [spot("key-a", 10_000), spot("key-b", 30_000)];
+
+  /** The engine on units carrying the field, the way the baseline builds them. */
+  async function engineOracle(withLists: boolean) {
+    const { computeScenario, buildDateMapCache } = await import("./scenario");
+    const { blendPeriodsPerYear } = await import("./closed-sets");
+    const unitFor = (id: string, daily_returns: typeof aSeries, extra: object = {}): StrategyForBuilder => ({
+      id,
+      name: "Connected key",
+      codename: null,
+      disclosure_tier: "exploratory",
+      strategy_types: [],
+      markets: [],
+      start_date: null,
+      daily_returns,
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+      asset_class: "crypto",
+      ...extra,
+    });
+    const strategies = [
+      unitFor("key-a", aSeries),
+      unitFor("key-b", bSeries, withLists ? { undefined_return_days: NAMED } : {}),
+    ];
+    return computeScenario(
+      strategies,
+      {
+        selected: { "key-a": true, "key-b": true },
+        weights: { "key-a": 10_000, "key-b": 30_000 },
+        startDates: {},
+      },
+      buildDateMapCache(strategies),
+      blendPeriodsPerYear(strategies),
+    );
+  }
+
+  const liveKey = (id: string, exchange: string) => ({
+    ...aum04Key(id, exchange),
+    venue_account_id: `acct-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_inclusion: null,
+  });
+  const inputs = (apiKeyId: string, extra: Record<string, unknown>) => ({
+    allocator_id: "user-1",
+    kind: `key_inputs:${apiKeyId}`,
+    payload: { marks_since: "2026-03-08", ...extra } as Record<string, unknown>,
+  });
+  function seedBook(keyInputs: ReturnType<typeof inputs>[]) {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.apiKeys = [liveKey("key-a", "binance"), liveKey("key-b", "okx")];
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1", symbol: "BTC", quantity: 1, mark_price: 50_000, value_usd: 10_000,
+        venue: "binance", holding_type: "spot", updated_at: "2026-03-12T04:00:00+00:00",
+        asof: "2026-03-12", api_key_id: "key-a",
+      },
+      {
+        allocator_id: "user-1", symbol: "BTC", quantity: 1, mark_price: 50_000, value_usd: 30_000,
+        venue: "okx", holding_type: "spot", updated_at: "2026-03-12T04:00:00+00:00",
+        asof: "2026-03-12", api_key_id: "key-b",
+      },
+    ];
+    state.csvDailyReturns = [
+      ...aSeries.map((p) => ({ api_key_id: "key-a", allocator_id: "user-1", date: p.date, daily_return: p.value })),
+      ...bSeries.map((p) => ({ api_key_id: "key-b", allocator_id: "user-1", date: p.date, daily_return: p.value })),
+    ];
+    state.allocatorEquityDerived = [derivedRow(true), ...keyInputs];
+  }
+  async function read() {
+    const { getMyAllocationDashboard } = await import("./queries");
+    return getMyAllocationDashboard("user-1");
+  }
+
+  it("liveBaselineMetricsFromPerKeyDailies with the lists equals the engine on units carrying them, and differs from the field-less run", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const withLists = liveBaselineMetricsFromPerKeyDailies(holdings, returns, LISTS);
+    const oracle = await engineOracle(true);
+    const without = liveBaselineMetricsFromPerKeyDailies(holdings, returns);
+
+    expect(withLists.ytdTwr).toBe(oracle.twr);
+    expect(withLists.sharpe).toBe(oracle.sharpe);
+    expect(withLists.maxDd).toBe(oracle.max_drawdown);
+    expect(withLists.avgRho).toBe(oracle.avg_pairwise_correlation);
+    expect(withLists.equity.at(-1)!.value).toBe(oracle.equity_curve.at(-1)!.value + 1);
+    // The independent invariant: the product of the typed day returns.
+    expect(withLists.ytdTwr!).toBeCloseTo(EXPECTED_TWR, 5);
+    // Non-vacuity: the 2-argument call (today) reads the days as 0 and lands elsewhere.
+    expect(without.ytdTwr).not.toBe(withLists.ytdTwr);
+    // The 2-argument call is the 3-argument call with no lists.
+    expect(liveBaselineMetricsFromPerKeyDailies(holdings, returns, {})).toStrictEqual(without);
+  });
+
+  it("getMyAllocationDashboard: key-b's stored days reach the baseline and ride the payload keyed by api_key id", async () => {
+    seedBook([inputs("key-a", {}), inputs("key-b", { tiny_base_days: NAMED })]);
+    const result = await read();
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+
+    expect(result.tinyBaseDaysByApiKeyId).toEqual({ "key-b": NAMED });
+    expect(result.liveBaselineMetrics).toEqual(
+      liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, returns, LISTS),
+    );
+    expect(result.liveBaselineMetrics.ytdTwr!).toBeCloseTo(EXPECTED_TWR, 5);
+  });
+
+  it("no row carries the field: no payload key, and the baseline is the field-less run", async () => {
+    seedBook([inputs("key-a", {}), inputs("key-b", { tiny_base_days: [] })]);
+    const result = await read();
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+
+    expect("tinyBaseDaysByApiKeyId" in result).toBe(false);
+    expect(result.liveBaselineMetrics).toEqual(
+      liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, returns),
+    );
+  });
+
+  it("the key_inputs read fails (KL-4): the baseline is the field-less run, no payload key, and the warn and Sentry capture fire once", async () => {
+    seedBook([inputs("key-b", { tiny_base_days: NAMED })]);
+    state.tableErrors["allocator_equity_derived:key_inputs"] = { message: "connection reset (test)" };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+
+    const result = await read();
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+
+    expect("tinyBaseDaysByApiKeyId" in result).toBe(false);
+    expect(result.liveBaselineMetrics).toEqual(
+      liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, returns),
+    );
+    const warns = warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("key_inputs marks_since read failed"));
+    expect(warns).toHaveLength(1);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  it("the fresh-allocator branch (no portfolio) carries the same field and the same baseline", async () => {
+    seedBook([inputs("key-a", {}), inputs("key-b", { tiny_base_days: NAMED })]);
+    state.portfolios = [];
+    const result = await read();
+
+    expect(result.tinyBaseDaysByApiKeyId).toEqual({ "key-b": NAMED });
+    expect(result.liveBaselineMetrics.ytdTwr!).toBeCloseTo(EXPECTED_TWR, 5);
+  });
+
+  it("a malformed list on key-b gives key-b no days (today's arithmetic) and leaves key-a's list alone", async () => {
+    seedBook([
+      inputs("key-a", { tiny_base_days: ["2026-03-03"] }),
+      inputs("key-b", { tiny_base_days: ["2026-02-30"] }),
+    ]);
+    const result = await read();
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+
+    expect(result.tinyBaseDaysByApiKeyId).toEqual({ "key-a": ["2026-03-03"] });
+    expect(result.liveBaselineMetrics).toEqual(
+      liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, returns, { "key-a": ["2026-03-03"] }),
+    );
   });
 });

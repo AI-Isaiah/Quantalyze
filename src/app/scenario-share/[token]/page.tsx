@@ -30,6 +30,9 @@ import {
 } from "@/lib/ratelimit";
 import { hashShareToken } from "@/lib/scenario-share-token";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { readTinyBaseDays } from "@/lib/tiny-base-flag";
+import { captureToSentry } from "@/lib/sentry-capture";
+import { shouldCaptureDerivedRowRejection } from "@/lib/queries";
 import { curveMethodFromFlags, type CurveMethod } from "@/lib/factsheet/resolve-series";
 import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
 // toWealth MUST come from the pure @/lib/scenario module, NOT from the
@@ -203,6 +206,9 @@ export default async function ScenarioSharePage({
   // the same sibling read (`curveMethodFromFlags`). Only the parsed method
   // crosses, never the raw flags. Empty lookup -> geometric, as before.
   const returnsMethodById: Record<string, CurveMethod> = {};
+  // 188 D-07 (round 1, MEDIUM-4) — the days the tiny-base rule left out of each leg's series,
+  // parsed from the same flags (`readTinyBaseDays`). Days only; the raw flags never cross.
+  const tinyBaseDaysById: Record<string, string[]> = {};
   const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
   if (seriesIds.length > 0) {
     try {
@@ -287,7 +293,11 @@ export default async function ScenarioSharePage({
       for (const r of (rsRows ?? []) as Array<{
         strategy_id: string;
         returns_series: unknown;
-        data_quality_flags: { native_unit?: unknown; cumulative_method?: unknown } | null;
+        data_quality_flags: {
+          native_unit?: unknown;
+          cumulative_method?: unknown;
+          tiny_base_days?: unknown;
+        } | null;
       }>) {
         returnsSeriesById[r.strategy_id] = r.returns_series;
         // Keep ONLY the parsed unit (a malformed value reads as USD).
@@ -297,6 +307,33 @@ export default async function ScenarioSharePage({
         returnsMethodById[r.strategy_id] = curveMethodFromFlags(
           r.data_quality_flags,
         );
+        tinyBaseDaysById[r.strategy_id] = readTinyBaseDays(
+          r.data_quality_flags?.tiny_base_days,
+        );
+        // 188 round 2 (SFH-2): a rejected list names no day and the blend reads those days as 0%.
+        // Report it by strategy id, never the value.
+        const rawTinyDays = r.data_quality_flags?.tiny_base_days;
+        if (
+          tinyBaseDaysById[r.strategy_id].length === 0 &&
+          rawTinyDays != null &&
+          !(Array.isArray(rawTinyDays) && rawTinyDays.length === 0)
+        ) {
+          console.warn(
+            "[scenario-share/page] tiny_base_days list rejected; the leg names no day:",
+            r.strategy_id,
+          );
+          // Round 3: this page is public and force-dynamic, so throttle the capture per strategy.
+          if (shouldCaptureDerivedRowRejection(r.strategy_id, "tiny_base_days_strategy_malformed")) {
+            captureToSentry(new Error("scenario-share: strategy tiny_base_days list rejected"), {
+              tags: {
+                route: "scenario-share/page",
+                reason: "tiny_base_days_malformed",
+                strategy_id: r.strategy_id,
+              },
+              level: "warning",
+            });
+          }
+        }
       }
     } catch (e) {
       // Transport/throw path degrades to the empty lookup (→ daily_returns
@@ -328,6 +365,7 @@ export default async function ScenarioSharePage({
     returnsUnitById,
     conversionCloses,
     returnsMethodById,
+    tinyBaseDaysById,
   );
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest

@@ -266,8 +266,9 @@ class TestBrokerNavStampSentencesAreNotFragments:
         # the walk finding NOTHING (a rename, a helper moved behind an attribute
         # call) and reporting clean over four raw writes. If a legitimate new
         # call site appears, update this integer and say which seam was added.
-        assert len(args) == 4, (
-            f"expected exactly 4 _dispose_broker_nav_error(stamp_detail=...) call "
+        # The fifth: 188 round 2 (SFH-1), the key_inputs tiny-base / dropped-day refusal.
+        assert len(args) == 5, (
+            f"expected exactly 5 _dispose_broker_nav_error(stamp_detail=...) call "
             f"sites in services/job_worker.py, found {len(args)}. If that is a "
             "legitimate change, update the integer here AND check the new site "
             "passes a whole user-facing sentence, because this test is the only "

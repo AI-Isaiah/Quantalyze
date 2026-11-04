@@ -152,6 +152,21 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
     expect(out!.buildOpts.missingSegments?.length).toBe(1);
   });
 
+  it("188 D-02, D-09: dqf.tiny_base_days lands on dataQuality.tinyBaseDays so the composite prints the note", async () => {
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: { ...DQF, tiny_base_days: ["2025-08-04", "2025-08-03"] },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.dataQuality).toEqual({
+      composite: true,
+      insufficientWindow: false,
+      degradedMembers: [],
+      tinyBaseDays: ["2025-08-03", "2025-08-04"],
+    });
+  });
+
   it("HARD-04: dqf.insufficient_window===true → dataQuality.insufficientWindow true", async () => {
     const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
       strategyId: "s1",
@@ -525,6 +540,83 @@ describe("HARD-03 readCompositeFactsheet — prefer persisted cumulative_method 
  * single-key. `singleKeyDataQuality` is the ONE shared owner both arms now
  * delegate to (mirroring the composite `readCompositeFactsheet` "one path").
  */
+/**
+ * 188 D-02, D-06, SC-5 - the single-key read of the stored `tiny_base_days` list. The days the
+ * factsheet note NAMES come only through `readTinyBaseDays`; a list it refuses whole gives no
+ * key at all (a missing note is recoverable, a false one is not, T-188-12).
+ */
+describe("188 singleKeyDataQuality - tinyBaseDays", () => {
+  it("lifts the days ascending and distinct", () => {
+    expect(
+      singleKeyDataQuality({ tiny_base_days: ["2026-10-28", "2026-10-27", "2026-10-27"] }).tinyBaseDays,
+    ).toEqual(["2026-10-27", "2026-10-28"]);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["empty", []],
+    ["a bare string", "2026-10-27"],
+    ["a day that is not on the calendar", ["2026-02-30"]],
+    ["one good and one impossible day", ["2026-10-27", "2026-02-30"]],
+    ["a number", [1]],
+    ["null", null],
+  ])("%s leaves the key OUT of the object", (_name, value) => {
+    const out = singleKeyDataQuality({ tiny_base_days: value });
+    expect("tinyBaseDays" in out).toBe(false);
+    expect(out).toEqual({ composite: false, insufficientWindow: false });
+  });
+});
+
+describe("188 round 1 (MEDIUM-5, SFH-3) - a rejected tiny_base_days list is reported, never silent", () => {
+  it.each([
+    ["a bare string", "2026-10-27"],
+    ["one good and one impossible day", ["2026-10-27", "2026-02-30"]],
+    ["a number", [1]],
+  ])("singleKeyDataQuality reports %s once, tagged, without the value", async (_name, value) => {
+    const sentry = await import("@/lib/sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    singleKeyDataQuality({ tiny_base_days: value });
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [, opts] = captureSpy.mock.calls[0]!;
+    expect(opts.tags.reason).toBe("tiny_base_days_malformed");
+    expect(JSON.stringify(captureSpy.mock.calls[0])).not.toContain("2026-02-30");
+    captureSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["empty", []],
+    ["null", null],
+    ["a valid list", ["2026-10-27"]],
+  ])("singleKeyDataQuality does not report %s", async (_name, value) => {
+    const sentry = await import("@/lib/sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+    singleKeyDataQuality({ tiny_base_days: value });
+    expect(captureSpy).not.toHaveBeenCalled();
+    captureSpy.mockRestore();
+  });
+
+  it("readCompositeFactsheet reports a rejected list with the strategy id and prints no note", async () => {
+    const sentry = await import("@/lib/sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: { ...DQF, tiny_base_days: ["2025-08-04", "nope"] },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.dataQuality).not.toHaveProperty("tinyBaseDays");
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [, opts] = captureSpy.mock.calls[0]!;
+    expect(opts.tags).toMatchObject({ reason: "tiny_base_days_malformed", strategy_id: "s1" });
+    captureSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+});
+
 describe("Finding B — singleKeyDataQuality single-key DQ opt (one owner)", () => {
   it("strict `=== true` server-truth coercion: only literal true flags the window", () => {
     // The persisted truth flags it.

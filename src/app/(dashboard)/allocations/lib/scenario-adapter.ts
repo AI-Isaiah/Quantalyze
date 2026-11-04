@@ -69,7 +69,7 @@ function buildAddedUnits(
   addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
   addedStrategyMetadataLookup: Record<
     StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days">
   >,
 ): StrategyForBuilder[] {
   return addedStrategies.map((a) => {
@@ -98,6 +98,11 @@ function buildAddedUnits(
       // lookup entry is absent (the default-meta branch above) — an unknown
       // leg keeps the conservative 252 blend default.
       asset_class: meta.asset_class ?? null,
+      // 188 D-07 (round 1, MEDIUM-4): the days the tiny-base rule left out of this strategy's
+      // stored series, so the engine sits the leg out of them like a key leg (no flat 0%).
+      ...(meta.undefined_return_days?.length
+        ? { undefined_return_days: meta.undefined_return_days }
+        : {}),
     };
   });
 }
@@ -141,11 +146,19 @@ function buildAddedUnits(
  *   headers, the shortest-history caveat, the gantt) shows the label and never
  *   the raw api_key_id. A key with no label reads "Connected key". REQUIRED, not
  *   optional, so the typechecker finds every caller.
+ * @param tinyBaseDaysByApiKeyId  188 D-07 — api_key_id → the days the tiny-base rule
+ *   left out of that key's stored series. A key with a non-empty list gets it as its
+ *   unit's `undefined_return_days`, so the engine sits the key out of those days
+ *   instead of reading them as 0 (T-KL1-UNIT: the days ride the unit, which every
+ *   merge and projection copies unchanged; this builder and the SSR baseline are the
+ *   only places that set it). Optional: absent or `{}` builds exactly today's units.
+ *   A list for a key with no series creates no unit.
  */
 export function buildPerKeyStrategyForBuilderSet(
   perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
   equityByApiKeyId: Record<string, number>,
   labelById: ReadonlyMap<string, string>,
+  tinyBaseDaysByApiKeyId: Readonly<Record<string, readonly string[]>> = {},
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   const strategies: StrategyForBuilder[] = [];
   const selected: Record<string, boolean> = {};
@@ -176,6 +189,10 @@ export function buildPerKeyStrategyForBuilderSet(
       // (84-CONTEXT.md D). When a non-crypto venue is ever added to
       // SUPPORTED_EXCHANGES this literal must derive from the key's exchange.
       asset_class: "crypto",
+      // 188 D-07: only a key with named days carries the field.
+      ...(tinyBaseDaysByApiKeyId[apiKeyId]?.length
+        ? { undefined_return_days: tinyBaseDaysByApiKeyId[apiKeyId] }
+        : {}),
     });
     selected[apiKeyId] = true; // default included (CONTEXT Area 1)
     // RAW clamped equity-share USD — NOT a sum-to-1 fraction (Pitfall 1). The
@@ -222,7 +239,7 @@ export function mergeAddedIntoPerKeySet(
   addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
   addedStrategyMetadataLookup: Record<
     StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days">
   >,
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   if (addedStrategies.length === 0) return perKey;
@@ -287,7 +304,7 @@ export function buildAddedOnlySet(
   addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
   addedStrategyMetadataLookup: Record<
     StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days">
   >,
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   const addedAsBuilder = buildAddedUnits(

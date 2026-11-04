@@ -38,6 +38,13 @@ export type GuardReason = "negative_nav" | "dust_nav" | "pnl_dominated";
 const GUARD_FLAGS = [
   ["negative_nav_guard", "negative_nav"],
   ["dust_nav_guard", "dust_nav"],
+  // 188 D-02, D-04: a realized-era day measured against a near-empty account breaks the chain
+  // (`tiny_base_guard`, `NAV_TWR_GUARD_KEYS` in nav_twr.py). It reuses the near-zero-balance
+  // phrase ON PURPOSE: no new headline copy (167.1.2.1.1 D-04). Two flags now map to one
+  // reason, which is why `readHeadlineBasis` keeps each reason once. The row sits beside the
+  // `dust_nav_guard` row it shares a reason with, so the first occurrence keeps the UI-SPEC
+  // order (negative, near-zero, one-day) when all three guards fire.
+  ["tiny_base_guard", "dust_nav"],
   ["pnl_dominated_guard", "pnl_dominated"],
 ] as const satisfies ReadonlyArray<readonly [string, GuardReason]>;
 
@@ -110,7 +117,11 @@ export function readHeadlineBasis(dqf: unknown): HeadlineBasis {
     return { twrChainBroken: false, headlineSince: null, reasons: [], withheld: false };
   }
   const headlineSince = isValidIsoDate(flags.headline_since) ? flags.headline_since : null;
-  const reasons = GUARD_FLAGS.filter(([flag]) => flags[flag] === true).map(([, reason]) => reason);
+  // Each reason once, in table order of first occurrence (188 D-02: `dust_nav_guard` and
+  // `tiny_base_guard` both map to `dust_nav`, and a phrase must never be named twice).
+  const reasons = [
+    ...new Set(GUARD_FLAGS.filter(([flag]) => flags[flag] === true).map(([, reason]) => reason)),
+  ];
   return { twrChainBroken: true, headlineSince, reasons, withheld: headlineSince === null };
 }
 
