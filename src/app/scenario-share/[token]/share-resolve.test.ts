@@ -1338,3 +1338,39 @@ describe("resolveSharedScenario — BTC leg converts to USD before the blend (16
     expect(result.metrics.twr).toBeNull();
   });
 });
+
+// --- 188 D-07 round 1 (MEDIUM-4): a strategy leg sits out of its tiny-base days ---------------
+
+describe("resolveSharedScenario - a leg names the tiny-base days its series lacks (188 D-07)", () => {
+  const NAMED = ["2023-01-10", "2023-01-11"];
+  const rowWithGap = () => ({
+    name: "Tiny",
+    draft: okDraft(),
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    series: [
+      { strategy_id: STRAT_A, daily_returns: makeSeries(0) },
+      {
+        strategy_id: STRAT_B,
+        daily_returns: makeSeries(7).filter((p) => !NAMED.includes(p.date)),
+      },
+    ],
+  });
+  const dayOf = (r: ReturnType<typeof resolveSharedScenario>, date: string): number => {
+    if (r.kind !== "ok") throw new Error("expected ok");
+    const p = r.portfolioDaily.find((x) => x.date === date);
+    if (!p) throw new Error(`no portfolio day ${date}`);
+    return p.value;
+  };
+  // Leg A on 2023-01-10 (i = 9, seed 0): 0.001 + 0.002 * sin(9 / 3).
+  const A_ON_0110 = 0.001 + 0.002 * Math.sin(9 / 3);
+
+  it("reads a named day as the other leg alone, never as the leg's flat 0%", () => {
+    const r = resolveSharedScenario(rowWithGap(), {}, {}, {}, null, {}, { [STRAT_B]: NAMED });
+    expect(dayOf(r, "2023-01-10")).toBeCloseTo(A_ON_0110, 12);
+  });
+
+  it("without the lookup the day 0-fills at the leg's weight (the old arithmetic)", () => {
+    const r = resolveSharedScenario(rowWithGap());
+    expect(dayOf(r, "2023-01-10")).toBeCloseTo(A_ON_0110 / 2, 12);
+  });
+});

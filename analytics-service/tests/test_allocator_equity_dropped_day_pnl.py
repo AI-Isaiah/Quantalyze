@@ -70,6 +70,11 @@ D0 = date(2026, 2, 1)
 # to stay INTERIOR must open on a base of at least 100 and be dropped by the P&L guard instead.
 _DUST = Fraction(100)
 _PNL_DOM = Fraction(10)
+# 188 D-03 (founder 2026-11-03, "Under 5% of the 30-day peak"), restated here as literals and
+# never read from the tiny-base module it checks: a day whose prior NAV is positive
+# and under 1/20 of the highest level over the previous 30 calendar days has no return.
+_TINY = Fraction(1, 20)
+_TINY_WINDOW = 30
 
 
 def _iso(i: int) -> str:
@@ -106,7 +111,19 @@ class Book:
             prev <= 0
             or prev < _DUST
             or abs(p) >= _PNL_DOM * prev
+            or self._is_tiny(i)
         )
+
+    def _is_tiny(self, i: int) -> bool:
+        """188 D-03, restated: ``0 < prev < 1/20 * peak``, ``peak`` the highest level on days
+        ``i-30`` through ``i-1``. The book is dense, so no carry is needed; the capital before the
+        first flow (``c0``) stands as the level of day -1, which is in the window for days 0..29.
+        Day 0's window holds only ``c0`` and its prior NAV IS ``c0``, so day 0 is never tiny."""
+        window_first = i - _TINY_WINDOW
+        levels = [self.nav[j] for j in range(max(window_first, 0), i)]
+        if window_first <= -1:
+            levels.append(self.c0)
+        return 0 < self.prev[i] < _TINY * max(levels)
 
     @property
     def dropped_idx(self) -> list[int]:
@@ -202,6 +219,21 @@ def two_day_run_book() -> Book:
     return Book(Fraction(0), pnl, flow)
 
 
+def tiny_base_after_withdrawal_book() -> Book:
+    """188 TINYBASE D-02/D-03 — key C's realized shape in exact arithmetic.
+
+    Day 0 funds 100000 (with 250 of P&L), days 1..29 run the ordinary window P&L and flows,
+    day 30 withdraws to a NAV of EXACTLY 400 with P&L 0 (its own start NAV is about 100000, so it
+    is a measured day), and days 31..33 carry P&L +188, -310, -29 on start NAVs 400, 588 and 278,
+    each under 5% of the 30-day peak. The dropped set is {0, 31, 32, 33}: the funding day (prior
+    capital 0) and the three tiny days."""
+    pnl = [Fraction(250)] + _window_pnl(29) + [Fraction(0)] + [Fraction(p) for p in (188, -310, -29)]
+    flow = [Fraction(100000)] + _window_flow(29) + [Fraction(0)] + [Fraction(0)] * 3
+    nav_29 = Book(Fraction(0), pnl, flow).nav[29]
+    flow[30] = Fraction(400) - nav_29  # the withdrawal that leaves exactly 400
+    return Book(Fraction(0), pnl, flow)
+
+
 def _levels_error(book: Book, ke) -> list[float]:
     assert ke.equity is not None
     return [float(ke.equity[d]) - float(book.nav[i]) for i, d in enumerate(book.days)]
@@ -230,6 +262,7 @@ def _replay(book: Book, *, with_pnl: bool = True):
         # outside the band), so the funding day stays dropped and the zero-start check is made.
         funding_and_dominated_book(Fraction(99)),
         funding_and_dominated_book(Fraction(20000)),
+        tiny_base_after_withdrawal_book(),
     ],
     ids=[
         "funding+dominated",
@@ -237,6 +270,7 @@ def _replay(book: Book, *, with_pnl: bool = True):
         "dust-interior",
         "missing-start-capital",
         "real-start-capital-measured-funding-day",
+        "tiny-base-after-withdrawal",
     ],
 )
 def test_the_oracle_book_is_what_the_real_writer_produces(book: Book) -> None:

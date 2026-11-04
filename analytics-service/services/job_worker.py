@@ -603,6 +603,7 @@ class _CompositeMarkSummary(NamedTuple):
     covered_days: tuple[str, ...]
     marks_since: str | None
     mark_gap_days: tuple[str, ...]
+    tiny_base_days: tuple[str, ...] = ()
 
 
 def _composite_mark_summary(
@@ -620,10 +621,14 @@ def _composite_mark_summary(
     ``covered_days`` is the union of every member's covered days inside its window.
     ``marks_since`` is the earliest mark day of any member that lies inside that member's window
     (None when no member has one). ``mark_gap_days`` is the union of the members' own lists,
-    restricted the same way. All ascending ISO days.
+    restricted the same way. ``tiny_base_days`` (188 D-02, D-09) is the union of the members' own
+    marked-era tiny-base days, restricted the same way: they are in neither list above (rule 15
+    keeps them out of ``covered_days``), and the composite must leave them out of its scalar input
+    instead of 0.0-filling them. All ascending ISO days.
     """
     covered: set[str] = set()
     gaps: set[str] = set()
+    tiny: set[str] = set()
     starts: list[str] = []
     for seq, marked in applied.items():
         window_start, window_end = windows[seq]
@@ -633,11 +638,13 @@ def _composite_mark_summary(
 
         covered.update(d for d in marked.covered_days if _inside(d))
         gaps.update(d for d in marked.mark_gap_days if _inside(d))
+        tiny.update(d for d in marked.tiny_base_days if _inside(d))
         starts.extend(d for d in marked.marked_levels if _inside(d))
     return _CompositeMarkSummary(
         covered_days=tuple(sorted(covered)),
         marks_since=min(starts) if starts else None,
         mark_gap_days=tuple(sorted(gaps)),
+        tiny_base_days=tuple(sorted(tiny)),
     )
 
 
@@ -8646,6 +8653,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 _moved_counts.on_last_mark, "key" if is_key_mode else "strategy",
             )
 
+    async def _dispose_key_inputs_nav_error(exc: NavReconstructionError) -> DispatchResult:
+        """Round 2 (SFH-1): the key_inputs tiny-base / dropped-day P&L refusals raise
+        ``NavReconstructionError`` from the epilogue below; without this they escape to the generic
+        dispatcher and are retried forever as ``unknown``. Same terminal disposition as the seams."""
+        return await _dispose_broker_nav_error(
+            exc,
+            stamp_detail=(
+                "Broker return reconstruction failed on a structural input "
+                "(a tiny-base or dropped day contradicts the stored series)."
+            ),
+            result_detail=(
+                "derive_broker_dailies: key_inputs dropped-day P&L failed structurally — "
+            ),
+        )
+
     async def _run_key_mode_compose_epilogue() -> None:
         # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
         # This derive ALREADY crawled the real external flows and read the live
@@ -8840,6 +8862,107 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _key_inputs_payload["dropped_day_pnl"] = dropped_day_pnl_payload(
                 returns, _day_pnl_usd
             )
+        if _applied_marks is not None and _applied_marks.tiny_base_days:
+            # 188 D-02 — the marked days measured against a near-empty account have no return
+            # (``apply_marks`` rule 15) but their P&L is already inside the marked level, so it
+            # rides ``dropped_day_pnl`` exactly like the days above. EVERY venue, OKX included:
+            # this P&L comes from the marks (``writer_day_pnl``), not from ``_day_pnl_usd``.
+            import pandas as _pandas_tiny
+            from services.allocator_equity_derive import dropped_day_pnl_payload
+
+            _tiny_index = _pandas_tiny.DatetimeIndex(
+                [_pandas_tiny.Timestamp(_d) for _d in _applied_marks.tiny_base_days]
+            )
+            _tiny_rows = dropped_day_pnl_payload(
+                _pandas_tiny.Series(float("nan"), index=_tiny_index, dtype="float64"),
+                _pandas_tiny.Series(
+                    [_applied_marks.writer_day_pnl[_d] for _d in _applied_marks.tiny_base_days],
+                    index=_tiny_index,
+                    dtype="float64",
+                ),
+            )
+            _dropped_rows = [*_key_inputs_payload.setdefault("dropped_day_pnl", []), *_tiny_rows]
+            if len({_r["utc_day_iso"] for _r in _dropped_rows}) != len(_dropped_rows):
+                raise NavReconstructionError(
+                    "key_inputs dropped-day P&L: a tiny-base day is already listed"
+                )
+            _key_inputs_payload["dropped_day_pnl"] = sorted(
+                _dropped_rows, key=lambda _r: _r["utc_day_iso"]
+            )
+            logger.info(
+                "derive_broker_dailies: tiny-base days left out of the returns (days=%d mode=key)",
+                len(_applied_marks.tiny_base_days),
+            )
+        # 188 D-02, SC-2, SC-5 — in the 167.1.2.2 D-15 voice above: ADDITIVE and present-only. The
+        # days the rule left out of this key's series, named for the reader (``tiny_base_days``:
+        # the realized-era days before the key's first mark, which the NAV core and plan 04's quiet
+        # days named, plus the marked days). ISO days only, no amount (T-73-02).
+        from services.tiny_base import realized_tiny_base_pnl, tiny_base_day_list
+
+        _tiny_since = _applied_marks.marks_since if _applied_marks is not None else None
+        _tiny_marked = _applied_marks.tiny_base_days if _applied_marks is not None else ()
+        _tiny_listed = tiny_base_day_list(meta.get("tiny_base_days"), _tiny_since, _tiny_marked)
+        if _tiny_listed:
+            _key_inputs_payload["tiny_base_days"] = _tiny_listed
+            logger.info(
+                "derive_broker_dailies: tiny-base days (days=%d realized=%d marked=%d mode=key)",
+                len(_tiny_listed), len(_tiny_listed) - len(_tiny_marked), len(_tiny_marked),
+            )
+        # 188 SC-5 — a realized-era tiny day the book does not already hold a P&L for would be read
+        # at r = 0 by the compose (``dropped_day_pnl_payload`` leaves out a NaN day its P&L series
+        # lacks). On OKX, Bybit, Binance and sFOX ``_day_pnl_usd`` is None and nothing is held; on
+        # Deribit and MT5 the existing block already emitted the measured tiny days from the
+        # writer's own P&L (skipped here, never twice) and only a quiet day, which that P&L does
+        # not hold, is left. Other guard days are deliberately untouched on every venue (SC-4).
+        _tiny_held = {
+            _r["utc_day_iso"] for _r in _key_inputs_payload.get("dropped_day_pnl", [])
+        }
+        _tiny_pnl = {
+            _d: _v
+            for _d, _v in realized_tiny_base_pnl(
+                meta.get("tiny_base_day_pnl"), _tiny_since
+            ).items()
+            if _d not in _tiny_held
+            # Round 1 (MEDIUM-3): a native-unit (BTC) MT5 key's combiner P&L is in BTC, and the USD
+            # P&L above already holds every day it could price. A measured day it lacks has no
+            # close, so it has no dollar amount (an interior day is named in ``unpriced_days``, a live-tail
+            # day is handled by the D-17 anchor rules); only a quiet day (0.0, the same in any unit)
+            # is carried.
+            and not (_native_key_usd and _v != 0.0)
+        }
+        if _tiny_pnl:
+            import pandas as _pandas_realized
+            from services.allocator_equity_derive import dropped_day_pnl_payload
+
+            _realized_days = sorted(_tiny_pnl)
+            _realized_index = _pandas_realized.DatetimeIndex(
+                [_pandas_realized.Timestamp(_d) for _d in _realized_days]
+            )
+            if isinstance(returns.index, _pandas_realized.DatetimeIndex):
+                _realized_index = _realized_index.as_unit(returns.index.unit)
+            _realized_rows = dropped_day_pnl_payload(
+                returns,
+                _pandas_realized.Series(
+                    [_tiny_pnl[_d] for _d in _realized_days],
+                    index=_realized_index,
+                    dtype="float64",
+                ),
+            )
+            if len(_realized_rows) != len(_realized_days):
+                # Round 1 (SFH-4): a named day the series does not drop would get its P&L nowhere
+                # and be read at r = 0 beside it. Refuse, like the duplicate-day check below.
+                raise NavReconstructionError(
+                    "key_inputs dropped-day P&L: a tiny-base day is not a dropped day"
+                )
+            _merged_rows = [*_key_inputs_payload.get("dropped_day_pnl", []), *_realized_rows]
+            if len({_r["utc_day_iso"] for _r in _merged_rows}) != len(_merged_rows):
+                raise NavReconstructionError(
+                    "key_inputs dropped-day P&L: a tiny-base day is already listed"
+                )
+            if _merged_rows:
+                _key_inputs_payload["dropped_day_pnl"] = sorted(
+                    _merged_rows, key=lambda _r: _r["utc_day_iso"]
+                )
         if _native_usd_inputs is not None:
             # 164.6.6.2.1 / D-09, D-17 — ADDITIVE, in the 167.1.2.2 D-15 voice above: a reader
             # that does not know these fields, and a row written before them, are both fine.
@@ -9028,7 +9151,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # DROPPED_KEY → untrustworthy → legacy fallback), never silently absent
             # from a "Derived" curve that understates its capital. No csv_daily_
             # returns / strategy_analytics write here — only the key_inputs surface.
-            await _run_key_mode_compose_epilogue()
+            try:
+                await _run_key_mode_compose_epilogue()
+            except NavReconstructionError as exc:
+                return await _dispose_key_inputs_nav_error(exc)
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
         # Strategy-mode: stamp a TERMINAL 'failed' status so the wizard's
@@ -9351,7 +9477,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # F1(a): the SAME Option-B epilogue the <2-day short-circuit runs (one
         # helper, so the two key-mode exits can never drift on the persist/enqueue
         # contract).
-        await _run_key_mode_compose_epilogue()
+        try:
+            await _run_key_mode_compose_epilogue()
+        except NavReconstructionError as exc:
+            return await _dispose_key_inputs_nav_error(exc)
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     logger.info(
@@ -9644,6 +9773,45 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # CR-03: present-only, a note and never a warning (not a guard key), popped by the
             # wholesale prestamp the next time the series is current.
             _prestamp_flags["marks_trailing_since"] = _marks_trailing_since
+    # 188 D-02 — the days the tiny-base rule left out of this series, by name: the realized-era days
+    # before the first mark (the NAV core's and plan 04's quiet days) plus the marked days.
+    # Present-only, ISO days only (T-73-02), and NEVER a member of NAV_TWR_GUARD_KEYS: membership
+    # promotes a row to complete_with_warnings, and this is a NOTE the factsheet reads. The bool
+    # ``tiny_base_guard`` rides the NAV_TWR_GUARD_KEYS loop above; ``tiny_base_day_pnl`` is an
+    # amount and is never pre-stamped (T-73-02). The prestamp replaces data_quality_flags
+    # wholesale, so a re-derive without such a day clears the list.
+    from services.tiny_base import tiny_base_day_list
+
+    _realized_tiny = meta.get("tiny_base_days")
+    if _applied_marks is not None:
+        # Round 1 (HIGH-2). The combiner judged the whole REALIZED history, but from the first
+        # mark on the realized rows are replaced by the marks, whose tiny days are absent and
+        # break no chain. So ``tiny_base_guard`` and ``twr_chain_broken`` describe the published
+        # series, not the meta. Round 2 (R2-02): a realized tiny day counts when it is a NaN day in
+        # the FINAL ``returns``, which is the pre-mark rows and also a closed mandate's W2 tail
+        # (kept verbatim after the last mark, NaN included), not a ``marks_since`` cut alone. The
+        # break is raised only if the published series has one.
+        from services.nav_twr import cumulative_twr_segmented
+
+        _published_nan = {ts.date().isoformat() for ts in returns.index[returns.isna().to_numpy()]}
+        _realized_tiny = [d for d in (meta.get("tiny_base_days") or ()) if d in _published_nan]
+        _prestamp_flags.pop("tiny_base_guard", None)
+        _prestamp_flags.pop("twr_chain_broken", None)
+        if tiny_base_day_list(_realized_tiny, None):
+            _prestamp_flags["tiny_base_guard"] = True
+        if meta.get("twr_chain_broken") and cumulative_twr_segmented(returns)[1]:
+            _prestamp_flags["twr_chain_broken"] = True
+
+    _tiny_marked_days = _applied_marks.tiny_base_days if _applied_marks is not None else ()
+    _tiny_listed_days = tiny_base_day_list(_realized_tiny, None, _tiny_marked_days)
+    if _tiny_listed_days:
+        _prestamp_flags["tiny_base_days"] = _tiny_listed_days
+        logger.info(
+            "derive_broker_dailies: tiny-base days (days=%d realized=%d marked=%d mode=strategy)",
+            len(_tiny_listed_days),
+            len(_tiny_listed_days) - len(_tiny_marked_days),
+            len(_tiny_marked_days),
+        )
 
     # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
     # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete
@@ -12127,7 +12295,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         """The densified scalar input minus the covered days (NAVMTM plan 09, D-05, D-15): a
         covered day is inside the next mark's single return, so it is one observation with that
         return and never a 0.0 observation of its own. Only covered days are removed; every other
-        absent day was 0.0-filled by ``gap_fill_daily_returns`` and stays so (a real hole)."""
+        absent day was 0.0-filled by ``gap_fill_daily_returns`` and stays so (a real hole). The
+        caller also passes the members' tiny-base days (188 D-02): a left-out day is not an
+        observation either, and 0.0-filling it would count it as a flat day."""
         if not covered:
             return filled
         covered_idx = pd.DatetimeIndex([pd.Timestamp(d) for d in covered]).as_unit("us")
@@ -12154,7 +12324,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             # is surfaced as `nan_dates` so the round-trip guard reinstates the chain
             # break rather than 0.0-bridging it.
             scalar_returns=_scalar_input_without_covered_days(
-                gap_fill_daily_returns(stitched_cash), _covered
+                gap_fill_daily_returns(stitched_cash),
+                (*_covered, *_mark_summary.tiny_base_days),
             ),
             densify_policy="zero_fill",
             # NAVMTM plan 09: None (byte-invisible) unless a member's marks applied.
@@ -12785,6 +12956,28 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["mark_gap_days"] = list(_mark_summary.mark_gap_days)
     else:
         merged_flags.pop("mark_gap_days", None)
+    # 188 D-02, D-09: the days the members' rule left out, named for the factsheet note and for the
+    # scenario leg readers. Present-only and popped when current, like the two above. ISO days only
+    # (T-73-02). Round 2 (R2-01), round 3 (R3-01): the list is the marked-era days (the scalar
+    # input's own exclusion, ``_mark_summary``) united with each member's meta tiny days inside its
+    # window that are NaN days of ``stitched_cash`` (a chain break, D-04, with no stored row). A
+    # leg reader that does not sit such a day out would score the composite at 0% there. No
+    # ``marks_since`` cut: a closed member's W2 tail keeps its NaN days after its first mark.
+    from services.tiny_base import tiny_base_day_list
+
+    _stitched_nan = {ts.date().isoformat() for ts in stitched_cash.index[stitched_cash.isna().to_numpy()]}
+    _listed_tiny: set[str] = set(_mark_summary.tiny_base_days)
+    for (_tiny_seq, _), _tiny_meta in zip(clipped_cash, member_metas, strict=True):
+        _tiny_lo, _tiny_hi = _window_by_seq[_tiny_seq]
+        _listed_tiny.update(
+            d
+            for d in tiny_base_day_list(_tiny_meta.get("tiny_base_days"), None)
+            if d >= _tiny_lo and (_tiny_hi is None or d < _tiny_hi) and d in _stitched_nan
+        )
+    if _listed_tiny:
+        merged_flags["tiny_base_days"] = sorted(_listed_tiny)
+    else:
+        merged_flags.pop("tiny_base_days", None)
     # SFH round 2 N2: the earliest day any still-open member's rows stop before the day this run
     # labels. A note like the two above (not a NAV_TWR_GUARD_KEYS member), popped when current.
     if member_trailing:

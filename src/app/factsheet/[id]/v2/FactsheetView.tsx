@@ -27,6 +27,7 @@ import { contactHref } from "@/lib/contact";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { formatCloseDay, formatUnpricedDays, withUnit } from "@/lib/factsheet/returns-unit";
+import { TINY_BASE_PERCENT, TINY_BASE_WINDOW_DAYS } from "@/lib/tiny-base-flag";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
 // affordance sites (the strategies page and discovery detail, both of which go
@@ -2117,6 +2118,32 @@ function KpiStrip() {
           }}
         >
           Flow timing at day level: some deposits and withdrawals have no time of day, so on those days we count the flow at the end of the day.
+        </p>
+      )}
+      {/* Phase 188 (TINYBASE) D-02, D-06 (founder 2026-11-03: "A short muted note under the
+          chart naming the near-empty days"): the days the rule left out because the account was
+          nearly empty, counted AND named, with the threshold attached (DESIGN.md "Voice /
+          microcopy"). DESIGN.md check: the muted token (a left-out day is an honest steady-state
+          fact, not an amber warning and not a red failure), the sibling paragraph's classes and
+          border (no new size, so the v2 4-size / 2-weight contract holds), no glyph. The days
+          come through `formatUnpricedDays` unchanged (the USD-view note's formatter): every run
+          is printed, none truncated, that being the formatter's own pinned contract, and a note
+          whose job is to name the days must not hide some. 5 and 30 are the rule's own
+          constants, never restated here. The same field (`dataQuality.tinyBaseDays`) drives the
+          allocator book's note (plan 08). Days only, never an amount (T-188-13). */}
+      {(payload.dataQuality?.tinyBaseDays?.length ?? 0) > 0 && (
+        <p
+          data-testid="factsheet-tiny-base-note"
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-text-muted, #64748B)",
+          }}
+        >
+          We leave out {payload.dataQuality!.tinyBaseDays!.length}{" "}
+          {payload.dataQuality!.tinyBaseDays!.length === 1 ? "day" : "days"} on which an account was nearly empty (under{" "}
+          {TINY_BASE_PERCENT}% of its highest balance over the previous {TINY_BASE_WINDOW_DAYS} days):{" "}
+          {formatUnpricedDays(payload.dataQuality!.tinyBaseDays!)}.
         </p>
       )}
       {spanNote && (

@@ -98,6 +98,7 @@ import { withPublishedOnly } from "./visibility";
 import { departedHistoryInclusion, isDepartedKey, type DepartedHistoryKey } from "./departed-history";
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "./nav-marks-start";
 import { OPTIONS_ACTIVITY_FLAG, OPTIONS_CASH_BASIS_FLAG, isOptionsCashBasis } from "./options-cash-basis-flag";
+import { TINY_BASE_DAYS_FLAG, readTinyBaseDays } from "@/lib/tiny-base-flag";
 import {
   PERCENTILE_METRICS,
   scoreAgainstPopulation,
@@ -3171,6 +3172,15 @@ export interface MyAllocationDashboardPayload {
        */
       native_unpriced?: boolean;
       /**
+       * 188 D-07 (round 1, MEDIUM-4) — the days the tiny-base rule left out of this strategy's
+       * stored series, parsed from `data_quality_flags.tiny_base_days` through
+       * `readTinyBaseDays` (a malformed list reads as none). The scenario composer and the compare
+       * panel carry it onto the book leg as `undefined_return_days`, so the engine sits the leg
+       * out of those days instead of reading them as a flat 0%. Present only when non-empty;
+       * days only, never an amount. The RAW flags blob is never shipped (T-111-03).
+       */
+      tiny_base_days?: string[];
+      /**
        * Phase 147 / SCEN-01 — what an EMPTY `strategy_analytics.daily_returns`
        * MEANS for this book row: a live job ("computing"), or genuine absence
        * ("empty"). Derived server-side by `deriveEmptySeriesState`, the SAME
@@ -3455,6 +3465,15 @@ export interface MyAllocationDashboardPayload {
    * fixtures compile; the producer always sets it.
    */
   optionsCashBasis?: boolean;
+  /** Phase 188 D-02, D-06: the distinct ISO days (ascending) a drawn key was left out as a near-empty account; present only when non-empty. */
+  tinyBaseDays?: string[];
+  /**
+   * Phase 188 D-07: each contributing key's tiny-base days (ISO, ascending, distinct), keyed by
+   * api_key id; present only when at least one key has some. Read by the per-key scenario
+   * builders, which sit the key out of those days instead of reading them as 0. A key with no
+   * valid list has no entry.
+   */
+  tinyBaseDaysByApiKeyId?: Record<string, string[]>;
   /**
    * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
    * written, on `asof`, by a poll that could not read their open positions
@@ -3892,6 +3911,10 @@ export function emptyLiveBaselineMetrics(
 // holdings path had to guard against does not arise here — but avgRho is still
 // sourced from computeScenario's avg_pairwise_correlation so the contract field
 // is populated.
+//
+// 188 D-07: a key's tiny-base days (`tinyBaseDaysByApiKeyId`) ride its unit as
+// `undefined_return_days`, so the engine sits the key out of those days the way the
+// stored book does, instead of reading them as r = 0.
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
@@ -3905,6 +3928,7 @@ export function emptyLiveBaselineMetrics(
 export function liveBaselineMetricsFromPerKeyDailies(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
   perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
+  tinyBaseDaysByApiKeyId: Readonly<Record<string, readonly string[]>> = {},
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
   // D2: AUM is unchanged — summed from holdings equity contribution, identical
   // to the gate=false emptyDefault branch (`emptyLiveBaselineMetrics`).
@@ -3969,6 +3993,10 @@ export function liveBaselineMetricsFromPerKeyDailies(
       // When a non-crypto venue is ever added to SUPPORTED_EXCHANGES this literal
       // must derive from the key's exchange instead.
       asset_class: "crypto",
+      // 188 D-07: only a key with named days carries the field.
+      ...(tinyBaseDaysByApiKeyId[apiKeyId]?.length
+        ? { undefined_return_days: tinyBaseDaysByApiKeyId[apiKeyId] }
+        : {}),
     });
     selected[apiKeyId] = true;
     // Clamp negative equity (deeply-losing derivative) to 0 for the weight so
@@ -4189,6 +4217,29 @@ const KEY_INPUTS_KIND_PREFIX = "key_inputs:";
  * key whose row is missing or lacks it (a departed key, or one whose derive keeps
  * failing) keeps its cash-basis option days with nothing to say so, so the caveat
  * shows. This over-warns for a frozen perp-only Deribit key, by decision.
+ *
+ * 188 D-02 / D-06: the same rows also carry `tiny_base_days`, the days a key was left
+ * out of the returns because its account was nearly empty. Same read, no new query.
+ * `tinyBaseDays` is the DISTINCT, ascending union of the drawn keys' lists, which the
+ * book's note names and counts (D-06, note only). Each list is read through
+ * `readTinyBaseDays`, so a malformed one contributes no day. It fails CLOSED, the
+ * reverse of `optionsCashBasis` and for the opposite reason (SC-5): that caveat's
+ * absence would hide cash-basis option days the book still draws, while this note's
+ * absence hides nothing the book shows, since the compose already left the key out of
+ * those days' sums, and a day named wrongly is a false disclosure. So a failed read
+ * names no day, and a departed key's days count only when the curve is known to
+ * contain it (not `departedHistoryUnavailable`), the rule `marks_since` follows. The
+ * days are collected per key id before the union.
+ *
+ * 188 D-07: the same per-key lists are also returned as `tinyBaseDaysByKeyId` (valid
+ * lists only, each ascending and distinct), which the scenario readers hand to the
+ * per-key units so the engine sits a key out of those days instead of reading them as
+ * 0. Same read, no new query. A failed read or a malformed list gives that key no
+ * days, so the scenario readers keep today's arithmetic for that key (KL-4): a missing
+ * list never invents a left-out day. Unlike the union above it is not narrowed by
+ * `departedHistoryUnavailable`: a key's list describes that key's own stored series,
+ * not the drawn curve, and only a unit the builders build from the contributing set
+ * ever reads it.
  */
 async function readMarksStart(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -4197,10 +4248,22 @@ async function readMarksStart(
   departedIncluded: ReadonlySet<string>,
   departedHistoryUnavailable: boolean,
   drawnDeribitKeyIds: ReadonlySet<string>,
-): Promise<{ start: string | null; trailingSince: string | null; optionsCashBasis: boolean }> {
+): Promise<{
+  start: string | null;
+  trailingSince: string | null;
+  optionsCashBasis: boolean;
+  tinyBaseDays: string[];
+  tinyBaseDaysByKeyId: Record<string, string[]>;
+}> {
   const drawsDeribit = drawnDeribitKeyIds.size > 0;
   if (includedKeyIds.length === 0) {
-    return { start: null, trailingSince: null, optionsCashBasis: false };
+    return {
+      start: null,
+      trailingSince: null,
+      optionsCashBasis: false,
+      tinyBaseDays: [],
+      tinyBaseDaysByKeyId: {},
+    };
   }
   const { data, error } = await supabase
     .from("allocator_equity_derived")
@@ -4218,12 +4281,19 @@ async function readMarksStart(
         level: "warning",
       }),
     );
-    return { start: null, trailingSince: null, optionsCashBasis: drawsDeribit };
+    return {
+      start: null,
+      trailingSince: null,
+      optionsCashBasis: drawsDeribit,
+      tinyBaseDays: [],
+      tinyBaseDaysByKeyId: {},
+    };
   }
   let earliest: { day: string; keyId: string } | null = null;
   let earliestTrailing: { day: string; keyId: string } | null = null;
   let optionsCashBasis = false;
   const classifiedKeyIds = new Set<string>();
+  const tinyBaseDaysByKeyId = new Map<string, string[]>();
   for (const row of data ?? []) {
     const payload = row.payload as Record<string, unknown> | null;
     const keyId = row.kind.slice(KEY_INPUTS_KIND_PREFIX.length);
@@ -4237,16 +4307,46 @@ async function readMarksStart(
     }
     if (isOptionsCashBasis(payload?.[OPTIONS_CASH_BASIS_FLAG])) optionsCashBasis = true;
     if (typeof payload?.[OPTIONS_ACTIVITY_FLAG] === "boolean") classifiedKeyIds.add(keyId);
+    const rawTinyDays = payload?.[TINY_BASE_DAYS_FLAG];
+    const tinyDays = readTinyBaseDays(rawTinyDays);
+    if (tinyDays.length > 0) {
+      tinyBaseDaysByKeyId.set(keyId, tinyDays);
+    } else if (rawTinyDays != null && !(Array.isArray(rawTinyDays) && rawTinyDays.length === 0)) {
+      // 188 round 1 (MEDIUM-5, SFH-3): a stored list the reader rejects names no day, and the
+      // scenario then reads those days as 0%. Say so once per allocator per window; the key id
+      // only, never the value.
+      console.warn(
+        "[queries.getMyAllocationDashboard] key_inputs tiny_base_days list rejected (naming no near-empty day for this key):",
+        keyId,
+      );
+      if (shouldCaptureDerivedRowRejection(userId, "tiny_base_days_key_malformed")) {
+        scheduleDerivedRowCapture(
+          captureToSentry(new Error("key_inputs tiny_base_days list rejected"), {
+            tags: { op: "getMyAllocationDashboard", reason: "tiny_base_days_malformed" },
+            extra: { api_key_id: keyId },
+            level: "warning",
+          }),
+        );
+      }
+    }
   }
   for (const id of drawnDeribitKeyIds) {
     if (!classifiedKeyIds.has(id)) optionsCashBasis = true;
   }
   const failsClosed = (e: { keyId: string } | null) =>
     e === null || (departedHistoryUnavailable && departedIncluded.has(e.keyId));
+  const tinyBaseDays = new Set<string>();
+  for (const [keyId, days] of tinyBaseDaysByKeyId) {
+    if (failsClosed({ keyId })) continue;
+    for (const day of days) tinyBaseDays.add(day);
+  }
   return {
     start: failsClosed(earliest) ? null : earliest!.day,
     trailingSince: failsClosed(earliestTrailing) ? null : earliestTrailing!.day,
     optionsCashBasis,
+    // ISO calendar days compare chronologically as strings.
+    tinyBaseDays: [...tinyBaseDays].sort(),
+    tinyBaseDaysByKeyId: Object.fromEntries(tinyBaseDaysByKeyId),
   };
 }
 
@@ -4502,9 +4602,12 @@ export const DERIVED_ROW_CAPTURE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const derivedRowCaptureLastAt = new Map<string, number>();
 
 /** Whether this (allocator, rejection) may be reported now; records it if so. */
-function shouldCaptureDerivedRowRejection(
+export function shouldCaptureDerivedRowRejection(
   allocatorId: string,
-  rejection: DerivedPayloadRejection,
+  rejection:
+    | DerivedPayloadRejection
+    | "tiny_base_days_key_malformed"
+    | "tiny_base_days_strategy_malformed",
 ): boolean {
   const key = `${allocatorId}:${rejection}`;
   const now = Date.now();
@@ -5982,6 +6085,35 @@ export const getMyAllocationDashboard = cache(
       (id) => (perKeyReturnsByApiKeyId[id]?.length ?? 0) > 0,
     );
     const bookEntryGateSatisfied = contributingApiKeyIds.length > 0;
+    // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the day recorded equity begins for
+    // the keys the drawn curve includes. After `allocatorEligibleApiKeyIds` and
+    // `phase07.departedHistoryUnavailable` are known, which the key set and the
+    // fail-closed case both read. Carried on both return branches below.
+    // 188 D-07: read BEFORE the live baseline further down, because the baseline hands
+    // each key's tiny-base days (`tinyBaseDaysByKeyId`) to the engine. Same read, same inputs.
+    const marksKeys = marksIncludedKeys(
+      apiKeys,
+      perKeyReturnsByApiKeyId,
+      allocatorEligibleApiKeyIds,
+    );
+    const {
+      start: marksStart,
+      trailingSince: marksTrailingSince,
+      optionsCashBasis,
+      tinyBaseDays,
+      tinyBaseDaysByKeyId,
+    } = await readMarksStart(
+      supabase,
+      userId,
+      marksKeys.included,
+      marksKeys.departedIncluded,
+      phase07.departedHistoryUnavailable === true,
+      new Set(
+        apiKeys
+          .filter((k) => marksKeys.included.includes(k.id) && k.exchange.toLowerCase() === "deribit")
+          .map((k) => k.id),
+      ),
+    );
     // RT1 (Phase 37 DSRC-03) parity for the live-book BASELINE source.
     // `liveBaselineMetrics` is the "your current live book" reference the Scenario
     // composer lifts (liveBaselineToComputedMetrics) to compare a hypothetical
@@ -6056,34 +6188,9 @@ export const getMyAllocationDashboard = cache(
       ? liveBaselineMetricsFromPerKeyDailies(
           contributingHoldings,
           contributingPerKeyReturns,
+          tinyBaseDaysByKeyId,
         )
       : emptyLiveBaselineMetrics(phase07.holdingsSummary);
-
-    // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the day recorded equity begins for
-    // the keys the drawn curve includes. After `allocatorEligibleApiKeyIds` and
-    // `phase07.departedHistoryUnavailable` are known, which the key set and the
-    // fail-closed case both read. Carried on both return branches below.
-    const marksKeys = marksIncludedKeys(
-      apiKeys,
-      perKeyReturnsByApiKeyId,
-      allocatorEligibleApiKeyIds,
-    );
-    const {
-      start: marksStart,
-      trailingSince: marksTrailingSince,
-      optionsCashBasis,
-    } = await readMarksStart(
-      supabase,
-      userId,
-      marksKeys.included,
-      marksKeys.departedIncluded,
-      phase07.departedHistoryUnavailable === true,
-      new Set(
-        apiKeys
-          .filter((k) => marksKeys.included.includes(k.id) && k.exchange.toLowerCase() === "deribit")
-          .map((k) => k.id),
-      ),
-    );
 
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
     // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
@@ -6140,6 +6247,10 @@ export const getMyAllocationDashboard = cache(
         marksStart,
         marksTrailingSince,
         optionsCashBasis,
+        ...(tinyBaseDays.length > 0 ? { tinyBaseDays } : {}),
+        ...(Object.keys(tinyBaseDaysByKeyId).length > 0
+          ? { tinyBaseDaysByApiKeyId: tinyBaseDaysByKeyId }
+          : {}),
       };
     }
 
@@ -6365,13 +6476,37 @@ export const getMyAllocationDashboard = cache(
       // (T-111-03: degraded-member venue detail never ships).
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
       const dqf = analyticsObj?.data_quality_flags as
-        | { composite?: unknown; native_unit?: unknown; cumulative_method?: unknown }
+        | { composite?: unknown; native_unit?: unknown; cumulative_method?: unknown; tiny_base_days?: unknown }
         | null
         | undefined;
       const is_composite = dqf?.composite === true;
       // Phase 164.6.6.2 (D-18, D-22) — strict coercion, same boundary as the
       // factsheet: anything that is not a well-formed unit code reads as USD.
       const returns_unit = parseReturnsUnit(dqf?.native_unit);
+      // 188 D-07 — the strategy's own tiny-base days, strictly parsed (a malformed list is none).
+      const strategyTinyBaseDays = readTinyBaseDays(dqf?.tiny_base_days);
+      const rawStrategyTinyDays = dqf?.tiny_base_days;
+      if (
+        strategyTinyBaseDays.length === 0 &&
+        rawStrategyTinyDays != null &&
+        !(Array.isArray(rawStrategyTinyDays) && rawStrategyTinyDays.length === 0)
+      ) {
+        // 188 round 1 (MEDIUM-5): a rejected list names no day, so the leg reads those days as
+        // 0%. Same once-per-window report as the key-inputs read above; the strategy id only.
+        console.warn(
+          "[queries.getMyAllocationDashboard] strategy tiny_base_days list rejected (naming no near-empty day for this strategy):",
+          row.strategy_id,
+        );
+        if (shouldCaptureDerivedRowRejection(userId, "tiny_base_days_strategy_malformed")) {
+          scheduleDerivedRowCapture(
+            captureToSentry(new Error("strategy tiny_base_days list rejected"), {
+              tags: { op: "getMyAllocationDashboard", reason: "tiny_base_days_malformed" },
+              extra: { strategy_id: String(row.strategy_id) },
+              level: "warning",
+            }),
+          );
+        }
+      }
       // Phase 147 / SCEN-01 — resolve the series HERE, server-side, and emit it
       // under the SAME `daily_returns` field name. The analytics-service writes
       // the cumprod WEALTH curve to `returns_series` and leaves `daily_returns`
@@ -6567,6 +6702,7 @@ export const getMyAllocationDashboard = cache(
             is_composite,
             returns_unit,
             native_unpriced,
+            ...(strategyTinyBaseDays.length > 0 ? { tiny_base_days: strategyTinyBaseDays } : {}),
             series_state,
             strategy_analytics: strategyAnalyticsForPayload,
           },
@@ -6640,6 +6776,10 @@ export const getMyAllocationDashboard = cache(
       marksStart,
       marksTrailingSince,
       optionsCashBasis,
+      ...(tinyBaseDays.length > 0 ? { tinyBaseDays } : {}),
+      ...(Object.keys(tinyBaseDaysByKeyId).length > 0
+        ? { tinyBaseDaysByApiKeyId: tinyBaseDaysByKeyId }
+        : {}),
     };
   },
 );

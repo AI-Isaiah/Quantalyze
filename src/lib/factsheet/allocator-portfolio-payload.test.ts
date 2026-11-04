@@ -439,3 +439,99 @@ describe("buildAllocatorPortfolioFactsheetPayload - optionsCashBasis (185 D-04)"
     expect(withFlag.dataQuality).toEqual({ composite: false, optionsCashBasis: true });
   });
 });
+
+// Phase 188 (TINYBASE) plan 08, D-02 and D-06: the days a drawn key was left out because its
+// account was nearly empty ride in as `tinyBaseDays` and land on `payload.dataQuality`, only
+// as a non-empty, wholly valid list of real days. A book without them keeps the payload it had.
+describe("buildAllocatorPortfolioFactsheetPayload - tinyBaseDays (188 D-02, D-06)", () => {
+  const isoDay = (startIso: string, i: number) =>
+    new Date(Date.parse(`${startIso}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10);
+  const book: DailyReturn[] = Array.from({ length: 30 }, (_, i) => ({
+    date: isoDay("2026-02-01", i),
+    value: i % 2 === 0 ? 0.004 : -0.002,
+  }));
+  const build = (extra: Record<string, unknown> = {}) =>
+    buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      computedAt: "2026-03-01T00:00:00Z",
+      dailyReturns: book,
+      ...extra,
+    });
+
+  it("a valid list lands on dataQuality beside composite false", () => {
+    expect(build({ tinyBaseDays: ["2026-10-27", "2026-10-28"] })!.dataQuality).toEqual({
+      composite: false,
+      tinyBaseDays: ["2026-10-27", "2026-10-28"],
+    });
+  });
+
+  it("keeps an options caveat already set, and all three of marks, caveat and days at once", () => {
+    const both = build({ optionsCashBasis: true, tinyBaseDays: ["2026-10-27"] })!;
+    expect(both.dataQuality).toEqual({ composite: false, optionsCashBasis: true, tinyBaseDays: ["2026-10-27"] });
+
+    const all = build({ marksStart: "2026-02-10", optionsCashBasis: true, tinyBaseDays: ["2026-10-27", "2026-10-28"] })!;
+    expect(all.marksSince).toBe("2026-02-10");
+    expect(all.dataQuality).toEqual({
+      composite: false,
+      optionsCashBasis: true,
+      tinyBaseDays: ["2026-10-27", "2026-10-28"],
+    });
+  });
+
+  it("with the days alone the payload is the build without them plus dataQuality only", () => {
+    // The base build carries `dataQuality: undefined` as a key, so compare without that key on both sides.
+    const { dataQuality: baseQuality, ...baseRest } = build()!;
+    const { dataQuality, ...rest } = build({ tinyBaseDays: ["2026-10-27"] })!;
+    expect(baseQuality).toBeUndefined();
+    expect(dataQuality).toEqual({ composite: false, tinyBaseDays: ["2026-10-27"] });
+    expect(rest).toStrictEqual(baseRest);
+  });
+
+  it.each([
+    ["an empty list", []],
+    ["an impossible date", ["2026-02-30"]],
+    ["one good day and one impossible date", ["2026-10-27", "2026-02-30"]],
+    ["a number", 3],
+    ["a string", "2026-10-27"],
+    ["null", null],
+    ["absent", undefined],
+  ])("%s gives the payload the build without the key gives (T-188-15)", (_label, value) => {
+    const expected = build();
+    expect(build(value === undefined ? {} : { tinyBaseDays: value })).toStrictEqual(expected);
+    expect(expected!.dataQuality).toBeUndefined();
+  });
+
+  it.each([
+    ["an impossible date", ["2026-02-30"]],
+    ["a string", "2026-10-27"],
+    ["a number", 3],
+  ])("188 round 1 (MEDIUM-5): %s is reported to Sentry once, tagged, without the value", async (_label, value) => {
+    const sentry = await import("@/lib/sentry-capture");
+    const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    build({ tinyBaseDays: value });
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(captureSpy.mock.calls[0]![1].tags.reason).toBe("tiny_base_days_malformed");
+    expect(JSON.stringify(captureSpy.mock.calls[0])).not.toContain("2026-02-30");
+    captureSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it.each([["an empty list", []], ["null", null], ["absent", undefined], ["a valid list", ["2026-10-27"]]])(
+    "188 round 1 (MEDIUM-5): %s is not reported",
+    async (_label, value) => {
+      const sentry = await import("@/lib/sentry-capture");
+      const captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+      build(value === undefined ? {} : { tinyBaseDays: value });
+      expect(captureSpy).not.toHaveBeenCalled();
+      captureSpy.mockRestore();
+    },
+  );
+
+  it("a malformed list leaves an already-set options caveat untouched", () => {
+    expect(build({ optionsCashBasis: true, tinyBaseDays: ["2026-02-30"] })!.dataQuality).toEqual({
+      composite: false,
+      optionsCashBasis: true,
+    });
+  });
+});

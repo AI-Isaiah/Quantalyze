@@ -10,6 +10,7 @@ import type { StoredCashHeadlineGate } from "./headline-basis";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
 import { isComputedAnalytics, isRankableAnalyticsRow } from "@/lib/closed-sets";
+import { readTinyBaseDays } from "@/lib/tiny-base-flag";
 
 /** The parsed, defensively-coerced form of an `mtm_daily_returns` series row. */
 export type ParsedMtmSeries = {
@@ -349,6 +350,7 @@ export async function readCompositeFactsheet(
           negative_nav_guard?: unknown;
           dust_nav_guard?: unknown;
           pnl_dominated_guard?: unknown;
+          tiny_base_days?: unknown;
         }
       | null
       | undefined;
@@ -404,6 +406,20 @@ export async function readCompositeFactsheet(
     (metricsByBasis as { smoothed_mtm?: unknown } | undefined)?.smoothed_mtm,
   );
   const markers = deriveSegmentMarkers(dqf);
+  const tinyBaseDays = readTinyBaseDays(dqf?.tiny_base_days);
+  if (
+    tinyBaseDays.length === 0 &&
+    dqf?.tiny_base_days != null &&
+    !(Array.isArray(dqf.tiny_base_days) && dqf.tiny_base_days.length === 0)
+  ) {
+    // 188 round 1 (MEDIUM-5): a rejected list prints no note and the reader never learns why.
+    // Strategy id only, never the value.
+    console.warn("[factsheet] readCompositeFactsheet — tiny_base_days list rejected; the note names no day", { strategyId });
+    captureToSentry(new Error("factsheet: composite tiny_base_days list rejected"), {
+      tags: { stage: "factsheet-tiny-base-days", reason: "tiny_base_days_malformed", strategy_id: strategyId },
+      level: "warning",
+    });
+  }
   // Phase 164.6.6.3.3 (D-01, D-03): the span a chain-broken stored headline covers
   // and the reasons it broke, from the ONE marker, through the ONE applier the
   // single-key arm also uses. It runs AFTER the gate above, which read the RAW
@@ -469,6 +485,9 @@ export async function readCompositeFactsheet(
         degradedMembers: parseDegradedMembers(dqf?.degraded_members),
         // Phase 164.6.6.3.3: present-only, so a clean row's opts are unchanged.
         ...applied.quality,
+        // Phase 188 (D-02, D-06, D-09): the marked-era days the members' rule left out, named by
+        // the same muted note a single key prints. Present only when non-empty.
+        ...(tinyBaseDays.length > 0 ? { tinyBaseDays } : {}),
       },
       mtmGate: {
         available: mtmAvailable,
@@ -598,10 +617,28 @@ export function singleKeyDataQuality(
         small_base_measured?: unknown;
         flow_timing_day_level?: unknown;
         flow_timing_day_level_large?: unknown;
+        tiny_base_days?: unknown;
       }
     | null
     | undefined,
 ): NonNullable<BuildFactsheetOpts["dataQuality"]> {
+  // 188 D-02, D-06 (SC-5): the stored list is untrusted JSONB. `readTinyBaseDays` returns the
+  // distinct ascending days of a list it accepts WHOLE and `[]` for anything else, so a
+  // malformed list names no day and prints no note (T-188-12).
+  const tinyBaseDays = readTinyBaseDays(dqf?.tiny_base_days);
+  if (
+    tinyBaseDays.length === 0 &&
+    dqf?.tiny_base_days != null &&
+    !(Array.isArray(dqf.tiny_base_days) && dqf.tiny_base_days.length === 0)
+  ) {
+    // 188 round 1 (MEDIUM-5, SFH-3): a rejected list prints no note and the reader never learns
+    // why. No value and no id here (the caller holds none): the tag says what was dropped.
+    console.warn("[factsheet] singleKeyDataQuality — tiny_base_days list rejected; the note names no day");
+    captureToSentry(new Error("factsheet: single-key tiny_base_days list rejected"), {
+      tags: { stage: "factsheet-tiny-base-days", reason: "tiny_base_days_malformed" },
+      level: "warning",
+    });
+  }
   return {
     composite: false,
     insufficientWindow: dqf?.insufficient_window === true,
@@ -620,6 +657,9 @@ export function singleKeyDataQuality(
     // prior balance can read as an extreme return. Informational, present only when true
     // under the same strict coercion, and it drives the same caveat as `smallBaseMeasured`.
     ...(dqf?.flow_timing_day_level_large === true ? { flowTimingDayLevelLarge: true } : {}),
+    // Phase 188 (D-02, D-06): the days left out because the account was nearly empty, named by
+    // a muted note. Present only when non-empty, so a clean row's opt is unchanged.
+    ...(tinyBaseDays.length > 0 ? { tinyBaseDays } : {}),
   };
 }
 

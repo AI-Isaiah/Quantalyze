@@ -341,6 +341,19 @@ class DataQualityFlags(TypedDict, total=False):
     turnover_missing_price_dates_truncated: bool
     turnover_missing_price_dates_truncated_kept: int
     turnover_missing_price_dates_truncated_total: int
+    # --- Phase 188 TINYBASE (D-02): the ISO days the tiny-base rule left out of this series (a
+    # day whose starting NAV was under 5% of its 30-day peak, realized-era and marked-era alike).
+    # Stamped by the broker derive's pre-stamp and carried present-only, validated, by
+    # run_csv_strategy_analytics. An annotation that NEVER promotes computation_status, the same
+    # rule as mark_gap_days: it is in neither NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS.
+    # Declared because the copy-through writes it with a literal key, which `mypy --strict`
+    # refuses on an undeclared TypedDict key. Days only, never an amount (T-73-02). ---
+    tiny_base_days: list[str]
+    # --- Phase 188 TINYBASE (D-02, D-03): the guard the NAV core raises when a realized-era day
+    # was left out as tiny-base (a NAV_TWR_GUARD_KEYS member, so it promotes the row to
+    # complete_with_warnings). Written by the guard lift loop with a variable key, declared here
+    # beside the other lifted guards (pnl_dominated_guard). A BOOL only (T-73-02). ---
+    tiny_base_guard: bool
 
 
 def _merge_into_top_level_flags(
@@ -1379,7 +1392,7 @@ def _without_gap_day_points(
 # (src/lib/snapshot-rebuild-boundary.ts): a real calendar date written exactly YYYY-MM-DD.
 _NAVMTM_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _NAVMTM_DAY_KEYS = ("marks_since", "marks_covered_from", "marks_trailing_since")
-_NAVMTM_DAY_LIST_KEYS = ("mark_gap_days",)
+_NAVMTM_DAY_LIST_KEYS = ("mark_gap_days", "tiny_base_days")
 
 
 class _NavmtmFlags(NamedTuple):
@@ -1389,6 +1402,9 @@ class _NavmtmFlags(NamedTuple):
     marks_covered_from: str | None
     mark_gap_days: list[str] | None
     marks_trailing_since: str | None
+    # 188 TINYBASE (D-02): the days the tiny-base rule left out, last so every earlier field keeps
+    # its position.
+    tiny_base_days: list[str] | None
 
 
 def _is_iso_calendar_day(value: object) -> bool:
@@ -1435,6 +1451,7 @@ def _read_navmtm_flags(existing_flags: Mapping[str, Any], strategy_id: str) -> _
         marks_covered_from=kept.get("marks_covered_from"),
         mark_gap_days=kept.get("mark_gap_days"),
         marks_trailing_since=kept.get("marks_trailing_since"),
+        tiny_base_days=kept.get("tiny_base_days"),
     )
 
 
@@ -2057,6 +2074,15 @@ async def run_csv_strategy_analytics(
                         if not _post.empty
                         else []
                     )
+                    # 188 D-02 and RESEARCH Pitfall 3: a tiny-base day is absent from the rows like
+                    # a covered day, but it is NOT inside the next mark's return - the rule left it
+                    # out because its base was a sliver. It is therefore a flagged gap span of the
+                    # published cash series, not a covered day, and (no row, no fill) it stays out
+                    # of the scalar input and breaks no chain. A realized-era tiny day sits before
+                    # the boundary and is reinstated as NaN above like every guard day (D-04).
+                    if _navmtm.tiny_base_days:
+                        _tiny_days = frozenset(_navmtm.tiny_base_days)
+                        _covered_days = [d for d in _covered_days if d not in _tiny_days]
                 returns.name = "returns"
 
             # D-10 (RESEARCH Pitfall 4): a native-unit series (a BTC MT5 account) is
@@ -2267,6 +2293,10 @@ async def run_csv_strategy_analytics(
                 data_quality_flags["mark_gap_days"] = _navmtm.mark_gap_days
             if _navmtm.marks_trailing_since is not None:
                 data_quality_flags["marks_trailing_since"] = _navmtm.marks_trailing_since
+            # 188 D-02: the tiny-base days, PRESENT-ONLY and validated like mark_gap_days. Days
+            # only: the derive's per-day amounts never leave the derive (T-188-08).
+            if _navmtm.tiny_base_days is not None:
+                data_quality_flags["tiny_base_days"] = _navmtm.tiny_base_days
 
             # Phase 164.6.6.2 (D-25): carry the small-base annotation PRESENT-ONLY and
             # OUTSIDE both `_warned` loops above, exactly like native_unit. The rebuild of

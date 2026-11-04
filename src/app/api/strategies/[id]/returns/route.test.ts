@@ -345,8 +345,11 @@ vi.mock("@/lib/sentry-capture", () => ({
 // (Mocking the helper also avoids the returns route transitively importing the
 // large queries.ts module graph under vitest.)
 const readSignalsMock = vi.hoisted(() => vi.fn());
+// 188 round 2 (SFH-2): the once-per-window throttle for a rejected tiny_base_days list.
+const throttleMock = vi.hoisted(() => vi.fn((_id: string, _token: string) => true));
 vi.mock("@/lib/queries", () => ({
   readPublicVerificationSignals: readSignalsMock,
+  shouldCaptureDerivedRowRejection: throttleMock,
 }));
 
 // Phase 164.6.6.2 plan 09 (D-18, D-22, D-23): the BTC closes the route converts a
@@ -1181,8 +1184,63 @@ describe("GET /api/strategies/[id]/returns", () => {
       "returns_unit",
       "series_state",
       "sharpe",
+      "tiny_base_days",
       "trust_tier",
     ]);
+  });
+
+  it("R-188 — round 1 MEDIUM-4: tiny_base_days is the strictly parsed list; a malformed one is [] and the raw flags never ship", async () => {
+    const series = [{ date: "2026-01-02", value: 0.021 }];
+    STATE.analyticsRow = {
+      daily_returns: series,
+      computation_status: "complete",
+      data_quality_flags: { tiny_base_days: ["2026-03-04", "2026-03-03", "2026-03-04"] },
+    };
+    const { GET } = await import("./route");
+    const named = await (await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID))).json();
+    expect(named.tiny_base_days).toEqual(["2026-03-03", "2026-03-04"]);
+    expect(JSON.stringify(named)).not.toContain("data_quality_flags");
+
+    for (const flags of [{ tiny_base_days: ["2026-03-03", "nope"] }, { tiny_base_days: "2026-03-03" }, {}, null]) {
+      STATE.analyticsRow = {
+        daily_returns: series,
+        computation_status: "complete",
+        data_quality_flags: flags,
+      };
+      const body = await (await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID))).json();
+      expect(body.tiny_base_days).toEqual([]);
+    }
+  });
+
+  it("R-188 — round 2 SFH-2: a rejected tiny_base_days list is warned and reported by strategy id (throttled), never by value; null, [] and a good list are silent", async () => {
+    const series = [{ date: "2026-01-02", value: 0.021 }];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    captureSpy.mockClear();
+    throttleMock.mockClear();
+    const { GET } = await import("./route");
+    const run = async (flags: unknown) => {
+      STATE.analyticsRow = { daily_returns: series, computation_status: "complete", data_quality_flags: flags };
+      await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    };
+
+    for (const silent of [{ tiny_base_days: ["2026-03-03"] }, { tiny_base_days: [] }, { tiny_base_days: null }, {}, null]) {
+      await run(silent);
+    }
+    expect(captureSpy).not.toHaveBeenCalled();
+
+    await run({ tiny_base_days: ["2026-03-03", "nope-value"] });
+    expect(throttleMock).toHaveBeenCalledWith(PUBLISHED_ID, expect.any(String));
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [, opts] = captureSpy.mock.calls[0]!;
+    expect(opts.tags).toMatchObject({ reason: "tiny_base_days_malformed", strategy_id: PUBLISHED_ID });
+    expect(JSON.stringify(captureSpy.mock.calls[0])).not.toContain("nope-value");
+    expect(warnSpy.mock.calls.flat().join(" ")).not.toContain("nope-value");
+
+    captureSpy.mockClear();
+    throttleMock.mockReturnValueOnce(false);
+    await run({ tiny_base_days: "2026-03-03" });
+    expect(captureSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it("R-D — HONEST-05: a rankable row with unset/non-finite scalar columns → null, never 0", async () => {

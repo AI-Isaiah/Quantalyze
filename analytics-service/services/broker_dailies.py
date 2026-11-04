@@ -232,6 +232,27 @@ def gap_fill_daily_returns(returns: pd.Series) -> pd.Series:
     return returns.reindex(full_idx, fill_value=0.0).astype("float64")
 
 
+def _leave_out_tiny_base_days(returns: pd.Series, meta: Mapping[str, Any]) -> pd.Series:
+    """Set every day ``meta["tiny_base_days"]`` names to NaN (188 D-02, D-03, D-08, SC-5).
+
+    Runs AFTER ``gap_fill_daily_returns`` on purpose: the fill only adds labels, and a quiet
+    day (no trade, funding or flow on a near-empty account) is absent from the sparse NAV index
+    until the fill writes it as 0.0, a flat day measured against a tiny base. The core
+    (``chain_linked_twr``) names those days; this turns the filled 0.0 into NaN so the derive
+    stores no row and the stats skip it. A day the list does not name is untouched; an absent or
+    malformed list changes nothing. Returns a copy; nothing is logged."""
+    days = meta.get("tiny_base_days")
+    if not isinstance(days, (list, tuple)) or not days:
+        return returns
+    named = {d for d in days if isinstance(d, str)}
+    if not named:
+        return returns
+    mask = [ts.date().isoformat() in named for ts in returns.index]
+    out = returns.copy()
+    out[mask] = float("nan")
+    return out
+
+
 def combine_realized_and_funding(
     realized_pnl_records: list[dict[str, Any]],
     funding_rows: Sequence[Mapping[str, Any]],
@@ -320,6 +341,7 @@ def combine_realized_and_funding(
         full_history=full_history,
     )
     returns = gap_fill_daily_returns(returns)
+    returns = _leave_out_tiny_base_days(returns, meta)
     out_meta = dict(meta)
     out_meta["series_completeness"] = "fill_derived_unproven"
     return returns, out_meta
@@ -403,6 +425,7 @@ def combine_native_ledger(
         ledger, indexable_currencies=indexable, venue="deribit"
     )
     returns = gap_fill_daily_returns(returns)
+    returns = _leave_out_tiny_base_days(returns, meta)
     out_meta = dict(meta)
     out_meta["series_completeness"] = "ledger_complete"
     return returns, out_meta
@@ -943,6 +966,7 @@ def combine_mt5_deal_ledger(
         full_history=True,
     )
     returns = gap_fill_daily_returns(returns)
+    returns = _leave_out_tiny_base_days(returns, meta)
     out_meta = dict(meta)
     # MT5-12 verdict: ``ledger_complete``. ``history_deals_get`` is a FULL-HISTORY
     # fetch (no retention window to truncate against, unlike the ccxt venues), and

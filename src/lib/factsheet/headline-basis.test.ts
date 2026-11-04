@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   GUARD_REASON_PHRASES,
   headlineVerdict,
@@ -275,6 +277,54 @@ describe("storedCashHeadlineGate", () => {
 
   it("a key present with an undefined VALUE is projected (presence, as the page reads it)", () => {
     expect(storedCashHeadlineGate({ ...ROW, cagr: undefined }, null, "complete")).toEqual({ applicable: true });
+  });
+});
+
+/**
+ * 188 D-02, D-04 - a realized-era tiny-day chain break is explained with the EXISTING
+ * near-zero-balance phrase (no new headline copy). Two flags now map to one reason, so a
+ * reason is named once. The expected phrase is typed by hand here.
+ */
+describe("188 tiny_base_guard - the headline reason for a tiny-base break", () => {
+  const BROKEN = { twr_chain_broken: true, headline_since: "2026-04-18" };
+
+  it("tiny_base_guard alone names the near-zero-balance reason", () => {
+    const out = readHeadlineBasis({ ...BROKEN, tiny_base_guard: true });
+    expect(out.reasons).toEqual(["dust_nav"]);
+    expect(joinGuardPhrases(out.reasons)).toBe("a near-zero account balance");
+  });
+
+  it("dust_nav_guard and tiny_base_guard together name that reason exactly once", () => {
+    const out = readHeadlineBasis({ ...BROKEN, dust_nav_guard: true, tiny_base_guard: true });
+    expect(out.reasons).toEqual(["dust_nav"]);
+    expect(joinGuardPhrases(out.reasons)).toBe("a near-zero account balance");
+  });
+
+  it("negative_nav, tiny_base and pnl_dominated together keep table order, first occurrence", () => {
+    expect(
+      readHeadlineBasis({
+        ...BROKEN,
+        pnl_dominated_guard: true,
+        tiny_base_guard: true,
+        negative_nav_guard: true,
+      }).reasons,
+    ).toEqual(["negative_nav", "dust_nav", "pnl_dominated"]);
+  });
+
+  it.each([["true"], [1], [null], [false]])("tiny_base_guard %j does not count (strict === true)", (v) => {
+    expect(readHeadlineBasis({ ...BROKEN, tiny_base_guard: v }).reasons).toEqual([]);
+  });
+
+  it("a row that is not chain-broken names no reason, whatever the guard says", () => {
+    expect(readHeadlineBasis({ tiny_base_guard: true }).reasons).toEqual([]);
+  });
+
+  it("the row names a flag the worker really writes: NAV_TWR_GUARD_KEYS carries tiny_base_guard", () => {
+    const raw = readFileSync(join(process.cwd(), "analytics-service", "services", "nav_twr.py"), "utf8");
+    expect(raw.length).toBeGreaterThan(0);
+    const tuple = /NAV_TWR_GUARD_KEYS: tuple\[str, \.\.\.\] = \(([\s\S]*?)\n\)/.exec(raw);
+    expect(tuple, "NAV_TWR_GUARD_KEYS tuple must be found in nav_twr.py").not.toBeNull();
+    expect(tuple![1]).toContain('"tiny_base_guard"');
   });
 });
 

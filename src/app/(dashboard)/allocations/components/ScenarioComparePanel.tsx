@@ -88,6 +88,12 @@ export interface ScenarioComparePanelProps {
      */
     bookEntryGateSatisfied?: boolean;
     contributingApiKeyIds?: string[];
+    /**
+     * 188 D-07 — each key's tiny-base days (api_key_id → ISO days), the same field the
+     * composer reads. Copied into the compare inputs so every per-key column sits a key
+     * out of those days. Optional so a narrow test payload still type-checks.
+     */
+    tinyBaseDaysByApiKeyId?: Record<string, string[]>;
   };
 }
 
@@ -100,6 +106,9 @@ interface ComparePayloadStrategy {
     // SSR select. Optional + `?? null` downstream so this stays compile- and
     // runtime-safe independently of the SSR shape (an unknown leg → the 252 leg).
     asset_class?: string | null;
+    // 188 D-07 (round 1, MEDIUM-4): the days the tiny-base rule left out of this strategy's
+    // series (`payload.strategies[i].strategy.tiny_base_days`), carried onto the added leg.
+    tiny_base_days?: string[];
     strategy_analytics: {
       daily_returns?: unknown;
       cagr?: number | null;
@@ -188,7 +197,7 @@ function deriveCompareInputs(
   const addedStrategyReturnsLookup: Record<string, DailyPoint[]> = {};
   const addedStrategyMetadataLookup: Record<
     string,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days">
   > = {};
   for (const [id, s] of strategyById) {
     const raw = s.strategy.strategy_analytics?.daily_returns;
@@ -202,6 +211,10 @@ function deriveCompareInputs(
       // Phase 84 (BLEND-01): carry asset_class so the added leg contributes to the
       // blend basis (blendPeriodsPerYear). `?? null` keeps an absent SSR field safe.
       asset_class: s.strategy.asset_class ?? null,
+      // 188 D-07 (round 1, MEDIUM-4): the strategy's tiny-base days, so a book leg sits out of them.
+      ...(s.strategy.tiny_base_days?.length
+        ? { undefined_return_days: s.strategy.tiny_base_days }
+        : {}),
     };
   }
 
@@ -227,6 +240,7 @@ function deriveCompareInputs(
     // composer's engine actually blends. Without it a pre-151 book draft made
     // this panel blend the owner's manager-side keys the composer excludes.
     contributingApiKeyIds: payload.contributingApiKeyIds,
+    tinyBaseDaysByApiKeyId: payload.tinyBaseDaysByApiKeyId,
     equityByApiKeyId,
     perKeyDailiesGateSatisfied: payload.perKeyDailiesGateSatisfied,
   };

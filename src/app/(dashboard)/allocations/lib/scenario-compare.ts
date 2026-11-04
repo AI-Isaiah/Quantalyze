@@ -88,7 +88,7 @@ export interface ScenarioCompareInputs {
     string,
     // Phase 84 (BLEND-01): asset_class widened in to match the 84-01 adapter Pick
     // so an added leg's class flows through to the blend basis (blendPeriodsPerYear).
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days">
   >;
   /**
    * P61-BUG-2 — the per-key channel. When a SAVED draft's persisted membership
@@ -121,6 +121,13 @@ export interface ScenarioCompareInputs {
    * (and any caller predating the split gate) keeps its current behaviour.
    */
   contributingApiKeyIds?: string[];
+  /**
+   * 188 D-07 — each key's tiny-base days (api_key_id → ISO days), the same field the
+   * dashboard payload carries. Passed to the per-key builder so every per-key column,
+   * the live-book one and a saved draft's alike, sits a key out of those days
+   * instead of reading them as 0 (T-KL1-SCOPE). Optional: absent builds today's units.
+   */
+  tinyBaseDaysByApiKeyId?: Record<string, string[]>;
   equityByApiKeyId?: Record<string, number>;
   /**
    * WR-03 — carried for PARITY with the live payload only. `computeMetricsForDraft`
@@ -217,6 +224,9 @@ export function computeMetricsForDraft(
         // inputs carry no key list, and this path returns ComputedMetrics
         // only; no unit name leaves it.
         new Map(),
+        // 188 D-07: the days each key was left out of, so this column reads them
+        // the way the SSR live baseline and the stored book do.
+        liveInputs.tinyBaseDaysByApiKeyId ?? {},
       ),
       draft.addedStrategies,
       liveInputs.addedStrategyReturnsLookup as Record<
@@ -225,7 +235,7 @@ export function computeMetricsForDraft(
       >,
       liveInputs.addedStrategyMetadataLookup as Record<
         StrategyForBuilderId,
-        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days">
       >,
     );
   } else {
@@ -249,7 +259,7 @@ export function computeMetricsForDraft(
       >,
       liveInputs.addedStrategyMetadataLookup as Record<
         StrategyForBuilderId,
-        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days">
       >,
     );
   }

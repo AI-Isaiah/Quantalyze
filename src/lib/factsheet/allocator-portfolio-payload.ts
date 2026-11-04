@@ -4,6 +4,8 @@ import { buildFactsheetPayload } from "./build-payload";
 import { equityCurveToDailyReturns } from "./resolve-series";
 import { parseMarksStart } from "@/lib/nav-marks-start";
 import { isOptionsCashBasis } from "@/lib/options-cash-basis-flag";
+import { readTinyBaseDays } from "@/lib/tiny-base-flag";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 // Phase 147 / SC2 — ONE series-resolution mechanism. Both functions moved verbatim to the
 // leaf `./resolve-series` (which does NOT import ./build-payload) so the OG route and the
@@ -67,6 +69,15 @@ export interface AllocatorPortfolioMetadata {
    * the boolean `true` raises it.
    */
   optionsCashBasis?: unknown;
+  /**
+   * Phase 188 (TINYBASE) D-02, D-06. The dashboard payload's `tinyBaseDays`: the days a
+   * key the drawn curve includes was left out because its account was nearly empty.
+   * Lands on `payload.dataQuality.tinyBaseDays`, which the factsheet's muted note names
+   * and counts. ISO days, never an amount. Typed `unknown` and parsed by
+   * `readTinyBaseDays`, so only a non-empty list of real days lands; one bad element
+   * voids the whole list (a false disclosure is worse than a missing one).
+   */
+  tinyBaseDays?: unknown;
 }
 
 /**
@@ -147,13 +158,38 @@ export function buildAllocatorPortfolioFactsheetPayload(
   // 185 D-04: the interim options caveat, by spread and only when true, so a book
   // without it keeps the payload (and its absent `dataQuality`) it had before.
   const optionsCashBasis = isOptionsCashBasis(meta.optionsCashBasis);
-  if (payload === null || (!marksSince && !marksTrailingSince && !optionsCashBasis)) return payload;
+  // 188 D-02, D-06: the near-empty-account days the note names, by spread and only when a
+  // non-empty valid list, so a book without them keeps the payload it had before.
+  const tinyBaseDays = readTinyBaseDays(meta.tinyBaseDays);
+  const hasTinyBaseDays = tinyBaseDays.length > 0;
+  if (
+    !hasTinyBaseDays &&
+    meta.tinyBaseDays != null &&
+    !(Array.isArray(meta.tinyBaseDays) && meta.tinyBaseDays.length === 0)
+  ) {
+    // 188 round 1 (MEDIUM-5): the dashboard already validated this list, so a rejection here is a
+    // wiring fault, not stored data. Report it instead of printing no note. No value.
+    console.warn("[factsheet] buildAllocatorPortfolioFactsheetPayload — tinyBaseDays rejected; the note names no day");
+    captureToSentry(new Error("factsheet: allocator portfolio tinyBaseDays rejected"), {
+      tags: { stage: "factsheet-tiny-base-days", reason: "tiny_base_days_malformed" },
+      level: "warning",
+    });
+  }
+  if (payload === null || (!marksSince && !marksTrailingSince && !optionsCashBasis && !hasTinyBaseDays)) {
+    return payload;
+  }
   return {
     ...payload,
     ...(marksSince ? { marksSince } : {}),
     ...(marksTrailingSince ? { marksTrailingSince } : {}),
-    ...(optionsCashBasis
-      ? { dataQuality: { ...(payload.dataQuality ?? { composite: false }), optionsCashBasis: true } }
+    ...(optionsCashBasis || hasTinyBaseDays
+      ? {
+          dataQuality: {
+            ...(payload.dataQuality ?? { composite: false }),
+            ...(optionsCashBasis ? { optionsCashBasis: true } : {}),
+            ...(hasTinyBaseDays ? { tinyBaseDays } : {}),
+          },
+        }
       : {}),
   };
 }

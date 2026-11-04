@@ -105,6 +105,7 @@ import type {
 } from "@/lib/factsheet/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
+import { readTinyBaseDays } from "@/lib/tiny-base-flag";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { deriveBlendPanels } from "@/lib/scenario-blend-adapter";
 import {
@@ -1288,6 +1289,14 @@ export function ScenarioComposer({
   const [addedProvenanceById, setAddedProvenanceById] = useState<
     Record<string, { trust_tier: string | null; is_composite: boolean }>
   >({});
+  // 188 D-07 (round 1, MEDIUM-4) — the lazily-fetched tiny-base days for a drawer-added, NON-book
+  // strategy, keyed by id: the days the rule left out of its stored series. Same lifecycle as
+  // addedProvenanceById (settle writes it, handleRemoveAdded purges it). Fed into
+  // addedStrategyMetadataLookup as `undefined_return_days`, so the engine sits the leg out of
+  // those days instead of reading them as a flat 0%.
+  const [addedTinyBaseDaysById, setAddedTinyBaseDaysById] = useState<
+    Record<string, string[]>
+  >({});
   // Phase 164.6.6.2 plan 11 (D-18, D-22, D-23) — the lazily-fetched returns UNIT
   // and the server-converted USD series for a drawer-added, NON-book strategy,
   // keyed by id. Exactly the addedProvenanceById lifecycle: written by
@@ -1656,8 +1665,10 @@ export function ScenarioComposer({
       seriesState: SeriesState,
       metrics: { cagr: number | null; sharpe: number | null },
       native: { unit: string | null; usdSeries: DailyPoint[]; unpriced: boolean },
+      tinyBaseDays: string[],
     ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+      setAddedTinyBaseDaysById((prev) => ({ ...prev, [id]: tinyBaseDays }));
       // 164.6.6.2 plan 11 — the unit and the server-converted series, beside the
       // raw one. Written unconditionally (a USD leg writes null / []), so the
       // settled entry is always a complete answer and a purge is a clean slate.
@@ -1724,6 +1735,7 @@ export function ScenarioComposer({
           returns_unit?: unknown;
           daily_returns_usd?: unknown;
           native_unpriced?: unknown;
+          tiny_base_days?: unknown;
         }) => {
           // A 200 with a non-array body is a malformed/failed response, NOT a
           // genuine empty series — treat it as a retryable failure (WR-01).
@@ -1789,6 +1801,8 @@ export function ScenarioComposer({
             seriesState,
             metrics,
             native,
+            // 188 D-07: the route already parsed the list; a stale deploy omits it -> none.
+            readTinyBaseDays(d.tiny_base_days),
           );
         },
       )
@@ -2765,6 +2779,11 @@ export function ScenarioComposer({
         const { [id]: _dropUnpriced, ...rest } = prev;
         return rest;
       });
+      setAddedTinyBaseDaysById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropTiny, ...rest } = prev;
+        return rest;
+      });
       // SCEN-01 — purge the fetched series_state identically, or a re-add would
       // render a STALE "Syncing" against a retry that has not answered yet.
       setAddedSeriesStateById((prev) => {
@@ -2801,7 +2820,7 @@ export function ScenarioComposer({
       string,
       Pick<
         StrategyForBuilder,
-        "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+        "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days"
       > & {
         // CONSTIT-02 — presentation-only provenance metadata carried BESIDE the
         // engine-facing Pick fields. Deliberately NOT part of StrategyForBuilder
@@ -2834,7 +2853,7 @@ export function ScenarioComposer({
       string,
       Pick<
         StrategyForBuilder,
-        "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+        "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days"
       > & {
         trust_tier: string | null;
         is_composite: boolean;
@@ -2853,6 +2872,8 @@ export function ScenarioComposer({
       // seam fault into a claim.
       const lazyMetrics = addedMetricsById[a.id];
       const lazyPair = lazyMetrics === "unavailable" ? undefined : lazyMetrics;
+      const tinyBaseDays =
+        found != null ? found.strategy.tiny_base_days : addedTinyBaseDaysById[a.id];
       // BLEND-01 — build an entry for EVERY added strategy, book or drawer.
       // Previously only book strategies (`if (found)`) got an entry and a
       // non-book leg fell through to the adapter's default meta (public / null
@@ -2919,6 +2940,9 @@ export function ScenarioComposer({
           found != null
             ? found.strategy.native_unpriced === true
             : (addedNativeUnpricedById[a.id] ?? false),
+        // 188 D-07 — the days the tiny-base rule left out of this leg's series; book wins whole
+        // (the payload is authoritative for a book leg), a drawer-added leg reads the route's.
+        ...(tinyBaseDays?.length ? { undefined_return_days: tinyBaseDays } : {}),
       };
     }
     return map;
@@ -2929,6 +2953,7 @@ export function ScenarioComposer({
     addedProvenanceById,
     addedReturnsUnitById,
     addedNativeUnpricedById,
+    addedTinyBaseDaysById,
     addedMetricsById,
   ]);
 
@@ -3113,14 +3138,19 @@ export function ScenarioComposer({
     const eligibleOnly = Object.fromEntries(
       Object.entries(all).filter(([id]) => contributing.has(id)),
     );
+    // 188 D-07 (T-KL1-UNIT): the builder stamps each key's tiny-base days on its
+    // unit, so the engine set, the solver and the diversification memo below
+    // read the days as they are.
     return buildPerKeyStrategyForBuilderSet(
       eligibleOnly,
       equityByApiKeyId,
       apiKeyLabelById,
+      payload.tinyBaseDaysByApiKeyId ?? {},
     );
   }, [
     payload.perKeyReturnsByApiKeyId,
     payload.contributingApiKeyIds,
+    payload.tinyBaseDaysByApiKeyId,
     equityByApiKeyId,
     apiKeyLabelById,
   ]);
@@ -3158,7 +3188,7 @@ export function ScenarioComposer({
           import("../lib/scenario-adapter").StrategyForBuilderId,
           Pick<
             StrategyForBuilder,
-            "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+            "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days"
           >
         >,
       );
@@ -3177,7 +3207,7 @@ export function ScenarioComposer({
         import("../lib/scenario-adapter").StrategyForBuilderId,
         Pick<
           StrategyForBuilder,
-          "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+          "disclosure_tier" | "cagr" | "sharpe" | "asset_class" | "undefined_return_days"
         >
       >,
     );

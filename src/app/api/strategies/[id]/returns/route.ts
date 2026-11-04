@@ -67,12 +67,13 @@ import {
   isNativeLegUnpriced,
 } from "@/lib/factsheet/native-to-usd";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { readTinyBaseDays } from "@/lib/tiny-base-flag";
 import {
   deriveEmptySeriesState,
   isRankableAnalyticsRow,
   type SeriesState,
 } from "@/lib/closed-sets";
-import { readPublicVerificationSignals } from "@/lib/queries";
+import { readPublicVerificationSignals, shouldCaptureDerivedRowRejection } from "@/lib/queries";
 
 // AGENTS.md: default to the Node.js runtime explicitly. The route touches the
 // supabase server client; Edge runtime would skip the Node-only paths the
@@ -190,6 +191,14 @@ export interface ReturnsResponse {
    * no series, whose absence `series_state` already names).
    */
   native_unpriced: boolean;
+  /**
+   * 188 D-07 (round 1, MEDIUM-4) — the days the tiny-base rule left out of this strategy's stored
+   * series, parsed from `data_quality_flags.tiny_base_days` through `readTinyBaseDays` (a malformed
+   * list is `[]`). The composer carries them onto the leg as `undefined_return_days`, so the engine
+   * sits the leg out of those days instead of reading them as a flat 0%. ISO days only, never an
+   * amount; emitted after the same published-or-owner probe as every field here.
+   */
+  tiny_base_days: string[];
 }
 
 export async function GET(
@@ -482,7 +491,7 @@ export async function GET(
       // CONSTIT-02 — strict `=== true` composite coercion (T-111-04). The raw
       // data_quality_flags blob is read here but only the boolean is emitted.
       const dqf = (data as { data_quality_flags?: unknown } | null)?.data_quality_flags as
-        | { composite?: unknown; native_unit?: unknown }
+        | { composite?: unknown; native_unit?: unknown; tiny_base_days?: unknown }
         | null
         | undefined;
       const is_composite = dqf?.composite === true;
@@ -520,6 +529,25 @@ export async function GET(
         );
       }
 
+      // 188 round 2 (SFH-2): a stored list the reader rejects names no day, and the composer then
+      // reads those days as 0%. Say so, throttled like the dashboard read; the strategy id only,
+      // never the value.
+      const tiny_base_days = readTinyBaseDays(dqf?.tiny_base_days);
+      const rawTinyDays = dqf?.tiny_base_days;
+      if (
+        tiny_base_days.length === 0 &&
+        rawTinyDays != null &&
+        !(Array.isArray(rawTinyDays) && rawTinyDays.length === 0)
+      ) {
+        console.warn("[api/strategies/returns] tiny_base_days list rejected; the leg names no day:", id);
+        if (shouldCaptureDerivedRowRejection(id, "tiny_base_days_strategy_malformed")) {
+          captureToSentry(new Error("strategy tiny_base_days list rejected"), {
+            tags: { route: "api/strategies/returns", reason: "tiny_base_days_malformed", strategy_id: id },
+            level: "warning",
+          });
+        }
+      }
+
       const body: ReturnsResponse = {
         daily_returns,
         asset_class,
@@ -531,6 +559,7 @@ export async function GET(
         returns_unit,
         daily_returns_usd,
         native_unpriced,
+        tiny_base_days,
       };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },

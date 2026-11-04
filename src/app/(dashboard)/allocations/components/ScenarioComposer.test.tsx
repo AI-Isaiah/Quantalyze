@@ -239,6 +239,8 @@ const computeScenarioStateArgs: Array<{
   // all-unknown → 252" directly at the computeScenario call site (the existing
   // engine-call spy — the harness the plan says to reuse).
   assetClassById: Record<string, string | null>;
+  // 188 D-07 round 1 (MEDIUM-4) — the per-leg days the engine set sits out of (undefined when none).
+  undefinedReturnDaysById: Record<string, readonly string[] | undefined>;
   periodsPerYear: number | undefined;
   state: Record<string, unknown>;
 }> = [];
@@ -261,6 +263,9 @@ vi.mock("@/lib/scenario", async (importOriginal) => {
           assetClassById: Object.fromEntries(
             strategies.map((s) => [s.id, s.asset_class ?? null]),
           ) as Record<string, string | null>,
+          undefinedReturnDaysById: Object.fromEntries(
+            strategies.map((s) => [s.id, s.undefined_return_days]),
+          ),
           periodsPerYear,
           state: state as unknown as Record<string, unknown>,
         });
@@ -1980,6 +1985,29 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       strategy_types: ["momentum"],
     });
     expect(latestReturnsLookup()[BOOK_ID]).toEqual(series);
+  });
+
+  it("188 D-07 round 1 (MEDIUM-4) a book strategy's tiny_base_days reach the engine as the leg's undefined_return_days", () => {
+    const series = [
+      { date: "2026-03-01", value: 0.01 },
+      { date: "2026-03-02", value: -0.004 },
+    ];
+    const payload = makePayloadWithBookStrategy(series);
+    (payload.strategies[0].strategy as unknown as { tiny_base_days: string[] }).tiny_base_days = [
+      "2026-03-03",
+      "2026-03-04",
+    ];
+    render(
+      <ScenarioComposer payload={payload} allocatorId={ALLOCATOR_A} allocatorMandate={null} />,
+    );
+    addStrategy({
+      id: BOOK_ID,
+      name: "Tiny Book Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const last = computeScenarioStateArgs[computeScenarioStateArgs.length - 1];
+    expect(last.undefinedReturnDaysById[BOOK_ID]).toEqual(["2026-03-03", "2026-03-04"]);
   });
 
   it("WR-05 a year-keyed-record book series is FLATTENED into a date-sorted DailyPoint[] (pre-fix it was silently dropped to [])", () => {
@@ -5851,15 +5879,25 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
    *  pipeline exactly (raw equity-share weights, selected map, no symbol map for
    *  per-key UUIDs). This is what makes the honesty assertion an oracle, not a
    *  "something changed" check. */
-  function independentRecompute(includedKeyIds: string[]) {
+  function independentRecompute(
+    includedKeyIds: string[],
+    // 188 D-07 — optional: the per-key series and the tiny-base day lists the
+    // real builder gets as its fourth argument. Absent = the unchanged call.
+    seriesByKey: Record<string, { date: string; value: number }[]> = {
+      "key-A": KEY_A_SERIES,
+      "key-B": KEY_B_SERIES,
+    },
+    tinyBaseDaysByApiKeyId?: Record<string, string[]>,
+  ) {
     const equityByApiKeyId: Record<string, number> = {
       "key-A": 70_000,
       "key-B": 30_000,
     };
     const built = buildPerKeyStrategyForBuilderSet(
-      { "key-A": KEY_A_SERIES, "key-B": KEY_B_SERIES },
+      seriesByKey,
       equityByApiKeyId,
       new Map(),
+      tinyBaseDaysByApiKeyId,
     );
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
@@ -6026,6 +6064,75 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
 
     // aria-checked reflects the exclusion (state visible, not silent).
     expect(switchB).toHaveAttribute("aria-checked", "false");
+  });
+
+  // -------------------------------------------------------------------------
+  // 188 D-07 (plan 10) — the composer sits a key out of its tiny-base days.
+  //
+  // key-B's stored series LACKS 2026-02-07 and 2026-02-08 (the days the
+  // tiny-base rule left out of it) and the dashboard payload names them in
+  // `tinyBaseDaysByApiKeyId`. The composer must hand those lists to the per-key
+  // builder so every unit carries them: on a named day the blend is key-A alone,
+  // not (0.7*rA + 0.3*0). Two oracles, neither is "something changed":
+  //   (1) the REAL builder + REAL engine run with the same lists (the
+  //       `independentRecompute` idiom of this describe), and
+  //   (2) a hand product of typed per-day returns written out below from the two
+  //       typed series, which does not run the engine at all.
+  // Non-vacuity: the field-less recompute (today's 0-fill) has a different twr.
+  // -------------------------------------------------------------------------
+  it("188 D-07 a key's tiny-base days are left out of the composer's blend, matching an independent recompute and a hand product (not read as 0%)", () => {
+    const NAMED = ["2026-02-07", "2026-02-08"];
+    const keyBWithoutNamed = KEY_B_SERIES.filter((p) => !NAMED.includes(p.date));
+    expect(keyBWithoutNamed).toHaveLength(12);
+
+    renderPerKey(
+      makePerKeyPayload({
+        perKeyReturnsByApiKeyId: {
+          "key-A": KEY_A_SERIES,
+          "key-B": keyBWithoutNamed,
+        },
+        tinyBaseDaysByApiKeyId: { "key-B": NAMED },
+      }),
+    );
+    const got = lastKpiScenarioMetrics();
+
+    const withLists = independentRecompute(
+      ["key-A", "key-B"],
+      { "key-A": KEY_A_SERIES, "key-B": keyBWithoutNamed },
+      { "key-B": NAMED },
+    );
+    const withoutLists = independentRecompute(["key-A", "key-B"], {
+      "key-A": KEY_A_SERIES,
+      "key-B": keyBWithoutNamed,
+    });
+
+    // (1) the engine run with the lists.
+    expect(got?.twr).toBeCloseTo(withLists.twr as number, 10);
+    expect(got?.sharpe).toBeCloseTo(withLists.sharpe as number, 10);
+    expect(got?.max_drawdown).toBeCloseTo(withLists.max_drawdown as number, 10);
+    expect(got?.avg_pairwise_correlation).toBeCloseTo(
+      withLists.avg_pairwise_correlation as number,
+      10,
+    );
+    // non-vacuity: today's reading (the named days as r = 0) is a different twr.
+    expect(withoutLists.twr as number).not.toBeCloseTo(withLists.twr as number, 6);
+    expect(got?.twr as number).not.toBeCloseTo(withoutLists.twr as number, 6);
+
+    // (2) hand product. Weights 70k : 30k renormalised per day. Typed returns:
+    // key-A cycles [0.002, 0.0015, 0.0025, 0.001]; key-B cycles
+    // [-0.03, 0.04, -0.05, 0.02, -0.01]. Day i (0-based) = 2026-02-(i+1).
+    const A = [0.002, 0.0015, 0.0025, 0.001];
+    const B = [-0.03, 0.04, -0.05, 0.02, -0.01];
+    let growth = 1;
+    for (let i = 0; i < 14; i++) {
+      const rA = A[i % 4];
+      const rB = B[i % 5];
+      const named = i === 6 || i === 7; // 2026-02-07, 2026-02-08
+      const r = named ? rA : 0.7 * rA + 0.3 * rB;
+      growth *= 1 + r;
+    }
+    // the engine rounds twr to 5 dp, so compare to 5 dp here.
+    expect(got?.twr as number).toBeCloseTo(growth - 1, 5);
   });
 
   // -------------------------------------------------------------------------
@@ -11888,6 +11995,38 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
       expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
     );
     expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+  });
+
+  it("HYD-188 round 1 (MEDIUM-4) a drawer-added strategy's tiny_base_days from the /returns route reach the engine as undefined_return_days", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
+      }
+      if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            daily_returns: HYD_SERIES,
+            series_state: "available",
+            tiny_base_days: ["2026-03-03", "2026-03-04"],
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    render(
+      <ScenarioComposer payload={makePayload()} allocatorId={ALLOCATOR_A} allocatorMandate={null} />,
+    );
+
+    await waitFor(() =>
+      expect(
+        computeScenarioStateArgs[computeScenarioStateArgs.length - 1].undefinedReturnDaysById[HYD_ID],
+      ).toEqual(["2026-03-03", "2026-03-04"]),
+    );
   });
 
   it("HYD-2 a hydrated added strategy that IS in the book fires NO lazy fetch (the book value is authoritative — same guard as the add seam)", async () => {
