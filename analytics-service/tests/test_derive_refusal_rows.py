@@ -83,6 +83,26 @@ def test_the_fixture_has_one_blocking_row_per_blocking_degrade_reason() -> None:
         assert row["reader_reason"] in EXISTING_READER_LINES, row["token"]
 
 
+def test_a_legacy_blocking_token_is_a_degrade_reason_that_is_no_longer_blocking() -> None:
+    """Phase 186 (D-03, D-07) retired ``failing_key_series_ended`` from the writer: a failing
+    key now leaves the book and is named, so it no longer withholds the curve. The token stays
+    a ``DegradeReason`` member because a stored pre-Phase-186 row may still carry it until the
+    daily recompute replaces it, and the reader and the census keep mapping it. Each
+    ``legacy_blocking`` token must therefore be a member that is NOT in ``_BLOCKING_REASONS``
+    (re-adding it to the blocking set without un-retiring it fails here by name), must not
+    also sit in ``blocking``, and must map to a line the reader already has."""
+    from services.allocator_equity_derive import _BLOCKING_REASONS, DegradeReason
+
+    assert [row["token"] for row in TABLE["legacy_blocking"]] == ["failing_key_series_ended"]
+    members = {m.value: m for m in DegradeReason}
+    blocking_tokens = {row["token"] for row in TABLE["blocking"]}
+    for row in TABLE["legacy_blocking"]:
+        assert row["token"] in members, row
+        assert members[row["token"]] not in _BLOCKING_REASONS, row
+        assert row["token"] not in blocking_tokens, row
+        assert row["reader_reason"] in EXISTING_READER_LINES, row
+
+
 def test_every_precedence_row_names_an_existing_line_over_known_tokens() -> None:
     """A precedence row is a multi-token ``degrade_reasons`` array. Each token is
     one the writer can really produce (a refusal token or a DegradeReason value),

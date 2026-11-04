@@ -1561,6 +1561,20 @@ class TestDeriveBrokerDailies:
             "services.ccxt_flow_fetch.fetch_ccxt_transfers",
             new=AsyncMock(side_effect=_fake_transfers),
         ))
+        # Phase 186 D-02: Bybit reads the Unified edge instead of the on-chain rows. The harness
+        # hands the same fixture rows through that reader, so a bybit case still drives the rows
+        # through fetch -> pure valuer -> external_flows.
+        async def _fake_unified(exchange, since_ms, now_ms):
+            captured["since_ms"] = since_ms
+            captured["now_ms"] = now_ms
+            if transfers_error is not None:
+                raise transfers_error
+            return list(deposits), list(withdrawals or [])
+
+        stack.enter_context(patch(
+            "services.job_worker.fetch_bybit_unified_flows",
+            new=AsyncMock(side_effect=_fake_unified),
+        ))
         stack.enter_context(patch(
             "services.equity_reconstruction._fetch_ohlcv_daily",
             new=AsyncMock(side_effect=_fake_ohlcv),

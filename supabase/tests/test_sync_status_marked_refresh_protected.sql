@@ -99,6 +99,40 @@
 --                               sweep or a restore-from-dump can undo it and
 --                               nothing else would notice.
 --
+--   P  KEPT FIGURES (Phase 186 round 2, R2-01, founder D-11 2026-11-04) — the
+--      P1..P12                 second protected class. A strategy-mode derive that
+--                               refuses an incomplete exchange read over a row that
+--                               carries figures writes ONLY its sentence and the
+--                               writer provenance naming its job; the sync_trades job
+--                               that queued it has usually already bounced the row to
+--                               'computing'. The bridge must give the row its status
+--                               back and keep the figures and the sentence, and must
+--                               stay LOUD for everything that is not that exact shape.
+--                               Round 3 (R3-01, R3-02): the signal is the worker's marker
+--                               `read_refusal_kept_figures` on the FAILING JOB's metadata, and the
+--                               figures are the headline `metrics_json` (every P arm seeds
+--                               the production row shape: by-basis NULL).
+--                               P1 the real shape ('computing' + figures), idempotent
+--                               across a second call; P2 a warned row returns to
+--                               complete_with_warnings; P3 a row that never left
+--                               'complete'; P4 DISCRIMINATOR: a writer sentence naming a
+--                               derive job that carries NO marker stays loud; P5
+--                               DISCRIMINATOR: the kind scope, a compute_analytics_from_csv
+--                               job carrying the marker stays loud; P6 DISCRIMINATOR: no
+--                               figures and no sentence (the no-numbers refusal) lands on
+--                               the bridge's per-kind copy;
+--                               P7 a job still in flight leaves the status alone, and its
+--                               finish returns the row; P8 DISCRIMINATOR: a marker over a
+--                               row with NO headline figures (by-basis only) stays loud; P9
+--                               DISCRIMINATOR: a RETRACTED marked refresh that was NOT a refusal
+--                               stays loud (residues gate W1); P10 a SECOND consecutive refusal,
+--                               after the row's provenance was cleared and rewritten, is still
+--                               protected; P11 a retracted marked refresh (a user's Sync now folded
+--                               into it) whose REFUSAL kept the figures is protected (R3-04);
+--                               P12 a marked job that ends failed_final with NO sentence on the
+--                               row naming it (its earlier attempt's was cleared, or its write
+--                               failed) still returns the row from 'computing' (PR3-01).
+--
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION
 -- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
@@ -116,7 +150,7 @@
 --
 -- The gate stays CONDITIONAL, which is what separates it from a blanket abort:
 -- with the migration applied it falls through and the arms decide the verdict.
--- The final 'ALL 23 ARMS EXECUTED (A, B, C, …, O2)' notice is the sentinel CI's
+-- The final 'ALL 35 ARMS EXECUTED (A, B, C, …, P12)' notice is the sentinel CI's
 -- loop reads the arm count off — if you add or remove an arm, update BOTH N and
 -- the roster on that line. The roster is not decoration: `sql-tests` in
 -- .github/workflows/ci.yml counts its entries and fails the job when they
@@ -138,7 +172,7 @@
 -- scripts/mutation-runner executes on every push: it mutates COPIES on a
 -- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
 -- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
--- ⚠️ ONLY THE THREE APPLIED-NESS GATES USE THE `TEST FAILED (…)` IDIOM. All 23
+-- ⚠️ ONLY THE THREE APPLIED-NESS GATES USE THE `TEST FAILED (…)` IDIOM. All 34
 -- arms below say `ARM x FAILED` / `ARM x SETUP BROKEN`, so they are invisible to
 -- the runner's identity regex: a mutation that reddens an arm scores
 -- NO-IDENTITY, not RED. The single twinned section is therefore `0`, and its
@@ -155,7 +189,7 @@
 -- [REDUNDER-SAVEPOINT] migrations and aborts any lane. Nothing is lost —
 -- 20260510175507 is the repair migration and registers `process_key_long` on
 -- its own.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/37-fixture-side-compute-job-kinds.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261009120000_sync_status_analytics_scope.sql","supabase/migrations/20261023120000_sync_status_runner_stamps_computed_at.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/37-fixture-side-compute-job-kinds.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261009120000_sync_status_analytics_scope.sql","supabase/migrations/20261023120000_sync_status_runner_stamps_computed_at.sql","supabase/migrations/20261105120000_sync_status_protect_refused_derive.sql"]}
 
 BEGIN;
 
@@ -186,6 +220,20 @@ DECLARE
   s_m2       UUID;  -- Arm M2: branch (b)'s keep arm survives the trigger
   s_m3       UUID;  -- Arm M3: branch (b-prime)'s keep arm survives it too
   s_o        UUID;  -- Arm O/O2: a half-stamped marker is a 23514, not a shrug
+  -- Phase 186 round 2 / D-11 (arms P1..P12): one strategy per arm, assigned inline.
+  s_p        UUID;
+  j_p        UUID;
+  tok_p      UUID;
+  v_metrics  JSONB;
+  v_warned   BOOLEAN;
+  -- The founder-approved sentence the worker writes, spelled LITERALLY like c_perm.
+  c_kept     TEXT := 'We could not read this account''s full history from the exchange, so these numbers stay at the last complete read.';
+  c_figures  JSONB := '{"cash_settlement": {"cumulative_return": 0.62}}'::jsonb;
+  -- The key the worker writes into the metadata of the derive job it is refusing a read on, when
+  -- the row already carries figures (round 3, R3-02). Spelled LITERALLY, like c_kept.
+  c_marker   JSONB := '{"read_refusal_kept_figures": true}'::jsonb;
+  j_p2       UUID;
+  tok_p2     UUID;
   v_src      TEXT;
   v_jobid    UUID;
   v_caught   TEXT;
@@ -1054,7 +1102,399 @@ BEGIN
     RAISE EXCEPTION 'ARM O2 FAILED: setting computation_error_job_id without computation_error_source was % rather than rejected. The pairing constraint is an implication, not an equality, so the half it leaves open is precisely the column the bridge''s job-id equality reads.', v_caught;
   END IF;
 
-  RAISE NOTICE 'ALL 23 ARMS EXECUTED (A, B, C, D, E, F, G, H, H2, I, I2, I3, I4, J, J2, K, L, L2, M, M2, M3, O, O2): sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) with the branch-(a) hold SCOPED to the jobs it is about (I3 releases it for a same-kind unmarked resync and lands that resync on branch (c); I4 refuses to release it for the recurring arm''s own marked retry) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K). Phase 164.2 / criterion 2: a PROVENANCE marker cannot outlive the sentence it describes (L the trigger fires on a blanked sentence, L2 it does not fire when the sentence is untouched, M the end-to-end consequence — a ''failed'' row must never render with NO sentence), the bridge''s keep arm survives it on BOTH write branches (M2 branch (b), M3 branch (b-prime)), and a half-stamped marker is a 23514 at the writer rather than a silent generic at the reader (O source-only, O2 id-only).';
+
+  -- ===== ARMS P1..P12 — a refused derive that KEPT the figures (D-11) ==============
+  -- Phase 186 round 2, R2-01. Founder 2026-11-04: "Keep figures, fix updater".
+  -- Every arm drives the REAL mark_compute_job_failed, never the bridge by hand, and
+  -- asserts the job reached failed_final first (or the arm proves nothing). The row
+  -- is seeded BEFORE the job fails, in the order the worker produces it: the worker
+  -- writes its sentence and provenance naming the job, then the queue marks the job.
+
+  -- ----- P1 — the real shape: 'computing' (bounced by sync_trades) + figures -----
+  -- R3-01: the figures are the headline `metrics_json` and the by-basis column is NULL, which
+  -- is the row every perp-only, ccxt and key-mode strategy has (the prestamp writes by-basis
+  -- NULL on every path but a Deribit options book). Every P arm seeds that shape.
+  -- MUTATION OBSERVED 2026-11-05 (prose only, no runner twin): drop the leading `COALESCE(f.kind = 'derive_broker_dailies' AND ...
+  --            v_has_figures, FALSE) OR` clause of is_protected in
+  --            20261105120000: the failure is then unprotected, branch (b) writes
+  --            'failed', and this arm reads 'failed'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P1') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'computing', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3, c_marker)
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (read_deadline)', 'permanent', tok_p);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P1 SETUP BROKEN: the job is %, not failed_final. Nothing was asked of the bridge.', v_jobstat;
+  END IF;
+  SELECT computation_status, computation_error, computation_error_source, computation_error_job_id, metrics_json, computing_started_at
+    INTO v_status, v_error, v_src, v_jobid, v_metrics, v_anchor
+    FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM P1 FAILED (D-11): a derive that refused an incomplete read and KEPT the figures left the row at % instead of ''complete''. The page then reads "Analytics computation failed: ...these numbers stay at the last complete read" over figures that are still there (migration 20261105120000 absent, or its protection clause lost).', COALESCE(v_status, 'NULL');
+  END IF;
+  IF v_metrics IS DISTINCT FROM c_figures THEN
+    RAISE EXCEPTION 'ARM P1 FAILED (D-11): the stored figures changed (%); the refusal must leave them exactly as they were.', COALESCE(v_metrics::text, 'NULL');
+  END IF;
+  IF v_error IS DISTINCT FROM c_kept OR v_src IS DISTINCT FROM 'writer' OR v_jobid IS DISTINCT FROM j_p THEN
+    RAISE EXCEPTION 'ARM P1 FAILED (D-11): the writer''s sentence and its provenance did not survive (sentence %, source %, job %). The founder-approved sentence is the only explanation the owner gets.', COALESCE(v_error, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+  END IF;
+  IF v_anchor IS NOT NULL THEN
+    RAISE EXCEPTION 'ARM P1 FAILED (JOB-01): computing_started_at survived the terminal transition.';
+  END IF;
+  -- idempotent: a second bridge call over the resolved row changes nothing
+  PERFORM sync_strategy_analytics_status(s_p);
+  SELECT computation_status, computation_error, metrics_json INTO v_status, v_error, v_metrics
+    FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' OR v_error IS DISTINCT FROM c_kept OR v_metrics IS DISTINCT FROM c_figures THEN
+    RAISE EXCEPTION 'ARM P1 FAILED (idempotence): a second bridge call moved the row to status %, sentence %.', COALESCE(v_status, 'NULL'), COALESCE(v_error, 'NULL');
+  END IF;
+
+  -- ----- P2 — a warned row returns to complete_with_warnings, not complete -------
+  -- MUTATION OBSERVED 2026-11-04 (prose only, no runner twin): replace the inner CASE of the status write in branch (b-prime) with
+  --            the bare literal 'complete': this arm then reads 'complete'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P2') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'computing', TRUE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3, c_marker)
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (read_truncated)', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P2 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status, computation_warned INTO v_status, v_warned FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete_with_warnings' OR v_warned IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'ARM P2 FAILED (D-11): a WARNED row came back as % (warned %), not complete_with_warnings. The runner-owned warning must not be laundered into a plain complete.', COALESCE(v_status, 'NULL'), COALESCE(v_warned::text, 'NULL');
+  END IF;
+
+  -- ----- P3 — a row that never left 'complete' stays 'complete' ------------------
+  -- MUTATION OBSERVED 2026-11-04 (prose only, no runner twin): same neuter as P1 (the clause is what protects it): 'failed'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P3') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'complete', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3, c_marker)
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (daily_pnl_truncated_okx)', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P3 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status, computation_error, computed_at INTO v_status, v_error, v_computed FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' OR v_error IS DISTINCT FROM c_kept THEN
+    RAISE EXCEPTION 'ARM P3 FAILED (D-11): a row that kept ''complete'' reads % with sentence % after the refusal.', COALESCE(v_status, 'NULL'), COALESCE(v_error, 'NULL');
+  END IF;
+  IF v_computed IS DISTINCT FROM v_before THEN
+    RAISE EXCEPTION 'ARM P3 FAILED: the freshness date moved from % to % on a refusal; the bridge writes it on no branch.', v_before, v_computed;
+  END IF;
+
+  -- ----- P4 — DISCRIMINATOR: the sentence alone is not the signal ----------------
+  -- Round 2 read the writer's sentence and provenance off the ROW. Round 3 reads the worker's marker
+  -- off the failing JOB, because the row's provenance moves (R3-02). A derive job with NO marker whose
+  -- id the row's writer provenance names, over figures, is exactly the old signal's shape: it must now
+  -- stay loud.
+  -- MUTATION OBSERVED 2026-11-05 (prose only, no runner twin): replace the marker test
+  --            `(f.metadata ->> 'read_refusal_kept_figures') = 'true'` with `TRUE` in the clause: this arm
+  --            then reads 'complete'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P4') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'computing', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3)
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'user resync failed', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P4 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'ARM P4 FAILED: an UNMARKED derive job was protected by the row''s writer provenance alone (row reads %). The protection must key on the failing job''s own marker.', COALESCE(v_status, 'NULL');
+  END IF;
+
+  -- ----- P5 — DISCRIMINATOR: the kind scope --------------------------------------
+  -- A marker-shaped key on a compute_analytics_from_csv job (`metadata` is not a closed namespace,
+  -- and the runner writes a curated sentence naming such a job) must not be read as a refused derive.
+  -- MUTATION OBSERVED 2026-11-04 (prose only, no runner twin): drop `f.kind = 'derive_broker_dailies' AND` from the clause: this arm
+  --            then reads 'complete'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P5') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'complete', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'compute_analytics_from_csv', 'running', tok_p, 1, 3, c_marker)
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'csv analytics failed', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P5 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'ARM P5 FAILED: a failed compute_analytics_from_csv job with a writer sentence was protected (row reads %). Only a refused derive_broker_dailies may be.', COALESCE(v_status, 'NULL');
+  END IF;
+
+  -- ----- P6 — DISCRIMINATOR: no figures, no sentence -> the bridge's per-kind copy -
+  -- The no-numbers refusal (R2-02): the worker writes NO sentence and NO provenance,
+  -- so the bridge's curated per-kind copy is what the page shows.
+  -- MUTATION OBSERVED 2026-11-04 (prose only, no runner twin): in branch (b) of 20261105120000 replace `computation_error_copy(v_latest_kind)`
+  --            in the VALUES tuple with NULL: this arm then reads a NULL sentence. (Observed
+  --            2026-11-04: arm M, earlier in this file, reds FIRST on that mutation because it
+  --            pins the same column; P6 is the one that names the no-figures refusal and also
+  --            pins its status.)
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P6') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computed_at)
+  VALUES (s_p, 'computing', FALSE, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3)
+  RETURNING id INTO j_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (read_truncated)', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P6 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status, computation_error INTO v_status, v_error FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'failed' OR v_error IS DISTINCT FROM c_perm THEN
+    RAISE EXCEPTION 'ARM P6 FAILED: a refusal over a row with NO figures and NO sentence read status %, sentence % (expected failed and the per-kind copy).', COALESCE(v_status, 'NULL'), COALESCE(v_error, 'NULL');
+  END IF;
+
+  -- ----- P8 — DISCRIMINATOR: a sentence over NO figures is not a kept refusal ------
+  -- The protection returns a row to a published status, which is only true when
+  -- figures exist, and the figures are the headline `metrics_json` (R3-01). A 'computing'
+  -- row with the writer's provenance and only a by-basis object, no headline, must stay loud.
+  -- MUTATION OBSERVED 2026-11-05 (prose only, no runner twin): drop `AND sa.metrics_json IS NOT NULL` from the 'computing'
+  --            arm of the v_has_figures read: this arm then reads 'complete'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P8') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json_by_basis, computed_at)
+  VALUES (s_p, 'computing', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3, c_marker)
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (read_truncated)', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P8 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'ARM P8 FAILED (D-11): a refusal over a row with NO figures was returned to % although there is nothing published to keep.', COALESCE(v_status, 'NULL');
+  END IF;
+
+  -- ----- P7 — a job still in flight leaves the status alone; its finish returns it -
+  -- MUTATION OBSERVED 2026-11-04 (prose only, no runner twin): drop `AND COALESCE(v_nonterminal_count, 0) = 0` from the status write
+  --            in branch (b-prime): the row then reads 'complete' while the sibling
+  --            job is still in flight.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P7') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'computing', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3, c_marker)
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  j_sib := NULL;
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_p, 'compute_analytics_from_csv', 'running', tok, 1, 3)
+  RETURNING id INTO j_sib;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (read_deadline)', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P7 SETUP BROKEN: the derive job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'ARM P7 FAILED (D-11): with a counting job still in flight the row read % instead of staying computing; the status is that job''s to decide.', COALESCE(v_status, 'NULL');
+  END IF;
+  PERFORM mark_compute_job_done(j_sib, tok);
+  SELECT computation_status, computation_error, metrics_json INTO v_status, v_error, v_metrics FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' OR v_metrics IS DISTINCT FROM c_figures THEN
+    RAISE EXCEPTION 'ARM P7 FAILED (D-11): after the sibling job finished the row reads %, figures %; it must return to complete with its figures.', COALESCE(v_status, 'NULL'), COALESCE(v_metrics::text, 'NULL');
+  END IF;
+
+  -- ----- P9 — DISCRIMINATOR: a RETRACTED marked refresh that was NOT a refusal stays loud --
+  -- test_sync_status_bridge_residues.sql W1 pins that a marked refresh whose marker was
+  -- retracted (a user took the job over) is LOUD after the worker's ordinary honour write. Its row
+  -- shape (a writer sentence naming the job over a published row) is the shape of a kept-figures
+  -- refusal, and it differs from one only by the job's own refusal marker, which this job lacks.
+  -- MUTATION OBSERVED 2026-11-05 (prose only, no runner twin): add `OR (f.metadata ->>
+  --            'refresh_marker_retracted') IS NOT NULL` to the kept clause of is_protected in
+  --            20261105120000 (a retraction treated as a protection): this arm reads 'complete'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P9') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'complete', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3,
+          jsonb_build_object('refresh_marker_retracted', 'ledger-refresh'))
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (daily_pnl_truncated_okx)', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P9 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'ARM P9 FAILED: a RETRACTED marked refresh without a refusal marker was protected (row reads %). A user took that job over and its failure was not a kept-figures refusal, so it stays loud (residues gate W1).', COALESCE(v_status, 'NULL');
+  END IF;
+
+  -- ----- P10 — a SECOND consecutive refusal keeps the protection (R3-02) --------------
+  -- The scenario: cycle 1 refuses and is protected; cycle 2's sync_trades completes, the follow-on
+  -- derive is pending and branch (a) bounces the row to 'computing', clearing the writer provenance;
+  -- the derive refuses again. The first refusal is STILL a live failure (only a later done supersedes
+  -- it), and round 2 had it unprotected the moment its provenance went, so branch (b) wrote 'failed'.
+  -- The job carries its own marker now, so both refusals are protected and the row stays published.
+  -- MUTATION OBSERVED 2026-11-05 (prose only, no runner twin): key the clause on the row instead of the
+  --            job (`f.id = v_protected_job_id`-style provenance equality in place of the marker
+  --            test): the second refusal reads 'failed'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P10') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'computing', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata, created_at)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3, c_marker, now() - INTERVAL '2 hours')
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (daily_pnl_truncated_okx)', 'permanent', tok_p);
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM P10 SETUP BROKEN: the first refusal left the row at %, not complete.', COALESCE(v_status, 'NULL');
+  END IF;
+  -- cycle 2: the follow-on derive is claimed, and the bridge bounces the row to computing
+  tok_p2 := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p2, 1, 3)
+  RETURNING id INTO j_p2;
+  PERFORM sync_strategy_analytics_status(s_p);
+  SELECT computation_status, computation_error_job_id INTO v_status, v_jobid FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'computing' OR v_jobid IS NOT NULL THEN
+    RAISE EXCEPTION 'ARM P10 SETUP BROKEN: the second cycle left the row at % with provenance %, not computing with none; the arm would not be measuring the cleared-provenance state.', COALESCE(v_status, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+  END IF;
+  -- the second derive refuses the same history: the worker marks its own job, writes its sentence
+  UPDATE compute_jobs SET metadata = coalesce(metadata, '{}'::jsonb) || c_marker WHERE id = j_p2;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p2
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p2, 'derive_broker_dailies: realized read incomplete (daily_pnl_truncated_okx)', 'permanent', tok_p2);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P10 SETUP BROKEN: the first refusal is %, not a live failed_final.', v_jobstat;
+  END IF;
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p2;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P10 SETUP BROKEN: the second job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status, computation_error, computation_error_job_id, metrics_json
+    INTO v_status, v_error, v_jobid, v_metrics FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM P10 FAILED (R3-02): the second consecutive refusal left the row at % instead of ''complete''. The first refusal, still a live failure, lost its protection with the row''s provenance and branch (b) stamped the row failed.', COALESCE(v_status, 'NULL');
+  END IF;
+  IF v_error IS DISTINCT FROM c_kept OR v_jobid IS DISTINCT FROM j_p2 OR v_metrics IS DISTINCT FROM c_figures THEN
+    RAISE EXCEPTION 'ARM P10 FAILED (R3-02): after the second refusal the sentence is %, provenance %, figures %; the sentence and the figures must both stay.', COALESCE(v_error, 'NULL'), COALESCE(v_jobid::text, 'NULL'), COALESCE(v_metrics::text, 'NULL');
+  END IF;
+
+  -- ----- P11 — a user's Sync now folded into a marked refresh, then refused (R3-04) --
+  -- A retraction is written exactly when a USER's Sync now reuses the in-flight marked job. If that
+  -- job then refuses the read over figures, the worker writes "these numbers stay" and marks the job.
+  -- Round 2 excluded every retracted job from the kept clause, so the page read "Analytics computation
+  -- failed: ...these numbers stay at the last complete read" for the one person watching.
+  -- MUTATION OBSERVED 2026-11-05 (prose only, no runner twin): re-add `AND (f.metadata ->>
+  --            'refresh_marker_retracted') IS NULL` to the kept clause of is_protected in
+  --            20261105120000: this arm reads 'failed'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P11') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'computing', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 1, 3,
+          c_marker || jsonb_build_object('refresh_marker_retracted', 'ledger-refresh'))
+  RETURNING id INTO j_p;
+  UPDATE strategy_analytics
+     SET computation_error = c_kept, computation_error_source = 'writer', computation_error_job_id = j_p
+   WHERE strategy_id = s_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (daily_pnl_truncated_okx)', 'permanent', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P11 SETUP BROKEN: the job is %, not failed_final.', v_jobstat;
+  END IF;
+  SELECT computation_status, computation_error, metrics_json INTO v_status, v_error, v_metrics FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' OR v_error IS DISTINCT FROM c_kept OR v_metrics IS DISTINCT FROM c_figures THEN
+    RAISE EXCEPTION 'ARM P11 FAILED (R3-04): a retracted marked refresh whose refusal kept the figures left the row at %, sentence %. The user who pressed Sync now reads "failed" over "these numbers stay".', COALESCE(v_status, 'NULL'), COALESCE(v_error, 'NULL');
+  END IF;
+
+  -- ----- P12 — a marked job, a row with figures and NO sentence naming it (PR3-01) ----
+  -- The scenario: attempt 1 refused transiently, the retry's branch (a) cleared the sentence and
+  -- its provenance, and the LAST attempt ends failed_final through 'transient' (a timeout writes no
+  -- sentence), or the last attempt's marker landed and its sentence write failed. The job carries the
+  -- marker, the row reads 'computing' with figures and no sentence, and nothing is in flight. Round 3
+  -- returned the status only when the row's sentence named the job, so the row stayed 'computing' with
+  -- nothing to move it until the reaper stamped it failed ("Analytics was interrupted...").
+  -- MUTATION OBSERVED 2026-11-04 (prose only, no runner twin): put the sentence conjunct back
+  --            (`computation_error_source = 'writer' AND computation_error_job_id =
+  --            v_protected_job_id`) in the status CASE of branch (b-prime) in place of the
+  --            `OR EXISTS (... read_refusal_kept_figures ...)` arm: this arm reads 'computing'.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr P12') RETURNING id INTO s_p;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, metrics_json, computed_at)
+  VALUES (s_p, 'computing', FALSE, c_figures, v_before);
+  tok_p := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_p, 'derive_broker_dailies', 'running', tok_p, 3, 3, c_marker)
+  RETURNING id INTO j_p;
+  PERFORM mark_compute_job_failed(j_p, 'derive_broker_dailies: realized read incomplete (daily_pnl_fetch_error)', 'transient', tok_p);
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_p;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM P12 SETUP BROKEN: the job is %, not failed_final. A transient failure at attempts = max_attempts must end the job.', v_jobstat;
+  END IF;
+  SELECT computation_status, computation_error_source, metrics_json, computing_started_at
+    INTO v_status, v_src, v_metrics, v_anchor FROM strategy_analytics WHERE strategy_id = s_p;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM P12 FAILED (PR3-01): a marked failed_final refusal over a computing row with figures and no sentence left the row at % instead of ''complete''. Nothing is in flight, so nothing else moves it and the reaper later stamps it failed over figures that were never lost.', COALESCE(v_status, 'NULL');
+  END IF;
+  IF v_metrics IS DISTINCT FROM c_figures OR v_anchor IS NOT NULL THEN
+    RAISE EXCEPTION 'ARM P12 FAILED (PR3-01): figures %, computing_started_at %; the figures must stay and the reaper anchor must clear.', COALESCE(v_metrics::text, 'NULL'), COALESCE(v_anchor::text, 'NULL');
+  END IF;
+  IF v_src IS NOT DISTINCT FROM 'writer' THEN
+    RAISE EXCEPTION 'ARM P12 FAILED (PR3-01): the bridge claimed writer provenance for a sentence no writer stamped for this job.';
+  END IF;
+
+  RAISE NOTICE 'ALL 35 ARMS EXECUTED (A, B, C, D, E, F, G, H, H2, I, I2, I3, I4, J, J2, K, L, L2, M, M2, M3, O, O2, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12): sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) with the branch-(a) hold SCOPED to the jobs it is about (I3 releases it for a same-kind unmarked resync and lands that resync on branch (c); I4 refuses to release it for the recurring arm''s own marked retry) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K). Phase 164.2 / criterion 2: a PROVENANCE marker cannot outlive the sentence it describes (L the trigger fires on a blanked sentence, L2 it does not fire when the sentence is untouched, M the end-to-end consequence — a ''failed'' row must never render with NO sentence), the bridge''s keep arm survives it on BOTH write branches (M2 branch (b), M3 branch (b-prime)), and a half-stamped marker is a 23514 at the writer rather than a silent generic at the reader (O source-only, O2 id-only). Phase 186 round 2 / D-11: a derive that refused an incomplete read over a row WITH figures keeps them (P1 the real shape, a bounced computing row, idempotent; P2 a warned row stays warned; P3 a row that never left complete; P7 an in-flight job decides first), and stays LOUD for anything else (P4 a sentence with no marker on the job, P5 another kind, P6 no figures and no sentence, P8 a marker over no headline figures, P9 a retracted marked refresh that was not a refusal). Round 3: the figures are the headline metrics_json (every P arm seeds the production row shape, by-basis NULL), and the protection is a property of the failing JOB, so a second consecutive refusal stays protected (P10), and so does a refusal on a job a user''s Sync now took over (P11). Round 4: a marked job that ends failed_final with no sentence naming it still returns the row from computing (P12).';
 END $$;
 
 ROLLBACK;

@@ -618,6 +618,55 @@ class TestPageCapsStampTheTruncationFlag:
         assert get_and_clear_last_dq_flags().get("daily_pnl_truncated_okx") is True
 
     @pytest.mark.asyncio
+    async def test_okx_bills_cap_is_a_module_constant_a_test_can_lower(self, monkeypatch):
+        """Phase 186 D-06: the cap is a sized module constant read at call time, so a
+        history longer than the cap is refused by name and a test can reach the cap in 3
+        calls instead of 100."""
+        import services.exchange as ex
+
+        monkeypatch.setattr(ex, "OKX_BILLS_PAGE_CAP", 3)
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        pages, counter = self._full_pages("r", "SWAP", _ts(2024, 3, 15, 10))
+        exchange.private_get_account_bills = AsyncMock(side_effect=pages)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert counter["n"] == 3
+        assert ex.get_and_clear_last_dq_flags().get("daily_pnl_truncated_okx") is True
+
+    @pytest.mark.asyncio
+    async def test_okx_deadline_ends_the_walk_with_its_own_deadline_flag(self, monkeypatch):
+        """Phase 186 D-06 / RESEARCH Pitfall 2: a key that cannot be read in the budget
+        stops and says so through ``daily_pnl_deadline_okx``, NOT the cap flag (review WR-06:
+        a deadline hit is retryable, a cap hit is not). It must not raise a TimeoutError that
+        the dispatcher would retry with no resume."""
+        import services.exchange as ex
+
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        pages, counter = self._full_pages("r", "SWAP", _ts(2024, 3, 15, 10))
+        exchange.private_get_account_bills = AsyncMock(side_effect=pages)
+
+        def _clock() -> float:
+            # 0.0 at the entry stamp and for the first two pages, then past any deadline.
+            return 0.0 if counter["n"] < 2 else 1e12
+
+        monkeypatch.setattr(ex, "_monotonic", _clock)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
+
+        rows = await fetch_daily_pnl(
+            exchange, since_ms, read_deadline_s=ex.DAILY_PNL_READ_DEADLINE_S
+        )
+
+        assert counter["n"] == 2, "no request may be issued once the deadline has passed"
+        flags = ex.get_and_clear_last_dq_flags()
+        assert flags.get("daily_pnl_deadline_okx") is True
+        assert "daily_pnl_truncated_okx" not in flags
+        assert rows, "the rows read before the deadline are kept (SC-6: never fabricated, never dropped)"
+
+    @pytest.mark.asyncio
     async def test_okx_archive_page_cap_stamps_the_flag(self):
         """The archive loop had `range(100)` and NO cap flag at all, so a
         157-day first window that exhausted it was returned as complete."""
@@ -685,13 +734,319 @@ class TestPageCapsStampTheTruncationFlag:
             }
 
         exchange.private_get_v5_position_closed_pnl = AsyncMock(side_effect=_pages)
-        # One 7-day window, so exactly one cap (50 pages) is exhausted.
+        # One 7-day window, so exactly one cap is exhausted. The cap is read off the module
+        # (Phase 186 review WR-05 raised it from 50), not restated here.
+        import services.exchange as ex
+
         since_ms = int((datetime.now(timezone.utc) - timedelta(days=3)).timestamp() * 1000)
 
         await fetch_daily_pnl(exchange, since_ms)
 
-        assert counter["n"] == 50
+        assert counter["n"] == ex.BYBIT_PNL_PAGE_CAP
         assert get_and_clear_last_dq_flags().get("daily_pnl_truncated_bybit") is True
+
+    @pytest.mark.asyncio
+    async def test_bybit_busiest_week_measured_in_prod_reads_whole_not_truncated(self):
+        """Phase 186 review WR-05 / D-06: the one PROD Bybit key needed 44 pages of 100 closes in
+        its busiest week (186-04 probe). A week 40% busier than that (62 pages) must still be read
+        in full, because a truncated window is refused permanently for as long as it stays inside
+        the 365-day walk. RED at cap 50: the 51st page is never requested and the flag is set."""
+        from services.exchange import get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        exchange = _make_bybit_exchange()
+        total_pages = 62
+        counter = {"n": 0}
+
+        async def _pages(params):
+            counter["n"] += 1
+            last = counter["n"] >= total_pages
+            return {
+                "result": {
+                    "list": [_bybit_closed_pnl("BTCUSDT", "1.0", _ts(2024, 3, 15, 10) + counter["n"])],
+                    "nextPageCursor": "" if last else f"cursor-{counter['n']}",
+                }
+            }
+
+        exchange.private_get_v5_position_closed_pnl = AsyncMock(side_effect=_pages)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=3)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert counter["n"] == total_pages
+        assert "daily_pnl_truncated_bybit" not in get_and_clear_last_dq_flags()
+
+    @staticmethod
+    def _endless_bybit_pages(counter):
+        """A Bybit closed-pnl endpoint that never runs out: every page holds one row and
+        a fresh cursor, so only a cap or the deadline can end a window."""
+
+        async def _pages(params):
+            counter["n"] += 1
+            counter.setdefault("limits", []).append(params.get("limit"))
+            return {
+                "result": {
+                    "list": [_bybit_closed_pnl("BTCUSDT", "1.0", _ts(2024, 3, 15, 10) + counter["n"])],
+                    "nextPageCursor": f"cursor-{counter['n']}",
+                }
+            }
+
+        return _pages
+
+    @pytest.mark.asyncio
+    async def test_okx_archive_cap_is_a_module_constant_a_test_can_lower(self, monkeypatch):
+        """Phase 186 D-06: the archive cap is a sized module constant."""
+        import services.exchange as ex
+
+        monkeypatch.setattr(ex, "OKX_ARCHIVE_PAGE_CAP", 2)
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        pages, counter = self._full_pages("a", "SWAP", _ts(2024, 3, 15, 10))
+        exchange.private_get_account_bills_archive = AsyncMock(side_effect=pages)
+
+        await fetch_daily_pnl(exchange, None)
+
+        assert counter["n"] == 2
+        assert ex.get_and_clear_last_dq_flags().get("daily_pnl_truncated_okx") is True
+
+    @pytest.mark.asyncio
+    async def test_okx_archive_deadline_ends_the_walk_with_its_own_deadline_flag(self, monkeypatch):
+        import services.exchange as ex
+
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        pages, counter = self._full_pages("a", "SWAP", _ts(2024, 3, 15, 10))
+        exchange.private_get_account_bills_archive = AsyncMock(side_effect=pages)
+        monkeypatch.setattr(ex, "_monotonic", lambda: 0.0 if counter["n"] < 2 else 1e12)
+
+        rows = await fetch_daily_pnl(
+            exchange, None, read_deadline_s=ex.DAILY_PNL_READ_DEADLINE_S
+        )
+
+        assert counter["n"] == 2, "no archive request may be issued once the deadline has passed"
+        flags = ex.get_and_clear_last_dq_flags()
+        assert flags.get("daily_pnl_deadline_okx") is True
+        assert "daily_pnl_truncated_okx" not in flags
+        assert rows
+
+    @pytest.mark.asyncio
+    async def test_history_that_is_an_exact_multiple_at_the_cap_still_reports_truncated(
+        self, monkeypatch
+    ):
+        """The ACCEPTED over-refusal (186-RESEARCH, Gap 1): a walk cannot tell a history that
+        ends exactly on the last allowed full page from one that continues, so it refuses.
+        Refusing a key that is in fact whole is the safe side; reading it as whole when it
+        continues is the defect this phase exists to remove."""
+        import services.exchange as ex
+
+        monkeypatch.setattr(ex, "OKX_BILLS_PAGE_CAP", 3)
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        served = {"n": 0}
+
+        async def _exactly_three_full_pages(params):
+            if params.get("instType") != "SWAP":
+                return {"data": []}
+            served["n"] += 1
+            if served["n"] > 3:
+                return {"data": []}
+            return {
+                "data": [
+                    _okx_bill(f"m{served['n']}-{i}", "1.0", "0.0", _ts(2024, 3, 15, 10))
+                    for i in range(100)
+                ]
+            }
+
+        exchange.private_get_account_bills = AsyncMock(side_effect=_exactly_three_full_pages)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert served["n"] == 3, "the walk stops at the cap without peeking at page 4"
+        assert ex.get_and_clear_last_dq_flags().get("daily_pnl_truncated_okx") is True
+
+    @pytest.mark.asyncio
+    async def test_bybit_page_cap_is_a_module_constant_a_test_can_lower(self, monkeypatch):
+        """Phase 186 D-06: the Bybit per-window cap is a sized module constant."""
+        import services.exchange as ex
+
+        monkeypatch.setattr(ex, "BYBIT_PNL_PAGE_CAP", 2)
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_bybit_exchange()
+        counter: dict = {"n": 0}
+        exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            side_effect=self._endless_bybit_pages(counter)
+        )
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=3)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert counter["n"] == 2
+        assert ex.get_and_clear_last_dq_flags().get("daily_pnl_truncated_bybit") is True
+
+    @pytest.mark.asyncio
+    async def test_bybit_deadline_stops_the_window_walk_with_its_own_deadline_flag(self, monkeypatch):
+        """Mid-walk deadline: a multi-window history (no checkpoint: 365 days, 53 windows)
+        stops issuing requests, keeps the rows read, and says it is short."""
+        import services.exchange as ex
+
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_bybit_exchange()
+        counter: dict = {"n": 0}
+        exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            side_effect=self._endless_bybit_pages(counter)
+        )
+        monkeypatch.setattr(ex, "BYBIT_PNL_PAGE_CAP", 2)
+        monkeypatch.setattr(ex, "_monotonic", lambda: 0.0 if counter["n"] < 3 else 1e12)
+
+        rows = await fetch_daily_pnl(
+            exchange, None, read_deadline_s=ex.DAILY_PNL_READ_DEADLINE_S
+        )
+
+        assert counter["n"] == 3, "no request after the deadline, in this window or the next"
+        flags = ex.get_and_clear_last_dq_flags()
+        # (The cap was lowered to 2 above, so window one also hit the CAP before the clock
+        # passed the deadline: both flags are legitimately set. The deadline has its own.)
+        assert flags.get("daily_pnl_deadline_bybit") is True
+        assert rows
+
+    @pytest.mark.asyncio
+    async def test_okx_bill_with_non_finite_pnl_or_unparseable_ts_stamps_the_malformed_flag(self):
+        """Review SFH-5: a dropped OKX bill used to leave only a log line, so a series with a
+        hole in it read as complete. Both drop reasons now stamp ``daily_pnl_malformed_okx``. Per
+        founder decision D-12 the flag is the record: the derive does not refuse on it."""
+        import services.exchange as ex
+
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
+        good = _okx_bill("ok", "1.0", "0.0", _ts(2024, 3, 15, 10))
+
+        def _swap_only(data):
+            async def _page(params):
+                return {"data": data if params.get("instType") == "SWAP" else []}
+
+            return _page
+
+        for bad in (
+            _okx_bill("b1", "nan", "0.0", _ts(2024, 3, 15, 10)),
+            {**_okx_bill("b2", "1.0", "0.0", _ts(2024, 3, 15, 10)), "ts": "2024-03-15"},
+        ):
+            ex.get_and_clear_last_dq_flags()
+            exchange = _make_okx_exchange()
+            exchange.private_get_account_bills = AsyncMock(side_effect=_swap_only([bad, good]))
+            rows = await fetch_daily_pnl(exchange, since_ms)
+            assert rows, "the readable bill is still returned"
+            assert ex.get_and_clear_last_dq_flags().get("daily_pnl_malformed_okx") is True
+
+    @pytest.mark.asyncio
+    async def test_binance_income_item_with_non_finite_income_stamps_the_malformed_flag(self):
+        import services.exchange as ex
+
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_binance_exchange()
+        exchange.fapiPrivate_get_income = AsyncMock(
+            return_value=[
+                {"incomeType": "REALIZED_PNL", "income": "nan", "symbol": "BTCUSDT", "time": "1710500000000"},
+                {"incomeType": "REALIZED_PNL", "income": "5.0", "symbol": "BTCUSDT", "time": "1710500000000"},
+            ]
+        )
+
+        rows = await fetch_daily_pnl(exchange, None)
+
+        assert len(rows) == 1
+        assert ex.get_and_clear_last_dq_flags().get("daily_pnl_malformed_binance") is True
+
+    @pytest.mark.asyncio
+    async def test_okx_clean_bills_stamp_no_malformed_flag(self):
+        import services.exchange as ex
+
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+
+        async def _page(params):
+            data = [_okx_bill("ok", "1.0", "0.0", _ts(2024, 3, 15, 10))]
+            return {"data": data if params.get("instType") == "SWAP" else []}
+
+        exchange.private_get_account_bills = AsyncMock(side_effect=_page)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert "daily_pnl_malformed_okx" not in ex.get_and_clear_last_dq_flags()
+
+    @pytest.mark.asyncio
+    async def test_bybit_row_with_unparseable_created_time_or_non_finite_value_stamps_the_flag(
+        self,
+    ):
+        import services.exchange as ex
+
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=3)).timestamp() * 1000)
+        good = _bybit_closed_pnl("BTCUSDT", "1.0", _ts(2024, 3, 15, 10))
+        for bad in (
+            {**good, "createdTime": "not-a-number"},
+            {**good, "cumEntryValue": "nan"},
+        ):
+            ex.get_and_clear_last_dq_flags()
+            exchange = _make_bybit_exchange()
+            exchange.private_get_v5_position_closed_pnl = AsyncMock(
+                return_value={"result": {"list": [bad, good], "nextPageCursor": ""}}
+            )
+            await fetch_daily_pnl(exchange, since_ms)
+            assert ex.get_and_clear_last_dq_flags().get("daily_pnl_malformed_bybit") is True
+
+    @pytest.mark.asyncio
+    async def test_a_caller_that_passes_no_deadline_is_never_truncated_by_the_clock(
+        self, monkeypatch
+    ):
+        """Phase 186 review SFH-4: the read deadline is opt-in, passed only by the per-key derive.
+        verify_strategy, the exchange router's fetch-trades and the member reconstruct call
+        ``fetch_all_trades`` and never read the DQ flags, so a deadline they did not ask for would
+        silently shorten their series. With the clock far past any budget, a default call still
+        walks to the end of the venue's history and sets no flag."""
+        import services.exchange as ex
+
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        served = {"n": 0}
+
+        async def _two_pages(params):
+            if params.get("instType") != "SWAP":
+                return {"data": []}
+            served["n"] += 1
+            if served["n"] == 1:
+                return {
+                    "data": [
+                        _okx_bill(f"p{i}", "1.0", "0.0", _ts(2024, 3, 15, 10)) for i in range(100)
+                    ]
+                }
+            return {"data": [_okx_bill("tail", "1.0", "0.0", _ts(2024, 3, 15, 10))]}
+
+        exchange.private_get_account_bills = AsyncMock(side_effect=_two_pages)
+        monkeypatch.setattr(ex, "_monotonic", lambda: 0.0 if served["n"] < 1 else 1e12)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
+
+        await ex.fetch_all_trades(exchange, since_ms=since_ms)
+
+        assert served["n"] == 2, "the second page must be requested: no deadline was asked for"
+        assert "daily_pnl_truncated_okx" not in ex.get_and_clear_last_dq_flags()
+
+    @pytest.mark.asyncio
+    async def test_bybit_sends_the_documented_page_size(self):
+        """D-10: Bybit documents a maximum page size of 100; the request sent 200."""
+        import services.exchange as ex
+
+        ex.get_and_clear_last_dq_flags()
+        exchange = _make_bybit_exchange()
+        counter: dict = {"n": 0}
+        exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            side_effect=self._endless_bybit_pages(counter)
+        )
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=3)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert counter["limits"], "the stub must have been called"
+        assert set(counter["limits"]) == {ex.BYBIT_CLOSED_PNL_LIMIT}
+        assert ex.BYBIT_CLOSED_PNL_LIMIT == 100
 
 
 # ===================================================================

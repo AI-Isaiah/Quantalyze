@@ -5068,6 +5068,14 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // function it tested, so its row left the table. MEASURED: this pin read `expected 1 to be +0` once
     // ci.yml carried SENTINEL_FLOOR=26, and ci-anti-skip-gate.contract.test.ts re-derives the
     // sentinel-bearing set from the corpus. 408 - 15 = 393 is the table's own sum.
+    // RAISED 2026-11-04 (Phase 186 DERIVEGAPS, fix round 2, D-11), 26/393 -> 26/402, and again
+    // in fix round 3 (R3-02 arm P10, a second consecutive refusal, and R3-04 arm P11, a refusal on a
+    // job a user's Sync now took over), 26/402 -> 26/404.
+    // test_sync_status_marked_refresh_protected.sql goes from `ALL 23 ARMS EXECUTED` to
+    // `ALL 34 ARMS EXECUTED` (arms P1..P11); no file joined, so SENTINEL_FLOOR stays 26.
+    // 393 + 11 = 404 is the table's own sum.
+    // RAISED 2026-11-04 (Phase 186 DERIVEGAPS, fix round 4, PR3-01), 26/404 -> 26/405. The same file
+    // goes from `ALL 34 ARMS EXECUTED` to `ALL 35 ARMS EXECUTED` (arm P12); no file joined.
     const res = spawnSync(
       "grep",
       ["-ac", "SENTINEL_FLOOR=26", ".github/workflows/ci.yml"],
@@ -5081,7 +5089,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=393", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=405", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

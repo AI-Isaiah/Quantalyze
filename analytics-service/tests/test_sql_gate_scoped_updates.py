@@ -142,6 +142,18 @@ _SCOPED_RE = re.compile(
 #     plan missed this key and the wave-2 post-merge gate found the pin red
 #                                                  -> (absent) -> 1
 #
+#   * Phase 186 (DERIVEGAPS fix round 2, D-11) added arms P1..P9 to
+#     supabase/tests/test_sync_status_marked_refresh_protected.sql. Eight of them each carry
+#     ONE seed-scoped UPDATE (the writer sentence and provenance on the arm's own
+#     strategy_id, `WHERE strategy_id = s_p`)          -> 8 -> 16
+#
+#   * Phase 186 (DERIVEGAPS fix round 3, R3-02) added arm P10 (a second consecutive refusal),
+#     which seeds the writer sentence and provenance twice, once per refusal, on its own
+#     strategy_id                                       -> 16 -> 18
+#
+#   * Phase 186 (DERIVEGAPS fix round 3, R3-04) added arm P11 (a refusal on a job a user's Sync
+#     now took over), one such UPDATE                  -> 18 -> 19
+#
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
 # never appears in it and an explicit `: 0` here would fail the comparison. The
@@ -157,7 +169,7 @@ _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_strategy_analytics_trade_fetch_provenance.sql": 6,
     "test_sync_status_bridge_residues.sql": 5,
     "test_sync_status_curated_sentence_survives.sql": 3,
-    "test_sync_status_marked_refresh_protected.sql": 8,
+    "test_sync_status_marked_refresh_protected.sql": 19,
     "test_wizard_composite_members.sql": 2,
 }
 

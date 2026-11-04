@@ -2,9 +2,11 @@
 tokens for a book the writer can no longer vouch for, asserted against ONE table the
 TS reader also reads.
 
-WHY this matters. The derive raises a blocking token (``failing_key_series_ended``,
-``account_identity_pending``) and the reader maps that token onto a line the owner
-already sees. If the two halves drift, a diluted book reads "ready" or a healthy one
+WHY this matters. The derive raises a blocking token (``account_identity_pending``,
+``shared_account_no_working_key``) and the reader maps that token onto a line the owner
+already sees. Since Phase 186 (D-03, D-07) a failing or refused key no longer raises one:
+it leaves the book on its last good day and the payload NAMES it (``failing_key_exits``),
+which both runtimes read from the same cell. If the two halves drift, a diluted book reads "ready" or a healthy one
 reads "rebuilding" and every suite stays green on its own side. The table in
 ``tests/fixtures/writer_residual_resolution.json`` states, per key list, the
 blocking tokens the derive carries and the verdict the reader gives; this file runs
@@ -54,14 +56,25 @@ def _book(alloc: str, cell: dict[str, Any]) -> _FakeSupabase:
             {"api_key_id": key["id"], "allocator_id": alloc, "date": day, "daily_return": 0.0}
             for day in own_days
         ]
-        derived.append({
-            "allocator_id": alloc,
-            "kind": f"key_inputs:{key['id']}",
-            "payload": {
-                "flows": [], "anchor_usd": key["anchor"],
-                "anchor_asof": own_days[-1], "venue": key["exchange"],
-            },
-        })
+        if key.get("read_incomplete"):
+            # Plan 09's marker row: the key's last derive was refused by name.
+            derived.append({
+                "allocator_id": alloc,
+                "kind": f"read_incomplete:{key['id']}",
+                "payload": {
+                    "token": "daily_pnl_truncated_okx", "error_class": None,
+                    "first_seen_day": days[0], "last_seen_day": days[-1],
+                },
+            })
+        if key.get("inputs", True):
+            derived.append({
+                "allocator_id": alloc,
+                "kind": f"key_inputs:{key['id']}",
+                "payload": {
+                    "flows": [], "anchor_usd": key["anchor"],
+                    "anchor_asof": (own_days or days)[-1], "venue": key["exchange"],
+                },
+            })
     return _FakeSupabase({
         "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived,
     })
@@ -69,13 +82,17 @@ def _book(alloc: str, cell: dict[str, Any]) -> _FakeSupabase:
 
 def test_the_cells_are_unique_and_cover_every_derive_side_token() -> None:
     """A cell deleted from the table must fail here, not leave a token without
-    cross-runtime coverage. ``failing_key_series_ended`` needs a cell that raises it
-    AND one that does not."""
+    cross-runtime coverage. Phase 186 (D-03, D-07) retired ``failing_key_series_ended``
+    from the writer: NO cell may raise it, and a cell must name an exit instead (one
+    for each reason, and one with no day)."""
     ids = [cell["id"] for cell in TABLE["cells"]]
     assert len(ids) == len(set(ids)), "a cell id appears twice"
     raised = {t for c in TABLE["cells"] for t in c["derive"]["blocking_tokens"]}
-    assert "failing_key_series_ended" in raised
+    assert "failing_key_series_ended" not in raised
     assert "account_identity_pending" in raised
+    exits = [e for c in TABLE["cells"] for e in c["derive"].get("failing_key_exits", [])]
+    assert {e["reason"] for e in exits} == {"sync_failing", "read_incomplete"}
+    assert any(e["day"] is None for e in exits), "a never-counted key is named with no day"
     for sc in ("SC-2", "SC-6"):
         assert any(
             c["sc"] == sc and not c["derive"]["blocking_tokens"] for c in TABLE["cells"]
@@ -95,3 +112,6 @@ async def test_the_derive_carries_each_cells_blocking_tokens(cell: dict[str, Any
         cell["derive"]["blocking_tokens"]
     ), payload["degrade_reasons"]
     assert payload["is_trustworthy"] is cell["derive"]["trustworthy"]
+    # Phase 186: the exits the cell names are exactly the ones the payload names; a cell that
+    # names none asserts the payload carries no ``failing_key_exits`` field at all.
+    assert payload.get("failing_key_exits", []) == cell["derive"].get("failing_key_exits", [])

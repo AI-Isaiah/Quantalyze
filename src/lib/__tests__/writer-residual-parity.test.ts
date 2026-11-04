@@ -23,7 +23,7 @@ import { resolve } from "node:path";
 // under vitest+jsdom. Mock it the same way the sibling queries tests do.
 vi.mock("server-only", () => ({}));
 
-import { derivePhase07Fields } from "../queries";
+import { derivePhase07Fields, readFailingKeyExits, FAILING_KEY_EXITED_FLAG } from "../queries";
 
 type CellKey = {
   id: string;
@@ -32,13 +32,26 @@ type CellKey = {
   venue_account_id: string | null;
   account_share_kind?: string | null;
   account_shared_with_api_key_id?: string | null;
+  // Phase 186: the Python runner seeds these; the reader never sees them.
+  read_incomplete?: boolean;
+  inputs?: boolean;
+};
+
+type FailingKeyExit = {
+  api_key_id: string;
+  reason: "sync_failing" | "read_incomplete";
+  day: string | null;
 };
 
 type Cell = {
   id: string;
   sc: string;
   keys: CellKey[];
-  derive: { blocking_tokens: string[]; trustworthy: boolean };
+  derive: {
+    blocking_tokens: string[];
+    trustworthy: boolean;
+    failing_key_exits?: FailingKeyExit[];
+  };
   reader: { state: "ready" | "rebuilding"; reason: string | null };
 };
 
@@ -69,8 +82,11 @@ const payloadFor = (cell: Cell) => ({
   is_trustworthy: cell.derive.trustworthy,
   curve: cell.derive.trustworthy ? [{ date: "2026-06-05", equity_usd: 100_000 }] : [],
   returns: cell.derive.trustworthy ? [{ date: "2026-06-05", r: 0 }] : [],
-  flags: [],
+  flags: cell.derive.failing_key_exits?.length ? [FAILING_KEY_EXITED_FLAG] : [],
   degrade_reasons: cell.derive.blocking_tokens,
+  ...(cell.derive.failing_key_exits?.length
+    ? { failing_key_exits: cell.derive.failing_key_exits }
+    : {}),
 });
 
 describe("writer residual parity: the reader against the shared table", () => {
@@ -90,6 +106,49 @@ describe("writer residual parity: the reader against the shared table", () => {
         state: result.equityHistoryState,
         reason: result.equityHistoryRebuildReason,
       }).toEqual(cell.reader);
+    },
+  );
+});
+
+/**
+ * Phase 186 (SC-4, D-03): the reader names exactly the exits the writer records.
+ * The Python twin asserts the payload's `failing_key_exits` equals the cell's;
+ * this half feeds that list to `readFailingKeyExits` and asserts one named entry
+ * per expected exit, so a writer that records an exit the reader drops (or the
+ * reverse) reddens CI on one side.
+ */
+describe("writer residual parity: the reader names the exits the writer records", () => {
+  const withExits = TABLE.cells.filter((c) => c.derive.failing_key_exits?.length);
+  const withoutExits = TABLE.cells.filter((c) => !c.derive.failing_key_exits?.length);
+
+  it("the table holds an exit with a dated day and one with day null (a fixture that lost either would pass on nothing)", () => {
+    const exits = withExits.flatMap((c) => c.derive.failing_key_exits ?? []);
+    expect(exits.some((e) => e.day !== null)).toBe(true);
+    expect(exits.some((e) => e.day === null)).toBe(true);
+    expect(exits.some((e) => e.reason === "sync_failing")).toBe(true);
+    expect(exits.some((e) => e.reason === "read_incomplete")).toBe(true);
+    expect(withoutExits.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it.each(withExits.map((cell) => [cell.id, cell] as const))(
+    "%s -> one named entry per recorded exit, same key, reason and day",
+    (_id, cell) => {
+      const payload = payloadFor(cell);
+      expect(payload.flags).toContain(FAILING_KEY_EXITED_FLAG);
+      const named = readFailingKeyExits(payload.flags, payload, apiKeys(cell));
+      const want = cell.derive.failing_key_exits ?? [];
+      expect(named.map((n) => ({ api_key_id: n.apiKeyId, reason: n.reason, day: n.day }))).toEqual(
+        [...want].sort((a, b) => a.api_key_id.localeCompare(b.api_key_id)),
+      );
+    },
+  );
+
+  it.each(withoutExits.map((cell) => [cell.id, cell] as const))(
+    "%s -> no failing_key_exited flag and nothing named",
+    (_id, cell) => {
+      const payload = payloadFor(cell);
+      expect(payload.flags).not.toContain(FAILING_KEY_EXITED_FLAG);
+      expect(readFailingKeyExits(payload.flags, payload, apiKeys(cell))).toEqual([]);
     },
   );
 });

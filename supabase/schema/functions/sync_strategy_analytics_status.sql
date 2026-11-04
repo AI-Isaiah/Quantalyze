@@ -2,11 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261023120000_sync_status_runner_stamps_computed_at.sql
--- --------------------------------------------------------------------------
--- the bridge, re-based on 20261009120000 with the date writes and the release
--- clause removed
--- --------------------------------------------------------------------------
+-- source migration: 20261105120000_sync_status_protect_refused_derive.sql
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(
   p_strategy_id    UUID,
   p_trigger_job_id UUID DEFAULT NULL
@@ -38,6 +34,9 @@ DECLARE
   v_latest_job_id      UUID;
   v_protected_job_id   UUID;
   v_publish_healthy    BOOLEAN;
+  -- Phase 186 round 3 / D-11: TRUE when the strategy's row carries published figures. Read
+  -- once, beside v_publish_healthy, so the partition cannot disagree about it within a call.
+  v_has_figures        BOOLEAN;
   v_protect_hold       BOOLEAN;
   v_unprotected_job_ids UUID[];
   v_nonterminal_unmarked_count INTEGER;
@@ -234,6 +233,35 @@ BEGIN
        AND sa.computation_status IN ('complete', 'complete_with_warnings')
   ) INTO v_publish_healthy;
 
+  -- ---- Phase 186 round 3 / D-11: does the row carry published figures? ----------
+  -- A strategy-mode derive that refuses an incomplete exchange read over a row that
+  -- already carries figures marks ITS OWN JOB `read_refusal_kept_figures` in
+  -- compute_jobs.metadata and writes its sentence (analytics-service job_worker.py,
+  -- `_stamp_strategy_analytics_failed` with `keep_numbers`); it leaves status, metrics and
+  -- flags alone. The marker is the worker's decision to keep the figures, and it lives on the
+  -- job, so it outlasts the row's mutable provenance (R3-02). The partition below reads it.
+  --
+  -- WHY THE STATUS TEST ALLOWS 'computing'. The sync_trades job that queued this derive
+  -- finished first, and its bridge call (branch (a), derive pending) moved a plain
+  -- 'complete' row to 'computing'. So at the refusal the row usually reads
+  -- 'computing', never 'complete'. The figures are the evidence that it was published:
+  -- a 'computing' row counts only with its headline metrics (`metrics_json`) present, the
+  -- same test the worker applied (`_published_numbers_exist`). The headline is the test
+  -- and the by-basis column is NOT: the derive's prestamp writes by-basis NULL on every
+  -- path except a Deribit options book, so on a perp-only, ccxt or key-mode strategy
+  -- (every api-key strategy on PROD) the by-basis column is NULL over published figures.
+  --
+  -- ⛔ TWO-VALUED: `SELECT EXISTS` is never NULL. A 'failed' row never qualifies: the loud
+  -- path writes 'failed', and a failed row is not published whatever it still carries (the
+  -- loud stamp nulls only `metrics_json_by_basis`; `metrics_json` survives it).
+  SELECT EXISTS (
+    SELECT 1
+      FROM strategy_analytics sa
+     WHERE sa.strategy_id = p_strategy_id
+       AND (sa.computation_status IN ('complete', 'complete_with_warnings')
+            OR (sa.computation_status = 'computing' AND sa.metrics_json IS NOT NULL))
+  ) INTO v_has_figures;
+
   -- ---- the live-failure PARTITION (consumed by branches (b) and (b-prime)) ---
   -- PER-(strategy,kind) created_at SUPERSESSION (F-3 / PUB-02 close, mig 20260710150000):
   -- a failed_final poisons the strategy ONLY when it is NOT superseded by a
@@ -326,6 +354,22 @@ BEGIN
       -- `v_publish_healthy` comes from a `SELECT EXISTS`, which is never NULL,
       -- so the COALESCE around the marker test is enough to make the whole
       -- conjunction two-valued.
+      -- Phase 186 round 3 / D-11: a refused derive that kept the figures (the worker marked
+      -- its own job `read_refusal_kept_figures`, see the header) is protected, ahead of the
+      -- marked-refresh clause. The kind scope is the same containment as for the refresh marker:
+      -- `metadata` is not a closed namespace, so the key is honoured on a derive_broker_dailies job
+      -- alone. COALESCE for the same reason as the marker test: a NULL
+      -- `metadata` must read FALSE, because a NULL `is_protected` is excluded from BOTH FILTERs and
+      -- the failure would fall through to branch (c) as a success. A RETRACTED marked refresh is
+      -- not excluded: the retraction says a user is watching, and a refusal that kept the figures
+      -- is the answer that user should see (R3-04). The honour write of a retracted marked refresh
+      -- carries no refusal marker, so it stays LOUD (test_sync_status_bridge_residues.sql W1).
+      -- AND binds tighter than OR, so the marked-refresh clause below is still
+      -- `marker-and-kind AND v_publish_healthy`, text unchanged (the 164.6.7 probe pins it).
+      COALESCE(f.kind = 'derive_broker_dailies'
+               AND (f.metadata ->> 'read_refusal_kept_figures') = 'true'
+               AND v_has_figures, FALSE)
+      OR
       COALESCE(
         (f.metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
         AND f.kind IN ('derive_broker_dailies',
@@ -802,7 +846,37 @@ BEGIN
        -- markers, every row on this path has NULL markers, the CASE takes its
        -- ELSE arm, and this branch behaves EXACTLY as it did before. That is
        -- the intended deploy order, not an oversight.
-       SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error ELSE computation_error_copy(v_protected_kind) END,
+       -- Phase 186 round 2 / D-11, the ONE status write of this branch: a refused derive
+       -- that kept the figures found its row at 'computing' (the sync_trades job that
+       -- queued it bounced it there), and the refusal is final, so the row returns to
+       -- the status it held. Only with nothing in flight (an in-flight job will decide
+       -- the status itself, and the next call lands here again), only when the protected
+       -- job carries the refusal marker or the sentence on the row is the writer's for it,
+       -- and only from 'computing': every other protected failure leaves the status
+       -- exactly as it was. Round 4 (PR3-01): the marker needs no sentence on the row. The
+       -- worker writes it only for a final refusal, but the sentence can be missing then
+       -- (an earlier attempt's was cleared by branch (a), or its write failed after the
+       -- marker landed), and a row left at 'computing' with nothing in flight is stuck
+       -- until the reaper stamps it failed. The sentence CASEs below keep the provenance
+       -- test: they decide whether to keep the sentence, not the status.
+       SET computation_status  = CASE
+             WHEN strategy_analytics.computation_status = 'computing'
+                  AND COALESCE(v_nonterminal_count, 0) = 0
+                  AND (
+                    (strategy_analytics.computation_error_source = 'writer'
+                     AND strategy_analytics.computation_error_job_id = v_protected_job_id)
+                    OR EXISTS (
+                      SELECT 1
+                        FROM compute_jobs pj
+                       WHERE pj.id = v_protected_job_id
+                         AND pj.kind = 'derive_broker_dailies'
+                         AND (pj.metadata ->> 'read_refusal_kept_figures') = 'true'
+                    )
+                  )
+             THEN CASE WHEN strategy_analytics.computation_warned IS TRUE THEN 'complete_with_warnings' ELSE 'complete' END
+             ELSE strategy_analytics.computation_status
+           END,
+           computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error ELSE computation_error_copy(v_protected_kind) END,
            -- The markers travel WITH the sentence, on the same predicate: kept
            -- when it is kept, cleared when the per-kind copy overwrites it.
            computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,

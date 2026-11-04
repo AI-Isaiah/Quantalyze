@@ -2,7 +2,7 @@
 
 The rebuild's trade read (Bybit 7-day windows, the OKX per-instrument-type walk, every other venue
 read to an empty page) was deleted with the reconstruct crawl in Phase 176 (D-04), and so were the
-tests that drove it. One text pin stays, on the Bybit Unified-transfer reader.
+tests that drove it. One text pin stays, on the Bybit Unified-transfer reader (Phase 186 D-02: the live derive reads it).
 """
 from __future__ import annotations
 
@@ -14,19 +14,20 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 
-def test_no_service_module_calls_the_unified_flows_reader() -> None:
-    """D-02: the live broker-dailies, composite and OKX-archive readers keep their kinds. The
-    rebuild that read the flows was retired by Phase 176 (D-04), so the reader is orphaned (booked
-    in TODOS ``176-RECONSTRUCT-CAP-MARKER-INERT``) and only its own module names the function.
-    The second half is unchanged: the live readers do not name the reader, and the worker may
-    import the reader's error class (the classifier arm) and nothing else from the module."""
+def test_job_worker_imports_the_unified_flows_reader_once() -> None:
+    """Phase 180 D-02 kept the live derive off the Unified-transfer reader; Phase 186 D-02
+    (founder 2026-11-01) reversed that for the per-key derive, so the old pin is replaced and not
+    deleted. The worker names the module path on exactly ONE line and that line imports the reader
+    (the live Bybit derive now reads it); the only other service module naming the function is the
+    reader's own module. The archive job and ``broker_dailies`` still name neither the module nor
+    the function: their flow kinds are unchanged."""
     services = Path(__file__).resolve().parent.parent / "services"
     naming = sorted(
         path.name
         for path in services.glob("*.py")
         if "fetch_bybit_unified_flows" in path.read_text(encoding="utf-8")
     )
-    assert naming == ["bybit_unified_flows.py"], naming
+    assert naming == ["bybit_unified_flows.py", "job_worker.py"], naming
 
     for name in ("broker_dailies.py", "okx_archive_job.py"):
         text = (services / name).read_text(encoding="utf-8")
@@ -34,7 +35,6 @@ def test_no_service_module_calls_the_unified_flows_reader() -> None:
         assert "bybit_unified_flows" not in text, name
 
     worker = (services / "job_worker.py").read_text(encoding="utf-8").splitlines()
-    mentions = [line for line in worker if "bybit_unified_flows" in line]
-    assert len(mentions) <= 1, mentions
-    for line in mentions:
-        assert line.strip().replace("(", "").replace(")", "").endswith("import BybitUnifiedFlowReadError"), line
+    mentions = [line for line in worker if "services.bybit_unified_flows" in line]
+    assert len(mentions) == 1, mentions
+    assert "fetch_bybit_unified_flows" in mentions[0], mentions

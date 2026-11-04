@@ -30,8 +30,8 @@ short list: a malformed answer, an unreadable row, a row of another type, a curs
 advance on a page that returned rows, and a window past `UNIFIED_FLOW_PAGE_CAP` each raise
 `BybitUnifiedFlowReadError`. An empty page ends its window naturally.
 
-Scope (D-02): only the rebuild and the allocator history probe read this; the live NAV, composite
-and broker-dailies readers keep `fetch_ccxt_transfers`.
+Scope: since Phase 186 (D-02, founder 2026-11-01) the per-key derive reads this for Bybit; the
+archive job and the composite (unless 186-04 recorded `q-composite: include`) keep their kinds.
 
 Limitation (orchestrator reading 3, an orchestrator reading and not a founder decision):
 `UNIFIED_FLOW_TYPES` is `TRANSFER_IN` and `TRANSFER_OUT` only. Earn, staking, bonus-transfer and PEF
@@ -45,8 +45,9 @@ place a follow-up extends.
 Pairing (Phase 186 plan 03): `pair_onchain_with_unified` is the one rule for deciding that an
 on-chain deposit or withdrawal row and a Unified TRANSFER row are the same money. It is shared by
 the SC-1 probe (`scripts/derivegaps_probe.py`, whose overlap count decides REPLACE against UNION
-for D-02) and by any pair-aware Bybit flow source, so the two cannot drift. It is pure, and it has
-no production caller until plan 186-10 decides.
+for D-02) and by any pair-aware Bybit flow source, so the two cannot drift. It is pure. Plan 186-10
+implemented the source 186-04 recorded (`g2-flow-final: replace`), so the derive does not call it;
+only the probe does.
 
 Rate limiting: no `asyncio.sleep`; ccxt's `enableRateLimit` throttles raw calls by the API table's
 cost.

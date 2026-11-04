@@ -1848,6 +1848,39 @@ async def test_a_non_true_flow_timing_day_level_large_is_not_carried(bad) -> Non
 
 
 # ===========================================================================
+# Phase 186 (D-12, review R3-03) — `daily_pnl_malformed_<venue>` is a FLAG: the venue read
+# dropped a realized row it could not read, and the strategy keeps publishing. The derive
+# pre-stamps it; the wholesale rebuild here would wipe it seconds later unless it is carried,
+# present-only and strictly `is True`. It never promotes the status (the founder decided a flag,
+# not a warning), so a flagged strategy stays exact-string "complete".
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flag", ["daily_pnl_malformed_okx", "daily_pnl_malformed_binance", "daily_pnl_malformed_bybit"]
+)
+async def test_daily_pnl_malformed_is_carried_and_never_promotes(flag: str) -> None:
+    payload, _spy, _bench = await _run_with_flags({"csv_source": True, flag: True})
+    dq = payload["data_quality_flags"]
+    assert dq.get(flag) is True, (
+        "the pre-stamped flag must survive the wholesale rebuild, or D-12's flag is wiped "
+        f"seconds after the derive writes it; got {dq!r}"
+    )
+    assert payload["computation_status"] == "complete"
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [False, None, 1, "true", ["x"], {}])
+async def test_a_non_true_daily_pnl_malformed_is_not_carried(bad) -> None:  # type: ignore[no-untyped-def]
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "daily_pnl_malformed_okx": bad}
+    )
+    assert "daily_pnl_malformed_okx" not in payload["data_quality_flags"]
+
+
+# ===========================================================================
 # Phase 164.6.6.2.2 (D-05) — the single-key row names the cumulative method its
 # curve was built with, as composites already do. Readers default to geometric
 # when the key is absent, so a simple (allocated-capital) curve WITHOUT the stamp

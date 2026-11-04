@@ -275,6 +275,14 @@ class DataQualityFlags(TypedDict, total=False):
     # never a warning (in neither NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS), no day is
     # dropped. A BOOL only (T-73-02). ---
     flow_timing_day_level_large: bool
+    # --- Phase 186 (D-12, review R3-03): a realized row the venue read dropped because it could not
+    # be read ("daily_pnl_malformed_<venue>", one BOOL per venue). Stamped by the broker derive's
+    # pre-stamp and carried present-only by run_csv_strategy_analytics. A FLAG, never a warning:
+    # in neither NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
+    # computation_status or set computation_warned, and the key keeps publishing. ---
+    daily_pnl_malformed_okx: bool
+    daily_pnl_malformed_binance: bool
+    daily_pnl_malformed_bybit: bool
     # --- Phase 164.6.6.2.2 (D-05): the cumulative method this row's returns_series
     # was built with, RAW ('geometric' | 'simple'). Stamped by
     # run_csv_strategy_analytics beside the curve (the composite stitch already wrote
@@ -2321,6 +2329,20 @@ async def run_csv_strategy_analytics(
             # which the factsheet says "returns can be extreme", not a warning.
             if existing_flags.get("flow_timing_day_level_large") is True:
                 data_quality_flags["flow_timing_day_level_large"] = True
+
+            # Phase 186 (D-12, review R3-03): carry the dropped-row flags PRESENT-ONLY, strictly
+            # `is True`, and OUTSIDE both `_warned` loops above, exactly like small_base_measured.
+            # The rebuild is wholesale, so an unbridged pre-stamp would be wiped seconds after the
+            # derive wrote it. A flag, not a warning: the strategy stays exact-string "complete".
+            # The prefix is the contract with services/exchange.py (`_record_dq_flag`) and the
+            # derive's pre-stamp in services/job_worker.py.
+            for _flag in existing_flags:
+                if (
+                    isinstance(_flag, str)
+                    and _flag.startswith("daily_pnl_malformed_")
+                    and existing_flags[_flag] is True
+                ):
+                    data_quality_flags[_flag] = True  # type: ignore[literal-required]
 
             csv_status = "complete_with_warnings" if _warned else "complete"
 

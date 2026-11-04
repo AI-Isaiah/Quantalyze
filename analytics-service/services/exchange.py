@@ -3,10 +3,13 @@ import ccxt.async_support as ccxt
 import logging
 import os
 import random
+import re
+import time
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final, Literal, TypedDict
+from typing import Any, Final, Literal, NamedTuple, TypedDict
 
 from supabase import Client
 
@@ -125,6 +128,101 @@ def get_and_clear_last_dq_flags() -> dict[str, Any]:
         _LAST_DQ_FLAGS.set({})
         return dict(flags)
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 186 DERIVEGAPS (plan 05) — the realized read's sized caps, its deadline,
+# and the derive's single reader of the DQ buffer.
+# ---------------------------------------------------------------------------
+# Module constants (NOT ``Final``) so a test can lower them by monkeypatch and each
+# walk reads them at call time. Sized from the SC-1 count (D-06): a normal key reads
+# its whole history, and a key still short is refused by name through the SAME
+# ``daily_pnl_truncated_*`` flag a cap hit has always set.
+OKX_BILLS_PAGE_CAP: int = 100
+OKX_ARCHIVE_PAGE_CAP: int = 100
+#: Per 7-day window, at ``BYBIT_CLOSED_PNL_LIMIT`` rows a page. The 186-04 probe measured 44 pages
+#: (about 4,400 closes) in the one PROD Bybit key's busiest week, so the first value, 50, left 12%
+#: headroom, and one busier week would have refused that key every day for a year (the walk is a
+#: rolling 365 days). 200 pages is 20,000 rows a window, about 100 s only in a window that busy
+#: (0.5 s a page); ``DAILY_PNL_READ_DEADLINE_S`` still bounds the whole walk (D-06).
+BYBIT_PNL_PAGE_CAP: int = 200
+#: Bybit V5 ``/v5/position/closed-pnl`` documents a maximum page size of 100; the
+#: request used to send 200 (D-10: set to the documented maximum).
+BYBIT_CLOSED_PNL_LIMIT: int = 100
+#: Wall-clock budget for one ``fetch_daily_pnl`` walk, passed ONLY by the per-key derive
+#: (``read_deadline_s=``). Past it the OKX and Bybit walks stop and set their OWN flag,
+#: ``daily_pnl_deadline_<venue>``, so a key that cannot be read in the budget is refused by name
+#: instead of a ``TimeoutError`` the dispatcher retries with no resume (RESEARCH Pitfall 2). It is
+#: NOT ``daily_pnl_truncated_*``: a cap hit is deterministic (the same history hits it again), but
+#: a deadline hit is venue latency and a retry later may read the key in full, so the derive
+#: refuses it as transient and a cap hit as permanent (review WR-06). Every other caller
+#: (verify_strategy, the exchange router's fetch-trades, the member reconstruct) never reads the
+#: DQ flags, so a deadline there would silently truncate; they pass nothing and walk unbounded, as
+#: before this phase.
+DAILY_PNL_READ_DEADLINE_S: float = 397.0
+#: Indirection so a test can pass the deadline without sleeping.
+_monotonic: Callable[[], float] = time.monotonic
+
+
+#: ccxt exception class names ``fetch_daily_pnl`` records for a venue rate limit.
+DAILY_PNL_RATE_LIMIT_CLASSES: Final[frozenset[str]] = frozenset(
+    {"RateLimitExceeded", "DDoSProtection"}
+)
+_DAILY_PNL_ERROR_CLASS_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+class DailyPnlReadVerdict(NamedTuple):
+    """What a drained ``fetch_daily_pnl`` buffer says about the read."""
+
+    #: Sorted names of the flags that mean the window was not read in full. Empty means
+    #: the read is trustworthy.
+    reasons: tuple[str, ...]
+    #: The recorded exception class name, only when it is a plain identifier; never text.
+    error_class: str | None
+    #: A swallowed venue rate limit (the caller defers rather than refuses).
+    rate_limited: bool
+
+
+def daily_pnl_read_verdict(flags: Mapping[str, Any]) -> DailyPnlReadVerdict:
+    """The derive's reader of the realized DQ buffer (Phase 186 D-05).
+
+    Reads ``flags`` exactly as ``routers/cron.py::_fetch_degradation`` (the trade sync)
+    does for the reasons and class, and exactly as
+    ``services/okx_archive_job.py::_check_live_realized_flags`` does for the rate-limit
+    verdict. The two older readers stay as they are; ``tests/test_daily_pnl_read_verdict.py``
+    enumerates every flag combination through all three, so the derive's reading cannot
+    drift from the trade sync's. The deliberate differences are ``daily_pnl_deadline_*`` (only the
+    derive's opt-in ``read_deadline_s`` can set it), which the two older readers never name.
+
+    ``daily_pnl_malformed_*`` (a row the walk dropped because it could not be read) is NOT a
+    reason, by founder decision D-12 (2026-11-04): a malformed row is stamped as a data-quality
+    flag and the key keeps publishing, because refusing would remove a key from the book every day
+    for as long as the row stays in the walk, and no one has counted the keys that carry one
+    (TODOS ``[186-REALIZED-MALFORMED-COUNT]``). All three readers therefore ignore the flag. The derive
+    persists it from the buffer it drains: strategy mode on ``strategy_analytics.data_quality_flags``,
+    key mode on the key's ``key_inputs`` record.
+    """
+    reasons: list[str] = []
+    if flags.get("daily_pnl_fetch_error"):
+        reasons.append("daily_pnl_fetch_error")
+    if flags.get("daily_pnl_binance_income_fallback"):
+        reasons.append("daily_pnl_binance_income_fallback")
+    reasons.extend(
+        key
+        for key, value in flags.items()
+        if key.startswith(("daily_pnl_truncated_", "daily_pnl_deadline_"))
+        and value
+    )
+    raw_class = flags.get("daily_pnl_fetch_error_class")
+    error_class: str | None = (
+        raw_class
+        if isinstance(raw_class, str) and _DAILY_PNL_ERROR_CLASS_RE.match(raw_class)
+        else None
+    )
+    rate_limited = bool(flags.get("daily_pnl_fetch_error")) and (
+        flags.get("daily_pnl_fetch_error_class") in DAILY_PNL_RATE_LIMIT_CLASSES
+    )
+    return DailyPnlReadVerdict(tuple(sorted(reasons)), error_class, rate_limited)
 
 
 def _record_dq_flag(key: str, value: Any) -> None:
@@ -1418,12 +1516,21 @@ async def _okx_bills_fetch_with_backoff(
     raise RuntimeError("unreachable: _okx_bills_fetch_with_backoff")
 
 
-async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) -> list[dict[str, Any]]:
+async def fetch_daily_pnl(
+    exchange: ccxt.Exchange,
+    since_ms: int | None = None,
+    *,
+    read_deadline_s: float | None = None,
+) -> list[dict[str, Any]]:
     """Fetch daily PnL from the exchange account bills/ledger.
 
     Instead of scanning every trading pair for individual trades (200+ API calls),
     this fetches account-level P&L history directly. Much faster and gives us
     exactly what we need for analytics: daily profit/loss.
+
+    ``read_deadline_s`` (Phase 186, opt-in, default off): a wall-clock budget for the walk. Only a
+    caller that drains the DQ flags afterwards may pass it, because a walk that stops at the
+    deadline reports it only through ``daily_pnl_truncated_*``.
     """
     # Audit-2026-05-07 C-0319 (Bybit cutover) / maintainability — same
     # entry-seam reset as ``fetch_raw_trades``. The Bybit branch used to
@@ -1437,6 +1544,9 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     # contract documented in ``_LAST_DQ_FLAGS``.
     _LAST_DQ_FLAGS.set({})
 
+    _read_deadline = (
+        float("inf") if read_deadline_s is None else _monotonic() + read_deadline_s
+    )
     daily_pnl: list[dict[str, Any]] = []
 
     try:
@@ -1445,13 +1555,20 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             # types, paginated for full history.
             all_bills: list[dict[str, Any]] = []
 
-            OKX_BILLS_PAGE_CAP = 100
+            # Phase 186 D-06: one deadline for the whole walk. Past it no further
+            # request is issued and ``daily_pnl_deadline_okx`` is stamped (not the cap flag).
+            _okx_deadline_hit = False
             for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
+                if _okx_deadline_hit:
+                    break
                 after_id = ""
                 type_count = 0
                 _okx_bills_cap_hit = False
 
                 for page in range(OKX_BILLS_PAGE_CAP):
+                    if _monotonic() >= _read_deadline:
+                        _okx_deadline_hit = True
+                        break
                     params: dict[str, str] = {"instType": inst_type, "limit": "100"}
                     if since_ms:
                         params["begin"] = str(since_ms)
@@ -1500,6 +1617,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         inst_type, OKX_BILLS_PAGE_CAP,
                     )
                     _record_dq_flag("daily_pnl_truncated_okx", True)
+            if _okx_deadline_hit:
+                logger.warning(
+                    "OKX: read deadline (%.0fs) passed — daily_pnl truncated "
+                    "after %d bills",
+                    read_deadline_s, len(all_bills),
+                )
+                _record_dq_flag("daily_pnl_deadline_okx", True)
 
             # Fetch bills-archive for older history (>3 months)
             # Only fetch archive if we need data older than 90 days
@@ -1510,12 +1634,17 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 logger.info("OKX: skipping archive API (since_ms is within 3 months)")
             else:
                 logger.info("OKX: fetching archive API for older history...")
-                OKX_ARCHIVE_PAGE_CAP = 100
+                _okx_archive_deadline_hit = False
                 for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
+                    if _okx_archive_deadline_hit:
+                        break
                     after_id = ""
                     type_count = 0
                     _okx_archive_cap_hit = False
                     for page in range(OKX_ARCHIVE_PAGE_CAP):
+                        if _monotonic() >= _read_deadline:
+                            _okx_archive_deadline_hit = True
+                            break
                         params = {"instType": inst_type, "limit": "100"}
                         if since_ms:
                             params["begin"] = str(since_ms)
@@ -1560,6 +1689,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             inst_type, OKX_ARCHIVE_PAGE_CAP,
                         )
                         _record_dq_flag("daily_pnl_truncated_okx", True)
+                if _okx_archive_deadline_hit:
+                    logger.warning(
+                        "OKX archive: read deadline (%.0fs) passed — daily_pnl "
+                        "truncated after %d archive bills",
+                        read_deadline_s, len(archive_bills),
+                    )
+                    _record_dq_flag("daily_pnl_deadline_okx", True)
 
             # Merge recent + archive and deduplicate by billId
             merged_bills = all_bills + archive_bills
@@ -1610,6 +1746,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         "(billId=%s)",
                         bill.get("pnl"), bill.get("fee"), bill.get("billId"),
                     )
+                    _record_dq_flag("daily_pnl_malformed_okx", True)
                     continue
                 pnl_val = _pnl_raw + _fee_raw
                 ts_raw = bill.get("ts", "")
@@ -1629,6 +1766,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         "OKX bill dropped: unparseable ts=%r (billId=%s, billType=%s)",
                         ts_raw, bill.get("billId"), bill.get("billType"),
                     )
+                    _record_dq_flag("daily_pnl_malformed_okx", True)
 
             logger.info(
                 "OKX: %d bills aggregated to %d daily PnL entries "
@@ -1674,6 +1812,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                                 item.get("incomeType"),
                                 item.get("symbol"),
                             )
+                            _record_dq_flag("daily_pnl_malformed_binance", True)
                             continue
                         daily_pnl.append({
                             "exchange": "binance",
@@ -1819,18 +1958,21 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     start_ms = since_ms
                 now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                 BYBIT_PNL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000  # 7-day max per request
-                BYBIT_PNL_PAGE_CAP = 50  # safety net per window
 
                 items: list[dict[str, Any]] = []
                 window_start = start_ms
                 _bybit_cap_hit = False
-                while window_start < now_ms:
+                _bybit_deadline_hit = False
+                while window_start < now_ms and not _bybit_deadline_hit:
                     window_end = min(window_start + BYBIT_PNL_WINDOW_MS, now_ms)
                     cursor = ""
                     for _page in range(BYBIT_PNL_PAGE_CAP):
+                        if _monotonic() >= _read_deadline:
+                            _bybit_deadline_hit = True
+                            break
                         bybit_params: dict[str, Any] = {
                             "category": "linear",
-                            "limit": 200,
+                            "limit": BYBIT_CLOSED_PNL_LIMIT,
                             "startTime": str(window_start),
                             "endTime": str(window_end),
                         }
@@ -1860,6 +2002,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         BYBIT_PNL_PAGE_CAP,
                     )
                     _record_dq_flag("daily_pnl_truncated_bybit", True)
+                if _bybit_deadline_hit:
+                    logger.warning(
+                        "Bybit: read deadline (%.0fs) passed — daily_pnl "
+                        "truncated after %d closed-pnl rows",
+                        read_deadline_s, len(items),
+                    )
+                    _record_dq_flag("daily_pnl_deadline_bybit", True)
 
                 # Defensive dedup: pagination boundaries can occasionally
                 # echo the same closure across two adjacent windows when
@@ -1937,6 +2086,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             item.get("closeFee"),
                             item.get("symbol"),
                         )
+                        _record_dq_flag("daily_pnl_malformed_bybit", True)
                         continue
                     # Bybit's ``side`` on a closed-pnl row is the side of
                     # the CLOSING order. ``Sell`` closes a long position
@@ -1972,6 +2122,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             "createdTime=%r (symbol=%s)",
                             ts_raw, item.get("symbol"),
                         )
+                        _record_dq_flag("daily_pnl_malformed_bybit", True)
 
                 # Build the daily_pnl rows in the SAME shape the OKX +
                 # Binance branches use: one row per (exchange, day) with
@@ -2001,7 +2152,11 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 )
                 daily_pnl.extend(converted_rows)
             except ccxt.RateLimitExceeded:
-                raise  # silent-failure/F-05: must propagate to _stamp_429 path
+                # silent-failure/F-05: re-raise, but the OUTER handler swallows a Bybit
+                # rate limit, so it reaches the caller only as the
+                # ``daily_pnl_fetch_error_class`` flag that ``daily_pnl_read_verdict`` reads
+                # (186-RESEARCH, measured); it is NOT propagated to a _stamp_429 path.
+                raise
             except Exception as exc:  # noqa: BLE001
                 # silent-failure/F-05: use scrub_freeform_string and drop
                 # exc_info=True — passing exc_info embeds the full exception
@@ -2878,10 +3033,17 @@ def _normalize_fill(trade: dict[str, Any], exchange_id: str) -> FillRow | None:
     )
 
 
-async def fetch_all_trades(exchange: ccxt.Exchange, symbol: str | None = None, since_ms: int | None = None) -> list[dict[str, Any]]:
+async def fetch_all_trades(
+    exchange: ccxt.Exchange,
+    symbol: str | None = None,
+    since_ms: int | None = None,
+    *,
+    read_deadline_s: float | None = None,
+) -> list[dict[str, Any]]:
     """Fetch daily PnL from exchange. Uses account-level APIs instead of
-    scanning individual trading pairs (which is 200+ API calls on OKX)."""
-    return await fetch_daily_pnl(exchange, since_ms)
+    scanning individual trading pairs (which is 200+ API calls on OKX).
+    ``read_deadline_s`` is ``fetch_daily_pnl``'s opt-in walk budget."""
+    return await fetch_daily_pnl(exchange, since_ms, read_deadline_s=read_deadline_s)
 
 
 def parse_since_ms(

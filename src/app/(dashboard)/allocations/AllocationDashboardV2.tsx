@@ -1,7 +1,11 @@
 "use client";
 
 import { useMemo } from "react";
-import type { MyAllocationDashboardPayload, UnpricedNativeAccount } from "@/lib/queries";
+import type {
+  FailingKeyExit,
+  MyAllocationDashboardPayload,
+  UnpricedNativeAccount,
+} from "@/lib/queries";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
@@ -71,6 +75,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // Phase 164.6.6.2.1 plan 17 (D-20): the native-unit accounts the total
     // leaves out on an unpriced day. Empty when absent.
     unpricedNativeAccounts = [],
+    // Phase 186 plan 08 (D-03, D-05, D-07): the keys the total stopped counting
+    // or holds at their last complete read. Empty when absent.
+    failingKeyExits = [],
     // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the first day recorded equity
     // begins for the keys the drawn curve includes. Absent reads as null (no
     // note). The embedded portfolio factsheet's cumulative chart names it when
@@ -206,6 +213,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           above. */}
       {!isRebuilding && unpricedNativeAccounts.length > 0 && (
         <UnpricedAccountNote accounts={unpricedNativeAccounts} />
+      )}
+      {/* Phase 186 plan 08 (SC-4): the readers say which key. A key whose
+          exchange read failed or came back incomplete leaves the total at its
+          last complete day, and the note names it. Ready only. */}
+      {!isRebuilding && failingKeyExits.length > 0 && (
+        <FailingKeyExitNote exits={failingKeyExits} />
       )}
       <InsightStrip
         analytics={analytics}
@@ -424,6 +437,63 @@ function UnpricedAccountNote({
     <p
       role="status"
       data-testid="dashboard-unpriced-account-note"
+      className="mb-3 px-1 text-sm text-text-secondary"
+    >
+      {sentences.join(" ")}
+    </p>
+  );
+}
+
+/**
+ * Phase 186 plan 08 (D-03, D-05, D-07, SC-4). One muted note naming each key the
+ * total stopped counting, or holds at its last complete read, and the day the
+ * total counts it through. Wording approved by the founder (plan 186-08 Task 1).
+ * Muted, not a warning: the total shown is right for the keys it covers.
+ */
+function FailingKeyExitNote({ exits }: { exits: ReadonlyArray<FailingKeyExit> }) {
+  const sorted = [...exits].sort(
+    (a, b) => a.label.localeCompare(b.label) || a.apiKeyId.localeCompare(b.apiKeyId),
+  );
+  // One clause per (reason, day): keys sharing both are joined; a key with no
+  // day (it never counted) is stated once for either reason. Dated groups run
+  // sync_failing first, then by day; the undated clause comes last.
+  const dated = new Map<string, { reason: FailingKeyExit["reason"]; day: string; labels: string[] }>();
+  const undated: string[] = [];
+  for (const e of sorted) {
+    if (e.day === null) {
+      undated.push(e.label);
+      continue;
+    }
+    const key = `${e.reason}|${e.day}`;
+    const group = dated.get(key) ?? { reason: e.reason, day: e.day, labels: [] };
+    group.labels.push(e.label);
+    dated.set(key, group);
+  }
+  const sentences: string[] = [];
+  const groups = [...dated.values()].sort(
+    (a, b) =>
+      (a.reason === b.reason ? 0 : a.reason === "sync_failing" ? -1 : 1) ||
+      (a.day < b.day ? -1 : a.day > b.day ? 1 : 0),
+  );
+  for (const g of groups) {
+    const many = g.labels.length > 1;
+    const its = many ? "their" : "its";
+    const day = formatCloseDay(g.day);
+    sentences.push(
+      g.reason === "sync_failing"
+        ? `The total counts ${joinAnd(g.labels)} through ${day}: ${its} exchange key is failing to sync, so ${its} capital is no longer counted after that day.`
+        : `The total counts ${joinAnd(g.labels)} through ${day}: the latest read of ${its} exchange history came back incomplete, so the total holds ${its} last complete day.`,
+    );
+  }
+  if (undated.length > 0) {
+    sentences.push(
+      `The total leaves out ${joinAnd(undated)}: ${undated.length > 1 ? "their" : "its"} exchange key has not returned a complete history yet.`,
+    );
+  }
+  return (
+    <p
+      role="status"
+      data-testid="dashboard-failing-key-note"
       className="mb-3 px-1 text-sm text-text-secondary"
     >
       {sentences.join(" ")}

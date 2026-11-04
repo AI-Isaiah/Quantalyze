@@ -2121,3 +2121,241 @@ class TestC3001BybitSevenDayWindowWalking:
             f"NEW-C30-01: default lookback should be ~365 days. "
             f"Got start={first_start[0]}, expected≈{expected_start}."
         )
+
+
+class TestBybitKeepsBothSameHourLegs:
+    """186 SC-7 (D-04): the derive's funding read must count two distinct
+    settlement legs that land in one (symbol, UTC hour). ``fetch_funding_bybit``
+    has no in-memory dedup (the 186 gate measured no OKX or Bybit same-hour
+    pair on PROD, ``q-g4: no-pairs``), and this guard pins that on every
+    branch so a later dedup by ``match_key`` cannot silently drop a leg and
+    understate funding in the derive's returns.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_settlement_legs_in_one_hour_both_returned(self) -> None:
+        hour_ms = 1700000000000  # one UTC hour bucket for both legs
+        linear = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.01",
+                        "currency": "USDT",
+                        "transactionTime": str(hour_ms),
+                        "id": "leg-1",
+                    },
+                    {
+                        "symbol": "BTCUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.02",
+                        "currency": "USDT",
+                        "transactionTime": str(hour_ms + 60_000),
+                        "id": "leg-2",
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = (
+            _bybit_mock_with_fallback(linear)
+        )
+
+        rows = await fetch_funding_bybit(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
+
+        assert len(rows) == 2
+        assert sum(r["amount"] for r in rows) == Decimal("-0.03")
+        # Same table identity (the funding_fees UNIQUE key still collapses a
+        # second leg, booked at the gate), distinct venue identity.
+        assert rows[0]["match_key"] == rows[1]["match_key"]
+
+
+class TestOnMalformedRaise:
+    """186 D-05 (funding half): a funding read that dropped a malformed row is
+    incomplete, so the derive must be able to refuse that key by name instead
+    of computing returns from the short read. ``on_malformed="raise"`` is the
+    opt-in; the default keeps the drop-and-warn behaviour every other caller
+    (sync, backfill, archive job) relies on.
+    """
+
+    # Distinctive values: the raised message must carry none of them.
+    _AMOUNT = "-0.0777"
+    _ROW_ID = "secret-row-id-9"
+
+    @staticmethod
+    def _binance(blank: bool) -> AsyncMock:
+        good = {
+            "symbol": "BTCUSDT", "incomeType": "FUNDING_FEE", "income": "-0.01",
+            "asset": "USDT", "time": 1700000000000, "tranId": "ok1",
+        }
+        bad = {
+            "symbol": "", "incomeType": "FUNDING_FEE",
+            "income": TestOnMalformedRaise._AMOUNT, "asset": "USDT",
+            "time": 1700000300000, "tranId": TestOnMalformedRaise._ROW_ID,
+        }
+        ex = AsyncMock()
+        ex.id = "binance"
+        ex.fapiPrivate_get_income = AsyncMock(
+            return_value=[good, bad] if blank else [good]
+        )
+        return ex
+
+    @staticmethod
+    def _okx(blank: bool) -> AsyncMock:
+        good = {
+            "instId": "BTC-USDT-SWAP", "type": "8", "pnl": "-0.01",
+            "ccy": "USDT", "ts": "1700000000000", "billId": "ok1",
+        }
+        bad = {
+            "instId": "", "type": "8", "pnl": TestOnMalformedRaise._AMOUNT,
+            "ccy": "USDT", "ts": "1700000300000",
+            "billId": TestOnMalformedRaise._ROW_ID,
+        }
+        ex = AsyncMock()
+        ex.id = "okx"
+        ex.private_get_account_bills = AsyncMock(
+            return_value={"data": [good, bad] if blank else [good]}
+        )
+        ex.private_get_account_bills_archive = AsyncMock(
+            return_value={"data": []}
+        )
+        return ex
+
+    @staticmethod
+    def _bybit(blank: bool) -> AsyncMock:
+        good = {
+            "symbol": "BTCUSDT", "type": "SETTLEMENT", "funding": "-0.01",
+            "currency": "USDT", "transactionTime": "1700000000000", "id": "ok1",
+        }
+        bad = {
+            "symbol": "", "type": "SETTLEMENT",
+            "funding": TestOnMalformedRaise._AMOUNT, "currency": "USDT",
+            "transactionTime": "1700000300000",
+            "id": TestOnMalformedRaise._ROW_ID,
+        }
+        page = {
+            "result": {
+                "list": [good, bad] if blank else [good],
+                "nextPageCursor": "",
+            }
+        }
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_account_transaction_log = _bybit_mock_with_fallback(
+            page
+        )
+        return ex
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "venue,builder,fetcher",
+        [
+            ("binance", "_binance", fetch_funding_binance),
+            ("okx", "_okx", fetch_funding_okx),
+            ("bybit", "_bybit", fetch_funding_bybit),
+        ],
+    )
+    async def test_raise_mode_refuses_a_walk_that_dropped_a_row(
+        self, venue, builder, fetcher
+    ) -> None:
+        from services.funding_fetch import FundingRowsMalformed
+
+        ex = getattr(self, builder)(True)
+        with pytest.raises(FundingRowsMalformed) as ei:
+            await fetcher(ex, STRATEGY_ID, since_ms=None, on_malformed="raise")
+
+        msg = str(ei.value)
+        # Venue and count only: no symbol, amount, row id or strategy id.
+        assert venue in msg
+        assert "1" in msg
+        assert self._AMOUNT not in msg
+        assert self._ROW_ID not in msg
+        assert STRATEGY_ID not in msg
+        assert "BTC" not in msg
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "builder,fetcher",
+        [
+            ("_binance", fetch_funding_binance),
+            ("_okx", fetch_funding_okx),
+            ("_bybit", fetch_funding_bybit),
+        ],
+    )
+    async def test_default_mode_still_drops_and_returns_the_kept_rows(
+        self, builder, fetcher
+    ) -> None:
+        ex = getattr(self, builder)(True)
+        rows = await fetcher(ex, STRATEGY_ID, since_ms=None)
+        explicit = await fetcher(
+            getattr(self, builder)(True), STRATEGY_ID, since_ms=None,
+            on_malformed="drop",
+        )
+        assert len(rows) == 1
+        assert [r["match_key"] for r in rows] == [
+            r["match_key"] for r in explicit
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "builder,fetcher",
+        [
+            ("_binance", fetch_funding_binance),
+            ("_okx", fetch_funding_okx),
+            ("_bybit", fetch_funding_bybit),
+        ],
+    )
+    async def test_raise_mode_without_a_malformed_row_matches_the_default(
+        self, builder, fetcher
+    ) -> None:
+        default = await fetcher(
+            getattr(self, builder)(False), STRATEGY_ID, since_ms=None
+        )
+        strict = await fetcher(
+            getattr(self, builder)(False), STRATEGY_ID, since_ms=None,
+            on_malformed="raise",
+        )
+        assert len(default) == 1
+        assert strict == default
+
+    @pytest.mark.asyncio
+    async def test_bybit_row_with_no_amount_field_also_refuses(self) -> None:
+        """A Bybit row carrying none of funding/change/cashFlow used to be
+        skipped with a log line only. It is a dropped row all the same, so raise
+        mode must count it (the walk is short by one settlement)."""
+        from services.funding_fetch import FundingRowsMalformed
+
+        page = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT", "type": "SETTLEMENT",
+                        "currency": "USDT", "transactionTime": "1700000000000",
+                        "id": self._ROW_ID,
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_account_transaction_log = _bybit_mock_with_fallback(
+            page
+        )
+        with pytest.raises(FundingRowsMalformed) as ei:
+            await fetch_funding_bybit(
+                ex, STRATEGY_ID, since_ms=None, on_malformed="raise"
+            )
+        assert self._ROW_ID not in str(ei.value)
+
+    def test_dispatcher_signature_is_unchanged(self) -> None:
+        """Plan 186-09 passes the keyword on the fetchers directly in the
+        derive; the dispatcher every other caller uses keeps today's contract."""
+        import inspect
+
+        assert "on_malformed" not in inspect.signature(fetch_funding).parameters

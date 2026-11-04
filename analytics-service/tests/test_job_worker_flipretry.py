@@ -138,8 +138,9 @@ async def test_deribit_cash_pass_hang_is_bounded_transient_not_permanent(monkeyp
 # Test 2 — ccxt transfers hang → TRANSIENT
 # ---------------------------------------------------------------------------
 async def test_ccxt_transfers_hang_is_bounded_transient(monkeypatch):
-    """C2: fetch_ccxt_transfers hangs on the ccxt venue (bybit) → cut at the
-    per-crawl bound → transient FAILED within the bound."""
+    """C2: the flow read hangs on the ccxt venue (bybit) → cut at the per-crawl bound →
+    transient FAILED within the bound. Since Phase 186 D-02 the Bybit flow read is the Unified
+    reader (not fetch_ccxt_transfers), so that is the call that hangs here."""
     monkeypatch.setattr(jw, "_BROKER_CRAWL_TIMEOUT_S", 0.05)
     ctx, capture = _ctx("bybit")
     patches = _common_patches(ctx) + [
@@ -153,7 +154,7 @@ async def test_ccxt_transfers_hang_is_bounded_transient(monkeypatch):
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "services.ccxt_flow_fetch.fetch_ccxt_transfers",
+            "services.job_worker.fetch_bybit_unified_flows",
             new=AsyncMock(side_effect=_hang),
         ),
     ]
@@ -186,8 +187,8 @@ async def test_ccxt_price_index_hang_is_bounded_transient(monkeypatch):
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "services.ccxt_flow_fetch.fetch_ccxt_transfers",
-            new=AsyncMock(return_value=[]),
+            "services.job_worker.fetch_bybit_unified_flows",
+            new=AsyncMock(return_value=([], [])),
         ),
         patch(
             "services.job_worker._resolve_ccxt_flow_price_index",

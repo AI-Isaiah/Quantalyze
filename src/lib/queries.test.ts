@@ -2989,6 +2989,147 @@ describe("unpricedNativeAccounts: the derive's omitted-account list reaches the 
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 186 plan 08 (D-03, D-05, D-07, SC-4). The compose writes
+// `failing_key_exits` beside the benign flag `failing_key_exited` for a key the
+// total stopped counting or holds at its last complete read (plan 186-07). The
+// reader names the OWNER's own key, so the readers say which key. The JSONB is
+// worker-written and untrusted: read defensively, log counts only.
+// ---------------------------------------------------------------------------
+describe("failingKeyExits: the compose's exited-key list reaches the Overview (186 SC-4)", () => {
+  const key = (id: string, label: string | null) => ({
+    id,
+    is_active: true,
+    exchange: "okx",
+    label,
+    sync_status: "complete",
+    last_sync_at: "2026-10-09T00:00:00Z",
+    disconnected_at: null,
+    venue_account_id: `va-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+  });
+  const KEYS = [key("K1", "Main"), key("K2", "Alpha"), key("K3", "  ")];
+  const row = (extra: Record<string, unknown>, trustworthy = true) => ({
+    payload: {
+      version: 2,
+      is_trustworthy: trustworthy,
+      curve: [{ date: "2026-10-09", equity_usd: 100 }],
+      returns: [{ date: "2026-10-09", r: 0.01 }],
+      flags: ["failing_key_exited"],
+      ...extra,
+    } as Record<string, unknown>,
+    computed_at: "2026-10-10T05:30:00Z",
+  });
+  const call = (r: Parameters<typeof derivePhase07Fields>[2], keys = KEYS) =>
+    derivePhase07Fields(keys, [], r);
+
+  it("names the owner's own key, the reason and the compose's day on a ready book", () => {
+    const result = call(
+      row({ failing_key_exits: [{ api_key_id: "K1", reason: "sync_failing", day: "2026-06-03" }] }),
+    );
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.failingKeyExits).toEqual([
+      { apiKeyId: "K1", label: "Main", reason: "sync_failing", day: "2026-06-03" },
+    ]);
+  });
+
+  it("is empty while the history is rebuilding: no curve is shown, so no key is named", () => {
+    const rebuilding = call(
+      row({ failing_key_exits: [{ api_key_id: "K1", reason: "sync_failing", day: "2026-06-03" }] }, false),
+    );
+    expect(rebuilding.equityHistoryState).toBe("rebuilding");
+    expect(rebuilding.failingKeyExits).toEqual([]);
+    expect(call(null).failingKeyExits).toEqual([]);
+  });
+
+  const good = { api_key_id: "K1", reason: "sync_failing", day: "2026-06-03" };
+
+  it("keeps day null (the key never counted), sorts by label then id, and names a blank label by its exchange", () => {
+    const result = call(
+      row({
+        failing_key_exits: [
+          { api_key_id: "K1", reason: "read_incomplete", day: "2026-06-03" },
+          { api_key_id: "K3", reason: "sync_failing", day: null },
+          { api_key_id: "K2", reason: "sync_failing", day: "2026-06-01" },
+        ],
+      }),
+    );
+    expect(result.failingKeyExits).toEqual([
+      { apiKeyId: "K2", label: "Alpha", reason: "sync_failing", day: "2026-06-01" },
+      { apiKeyId: "K1", label: "Main", reason: "read_incomplete", day: "2026-06-03" },
+      { apiKeyId: "K3", label: "okx", reason: "sync_failing", day: null },
+    ]);
+  });
+
+  describe("an entry that cannot be trusted is dropped and counted, never named (T-186-18, T-186-19, T-186-20)", () => {
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      recorders.sentryCalls.length = 0;
+    });
+    afterEach(() => errorSpy.mockRestore());
+
+    it("drops a key the owner does not hold, and logs received vs kept with no id, label or day", () => {
+      const result = call(
+        row({
+          failing_key_exits: [good, { api_key_id: "not-mine", reason: "sync_failing", day: "2026-06-03" }],
+        }),
+      );
+      expect(result.failingKeyExits?.map((e) => e.apiKeyId)).toEqual(["K1"]);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const message = String(errorSpy.mock.calls[0].join(" "));
+      expect(message).toContain("received 2");
+      expect(message).toContain("kept 1");
+      for (const leak of ["not-mine", "K1", "Main", "2026-06-03"]) expect(message).not.toContain(leak);
+      expect(recorders.sentryCalls).toHaveLength(1);
+      expect(recorders.sentryCalls[0].opts).toMatchObject({
+        tags: { op: "readFailingKeyExits" },
+        level: "warning",
+      });
+      expect(String((recorders.sentryCalls[0].err as Error).message)).not.toContain("not-mine");
+    });
+
+    it.each([
+      ["an entry that is not an object", null],
+      ["an unknown reason", { api_key_id: "K1", reason: "revoked", day: "2026-06-03" }],
+      ["a missing reason", { api_key_id: "K1", day: "2026-06-03" }],
+      ["a day that is not a string", { api_key_id: "K1", reason: "sync_failing", day: 20260603 }],
+      ["a day with the wrong shape", { api_key_id: "K1", reason: "sync_failing", day: "06/03/2026" }],
+      ["a day that is not on the calendar", { api_key_id: "K1", reason: "sync_failing", day: "2026-02-31" }],
+      ["a missing day", { api_key_id: "K1", reason: "sync_failing" }],
+    ])("drops %s and logs it", (_label, bad) => {
+      const result = call(row({ failing_key_exits: [good, { ...good, api_key_id: "K2" }, bad] }));
+      expect(result.failingKeyExits?.map((e) => e.apiKeyId)).toEqual(["K2", "K1"]);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(String(errorSpy.mock.calls[0].join(" "))).toContain("received 3, kept 2");
+    });
+
+    it("logs when the flag is raised but the list is missing or not an array", () => {
+      expect(call(row({})).failingKeyExits).toEqual([]);
+      expect(call(row({ failing_key_exits: good })).failingKeyExits).toEqual([]);
+      expect(errorSpy).toHaveBeenCalledTimes(2);
+      expect(String(errorSpy.mock.calls[0].join(" "))).toContain("received 0");
+      expect(recorders.sentryCalls).toHaveLength(2);
+    });
+
+    it("does not log when every entry is kept", () => {
+      call(row({ failing_key_exits: [good, { api_key_id: "K2", reason: "read_incomplete", day: null }] }));
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(recorders.sentryCalls).toHaveLength(0);
+    });
+
+    it.each([
+      ["the flag is absent", { flags: [], failing_key_exits: [good, null, { api_key_id: "x" }] }],
+      ["flags is not a list", { flags: "failing_key_exited", failing_key_exits: [good] }],
+    ])("is empty and silent when %s, whatever the list holds", (_label, extra) => {
+      expect(call(row(extra)).failingKeyExits).toEqual([]);
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(recorders.sentryCalls).toHaveLength(0);
+    });
+  });
+});
+
 /**
  * Phase 164.6.6.2.1 plan 16 (D-05, D-12) — a rankable row carries the unit the
  * StrategyTable chip reads. The anonymous ranking read projects the one scalar

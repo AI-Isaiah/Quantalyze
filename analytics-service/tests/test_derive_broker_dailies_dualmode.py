@@ -18,6 +18,7 @@ allocator_id).
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -71,7 +72,7 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
       - capture['upserts']: list of (table_name, payload, on_conflict)
       - capture['rpc_calls']: list of (rpc_name, payload)
     """
-    capture: dict = {"upserts": [], "rpc_calls": [], "deletes": [], "ops": []}
+    capture: dict = {"upserts": [], "rpc_calls": [], "deletes": [], "ops": [], "updates": []}
 
     ctx = MagicMock()
     ctx.exchange = AsyncMock()
@@ -130,6 +131,23 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
             return chain
 
         tbl.delete.side_effect = _delete
+
+        def _update(payload: object, **kw: object) -> MagicMock:
+            # Phase 186 R3-02: the refused derive marks its own compute_jobs row.
+            record: dict = {"table": name, "payload": payload, "filters": {}}
+            capture["updates"].append(record)
+            capture["ops"].append(("update", name))
+            chain = MagicMock()
+
+            def _eq(col: str, val: object) -> MagicMock:
+                record["filters"][f"eq:{col}"] = val
+                return chain
+
+            chain.eq.side_effect = _eq
+            chain.execute.return_value = MagicMock(data=[payload])
+            return chain
+
+        tbl.update.side_effect = _update
         return tbl
 
     ctx.supabase.table.side_effect = _table
@@ -1306,6 +1324,54 @@ class TestCashSettlementSeriesPersist:
 # branch mocks combine_native_ledger, not combine_realized_and_funding).
 
 
+class TestStrategyModeDroppedRowFlag:
+    """Founder decision D-12, review R3-03: a realized row the venue read dropped because it could
+    not be read is FLAGGED on the strategy's data-quality flags and the strategy keeps publishing.
+    The flag rides the prestamp, which replaces the column wholesale, so a clean re-read clears it."""
+
+    @staticmethod
+    async def _derive(flags: dict[str, object]) -> tuple[object, dict]:
+        from services.exchange import _record_dq_flag, get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-b", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-b", "user_id": "user-1"},
+        )
+
+        async def _realized(*_a: object, **_k: object) -> list:
+            for _flag, _value in flags.items():
+                _record_dq_flag(_flag, _value)
+            return []
+
+        patches = _patches(ctx, key_mode=False, returns=_two_day_returns())
+        patches[1] = patch("services.job_worker.fetch_all_trades", new=AsyncMock(side_effect=_realized))
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(
+                {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-b"}
+            )
+        return result, capture
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_row_is_flagged_on_the_prestamp_and_the_strategy_publishes(self) -> None:
+        result, capture = await self._derive({"daily_pnl_malformed_binance": True})
+        assert result.outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        (prestamp,) = [u[1] for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert prestamp["data_quality_flags"]["daily_pnl_malformed_binance"] is True
+        # a flag, not a warning: it is not a member of the guard set that promotes the status
+        from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+        assert "daily_pnl_malformed_binance" not in NAV_TWR_GUARD_KEYS
+        assert [u for u in capture["upserts"] if u[0] == "csv_daily_returns"] != []
+
+    @pytest.mark.asyncio
+    async def test_a_clean_re_read_writes_no_flag_so_the_wholesale_prestamp_clears_it(self) -> None:
+        result, capture = await self._derive({})
+        assert result.outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        (prestamp,) = [u[1] for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert not [k for k in prestamp["data_quality_flags"] if k.startswith("daily_pnl_malformed_")]
+
+
 class TestKeyModeDeribitParity:
     """A deribit allocator key produces the IDENTICAL per-key upsert shape as a
     ccxt allocator key — the dogfooding-gap consumer for an all-deribit allocator."""
@@ -1674,10 +1740,33 @@ async def _ccxt_key_derive_with_real_combine(
     realized: list[dict[str, object]],
     deposits: list[dict[str, object]],
     equity: float,
+    dq_flags: Mapping[str, object] | None = None,
+    funding_side_effect: BaseException | None = None,
+    expect_raises: type[BaseException] | None = None,
+    ctx_hook: Callable[[MagicMock], None] | None = None,
+    unified: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None,
+    unified_side_effect: BaseException | None = None,
+    job_extra: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Run a ccxt KEY-MODE derive with the REAL combine behind a spy. Returns what the
-    derive handed the combine (``full_history``, ``external_flows``) and what came back."""
+    derive handed the combine (``full_history``, ``external_flows``) and what came back.
+
+    Phase 186 plan 09: ``dq_flags`` makes the patched realized read record those flags INSIDE
+    the awaited read (RESEARCH Pitfall 1: that is where ``fetch_daily_pnl`` records them);
+    ``funding_side_effect`` makes the venue's funding fetcher raise it; ``expect_raises`` runs
+    the derive under ``pytest.raises`` and stores the exception as ``seen["raised"]``. The
+    capture of every table write and rpc is ``seen["capture"]``, the fetcher mocks
+    ``seen["mocks"]``, the exchange close ``seen["close"]``; ``ctx_hook`` may reshape the
+    context's supabase stub before the derive runs.
+
+    Phase 186 plan 10 (D-02): the Bybit branch reads the Unified edge. ``unified`` is the
+    ``(deposits, withdrawals)`` that read returns (default none), ``unified_side_effect`` makes it
+    raise; the mock is ``seen["mocks"]["unified"]``. It is ALWAYS patched, so no Bybit case can
+    reach a live exchange."""
     import services.broker_dailies as _bd
+    from services.exchange import _record_dq_flag, get_and_clear_last_dq_flags
+
+    get_and_clear_last_dq_flags()
 
     real_combine = _bd.combine_realized_and_funding
     seen: dict[str, object] = {}
@@ -1695,24 +1784,52 @@ async def _ccxt_key_derive_with_real_combine(
         strategy_row=None,
     )
 
+    if ctx_hook is not None:
+        ctx_hook(ctx)
+    close_mock = AsyncMock()
+    seen["close"] = close_mock
+
     async def _transfers(_ex: object, kind: str, _since: int, _now: int) -> list:
         return list(deposits) if kind == "deposits" else []
 
+    async def _realized_read(*_a: object, **_k: object) -> list[dict[str, object]]:
+        seen["realized_kwargs"] = dict(_k)
+        for _flag, _value in (dq_flags or {}).items():
+            _record_dq_flag(_flag, _value)
+        return list(realized)
+
+    def _funding_mock() -> AsyncMock:
+        if funding_side_effect is not None:
+            return AsyncMock(side_effect=funding_side_effect)
+        return AsyncMock(return_value=[])
+
+    mocks: dict[str, AsyncMock] = {
+        "binance": _funding_mock(),
+        "okx": _funding_mock(),
+        "bybit": _funding_mock(),
+        "transfers": AsyncMock(side_effect=_transfers),
+        "unified": (
+            AsyncMock(side_effect=unified_side_effect)
+            if unified_side_effect is not None
+            else AsyncMock(return_value=unified if unified is not None else ([], []))
+        ),
+    }
+    seen["mocks"] = mocks
+    seen["capture"] = _capture
+
     patches = [
         patch("services.job_worker._allocator_key_preflight", new=AsyncMock(return_value=ctx)),
-        patch("services.job_worker.fetch_all_trades", new=AsyncMock(return_value=list(realized))),
-        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch("services.job_worker.fetch_all_trades", new=AsyncMock(side_effect=_realized_read)),
+        patch("services.job_worker.aclose_exchange", new=close_mock),
         patch(
             "services.exchange.fetch_account_equity_and_upnl_usd",
             new=AsyncMock(return_value=(equity, False, 0.0, False)),
         ),
-        patch("services.funding_fetch.fetch_funding_binance", new=AsyncMock(return_value=[])),
-        patch("services.funding_fetch.fetch_funding_okx", new=AsyncMock(return_value=[])),
-        patch("services.funding_fetch.fetch_funding_bybit", new=AsyncMock(return_value=[])),
-        patch(
-            "services.ccxt_flow_fetch.fetch_ccxt_transfers",
-            new=AsyncMock(side_effect=_transfers),
-        ),
+        patch("services.funding_fetch.fetch_funding_binance", new=mocks["binance"]),
+        patch("services.funding_fetch.fetch_funding_okx", new=mocks["okx"]),
+        patch("services.funding_fetch.fetch_funding_bybit", new=mocks["bybit"]),
+        patch("services.ccxt_flow_fetch.fetch_ccxt_transfers", new=mocks["transfers"]),
+        patch("services.job_worker.fetch_bybit_unified_flows", new=mocks["unified"]),
         patch(
             "services.job_worker._resolve_ccxt_flow_price_index",
             new=AsyncMock(return_value={}),
@@ -1725,12 +1842,16 @@ async def _ccxt_key_derive_with_real_combine(
     ]
     from contextlib import ExitStack
 
+    job = {"id": "j-fh", "kind": "derive_broker_dailies", "api_key_id": "key-fh", **(job_extra or {})}
     with ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
-        result = await run_derive_broker_dailies_job(
-            {"id": "j-fh", "kind": "derive_broker_dailies", "api_key_id": "key-fh"}
-        )
+        if expect_raises is not None:
+            with pytest.raises(expect_raises) as _raised:
+                await run_derive_broker_dailies_job(job)
+            seen["raised"] = _raised.value
+            return seen
+        result = await run_derive_broker_dailies_job(job)
     seen["result"] = result
     return seen
 
@@ -1865,3 +1986,1400 @@ class TestCcxtFullHistoryVerdictHelper:
         before = [{**_daily_pnl_record(floor_day, 1.0), "timestamp": (floor - pd.Timedelta(seconds=1)).isoformat()}]
         assert _ccxt_full_history_verdict("okx", on_floor, [], now) is True
         assert _ccxt_full_history_verdict("okx", before, [], now) is False
+
+
+# ── Phase 186 plan 09 (D-05, SC-2, SC-6): a truncated or failed read is refused by name ──
+# "The run writes nothing for that key. Its last good stored days stay as they are, and the key
+# is marked read incomplete by name." The tests below drive the REAL derive with a realized read
+# that records its DQ flags inside the awaited read (where ``fetch_daily_pnl`` records them) and
+# assert on every write the capture saw, not on a return value alone.
+
+_SC2_APPROVED_STRATEGY_SENTENCE = (
+    "We could not read this account's full history from the exchange, "
+    "so these numbers stay at the last complete read."
+)
+
+
+def _healthy_okx_history() -> list[dict[str, object]]:
+    return [_daily_pnl_record(_utc_day(10 - i), 10.0) for i in range(0, 8)]
+
+
+def _read_incomplete_rows(capture: dict) -> list[dict]:
+    return [
+        u[1]
+        for u in capture["upserts"]
+        if u[0] == "allocator_equity_derived"
+        and str(u[1].get("kind", "")).startswith("read_incomplete:")
+    ]
+
+
+def _key_inputs_rows(capture: dict) -> list[dict]:
+    return [
+        u[1]
+        for u in capture["upserts"]
+        if u[0] == "allocator_equity_derived" and str(u[1].get("kind", "")).startswith("key_inputs:")
+    ]
+
+
+def _writes_other_than_marker(capture: dict) -> list[tuple]:
+    return [
+        u
+        for u in capture["upserts"]
+        if not (
+            u[0] == "allocator_equity_derived"
+            and str(u[1].get("kind", "")).startswith(("read_incomplete:", "nav_mark_refusal:"))
+        )
+    ]
+
+
+_COMPOSE_ENQUEUE = (
+    "enqueue_compute_job",
+    {"p_strategy_id": None, "p_allocator_id": "alloc-fh", "p_kind": "derive_allocator_equity"},
+)
+
+
+async def _refused_key_derive(
+    venue: str, dq_flags: Mapping[str, object], **kw: object
+) -> dict[str, object]:
+    seen = await _ccxt_key_derive_with_real_combine(
+        venue=venue,
+        realized=_healthy_okx_history(),
+        deposits=[],
+        equity=5000.0,
+        dq_flags=dq_flags,
+        **kw,  # type: ignore[arg-type]
+    )
+    return seen
+
+
+def _break_the_marker_write(ctx: MagicMock) -> None:
+    """``ctx_hook``: the ``allocator_equity_derived`` upsert fails, so no marker can land."""
+    original = ctx.supabase.table.side_effect
+
+    def _table(name: str) -> MagicMock:
+        tbl = original(name)
+        if name == "allocator_equity_derived":
+            tbl.upsert.side_effect = RuntimeError("db down")
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+
+
+def _assert_nothing_written_but_the_marker(seen: dict[str, object]) -> None:
+    capture = seen["capture"]
+    assert _writes_other_than_marker(capture) == [], (  # type: ignore[arg-type]
+        f"a refused key writes no series, key_inputs, nav mark or analytics: {capture['upserts']!r}"  # type: ignore[index]
+    )
+    mocks = seen["mocks"]
+    for name in ("binance", "okx", "bybit", "transfers"):
+        mocks[name].assert_not_awaited()  # type: ignore[index]
+
+
+class TestRealizedReadRefusedByName:
+    """SC-2 on the key-mode derive. RED on today's code: it returns DONE and upserts the
+    series from a truncated read."""
+
+    @pytest.mark.asyncio
+    async def test_the_derive_asks_for_the_read_deadline_because_it_alone_drains_the_flags(
+        self,
+    ) -> None:
+        """Review SFH-4. The deadline is opt-in on the realized read, and the per-key derive is the
+        caller that drains the DQ flags and refuses on them, so it must pass it. Drop the keyword
+        and a key too slow to read is no longer stopped at the budget: it runs into the 900 s
+        envelope and is retried with no resume."""
+        from services.exchange import DAILY_PNL_READ_DEADLINE_S
+
+        seen = await _refused_key_derive("okx", {})
+        assert seen["realized_kwargs"] == {  # type: ignore[comparison-overlap]
+            "since_ms": None,
+            "read_deadline_s": DAILY_PNL_READ_DEADLINE_S,
+        }
+
+    @pytest.mark.asyncio
+    async def test_okx_truncation_refuses_the_key_and_writes_only_the_marker(self) -> None:
+        seen = await _refused_key_derive("okx", {"daily_pnl_truncated_okx": True})
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        assert "daily_pnl_truncated_okx" in result.error_message  # type: ignore[attr-defined]
+        capture = seen["capture"]
+        markers = _read_incomplete_rows(capture)  # type: ignore[arg-type]
+        assert len(markers) == 1
+        marker = markers[0]
+        # T-186-22: the owner is the key row's user_id, never the job payload.
+        assert marker["allocator_id"] == "alloc-fh"
+        assert marker["kind"] == "read_incomplete:key-fh"
+        assert marker["payload"]["token"] == "daily_pnl_truncated_okx"
+        assert marker["payload"]["first_seen_day"] == marker["payload"]["last_seen_day"]
+        # The compose is told at once so the book can name the key.
+        assert capture["rpc_calls"] == [  # type: ignore[index]
+            (
+                "enqueue_compute_job",
+                {
+                    "p_strategy_id": None,
+                    "p_allocator_id": "alloc-fh",
+                    "p_kind": "derive_allocator_equity",
+                },
+            )
+        ]
+        # SC-6 / T-186-23: no series, no key_inputs, no nav mark; nothing past the read ran.
+        _assert_nothing_written_but_the_marker(seen)
+
+    @pytest.mark.asyncio
+    async def test_bybit_truncation_is_refused_permanently(self) -> None:
+        seen = await _refused_key_derive("bybit", {"daily_pnl_truncated_bybit": True})
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        markers = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert [m["payload"]["token"] for m in markers] == ["daily_pnl_truncated_bybit"]
+        _assert_nothing_written_but_the_marker(seen)
+
+    @pytest.mark.asyncio
+    async def test_binance_income_fallback_is_refused_permanently(self) -> None:
+        seen = await _refused_key_derive("binance", {"daily_pnl_binance_income_fallback": True})
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        markers = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert [m["payload"]["token"] for m in markers] == ["daily_pnl_binance_income_fallback"]
+        _assert_nothing_written_but_the_marker(seen)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("venue", "flag"),
+        [("okx", "daily_pnl_deadline_okx"), ("bybit", "daily_pnl_deadline_bybit")],
+    )
+    async def test_a_deadline_hit_is_refused_by_name_but_as_transient_so_it_is_retried(
+        self, venue: str, flag: str
+    ) -> None:
+        """Review WR-06. A cap hit is deterministic (the same history hits it again), a deadline
+        hit is venue latency: a retry an hour later may read the key in full. The refusal is named
+        with its own closed token and is TRANSIENT; refused permanently it dropped the key for the
+        whole day (the next key-mode derive is the 05:30 fan-out)."""
+        seen = await _refused_key_derive(venue, {flag: True})
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "read_deadline"
+        _assert_nothing_written_but_the_marker(seen)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("venue", "flag"),
+        [("okx", "daily_pnl_malformed_okx"), ("bybit", "daily_pnl_malformed_bybit")],
+    )
+    async def test_a_read_that_dropped_malformed_rows_is_not_refused_and_the_key_publishes(
+        self, venue: str, flag: str
+    ) -> None:
+        """Founder decision D-12 (2026-11-04), reversing review SFH-5. A malformed row is the row's
+        content, so a retry drops the same row and the key would be refused every day for as long
+        as the row stays in the walk, with no one having counted how many production keys carry
+        one. The row is stamped as a data-quality flag (``daily_pnl_malformed_*``, pinned in
+        ``test_exchange_harness.py``) and the key keeps publishing, as it did before 186. RED
+        before: the derive wrote only a ``read_malformed`` marker and no series."""
+        seen = await _refused_key_derive(venue, {flag: True})
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        assert _read_incomplete_rows(seen["capture"]) == []  # type: ignore[arg-type]
+        assert _writes_other_than_marker(seen["capture"]) != []  # type: ignore[arg-type]
+        # Review R3-03: D-12 says the dropped row is recorded as a data-quality flag "rather than
+        # only a log line". Key mode records it on the key's own owner-only ``key_inputs`` record
+        # (never the publicly readable strategy_analytics.data_quality_flags), so the production
+        # count is a SELECT over it. RED before: the derive drained the flag into the verdict and
+        # dropped it, so nothing stored it.
+        (key_inputs,) = _key_inputs_rows(seen["capture"])  # type: ignore[arg-type]
+        assert key_inputs["payload"]["daily_pnl_malformed"] == [flag]
+        assert [u for u in seen["capture"]["upserts"] if u[0] == "strategy_analytics"] == []  # type: ignore[index]
+
+    @pytest.mark.asyncio
+    async def test_a_clean_re_read_stores_no_malformed_flag(self) -> None:
+        """The record is rewritten whole on every derive, so a clean re-read clears the flag."""
+        seen = await _refused_key_derive("okx", {})
+        (key_inputs,) = _key_inputs_rows(seen["capture"])  # type: ignore[arg-type]
+        assert "daily_pnl_malformed" not in key_inputs["payload"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("attempts", [2, 3])
+    async def test_a_deadline_hit_on_a_retry_is_refused_permanently(self, attempts: int) -> None:
+        """Review R2-05. A deadline hit caused by volume (two heavy weeks of pages) is the same
+        size on every retry, so retrying it burns every attempt of every day for nothing. It is
+        transient on the FIRST attempt only (the test above); from the second it is permanent,
+        still named ``read_deadline``. RED before: every attempt came back transient."""
+        seen = await _refused_key_derive(
+            "okx", {"daily_pnl_deadline_okx": True}, job_extra={"attempts": attempts, "max_attempts": 3}
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "read_deadline"
+        _assert_nothing_written_but_the_marker(seen)
+
+    @pytest.mark.asyncio
+    async def test_a_deadline_hit_on_the_first_attempt_stays_transient(self) -> None:
+        """The boundary of the test above: ``attempts`` 1 is the first attempt."""
+        seen = await _refused_key_derive(
+            "okx", {"daily_pnl_deadline_okx": True}, job_extra={"attempts": 1, "max_attempts": 3}
+        )
+        assert seen["result"].error_kind == "transient"  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_a_cap_hit_beside_a_deadline_hit_stays_permanent(self) -> None:
+        """The cap is deterministic: a retry cannot shorten the history, so it wins."""
+        seen = await _refused_key_derive(
+            "okx", {"daily_pnl_deadline_okx": True, "daily_pnl_truncated_okx": True}
+        )
+        assert seen["result"].error_kind == "permanent"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "daily_pnl_truncated_okx"
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_whose_marker_write_failed_is_transient_so_the_retry_names_the_key(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review SFH-2. ``_record_read_incomplete`` never raises, so a failed marker write used
+        to leave a permanently refused key unnamed AND unretried until the next day's derive.
+        The refusal stays a refusal (nothing else is written) but is transient, so the queue
+        retries it and the retry writes the marker."""
+
+        def _break_the_marker_write(ctx: MagicMock) -> None:
+            original = ctx.supabase.table.side_effect
+
+            def _table(name: str) -> MagicMock:
+                tbl = original(name)
+                if name == "allocator_equity_derived":
+                    tbl.upsert.side_effect = RuntimeError("db down")
+                return tbl
+
+            ctx.supabase.table.side_effect = _table
+
+        with caplog.at_level("WARNING"):
+            seen = await _refused_key_derive(
+                "okx", {"daily_pnl_truncated_okx": True}, ctx_hook=_break_the_marker_write
+            )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        assert "read incomplete marker not recorded" in caplog.text
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_fetch_error_is_transient_and_names_the_class_only(self) -> None:
+        seen = await _refused_key_derive(
+            "okx",
+            {
+                "daily_pnl_fetch_error": True,
+                "daily_pnl_fetch_error_class": "NetworkError",
+            },
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        assert "daily_pnl_fetch_error" in result.error_message  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "daily_pnl_fetch_error"
+        assert marker["payload"]["error_class"] == "NetworkError"
+        _assert_nothing_written_but_the_marker(seen)
+
+    @pytest.mark.asyncio
+    async def test_a_venue_message_in_the_class_slot_is_never_stored(self) -> None:
+        """T-186-21: only an identifier-shaped class name survives; a signed URL does not."""
+        leaky = "https://api.venue.example/v5?sign=abc123 failed"
+        seen = await _refused_key_derive(
+            "okx",
+            {"daily_pnl_fetch_error": True, "daily_pnl_fetch_error_class": leaky},
+        )
+        result = seen["result"]
+        assert "abc123" not in result.error_message  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert "abc123" not in repr(marker)
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_read_defers_to_the_429_arm_and_marks_nothing(self) -> None:
+        import ccxt
+
+        stamp = AsyncMock()
+        with patch("services.job_worker._stamp_429", new=stamp):
+            seen = await _refused_key_derive(
+                "okx",
+                {
+                    "daily_pnl_fetch_error": True,
+                    "daily_pnl_fetch_error_class": "RateLimitExceeded",
+                },
+                expect_raises=ccxt.RateLimitExceeded,
+            )
+        assert isinstance(seen["raised"], ccxt.RateLimitExceeded)
+        stamp.assert_awaited_once()
+        assert seen["capture"]["upserts"] == []  # type: ignore[index]
+        assert seen["capture"]["rpc_calls"] == []  # type: ignore[index]
+
+    @pytest.mark.asyncio
+    async def test_the_exchange_is_still_closed_on_a_refusal(self) -> None:
+        seen = await _refused_key_derive("okx", {"daily_pnl_truncated_okx": True})
+        assert seen["result"].outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        seen["close"].assert_awaited()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_a_clean_read_is_not_refused(self) -> None:
+        """The refusal is not vacuous: no flag, same history, the key derives."""
+        seen = await _refused_key_derive("okx", {})
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        assert _read_incomplete_rows(seen["capture"]) == []  # type: ignore[arg-type]
+
+
+class TestATimedOutReadIsNamed:
+    """Review WR-03 / SFH-1. SC-2 says a failed read refuses the key BY NAME. A funding or flow
+    read that timed out, or a derive that overran its 900 s envelope, returned a transient failure
+    with no marker, so once the retries ran out the key was carried flat in the book and nobody
+    was told. Each now records ``read_timeout`` and enqueues the compose; the outcome stays
+    transient (a retry may well read the key)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("venue", ["okx", "binance", "bybit"])
+    async def test_a_funding_read_that_times_out_is_marked_and_the_book_is_told(
+        self, venue: str
+    ) -> None:
+        import asyncio
+
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue=venue,
+            realized=_healthy_okx_history(),
+            deposits=[],
+            equity=5000.0,
+            funding_side_effect=asyncio.TimeoutError(),
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["kind"] == "read_incomplete:key-fh"
+        assert marker["payload"]["token"] == "read_timeout"
+        assert marker["payload"]["error_class"] == "TimeoutError"
+        assert _COMPOSE_ENQUEUE in seen["capture"]["rpc_calls"]  # type: ignore[index]
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_unified_flow_read_that_times_out_is_marked_and_the_book_is_told(self) -> None:
+        import asyncio
+
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified_side_effect=asyncio.TimeoutError(),
+        )
+        assert seen["result"].error_kind == "transient"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "read_timeout"
+        assert _COMPOSE_ENQUEUE in seen["capture"]["rpc_calls"]  # type: ignore[index]
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+
+    @staticmethod
+    async def _dispatch_overrun(job: dict) -> tuple[object, MagicMock, MagicMock]:
+        import asyncio
+
+        from services.job_worker import TIMEOUT_PER_KIND, dispatch
+
+        async def _never_finishes(_job: dict) -> None:
+            await asyncio.sleep(30)
+
+        supabase = MagicMock()
+        supabase.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+            data={"user_id": "alloc-fh"}
+        )
+        record = AsyncMock(return_value=True)
+        enqueue = MagicMock()
+        with (
+            patch.dict(TIMEOUT_PER_KIND, {"derive_broker_dailies": 0.05}),
+            patch("services.job_worker.run_derive_broker_dailies_job", new=_never_finishes),
+            patch("services.job_worker.get_supabase", return_value=supabase),
+            patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
+            patch("services.job_worker._record_read_incomplete", new=record),
+            patch("services.job_worker._enqueue_allocator_compose", new=enqueue),
+        ):
+            result = await dispatch(job)
+        return result, record, enqueue
+
+    @pytest.mark.asyncio
+    async def test_a_key_mode_derive_that_overruns_its_budget_is_marked_and_the_book_is_told(
+        self,
+    ) -> None:
+        result, record, enqueue = await self._dispatch_overrun(
+            {"id": "j-1", "kind": "derive_broker_dailies", "api_key_id": "key-fh"}
+        )
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        record.assert_awaited_once()
+        kwargs = record.await_args.kwargs  # type: ignore[union-attr]
+        # The owner is the key row's user_id, never a job-payload value.
+        assert kwargs["allocator_id"] == "alloc-fh"
+        assert kwargs["api_key_id"] == "key-fh"
+        assert kwargs["token"] == "read_timeout"
+        assert kwargs["error_class"] == "TimeoutError"
+        enqueue.assert_called_once()
+        assert enqueue.call_args.args[1] == "alloc-fh"
+
+    @pytest.mark.asyncio
+    async def test_an_overrun_whose_marker_did_not_land_is_logged_at_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review SFH M1. The overrun is transient and retried, but a marker that never lands
+        leaves the key unnamed; that is an ERROR, not only the marker writer's WARNING."""
+        from services.job_worker import TIMEOUT_PER_KIND, dispatch
+        import asyncio
+
+        async def _never_finishes(_job: dict) -> None:
+            await asyncio.sleep(30)
+
+        supabase = MagicMock()
+        supabase.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+            data={"user_id": "alloc-fh"}
+        )
+        with (
+            patch.dict(TIMEOUT_PER_KIND, {"derive_broker_dailies": 0.05}),
+            patch("services.job_worker.run_derive_broker_dailies_job", new=_never_finishes),
+            patch("services.job_worker.get_supabase", return_value=supabase),
+            patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
+            patch("services.job_worker._record_read_incomplete", new=AsyncMock(return_value=False)),
+            patch("services.job_worker._enqueue_allocator_compose", new=MagicMock()),
+            caplog.at_level("WARNING"),
+        ):
+            result = await dispatch(
+                {"id": "j-3", "kind": "derive_broker_dailies", "api_key_id": "key-fh"}
+            )
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        errors = [r for r in caplog.records if r.levelname == "ERROR" and "overrun key not named" in r.getMessage()]
+        assert len(errors) == 1
+        assert "key-fh" in errors[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_strategy_mode_overrun_marks_nobody(self) -> None:
+        result, record, enqueue = await self._dispatch_overrun(
+            {"id": "j-2", "kind": "derive_broker_dailies", "strategy_id": "strat-1"}
+        )
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        record.assert_not_awaited()
+        enqueue.assert_not_called()
+
+
+class TestReadIncompleteMarkerHelpers:
+    """``_record_read_incomplete`` / ``_clear_read_incomplete``: owner-only, closed tokens,
+    never raising."""
+
+    @staticmethod
+    def _store() -> tuple[MagicMock, dict]:
+        rows: dict[tuple[str, str], dict] = {}
+        log: dict = {"upserts": [], "deletes": []}
+        supa = MagicMock()
+
+        def _table(name: str) -> MagicMock:
+            assert name == "allocator_equity_derived"
+            t = MagicMock()
+            query: dict = {}
+
+            def _select(*_a: object) -> MagicMock:
+                return t
+
+            def _eq(col: str, val: object) -> MagicMock:
+                query[col] = val
+                return t
+
+            def _execute() -> MagicMock:
+                key = (str(query.get("allocator_id")), str(query.get("kind")))
+                if query.get("_delete"):
+                    log["deletes"].append(key)
+                    rows.pop(key, None)
+                    return MagicMock(data=[])
+                row = rows.get(key)
+                return MagicMock(data=[row] if row else [])
+
+            def _upsert(payload: dict, **_k: object) -> MagicMock:
+                log["upserts"].append(payload)
+                rows[(payload["allocator_id"], payload["kind"])] = payload
+                stub = MagicMock()
+                stub.execute.return_value = MagicMock(data=1)
+                return stub
+
+            def _delete() -> MagicMock:
+                query["_delete"] = True
+                return t
+
+            t.select.side_effect = _select
+            t.eq.side_effect = _eq
+            t.limit.return_value = t
+            t.execute.side_effect = _execute
+            t.upsert.side_effect = _upsert
+            t.delete.side_effect = _delete
+            return t
+
+        supa.table.side_effect = _table
+        return supa, log
+
+    @pytest.mark.asyncio
+    async def test_a_second_refusal_keeps_first_seen_day_and_moves_last_seen_day(self) -> None:
+        from services.job_worker import _record_read_incomplete
+
+        supa, log = self._store()
+        with patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())):
+            await _record_read_incomplete(
+                supa,
+                allocator_id="a",
+                api_key_id="k",
+                token="daily_pnl_truncated_okx",
+                error_class=None,
+                day="2026-11-01",
+            )
+            await _record_read_incomplete(
+                supa,
+                allocator_id="a",
+                api_key_id="k",
+                token="daily_pnl_fetch_error",
+                error_class="NetworkError",
+                day="2026-11-03",
+            )
+        payload = log["upserts"][-1]["payload"]
+        assert payload["first_seen_day"] == "2026-11-01"
+        assert payload["last_seen_day"] == "2026-11-03"
+        assert payload["token"] == "daily_pnl_fetch_error"
+        assert payload["error_class"] == "NetworkError"
+
+    @pytest.mark.asyncio
+    async def test_a_token_outside_the_closed_set_writes_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        from services.job_worker import READ_INCOMPLETE_TOKENS, _record_read_incomplete
+
+        assert "https://x.example/?sign=1" not in READ_INCOMPLETE_TOKENS
+        supa, log = self._store()
+        with patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())):
+            await _record_read_incomplete(
+                supa,
+                allocator_id="a",
+                api_key_id="k",
+                token="https://x.example/?sign=1",
+                error_class=None,
+                day="2026-11-03",
+            )
+        assert log["upserts"] == []
+
+    @pytest.mark.asyncio
+    async def test_the_token_set_is_exactly_the_shipped_closed_set(self) -> None:
+        from services.job_worker import READ_INCOMPLETE_KIND_PREFIX, READ_INCOMPLETE_TOKENS
+
+        assert READ_INCOMPLETE_KIND_PREFIX == "read_incomplete:"
+        assert READ_INCOMPLETE_TOKENS == frozenset(
+            {
+                "daily_pnl_fetch_error",
+                "daily_pnl_truncated_okx",
+                "daily_pnl_truncated_bybit",
+                "daily_pnl_binance_income_fallback",
+                "read_deadline",
+                "read_timeout",
+                "funding_truncated",
+                "funding_fetch_error",
+                "funding_rows_malformed",
+                "bybit_unified_flow_error",
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_record_and_clear_never_raise(self, caplog: pytest.LogCaptureFixture) -> None:
+        from services.job_worker import _clear_read_incomplete, _record_read_incomplete
+
+        broken = MagicMock()
+        broken.table.side_effect = RuntimeError("signed-url-secret")
+        with patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())):
+            with caplog.at_level("WARNING"):
+                await _record_read_incomplete(
+                    broken,
+                    allocator_id="a",
+                    api_key_id="k",
+                    token="funding_truncated",
+                    error_class=None,
+                    day="2026-11-03",
+                )
+                await _clear_read_incomplete(broken, allocator_id="a", api_key_id="k")
+        text = caplog.text
+        assert "RuntimeError" in text
+        assert "signed-url-secret" not in text
+
+
+class TestStrategyModeRefusal:
+    """Strategy mode names the refusal and leaves the published series alone
+    (``heal_series=False``); it writes no marker.
+
+    Review WR-01. The founder-approved sentence says the numbers "stay at the last complete
+    read", so it is stamped only where numbers exist to stay, and there it is written ERROR-ONLY
+    (status, metrics and flags untouched). Where no published numbers exist the stamp is the
+    failed one and carries no sentence at all (the approved one would promise numbers that were
+    never there)."""
+
+    @staticmethod
+    async def _refuse(
+        caplog: pytest.LogCaptureFixture,
+        stored_row: dict | None,
+        *,
+        live_job_metadata: dict | None = None,
+        claimed_job_metadata: dict | None = None,
+        break_the_job_marker_write: bool = False,
+        dq_flag: str = "daily_pnl_truncated_okx",
+        attempts: tuple[int, int] | None = None,
+    ) -> tuple[object, dict]:
+        from services.exchange import _record_dq_flag, get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-st", "exchange": "okx", "user_id": "user-st"},
+            strategy_row={"id": "strat-st", "user_id": "user-st"},
+        )
+        original_table = ctx.supabase.table.side_effect
+
+        def _table(name: str) -> MagicMock:
+            tbl = original_table(name)
+            if name == "strategy_analytics":
+                tbl.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+                    MagicMock(data=stored_row)
+                )
+            if name == "compute_jobs":
+                tbl.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
+                    MagicMock(data={"metadata": live_job_metadata})
+                )
+                if break_the_job_marker_write:
+                    tbl.update.side_effect = RuntimeError("db down")
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+
+        async def _realized(*_a: object, **_k: object) -> list:
+            _record_dq_flag(dq_flag, True)
+            return _healthy_okx_history()
+
+        patches = [
+            patch("services.job_worker._exchange_preflight", new=AsyncMock(return_value=ctx)),
+            patch("services.job_worker.fetch_all_trades", new=AsyncMock(side_effect=_realized)),
+            patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+            patch(
+                "services.exchange.fetch_account_equity_and_upnl_usd",
+                new=AsyncMock(return_value=(5000.0, False, 0.0, False)),
+            ),
+            patch("services.funding_fetch.fetch_funding_okx", new=AsyncMock(return_value=[])),
+            patch(
+                "services.job_worker.db_execute",
+                new=AsyncMock(side_effect=lambda fn: fn()),
+            ),
+            patch(
+                "services.job_worker.db_read_with_retry",
+                new=AsyncMock(side_effect=lambda fn: fn()),
+            ),
+        ]
+        from contextlib import ExitStack
+
+        with ExitStack() as stack, caplog.at_level("WARNING"):
+            for p in patches:
+                stack.enter_context(p)
+            result = await run_derive_broker_dailies_job(
+                {
+                    "id": "j-st",
+                    "kind": "derive_broker_dailies",
+                    "strategy_id": "strat-st",
+                    **({"metadata": claimed_job_metadata} if claimed_job_metadata else {}),
+                    **({"attempts": attempts[0], "max_attempts": attempts[1]} if attempts else {}),
+                }
+            )
+        return result, capture
+
+    @staticmethod
+    def _assert_nothing_else_written(capture: dict) -> None:
+        # heal_series=False: the published series is never deleted.
+        assert [d for d in capture["deletes"] if d["table"] != "strategy_analytics"] == []
+        assert [u for u in capture["upserts"] if u[0] == "csv_daily_returns"] == []
+        assert [u for u in capture["upserts"] if u[0] == "allocator_equity_derived"] == []
+        assert capture["rpc_calls"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored_row",
+        [
+            pytest.param(
+                {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+                id="complete",
+            ),
+            # The status bridge rewrites a published row to 'computing' while the follow-on job is
+            # pending, so the numbers are the oracle, not the status. Review R3-01: the numbers are
+            # the headline ``metrics_json``. The by-basis column is NULL on every path but a Deribit
+            # options book, so this is the shape of every perp-only, ccxt or key-mode strategy.
+            pytest.param(
+                {"computation_status": "computing", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+                id="computing-over-published-headline-with-null-by-basis",
+            ),
+        ],
+    )
+    async def test_where_numbers_exist_the_refusal_is_error_only_and_keeps_them(
+        self, caplog: pytest.LogCaptureFixture, stored_row: dict
+    ) -> None:
+        result, capture = await self._refuse(caplog, stored_row)
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        assert "daily_pnl_truncated_okx" in result.error_message  # type: ignore[attr-defined]
+        sa = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert len(sa) == 1
+        payload = sa[0][1]
+        assert payload["computation_error"] == _SC2_APPROVED_STRATEGY_SENTENCE
+        # Phase 186 D-11: the writer provenance naming this job is what the status bridge keeps
+        # as the row's sentence (migration 20261105120000); the job's own marker, asserted below,
+        # is what makes the bridge keep the status and the numbers.
+        assert payload["computation_error_source"] == "writer"
+        assert payload["computation_error_job_id"] == "j-st"
+        # The sentence says the numbers stay, so the write must not touch them.
+        for column in ("computation_status", "metrics_json_by_basis", "data_quality_flags"):
+            assert column not in payload, column
+        # detail rides the log line, never the curated column.
+        assert "daily_pnl_truncated_okx" not in payload["computation_error"]
+        assert "detail: daily_pnl_truncated_okx" in caplog.text
+        self._assert_nothing_else_written(capture)
+        # Review R3-02: the job carries its own marker, written BEFORE the sentence, so the status
+        # bridge keeps the figures for as long as this failure is live (the row's provenance is
+        # overwritten by the next sync and the next refusal).
+        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
+
+        assert capture["updates"] == [
+            {
+                "table": "compute_jobs",
+                "payload": {"metadata": {READ_REFUSAL_KEPT_FIGURES_KEY: True}},
+                "filters": {"eq:id": "j-st"},
+            }
+        ]
+        ops = capture["ops"]
+        assert ops.index(("update", "compute_jobs")) < ops.index(("upsert", "strategy_analytics"))
+
+    @pytest.mark.asyncio
+    async def test_the_job_marker_is_merged_into_the_live_metadata_not_written_over_it(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """PostgREST replaces the column, so the marker is a read-modify-write: the claim's own
+        telemetry key and a user's retraction survive it."""
+        live = {"unified_backbone_at_claim": True, "refresh_marker_retracted": "ledger-refresh"}
+        _, capture = await self._refuse(
+            caplog,
+            {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+            live_job_metadata=live,
+        )
+        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
+
+        assert capture["updates"][0]["payload"] == {
+            "metadata": {**live, READ_REFUSAL_KEPT_FIGURES_KEY: True}
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_on_a_job_a_users_sync_now_took_over_is_marked_too(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review R3-04. A user's Sync now folded into an in-flight marked refresh retracts the
+        refresh marker on the live row. The refusal that follows is the answer that user is waiting
+        for: it keeps the figures, writes the approved sentence and marks the job, so the bridge
+        does not stamp the row failed under "these numbers stay"."""
+        live = {"refresh_marker_retracted": "ledger-refresh"}
+        result, capture = await self._refuse(
+            caplog,
+            {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+            live_job_metadata=live,
+            claimed_job_metadata={"source": "ledger-refresh"},
+        )
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
+
+        assert capture["updates"][0]["payload"] == {
+            "metadata": {**live, READ_REFUSAL_KEPT_FIGURES_KEY: True}
+        }
+        sa = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert len(sa) == 1
+        assert sa[0][1]["computation_error"] == _SC2_APPROVED_STRATEGY_SENTENCE
+        assert "computation_status" not in sa[0][1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("dq_flag", "attempts"),
+        [
+            pytest.param("daily_pnl_fetch_error", (1, 3), id="transient-fetch-error-first-attempt"),
+            pytest.param("daily_pnl_fetch_error", (2, 3), id="transient-fetch-error-middle-attempt"),
+            pytest.param("daily_pnl_deadline_okx", (1, 3), id="first-attempt-deadline"),
+        ],
+    )
+    async def test_a_retryable_refusal_over_published_figures_writes_nothing_to_the_row(
+        self, caplog: pytest.LogCaptureFixture, dq_flag: str, attempts: tuple[int, int]
+    ) -> None:
+        """Review PR3-01 and R4-01. The marker means the refusal is FINAL, and the sentence follows
+        it. A retryable refusal over published figures writes neither: not the marker (it would
+        cross attempts and protect the job's later failure), and not the sentence (on a warned row
+        the bridge keeps it through the retry, so a later non-refusal failure would keep "these
+        numbers stay" over ``failed``). The retry decides alone."""
+        result, capture = await self._refuse(
+            caplog,
+            {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+            dq_flag=dq_flag,
+            attempts=attempts,
+        )
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        assert capture["updates"] == []
+        assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []
+        self._assert_nothing_else_written(capture)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("dq_flag", "attempts", "error_kind"),
+        [
+            pytest.param("daily_pnl_fetch_error", (3, 3), "transient", id="transient-on-the-last-attempt"),
+            pytest.param("daily_pnl_deadline_okx", (2, 3), "permanent", id="repeat-deadline-is-permanent"),
+            pytest.param("daily_pnl_truncated_okx", (1, 3), "permanent", id="permanent-on-the-first-attempt"),
+        ],
+    )
+    async def test_a_final_refusal_writes_the_marker_before_the_sentence(
+        self, caplog: pytest.LogCaptureFixture, dq_flag: str, attempts: tuple[int, int], error_kind: str
+    ) -> None:
+        """Review PR3-01, the other half: a refusal that is final (permanent, or transient on the
+        last attempt, which ``mark_compute_job_failed`` makes ``failed_final``) is marked."""
+        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
+
+        result, capture = await self._refuse(
+            caplog,
+            {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+            dq_flag=dq_flag,
+            attempts=attempts,
+        )
+        assert result.error_kind == error_kind  # type: ignore[attr-defined]
+        assert capture["updates"] == [
+            {
+                "table": "compute_jobs",
+                "payload": {"metadata": {READ_REFUSAL_KEPT_FIGURES_KEY: True}},
+                "filters": {"eq:id": "j-st"},
+            }
+        ]
+        ops = capture["ops"]
+        assert ops.index(("update", "compute_jobs")) < ops.index(("upsert", "strategy_analytics"))
+
+    @pytest.mark.asyncio
+    async def test_a_marker_that_did_not_land_fails_the_job_transient_and_writes_no_sentence(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A sentence without its marker is the contradiction the bridge cannot undo: it would stamp
+        the row failed under "these numbers stay". So the marker is written first, and if it cannot
+        be written nothing is, and the queue retries."""
+        from services.job_worker import StampIOUnavailable
+
+        with pytest.raises(StampIOUnavailable):
+            await self._refuse(
+                caplog,
+                {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+                break_the_job_marker_write=True,
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored_row",
+        [
+            pytest.param(None, id="no-row"),
+            pytest.param(
+                {"computation_status": "computing", "metrics_json": None, "metrics_json_by_basis": None},
+                id="first-compute",
+            ),
+            # Review R3-01 (worker and bridge agree): by-basis alone is not figures, and a 'failed'
+            # row is not published whatever it still carries.
+            pytest.param(
+                {"computation_status": "computing", "metrics_json": None, "metrics_json_by_basis": {"a": 1}},
+                id="computing-with-only-a-by-basis-object",
+            ),
+            pytest.param(
+                {"computation_status": "failed", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+                id="failed-row-with-stale-headline",
+            ),
+        ],
+    )
+    async def test_where_no_numbers_exist_the_failed_stamp_carries_no_promise(
+        self, caplog: pytest.LogCaptureFixture, stored_row: dict | None
+    ) -> None:
+        result, capture = await self._refuse(caplog, stored_row)
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        sa = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert len(sa) == 1
+        payload = sa[0][1]
+        assert payload["computation_status"] == "failed"
+        # Review R2-02: NO sentence and NO writer provenance are written. A writer sentence (even
+        # an empty one) is kept by the status bridge over its per-kind curated copy, which left
+        # every surface showing a bare "failed" with no cause. Asserted on what is WRITTEN: the
+        # keys are present and None, so the upsert clears any earlier sentence and markers too.
+        assert payload["computation_error"] is None
+        assert payload["computation_error_source"] is None
+        assert payload["computation_error_job_id"] is None
+        assert "detail: daily_pnl_truncated_okx" in caplog.text
+        self._assert_nothing_else_written(capture)
+        # No figures to keep, so no marker: the bridge must stamp this one failed.
+        assert capture["updates"] == []
+
+
+class TestFundingReadRefusedByName:
+    """D-05 'realized or funding read': the funding half."""
+
+    @pytest.mark.asyncio
+    async def test_a_funding_page_ceiling_is_refused_permanently(self) -> None:
+        from services.funding_fetch import FundingFetchCeilingExceeded
+
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="okx",
+            realized=_healthy_okx_history(),
+            deposits=[],
+            equity=5000.0,
+            funding_side_effect=FundingFetchCeilingExceeded("okx funding hit its page ceiling"),
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "funding_truncated"
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+        seen["mocks"]["transfers"].assert_not_awaited()  # type: ignore[index]
+
+    @pytest.mark.asyncio
+    async def test_malformed_funding_rows_are_refused_and_asked_for_with_raise(self) -> None:
+        from services.funding_fetch import FundingRowsMalformed
+
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="okx",
+            realized=_healthy_okx_history(),
+            deposits=[],
+            equity=5000.0,
+            funding_side_effect=FundingRowsMalformed("okx funding read dropped 2 malformed row(s)"),
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "funding_rows_malformed"
+        okx = seen["mocks"]["okx"]  # type: ignore[index]
+        assert okx.await_args.kwargs.get("on_malformed") == "raise"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("venue", ["binance", "okx", "bybit"])
+    async def test_every_venue_funding_call_passes_on_malformed_raise(self, venue: str) -> None:
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue=venue, realized=_healthy_okx_history(), deposits=[], equity=5000.0,
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        mock = seen["mocks"][venue]  # type: ignore[index]
+        assert mock.await_args.kwargs.get("on_malformed") == "raise"
+
+    @pytest.mark.asyncio
+    async def test_another_funding_exception_is_named_and_propagates_unchanged(self) -> None:
+        import ccxt
+
+        boom = ccxt.NetworkError("funding page failed")
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="okx",
+            realized=_healthy_okx_history(),
+            deposits=[],
+            equity=5000.0,
+            funding_side_effect=boom,
+            expect_raises=ccxt.NetworkError,
+        )
+        # The dispatcher's classification is exactly today's: the SAME object arrives.
+        assert seen["raised"] is boom
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "funding_fetch_error"
+        # Review WR-02: the compose is told at once, so a single-key book names the key now and
+        # not after the next day's compose (the re-raised failure is permanent for some classes).
+        assert _COMPOSE_ENQUEUE in seen["capture"]["rpc_calls"]  # type: ignore[index]
+        assert marker["payload"]["error_class"] == "NetworkError"
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_funding_failure_whose_marker_did_not_land_is_transient_not_the_permanent_reraise(
+        self,
+    ) -> None:
+        """Review R2-06 (SFH-2 at a site the first fix did not touch). A funding exception that
+        classifies PERMANENT, with the marker write failing at the same moment, was re-raised as
+        permanent: the key stayed unnamed and never retried until the next day's derive. It now
+        comes back as a transient failure so the retry writes the marker. RED before: the
+        original exception was raised."""
+        import ccxt
+
+        from services.job_worker import classify_exception
+
+        boom = ccxt.AuthenticationError("funding key refused")
+        assert classify_exception(boom)[0] == "permanent"  # the case that matters
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="okx",
+            realized=_healthy_okx_history(),
+            deposits=[],
+            equity=5000.0,
+            funding_side_effect=boom,
+            ctx_hook=_break_the_marker_write,
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        assert "AuthenticationError" in result.error_message  # type: ignore[attr-defined]
+        assert "funding key refused" not in result.error_message  # type: ignore[attr-defined]
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_funding_rate_limit_is_not_marked(self) -> None:
+        import ccxt
+
+        stamp = AsyncMock()
+        with patch("services.job_worker._stamp_429", new=stamp):
+            seen = await _ccxt_key_derive_with_real_combine(
+                venue="okx",
+                realized=_healthy_okx_history(),
+                deposits=[],
+                equity=5000.0,
+                funding_side_effect=ccxt.RateLimitExceeded("slow down"),
+                expect_raises=ccxt.RateLimitExceeded,
+            )
+        stamp.assert_awaited_once()
+        assert _read_incomplete_rows(seen["capture"]) == []  # type: ignore[arg-type]
+
+
+class TestMarkerClearedOnACleanDerive:
+    @pytest.mark.asyncio
+    async def test_a_clean_key_mode_derive_deletes_the_marker_after_key_inputs(self) -> None:
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="okx", realized=_healthy_okx_history(), deposits=[], equity=5000.0,
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        capture = seen["capture"]
+        deletes = [
+            d
+            for d in capture["deletes"]  # type: ignore[index]
+            if d["table"] == "allocator_equity_derived"
+            and d["filters"].get("eq:kind") == "read_incomplete:key-fh"
+        ]
+        assert len(deletes) == 1
+        assert deletes[0]["filters"]["eq:allocator_id"] == "alloc-fh"
+        ops = capture["ops"]  # type: ignore[index]
+        key_inputs_at = max(
+            i
+            for i, op in enumerate(ops)
+            if op == ("upsert", "allocator_equity_derived")
+            and any(
+                u[0] == "allocator_equity_derived" and str(u[1].get("kind", "")).startswith("key_inputs:")
+                for u in capture["upserts"]  # type: ignore[index]
+            )
+        )
+        delete_at = max(i for i, op in enumerate(ops) if op == ("delete", "allocator_equity_derived"))
+        assert delete_at > key_inputs_at
+
+    @pytest.mark.asyncio
+    async def test_a_failing_delete_warns_and_the_derive_still_returns_done(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _break_the_delete(ctx: MagicMock) -> None:
+            original = ctx.supabase.table.side_effect
+
+            def _table(name: str) -> MagicMock:
+                tbl = original(name)
+                if name == "allocator_equity_derived":
+                    tbl.delete.side_effect = RuntimeError("db down")
+                return tbl
+
+            ctx.supabase.table.side_effect = _table
+
+        with caplog.at_level("WARNING"):
+            seen = await _ccxt_key_derive_with_real_combine(
+                venue="okx",
+                realized=_healthy_okx_history(),
+                deposits=[],
+                equity=5000.0,
+                ctx_hook=_break_the_delete,
+            )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        assert "read incomplete marker not cleared" in caplog.text
+        assert "RuntimeError" in caplog.text
+
+
+# ── Phase 186 plan 10 (SC-3, D-02): the Bybit derive counts Unified-edge transfers as flows ──
+# Source recorded by 186-04 (`g2-flow-final: replace`): the key's flows for Bybit are the Unified
+# TRANSFER rows ONLY, never beside the on-chain reads (a deposit to FUND plus its FUND-to-UNIFIED
+# move would count twice). The anchor is the Unified wallet balance, so money crossing ITS edge
+# is the capital flow.
+
+
+def _unified_transfer_in(days_before_now: int, amount: float = 5000.0) -> dict[str, object]:
+    """The shape ``fetch_bybit_unified_flows`` returns: int-ms timestamp, upper-case currency,
+    absolute amount, ``fee`` None, no ``info`` (an internal or sub-account transfer)."""
+    from datetime import datetime, timezone
+
+    day = datetime.fromisoformat(_utc_day(days_before_now)).replace(
+        hour=12, tzinfo=timezone.utc
+    )
+    return {
+        "id": f"uni-{days_before_now}",
+        "type": "deposit",
+        "currency": "USDT",
+        "amount": amount,
+        "timestamp": int(day.timestamp() * 1000),
+        "fee": None,
+    }
+
+
+def _internally_funded_history() -> list[dict[str, object]]:
+    """Days 1..5 of +100 each (k days back = 10 - k); day 3 is `_utc_day(7)`."""
+    return [_daily_pnl_record(_utc_day(10 - k), 100.0) for k in range(1, 6)]
+
+
+class TestBybitUnifiedTransfersAreFlows:
+    """An internally funded Bybit account: P&L +100 a day, a 5,000 TRANSFER_IN on day 3, anchor
+    15,500 after day 5. The oracles are written from those inputs and the combine's documented
+    flow timing (`nav_twr.reconstruct_nav`: NAV_{t-1} = NAV_t - pnl_t - F_t, a flow counted at the
+    END of its day), never read back through the combine."""
+
+    @pytest.mark.asyncio
+    async def test_the_transfer_reaches_the_combine_and_the_key_inputs(self) -> None:
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified=([_unified_transfer_in(7)], []),
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        flows = seen["external_flows"]
+        assert [(f.utc_day_iso, f.usd_signed) for f in flows] == [  # type: ignore[attr-defined,union-attr]
+            (_utc_day(7), 5000.0)
+        ]
+        (key_inputs,) = [
+            u[1]
+            for u in seen["capture"]["upserts"]  # type: ignore[index]
+            if u[0] == "allocator_equity_derived"
+            and str(u[1].get("kind", "")).startswith("key_inputs:")
+        ]
+        assert key_inputs["payload"]["flows"] == [
+            {"utc_day_iso": _utc_day(7), "usd_signed": 5000.0}
+        ]
+        unified = seen["mocks"]["unified"]  # type: ignore[index]
+        unified.assert_awaited_once()
+        since_ms, now_ms = unified.await_args.args[1:]
+        assert isinstance(since_ms, int) and isinstance(now_ms, int) and since_ms < now_ms
+
+    @pytest.mark.asyncio
+    async def test_oracle_a_cumulative_twr_starts_from_the_unfunded_base(self) -> None:
+        """NAV_5 = 15,500; NAV_4 = 15,400; NAV_3 = 15,300; NAV_2 = 15,300 - 100 - 5,000 = 10,200;
+        NAV_1 = 10,100; NAV_0 = 10,000. Each day's factor is (NAV_t - F_t) / NAV_{t-1}:
+        10,100/10,000 * 10,200/10,100 * 10,300/10,200 * 15,400/15,300 * 15,500/15,400, which
+        telescopes to 10,300/10,000 * 15,500/15,300. With no flow the base is NAV_0 = 15,000 and
+        the cumulative is 15,500/15,000 - 1: every day before the transfer is understated."""
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified=([_unified_transfer_in(7)], []),
+        )
+        returns = seen["returns"].dropna()  # type: ignore[attr-defined]
+        assert len(returns) == 5
+        expected = (10_300 / 10_000) * (15_500 / 15_300) - 1
+        no_flow_value = 15_500 / 15_000 - 1
+        assert abs(expected - no_flow_value) > 0.01  # the oracle can tell the two apart
+        assert float((1.0 + returns).prod() - 1.0) == pytest.approx(expected, abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_oracle_b_the_marks_show_no_pnl_spike_on_the_transfer_day(self) -> None:
+        """Day marks that jump by the transfer (10,000 / 10,100 / 15,200 / 15,300 / 15,400).
+        Day 3: base = 10,100, return = (15,200 - 10,100 - 5,000) / 10,100 = 100 / 10,100 < 1%.
+        With the flow missing the same call reads (15,200 - 10,100) / 10,100 = about +50.5%."""
+        from services.nav_marks_apply import AppliedMark, apply_marks
+
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified=([_unified_transfer_in(7)], []),
+        )
+        navs = (10_000.0, 10_100.0, 15_200.0, 15_300.0, 15_400.0)
+        marks = [
+            AppliedMark(day=_utc_day(10 - k), nav=nav, open_pnl=0.0)
+            for k, nav in zip(range(1, 6), navs)
+        ]
+        flows_by_day: dict[str, float] = {}
+        for f in seen["external_flows"]:  # type: ignore[attr-defined,union-attr]
+            flows_by_day[f.utc_day_iso] = flows_by_day.get(f.utc_day_iso, 0.0) + f.usd_signed
+        returns = seen["returns"]  # type: ignore[assignment]
+        day3 = pd.Timestamp(_utc_day(7))
+
+        with_flows = apply_marks(returns, flows_by_day, marks).returns  # type: ignore[arg-type]
+        spike = apply_marks(returns, {}, marks).returns  # type: ignore[arg-type]
+        assert spike.loc[day3] >= 0.4  # the spike a missing flow makes
+        assert with_flows.loc[day3] <= 0.01 + 1e-9
+
+    @pytest.mark.asyncio
+    async def test_unified_rows_replace_the_on_chain_reads_and_count_once(self) -> None:
+        """`g2-flow-final: replace` (186-04, no on-chain rows on PROD): an on-chain deposit
+        that also reaches the key's fixtures is NOT read for Bybit. The deposit that lands in the
+        Unified wallet counts exactly once, whatever the on-chain log says."""
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[_stable_deposit(7, 1234.0)],
+            equity=15_500.0,
+            unified=([_unified_transfer_in(7)], []),
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        flows = seen["external_flows"]
+        assert [(f.utc_day_iso, f.usd_signed) for f in flows] == [  # type: ignore[attr-defined,union-attr]
+            (_utc_day(7), 5000.0)
+        ]
+        seen["mocks"]["transfers"].assert_not_awaited()  # type: ignore[index]
+
+    @pytest.mark.asyncio
+    async def test_a_unified_withdrawal_is_a_negative_flow(self) -> None:
+        withdrawal = {**_unified_transfer_in(7, 300.0), "id": "uni-out", "type": "withdrawal"}
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified=([], [withdrawal]),
+        )
+        flows = seen["external_flows"]
+        assert [(f.utc_day_iso, f.usd_signed) for f in flows] == [  # type: ignore[attr-defined,union-attr]
+            (_utc_day(7), -300.0)
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("venue", ["okx", "binance"])
+    async def test_other_venues_keep_the_on_chain_reads_and_never_read_unified(
+        self, venue: str
+    ) -> None:
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue=venue,
+            realized=_healthy_okx_history(),
+            deposits=[_stable_deposit(8, 1000.0)],
+            equity=5000.0,
+            unified=([_unified_transfer_in(7)], []),
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        seen["mocks"]["unified"].assert_not_awaited()  # type: ignore[index]
+        assert seen["mocks"]["transfers"].await_count == 2  # type: ignore[index]
+        flows = seen["external_flows"]
+        assert [(f.utc_day_iso, f.usd_signed) for f in flows] == [  # type: ignore[attr-defined,union-attr]
+            (_utc_day(8), 1000.0)
+        ]
+
+
+class TestBybitUnifiedReadFailureIsNamed:
+    """A Unified read that fails is named, not silent (T-186-26): key mode records
+    `read_incomplete:<key>` with token `bybit_unified_flow_error` and the CLASS NAME only, and the
+    SAME exception propagates so `classify_exception` keeps `BybitUnifiedFlowReadError` permanent
+    exactly as before. `g2-non-uta: none-on-prod` (186-04): no account-type read exists."""
+
+    @pytest.mark.asyncio
+    async def test_the_reader_refusal_is_marked_and_propagates_unchanged(self) -> None:
+        from services.bybit_unified_flows import BybitUnifiedFlowReadError
+        from services.job_worker import classify_exception
+
+        boom = BybitUnifiedFlowReadError("Bybit Unified flow read refused: the answer is not an object")
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified_side_effect=boom,
+            expect_raises=BybitUnifiedFlowReadError,
+        )
+        assert seen["raised"] is boom
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["kind"] == "read_incomplete:key-fh"
+        assert marker["payload"]["token"] == "bybit_unified_flow_error"
+        assert marker["payload"]["error_class"] == "BybitUnifiedFlowReadError"
+        assert "answer is not an object" not in str(marker)  # the venue text never reaches the row
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+        kind, _detail = classify_exception(boom)
+        assert kind == "permanent"
+
+    @pytest.mark.asyncio
+    async def test_another_unified_exception_is_named_and_propagates_unchanged(self) -> None:
+        import ccxt
+
+        boom = ccxt.NetworkError("transaction-log page failed")
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified_side_effect=boom,
+            expect_raises=ccxt.NetworkError,
+        )
+        assert seen["raised"] is boom
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "bybit_unified_flow_error"
+        assert marker["payload"]["error_class"] == "NetworkError"
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+        # Review WR-02: the book is told at once (BybitUnifiedFlowReadError is permanent and gets
+        # no later derive, so without this a single-Bybit-key book never names the key).
+        assert _COMPOSE_ENQUEUE in seen["capture"]["rpc_calls"]  # type: ignore[index]
+
+    @pytest.mark.asyncio
+    async def test_a_reader_refusal_whose_marker_did_not_land_is_transient_not_the_permanent_reraise(
+        self,
+    ) -> None:
+        """Review R2-06. ``BybitUnifiedFlowReadError`` classifies permanent, so with the marker
+        write failing the key was left unnamed and unretried. It now comes back transient so the
+        retry writes the marker. RED before: the original exception was raised."""
+        from services.bybit_unified_flows import BybitUnifiedFlowReadError
+        from services.job_worker import classify_exception
+
+        boom = BybitUnifiedFlowReadError("Bybit Unified flow read refused: the answer is not an object")
+        assert classify_exception(boom)[0] == "permanent"
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified_side_effect=boom,
+            ctx_hook=_break_the_marker_write,
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        assert "BybitUnifiedFlowReadError" in result.error_message  # type: ignore[attr-defined]
+        assert "the answer is not an object" not in result.error_message  # type: ignore[attr-defined]
+        assert _writes_other_than_marker(seen["capture"]) == []  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_unified_rate_limit_is_not_marked(self) -> None:
+        import ccxt
+
+        stamp = AsyncMock()
+        with patch("services.job_worker._stamp_429", new=stamp):
+            seen = await _ccxt_key_derive_with_real_combine(
+                venue="bybit",
+                realized=_internally_funded_history(),
+                deposits=[],
+                equity=15_500.0,
+                unified_side_effect=ccxt.RateLimitExceeded("slow down"),
+                expect_raises=ccxt.RateLimitExceeded,
+            )
+        stamp.assert_awaited_once()
+        assert _read_incomplete_rows(seen["capture"]) == []  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_unified_timeout_stays_transient_but_is_now_named_read_timeout(self) -> None:
+        """Review WR-03 reverses the plan-10 choice to leave a timeout unmarked: the retry
+        budget is unchanged (transient), but a key whose retries run out is no longer anonymous."""
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit",
+            realized=_internally_funded_history(),
+            deposits=[],
+            equity=15_500.0,
+            unified_side_effect=TimeoutError("bound"),
+        )
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "transient"  # type: ignore[attr-defined]
+        (marker,) = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert marker["payload"]["token"] == "read_timeout"
+
+    def test_the_token_is_in_the_closed_set(self) -> None:
+        from services.job_worker import READ_INCOMPLETE_TOKENS
+
+        assert "bybit_unified_flow_error" in READ_INCOMPLETE_TOKENS

@@ -18,3 +18,12 @@
 -- 03-fixture-compute-jobs.sql. Never a second base.
 ALTER TABLE public.strategy_analytics
   ADD COLUMN IF NOT EXISTS computation_error TEXT;
+
+-- Phase 186 DERIVEGAPS fix round 3 (R3-01): the headline figures column. The refused-derive
+-- protection in migration 20261105120000 decides "this row has published figures" from
+-- `metrics_json` (the by-basis column is NULL on every strategy but a Deribit options book), so
+-- the bridge reads it on every call and a bare lane without it dies with 42703. Production
+-- declares it as a bare nullable `JSONB`; nothing else about it is asserted here, and every
+-- gate that does not seed it reads it as NULL ("no figures"). Same stand-in rule as above.
+ALTER TABLE public.strategy_analytics
+  ADD COLUMN IF NOT EXISTS metrics_json JSONB;
