@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.133.21.2] - 2026-11-04
+
+### Added
+- Phase 191 REFUSALRACE booked in the ROADMAP (goal, booking, evidence, five success criteria), with its STATE roadmap-evolution line and a Progress row. It owns TODOS `186-REFUSAL-MARKER-RMW-RACE`: the derive's refusal marker and a Sync's refresh-marker retraction both replace `compute_jobs.metadata`, so an interleaving loses one of them. Booked after 186 DERIVEGAPS shipped, per its decision D-13.
+
+### Changed
+- TODOS `186-REFUSAL-MARKER-RMW-RACE` now names Phase 191 as its owner.
+
 ## [0.133.21.1] - 2026-11-04 — BASELINE: automated re-dump after the PROD apply of 8f452313
 
 ### Changed

@@ -223,6 +223,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
 - [x] **~~Phase 189~~: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put all open phases that are purely about deribit or sfox into todos and not do them in this milestone"): moved out of this milestone, not delivered; TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
 - [x] **Phase 190: FACTSHEETQUEUED — finishing the wizard does not queue a redundant re-run, and a re-compute never hides a strategy's computed factsheet** — booked 2026-11-03 from the founder's factsheet report (founder "New phase, start now (Recommended)"); the finalize step queued a second sync_trades after the first computation finished, and a pending or computing status hides analytics already computed; user-facing (completed 2026-11-04: shipped v0.133.19.0 #1194; verification passed with the PROD finalize reading VOID by founder decision, carried to TODOS `190-SC5-POSTDEPLOY-REREAD`; security 25/25)
+- [ ] **Phase 191: REFUSALRACE — the derive's refusal marker and a Sync's refresh-marker retraction merge into a job's metadata, so neither write undoes the other** — booked 2026-11-04 from TODOS `186-REFUSAL-MARKER-RMW-RACE` (DERIVEGAPS 186 decision D-13, founder "One narrow round 4 (Recommended)": the race goes to a follow-up phase after 186 ships); both writers replace `compute_jobs.metadata`, so an interleaving loses the refusal marker or the retraction; data integrity
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -7133,6 +7134,32 @@ Plans:
 
 - [x] 190-08-PLAN.md — TODOS booking for the D-05 surfaces, ship gate, SC-5 post-deploy PROD reading and live UI captures (SC-5) [Wave 4]
 
+### Phase 191: REFUSALRACE — the derive's refusal marker and a Sync's refresh-marker retraction merge into a job's metadata, so neither write undoes the other
+
+**Goal:** The worker's refusal marker (`read_refusal_kept_figures`) and a Sync's retraction of a refresh marker both merge into `compute_jobs.metadata` instead of replacing the whole column, so when the two writes interleave both survive.
+**Requirements**: TBD
+**Depends on:** Phase 186
+**Plans:** 0 plans
+
+**Booking.** From TODOS `[186-REFUSAL-MARKER-RMW-RACE]`. Founder 2026-11-04, Phase 186 D-13 ("One narrow round 4 (Recommended)"): the race goes to a follow-up phase, booked after 186 ships. 186 shipped as #1197.
+
+**Evidence (code reading, Phase 186 review round 4).** `_mark_job_kept_figures` (`analytics-service/services/job_worker.py`) and `_retract_refresh_marker_on_reuse` (`analytics-service/services/ingestion/long_fetch.py`, with `src/lib/ledger-refresh-marker.ts`) each read the job's `metadata`, change one key and write the whole object back. If one write lands between the other's read and write, it is undone:
+- marker lost: the status bridge stamps the strategy `failed` over figures the refusal kept;
+- retraction lost: a user's Sync job stays protected as a refresh.
+The window is about one round trip at the end of a derive that runs for minutes. Same family as the 161.1 D11 and D12 read-modify-write residue.
+
+**Success Criteria** (what must be TRUE):
+1. A read-only PROD count of jobs carrying `read_refusal_kept_figures` and of retracted refresh markers is recorded before any code change.
+2. Both writers merge into `metadata`: a JSONB merge write for the marker, and a merge arm in `enqueue_compute_job` for the retraction. Each has a test that goes RED on today's replace behaviour.
+3. A concurrency test interleaves the two writes and both keys survive.
+4. Any migration passes migration-reviewer and rls-policy-auditor before merge.
+5. After deploy, a read-only PROD reading confirms no regression.
+
+Data integrity. Relates to 186 DERIVEGAPS and 161.1 D11/D12.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 191 to break down)
+
 ---
 
 ### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
@@ -7441,6 +7468,7 @@ kept verbatim.
 | 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
 | 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
 | 190 FACTSHEETQUEUED | 9/9 | Complete — shipped v0.133.19.0 #1194 (finalize queues a re-run only when one is needed; a re-compute over a stored result keeps its factsheet with an updating line); verification passed (SC-2 and SC-4 by code and tests with their PROD readings VOID, the 390 px check unmeasured, accepted by the founder 2026-11-03 and carried to TODOS `190-SC5-POSTDEPLOY-REREAD`), SC-3 confirmed on PROD; security 25/25; D-05 surfaces booked to `190-RERUN-SURFACES-NOT-HOLDING` | 2026-11-04 |
+| 191 REFUSALRACE | 0/0 | Not started — booked 2026-11-04 from TODOS `186-REFUSAL-MARKER-RMW-RACE` (Phase 186 D-13) | - |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
