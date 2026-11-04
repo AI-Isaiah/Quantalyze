@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.133.20.0] - 2026-11-04 — TINYBASE 188: a day measured against a near-empty account is left out and named, never a fake return
+
+### Why
+After a near-total withdrawal an account can hold a sliver of its former balance. A day's P&L divided by that sliver is a real arithmetic result and a meaningless return: it swings the equity curve, the volatility and the drawdown by tens of percent on a few dollars. Before this release every reader chained those days in. Now they are left out and named, and nothing is invented to fill the hole.
+
+**The rule.** A day whose starting balance is under 5% of the account's highest balance over the previous 30 days has no return. It is not chained into the equity curve and not counted in the stats; its P&L still reaches the book. It is stored as a flagged gap and its date is listed under `data_quality_flags.tiny_base_days`, with the `tiny_base_guard` flag beside it.
+
+### Founder decisions (2026-11-03, AskUserQuestion; `188-CONTEXT.md`)
+- **D-02**: leave the day out and name it; nothing is invented.
+- **D-03**: the threshold is under 5% of the 30-day peak, so a key that stays small becomes its own new normal once the peak leaves the window.
+- **D-04**: split by era. Before a key's first daily mark a left-out day breaks the chain and the headline restarts the day after the last tiny day. From the first mark on the day is skipped and the earlier history stays.
+- **D-05**: a day that starts from a balance of zero or below is not in the rule and stays as today (flat).
+- **D-06**: the My Allocation and single-key charts show a short muted note naming the days; the line itself is unchanged. This narrows D-02's "flagged gap".
+- **D-07**: the live-book scenario readers are fixed in this phase, so every panel on the screen agrees with the stored book.
+- **D-08**: a quiet day (no trades, funding or flows) under the threshold is left out like an active one.
+- **D-09**: **new rule everywhere.** BTC-unit accounts follow it too, which supersedes 164.6.6.2 D-25 ("measured exactly and only flagged") for such days. The four D-25 tests in `test_mt5_deal_reconstruction.py` were restated to the new rule.
+
+### Added
+- **`analytics-service/services/tiny_base.py`**: the one definition of a tiny base (5%, 30 days) and the helpers every venue uses. A TypeScript twin, `src/lib/tiny-base-flag.ts`, shares the key and threshold, with `src/__tests__/tiny-base-literal-pin.test.ts` pinning that no second copy of the literals appears. `readTinyBaseDays` is the one strict reader: a malformed list is refused, never coerced.
+- **A tiny-base reason for the headline**, `tiny_base_guard`, which names a chain break with the existing "a near-zero account balance" phrase (no new headline copy; both flags that map to it name it once).
+- **A note under the factsheet and under My Allocation** naming the days left out. The book's factsheet carries the days of every drawn key.
+
+### Changed
+- **Marked seam (plan 01)**: a marked day measured on a near-empty base has no return and its P&L reaches the book.
+- **Realized era, every venue (plan 02)**: the same rule for days before the first mark, on every venue.
+- **Pre-start window and gap days (plan 03)**: the 30-day window now reaches before a key's first mark, and the gap days of a withheld mark are left out with it instead of read as covered.
+- **Quiet days (plan 04)**: a quiet day on a near-empty account is left out on every venue; the combiner no longer gap-fills it to 0.0.
+- **Derive and runner (plan 05)**: every derive names its tiny-base days and stores their P&L on every venue (OKX used to lose it). The series runner leaves such a day out as a flagged gap.
+- **Where the rule is read**: the factsheet note (07), My Allocation and the book's factsheet (08), the live-book scenario, the live baseline and every compare column (09), the scenario composer, the diversification panel and the compare feed (10), strategy legs (round 1 MEDIUM-4, KL-5) and composites (round 1 HIGH-1, round 2 R2-01).
+
+### Fixed (three review fix rounds)
+- **Round 1**: HIGH-1 a composite leaves a marked-era tiny day out of its scalars and names it. HIGH-2 `tiny_base_guard` and `twr_chain_broken` describe the published series. MEDIUM-3 a BTC MT5 tiny day never stores a BTC amount as `pnl_usd`. MEDIUM-4 strategy legs sit out of their tiny-base days. MEDIUM-5 a rejected `tiny_base_days` list is reported, not dropped silently. MEDIUM-6 the compare panel's `tinyBaseDaysByApiKeyId` wiring now fails a test. SFH-4 a named realized tiny day the series does not drop refuses the derive.
+- **Round 2**: R2-01 a composite names its members' realized-era tiny days for the scenario leg readers. R2-02 the guard and day list follow the published NaN days, including the W2 tail. SFH-1 a `key_inputs` tiny-base refusal fails permanently and scrubbed, instead of retrying as unknown. SFH-2 the returns route and the share page report a rejected list. SFH-3 the key site and the strategy site get their own throttle slot. A comment that put a live-tail day in `unpriced_days` was corrected.
+- **Round 3**: R3-01 a closed composite member's tail tiny NaN day is named. The scenario-share `tiny_base_days` Sentry capture is throttled. The `stamp_detail` census counts the new `key_inputs` seam (SFH-1 follow-up).
+
+### Tests
+- New suites: `test_tiny_base*.py` (definition, book, marks, quiet days, realized era, round trip, runner, venues, derive flags) and `tiny-base-flag`, `scenario*.tiny-base`, `diversification.tiny-base`, `FactsheetView.tiny-base` and `AllocationDashboardV2.tiny-base` on the TypeScript side; each RED commit precedes its fix.
+- **Merge with `main`** (Phase 186 tooling #1193, Phase 190 #1194, #1195): two conflicts, both resolved keeping both sides. `headline-basis.test.ts` keeps 188's `tiny_base_guard` suite beside 190's `isStoredResultReadable` suites; `.planning/STATE.md` keeps main's counters with 188 as the open phase. One semantic collision, fixed in the test and not the code: Phase 190 stamps `last_success_snapshot: null` on every strategy prestamp, so `test_strategy_prestamp_without_a_tiny_day_carries_neither_key` now expects that key beside `csv_source`. It still asserts the tiny-base keys are absent.
+- Full suites at the merged head: pytest 13689 passed, 97 skipped, 0 failed; mypy strict clean; typecheck clean; lint 0 errors; vitest 23685 passed with the 2 known `compute.conventions.test.ts` snapshot failures.
+
+### Notes
+- Known limits, recorded and not fixed:
+  - **The PROD reading (plan 11, SC-4) is still to come.** It needs the deploy, then the next nightly key-dailies derive and book composes, then a read-only reading that the affected rows are gone and every other change is bounded to days under the threshold. Until it is taken, the rule is verified by code and tests, not on PROD.
+  - **KL-3**: on a ccxt venue (OKX, Bybit, Binance: returns-based roll, no day P&L) the pre-start roll stops at the first unknown day, so a peak before it is not seen by the first marks' windows. Pinned as a recorded limit, never a refusal, because rolling through an unknown day would invent a level. No PROD key was found in this shape.
+  - **KL-4**: a failed `key_inputs` read or a malformed list gives that key no named days, so the scenario panels compute exactly what they did before this phase for that key. The existing warn and Sentry capture report it. Chosen over blanking every scenario KPI on a transient read error.
+  - **Two local snapshot failures**: two `compute.conventions.test.ts` snapshot arms (one is "fixture C") differ from the frozen snapshot in the last digits of a float, `skew`, on this machine. They also fail on `main` and are not part of this change.
+  - Phase 188's `.planning/` artifacts are not in this PR.
+
 ## [0.133.19.1] - 2026-11-04 — records: close FACTSHEETQUEUED 190
 
 Records only. The code shipped in v0.133.19.0 (#1194); this release changes no source file, no migration and no schema. It closes Phase 190 in `.planning/`, books the readings that are still open, and carries the phase artifacts onto `main`.
