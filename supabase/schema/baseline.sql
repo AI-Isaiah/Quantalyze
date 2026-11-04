@@ -8295,6 +8295,30 @@ COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_err
 
 
 
+CREATE OR REPLACE FUNCTION "public"."mark_compute_job_kept_figures"("p_job_id" "uuid") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  UPDATE public.compute_jobs
+     SET metadata = CASE WHEN jsonb_typeof(metadata) = 'object'
+                         THEN metadata
+                         ELSE '{}'::jsonb
+                    END
+                    || jsonb_build_object('read_refusal_kept_figures', true)
+   WHERE id = p_job_id;
+  RETURN FOUND;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."mark_compute_job_kept_figures"("p_job_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."mark_compute_job_kept_figures"("p_job_id" "uuid") IS 'Phase 191 REFUSALRACE (D-03, D-07, D-09), migration 20261106120000: writes the derive''s refusal marker (read_refusal_kept_figures = true) into compute_jobs.metadata as ONE merge statement, so a concurrent write to another key of the same blob is never undone. Non-object metadata becomes a fresh object. Returns FOUND: true only when a row changed. Unfenced by claim_token (parity with the write it replaces). Service-role only; sole caller is the analytics worker refusal path.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."match_engine_cron_tick"() RETURNS bigint
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -9511,6 +9535,58 @@ ALTER FUNCTION "public"."retention_delete_guard"() OWNER TO "postgres";
 
 
 COMMENT ON FUNCTION "public"."retention_delete_guard"() IS 'STATEMENT-level AFTER DELETE guard. Aborts a DELETE that touches >100,000 rows on audit_log/audit_log_cold. See migration 121 (audit-2026-05-07 P917).';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."retract_ledger_refresh_marker"("p_job_id" "uuid", "p_correlation_id" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_marker      text;
+  v_status      text;
+  v_done_marker text;
+BEGIN
+  -- In RETURNING, `metadata` is the NEW row, so the old marker is read back from the
+  -- key just written.
+  UPDATE public.compute_jobs
+     SET metadata = (metadata - 'source')
+                    || jsonb_build_object('refresh_marker_retracted', metadata ->> 'source',
+                                          'correlation_id', p_correlation_id)
+   WHERE id = p_job_id
+     AND status <> 'done'
+     AND (metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
+  RETURNING metadata ->> 'refresh_marker_retracted' INTO v_marker;
+
+  IF FOUND THEN
+    RETURN jsonb_build_object('outcome', 'retracted', 'marker', v_marker);
+  END IF;
+
+  SELECT status,
+         CASE WHEN (metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
+              THEN metadata ->> 'source'
+         END
+    INTO v_status, v_done_marker
+    FROM public.compute_jobs
+   WHERE id = p_job_id;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('outcome', 'no_row');
+  END IF;
+
+  IF v_status = 'done' THEN
+    RETURN jsonb_build_object('outcome', 'done', 'status', v_status, 'marker', v_done_marker);
+  END IF;
+
+  RETURN jsonb_build_object('outcome', 'no_marker', 'status', v_status);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."retract_ledger_refresh_marker"("p_job_id" "uuid", "p_correlation_id" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."retract_ledger_refresh_marker"("p_job_id" "uuid", "p_correlation_id" "text") IS 'Phase 191 REFUSALRACE (D-01), migration 20261106120000: retracts an inherited ledger-refresh marker from compute_jobs.metadata in ONE UPDATE (drops source only when it is ledger-refresh or ledger-refresh-composite, adds refresh_marker_retracted and correlation_id, keeps every other key, never touches a done row). Returns jsonb {outcome: retracted | done | no_marker | no_row, ...} so the callers keep their outcomes and log lines. Service-role only; callers are the Python long-fetch tail and the TypeScript keys/sync and finalize-wizard routes.';
 
 
 
@@ -17811,6 +17887,11 @@ GRANT ALL ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_e
 
 
 
+REVOKE ALL ON FUNCTION "public"."mark_compute_job_kept_figures"("p_job_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."mark_compute_job_kept_figures"("p_job_id" "uuid") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."match_engine_cron_tick"() FROM PUBLIC;
 
 
@@ -17910,6 +17991,11 @@ GRANT ALL ON FUNCTION "public"."reset_stalled_portfolio_analytics"("p_stale_thre
 GRANT ALL ON FUNCTION "public"."retention_delete_guard"() TO "anon";
 GRANT ALL ON FUNCTION "public"."retention_delete_guard"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."retention_delete_guard"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."retract_ledger_refresh_marker"("p_job_id" "uuid", "p_correlation_id" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."retract_ledger_refresh_marker"("p_job_id" "uuid", "p_correlation_id" "text") TO "service_role";
 
 
 

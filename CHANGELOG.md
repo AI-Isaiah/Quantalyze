@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.133.22.1] - 2026-11-04 — BASELINE: automated re-dump after the PROD apply of a363392e
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `41932983784`, after the PROD apply of merge `a363392e`: sha256 `02dc52f8…` → `aa24e1a4…`.
+- Shape, old → new: tables 66 → 66, policies 153 → 153, function statements 132 → 134, distinct function names 130 → 132, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261106120000_refusalrace_metadata_merge_rpcs.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-04` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.22.0 → 0.133.22.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=316 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+- `scripts/dump-sql-functions.ts`: the two Phase 191 REFUSALRACE `NAME_SET_RATCHET` rows (`retract_ledger_refresh_marker`, `mark_compute_job_kept_figures`) are deleted, their own clearing condition (a re-dump taken after `20261106120000` applied to PROD). `supabase/schema/BASELINE.md` gets the "what it adds" row for that migration.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `41932983784` succeeded, and this entry was composed by the `redump-pr` job. Run `41932983784` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.22.0] - 2026-11-05 — REFUSALRACE (PR 1 of 2): single-statement metadata merge functions for the refusal marker and the refresh-marker retraction
 
 ### Added
