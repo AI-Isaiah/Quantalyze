@@ -289,8 +289,21 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * not an allowlisted row is `DRIFT delete_allocator_api_key/2`, which the same migration re-bases
  * (the committed dump still carries the body with the last-key snapshot DELETE); it is EXPECTED until
  * the re-dump taken after the PROD apply, and no allowlist row was added for it.
+ *
+ * MOVED 2026-11-04 (Phase 191 REFUSALRACE plan 02), 132 -> 134: two ADDITIONS, not a parser
+ * gain. `public.mark_compute_job_kept_figures(uuid)` and
+ * `public.retract_ledger_refresh_marker(uuid, text)` enter the chain via forward migration
+ * 20261106120000_refusalrace_metadata_merge_rpcs.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 134 - MATCH 129,
+ * DRIFT 3, SNAPSHOT_MISSING 2, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `findings 2`. The two
+ * SNAPSHOT_MISSING findings are `mark_compute_job_kept_figures/1` and
+ * `retract_ledger_refresh_marker/2`, whose migration is not on PROD yet (recorded as dated
+ * `snapshot-only` rows in NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the re-dump
+ * taken after the apply); both are EXPECTED until that re-dump, and NO allowlist row was added for
+ * either. Raising this floor records the functions joining the corpus; it does NOT suppress any
+ * finding.
  */
-export const COMPARED_FLOOR = 132;
+export const COMPARED_FLOOR = 134;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.133.22.0] - 2026-11-05 — REFUSALRACE (PR 1 of 2): single-statement metadata merge functions for the refusal marker and the refresh-marker retraction
+
+### Added
+- **Migration `20261106120000_refusalrace_metadata_merge_rpcs.sql`** adds two service-role-only `SECURITY DEFINER` functions with `search_path = public, pg_catalog`:
+  - `mark_compute_job_kept_figures(uuid) RETURNS boolean` merges `read_refusal_kept_figures: true` into `compute_jobs.metadata` in one `UPDATE`. Non-object metadata becomes a fresh object. It returns `true` only when a row changed (Phase 191 D-03, D-07).
+  - `retract_ledger_refresh_marker(uuid, text) RETURNS jsonb` retracts an inherited ledger-refresh marker in one `UPDATE`. It drops `source` only when it is `ledger-refresh` or `ledger-refresh-composite`, adds `refresh_marker_retracted` and `correlation_id`, keeps every other key, and never touches a `done` job. It reports `{outcome: retracted | done | no_marker | no_row}` so the callers keep their log lines and error contracts (D-01).
+  - EXECUTE is revoked from PUBLIC, anon and authenticated and granted to `service_role` only. The migration's verify block reads only the catalogue (SECURITY DEFINER, the pinned search_path, the ACL), so it applies the same on schema-only TEST and on PROD. A manual rollback is in `supabase/migrations/down/20261106120000-rollback.sql`.
+- **SQL gate `supabase/tests/test_compute_job_metadata_merge.sql`**, 13 arms (`ALL 13 ARMS EXECUTED`):
+  - Arms 1 and 2 pin the ACL, SECURITY DEFINER and the search_path.
+  - Arms 3 to 8 cover each function's outcomes and the keys it keeps or drops.
+  - Arms 9 and 10 run the marker, the retraction and a claim-style additive write in both orders and assert every key survives. They are sequential, so they prove key preservation, not concurrency.
+  - Arm 11 illustrates the whole-metadata assertion style.
+  - Arms 12 and 13 pin each function's single-statement shape from its comment-stripped definition: neither reads `compute_jobs` before its `UPDATE`.
+  - Twelve arms carry a mutation twin, and each twin reddens its own arm first.
+- **Static privilege test** `analytics-service/tests/test_compute_job_metadata_merge_privilege.py`, which pins the migration's ACL text.
+- Function snapshots for both functions.
+
+### Changed
+- **Censuses moved to measured values:**
+  - `scripts/mutation-floors.mjs`: `FILES_FLOOR` 79 → 80 and `ARMS_FLOOR` 791 → 803, from one full mutation run (`arms: 803/803/0`, `biting: 803`, exit 0). `WAIVED_CEILING` stays 0.
+  - `ci.yml`: `SENTINEL_FLOOR` 26 → 27, `ARMS_FLOOR` 405 → 418, and a new sentinel table row.
+  - `COMPARED_FLOOR` 132 → 134.
+  - Two dated `snapshot-only` rows in `NAME_SET_RATCHET`, cleared by the post-apply baseline re-dump.
+  - The pins that echo these in `drift-check-scripts`, `gate-family-meta`, `lint-sql-gates`, `mutation-annotation-parser` and `mutation-runner-floors`.
+
+### Fixed
+Three review rounds ran on this PR (code review and silent-failure hunt each round, plus migration-reviewer and rls-policy-auditor):
+- **Round 1:** arms 9 and 10 call the writers one after another, so the gate stayed green when both functions were rewritten as a read-then-write (CR-01). Arms 12 and 13 were added, each with its own twin. The gate, CI and floor comments were reworded to claim only what the arms prove (WR-01).
+- **Round 2:** arm 13 missed a read inside the retraction's own `UPDATE` (a scalar subquery or a self-join) and now requires exactly two `compute_jobs` mentions in the right places (WR-02). The comment strip could be defeated by a `--` inside a block comment and is now a single pass (WR-03). Every racy variant the reviewer built goes red on the right arm.
+- **Round 3:** clean from both reviewers.
+
+### Security
+- `migration-reviewer` and `rls-policy-auditor` came back clean. Neither function is reachable by anon or authenticated, and both are reachable by service_role only.
+
+### Notes
+- **Migration note.** Merging applies the migration to TEST and then to PROD with no human stop. Nothing calls either function until PR 2. That PR switches the Python refusal marker, the Python retraction and the TypeScript retraction once this migration is confirmed on PROD (D-06).
+- **What this PR does not prove.** Concurrency: that two simultaneous writes keep both keys. That proof is PR 2's live two-connection probe (plan 191-09). Until then, the race booked as `186-REFUSAL-MARKER-RMW-RACE` is still open in the running code.
+- `baseline-content-drift` reads `SNAPSHOT_MISSING` for the two new functions until the post-apply re-dump. That is the expected stale-baseline state.
+- The planning artifacts (plans, summaries, the review file) land on `main` through the records PR, not this one.
+
 ## [0.133.21.2] - 2026-11-04
 
 ### Added

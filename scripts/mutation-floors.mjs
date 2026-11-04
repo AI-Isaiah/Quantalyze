@@ -1333,7 +1333,13 @@
 // `coverage: files 79/106` (110 gate files before, 106 now), `arms: 791/791/0`, `biting: 791`, `lane-invocations: 791 ... plus 79 baseline / 79 restore leg(s)`
 // (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.6s over 791 arm run(s)`.
 // The stale-high direction was observed first: with the floor still at 83 the same run exited 1 with `FILES_FLOOR regression: 79 annotated file(s) < floor 83`. A second full run after the floors moved exited 0: `No defects. Every annotated arm bit its own arm first.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 79;
+// RAISED 79 -> 80 2026-11-04 (Phase 191 REFUSALRACE plan 04): +1 file, test_compute_job_metadata_merge.sql (migration 20261106120000, the metadata-merge gate for the
+// refusal-marker and ledger-refresh-retraction merge RPCs (sequential key preservation in arms 9 and 10, not a concurrency proof; the live probe is plan 191-09): eleven arms, ten of them twinned and one untwinned control that raises with the `ARM 11 FAILED` spelling the runner
+// deliberately does not attribute, so the runner judges ten sections), so 80 of 107 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file edited during it,
+// exit 0: `scope: FULL 80/80 annotated files`, `lane-concurrency: 4`, `coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`, `lane-invocations: 801 ... plus 80 baseline / 80 restore leg(s)`
+// (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.8s over 801 arm run(s)`,
+// `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_compute_job_metadata_merge.sql: sections 10 / judged 10 / annotated 10 / waived 0 / biting 10`. WAIVED_CEILING stays 0 - no waiver was added.
+export const FILES_FLOOR = 80;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3374,7 +3380,16 @@ export const FILES_FLOOR = 79;
 // no waiver was added. MEASURED by the same single run recorded under FILES_FLOOR: `scope: FULL 79/79 annotated files`, `coverage: files 79/106`, `arms: 791/791/0`,
 // `biting: 791`, `lane-invocations: 791 ... plus 79 baseline / 79 restore leg(s)` (the two independent tallies AGREE). The stale-high direction was observed first: with
 // the floor still at 859 the same run exited 1 with `ARMS_FLOOR regression: 791 biting arm(s) < floor 859`. A second full run after the floors moved exited 0 with the same tallies and `No defects.`
-export const ARMS_FLOOR = 791;
+// RAISED 791 -> 801 2026-11-04 (Phase 191 REFUSALRACE plan 04): +10 arms, the ten twinned arms of test_compute_job_metadata_merge.sql (arm 11 is the untwinned control and is not an annotated arm).
+// MEASURED by the same single run recorded under FILES_FLOOR: `scope: FULL 80/80 annotated files`, `coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`,
+// `lane-invocations: 801 ... plus 80 baseline / 80 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `unreachable: 27`. FILES_FLOOR moves 79 -> 80 and WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 801 -> 803 2026-11-05 (Phase 191 REFUSALRACE fix round 1): +2 arms, arms 12 and 13 of test_compute_job_metadata_merge.sql (the marker mentions compute_jobs only in its single UPDATE,
+// and the retraction reaches compute_jobs first in its UPDATE; one twin each, so the file now has twelve annotated arms and the untwinned arm 11 is an illustration of the assertion style only).
+// MEASURED by ONE full `node scripts/mutation-runner/run.mjs` on a clean tree, exit 0: `scope: FULL 80/80 annotated files`, `coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`,
+// `lane-invocations: 803 ... plus 80 baseline / 80 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 2.1s over 803 arm run(s)`,
+// `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_compute_job_metadata_merge.sql: sections 12 / judged 12 / annotated 12 / waived 0 / biting 12`.
+// FILES_FLOOR stays 80 and WAIVED_CEILING stays 0 - no waiver was added. Arms 9 and 10 prove sequential key preservation, not concurrency; the live two-connection probe (plan 191-09) is that proof.
+export const ARMS_FLOOR = 803;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

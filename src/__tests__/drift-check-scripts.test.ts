@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=23 and ARMS_FLOOR=362 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=27 and ARMS_FLOOR=418 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5076,9 +5076,18 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // 393 + 11 = 404 is the table's own sum.
     // RAISED 2026-11-04 (Phase 186 DERIVEGAPS, fix round 4, PR3-01), 26/404 -> 26/405. The same file
     // goes from `ALL 34 ARMS EXECUTED` to `ALL 35 ARMS EXECUTED` (arm P12); no file joined.
+    // RAISED 2026-11-04 (Phase 191 REFUSALRACE, plan 03), 26/405 -> 27/416.
+    // test_compute_job_metadata_merge.sql JOINED (an ordinary sql-tests gate: it runs on a database
+    // private to its runner) and declares `ALL 11 ARMS EXECUTED`. MEASURED: this pin read
+    // `expected 1 to be +0` once ci.yml carried SENTINEL_FLOOR=27, and
+    // ci-anti-skip-gate.contract.test.ts re-derives the sentinel-bearing set from the corpus.
+    // 405 + 11 = 416 is the table's own sum.
+    // RAISED 2026-11-05 (Phase 191 REFUSALRACE, fix round 1), 27/416 -> 27/418. The same file goes from
+    // `ALL 11 ARMS EXECUTED` to `ALL 13 ARMS EXECUTED` (arms 12 and 13); no file joined. MEASURED: this pin read
+    // `expected 1 to be +0` once ci.yml carried ARMS_FLOOR=418. 416 + 2 = 418 is the table's own sum.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=26", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=27", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5089,7 +5098,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=405", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=418", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

@@ -392,6 +392,30 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-11-04: Phase 191 REFUSALRACE plan 02 adds two `snapshot-only` rows, one
+  // per new service-role-only function that merges into `compute_jobs.metadata`
+  // (the refusal marker writer and the ledger-refresh retraction). Their clearing
+  // condition is the re-dump taken after the migration has applied to PROD; that
+  // act turns each row into `ratchet-stale` and it is DELETED, as the rows below
+  // were.
+  {
+    name: "retract_ledger_refresh_marker",
+    side: "snapshot-only",
+    capturedAt: "2026-11-04",
+    clearedBy:
+      "a regeneration of supabase/schema/baseline.sql taken AFTER 20261106120000_refusalrace_metadata_merge_rpcs.sql has applied to PROD",
+    reason:
+      "Phase 191 REFUSALRACE plan 02 defines the function in a forward migration while the committed PROD dump predates it, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+  },
+  {
+    name: "mark_compute_job_kept_figures",
+    side: "snapshot-only",
+    capturedAt: "2026-11-04",
+    clearedBy:
+      "a regeneration of supabase/schema/baseline.sql taken AFTER 20261106120000_refusalrace_metadata_merge_rpcs.sql has applied to PROD",
+    reason:
+      "Phase 191 REFUSALRACE plan 02 defines the function in a forward migration while the committed PROD dump predates it, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+  },
   // ⭐ 2026-11-02: the four Phase 176 LEGACYRETIRE plan 13 rows
   // (`replace_allocator_equity_snapshots`, `replace_allocator_equity_snapshots_window`,
   // `extract_symbol_value_at` and `enqueue_refresh_allocator_equity_for_all`,
