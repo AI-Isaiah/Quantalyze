@@ -20,6 +20,7 @@ Two review rounds ran (code review and silent-failure hunt each round):
 - **Round 1, SFH-M1:** a failed retraction rpc, a non-object answer or an unknown outcome was caught by the caller and logged as `enqueue_tail_failed`. The helper now logs `process_key_long.refresh_marker_retraction_failed` and makes one tagged Sentry capture, without re-raising.
 - **Round 1, CR-WR01:** the live probe's loopback check let it write to a hosted database reached through a localhost tunnel. It now writes only when the database carries Postgres's stock comment, which PROD's and TEST's hand-set markers never match.
 - **Round 2:** clean from both reviewers.
+- **Pre-push:** the loopback-guard fixtures in the live probe carried a placeholder password, which reads as a credential-shaped URL to the push and gitleaks scans. They now carry no password. The guard reads only the host, so every arm keeps its meaning.
 
 ### Notes
 - No migration in this PR. It calls functions that PR 1 (#1200) already applied on PROD.
