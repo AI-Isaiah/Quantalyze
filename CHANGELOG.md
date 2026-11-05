@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.133.22.2] - 2026-11-05 — REFUSALRACE (PR 2 of 2): the refusal marker and the refresh-marker retractions merge into compute_jobs.metadata instead of replacing it
+
+### Fixed
+- **The derive's refusal marker can no longer be undone by a concurrent Sync, and the reverse.** Both writers used to read the whole `compute_jobs.metadata`, edit one key and write the whole object back, so one write landing between the other's read and write was lost. A lost marker let the status bridge stamp a strategy `failed` over figures the refusal kept. A lost retraction left a user's Sync job protected as a ledger refresh. Each write is now one call to the merge functions PR 1 put on PROD (`[186-REFUSAL-MARKER-RMW-RACE]`, now CLOSED in `TODOS.md`).
+
+### Changed
+- **Refusal marker** (`analytics-service/services/job_worker.py`, `_mark_job_kept_figures`): one `mark_compute_job_kept_figures` rpc through `_stamp_io`. Any answer other than `true` fails the job TRANSIENT with nothing else written. Before, a zero-row update counted as success (Phase 191 D-07; plan 06).
+- **Python retraction** (`analytics-service/services/ingestion/long_fetch.py`, `_retract_refresh_marker_on_reuse`): one `retract_ledger_refresh_marker` rpc replaces the read, the edit and the status re-read. `no_row` now logs an error line plus one Sentry capture. That is louder than D-08's "warning" and is recorded as a deviation (plan 07).
+- **TypeScript retraction** (`src/lib/ledger-refresh-marker.ts`, `retractInheritedRefreshMarker`): one `admin.rpc("retract_ledger_refresh_marker", …)` call with the same outcome words. `audit-coverage.test.ts` lists it as a mutating rpc, and the keys/sync and finalize-wizard route tests serve it through their rpc mocks (plan 08).
+
+### Tests
+- Each writer has a test that goes RED on the old replace behaviour (plans 06 to 08).
+- **Live two-connection race probe** `analytics-service/tests/test_compute_job_metadata_merge_live.py` runs on the python job's local-stack lane. It holds one writer's row lock, observes the other block, and asserts that every key survives in both orders. `ci.yml`'s python job hands it a masked `LANE_DB_URL` (plan 09).
+- **Parity pins** (`test_compute_job_metadata_merge_parity.py`, `ledger-refresh-marker.test.ts`) tie the Python and TypeScript marker sets, rpc names, outcome words and key to the generated function snapshots, so the three cannot drift (plans 08 and 09).
+
+### Fixed in review
+Two review rounds ran (code review and silent-failure hunt each round):
+- **Round 1, SFH-M1:** a failed retraction rpc, a non-object answer or an unknown outcome was caught by the caller and logged as `enqueue_tail_failed`. The helper now logs `process_key_long.refresh_marker_retraction_failed` and makes one tagged Sentry capture, without re-raising.
+- **Round 1, CR-WR01:** the live probe's loopback check let it write to a hosted database reached through a localhost tunnel. It now writes only when the database carries Postgres's stock comment, which PROD's and TEST's hand-set markers never match.
+- **Round 2:** clean from both reviewers.
+
+### Notes
+- No migration in this PR. It calls functions that PR 1 (#1200) already applied on PROD.
+- The planning artifacts land on `main` through the records PR.
+
 ## [0.133.22.1] - 2026-11-04 — BASELINE: automated re-dump after the PROD apply of a363392e
 
 ### Changed
