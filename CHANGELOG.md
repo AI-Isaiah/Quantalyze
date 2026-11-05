@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.133.22.2] - 2026-11-05 — CI: the SQL mutation lane stays on the PostgreSQL major it was measured on
+
+### Fixed
+- **`sql-mutation` and `sql-mutation-full` run on `ubuntu-24.04` instead of `ubuntu-latest`.** GitHub moved `ubuntu-latest` to Ubuntu 26.04, whose PostgreSQL major is 18. The lane's pg_cron provisioning step asserts major 16 (164.4.1 assumption A5: the authoring box runs 16, and a pg_cron build for another major does not load). It refused with `MEASURE_FAIL: the runner's PostgreSQL major is '18', not 16`, which reddened `sql-mutation` and the `frontend` aggregator on every PR (first seen on #1202). It would also have reddened tomorrow's nightly full run. The guard did its job, so the runner is pinned and the assertion is unchanged.
+
+### Notes
+- Moving the lane to PostgreSQL 18 is a separate, measured change (re-take the major comparison against the authoring box). The other lane jobs (`sql-tests`, the local-stack lanes) boot their own Supabase image and passed on 26.04.
+
 ## [0.133.22.1] - 2026-11-04 — BASELINE: automated re-dump after the PROD apply of a363392e
 
 ### Changed
