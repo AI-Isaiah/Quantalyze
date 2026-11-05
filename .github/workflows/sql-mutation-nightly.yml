@@ -52,7 +52,10 @@ concurrency:
 
 jobs:
   sql-mutation-full:
-    runs-on: ubuntu-latest
+    # Pinned 2026-11-05: ubuntu-latest moved to 26.04, whose PostgreSQL major is 18; the lane
+    # asserts major 16 (164.4.1 A5, the authoring box runs 16), so the image is pinned rather
+    # than the assertion relaxed. Moving the lane to a new major is its own measured change.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

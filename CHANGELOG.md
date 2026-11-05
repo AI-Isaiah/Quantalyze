@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.22.2] - 2026-11-05 — REFUSALRACE (PR 2 of 2): the refusal marker and the refresh-marker retractions merge into compute_jobs.metadata instead of replacing it
+## [0.133.22.3] - 2026-11-05 — REFUSALRACE (PR 2 of 2): the refusal marker and the refresh-marker retractions merge into compute_jobs.metadata instead of replacing it
 
 ### Fixed
 - **The derive's refusal marker can no longer be undone by a concurrent Sync, and the reverse.** Both writers used to read the whole `compute_jobs.metadata`, edit one key and write the whole object back, so one write landing between the other's read and write was lost. A lost marker let the status bridge stamp a strategy `failed` over figures the refusal kept. A lost retraction left a user's Sync job protected as a ledger refresh. Each write is now one call to the merge functions PR 1 put on PROD (`[186-REFUSAL-MARKER-RMW-RACE]`, now CLOSED in `TODOS.md`).
@@ -25,6 +25,14 @@ Two review rounds ran (code review and silent-failure hunt each round):
 ### Notes
 - No migration in this PR. It calls functions that PR 1 (#1200) already applied on PROD.
 - The planning artifacts land on `main` through the records PR.
+
+## [0.133.22.2] - 2026-11-05 — CI: the SQL mutation lane stays on the PostgreSQL major it was measured on
+
+### Fixed
+- **`sql-mutation` and `sql-mutation-full` run on `ubuntu-24.04` instead of `ubuntu-latest`.** GitHub moved `ubuntu-latest` to Ubuntu 26.04, whose PostgreSQL major is 18. The lane's pg_cron provisioning step asserts major 16 (164.4.1 assumption A5: the authoring box runs 16, and a pg_cron build for another major does not load). It refused with `MEASURE_FAIL: the runner's PostgreSQL major is '18', not 16`, which reddened `sql-mutation` and the `frontend` aggregator on every PR (first seen on #1202). It would also have reddened tomorrow's nightly full run. The guard did its job, so the runner is pinned and the assertion is unchanged.
+
+### Notes
+- Moving the lane to PostgreSQL 18 is a separate, measured change (re-take the major comparison against the authoring box). The other lane jobs (`sql-tests`, the local-stack lanes) boot their own Supabase image and passed on 26.04.
 
 ## [0.133.22.1] - 2026-11-04 — BASELINE: automated re-dump after the PROD apply of a363392e
 
