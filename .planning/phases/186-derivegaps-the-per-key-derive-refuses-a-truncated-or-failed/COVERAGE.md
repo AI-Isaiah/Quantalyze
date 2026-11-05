@@ -1,0 +1,1 @@
+No external API integration: the phase reuses the OKX and Bybit reads the worker already integrates (fetch_daily_pnl, funding fetchers, fetch_bybit_unified_flows) and adds no endpoint, SDK or service.
