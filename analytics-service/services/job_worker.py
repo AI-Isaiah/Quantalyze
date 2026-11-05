@@ -3620,6 +3620,12 @@ _STAMP_OP_REFUSAL_MARKER_WRITE = "mark the refused job as having kept the figure
 #: is a live failure. ⛔ The literal is a CROSS-LANGUAGE CONTRACT with that migration.
 READ_REFUSAL_KEPT_FIGURES_KEY: Final[str] = "read_refusal_kept_figures"
 
+#: The SQL function that writes that key: one JSONB merge statement, service-role-only, answering
+#: ``true`` only when it changed a row (migration 20261106120000_refusalrace_metadata_merge_rpcs,
+#: Phase 191 D-03). ⛔ The literal is a CROSS-LANGUAGE CONTRACT with that migration, pinned by the
+#: parity test from plan 191-09.
+MARK_KEPT_FIGURES_RPC: Final[str] = "mark_compute_job_kept_figures"
+
 
 async def _stamp_io(
     call: Callable[[], Awaitable[_StampT]],
@@ -5301,25 +5307,27 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         # THIS job instead. Written BEFORE the sentence and through ``_stamp_io``: a
                         # marker that did not land fails the job TRANSIENT with nothing written, so
                         # the retry refuses again, rather than leaving a sentence the bridge stamps
-                        # ``failed`` over. A read-modify-write, because PostgREST replaces the column.
+                        # ``failed`` over. The marker is ONE merge statement in the SQL function
+                        # (Phase 191 D-03), so no read-to-write window exists in which a retraction
+                        # or the claim's own key could be undone. It counts as written only when the
+                        # function answers exactly ``True`` (D-07): a zero-row update used to be a
+                        # silent success. Anything else raises ``RuntimeError``, which ``_stamp_io``
+                        # files as ``StampIOUnavailable`` (TRANSIENT); ``KeyError``/``TypeError``/
+                        # ``AssertionError`` would escape as ``unknown``, so none is raised here.
+                        # The write stays unfenced by a claim token, as before (D-09).
                         def _mark_job_kept_figures() -> None:
-                            _live = (
-                                ctx.supabase.table("compute_jobs")
-                                .select("metadata")
-                                .eq("id", job.get("id"))
-                                .maybe_single()
+                            _answer = (
+                                ctx.supabase.rpc(
+                                    MARK_KEPT_FIGURES_RPC, {"p_job_id": job.get("id")}
+                                )
                                 .execute()
+                                .data
                             )
-                            _row = getattr(_live, "data", None)
-                            _meta = _row.get("metadata") if isinstance(_row, dict) else None
-                            ctx.supabase.table("compute_jobs").update(
-                                {
-                                    "metadata": {
-                                        **(_meta if isinstance(_meta, dict) else {}),
-                                        READ_REFUSAL_KEPT_FIGURES_KEY: True,
-                                    }
-                                }
-                            ).eq("id", job.get("id")).execute()
+                            if _answer is not True:
+                                raise RuntimeError(
+                                    f"{MARK_KEPT_FIGURES_RPC} did not confirm the marker write: "
+                                    f"answered {type(_answer).__name__} {_answer!r}, expected True"
+                                )
 
                         await _stamp_io(
                             lambda: db_execute(_mark_job_kept_figures),

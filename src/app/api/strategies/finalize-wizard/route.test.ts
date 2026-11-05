@@ -114,17 +114,13 @@ const STATE = vi.hoisted(() => ({
   capitalOwnershipUpdateRows: [{ id: "" }] as Array<{ id: string }> | null,
   // Admin RPC capture (after() block).
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
-  // 164.6 / 161.1-D13 — the enqueued stitch_composite job's row, read by the
-  // inherited-marker retraction, and every compute_jobs UPDATE it issues. The
-  // default row carries no marker, so every pre-existing composite case sees a
-  // read-only no-op.
-  computeJobsRow: null as { metadata: Record<string, unknown> | null } | null,
-  computeJobsReadError: null as { message: string } | null,
-  computeJobsUpdateError: null as { message: string; code?: string } | null,
-  computeJobsUpdates: [] as Array<{
-    patch: Record<string, unknown>;
-    eq: [string, unknown];
-  }>,
+  // 164.6 / 161.1-D13 / Phase 191 D-01 — what the inherited-marker retraction's
+  // ONE rpc, `retract_ledger_refresh_marker`, answers. The default is
+  // `no_marker`, so every pre-existing composite case sees a no-op.
+  retractionAnswer: { data: null, error: null } as {
+    data: unknown;
+    error: { message: string; code?: string } | null;
+  },
   // H-0330 — forced error returned by admin.rpc('enqueue_compute_job').
   adminEnqueueError: null as { message: string } | null,
   // Admin client api_keys lookup (api_key_id) for the after() block.
@@ -502,8 +498,7 @@ vi.mock("@/lib/supabase/admin", () => ({
             eq: () => {
               // Phase 190 / SC-2 — `.in()` chains are decideFinalizeRerun's
               // in-flight read: select().eq(strategy).in(kind).in(status),
-              // awaited at the last link. `.maybeSingle()` stays the marker
-              // retraction's single-row read.
+              // awaited at the last link.
               const jobsResult = () => ({
                 data: STATE.chainJobsReadError ? null : STATE.chainJobs,
                 error: STATE.chainJobsReadError,
@@ -541,27 +536,25 @@ vi.mock("@/lib/supabase/admin", () => ({
                 eq: stitchChain.eq,
                 order: stitchChain.order,
                 limit: stitchChain.limit,
-                maybeSingle: async () => ({
-                  data: STATE.computeJobsReadError ? null : STATE.computeJobsRow,
-                  error: STATE.computeJobsReadError,
-                }),
+                // Phase 191 D-01: the retraction no longer reads this table, so a
+                // single-row read here is the old read-modify-write coming back.
+                maybeSingle: async () => {
+                  throw new Error(
+                    "unexpected compute_jobs single-row read: the marker retraction is an rpc now",
+                  );
+                },
                 in: inChain.in,
                 then: inChain.then,
               };
             },
           }),
-          update: (patch: Record<string, unknown>) => ({
-            eq: (col: string, val: unknown) => {
-              STATE.computeJobsUpdates.push({ patch, eq: [col, val] });
-              // LOW-1: the helper asks for the updated rows back.
-              const select = async () => ({
-                data: STATE.computeJobsUpdateError ? null : [{ id: val }],
-                error: STATE.computeJobsUpdateError,
-              });
-              // 166.5 D-07: the helper filters `.neq("status", "done")`.
-              return { select, neq: () => ({ select }) };
-            },
-          }),
+          // Phase 191 D-01: nothing writes compute_jobs from the route's admin
+          // client any more; the retraction is one SQL function.
+          update: () => {
+            throw new Error(
+              "unexpected compute_jobs update: the marker retraction is an rpc now",
+            );
+          },
         };
       }
       throw new Error(`unexpected admin from(${table})`);
@@ -571,6 +564,7 @@ vi.mock("@/lib/supabase/admin", () => ({
       if (name === "enqueue_compute_job" && STATE.adminEnqueueError) {
         return { data: null, error: STATE.adminEnqueueError };
       }
+      if (name === "retract_ledger_refresh_marker") return STATE.retractionAnswer;
       return { data: "fake-job-id", error: null };
     },
   }),
@@ -784,10 +778,7 @@ beforeEach(async () => {
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
-  STATE.computeJobsRow = { metadata: { source: "finalize-wizard" } };
-  STATE.computeJobsReadError = null;
-  STATE.computeJobsUpdateError = null;
-  STATE.computeJobsUpdates = [];
+  STATE.retractionAnswer = { data: { outcome: "no_marker", status: "queued" }, error: null };
   STATE.captureToSentryCalls = [];
   STATE.processKeyResult = null;
   STATE.processKeyCalls = [];
@@ -847,6 +838,11 @@ function routeThroughLegacyFinalize(): void {
 // STATE.afterPromise; await it directly so nested `await`s inside the
 // callback (Promise.all + Promise.allSettled + chained admin RPCs) are
 // fully drained before assertions, instead of racing the scheduler.
+/** The retraction rpc calls the route's admin client made, by name (Phase 191 D-01). */
+function retractionRpcCalls() {
+  return STATE.adminRpcCalls.filter((c) => c.name === "retract_ledger_refresh_marker");
+}
+
 async function flushAfter(): Promise<void> {
   if (STATE.afterPromise) {
     await STATE.afterPromise;
@@ -2809,19 +2805,18 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue failure escala
  * returns ITS id with our p_metadata discarded. If that job is a background
  * ledger refresh, its `metadata.source` marker keeps a stale factsheet
  * published over a failure of the finalize the user just submitted. The route
- * must retract it — for BOTH markers — must never touch an unmarked row, and a
- * failed retraction must be loud under its OWN tag, never the enqueue's.
+ * must retract it — for BOTH markers — through the single
+ * `retract_ledger_refresh_marker` rpc (Phase 191 D-01), and a failed retraction
+ * must be loud under its OWN tag, never the enqueue's.
  */
 describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh-marker retraction", () => {
   it.each(["ledger-refresh", "ledger-refresh-composite"])(
-    "a deduped job carrying %s is rewritten without source, with the marker and this request's correlation id",
+    "a deduped job carrying %s is retracted by ONE rpc with the job id and this request's correlation id",
     async (marker) => {
       const fetchSpy = mockProbeReadOnly();
       vi.spyOn(console, "warn").mockImplementation(() => {});
       routeThroughLegacyFinalize();
-      STATE.computeJobsRow = {
-        metadata: { source: marker, correlation_id: "fanout-run", run: 7 },
-      };
+      STATE.retractionAnswer = { data: { outcome: "retracted", marker }, error: null };
       STATE.runAfterCallback = true;
 
       const POST = await importPost();
@@ -2829,28 +2824,23 @@ describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh
       expect(res.status).toBe(200);
       await flushAfter();
 
-      expect(STATE.computeJobsUpdates).toEqual([
+      // Only the ids travel; the SQL function merges the metadata itself. The
+      // job id is the one the enqueue RPC RETURNED (the admin rpc double answers
+      // "fake-job-id"), never one derived from the request.
+      expect(retractionRpcCalls()).toEqual([
         {
-          patch: {
-            metadata: {
-              run: 7,
-              refresh_marker_retracted: marker,
-              correlation_id: TEST_CORRELATION_ID,
-            },
-          },
-          // The id the enqueue RPC RETURNED — the admin rpc double answers
-          // "fake-job-id" — never one derived from the request.
-          eq: ["id", "fake-job-id"],
+          name: "retract_ledger_refresh_marker",
+          args: { p_job_id: "fake-job-id", p_correlation_id: TEST_CORRELATION_ID },
         },
       ]);
       fetchSpy.mockRestore();
     },
   );
 
-  it("a deduped job WITHOUT a ledger-refresh marker is never rewritten", async () => {
+  it("a deduped job WITHOUT a ledger-refresh marker is answered no_marker: nothing is captured as a failure", async () => {
     const fetchSpy = mockProbeReadOnly();
     routeThroughLegacyFinalize();
-    STATE.computeJobsRow = { metadata: { source: "keys/sync" } };
+    STATE.retractionAnswer = { data: { outcome: "no_marker", status: "queued" }, error: null };
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -2861,7 +2851,12 @@ describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh
     expect(
       STATE.adminRpcCalls.find((c) => c.args.p_kind === "stitch_composite"),
     ).toBeDefined();
-    expect(STATE.computeJobsUpdates).toEqual([]);
+    expect(retractionRpcCalls()).toHaveLength(1);
+    expect(
+      STATE.captureToSentryCalls.filter(
+        (c) => c.options.tags.side_effect === "composite_refresh_marker_retract",
+      ),
+    ).toEqual([]);
     fetchSpy.mockRestore();
   });
 
@@ -2870,8 +2865,7 @@ describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     routeThroughLegacyFinalize();
-    STATE.computeJobsRow = { metadata: { source: "ledger-refresh-composite" } };
-    STATE.computeJobsUpdateError = { message: "update denied", code: "42501" };
+    STATE.retractionAnswer = { data: null, error: { message: "rpc denied", code: "42501" } };
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -2880,7 +2874,7 @@ describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh
     expect(await res.json()).toMatchObject({ ok: true, strategy_id: STRATEGY_ID });
     await flushAfter();
 
-    expect(STATE.computeJobsUpdates).toHaveLength(1);
+    expect(retractionRpcCalls()).toHaveLength(1);
     const retractCall = STATE.captureToSentryCalls.find(
       (c) => c.options.tags.side_effect === "composite_refresh_marker_retract",
     );
@@ -5580,7 +5574,10 @@ describe("POST /api/strategies/finalize-wizard — [190 SC-2] re-run decision wi
     // The draft already holds the "crypto" a composite finalize writes.
     STATE.strategyRow = { api_key_id: null, asset_class: "crypto" };
     // A marker that WOULD be retracted if the enqueue path ran.
-    STATE.computeJobsRow = { metadata: { source: "ledger-refresh-composite" } };
+    STATE.retractionAnswer = {
+      data: { outcome: "retracted", marker: "ledger-refresh-composite" },
+      error: null,
+    };
     STATE.analyticsStatusRow = COMPUTED_ROW;
     STATE.runAfterCallback = true;
 
@@ -5590,7 +5587,7 @@ describe("POST /api/strategies/finalize-wizard — [190 SC-2] re-run decision wi
     await flushAfter();
 
     expect(enqueued("stitch_composite")).toBeUndefined();
-    expect(STATE.computeJobsUpdates).toEqual([]);
+    expect(retractionRpcCalls()).toEqual([]);
     expect(STATE.auditEvents.filter((e) => e.action === "sync.start")).toEqual([]);
     fetchSpy.mockRestore();
   });

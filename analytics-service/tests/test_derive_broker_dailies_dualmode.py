@@ -154,8 +154,13 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
 
     def _rpc(name: str, payload: dict) -> MagicMock:
         capture["rpc_calls"].append((name, payload))
+        capture["ops"].append(("rpc", name))
         stub = MagicMock()
-        stub.execute.return_value = MagicMock(data=1)
+        # Phase 191 D-07: the refusal-marker function answers ``True`` when it changed a row; the
+        # derive counts the marker as written only on exactly that answer.
+        stub.execute.return_value = MagicMock(
+            data=True if name == "mark_compute_job_kept_figures" else 1
+        )
         return stub
 
     ctx.supabase.rpc.side_effect = _rpc
@@ -2622,6 +2627,8 @@ class TestStrategyModeRefusal:
         live_job_metadata: dict | None = None,
         claimed_job_metadata: dict | None = None,
         break_the_job_marker_write: bool = False,
+        marker_rpc_answer: object = True,
+        capture_into: dict | None = None,
         dq_flag: str = "daily_pnl_truncated_okx",
         attempts: tuple[int, int] | None = None,
     ) -> tuple[object, dict]:
@@ -2632,6 +2639,9 @@ class TestStrategyModeRefusal:
             key_row={"id": "key-st", "exchange": "okx", "user_id": "user-st"},
             strategy_row={"id": "strat-st", "user_id": "user-st"},
         )
+        if capture_into is not None:
+            # The lists are shared, so a caller whose derive raises can still read what was written.
+            capture_into.update(capture)
         original_table = ctx.supabase.table.side_effect
 
         def _table(name: str) -> MagicMock:
@@ -2644,11 +2654,24 @@ class TestStrategyModeRefusal:
                 tbl.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = (
                     MagicMock(data={"metadata": live_job_metadata})
                 )
-                if break_the_job_marker_write:
-                    tbl.update.side_effect = RuntimeError("db down")
             return tbl
 
         ctx.supabase.table.side_effect = _table
+
+        # Phase 191 D-03: the marker is one rpc, not a compute_jobs read and update. The knobs
+        # drive THAT call: a raise is a write error, any other answer is what the function said.
+        original_rpc = ctx.supabase.rpc.side_effect
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            stub = original_rpc(name, payload)
+            if name == "mark_compute_job_kept_figures":
+                if break_the_job_marker_write:
+                    stub.execute.side_effect = RuntimeError("db down")
+                else:
+                    stub.execute.return_value = MagicMock(data=marker_rpc_answer)
+            return stub
+
+        ctx.supabase.rpc.side_effect = _rpc
 
         async def _realized(*_a: object, **_k: object) -> list:
             _record_dq_flag(dq_flag, True)
@@ -2694,7 +2717,8 @@ class TestStrategyModeRefusal:
         assert [d for d in capture["deletes"] if d["table"] != "strategy_analytics"] == []
         assert [u for u in capture["upserts"] if u[0] == "csv_daily_returns"] == []
         assert [u for u in capture["upserts"] if u[0] == "allocator_equity_derived"] == []
-        assert capture["rpc_calls"] == []
+        # The refusal marker is itself an rpc (Phase 191): it is the one write this helper allows.
+        assert [c for c in capture["rpc_calls"] if c[0] != "mark_compute_job_kept_figures"] == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2740,35 +2764,32 @@ class TestStrategyModeRefusal:
         # Review R3-02: the job carries its own marker, written BEFORE the sentence, so the status
         # bridge keeps the figures for as long as this failure is live (the row's provenance is
         # overwritten by the next sync and the next refusal).
-        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
-
-        assert capture["updates"] == [
-            {
-                "table": "compute_jobs",
-                "payload": {"metadata": {READ_REFUSAL_KEPT_FIGURES_KEY: True}},
-                "filters": {"eq:id": "j-st"},
-            }
-        ]
+        # Phase 191 D-03: ONE rpc carries the marker, and Python issues no compute_jobs update, so
+        # no read-to-write window exists for a retraction or the claim's key to be undone in.
+        assert capture["rpc_calls"] == [("mark_compute_job_kept_figures", {"p_job_id": "j-st"})]
+        assert capture["updates"] == []
         ops = capture["ops"]
-        assert ops.index(("update", "compute_jobs")) < ops.index(("upsert", "strategy_analytics"))
+        assert ops.index(("rpc", "mark_compute_job_kept_figures")) < ops.index(
+            ("upsert", "strategy_analytics")
+        )
 
     @pytest.mark.asyncio
     async def test_the_job_marker_is_merged_into_the_live_metadata_not_written_over_it(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """PostgREST replaces the column, so the marker is a read-modify-write: the claim's own
-        telemetry key and a user's retraction survive it."""
+        """Phase 191 (the lost-write race). The merge now happens in ONE SQL statement, so what
+        survives it is the database's business, proven by the SQL gate. What THIS side must guarantee
+        is that no copy of the metadata travels from Python to the write: a copy read earlier goes
+        stale the moment a retraction or the claim's key lands, and writing it back would undo them.
+        So the payload is exactly the job id, even when the live row carries other keys."""
         live = {"unified_backbone_at_claim": True, "refresh_marker_retracted": "ledger-refresh"}
         _, capture = await self._refuse(
             caplog,
             {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
             live_job_metadata=live,
         )
-        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
-
-        assert capture["updates"][0]["payload"] == {
-            "metadata": {**live, READ_REFUSAL_KEPT_FIGURES_KEY: True}
-        }
+        assert capture["rpc_calls"] == [("mark_compute_job_kept_figures", {"p_job_id": "j-st"})]
+        assert capture["updates"] == []
 
     @pytest.mark.asyncio
     async def test_a_refusal_on_a_job_a_users_sync_now_took_over_is_marked_too(
@@ -2786,11 +2807,8 @@ class TestStrategyModeRefusal:
             claimed_job_metadata={"source": "ledger-refresh"},
         )
         assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
-        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
-
-        assert capture["updates"][0]["payload"] == {
-            "metadata": {**live, READ_REFUSAL_KEPT_FIGURES_KEY: True}
-        }
+        assert capture["rpc_calls"] == [("mark_compute_job_kept_figures", {"p_job_id": "j-st"})]
+        assert capture["updates"] == []
         sa = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
         assert len(sa) == 1
         assert sa[0][1]["computation_error"] == _SC2_APPROVED_STRATEGY_SENTENCE
@@ -2822,6 +2840,7 @@ class TestStrategyModeRefusal:
         assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
         assert result.error_kind == "transient"  # type: ignore[attr-defined]
         assert capture["updates"] == []
+        assert capture["rpc_calls"] == []
         assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []
         self._assert_nothing_else_written(capture)
 
@@ -2838,9 +2857,8 @@ class TestStrategyModeRefusal:
         self, caplog: pytest.LogCaptureFixture, dq_flag: str, attempts: tuple[int, int], error_kind: str
     ) -> None:
         """Review PR3-01, the other half: a refusal that is final (permanent, or transient on the
-        last attempt, which ``mark_compute_job_failed`` makes ``failed_final``) is marked."""
-        from services.job_worker import READ_REFUSAL_KEPT_FIGURES_KEY
-
+        last attempt, which ``mark_compute_job_failed`` makes ``failed_final``) is marked. Phase 191:
+        the mark is one ``mark_compute_job_kept_figures`` rpc, not a compute_jobs update."""
         result, capture = await self._refuse(
             caplog,
             {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
@@ -2848,15 +2866,12 @@ class TestStrategyModeRefusal:
             attempts=attempts,
         )
         assert result.error_kind == error_kind  # type: ignore[attr-defined]
-        assert capture["updates"] == [
-            {
-                "table": "compute_jobs",
-                "payload": {"metadata": {READ_REFUSAL_KEPT_FIGURES_KEY: True}},
-                "filters": {"eq:id": "j-st"},
-            }
-        ]
+        assert capture["rpc_calls"] == [("mark_compute_job_kept_figures", {"p_job_id": "j-st"})]
+        assert capture["updates"] == []
         ops = capture["ops"]
-        assert ops.index(("update", "compute_jobs")) < ops.index(("upsert", "strategy_analytics"))
+        assert ops.index(("rpc", "mark_compute_job_kept_figures")) < ops.index(
+            ("upsert", "strategy_analytics")
+        )
 
     @pytest.mark.asyncio
     async def test_a_marker_that_did_not_land_fails_the_job_transient_and_writes_no_sentence(
@@ -2864,15 +2879,51 @@ class TestStrategyModeRefusal:
     ) -> None:
         """A sentence without its marker is the contradiction the bridge cannot undo: it would stamp
         the row failed under "these numbers stay". So the marker is written first, and if it cannot
-        be written nothing is, and the queue retries."""
-        from services.job_worker import StampIOUnavailable
+        be written nothing is, and the queue retries. Phase 191: the write that fails is now the
+        ``mark_compute_job_kept_figures`` rpc raising, and the stamp's op text rides the cause."""
+        from services.job_worker import _STAMP_OP_REFUSAL_MARKER_WRITE, StampIOUnavailable
 
-        with pytest.raises(StampIOUnavailable):
+        with pytest.raises(StampIOUnavailable, match=_STAMP_OP_REFUSAL_MARKER_WRITE):
             await self._refuse(
                 caplog,
                 {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
                 break_the_job_marker_write=True,
             )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            pytest.param(False, id="false-no-row-changed"),
+            pytest.param(None, id="none-no-answer"),
+            pytest.param(1, id="one-is-not-true"),
+            pytest.param("true", id="string-true-is-not-true"),
+        ],
+    )
+    async def test_a_marker_the_function_did_not_confirm_fails_the_job_transient_with_no_sentence(
+        self, caplog: pytest.LogCaptureFixture, answer: object
+    ) -> None:
+        """Phase 191 D-07. The marker counts as written only when the function answers exactly
+        ``True``. Before this phase a zero-row update was silent success, and the status bridge
+        would then stamp ``failed`` over figures the refusal kept. Every other answer (``False`` is
+        a job that is gone, ``None`` an empty body, ``1`` and ``"true"`` a changed contract) raises
+        inside the stamp's closure, which ``_stamp_io`` files as ``StampIOUnavailable``
+        (TRANSIENT), and neither the sentence nor anything else is written."""
+        from services.job_worker import _STAMP_OP_REFUSAL_MARKER_WRITE, StampIOUnavailable
+
+        captured: dict = {}
+        with pytest.raises(StampIOUnavailable, match=_STAMP_OP_REFUSAL_MARKER_WRITE) as excinfo:
+            await self._refuse(
+                caplog,
+                {"computation_status": "complete", "metrics_json": {"a": 1}, "metrics_json_by_basis": None},
+                marker_rpc_answer=answer,
+                capture_into=captured,
+            )
+        assert "did not confirm the marker write" in str(excinfo.value.__cause__)
+        # No sentence, no series write, no second marker attempt.
+        assert [u for u in captured["upserts"] if u[0] == "strategy_analytics"] == []
+        assert captured["updates"] == []
+        assert captured["rpc_calls"] == [("mark_compute_job_kept_figures", {"p_job_id": "j-st"})]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2915,6 +2966,7 @@ class TestStrategyModeRefusal:
         self._assert_nothing_else_written(capture)
         # No figures to keep, so no marker: the bridge must stamp this one failed.
         assert capture["updates"] == []
+        assert capture["rpc_calls"] == []
 
 
 class TestFundingReadRefusedByName:
