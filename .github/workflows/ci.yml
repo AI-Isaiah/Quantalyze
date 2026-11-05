@@ -2365,7 +2365,10 @@ jobs:
     # above is therefore true of the JOB and no longer true of its steps.
     needs: [changed-paths]
     if: needs.changed-paths.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
+    # Pinned 2026-11-05: ubuntu-latest moved to 26.04, whose PostgreSQL major is 18; the lane
+    # asserts major 16 (164.4.1 A5, the authoring box runs 16), so the image is pinned rather
+    # than the assertion relaxed. Moving the lane to a new major is its own measured change.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -5737,6 +5740,7 @@ jobs:
           bash scripts/local-stack/run.sh --assert-local-handoff "${lane_env_file}"
           api_url="$(sed -n 's/^API_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
           service_key="$(sed -n 's/^SERVICE_ROLE_KEY="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
+          db_url="$(sed -n 's/^DB_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
           if [ -z "${api_url}" ]; then
             echo "::error::the lane handoff carries no API_URL line. It is written by the boot step above; pytest's live-DB modules would have no database."
             exit 1
@@ -5745,10 +5749,16 @@ jobs:
             echo "::error::the lane handoff carries no SERVICE_ROLE_KEY line. It is written by the boot step above; pytest's live-DB modules would have no key."
             exit 1
           fi
+          if [ -z "${db_url}" ]; then
+            echo "::error::the lane handoff carries no DB_URL line. It is written by the boot step above; the Phase 191 two-connection merge probe would have no raw DSN and would fail rather than skip."
+            exit 1
+          fi
           # The service key is the CLI's public demo key, but masking is free.
           # The API URL is loopback and not secret, so it stays unmasked and a
           # later failure can name the port.
           echo "::add-mask::${service_key}"
+          # The DSN carries the lane's database password, so it is masked too.
+          echo "::add-mask::${db_url}"
           # Handed over through the job's environment file and NEVER through a
           # step `env:` entry: a step `env:` value wins over this file, so a
           # pytest `env:` naming these two variables would silently shadow the
@@ -5759,6 +5769,15 @@ jobs:
           # this phase does not scope in (RESEARCH Anti-Patterns).
           printf 'SUPABASE_TEST_URL=%s\n' "${api_url}" >> "${GITHUB_ENV}"
           printf 'SUPABASE_TEST_SERVICE_KEY=%s\n' "${service_key}" >> "${GITHUB_ENV}"
+          # Phase 191 D-09 (2026-11-05): the metadata-merge probe
+          # (tests/test_compute_job_metadata_merge_live.py) needs a RAW DSN, because it
+          # holds a row lock on one psycopg connection while a second one blocks on it,
+          # which PostgREST cannot express. The name is LANE_DB_URL so the psycopg modules
+          # gated on TEST_SUPABASE_DB_URL stay skipped. The DSN is the loopback one
+          # `--assert-local-handoff` above already refused when it was not, and the probe
+          # re-checks the host and the connected server before it writes. The probe FAILS
+          # (never skips) when this variable is absent under CI=true.
+          printf 'LANE_DB_URL=%s\n' "${db_url}" >> "${GITHUB_ENV}"
           echo "lane handoff exported to later steps; the values are not printed."
 
       # PR #149 v0.22.25.3 follow-up: wire the test Supabase project into

@@ -29,7 +29,7 @@ Pitfall 3 — Drain semantics
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any, Final, cast, get_args
 
 import sentry_sdk
 import structlog
@@ -39,6 +39,7 @@ from services.db import get_supabase
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
+from services.redact import scrub_freeform_string
 
 if TYPE_CHECKING:
     from services.job_worker import DispatchResult
@@ -62,6 +63,18 @@ log = structlog.get_logger("quantalyze.analytics.long_fetch")
 # the state machine and enqueue the derive_broker_dailies tail, never the fill
 # steps — exactly like deribit and sfox.
 _LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox", "mt5"})
+
+
+# Phase 191 D-01 — the refresh-marker retraction is ONE SQL function, not a
+# read-modify-write over ``compute_jobs.metadata``. These two are cross-language
+# contracts: the rpc name is hand-typed in the TypeScript twin
+# (``src/lib/ledger-refresh-marker.ts``) and the outcome vocabulary is the
+# function's own (``supabase/schema/functions/retract_ledger_refresh_marker.sql``).
+# Plan 191-09's parity test pins both ends.
+RETRACT_REFRESH_MARKER_RPC: Final[str] = "retract_ledger_refresh_marker"
+RETRACTION_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"retracted", "done", "no_marker", "no_row"}
+)
 
 
 def _retract_refresh_marker_on_reuse(
@@ -97,100 +110,111 @@ def _retract_refresh_marker_on_reuse(
     site today (``process_key_long``'s tails are ``derive_broker_dailies`` and
     ``sync_trades``), and if a future arm changes that it should be retracted too.
 
-    ⚠️ RESIDUAL, stated rather than hidden: this is a read-modify-write, and the
-    claim RPC additively writes ``unified_backbone_at_claim`` into the same
-    column. A claim committing between the read and the write loses that key.
-    It is re-derivable and nothing re-reads it from the row — the drain check at
-    :81 takes it from the claim's own returned metadata — so the cost of the
-    window is a telemetry key, against a funded account rendering a stale
-    factsheet over a silently-failed resync if the write is skipped. The real
-    closure is a merge arm in ``enqueue_compute_job``; that RPC is on every
-    enqueue path in the system and needs its own review.
+    ⛔ Phase 191 D-01 — THE RETRACTION IS ONE UPDATE IN SQL. It used to read
+    ``metadata`` here, drop ``source`` and write the whole object back, so any key
+    another writer added between the read and the write (a refusal marker, the
+    claim's ``unified_backbone_at_claim``) was undone by this stale copy. It is now
+    a single call to ``public.retract_ledger_refresh_marker`` (``supabase/schema/
+    functions/retract_ledger_refresh_marker.sql``), which merges in the database in
+    one statement and answers ``retracted``, ``done``, ``no_marker`` or ``no_row``.
+    Python sends only the job id and the correlation id, so it has no stale copy to
+    write back. The function never rewrites a ``done`` job: its protection was
+    decided when it ran, and the ``updated_at`` trigger would falsify its finish time.
+    ``no_row`` is LOUD here, as in the TypeScript twin: an error line plus one
+    tagged Sentry capture (D-08), because a user's resync left protected as a
+    refresh job is the very failure this helper exists to prevent.
+    ⚠️ D-02, unchanged and NOT that race: the enqueue dedup returns the existing id
+    and discards ``p_metadata``, and this call runs afterwards, so there is still a
+    gap between the deduped enqueue and the retraction. Closing it is a merge arm
+    inside ``enqueue_compute_job``, which Phase 191 deliberately did not touch
+    (D-01).
 
-    Best-effort by design: the caller's ``try:`` already contains an enqueue blip
-    for the reason its own comment gives, and this is the same class of failure.
+    Best-effort by design: a failed retraction (rpc error, non-object answer,
+    unrecognised outcome) is logged as ``refresh_marker_retraction_failed`` with
+    one tagged Sentry capture and never raised, so the caller does not mislabel it
+    as ``enqueue_tail_failed``.
     """
     if not job_id:
         return
-    from services.job_worker import LEDGER_REFRESH_JOB_SOURCES
 
-    res = (
-        supabase.table("compute_jobs")
-        .select("metadata")
-        .eq("id", job_id)
-        .maybe_single()
-        .execute()
-    )
-    row = getattr(res, "data", None)
-    metadata = row.get("metadata") if isinstance(row, dict) else None
-    marker = metadata.get("source") if isinstance(metadata, dict) else None
-    if not isinstance(metadata, dict) or marker not in LEDGER_REFRESH_JOB_SOURCES:
+    try:
+        res = supabase.rpc(
+            RETRACT_REFRESH_MARKER_RPC,
+            {"p_job_id": job_id, "p_correlation_id": correlation_id},
+        ).execute()
+        answer = getattr(res, "data", None)
+        if not isinstance(answer, dict):
+            raise RuntimeError(
+                f"{RETRACT_REFRESH_MARKER_RPC} answered a non-object: {answer!r}"
+            )
+        outcome = answer.get("outcome")
+        if outcome not in RETRACTION_OUTCOMES:
+            raise RuntimeError(
+                f"{RETRACT_REFRESH_MARKER_RPC} answered an unrecognised outcome: {answer!r}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        # A failed retraction leaves the inherited refresh marker on a user's job.
+        # It is its own failure, named as such: the caller's ``try:`` would log it
+        # as ``enqueue_tail_failed`` with no capture, though the enqueue succeeded.
+        log.error(
+            "process_key_long.refresh_marker_retraction_failed",
+            job_id=str(job_id),
+            error_type=type(exc).__name__,
+            error=str(scrub_freeform_string(str(exc)))[:200],
+        )
+        try:
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("compute_job_id", str(job_id))
+                scope.set_tag("refresh_marker", "unknown")
+                scope.set_tag("error_type", type(exc).__name__)
+                sentry_sdk.capture_message(
+                    "process_key_long.refresh_marker_retraction_failed: "
+                    "the inherited refresh marker may still be on the job",
+                    level="error",
+                )
+        except Exception as sentry_exc:  # noqa: BLE001 — never mask the enqueue
+            log.warning(
+                "process_key_long.refresh_marker_retraction_sentry_failed",
+                error_type=type(sentry_exc).__name__,
+            )
         return
+    marker = answer.get("marker")
 
-    retracted = {key: value for key, value in metadata.items() if key != "source"}
-    retracted["refresh_marker_retracted"] = marker
-    retracted["correlation_id"] = correlation_id
-    # D-07: never rewrite a FINISHED job. Its protection was decided when it ran,
-    # and the compute_jobs_set_updated_at BEFORE UPDATE trigger would bump its
-    # updated_at, falsifying the finish time every reader of a job trusts. The
-    # filter (not a read-then-skip) also closes the race where the job finishes
-    # between the read above and this write: PostgREST reports zero rows.
-    #
-    # SFH-1 (166.5): the audit line below may only claim a retraction the UPDATE
-    # actually made. postgrest-py's update returns the matched rows
-    # (``return=representation``), so ``.data`` is empty exactly when the filter
-    # matched nothing. That mirrors the TypeScript twin
-    # (``retractInheritedRefreshMarker``): zero rows -> re-read the status once;
-    # ``done`` is a quiet skip, anything else leaves the marker in place under a
-    # job somebody is watching, which is loud.
-    res = (
-        supabase.table("compute_jobs")
-        .update({"metadata": retracted})
-        .eq("id", job_id)
-        .neq("status", "done")
-        .execute()
-    )
-    updated = getattr(res, "data", None)
-    if isinstance(updated, list) and updated:
+    if outcome == "retracted":
         log.warning(
             "process_key_long.refresh_marker_retracted",
             job_id=str(job_id),
             marker=marker,
         )
         return
-
-    after = (
-        supabase.table("compute_jobs")
-        .select("status")
-        .eq("id", job_id)
-        .maybe_single()
-        .execute()
-    )
-    after_row = getattr(after, "data", None)
-    status = after_row.get("status") if isinstance(after_row, dict) else None
-    if status == "done":
-        log.info(
-            "process_key_long.refresh_marker_retraction_skipped_done",
-            job_id=str(job_id),
-            marker=marker,
-        )
+    if outcome == "done":
+        if marker:
+            log.info(
+                "process_key_long.refresh_marker_retraction_skipped_done",
+                job_id=str(job_id),
+                marker=marker,
+            )
         return
+    if outcome == "no_marker":
+        return
+    # "no_row": the only member of RETRACTION_OUTCOMES left. The function found no
+    # row at all, so there is no marker or status to report.
     log.error(
         "process_key_long.refresh_marker_retraction_matched_no_row",
         job_id=str(job_id),
-        marker=marker,
-        status=status,
+        marker=None,
+        status=None,
     )
-    # Round-2 SFH: a log line alone is not an operator signal. Pair it with one
-    # tagged capture, the shape ``services/job_worker.py`` uses
+    # D-08 / round-2 SFH: a log line alone is not an operator signal. Pair it with
+    # one tagged capture, the shape ``services/job_worker.py`` uses
     # (``new_scope`` + static message, ids as tags, no PII). Wrapped because
     # telemetry must never fail the work it observes, and this helper must not
-    # raise at all: its caller would mislabel a successful enqueue as
-    # ``enqueue_tail_failed``.
+    # raise on a Sentry failure: its caller would mislabel a successful enqueue
+    # as ``enqueue_tail_failed``.
     try:
         with sentry_sdk.new_scope() as scope:
             scope.set_tag("compute_job_id", str(job_id))
-            scope.set_tag("refresh_marker", str(marker))
+            scope.set_tag("refresh_marker", "unknown")
             sentry_sdk.capture_message(
                 "process_key_long.refresh_marker_retraction_matched_no_row: "
                 "the job vanished before the marker could be retracted",

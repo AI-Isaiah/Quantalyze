@@ -419,6 +419,16 @@ const MUTATING_RPC_NAMES: readonly string[] = [
   // two halves of one repudiation surface; auditing only the mint would leave
   // "who killed this link, and when" unanswerable.
   "revoke_strategy_share",
+  // Phase 191 (REFUSALRACE): the single-UPDATE retraction of an inherited
+  // ledger-refresh marker (migration 20261106120000), called by
+  // `retractInheritedRefreshMarker` in src/lib/ledger-refresh-marker.ts. Without
+  // this name the helper stops counting as a mutator (`moduleExportMutates`
+  // reads it through `MUTATING_RPC_RE`), so the `@audit-skip` pragmas at the two
+  // Sync call sites (keys/sync, strategies/finalize-wizard) become decorative:
+  // the gate would never evaluate them. The helper must also write the name as a
+  // QUOTED LITERAL at its `.rpc(` call, since that regex reads no constant; the
+  // pin "retractInheritedRefreshMarker counts as a mutator" fails on either slip.
+  "retract_ledger_refresh_marker",
 ];
 
 /**
@@ -1012,6 +1022,21 @@ describe("audit-coverage helpers — P692/P694 regression fixtures", () => {
     const check = isCovered(mutation, lines);
     expect(check.covered).toBe(true);
     expect(check.reason).toBe("pragma");
+  });
+});
+
+describe("audit-coverage — the Sync routes' retraction helper (Phase 191)", () => {
+  // The corpus test's `detectedMutationSites` floor is a `>=` bound, so losing
+  // the two Sync call sites (the allowlist entry removed, or the helper passing
+  // a constant where the scanner needs a quoted literal) would stay green on its
+  // own: the sites would simply stop being counted and the routes' @audit-skip
+  // pragmas would stop being evaluated. This pin fails first.
+  it("retractInheritedRefreshMarker counts as a mutator, so the Sync routes' @audit-skip pragmas are evaluated (Phase 191)", () => {
+    const helperSrc = fs.readFileSync(
+      path.resolve(__dirname, "../lib/ledger-refresh-marker.ts"),
+      "utf8",
+    );
+    expect(moduleExportMutates(helperSrc, "retractInheritedRefreshMarker")).toBe(true);
   });
 });
 
