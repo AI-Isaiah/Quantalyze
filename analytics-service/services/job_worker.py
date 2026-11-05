@@ -3825,6 +3825,52 @@ def _calendar_days_absent_from(
     return out
 
 
+def _tiny_base_days_stored(
+    meta: Mapping[str, Any],
+    returns: pd.Series,
+    applied: MarkedSeries | None,
+    *,
+    key_mode: bool,
+) -> list[str]:
+    """The one stated list of a derive run: the days the tiny-base rule left out of its series
+    (188 gap closure, VERIFICATION gap 1).
+
+    Three readers share it so the list that is stored and the days that are deleted cannot drift:
+    ``key_inputs.tiny_base_days`` (key mode), the strategy pre-stamp's ``tiny_base_days`` and the
+    reconcile delete's span (``_reconcile_hull``).
+
+    Key mode keeps the combiner's realized-era days strictly before the key's first mark
+    (``marks_since``): from the first mark on, the marked era owns every day. Strategy mode reads
+    the final published series instead. When marks were applied, a realized tiny day counts only if
+    it is a NaN day of the FINAL ``returns`` (R2-02: the pre-mark rows, and a closed mandate's tail
+    kept verbatim after the last mark), because the rows from the first mark on were replaced.
+    Both modes add the days ``apply_marks`` left out. ISO days only (T-73-02)."""
+    from services.tiny_base import tiny_base_day_list
+
+    marked_days = applied.tiny_base_days if applied is not None else ()
+    if key_mode:
+        marks_since = applied.marks_since if applied is not None else None
+        return tiny_base_day_list(meta.get("tiny_base_days"), marks_since, marked_days)
+    realized = meta.get("tiny_base_days")
+    if applied is not None:
+        published_nan = {ts.date().isoformat() for ts in returns.index[returns.isna().to_numpy()]}
+        realized = [d for d in (meta.get("tiny_base_days") or ()) if d in published_nan]
+    return tiny_base_day_list(realized, None, marked_days)
+
+
+def _reconcile_hull(index_days: Iterable[str], named_days: Iterable[str]) -> tuple[str, str]:
+    """The reconcile delete's span: the smallest and largest ISO day over the payload series' days
+    and the days this run states as left out.
+
+    A left-out marked day has no index entry (D-04), so the index alone ends the span at the last
+    measured day and misses a stated tail (or leading) day. The hull covers the stated days by
+    construction. Raises ``ValueError`` (static text) when both inputs are empty."""
+    days = [*index_days, *named_days]
+    if not days:
+        raise ValueError("reconcile hull: no days to span")
+    return min(days), max(days)
+
+
 async def _persist_refused_key_capture(
     supabase: Any,
     *,
@@ -9427,11 +9473,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # days the rule left out of this key's series, named for the reader (``tiny_base_days``:
         # the realized-era days before the key's first mark, which the NAV core and plan 04's quiet
         # days named, plus the marked days). ISO days only, no amount (T-73-02).
-        from services.tiny_base import realized_tiny_base_pnl, tiny_base_day_list
+        from services.tiny_base import realized_tiny_base_pnl
 
         _tiny_since = _applied_marks.marks_since if _applied_marks is not None else None
         _tiny_marked = _applied_marks.tiny_base_days if _applied_marks is not None else ()
-        _tiny_listed = tiny_base_day_list(meta.get("tiny_base_days"), _tiny_since, _tiny_marked)
+        _tiny_listed = _tiny_base_days_stored(meta, returns, _applied_marks, key_mode=True)
         if _tiny_listed:
             _key_inputs_payload["tiny_base_days"] = _tiny_listed
             logger.info(
@@ -9677,8 +9723,51 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # fetched) and enqueue the compose. An idle/short key with real capital
             # must be visible to the compose core (anchored-without-returns →
             # DROPPED_KEY → untrustworthy → legacy fallback), never silently absent
-            # from a "Derived" curve that understates its capital. No csv_daily_
-            # returns / strategy_analytics write here — only the key_inputs surface.
+            # from a "Derived" curve that understates its capital. No strategy_analytics
+            # write here, and no csv_daily_returns write unless marks were applied (below).
+            # GC1-02: every row an earlier derive stored on a day this derive states as left
+            # out, or on a day the marks own (first covered day through the last mark day),
+            # is stale beside the stated `dropped_day_pnl`. It is deleted here, else the
+            # compose reads both as a double count (`key_inputs_mismatch`).
+            _stale_days = _tiny_base_days_stored(meta, returns, _applied_marks, key_mode=True)
+            if _applied_marks is not None and _applied_marks.covered_from is not None:
+                assert _applied_marks.terminal is not None  # marks exist, so a last mark does
+                # GC2-01: the one day this derive measured (at most one interpretable day) is
+                # stored, as the main path does, and kept out of the delete: the epilogue
+                # stores the last mark day as `realized_terminal_day`, and a series ending
+                # before it reads `key_inputs_mismatch`. The stated days can reach back
+                # before the first covered day, so the span is the hull of all three.
+                _measured = [
+                    {
+                        "api_key_id": api_key_id,
+                        "allocator_id": allocator_id,
+                        "strategy_id": None,
+                        "date": ts.date().isoformat(),
+                        "daily_return": float(val),
+                    }
+                    for ts, val in returns.dropna().items()
+                ]
+                if _measured:
+                    await db_execute(
+                        lambda: ctx.supabase.table("csv_daily_returns")
+                        .upsert(_measured, on_conflict="api_key_id,date")
+                        .execute()
+                    )
+                _stale_start, _stale_end = _reconcile_hull(
+                    [], [*_stale_days, _applied_marks.covered_from, _applied_marks.terminal[0]]
+                )
+                _stale_days = _calendar_days_absent_from(
+                    _stale_start, _stale_end, (str(r["date"]) for r in _measured)
+                )
+            for _dstart in range(0, len(_stale_days), _RECONCILE_DELETE_IN_BATCH):
+                _days = _stale_days[_dstart:_dstart + _RECONCILE_DELETE_IN_BATCH]
+
+                def _stale_day_delete(days: list[str] = _days) -> None:
+                    ctx.supabase.table("csv_daily_returns").delete().eq(
+                        "api_key_id", api_key_id
+                    ).in_("date", days).execute()
+
+                await db_execute(_stale_day_delete)
             try:
                 await _run_key_mode_compose_epilogue()
             except NavReconstructionError as exc:
@@ -9931,25 +10020,42 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # guaranteed: SFH-C3R3-02), instead of leaving the span empty.
     #
     # SPAN/SCOPE bound — the delete must NEVER remove legitimate out-of-scope
-    # history. The authoritative span is EXACTLY the dense reconstructed calendar
-    # [returns.index.min(), returns.index.max()]. `returns` here is the POST-terminus
-    # dense Series (gap_fill_daily_returns -> pd.date_range, then the DQ-02 terminus
-    # segmentation), so its min/max cleanly bound the span for BOTH venue classes:
+    # history. The authoritative span is the HULL of the payload series' days and the
+    # days this derive states as left out (`_reconcile_hull`, `_tiny_base_days_stored`),
+    # widened by the marked era's first covered day and last mark day when marks applied.
+    # A left-out marked day has no index entry (D-04: in the marked era a tiny day is
+    # skipped, never a chain break), so the index alone ended the span at the last
+    # measured day and left the rows an earlier derive stored on a tiny tail or a tiny
+    # leading edge, beside a stated `dropped_day_pnl` for the same day (188 gap
+    # closure, VERIFICATION gap 1). The stated days come from this run itself, so the
+    # hull never reaches history the derive did not judge. `returns` here is the
+    # POST-terminus dense Series (gap_fill_daily_returns -> pd.date_range, then the
+    # DQ-02 terminus segmentation), so its min/max bound the rest of the span for BOTH
+    # venue classes:
     #   - full_history (Deribit, no retention cap): [min,max] IS the whole strategy
     #     series — every stored row is in-scope and authoritative.
     #   - retention-windowed (ccxt OKX/Bybit): [min,max] is only the reconstructed
-    #     window. Rows OLDER than index.min() (written by an EARLIER derive when the
-    #     retention floor sat further back) are strictly < span_start and are never
+    #     window. Rows OLDER than the earliest day (written by an EARLIER derive when
+    #     the retention floor sat further back) are strictly < span_start and are never
     #     named by the delete -> PRESERVED. Every delete names only calendar days
     #     inside [span_start, span_end] AND carries that gte/lte bound as well, so
-    #     it can only touch days this derive actually reconstructed.
+    #     it can only touch days this derive actually reconstructed or stated.
     #
     # The deleted days are the span's calendar minus the payload, computed
     # client-side (`_calendar_days_absent_from`) and sent in `in.(...)` lists of at
     # most `_RECONCILE_DELETE_IN_BATCH` dates, so a span thousands of days wide
     # never builds an unbounded request line and no read of the table is needed.
-    _span_start = returns.index.min().date().isoformat()
-    _span_end = returns.index.max().date().isoformat()
+    # GC1-01: the marks own every day from the first covered day through the last mark day, a
+    # day with no usable base included (no row, not stated), so a row an earlier derive stored
+    # on the first or the last mark day must fall inside the span too.
+    _span_named = _tiny_base_days_stored(meta, returns, _applied_marks, key_mode=is_key_mode)
+    if _applied_marks is not None and _applied_marks.covered_from is not None:
+        assert _applied_marks.terminal is not None  # marks exist, so a last mark does
+        _span_named = [*_span_named, _applied_marks.covered_from, _applied_marks.terminal[0]]
+    _span_start, _span_end = _reconcile_hull(
+        (ts.date().isoformat() for ts in returns.index),
+        _span_named,
+    )
 
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
@@ -10340,7 +10446,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _prestamp_flags["twr_chain_broken"] = True
 
     _tiny_marked_days = _applied_marks.tiny_base_days if _applied_marks is not None else ()
-    _tiny_listed_days = tiny_base_day_list(_realized_tiny, None, _tiny_marked_days)
+    _tiny_listed_days = _tiny_base_days_stored(meta, returns, _applied_marks, key_mode=False)
     if _tiny_listed_days:
         _prestamp_flags["tiny_base_days"] = _tiny_listed_days
         logger.info(

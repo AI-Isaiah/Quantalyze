@@ -122,8 +122,10 @@ export interface StrategyForBuilder {
    * account). The engine sits the unit out of those days: it adds nothing to
    * the day's numerator or weight sum, and the date axis is built without them,
    * so the day is never read as a flat 0% return. OPTIONAL + additive: absent or
-   * empty is byte-identical to a unit without the field. Set only by the two
-   * per-key builders; a value is a day to leave out, never a return.
+   * empty is byte-identical to a unit without the field. Set by the two per-key
+   * builders and by every strategy-leg builder, from the strategy's
+   * `data_quality_flags.tiny_base_days` (188 D-12); a value is a day to leave
+   * out, never a return.
    */
   undefined_return_days?: readonly string[];
 }

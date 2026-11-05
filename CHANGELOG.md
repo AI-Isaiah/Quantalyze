@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.133.23.0] - 2026-11-05 — TINYBASE 188 gap closure: the derive deletes the stale rows on the days it leaves out
+
+### Fixed
+- **A derive now removes the rows an earlier derive stored on a day it leaves out at the edge of a series.** The reconcile delete used to span only the days that carry a return. A tiny-base day (a day measured against a near-empty account) at the tail or leading edge has no return, so the old row stayed beside the day's stated `dropped_day_pnl`. On PROD that left 24 stale rows on keys C, k1 and k2 and made three books compose as `key_inputs_mismatch`. The span is now the hull of the series days and the days the derive states as left out, in key mode and strategy mode, and one helper (`_tiny_base_days_stored`) produces both the stored list and the delete span, so they cannot drift.
+- **The marked era's first covered day and last mark day are inside the span.** An account with no realized day before its first mark gives that day no return and no stated entry, and a dust-base last mark does the same at the tail. A stale row there survived, and in strategy mode the series runner would use it, so a made-up return could reach the factsheet (reproduced in review, not observed on PROD). Both days are now covered.
+- **A key with fewer than two measured days no longer keeps stale rows.** That branch returned before the reconcile, so it stated its left-out days while the old rows stayed. It now writes its one measured row (when marks were applied) and deletes the rest of the marked era and the stated days for that key only.
+
+### Root cause
+- `apply_marks` gives a left-out marked day no index entry, so a span read from the series index ended at the last measured day and started at the first.
+
+### Tests
+- `analytics-service/tests/test_tiny_base_reconcile.py` (9 tests): tail and leading edge in key and strategy mode, the book after the derive, the dust-base last mark day, the under-two-days branch with a composed book carrying no `key_inputs_mismatch`, and the scope guards (rows outside the span and other keys are kept). Every stale-row test was RED against the pre-fix code, and neuter drills of the span start, the span end and the per-key scope each turned a named test red.
+
+### Notes
+- KL-5 (a strategy leg 0-filling a day it lacks) was already wired in #1196. A neuter drill at each of the nine strategy-leg sites turned its named test red; the only change is the `undefined_return_days` docstring in `src/lib/scenario.ts`.
+- The PROD rows are removed by the next nightly derive after deploy, not by a migration. The pre-fix values are kept only in the phase's read-only baseline capture.
+- A key whose derive has no marks and fewer than two measured days still writes no row, as before; its stated days are all NaN days, so nothing stale is stated there.
+- Planning artifacts land on `main` through the records PR.
+
 ## [0.133.22.4] - 2026-11-05 — records: close DERIVEGAPS 186
 
 ### Added
