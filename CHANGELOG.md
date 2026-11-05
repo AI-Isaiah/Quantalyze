@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.22.4] - 2026-11-05 — records: close DERIVEGAPS 186
+
+### Added
+- Phase 186 DERIVEGAPS planning records on `main`: the 14 plans and their summaries, the review file, validation, verification (passed 7/7) and the security audit (36 threats closed, one accepted risk, AR-186-01).
+
+### Changed
+- ROADMAP: Phase 186 ticked complete with all plans ticked; its Progress row keeps its prose.
+- STATE: current position moves off 186; several phases run in parallel.
+
+### Notes
+- The SC-5 post-deploy PROD reading confirmed the fix after 31 broker and 9 equity derives finished post-deploy: no eligible key is failing (0 of 26), no composed curve carries a refusal bucket, and the Bybit live key now stores positive flows (0 at SC-1, 1 after).
+- Planning files only. No code, migration or CI change.
+
 ## [0.133.22.3] - 2026-11-05 — REFUSALRACE (PR 2 of 2): the refusal marker and the refresh-marker retractions merge into compute_jobs.metadata instead of replacing it
 
 ### Fixed

@@ -218,7 +218,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 183: DUPCOUNT — a book whose marked duplicate key is already counted once draws its equity curve** — booked 2026-10-31 from the Sentry check (founder "Count once, draw the curve (Recommended)"); QUANTALYZE-2H: 1 book refused as `account_duplicate` nightly since 2026-10-20 although the derive already counts its account once; data integrity, user-facing (completed 2026-11-02)
 - [x] **Phase 184: WALLETOFFSET — the first-mark offset on wallet-base venues is measured from fills** — booked 2026-11-01 from NAVMTM 167.2.1.1.1 D-27 (founder "Book a measure phase"); rebuild the realized P&L between UTC midnight and the first mark read from fills on OKX and Bybit (Binance and sFOX once marked) and measure the offset as a ratio of NAV, read-only; the founder then decides on a writer-chain base; data integrity (completed 2026-11-01)
 - [x] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing (completed 2026-11-03: v0.133.18.0 #1187; verification passed 5/5, SECURED 30/30; replanned to value options at market in allocator books (D-04); PROD days above 50% 6 to 2, SC-4 met with key A's two days named (D-14); key C stays on cash with the caveat; the cumulative to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED`)
-- [ ] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing
+- [x] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing (completed 2026-11-05)
 - [x] **~~Phase 187~~: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put binance into todos"): moved out of this milestone, not delivered; TODOS `[187-BINANCEINCOME-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
 - [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
 - [x] **~~Phase 189~~: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put all open phases that are purely about deribit or sfox into todos and not do them in this milestone"): moved out of this milestone, not delivered; TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
@@ -6955,7 +6955,7 @@ Plans:
 **Goal:** The new curve's path (per-key `derive_broker_dailies` plus the compose) carries the protections the legacy engine got from ACCTREBUILD, TRADEPAGES, READCEILING, OKXANCHOR, OKXREWRITE and BYBITFUNDING before Phase 176 deletes that engine. A truncated or failed realized or funding read refuses that key by name instead of publishing as complete; the Bybit derive counts Unified internal, sub-account and universal transfers as flows, not P&L; and a failing key is left out or flagged on its own while the rest of the book draws normally.
 **Requirements**: TBD
 **Depends on:** Phase 176
-**Plans:** 0 plans
+**Plans:** 14/14 plans complete
 
 **Booking.** Founder 2026-11-01, AskUserQuestion, after a read-only check of the new curve's path (per-key `derive_broker_dailies` plus the compose) against the fixes the legacy engine got from ACCTREBUILD, TRADEPAGES, READCEILING, OKXANCHOR, OKXREWRITE and BYBITFUNDING, which Phase 176 deletes.
 - Gaps 1+2: "Book one fix phase (Recommended)": "One phase: (1) the derive refuses by name on a truncated or failed read, as the trade sync already does; (2) the Bybit derive also reads Unified internal/sub-account transfers, reversing 180's D-02. Each starts with a PROD count of how many keys are affected."
@@ -6990,8 +6990,46 @@ On a cap hit it only records a DQ flag (`daily_pnl_truncated_okx` / `daily_pnl_t
 
 Data integrity, user-facing. Relates to 180 BYBITFUNDING (reverses its D-02), 171 READCEILING and 167.1.2.1.1 (reverses its D-03).
 
+**SC-1 gate (2026-11-03).** Founder decision D-10 (186-CONTEXT.md): the Bybit closed-pnl limit becomes 100 and the phase proceeds to the fix plans without re-measuring; the composite member path and the shared account with no working key are booked (no PROD exposure).
+
+**Round-2 review decisions (founder 2026-11-04, AskUserQuestion; 186-CONTEXT.md D-11 and D-12).** D-11, "Keep figures, fix updater (Recommended)": when a refused derive hits a strategy that already has figures, a small migration makes the status updater treat that refusal as protected, the same way it treats a ledger refresh, so the strategy keeps its figures and its status and shows the approved sentence; this widens D-15 by one case, and the migration and RLS checkers review it before merge (costly to reverse). D-12, "Flag it, don't refuse (Recommended)": a malformed realized row no longer refuses the key; the key keeps publishing and the dropped row is recorded as a data-quality flag, and a TODO books a production count before refusing is reconsidered (reversible).
+
+**Post-round-3 review decision (founder 2026-11-04, AskUserQuestion; 186-CONTEXT.md D-13).** A one-time exception to the 3-round fix cap, "One narrow round 4 (Recommended)": "One exception to the cap, only for the regression round 3 introduced. Write the marker only when the refusal is final, and let the bridge return the status for a marked job without its sentence. Add one SQL arm and one Python test, then re-review just that diff. Fixing it now costs less than a follow-up migration after PROD has it. The race goes to a follow-up phase; the name test is booked as a TODO." Round 4 fixes PR3-01 only; the marker race is `[186-REFUSAL-MARKER-RMW-RACE]` (follow-up phase to be booked after 186 ships) and the missing name test is `[186-REFUSAL-MARKER-NAME-CONTRACT]` in TODOS.md.
+
+**Post-round-4 review decision (founder 2026-11-04, AskUserQuestion; 186-CONTEXT.md D-14).** The second and last exception to the 3-round fix cap, "One-line round 5 (Recommended)": "Second and last exception to the cap: only that condition plus the flipped test, then re-review only that diff. If anything else surfaces, ship and route it to the follow-up phase, with no further rounds." Round 5 fixes R4-01 only: a retryable refusal over published figures writes nothing to the `strategy_analytics` row, so the retry decides alone. No SQL change.
+
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 186-01-PLAN.md — operator, read-only: SC-1 database half, PROD counts of the keys and stored rows each gap affects, marker first (SC-1, D-01, D-04)
+- [x] 186-02-PLAN.md — read-only SC-1 probe, first half: skeleton and the Gap 1 realized-read measurement (SC-1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 186-03-PLAN.md — read-only SC-1 probe, second half: Gap 2 (Bybit account type, on-chain against Unified overlap) and Gap 4 (same-hour funding pairs) (SC-1, SC-7)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 186-04-PLAN.md — operator: run the shipped probe once after founder approval, write the gate lines (caps, flow source, pairs, unmeasured keys) and ask the founder questions their counts trigger (SC-1, D-04, D-06)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 186-05-PLAN.md — Gap 1 venue read: sized module-level caps, a deadline inside the page walk, one shared DQ-flag verdict (SC-2, D-05, D-06)
+- [x] 186-06-PLAN.md — Gap 4 dedup on `billId` and malformed funding rows, each only if the gate says so (SC-7, SC-2, D-04)
+- [x] 186-07-PLAN.md — compose names the keys that exit the book (SC-4, D-07)
+- [x] 186-08-PLAN.md — reader parses `failing_key_exits` and shows a muted note; founder wording checkpoint (SC-4, D-05)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 186-09-PLAN.md — Gap 1 derive half: an incomplete realized or funding read refuses the key by name and writes the `read_incomplete:` marker (SC-2, SC-6, D-05)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 186-10-PLAN.md — Gap 2: the Bybit derive counts Unified internal, sub-account and universal transfers as flows (SC-3, D-02)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 186-11-PLAN.md — Gap 3: a failing or marked key exits through `departed_end_by_key`; `failing_key_series_ended` stops blocking (SC-4, SC-6, D-03, D-07)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 186-12-PLAN.md — TS twins of the token retirement and the naming parity; ships in the same PR as 186-11 (SC-4, D-07)
+- [x] 186-13-PLAN.md — composite member derive follows the founder's `q-composite:` answer (SC-2, SC-3)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 186-14-PLAN.md — operator, read-only: SC-5 post-deploy PROD reading against the SC-1 baseline (SC-5)
 
 ### Phase 187: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)
 
@@ -7465,7 +7503,7 @@ kept verbatim.
 | 183 DUPCOUNT | 5/5 | Complete — v0.133.14.0 #1169; a marked duplicate the derive already counts once no longer refuses the book, a real double count still does; post-deploy: 0 `account_duplicate` rows, the book draws a counted-once curve, QUANTALYZE-2H and 23 resolved | 2026-11-02 |
 | 184 WALLETOFFSET | 7/7 | Complete — shipped v0.133.16.0 and the OKX fix v0.133.16.2; every marked key measured, every venue keeps the wallet base (D-02) | 2026-11-01 |
 | 185 DERIBITFLOWTIME | 10/10 | Complete — shipped v0.133.18.0 #1187 (a Deribit allocator book values open options at market, smoothed basis, cash fallback with the amber caveat); verification 5/5, security 30/30; PROD reading: days above 50% 6 to 2, SC-3 flags shown (key A valued at market, key C on cash with the caveat); SC-4 met with key A's two days named (D-14); the cumulative x3516 to x3836 booked to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED` | 2026-11-03 |
-| 186 DERIVEGAPS | 0/0 | Not started — booked 2026-11-01 from the read-only check of the new curve's path against the legacy engine's fixes | - |
+| 186 DERIVEGAPS | 14/14 | Complete — shipped the read-only probe v0.133.18.6 #1193 and the fix v0.133.21.0 #1197 (a truncated or failed read refuses the key by name, the Bybit derive counts Unified transfers as flows, a failing key leaves the book on its own); verification 7/7, security 36/36; SC-5 PROD reading confirmed on every gap (Bybit stored flows 0 to positive; no failing key on PROD, so the Gap 1 and Gap 3 exit paths rest on the synthetic tests) | 2026-11-05 |
 | 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
 | 190 FACTSHEETQUEUED | 9/9 | Complete — shipped v0.133.19.0 #1194 (finalize queues a re-run only when one is needed; a re-compute over a stored result keeps its factsheet with an updating line); verification passed (SC-2 and SC-4 by code and tests with their PROD readings VOID, the 390 px check unmeasured, accepted by the founder 2026-11-03 and carried to TODOS `190-SC5-POSTDEPLOY-REREAD`), SC-3 confirmed on PROD; security 25/25; D-05 surfaces booked to `190-RERUN-SURFACES-NOT-HOLDING` | 2026-11-04 |
 | 191 REFUSALRACE | 0/0 | Not started — booked 2026-11-04 from TODOS `186-REFUSAL-MARKER-RMW-RACE` (Phase 186 D-13) | - |
