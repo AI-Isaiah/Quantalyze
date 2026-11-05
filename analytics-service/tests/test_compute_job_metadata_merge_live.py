@@ -178,15 +178,15 @@ def test_loopback_guard_refuses_non_loopback_dsn() -> None:
     remote ``hostaddr``, a mixed host list, an empty value and a DSN with no host all trip it;
     the three loopback spellings pass. Without this test the guard could silently pass anything."""
     for ok in (
-        "postgresql://postgres:pw@127.0.0.1:54422/postgres",
-        "postgresql://postgres:pw@localhost:54422/postgres",
-        "postgresql://postgres:pw@[::1]:54422/postgres",
+        "postgresql://postgres@127.0.0.1:54422/postgres",
+        "postgresql://postgres@localhost:54422/postgres",
+        "postgresql://postgres@[::1]:54422/postgres",
         "host=127.0.0.1 port=54422 dbname=postgres",
     ):
         _require_loopback_dsn(ok)  # must not raise
     for bad in (
-        "postgresql://postgres:pw@db.abcdefghijklmnop.supabase.co:5432/postgres",
-        "postgresql://postgres:pw@127.0.0.1.evil.example:54422/postgres",
+        "postgresql://postgres@db.abcdefghijklmnop.supabase.co:5432/postgres",
+        "postgresql://postgres@127.0.0.1.evil.example:54422/postgres",
         "host=127.0.0.1 hostaddr=203.0.113.9 dbname=postgres",
         "host=127.0.0.1,db.example.com dbname=postgres",
         "dbname=postgres",
