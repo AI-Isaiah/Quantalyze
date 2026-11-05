@@ -59,13 +59,10 @@ const {
   // (strategies update BEFORE the stitch enqueue) so a regression that drops it
   // — re-opening the √252-vs-√365 preview fail-loud — reddens.
   mockStrategiesUpdate,
-  // 164.6 / 161.1-D13: the composite kickoff reads the enqueued job's
-  // metadata and retracts an inherited ledger-refresh marker. The read result
-  // is configurable per test; the update is a spy so a dropped retraction is
-  // observable (and a retraction on an unmarked row is too).
-  computeJobsRead,
-  computeJobsUpdateResult,
-  mockComputeJobsUpdate,
+  // 164.6 / 161.1-D13 / Phase 191 D-01: the composite kickoff retracts an
+  // inherited ledger-refresh marker through ONE rpc, `retract_ledger_refresh_marker`.
+  // What that rpc answers is configurable per test (default: `no_marker`).
+  retractionRpc,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockRpc: vi.fn(),
@@ -114,20 +111,20 @@ const {
   mockStrategyKeysSelect: vi.fn(),
   mockPostProcessKey: vi.fn(),
   mockStrategiesUpdate: vi.fn(),
-  computeJobsRead: {
-    data: null as { metadata: Record<string, unknown> | null } | null,
-    error: null as { message: string } | null,
-    // IN-04 (164.6 review fix): a read that never settles, so the bounded
+  retractionRpc: {
+    answer: { data: null, error: null } as {
+      data: unknown;
+      error: { message: string; code?: string } | null;
+    },
+    // IN-04 (164.6 review fix): an rpc that never settles, so the bounded
     // retraction's budget is the only thing that can end the wait.
     hang: false,
-    // L2 (164.6 round 2): while `hang` is set, the hung read's resolver, so a
+    // L2 (164.6 round 2): while `hang` is set, the hung rpc's resolver, so a
     // test can settle it AFTER the budget has already answered the 202.
     settleLate: undefined as
       | ((v: { data: null; error: { message: string; code?: string } }) => void)
       | undefined,
   },
-  computeJobsUpdateResult: { error: null as { message: string; code?: string } | null },
-  mockComputeJobsUpdate: vi.fn(),
   ownershipQuery: {
     table: null as string | null,
     selectCols: null as string | null,
@@ -268,40 +265,6 @@ vi.mock("@/lib/supabase/admin", () => ({
           }),
         };
       }
-      if (table === "compute_jobs") {
-        // 164.6 / 161.1-D13: EXPLICIT, so the retraction's read never falls
-        // through to the `{ upsert }` default below — there `.select` is
-        // undefined, the TypeError lands in the route's best-effort catch, and a
-        // retraction test would pass vacuously.
-        return {
-          select: (_cols: string) => ({
-            eq: (_col: string, _val: unknown) => ({
-              maybeSingle: () =>
-                computeJobsRead.hang
-                  ? new Promise((resolve) => {
-                      computeJobsRead.settleLate = resolve;
-                    })
-                  : Promise.resolve({
-                      data: computeJobsRead.data,
-                      error: computeJobsRead.error,
-                    }),
-            }),
-          }),
-          update: (patch: Record<string, unknown>) => ({
-            eq: (col: string, val: unknown) => {
-              mockComputeJobsUpdate(patch, col, val);
-              // LOW-1: the helper asks for the updated rows back.
-              const select = (_cols: string) =>
-                Promise.resolve({
-                  data: computeJobsUpdateResult.error ? null : [{ id: val }],
-                  error: computeJobsUpdateResult.error,
-                });
-              // 166.5 D-07: the helper filters `.neq("status", "done")`.
-              return { select, neq: (_c: string, _v: unknown) => ({ select }) };
-            },
-          }),
-        };
-      }
       return { upsert: mockUpsert };
     },
   }),
@@ -376,6 +339,30 @@ function makeReq(body: Record<string, unknown> = {}) {
   });
 }
 
+/**
+ * The admin client's rpc, dispatched by NAME: the enqueue answers the job id, the
+ * Phase 191 retraction answers `retractionRpc` (or never settles, for the budget
+ * cases). Counting calls by name keeps the two from masking each other.
+ */
+function serveRpc(name: string): Promise<{ data: unknown; error: unknown }> {
+  if (name === RETRACT_RPC) {
+    if (retractionRpc.hang) {
+      return new Promise((resolve) => {
+        retractionRpc.settleLate = resolve;
+      });
+    }
+    return Promise.resolve(retractionRpc.answer);
+  }
+  return Promise.resolve({ data: TEST_JOB_ID, error: null });
+}
+
+const RETRACT_RPC = "retract_ledger_refresh_marker";
+
+/** The retraction rpc calls so far, by name (the enqueue is excluded). */
+function retractionCalls(): unknown[][] {
+  return mockRpc.mock.calls.filter(([name]) => name === RETRACT_RPC);
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 describe("POST /api/keys/sync", () => {
@@ -403,15 +390,13 @@ describe("POST /api/keys/sync", () => {
     mockPostProcessKey.mockResolvedValue({ ok: true, body: { queued: true } });
 
     // 164.6 / 161.1-D13: the enqueued job carries no marker by default, so the
-    // retraction is a read-only no-op unless a test marks the row.
-    computeJobsRead.data = { metadata: { source: "keys/sync" } };
-    computeJobsRead.error = null;
-    computeJobsRead.hang = false;
-    computeJobsRead.settleLate = undefined;
-    computeJobsUpdateResult.error = null;
+    // retraction answers `no_marker` unless a test says otherwise.
+    retractionRpc.answer = { data: { outcome: "no_marker", status: "queued" }, error: null };
+    retractionRpc.hang = false;
+    retractionRpc.settleLate = undefined;
 
     // Default mock implementations
-    mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
+    mockRpc.mockImplementation(serveRpc);
     mockUpsert.mockReturnValue({ error: null });
   });
 
@@ -906,49 +891,49 @@ describe("POST /api/keys/sync", () => {
       }
 
       it.each(["ledger-refresh", "ledger-refresh-composite"])(
-        "a deduped job carrying %s is rewritten without source, with the marker and this request's correlation id — and still answers 202",
+        "a deduped job carrying %s is retracted by ONE rpc with the job id and this request's correlation id — and still answers 202",
         async (marker) => {
           composite();
-          computeJobsRead.data = {
-            metadata: { source: marker, correlation_id: "fanout-run", run: 7 },
-          };
+          retractionRpc.answer = { data: { outcome: "retracted", marker }, error: null };
           const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
           const { POST } = await import("./route");
           const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
           expect(res.status).toBe(202);
-          expect(mockComputeJobsUpdate).toHaveBeenCalledTimes(1);
-          expect(mockComputeJobsUpdate).toHaveBeenCalledWith(
-            {
-              metadata: {
-                run: 7,
-                refresh_marker_retracted: marker,
-                correlation_id: TEST_CORRELATION_ID,
-              },
-            },
-            "id",
-            TEST_JOB_ID,
+          // Only the ids travel; the SQL function merges the metadata itself.
+          expect(retractionCalls()).toEqual([
+            [RETRACT_RPC, { p_job_id: TEST_JOB_ID, p_correlation_id: TEST_CORRELATION_ID }],
+          ]);
+          expect(warnSpy).toHaveBeenCalledWith(
+            expect.stringContaining(`retracted inherited ${marker} marker`),
           );
           warnSpy.mockRestore();
         },
       );
 
-      it("a deduped job WITHOUT a ledger-refresh marker is never rewritten", async () => {
+      it("a deduped job WITHOUT a ledger-refresh marker is answered no_marker: nothing is reported retracted or failed", async () => {
         composite();
-        computeJobsRead.data = { metadata: { source: "finalize-wizard" } };
+        retractionRpc.answer = { data: { outcome: "no_marker", status: "queued" }, error: null };
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
 
         const { POST } = await import("./route");
         const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
         expect(res.status).toBe(202);
-        expect(mockComputeJobsUpdate).not.toHaveBeenCalled();
+        expect(retractionCalls()).toHaveLength(1);
+        expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("retracted inherited"));
+        expect(errSpy).not.toHaveBeenCalled();
+        expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+        errSpy.mockRestore();
       });
 
       it("a failed retraction never changes the 202, and is LOUD under its own Sentry tag", async () => {
         composite();
-        computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
-        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
+        retractionRpc.answer = { data: null, error: { message: "rpc denied", code: "42501" } };
         const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
         const { captureToSentry } = await import("@/lib/sentry-capture");
 
@@ -957,7 +942,7 @@ describe("POST /api/keys/sync", () => {
 
         expect(res.status).toBe(202);
         expect(await res.json()).toMatchObject({ ok: true, composite: true });
-        expect(mockComputeJobsUpdate).toHaveBeenCalledTimes(1);
+        expect(retractionCalls()).toHaveLength(1);
         expect(errSpy).toHaveBeenCalledWith(
           expect.stringContaining("composite refresh-marker retraction failed"),
           expect.anything(),
@@ -990,7 +975,7 @@ describe("POST /api/keys/sync", () => {
       // is LOUD under its OWN tag, because the marker may still be in place.
       it("a retraction that overruns its 5 s budget still answers 202, and the overrun is LOUD under its own tag", async () => {
         composite();
-        computeJobsRead.hang = true;
+        retractionRpc.hang = true;
         const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
         const { captureToSentry } = await import("@/lib/sentry-capture");
         const { POST } = await import("./route");
@@ -1011,7 +996,8 @@ describe("POST /api/keys/sync", () => {
 
           expect(res.status).toBe(202);
           expect(await res.json()).toMatchObject({ ok: true, composite: true });
-          expect(mockComputeJobsUpdate).not.toHaveBeenCalled();
+          // The rpc was issued and never answered: the budget, not the rpc, ended the wait.
+          expect(retractionCalls()).toHaveLength(1);
           expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
             expect.any(Error),
             expect.objectContaining({
@@ -1037,7 +1023,7 @@ describe("POST /api/keys/sync", () => {
       // late failure is LOUD under its OWN `_late` tag, with its SQLSTATE.
       it("a retraction that fails AFTER the budget answered 202 is still LOUD under a _late tag, with its code", async () => {
         composite();
-        computeJobsRead.hang = true;
+        retractionRpc.hang = true;
         const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
         const { captureToSentry } = await import("@/lib/sentry-capture");
         const { POST } = await import("./route");
@@ -1053,9 +1039,9 @@ describe("POST /api/keys/sync", () => {
             expect.stringContaining("failed late"),
             expect.anything(),
           );
-          expect(computeJobsRead.settleLate, "the hung read must expose its resolver").toBeDefined();
+          expect(retractionRpc.settleLate, "the hung rpc must expose its resolver").toBeDefined();
 
-          computeJobsRead.settleLate!({
+          retractionRpc.settleLate!({
             data: null,
             error: { message: "canceling statement due to statement timeout", code: "57014" },
           });
@@ -1095,8 +1081,7 @@ describe("POST /api/keys/sync", () => {
 
       it("a retraction that fails IN TIME is reported once by the route's catch, never also as late", async () => {
         composite();
-        computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
-        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
+        retractionRpc.answer = { data: null, error: { message: "rpc denied", code: "42501" } };
         const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
         const { captureToSentry } = await import("@/lib/sentry-capture");
         const { POST } = await import("./route");

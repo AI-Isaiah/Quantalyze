@@ -6,6 +6,8 @@ import { resolve } from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   LEDGER_REFRESH_JOB_SOURCES,
+  RETRACT_REFRESH_MARKER_RPC,
+  RETRACTION_OUTCOMES,
   retractInheritedRefreshMarker,
   retractionFailureCode,
 } from "./ledger-refresh-marker";
@@ -109,77 +111,20 @@ const SYNC_STATUS_PATH = resolve(
 const SYNC_STATUS_SQL = readFileSync(SYNC_STATUS_PATH, "utf8");
 
 /**
- * A fake admin client exposing only the compute_jobs chains the helper uses.
+ * A fake admin client that answers ONE rpc and refuses every table.
  *
- * `reread` is what a SECOND `select(...).eq("id", ..).maybeSingle()` returns (the
- * status re-read after a zero-row UPDATE, D-07); it defaults to `read`, so a
- * case that never supplies one sees an unchanged row. `readCalls` counts the
- * selects, so a case can prove the re-read happened exactly once.
- *
- * The UPDATE chain is `.eq(..)` then `.neq(..)` then `.select(..)`, as the helper
- * issues it. `.eq(..)` ALSO exposes `.select` so that dropping the `.neq` guard
- * surfaces as the `updateNeq` assertion failing, not as an unrelated TypeError.
+ * Phase 191 D-01: the retraction is a single SQL UPDATE behind
+ * `retract_ledger_refresh_marker`. The helper may not read or write any table
+ * itself, so `from` throws for every table: a read-modify-write body (today's
+ * pre-191 shape) fails every case below with `unexpected table access`, which is
+ * what makes these cases fail on the replace behaviour they retire.
  */
-function fakeAdmin(
-  read: { data: unknown; error: unknown },
-  updateError: unknown = null,
-  updatedRows: unknown = [{ id: "the-updated-row" }],
-  reread: { data: unknown; error: unknown } = read,
-) {
-  const readEq = vi.fn();
-  const readSelect = vi.fn();
-  const update = vi.fn();
-  const updateEq = vi.fn();
-  const updateNeq = vi.fn();
-  let readCalls = 0;
+function fakeAdmin(answer: { data: unknown; error: unknown }) {
+  const rpc = vi.fn((_name: string, _args: Record<string, unknown>) => Promise.resolve(answer));
   const from = vi.fn((table: string) => {
-    if (table !== "compute_jobs") throw new Error(`unexpected from(${table})`);
-    return {
-      select: (cols: string) => {
-        readSelect(cols);
-        return {
-          eq: (col: string, val: unknown) => {
-            readEq(col, val);
-            return {
-              maybeSingle: () => {
-                readCalls += 1;
-                return Promise.resolve(readCalls === 1 ? read : reread);
-              },
-            };
-          },
-        };
-      },
-      update: (patch: Record<string, unknown>) => {
-        update(patch);
-        // LOW-1: the helper asks PostgREST for the updated rows, so a
-        // zero-row UPDATE is visible instead of reading as success.
-        const select = (_cols: string) =>
-          Promise.resolve({ data: updateError ? null : updatedRows, error: updateError });
-        return {
-          eq: (col: string, val: unknown) => {
-            updateEq(col, val);
-            return {
-              select,
-              neq: (ncol: string, nval: unknown) => {
-                updateNeq(ncol, nval);
-                return { select };
-              },
-            };
-          },
-        };
-      },
-    };
+    throw new Error(`unexpected table access: from(${table})`);
   });
-  return {
-    admin: { from } as unknown as SupabaseClient,
-    from,
-    readEq,
-    readSelect,
-    readCalls: () => readCalls,
-    update,
-    updateEq,
-    updateNeq,
-  };
+  return { admin: { rpc, from } as unknown as SupabaseClient, rpc, from };
 }
 
 const JOB_ID = "33333333-3333-3333-3333-333333333333";
@@ -255,136 +200,189 @@ describe("[161.1-D13] LEDGER_REFRESH_JOB_SOURCES — parity with the SQL publish
   });
 });
 
+/**
+ * Phase 191 — the TS helper and the SQL function it calls share three things that
+ * must not drift: the marker set, the function's name, and the outcome words.
+ * Each is read from the GENERATED snapshot
+ * (`supabase/schema/functions/retract_ledger_refresh_marker.sql`), so a change to
+ * the function that is not mirrored here turns a case red instead of leaving a
+ * Sync routed to an answer the helper reads as success or throws on.
+ *
+ * Three copies of the marker set (Python, TS, SQL) must not drift (CONTEXT
+ * Specifics). The snapshot is the third; `job_worker.py` and
+ * `sync_strategy_analytics_status.sql` are pinned above.
+ */
+const RETRACT_FN_PATH = resolve(
+  process.cwd(),
+  "supabase/schema/functions/retract_ledger_refresh_marker.sql",
+);
+const RETRACT_FN_SQL = readFileSync(RETRACT_FN_PATH, "utf8");
+const HELPER_SRC = readFileSync(resolve(process.cwd(), "src/lib/ledger-refresh-marker.ts"), "utf8");
+
+/** Every `'outcome', '<word>'` literal in the function body, as a set. */
+function parseSqlOutcomes(sql: string): Set<string> {
+  return new Set([...sql.matchAll(/'outcome',\s*'([a-z_]+)'/g)].map((m) => m[1]));
+}
+
+/** The name in `CREATE [OR REPLACE] FUNCTION public.<name>(`. */
+function parseSqlFunctionName(sql: string): string {
+  const m = /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+public\.([a-z0-9_]+)\(/.exec(sql);
+  if (!m) throw new Error("retract_ledger_refresh_marker.sql: no CREATE FUNCTION public.<name>( found");
+  return m[1];
+}
+
+describe("[Phase 191] parity with the retract_ledger_refresh_marker snapshot", () => {
+  it("both marker lists in the SQL function equal the TS set", () => {
+    const lists = parseSqlLedgerRefreshSourceLists(RETRACT_FN_SQL, RETRACT_FN_PATH);
+    // MEASURED 2026-11-05: two lists, the UPDATE's WHERE and the classifying
+    // SELECT's CASE (which names the marker a finished job still carries). An
+    // exact count, so a parse that silently finds none fails.
+    expect(lists.length, "the snapshot's marker lists were not found; re-point the parse").toBe(2);
+    for (const list of lists) {
+      expect(list).toEqual(new Set(LEDGER_REFRESH_JOB_SOURCES));
+    }
+  });
+
+  it("a marker added to the SQL function alone turns the marker parity case RED", () => {
+    const widened = RETRACT_FN_SQL.replaceAll(
+      "IN ('ledger-refresh', 'ledger-refresh-composite')",
+      "IN ('ledger-refresh', 'ledger-refresh-composite', 'ledger-refresh-mt5')",
+    );
+    expect(widened).not.toBe(RETRACT_FN_SQL);
+    const lists = parseSqlLedgerRefreshSourceLists(widened, "a widened copy");
+    expect(lists.some((list) => list.size === 3)).toBe(true);
+    expect(lists.every((list) => list.size === LEDGER_REFRESH_JOB_SOURCES.length)).toBe(false);
+  });
+
+  it("the function's name, RETRACT_REFRESH_MARKER_RPC and the literal the helper passes to .rpc( are the same string", () => {
+    const sqlName = parseSqlFunctionName(RETRACT_FN_SQL);
+    // The same quoted-literal shape MUTATING_RPC_RE (audit-coverage.test.ts)
+    // matches: the helper must write the name as a literal at the call, because
+    // the audit scanner reads no constant. Exactly one call, so a second `.rpc(`
+    // added to the helper cannot hide behind the first.
+    const literals = [...HELPER_SRC.matchAll(/\.rpc\(\s*["']([a-z0-9_]+)["']/g)].map((m) => m[1]);
+    expect(literals, "the helper must make one rpc call whose name is a quoted literal").toEqual([sqlName]);
+    expect(RETRACT_REFRESH_MARKER_RPC).toBe(sqlName);
+  });
+
+  it("the function's name drifting from the helper's literal turns the name case RED", () => {
+    const renamed = RETRACT_FN_SQL.replace(
+      "FUNCTION public.retract_ledger_refresh_marker(",
+      "FUNCTION public.retract_ledger_refresh_marker_v2(",
+    );
+    expect(renamed).not.toBe(RETRACT_FN_SQL);
+    expect(parseSqlFunctionName(renamed)).not.toBe(RETRACT_REFRESH_MARKER_RPC);
+  });
+
+  it("the outcome words the function answers with equal RETRACTION_OUTCOMES", () => {
+    const outcomes = parseSqlOutcomes(RETRACT_FN_SQL);
+    // Anti-vacuity: four outcomes, so a regex that matched nothing, or only some
+    // of them, cannot agree with a short list by accident.
+    expect(outcomes.size).toBe(4);
+    expect(RETRACTION_OUTCOMES).toHaveLength(4);
+    expect(outcomes).toEqual(new Set(RETRACTION_OUTCOMES));
+  });
+
+  it("an outcome added to the SQL function alone turns the outcome parity case RED", () => {
+    const widened = RETRACT_FN_SQL.replace(
+      "jsonb_build_object('outcome', 'no_row')",
+      "jsonb_build_object('outcome', 'no_row'), jsonb_build_object('outcome', 'gone')",
+    );
+    expect(widened).not.toBe(RETRACT_FN_SQL);
+    const outcomes = parseSqlOutcomes(widened);
+    expect(outcomes.size).toBe(5);
+    expect(outcomes).not.toEqual(new Set(RETRACTION_OUTCOMES));
+  });
+});
+
 describe("[161.1-D13] retractInheritedRefreshMarker", () => {
   // Pitfall 16: the UNION, not one value — one positive case per marker.
   it.each(["ledger-refresh", "ledger-refresh-composite"])(
-    "retracts an inherited %s marker: drops source, keeps every other key, records the marker and this request's correlation id",
+    "retracts an inherited %s marker with ONE rpc carrying only the job id and this request's correlation id",
     async (marker) => {
-      const f = fakeAdmin({
-        data: {
-          metadata: {
-            source: marker,
-            correlation_id: "fanout-run",
-            unified_backbone_at_claim: "true",
-          },
-        },
-        error: null,
-      });
+      const f = fakeAdmin({ data: { outcome: "retracted", marker }, error: null });
 
       const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
 
       expect(result).toEqual({ retracted: true, marker });
-      expect(f.readEq).toHaveBeenCalledWith("id", JOB_ID);
-      expect(f.update).toHaveBeenCalledTimes(1);
-      expect(f.update).toHaveBeenCalledWith({
-        metadata: {
-          unified_backbone_at_claim: "true",
-          refresh_marker_retracted: marker,
-          correlation_id: CORRELATION_ID,
-        },
+      expect(f.rpc).toHaveBeenCalledTimes(1);
+      // Only the ids travel: the helper never sends a metadata copy, so it cannot
+      // write a stale one back over a concurrent writer's key (T-191-24).
+      expect(f.rpc).toHaveBeenCalledWith("retract_ledger_refresh_marker", {
+        p_job_id: JOB_ID,
+        p_correlation_id: CORRELATION_ID,
       });
-      expect(f.updateEq).toHaveBeenCalledWith("id", JOB_ID);
+      expect(f.from).not.toHaveBeenCalled();
     },
   );
 
-  it.each([
-    ["another source", { data: { metadata: { source: "keys/sync" } }, error: null }],
-    ["null metadata", { data: { metadata: null }, error: null }],
-    ["array metadata", { data: { metadata: ["ledger-refresh"] }, error: null }],
-  ])("never rewrites a job without a ledger-refresh marker (%s)", async (_label, read) => {
-    const f = fakeAdmin(read);
-
-    const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
-
-    expect(result).toEqual({ retracted: false });
-    expect(f.readEq).toHaveBeenCalledWith("id", JOB_ID);
-    expect(f.update).not.toHaveBeenCalled();
-  });
-
   // D-07 (STATUSBRIDGE review IN-R4-01): a FINISHED job's protection was decided
-  // when it ran. Retracting its marker changes nothing a reader acts on, while
-  // the compute_jobs_set_updated_at BEFORE UPDATE trigger would bump its
-  // `updated_at`, falsifying the finish time every reader of a job trusts.
-  it("never rewrites a job that is already done, and does not even issue the UPDATE", async () => {
-    const f = fakeAdmin({
-      data: { metadata: { source: "ledger-refresh" }, status: "done" },
-      error: null,
-    });
+  // when it ran; the function leaves the row alone so `updated_at` keeps telling
+  // when it finished. And a job with no marker is an ordinary no-op.
+  it.each([
+    ["done, marker still on the finished row", { outcome: "done", status: "done", marker: "ledger-refresh" }],
+    ["done, no marker", { outcome: "done", status: "done", marker: null }],
+    ["no_marker", { outcome: "no_marker", status: "running" }],
+  ])("reports nothing retracted and does not throw (%s)", async (_label, data) => {
+    const f = fakeAdmin({ data, error: null });
 
     const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
 
     expect(result).toEqual({ retracted: false });
-    expect(f.readSelect).toHaveBeenCalledWith("metadata, status");
-    expect(f.update).not.toHaveBeenCalled();
+    expect(f.rpc).toHaveBeenCalledTimes(1);
   });
 
-  // The control for the case above, and the half that closes the race: even a
-  // job read as `running` may finish before the write lands, so the UPDATE
-  // itself carries the status filter.
-  it("guards the UPDATE of a running job with .neq(status, done)", async () => {
-    const f = fakeAdmin({
-      data: { metadata: { source: "ledger-refresh" }, status: "running" },
-      error: null,
-    });
-
-    const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
-
-    expect(result).toEqual({ retracted: true, marker: "ledger-refresh" });
-    expect(f.update).toHaveBeenCalledTimes(1);
-    expect(f.updateNeq).toHaveBeenCalledWith("status", "done");
-  });
-
-  // The race the guard creates: read `running`, job finishes, the filtered
-  // UPDATE matches zero rows. That is a quiet no-op, not a failure the caller
-  // would send to Sentry as if a marker were still stuck on a live job.
-  it("treats a zero-row UPDATE as a no-op when the re-read shows the job finished", async () => {
-    const f = fakeAdmin(
-      { data: { metadata: { source: "ledger-refresh" }, status: "running" }, error: null },
-      null,
-      [],
-      { data: { status: "done" }, error: null },
-    );
-
-    const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
-
-    expect(result).toEqual({ retracted: false });
-    expect(f.readCalls()).toBe(2);
-    expect(f.readSelect).toHaveBeenLastCalledWith("status");
-  });
-
-  // The other half: a zero-row UPDATE with the job NOT done is still the LOW-1
-  // anomaly (a lost row), and must stay loud.
-  it("still throws when a zero-row UPDATE is followed by a re-read that is not done", async () => {
-    const f = fakeAdmin(
-      { data: { metadata: { source: "ledger-refresh" }, status: "running" }, error: null },
-      null,
-      [],
-      { data: { status: "running" }, error: null },
-    );
+  // LOW-1 (164.6 review fix): the id came back from enqueue_compute_job a
+  // moment ago, so NO ROW is an unreadable job, not an unmarked one. It must
+  // reach the caller's loud path instead of reading as "nothing to retract".
+  it("throws when the just-enqueued job's row does not exist (no_row)", async () => {
+    const f = fakeAdmin({ data: { outcome: "no_row" }, error: null });
 
     const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
       (e: unknown) => e,
     );
 
     expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/matched no row/);
+    expect((err as Error).message).toMatch(/not readable/);
   });
 
-  it("throws, carrying the PostgREST error as cause, when the status re-read fails", async () => {
-    const rereadErr = { message: "read denied", code: "42501" };
-    const f = fakeAdmin(
-      { data: { metadata: { source: "ledger-refresh" }, status: "running" }, error: null },
-      null,
-      [],
-      { data: null, error: rereadErr },
-    );
+  it("throws on an rpc error, carrying the PostgREST error as cause, and retractionFailureCode reads its code", async () => {
+    const rpcErr = { message: "permission denied for function", code: "42501" };
+    const f = fakeAdmin({ data: null, error: rpcErr });
 
     const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
       (e: unknown) => e,
     );
 
     expect(err).toBeInstanceOf(Error);
-    expect((err as Error).cause).toBe(rereadErr);
+    expect((err as Error).cause).toBe(rpcErr);
+    expect(retractionFailureCode(err)).toBe("42501");
+  });
+
+  // T-191-23: an answer this helper cannot read must never pass as "nothing to
+  // retract" or as a retraction, or a Sync left protected as a refresh would be
+  // reported as handled.
+  it.each([
+    ["an unknown outcome", { outcome: "retired" }, /unknown outcome \(retired\)/],
+    ["a missing outcome", {}, /unknown outcome \(undefined\)/],
+    ["a null answer", null, /not an object/],
+    ["a string answer", "retracted", /not an object/],
+    ["an array answer", [{ outcome: "retracted", marker: "ledger-refresh" }], /not an object/],
+    [
+      "a retraction of a marker outside the set",
+      { outcome: "retracted", marker: "keys/sync" },
+      /outside LEDGER_REFRESH_JOB_SOURCES/,
+    ],
+    ["a retraction naming no marker", { outcome: "retracted" }, /outside LEDGER_REFRESH_JOB_SOURCES/],
+  ])("throws on %s", async (_label, data, message) => {
+    const f = fakeAdmin({ data, error: null });
+
+    const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(message);
   });
 
   it.each([null, undefined, ""])("does not touch the database without a job id (%s)", async (jobId) => {
@@ -393,76 +391,20 @@ describe("[161.1-D13] retractInheritedRefreshMarker", () => {
     const result = await retractInheritedRefreshMarker(f.admin, jobId, CORRELATION_ID);
 
     expect(result).toEqual({ retracted: false });
+    expect(f.rpc).not.toHaveBeenCalled();
     expect(f.from).not.toHaveBeenCalled();
   });
 
-  it("throws on a read error, carrying the PostgREST error as cause, and writes nothing", async () => {
-    const readErr = { message: "read denied", code: "42501" };
-    const f = fakeAdmin({ data: null, error: readErr });
-
-    const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
-      (e: unknown) => e,
-    );
-
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).cause).toBe(readErr);
-    expect(f.update).not.toHaveBeenCalled();
-  });
-
-  // LOW-1 (164.6 review fix): the id came back from enqueue_compute_job a
-  // moment ago, so NO ROW is an unreadable job, not an unmarked one. It must
-  // reach the caller's loud path instead of reading as "nothing to retract".
-  it("throws when the just-enqueued job's row cannot be read at all, and writes nothing", async () => {
-    const f = fakeAdmin({ data: null, error: null });
-
-    const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
-      (e: unknown) => e,
-    );
-
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/not readable/);
-    expect(f.update).not.toHaveBeenCalled();
-  });
-
-  // LOW-1: without `.select`, a zero-row UPDATE reads as success and the
-  // marker stays in place under a `retracted: true` result.
-  it("throws when the UPDATE matched no row, instead of reporting a retraction", async () => {
-    const f = fakeAdmin(
-      { data: { metadata: { source: "ledger-refresh" } }, error: null },
-      null,
-      [],
-    );
-
-    const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
-      (e: unknown) => e,
-    );
-
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/matched no row/);
-    expect(f.update).toHaveBeenCalledTimes(1);
-  });
-
+  // Retired with Phase 191 D-01: the cases that modelled the read-to-write window
+  // (a zero-row UPDATE followed by a status re-read, `.neq("status", "done")` on
+  // the UPDATE chain, the metadata read error). One UPDATE in SQL has no such
+  // window, and the helper has no table access left to model.
   it("retractionFailureCode reads the SQLSTATE out of the cause, and says none when there is none", () => {
     expect(
       retractionFailureCode(new Error("x", { cause: { message: "denied", code: "42501" } })),
     ).toBe("42501");
     expect(retractionFailureCode(new Error("no cause"))).toBe("none");
     expect(retractionFailureCode("not an error")).toBe("none");
-  });
-
-  it("throws on an update error, carrying the PostgREST error as cause", async () => {
-    const updateErr = { message: "update denied", code: "42501" };
-    const f = fakeAdmin(
-      { data: { metadata: { source: "ledger-refresh-composite" } }, error: null },
-      updateErr,
-    );
-
-    const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
-      (e: unknown) => e,
-    );
-
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).cause).toBe(updateErr);
   });
 });
 

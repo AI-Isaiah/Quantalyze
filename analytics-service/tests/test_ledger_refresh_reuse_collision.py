@@ -115,10 +115,6 @@ class _Queue:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
         self._next = 0
-        # One-shot callback fired right AFTER the next compute_jobs select is
-        # served: models a job finishing (or vanishing) in the window between
-        # the helper's read and its write.
-        self.after_next_read: Any = None
 
     def seed(
         self, *, kind: str, metadata: dict[str, Any] | None, status: str = "pending"
@@ -145,6 +141,36 @@ class _Queue:
                 return str(row["id"])  # ⛔ p_metadata discarded, exactly as in SQL
         return self.seed(kind=kind, metadata=payload.get("p_metadata"))
 
+    def retract(self, job_id: str, correlation_id: str) -> dict[str, Any]:
+        """``public.retract_ledger_refresh_marker`` (Phase 191 D-01), spelled out.
+
+        ONE atomic step over the stored row: a ``done`` job is never rewritten,
+        only a ``source`` in the two refresh markers is retracted, every other
+        metadata key is kept, and the answer says which of the four things
+        happened. Mirrors supabase/schema/functions/retract_ledger_refresh_marker.sql
+        so the tests drive the same outcomes the database gives.
+        """
+        row = self.rows.get(job_id)
+        if row is None:
+            return {"outcome": "no_row"}
+        metadata = row["metadata"]
+        marker = metadata.get("source") if isinstance(metadata, dict) else None
+        has_marker = marker in (_MARKER, _COMPOSITE_MARKER)
+        if row["status"] != "done" and has_marker:
+            assert isinstance(metadata, dict)
+            retracted = {k: v for k, v in metadata.items() if k != "source"}
+            retracted["refresh_marker_retracted"] = marker
+            retracted["correlation_id"] = correlation_id
+            row["metadata"] = retracted
+            return {"outcome": "retracted", "marker": marker}
+        if row["status"] == "done":
+            return {
+                "outcome": "done",
+                "status": "done",
+                "marker": marker if has_marker else None,
+            }
+        return {"outcome": "no_marker", "status": row["status"]}
+
     def source_of(self, job_id: str) -> Any:
         metadata = self.rows[job_id]["metadata"]
         return metadata.get("source") if isinstance(metadata, dict) else None
@@ -158,6 +184,12 @@ def _queue_supabase(queue: _Queue, capture: dict[str, Any]) -> MagicMock:
 
     def _table(name: str) -> MagicMock:
         tbl = MagicMock()
+        if name == "compute_jobs":
+            # Phase 191 D-01: the retraction helper may not read or write this
+            # table at all any more; counted so a test can say "zero".
+            capture["compute_jobs_table_calls"] = (
+                capture.get("compute_jobs_table_calls", 0) + 1
+            )
         if name != "compute_jobs":
             tbl.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
                 data={"status": "draft"}
@@ -174,11 +206,7 @@ def _queue_supabase(queue: _Queue, capture: dict[str, Any]) -> MagicMock:
 
             def _execute() -> MagicMock:
                 row = queue.rows.get(str(state.get("id")))
-                served = MagicMock(data=copy.deepcopy(row))
-                hook, queue.after_next_read = queue.after_next_read, None
-                if hook is not None:
-                    hook(queue)
-                return served
+                return MagicMock(data=copy.deepcopy(row))
 
             chain.eq.side_effect = _eq
             chain.maybe_single.return_value = chain
@@ -229,7 +257,11 @@ def _queue_supabase(queue: _Queue, capture: dict[str, Any]) -> MagicMock:
     def _rpc(name: str, payload: dict[str, Any]) -> MagicMock:
         capture["rpc_calls"].append((name, copy.deepcopy(payload)))
         stub = MagicMock()
-        data = queue.enqueue(payload) if name == "enqueue_compute_job" else None
+        data: Any = None
+        if name == "enqueue_compute_job":
+            data = queue.enqueue(payload)
+        elif name == "retract_ledger_refresh_marker":
+            data = queue.retract(payload["p_job_id"], payload["p_correlation_id"])
         stub.execute.return_value = MagicMock(data=data)
         return stub
 
@@ -390,6 +422,24 @@ class TestUserResyncInheritsAMarkedRefresh:
             "the tail enqueue MINTED a second derive job, so no collision "
             "happened and this test is not about the defect. The double's dedup "
             "predicate has drifted from the RPC's."
+        )
+
+        # Phase 191 D-01: the retraction is ONE rpc carrying only the job id and
+        # the caller's correlation id. The name is hand-typed (not imported) so a
+        # rename of the constant cannot silently move both ends of this check.
+        retractions = [
+            (n, p) for (n, p) in capture["rpc_calls"] if n == "retract_ledger_refresh_marker"
+        ]
+        assert retractions == [
+            (
+                "retract_ledger_refresh_marker",
+                {"p_job_id": marked_id, "p_correlation_id": "cid-d15"},
+            )
+        ], (
+            "the tail did not retract through the one-statement SQL function "
+            "(Phase 191 D-01): a read-modify-write over compute_jobs.metadata "
+            "can lose a concurrent refusal marker or claim key. "
+            f"rpc calls: {capture['rpc_calls']!r}"
         )
 
         assert queue.source_of(marked_id) != _MARKER, (
@@ -797,27 +847,56 @@ class TestMarkerReReadProgrammingErrorsPropagate:
 # 3 — the retraction helper, at its own boundary
 # ---------------------------------------------------------------------------
 class TestRetractionHelper:
-    """Neuter to redden: make ``_retract_refresh_marker_on_reuse`` return early
-    unconditionally (case 1 goes RED), or drop its marker test so it rewrites
-    every row it is handed (cases 2 and 3 go RED)."""
+    """Phase 191 D-01 — the retraction is ONE rpc, ``retract_ledger_refresh_marker``,
+    and the helper touches no ``compute_jobs`` table query at all.
+
+    Why it matters: the helper used to read ``metadata``, drop ``source`` and write
+    the WHOLE object back. A refusal marker or a claim key written between that read
+    and that write was silently undone (the lost-write race this phase closes). One
+    UPDATE in SQL has no read-to-write window, and Python now sends only the job id
+    and the correlation id, so it has no stale copy to write back.
+
+    Neuter to redden: put back the old read-modify-write body (the table select and
+    update). Every case below goes RED on the missing rpc call and on the nonzero
+    ``compute_jobs`` table-call count."""
+
+    _RPC = "retract_ledger_refresh_marker"
 
     @staticmethod
-    def _run(row_metadata: dict[str, Any] | None) -> tuple[_Queue, dict[str, Any], str]:
+    def _run(
+        row_metadata: dict[str, Any] | None, *, status: str = "pending"
+    ) -> tuple[_Queue, dict[str, Any], str]:
         queue = _Queue()
-        job_id = queue.seed(kind=_DERIVE_KIND, metadata=row_metadata)
+        job_id = queue.seed(kind=_DERIVE_KIND, metadata=row_metadata, status=status)
         capture: dict[str, Any] = {"rpc_calls": [], "job_updates": []}
         sb = _queue_supabase(queue, capture)
         _retract_refresh_marker_on_reuse(sb, job_id, correlation_id="cid-1")
         return queue, capture, job_id
 
+    def _assert_one_rpc_and_no_table_access(
+        self, capture: dict[str, Any], job_id: str
+    ) -> None:
+        assert capture["rpc_calls"] == [
+            (self._RPC, {"p_job_id": job_id, "p_correlation_id": "cid-1"})
+        ], (
+            "the retraction must be exactly one retract_ledger_refresh_marker rpc "
+            f"carrying only the job id and the correlation id: {capture['rpc_calls']!r}"
+        )
+        assert capture.get("compute_jobs_table_calls", 0) == 0, (
+            "the helper queried compute_jobs directly. A read-modify-write over "
+            "metadata can undo a concurrent writer's key (Phase 191 D-01)."
+        )
+
     def test_single_key_marker_is_retracted(self) -> None:
         queue, capture, job_id = self._run({"source": _MARKER, "enqueued_at": "t"})
-        assert capture["job_updates"], "no compute_jobs update was issued"
+        self._assert_one_rpc_and_no_table_access(capture, job_id)
         assert queue.source_of(job_id) is None
         assert queue.rows[job_id]["metadata"]["enqueued_at"] == "t", (
             "the retraction must be a MERGE, not a replacement — losing the rest "
             "of the row's metadata is a second bug, not a fix."
         )
+        assert queue.rows[job_id]["metadata"]["refresh_marker_retracted"] == _MARKER
+        assert queue.rows[job_id]["metadata"]["correlation_id"] == "cid-1"
 
     def test_composite_marker_is_retracted_too(self) -> None:
         """The UNION, and here the union is the SAFE direction: retraction
@@ -825,86 +904,101 @@ class TestRetractionHelper:
         visible. (F5/F7 narrow a PROTECTION to its own arm — the opposite
         direction, for the opposite reason.)"""
         queue, capture, job_id = self._run({"source": _COMPOSITE_MARKER})
-        assert capture["job_updates"]
+        self._assert_one_rpc_and_no_table_access(capture, job_id)
         assert queue.source_of(job_id) is None
+        assert queue.rows[job_id]["metadata"]["refresh_marker_retracted"] == _COMPOSITE_MARKER
 
     def test_an_unmarked_job_is_left_alone(self) -> None:
         """A tail enqueue that MINTED its own job must not be rewritten — the
-        retraction is a response to a collision, not a routine write."""
-        _queue, capture, _job_id = self._run({"correlation_id": "cid-1"})
-        assert not capture["job_updates"], (
+        retraction is a response to a collision, not a routine write. The
+        decision is now the SQL function's (``no_marker``); the row is
+        byte-identical afterwards."""
+        queue, capture, job_id = self._run({"correlation_id": "cid-0"})
+        self._assert_one_rpc_and_no_table_access(capture, job_id)
+        assert queue.rows[job_id]["metadata"] == {"correlation_id": "cid-0"}, (
             "the retraction rewrote a job that carried no refresh marker; it is "
             "then an unconditional write to every tail enqueue in the system."
         )
 
     def test_no_metadata_at_all_is_left_alone(self) -> None:
-        _queue, capture, _job_id = self._run(None)
-        assert not capture["job_updates"]
-
-    @staticmethod
-    def _run_with_status(
-        status: str,
-    ) -> tuple[_Queue, dict[str, Any], str]:
-        queue = _Queue()
-        job_id = queue.seed(
-            kind=_DERIVE_KIND,
-            metadata={"source": _MARKER, "enqueued_at": "t"},
-            status=status,
-        )
-        capture: dict[str, Any] = {"rpc_calls": [], "job_updates": []}
-        sb = _queue_supabase(queue, capture)
-        _retract_refresh_marker_on_reuse(sb, job_id, correlation_id="cid-1")
-        return queue, capture, job_id
+        queue, capture, job_id = self._run(None)
+        self._assert_one_rpc_and_no_table_access(capture, job_id)
+        assert queue.rows[job_id]["metadata"] is None
 
     def test_done_job_with_marker_is_not_rewritten(self) -> None:
         """D-07 (STATUSBRIDGE review IN-R4-01): a FINISHED job's protection was
         decided when it ran, so retracting its marker changes nothing a reader
         acts on, while the ``compute_jobs_set_updated_at`` BEFORE UPDATE trigger
         would bump its ``updated_at`` and falsify the finish time every reader
-        of a job trusts. The write must therefore be filtered on status."""
-        queue, capture, job_id = self._run_with_status("done")
-        assert not [u for u in capture["job_updates"] if u[0] == job_id], (
-            "the retraction rewrote a `done` job; the trigger would bump its "
-            "updated_at. The update must carry .neq('status', 'done')."
+        of a job trusts. The SQL function's UPDATE is filtered on status."""
+        queue, capture, job_id = self._run(
+            {"source": _MARKER, "enqueued_at": "t"}, status="done"
         )
-        assert queue.source_of(job_id) == _MARKER, "a done job's marker is untouched"
+        self._assert_one_rpc_and_no_table_access(capture, job_id)
+        assert queue.rows[job_id]["metadata"] == {"source": _MARKER, "enqueued_at": "t"}, (
+            "the retraction rewrote a `done` job; the trigger would bump its updated_at."
+        )
 
     def test_running_job_with_marker_is_still_retracted(self) -> None:
         """Control for the case above: the status guard must not turn the
         retraction into a no-op for the in-flight job it exists for, or the
         `done` case would pass against a helper that never writes."""
-        queue, capture, job_id = self._run_with_status("running")
-        assert [u for u in capture["job_updates"] if u[0] == job_id]
+        queue, capture, job_id = self._run(
+            {"source": _MARKER, "enqueued_at": "t"}, status="running"
+        )
+        self._assert_one_rpc_and_no_table_access(capture, job_id)
         assert queue.source_of(job_id) is None
         assert queue.rows[job_id]["metadata"]["refresh_marker_retracted"] == _MARKER
 
+    def test_a_falsy_job_id_makes_no_call_at_all(self) -> None:
+        queue = _Queue()
+        capture: dict[str, Any] = {"rpc_calls": [], "job_updates": []}
+        sb = _queue_supabase(queue, capture)
+        _retract_refresh_marker_on_reuse(sb, None, correlation_id="cid-1")
+        _retract_refresh_marker_on_reuse(sb, "", correlation_id="cid-1")
+        assert capture["rpc_calls"] == []
+        assert capture.get("compute_jobs_table_calls", 0) == 0
+
 
 class TestRetractionAuditTrailTellsTheTruth:
-    """Phase 166.5 SFH-1 — ``process_key_long.refresh_marker_retracted`` is the
-    audit line an operator greps to learn a user's resync stood the refresh
-    protection down. It may be emitted ONLY when the UPDATE matched a row.
+    """Phase 166.5 SFH-1 / Phase 191 D-01 and D-08 — what the helper tells an
+    operator for each of the four answers ``retract_ledger_refresh_marker`` gives.
 
-    Before this fix the helper logged it unconditionally after an UPDATE whose
-    ``.neq("status", "done")`` filter can match zero rows (PostgREST reports
-    success for zero rows), so a job finishing between the read and the write
-    produced a "retracted" line over a marker that was never touched. The
-    contract mirrors the TypeScript twin ``retractInheritedRefreshMarker``
-    (``src/lib/ledger-refresh-marker.ts``): zero rows, re-read the status once;
-    ``done`` is a quiet skip, anything else is loud.
+    ``process_key_long.refresh_marker_retracted`` is the audit line an operator
+    greps to learn a user's resync stood the refresh protection down. It may be
+    emitted ONLY for the ``retracted`` answer. ``done`` is a quiet skip (an info
+    line when the finished job still carries a marker), ``no_marker`` is quiet,
+    and ``no_row`` is LOUD: an error line plus exactly one tagged Sentry capture,
+    as the TypeScript twin ``retractInheritedRefreshMarker``
+    (``src/lib/ledger-refresh-marker.ts``) has always done. A Sentry failure is
+    logged and never raised, because the caller would mislabel a successful
+    enqueue as ``enqueue_tail_failed``.
 
-    Neuter to redden: put back the unconditional ``log.warning`` after the
-    update; the skipped and no-row cases go RED on the retracted line.
+    Retired (Phase 191 D-01): the two cases built on the read-to-write window, "a
+    job that finishes between read and write" and "a row that vanishes between
+    read and write". One UPDATE in SQL has no such window. What they observed is
+    now the ``done`` and ``no_row`` answers, driven below by the row's state when
+    the function runs.
+
+    Neuter to redden: put back the unconditional ``log.warning`` for every
+    answer (the done, no-marker and no-row cases go RED on the retracted line);
+    drop the Sentry block (the no_row capture case goes RED); drop the
+    ``RETRACTION_OUTCOMES`` membership check (the unrecognised-outcome case goes
+    RED); take the ``try:``/``except`` off the rpc call and its two answer checks
+    (every failed-retraction case goes RED, and the end-to-end one logs
+    ``enqueue_tail_failed``).
     """
 
     @staticmethod
-    def _run(after_read: Any = None) -> tuple[_Queue, str, MagicMock]:
+    def _run(
+        *, metadata: dict[str, Any] | None, status: str = "running", seed: bool = True
+    ) -> tuple[_Queue, str, MagicMock]:
         queue = _Queue()
-        job_id = queue.seed(
-            kind=_DERIVE_KIND,
-            metadata={"source": _MARKER, "enqueued_at": "t"},
-            status="running",
+        job_id = (
+            queue.seed(kind=_DERIVE_KIND, metadata=metadata, status=status)
+            if seed
+            else "job-missing"
         )
-        queue.after_next_read = after_read
         capture: dict[str, Any] = {"rpc_calls": [], "job_updates": []}
         sb = _queue_supabase(queue, capture)
         with patch("services.ingestion.long_fetch.log") as log:
@@ -915,55 +1009,63 @@ class TestRetractionAuditTrailTellsTheTruth:
     def _events(method: MagicMock) -> list[str]:
         return [str(c.args[0]) for c in method.call_args_list if c.args]
 
+    def _all_events(self, log: MagicMock) -> list[str]:
+        return (
+            self._events(log.warning) + self._events(log.info) + self._events(log.error)
+        )
+
     def test_a_landed_retraction_is_logged_as_retracted(self) -> None:
-        """Control: the line still fires when the write matched a row, or the
-        two cases below would pass against a helper that never logs."""
-        queue, job_id, log = self._run()
+        """Control: the line still fires when the function retracted, or the
+        cases below would pass against a helper that never logs."""
+        queue, job_id, log = self._run(metadata={"source": _MARKER, "enqueued_at": "t"})
         assert queue.source_of(job_id) is None
-        assert "process_key_long.refresh_marker_retracted" in self._events(log.warning)
+        assert self._events(log.warning) == ["process_key_long.refresh_marker_retracted"]
+        assert log.warning.call_args.kwargs == {"job_id": job_id, "marker": _MARKER}
         assert log.error.call_count == 0
 
-    def test_a_job_that_finishes_between_read_and_write_is_not_called_retracted(
-        self,
-    ) -> None:
-        def _finish(q: _Queue) -> None:
-            for row in q.rows.values():
-                row["status"] = "done"
-
-        queue, job_id, log = self._run(after_read=_finish)
-        assert queue.source_of(job_id) == _MARKER, "a done job's marker is untouched"
-        assert "process_key_long.refresh_marker_retracted" not in (
-            self._events(log.warning) + self._events(log.info) + self._events(log.error)
-        ), "the audit line claims a retraction that never happened"
-        assert "process_key_long.refresh_marker_retraction_skipped_done" in (
-            self._events(log.info) + self._events(log.warning)
+    def test_a_finished_job_with_a_marker_is_a_quiet_info_skip(self) -> None:
+        queue, job_id, log = self._run(
+            metadata={"source": _MARKER, "enqueued_at": "t"}, status="done"
         )
+        assert queue.source_of(job_id) == _MARKER, "a done job's marker is untouched"
+        assert "process_key_long.refresh_marker_retracted" not in self._all_events(log), (
+            "the audit line claims a retraction that never happened"
+        )
+        assert self._events(log.info) == [
+            "process_key_long.refresh_marker_retraction_skipped_done"
+        ]
+        assert log.info.call_args.kwargs == {"job_id": job_id, "marker": _MARKER}
         assert log.error.call_count == 0, "a done job is the designed quiet skip"
+        assert log.warning.call_count == 0
 
-    def test_a_row_that_vanishes_between_read_and_write_is_an_error(self) -> None:
-        def _vanish(q: _Queue) -> None:
-            q.rows.clear()
+    def test_a_finished_job_without_a_marker_is_silent(self) -> None:
+        _queue, _job_id, log = self._run(metadata={"correlation_id": "c"}, status="done")
+        assert self._all_events(log) == []
 
-        queue, job_id, log = self._run(after_read=_vanish)
+    def test_a_job_with_no_marker_is_silent(self) -> None:
+        queue, job_id, log = self._run(metadata={"correlation_id": "c"})
+        assert queue.rows[job_id]["metadata"] == {"correlation_id": "c"}
+        assert self._all_events(log) == []
+
+    def test_a_missing_row_is_an_error(self) -> None:
+        """D-08: ``no_row`` is the job that vanished, or an id that never was.
+        An unretracted marker the helper cannot even find is loud."""
+        _queue, job_id, log = self._run(metadata=None, seed=False)
         assert "process_key_long.refresh_marker_retracted" not in (
             self._events(log.warning) + self._events(log.info)
         )
-        assert "process_key_long.refresh_marker_retraction_matched_no_row" in (
-            self._events(log.error)
-        ), "an unretracted marker on a not-done job must be loud"
+        assert self._events(log.error) == [
+            "process_key_long.refresh_marker_retraction_matched_no_row"
+        ], "a missing row must be loud"
+        assert log.error.call_args.kwargs["job_id"] == job_id
 
-    def test_a_vanished_row_also_raises_an_operator_signal(self) -> None:
-        """Round-2 SFH: ``log.error`` alone is a log line nobody greps until a
-        user complains. This service's other operator signals pair the log with
-        one tagged Sentry capture (static message, no PII). The helper must
-        still NOT raise: its caller would mislabel a successful enqueue as
-        ``enqueue_tail_failed``."""
-
-        def _vanish(q: _Queue) -> None:
-            q.rows.clear()
-
+    def test_a_missing_row_also_raises_exactly_one_operator_signal(self) -> None:
+        """Round-2 SFH, now D-08 for Python: ``log.error`` alone is a log line
+        nobody greps until a user complains. This service's other operator
+        signals pair the log with one tagged Sentry capture (static message, no
+        PII). The helper must still NOT raise."""
         with patch("services.ingestion.long_fetch.sentry_sdk") as sentry:
-            queue, job_id, log = self._run(after_read=_vanish)
+            _queue, job_id, _log = self._run(metadata=None, seed=False)
         assert sentry.capture_message.call_count == 1
         args, kwargs = sentry.capture_message.call_args
         assert "refresh_marker_retraction_matched_no_row" in args[0]
@@ -971,31 +1073,128 @@ class TestRetractionAuditTrailTellsTheTruth:
         scope = sentry.new_scope.return_value.__enter__.return_value
         tags = {c.args[0]: c.args[1] for c in scope.set_tag.call_args_list}
         assert tags.get("compute_job_id") == str(job_id)
-        assert tags.get("refresh_marker") == _MARKER
+        # no_row means the function found no row, so no marker was ever read.
+        assert tags.get("refresh_marker") == "unknown"
         assert str(job_id) not in args[0], "the id is a tag, never the grouped message"
 
     def test_a_sentry_transport_failure_never_masks_the_helper(self) -> None:
         """Telemetry must not fail the work it observes (main.py's rule)."""
-
-        def _vanish(q: _Queue) -> None:
-            q.rows.clear()
-
         with patch("services.ingestion.long_fetch.sentry_sdk") as sentry:
             sentry.capture_message.side_effect = RuntimeError("transport down")
-            _queue, _job_id, log = self._run(after_read=_vanish)
+            _queue, _job_id, log = self._run(metadata=None, seed=False)
         assert "process_key_long.refresh_marker_retraction_matched_no_row" in (
             self._events(log.error)
         )
+        assert self._events(log.warning) == [
+            "process_key_long.refresh_marker_retraction_sentry_failed"
+        ]
 
     def test_the_designed_quiet_and_landed_paths_raise_no_signal(self) -> None:
-        def _finish(q: _Queue) -> None:
-            for row in q.rows.values():
-                row["status"] = "done"
-
         with patch("services.ingestion.long_fetch.sentry_sdk") as sentry:
-            self._run()
-            self._run(after_read=_finish)
+            self._run(metadata={"source": _MARKER})  # retracted
+            self._run(metadata={"source": _MARKER}, status="done")  # done + marker
+            self._run(metadata={}, status="done")  # done, no marker
+            self._run(metadata={})  # no_marker
         assert sentry.capture_message.call_count == 0
+
+    @staticmethod
+    def _answering(data: Any) -> MagicMock:
+        sb = MagicMock()
+        sb.rpc.return_value.execute.return_value = MagicMock(data=data)
+        return sb
+
+    @staticmethod
+    def _rpc_raising(sb: MagicMock) -> MagicMock:
+        sb.rpc.return_value.execute.side_effect = ConnectionError("pgrst down")
+        return sb
+
+    @pytest.mark.parametrize(
+        "make_sb, error_type",
+        [
+            # an rpc failure raises from ``.execute()``
+            (lambda: TestRetractionAuditTrailTellsTheTruth._rpc_raising(MagicMock()), "ConnectionError"),
+            # a non-object answer
+            (lambda: TestRetractionAuditTrailTellsTheTruth._answering([{"outcome": "retracted"}]), "RuntimeError"),
+            (lambda: TestRetractionAuditTrailTellsTheTruth._answering(None), "RuntimeError"),
+            # an outcome the helper does not know is not success (T-191-20)
+            (lambda: TestRetractionAuditTrailTellsTheTruth._answering({"outcome": "retracted_maybe"}), "RuntimeError"),
+        ],
+    )
+    def test_a_failed_retraction_is_loud_once_and_never_raises(
+        self, make_sb: Any, error_type: str
+    ) -> None:
+        """SFH M-1: a retraction that could not be confirmed leaves the inherited
+        refresh marker on a user's job. It is logged as its own failure with the
+        error class and one tagged Sentry capture, and the helper does not raise
+        (the caller's ``try:`` would log it as ``enqueue_tail_failed``, no capture)."""
+        with patch("services.ingestion.long_fetch.sentry_sdk") as sentry, \
+             patch("services.ingestion.long_fetch.log") as log:
+            _retract_refresh_marker_on_reuse(make_sb(), "job-1", correlation_id="cid-1")
+        assert self._events(log.error) == [
+            "process_key_long.refresh_marker_retraction_failed"
+        ]
+        assert log.error.call_args.kwargs["error_type"] == error_type
+        assert log.error.call_args.kwargs["job_id"] == "job-1"
+        assert sentry.capture_message.call_count == 1
+        args, kwargs = sentry.capture_message.call_args
+        assert "refresh_marker_retraction_failed" in args[0]
+        assert kwargs.get("level") == "error"
+        scope = sentry.new_scope.return_value.__enter__.return_value
+        tags = {c.args[0]: c.args[1] for c in scope.set_tag.call_args_list}
+        assert tags.get("compute_job_id") == "job-1"
+        assert "job-1" not in args[0], "the id is a tag, never the grouped message"
+
+    def test_a_sentry_failure_on_a_failed_retraction_never_raises(self) -> None:
+        with patch("services.ingestion.long_fetch.sentry_sdk") as sentry, \
+             patch("services.ingestion.long_fetch.log") as log:
+            sentry.capture_message.side_effect = RuntimeError("transport down")
+            _retract_refresh_marker_on_reuse(
+                self._answering(None), "job-1", correlation_id="cid-1"
+            )
+        assert self._events(log.warning) == [
+            "process_key_long.refresh_marker_retraction_sentry_failed"
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("answer", ["rpc_raises", "non_object", "unknown_outcome"])
+    async def test_a_failed_retraction_is_not_mislabelled_as_an_enqueue_failure(
+        self, answer: str
+    ) -> None:
+        """Driven through the REAL ``run_process_key_long_job``: the tail enqueue
+        succeeded, so the caller's ``enqueue_tail_failed`` line must not fire, and
+        the job still finishes DONE."""
+        queue = _Queue()
+        queue.seed(kind=_DERIVE_KIND, metadata={"source": _MARKER})
+        capture: dict[str, Any] = {"rpc_calls": [], "job_updates": []}
+        sb = _queue_supabase(queue, capture)
+        queue_rpc = sb.rpc.side_effect
+
+        def _rpc(name: str, payload: dict[str, Any]) -> MagicMock:
+            if name != "retract_ledger_refresh_marker":
+                return queue_rpc(name, payload)
+            stub = MagicMock()
+            if answer == "rpc_raises":
+                stub.execute.side_effect = ConnectionError("pgrst down")
+            else:
+                stub.execute.return_value = MagicMock(
+                    data="oops" if answer == "non_object" else {"outcome": "surprise"}
+                )
+            return stub
+
+        sb.rpc.side_effect = _rpc
+        with patch("services.ingestion.long_fetch.get_adapter", return_value=_ledger_adapter()), \
+             patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+             patch("services.ingestion.long_fetch.sentry_sdk") as sentry, \
+             patch("services.ingestion.long_fetch.log") as log, \
+             patch("services.encryption.encrypt_credentials", return_value={"v": 1}), \
+             patch("services.encryption.get_kek", return_value=b"0" * 32):
+            result = await run_process_key_long_job(_long_fetch_job())
+
+        assert result.outcome == DispatchOutcome.DONE
+        errors = self._events(log.error)
+        assert "process_key_long.refresh_marker_retraction_failed" in errors
+        assert "process_key_long.enqueue_tail_failed" not in errors
+        assert sentry.capture_message.call_count == 1
 
 
 # ---------------------------------------------------------------------------
