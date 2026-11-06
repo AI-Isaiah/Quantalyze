@@ -5,7 +5,7 @@ file, and removes everything it created — on success, on failure, and on
 interrupt. It never touches TEST or PROD.
 
 Promoted (VAC-02 / D-03) from the mid-phase harness at
-`.planning/phases/164-share-copy-link-always-works-and-never-discloses/pg-harness/run.sh`,
+`.planning/milestones/v1.20-phases/164-share-copy-link-always-works-and-never-discloses/pg-harness/run.sh`,
 with its three measured defects fixed. Read [Why it exists](#why-it-exists)
 before changing the CLI: the mutation runner, the CI job and Phase 164.4's
 backfill oracle all stand on this contract.
@@ -273,7 +273,7 @@ The ubuntu row above was INSPECTED when it was written, never executed —
 164.4.1-RESEARCH assumption A1. It has now been run, on `ubuntu-latest`, in
 workflow run **33938272686** (head `f04ce51b`, `sql-mutation` job
 101230396626). The provisioning step's own prints are quoted verbatim in
-`.planning/phases/164.4.1-pgcron-lane-put-pg-cron-on-the-throwaway-pg-lane-and-retire/164.4.1-TRIPWIRE-FIRED.log`.
+`.planning/milestones/v1.20-phases/164.4.1-pgcron-lane-put-pg-cron-on-the-throwaway-pg-lane-and-retire/164.4.1-TRIPWIRE-FIRED.log`.
 What it settles:
 
 - **Which apt source wins: `noble/universe`, not PGDG.** That was RESEARCH's

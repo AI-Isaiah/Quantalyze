@@ -1288,6 +1288,10 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
       [
         [".planning/STATE.md", FIXTURE],
         [".planning/milestones/v1.20-phases/164-old/164-01-PLAN.md", FIXTURE],
+        [".planning/phases/164.3-x/164.3-07-DEFERRED.md", FIXTURE],
+        [".planning/phases/164.3-x/164.3-07-PLAN.md", FIXTURE],
+        [".planning/phases/166.3.1-x/166.3.1-03-DEFERRED.md", FIXTURE],
+        [".planning/phases/166.3.1-x/166.3.1-03-PLAN.md", FIXTURE],
         [".planning/phases/.keep", FIXTURE],
         [".planning/phases/00-x/.keep", FIXTURE],
         [".planning/phases/98-done/98-01-PLAN.md", FIXTURE],

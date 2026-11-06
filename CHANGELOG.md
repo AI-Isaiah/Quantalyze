@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.23.3] - 2026-11-06 — records: close milestone v1.20 Backlog Burndown
+
+### Added
+- The v1.20 milestone audit: status `tech_debt`, 62/64 requirements, 142/142 phases verified, 9/9 integration seams, 4/4 flows. DEPS-01 is descoped and HONEST-07 deferred. The carried debt has named owners. The largest item is Phase 188's SC-4 residual, which goes to a follow-up phase in the next milestone (D-13).
+- Archives under `.planning/milestones/`: `v1.20-ROADMAP.md`, `v1.20-REQUIREMENTS.md`, `v1.20-MILESTONE-AUDIT.md`, and all 150 v1.20 phase directories in `v1.20-phases/` (moved, not rewritten).
+- MILESTONES.md has a v1.20 entry, and RETROSPECTIVE.md has a v1.20 section plus a cross-milestone trend line.
+
+### Changed
+- ROADMAP.md is collapsed to a milestone index. v1.16, v1.17, v1.19 and v1.20 each get a one-paragraph summary linking to their archive. The parked v1.18 section (Phases 155 and 157) is kept verbatim.
+- PROJECT.md: v1.20 recorded as shipped, the Validated, Active and Out of Scope lists updated, the annualization constraint corrected, and 20 Key Decisions rows added.
+- STATE.md: the milestone is complete and the next step is `/gsd-new-milestone` for the UX milestone.
+- `.planning/REQUIREMENTS.md` removed. The next milestone writes a fresh one.
+
+### Tests
+- Tests that read v1.20 planning files now read them from the archive: `lint-sql-gates` (VAC-03 five-shapes pin), and `verify-plan-anchors` (G2 deferral routing, and R2-W05, which replays the two real archived deferral markers into a scratch tree, because the live scan no longer sees them). The 164.3-07 pin now asserts that the archived plan is in neither the pending nor the deferred list.
+- `TEST_READ_PLANNING_PATHS` in `scripts/classify-changed-paths.mjs` points at the archive and grows from seven to nine entries (the real 166.3.1-03 marker and plan). Its self-test pin and the contract test's fixture list move with it.
+- The live-ROADMAP hygiene arm drops its "more than 100 headings" floor. A collapsed roadmap has none, and the fixture arms prove the parser fires.
+
+### Notes
+- Prose references to moved phase paths in `TODOS.md`, `scripts/pg-lane/README.md`, two comments and one `ci.yml` comment now point at `.planning/milestones/v1.20-phases/`. Migration comments are left as they are, because applied migrations are immutable.
+- After the archive, `plan-anchor-verify` reads a measured-zero corpus (0 pending, 0 deferred). The `ci.yml` assertion step passes on it, with `DEFERRED_CEILING` unchanged at 2.
+- The `v1.20` git tag goes on this PR's squash commit on `main`.
+
 ## [0.133.23.2] - 2026-11-06 — records: close TINYBASE 188
 
 ### Added

@@ -671,7 +671,7 @@ CENSUS_SQL
   # APPENDED with printf rather than interpolated into the heredoc above: that
   # heredoc is QUOTED, and unquoting it to reach one variable would put every `$`
   # and backtick in ~90 lines of catalogue SQL at the mercy of the shell
-  # (.planning/phases/164.8-testpreprod-test-becomes-a-real-pre-prod/deferred-items.md:99).
+  # (.planning/milestones/v1.20-phases/164.8-testpreprod-test-becomes-a-real-pre-prod/deferred-items.md:99).
   #
   # `to_regclass` + `query_to_xml` for the same reason `ledger_rows` uses it: a
   # table the dump has not created yet must read `absent`, not raise a parse error

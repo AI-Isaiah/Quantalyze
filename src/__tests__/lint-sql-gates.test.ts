@@ -158,7 +158,7 @@ describe("lint-sql-gates: the shipped rule set (D-16)", () => {
         .sort(),
     ).toEqual([...VAC03_RULE_IDS].sort());
 
-    for (const rel of [".planning/REQUIREMENTS.md", ".planning/ROADMAP.md"]) {
+    for (const rel of [".planning/milestones/v1.20-REQUIREMENTS.md", ".planning/ROADMAP.md"]) {
       const text = readFileSync(join(ROOT, rel), "utf8");
       const claims = text
         .split("\n")

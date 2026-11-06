@@ -729,7 +729,9 @@ describe("Rule 6 ROADMAP-STRUCTURE — a phase heading must be closable by phase
   it("the live ROADMAP.md has a bullet and a row for every phase heading, and every passed phase is ticked", () => {
     const r = runRoadmapCheck(process.cwd());
     expect(r, "no .planning/ROADMAP.md in this checkout").not.toBeNull();
-    expect(r!.headings).toBeGreaterThan(100);
+    // No heading-count floor: after a milestone close (v1.20, 2026-11-06) the
+    // live ROADMAP is collapsed and carries 0 phase headings by design. The
+    // fixture arms above prove the parser finds headings and fires.
     expect(r!.violations).toEqual([]);
   });
 });
