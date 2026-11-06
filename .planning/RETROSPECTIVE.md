@@ -118,9 +118,50 @@
 
 ---
 
+## Milestone: v1.20 — Backlog Burndown (Phases 158+)
+
+**Shipped:** 2026-11-06 (v0.68.1.1 → v0.133.23.2, PRs #697–#1207)
+**Phases:** 150 in the roadmap (142 delivered, 8 retired or absorbed) | **Plans:** 1078 | **Timeline:** 2026-08-20 → 2026-11-06, 475 commits on main
+
+### What Was Built
+- Ranking and public-trust correctness (RANK-01..09): failed or stale analytics leave published percentiles, anonymous embeds are explicit projections, the venue stamps the annualization, and the quantstats sign-flip is gone.
+- Honest error and freshness surfaces (WIZERR, HONEST, SHARE): the wizard names real causes, badges follow the return series, and share links are revocable tokens.
+- CI and test-database discipline (OPS, VAC): the evicting shared-TEST group became an advisory-lock mutex, then a private local-stack lane per job; SQL gates are mutation-tested, linted and drift-checked.
+- Ledger-backed account correctness (LEDGER and Phases 176–191): marked-to-market NAV on every ingest, derive gaps, tiny-base days and the refusal-marker race.
+
+### What Worked
+- **Re-measuring a ledger claim at HEAD before acting on it.** Several booked remedies in TODOS were measured wrong at triage, and phases carried the corrections, not the bullets.
+- **"Completion is historical, drift is a report" (2026-09-18).** Before it, the more carefully a phase was verified the more likely it was to go stale. After it, the milestone could close.
+- **Reshaping our own ROADMAP/STATE files (2026-10-15)** made the gsd-tools handlers safe again instead of hand-editing around them, with hygiene rules guarding the shape.
+- **Gates that must be seen RED before they count.** Neuter-then-restore caught spies that suppressed the failure they were meant to observe.
+
+### What Was Inefficient
+- **Scope grew from 8 planned phases to 150.** Most were decimal inserts from review findings and PROD readings. That was honest work, but the milestone stopped being a bounded burndown and ran 11 weeks.
+- **CI ordering on shared TEST** took four rounds (mutex, key census, wait-only, private lanes) before it stopped costing sessions.
+- **PROD readings that need a nightly** (186, 188, 190) stretched closes across days, and 188's SC-4 still ended NOT CONFIRMED, moved to the next milestone by founder decision.
+- **Hand-orchestrating a milestone close** in a "lighter convention" was rejected by the founder. Run the full skill.
+
+### Patterns Established
+- CHANGELOG plus VERSION in every ship, with the version digit set by meaning, and records PRs for bookkeeping.
+- Green means checks bound to the head SHA with the expected count. Never write the skip trailer, not even to deny it.
+- Every deviation goes in both the phase CONTEXT and the ROADMAP.
+- A PROD reading starts with the database marker query, run alone.
+
+### Key Lessons
+- A residual that can't be explained needs a control capture (a nightly with no deploy in between) planned up front, not after the fix ships.
+- A backlog-burndown milestone needs a stopping rule for inserted phases, or it becomes the product roadmap.
+
+### Cost Observations
+- Model mix: the orchestrator and code review on the large model; executors, fixers, verifiers and security auditors on the mid model.
+- Sessions: many; 69 distinct commit days.
+- Notable: nightly-bound PROD readings, not agent time, set the pace of the late phases.
+
+---
+
 ## Cross-Milestone Trends
 
 ### Process Evolution
 - v1.2.2 → v1.5: every milestone now ends with a live authed prod canary; v1.5 is the first where the canary phase found (and the milestone fixed) real prod bugs — the pattern graduates from "verification" to "discovery."
 - Frozen-engine discipline survived its first deliberate unfreeze: re-baseline as a reviewed act with independent re-derivation, then re-freeze. The mechanism (spine guards + zero-diff checks) works in both directions.
 - v1.10: the per-phase **fresh-context Fable red team** graduated from optional to standard — it caught real defects the opus review + opus verifier missed on multiple phases, confirming that model diversity (not just pass count) is what closes the gap. The recurring miss is the reverse: verification-ledger bookkeeping drift keeps resurfacing at close (v1.5 → v1.10).
+- v1.20: verification became a historical fact with drift as a separate report, and gates must be seen RED before they count. The recurring cost moved from review passes to nightly-bound PROD readings.
