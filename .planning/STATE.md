@@ -28,6 +28,10 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 ## Project Reference
 
+See: .planning/PROJECT.md (updated 2026-11-06)
+
+**Current focus:** Planning the next milestone (UX, founder 2026-11-06) with `/gsd-new-milestone`. It carries the Phase 188 SC-4 residual follow-up (D-13).
+
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
 ⛔ **v1.17 CLOSED 2026-08-14 as "MT5 — ingested, wizardable, surfaced" (Phases 147–154, 156).**
@@ -179,6 +183,8 @@ Progress: [██████████] 100%
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
+
+**Next: `/gsd-new-milestone` (UX milestone).** v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
 
 **Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
 Load-bearing sequencing (real dependencies, do not reorder):
