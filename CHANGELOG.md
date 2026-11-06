@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.23.1] - 2026-11-06 — records: close REFUSALRACE 191
+
+### Added
+- Phase 191 REFUSALRACE planning records on `main`: the 10 plans and their summaries, context, research, patterns, both PR review files, validation, verification (passed 5/5) and the security audit (34 threats closed, two accepted risks, AR-191-01 and AR-191-02).
+
+### Changed
+- ROADMAP: Phase 191 ticked complete, with its 10 plans listed and ticked. Its success criteria carry the 2026-11-06 recorded deviations, and its Progress row keeps its prose.
+- STATE: current position moves off 191. 188 TINYBASE is the one open phase and waits for a control capture after the 2026-11-07 nightly.
+
+### Notes
+- The SC-5 PROD reading after the deploy found 34 derives finished, 0 marker-write failures, both functions still service-role only with a pinned search path, and 0 Sentry events for the retraction signals. No refusal or retraction happened in that window, so PROD did not exercise the race itself. The concurrency proof is the live two-connection probe in CI.
+- Recorded deviations (CONTEXT and ROADMAP): D-08's `no_row` signal is an error-level log line plus one Sentry capture, louder than the warning D-08 named. Plan 08's audit neuter reading (c) was corrected, because the routes' `sync.start` emission already covers the site.
+- One step of plan 10's own Task 1 check matches two older repo files by glob, so it fails whatever this phase does. That is a defect in the plan's check, not a gap in the phase (191-10 SUMMARY, Verify note).
+
 ## [0.133.23.0] - 2026-11-05 — TINYBASE 188 gap closure: the derive deletes the stale rows on the days it leaves out
 
 ### Fixed

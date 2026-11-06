@@ -223,7 +223,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
 - [x] **~~Phase 189~~: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put all open phases that are purely about deribit or sfox into todos and not do them in this milestone"): moved out of this milestone, not delivered; TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
 - [x] **Phase 190: FACTSHEETQUEUED — finishing the wizard does not queue a redundant re-run, and a re-compute never hides a strategy's computed factsheet** — booked 2026-11-03 from the founder's factsheet report (founder "New phase, start now (Recommended)"); the finalize step queued a second sync_trades after the first computation finished, and a pending or computing status hides analytics already computed; user-facing (completed 2026-11-04: shipped v0.133.19.0 #1194; verification passed with the PROD finalize reading VOID by founder decision, carried to TODOS `190-SC5-POSTDEPLOY-REREAD`; security 25/25)
-- [ ] **Phase 191: REFUSALRACE — the derive's refusal marker and a Sync's refresh-marker retraction merge into a job's metadata, so neither write undoes the other** — booked 2026-11-04 from TODOS `186-REFUSAL-MARKER-RMW-RACE` (DERIVEGAPS 186 decision D-13, founder "One narrow round 4 (Recommended)": the race goes to a follow-up phase after 186 ships); both writers replace `compute_jobs.metadata`, so an interleaving loses the refusal marker or the retraction; data integrity
+- [x] **Phase 191: REFUSALRACE — the derive's refusal marker and a Sync's refresh-marker retraction merge into a job's metadata, so neither write undoes the other** — booked 2026-11-04 from TODOS `186-REFUSAL-MARKER-RMW-RACE` (DERIVEGAPS 186 decision D-13, founder "One narrow round 4 (Recommended)": the race goes to a follow-up phase after 186 ships); both writers replace `compute_jobs.metadata`, so an interleaving loses the refusal marker or the retraction; data integrity (completed 2026-11-06)
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -7177,7 +7177,7 @@ Plans:
 **Goal:** The worker's refusal marker (`read_refusal_kept_figures`) and a Sync's retraction of a refresh marker both merge into `compute_jobs.metadata` instead of replacing the whole column, so when the two writes interleave both survive.
 **Requirements**: TBD
 **Depends on:** Phase 186
-**Plans:** 0 plans
+**Plans:** 10/10 plans complete
 
 **Booking.** From TODOS `[186-REFUSAL-MARKER-RMW-RACE]`. Founder 2026-11-04, Phase 186 D-13 ("One narrow round 4 (Recommended)"): the race goes to a follow-up phase, booked after 186 ships. 186 shipped as #1197.
 
@@ -7189,14 +7189,49 @@ The window is about one round trip at the end of a derive that runs for minutes.
 **Success Criteria** (what must be TRUE):
 1. A read-only PROD count of jobs carrying `read_refusal_kept_figures` and of retracted refresh markers is recorded before any code change.
 2. Both writers merge into `metadata`: a JSONB merge write for the marker, and a merge arm in `enqueue_compute_job` for the retraction. Each has a test that goes RED on today's replace behaviour.
+   ⛔ **AMENDED 2026-11-04 (191 D-01, founder "Small dedicated RPC (Recommended)"):** the retraction is a small service-role-only SQL function doing it in one `UPDATE`, called by both the Python and the TypeScript writer; `enqueue_compute_job` is not changed, because it runs on every enqueue path and its signature has a history of overload and ACL drift. The original wording above is kept as lineage.
+   ⭐ **2026-11-04 (191 D-06, D-07, founder):** ships as two PRs, migration first ("Two PRs, migration first (Recommended)"); the marker counts as written only on a confirmed row change, anything else fails the job TRANSIENT ("Require a confirmed write (Recommended)"), a deviation from D-03's "nothing else changes".
 3. A concurrency test interleaves the two writes and both keys survive.
 4. Any migration passes migration-reviewer and rls-policy-auditor before merge.
 5. After deploy, a read-only PROD reading confirms no regression.
+   ⭐ **2026-11-06 (close, recorded deviations; detail in 191-CONTEXT):** D-08's `no_row` signal ships as an error-level log line plus one Sentry capture, not a warning (the louder of the two, keeping the existing line). Plan 08's neuter reading (c) could not go red as written, because the routes' `sync.start` audit emission covers the site, so the corrected reading neuters the pragma and the emission together.
 
 Data integrity. Relates to 186 DERIVEGAPS and 161.1 D11/D12.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 191 to break down)
+**Wave 1**
+
+- [x] 191-01-PLAN.md — SC-1 read-only PROD count before any code change, marker first, counts only (orchestrator) (SC-1) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 — SC-1 is recorded before any code change; PR 1 starts)*
+
+- [x] 191-02-PLAN.md — D-01 recorded; the migration with `mark_compute_job_kept_figures` and `retract_ledger_refresh_marker`, rollback, static privilege test, snapshots, ratchet rows, `COMPARED_FLOOR` (SC-2, SC-3, SC-4) [Wave 2]
+
+**Wave 3** *(blocked on 191-02 — twins are measured against the final migration text)*
+
+- [x] 191-03-PLAN.md — SC-3 gate `test_compute_job_metadata_merge.sql` (11 arms, twins, control) and the corpus censuses (SC-3) [Wave 3]
+
+**Wave 4** *(blocked on 191-03)*
+
+- [x] 191-04-PLAN.md — One full mutation run; `FILES_FLOOR` and `ARMS_FLOOR` and their echo pins (SC-3) [Wave 4]
+
+**Wave 5** *(blocked on PR 1's plans — orchestrator ships PR 1)*
+
+- [x] 191-05-PLAN.md — SC-4 reviews, ship PR 1, CI apply, [BLOCKING] read-only PROD catalogue check opening PR 2 (orchestrator) (SC-4, SC-2) [Wave 5]
+
+**Wave 6** *(blocked on `gate-pr2: open` in 191-05 — PR 2 starts)*
+
+- [x] 191-06-PLAN.md — Python refusal marker as one rpc through `_stamp_io`; D-07 confirmed write (SC-2) [Wave 6]
+- [x] 191-07-PLAN.md — Python retraction as one rpc with the outcome map; D-08 loud `no_row` (SC-2) [Wave 6]
+- [x] 191-08-PLAN.md — TypeScript retraction as one rpc; route tests; `MUTATING_RPC_NAMES`; SQL parity pins (SC-2) [Wave 6]
+
+**Wave 7** *(blocked on 191-06, 191-07, 191-08)*
+
+- [x] 191-09-PLAN.md — Live two-connection race probe with the python job's `LANE_DB_URL` export; Python parity pins; TODOS closure (SC-3, SC-2) [Wave 7]
+
+**Wave 8** *(blocked on all other plans — orchestrator ships PR 2, post-deploy)*
+
+- [x] 191-10-PLAN.md — SC-5 post-deploy read-only PROD reading against the SC-1 baseline (orchestrator) (SC-5) [Wave 8]
 
 ---
 
@@ -7506,7 +7541,7 @@ kept verbatim.
 | 186 DERIVEGAPS | 14/14 | Complete — shipped the read-only probe v0.133.18.6 #1193 and the fix v0.133.21.0 #1197 (a truncated or failed read refuses the key by name, the Bybit derive counts Unified transfers as flows, a failing key leaves the book on its own); verification 7/7, security 36/36; SC-5 PROD reading confirmed on every gap (Bybit stored flows 0 to positive; no failing key on PROD, so the Gap 1 and Gap 3 exit paths rest on the synthetic tests) | 2026-11-05 |
 | 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
 | 190 FACTSHEETQUEUED | 9/9 | Complete — shipped v0.133.19.0 #1194 (finalize queues a re-run only when one is needed; a re-compute over a stored result keeps its factsheet with an updating line); verification passed (SC-2 and SC-4 by code and tests with their PROD readings VOID, the 390 px check unmeasured, accepted by the founder 2026-11-03 and carried to TODOS `190-SC5-POSTDEPLOY-REREAD`), SC-3 confirmed on PROD; security 25/25; D-05 surfaces booked to `190-RERUN-SURFACES-NOT-HOLDING` | 2026-11-04 |
-| 191 REFUSALRACE | 0/0 | Not started — booked 2026-11-04 from TODOS `186-REFUSAL-MARKER-RMW-RACE` (Phase 186 D-13) | - |
+| 191 REFUSALRACE | 10/10 | Complete — PR 1 v0.133.22.0 #1200 (two service-role-only merge functions, applied on PROD) and PR 2 v0.133.22.3 #1202 (the Python marker and both retraction writers call them; a live two-connection probe in CI); verification 5/5, security 34/34; SC-5 PROD reading confirmed (34 derives after the deploy, 0 marker-write failures, 0 Sentry events; no refusal or retraction in the window, so the race itself was not exercised on PROD) | 2026-11-06 |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 

@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 188
 current_phase_name: TINYBASE
 status: executing
-stopped_at: 186 DERIVEGAPS closed; several phases in parallel
-last_updated: "2026-11-05T06:52:50.132Z"
-last_activity: 2026-11-05
-last_activity_desc: 186 DERIVEGAPS closed (verification passed 7/7, SC-5 PROD reading confirmed, security 36/36)
-state_head: d37e5e56927882848f5a9cfeac7708e450de2f57
+stopped_at: 191 REFUSALRACE closed; 188 TINYBASE awaits its control capture
+last_updated: "2026-11-06T07:25:03.617Z"
+last_activity: 2026-11-06
+last_activity_desc: 191 REFUSALRACE closed (verification passed 5/5, SC-5 PROD reading confirmed, security 34/34)
+state_head: 50594c75034a2bf61f4fff7cbc5bf27252220fed
 progress:
   total_phases: 144
-  completed_phases: 142
-  total_plans: 1052
-  completed_plans: 1045
+  completed_phases: 143
+  total_plans: 1062
+  completed_plans: 1055
   percent: 99
 ---
 
@@ -172,10 +172,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 186 (DERIVEGAPS) — CLOSED 2026-11-05
-Plan: 14 of 14 complete; verification passed 7/7, SC-5 post-deploy PROD reading confirmed on every gap, security SECURED 36/36
-Status: Executing — several phases in parallel. Open: 188 TINYBASE (shipped v0.133.20.0 #1196; its SC-4 PROD reading failed on 2026-11-05, so gap-closure plans are under way by founder decision) and 191 REFUSALRACE (PR 1 v0.133.22.0 #1200 applied on PROD; PR 2 in review). Closed 2026-11-05: 186 DERIVEGAPS (v0.133.18.6 #1193 tooling, v0.133.21.0 #1197; verification 7/7; SC-5 confirmed, with the Gap 1 and Gap 3 PROD populations empty so the synthetic tests carry those exit paths; security 36/36). Closed 2026-11-04: 190 FACTSHEETQUEUED (v0.133.19.0 #1194; verification passed with SC-2 and SC-4 PROD readings VOID and the 390 px check unmeasured, accepted by the founder 2026-11-03 and carried to TODOS `190-SC5-POSTDEPLOY-REREAD`; SC-3 confirmed on PROD; security 25/25). Closed 2026-11-03: 175 MT5OFFSET (v0.133.3.0 #1135; verification 3/3, security 0 open; switched to the US rule 2026-11-03T13:38Z with the first derive clean; D-05 voided the legacy rebuild, D-06 switched without the live count), 185 DERIBITFLOWTIME (v0.133.18.0 #1187; verification 5/5, SECURED 30/30; SC-4 met with key A's two days named, D-14), 176 LEGACYRETIRE (v0.133.12.0 #1164, v0.133.15.0 #1172, v0.133.17.0 #1185, re-dump #1186), with 181 SHAREDKEYS absorbed and 182 SPIKEREPAIR superseded (D-01). Retired 2026-11-03 to TODOS by the founder: 189 OPTIONREPLAY and 187 BINANCEINCOME. Closed 2026-11-02: 167.2.1.1.1 NAVMTM, 183 DUPCOUNT. Closed 2026-11-01: 184 WALLETOFFSET.
-Last activity: 2026-11-05 — 186 DERIVEGAPS closed
+Phase: 191 (REFUSALRACE) — CLOSED 2026-11-06
+Plan: 10 of 10 complete; verification passed 5/5, SC-5 post-deploy PROD reading confirmed, security SECURED 34/34
+Status: Executing — one phase open: 188 TINYBASE (gap closure v0.133.23.0 #1205 shipped and re-derived on PROD; its SC-4 re-reading read NOT CONFIRMED on value churn the fix does not touch, so by founder decision 2026-11-06 a control capture after the 2026-11-07 nightly decides whether it closes with a recorded explanation or takes another round). Closed 2026-11-06: 191 REFUSALRACE (v0.133.22.0 #1200 migration, v0.133.22.3 #1202 writers; verification 5/5; SC-5 confirmed with no refusal or retraction in the window; security 34/34). Closed 2026-11-05: 186 DERIVEGAPS (v0.133.18.6 #1193 tooling, v0.133.21.0 #1197; verification 7/7; SC-5 confirmed; security 36/36). Earlier closes are in the Progress table.
+Last activity: 2026-11-06 — 191 REFUSALRACE closed
 Progress: [█████████░] 99%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -1729,7 +1729,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** Phase 186 complete, ready to plan Phase 187
+**Stopped At:** 191 REFUSALRACE closed; 188 TINYBASE awaits its control capture
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
