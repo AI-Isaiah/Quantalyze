@@ -75,11 +75,44 @@ Deferred, tracked, not in this roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| TRUST-01 | Phase 192 | Pending |
+| TRUST-02 | Phase 193 | Pending |
+| TRUST-03 | Phase 193 | Pending |
+| TRUST-04 | Phase 194 | Pending |
+| TRUST-05 | Phase 194 | Pending |
+| TRUST-06 | Phase 193 | Pending |
+| ROUTE-01 | Phase 199 | Pending |
+| ROUTE-02 | Phase 196 | Pending |
+| ROUTE-03 | Phase 192 | Pending |
+| ROUTE-04 | Phase 196 | Pending |
+| ROUTE-05 | Phase 197 | Pending |
+| ROUTE-06 | Phase 198 | Pending |
+| ROUTE-07 | Phase 198 | Pending |
+| ROUTE-08 | Phase 198 | Pending |
+| ROUTE-09 | Phase 200 | Pending |
+| ROUTE-10 | Phase 200 | Pending |
+| ROUTE-11 | Phase 199 | Pending |
+| CLAR-01 | Phase 197 | Pending |
+| CLAR-02 | Phase 197 | Pending |
+| CLAR-03 | Phase 201 | Pending |
+| CLAR-04 | Phase 201 | Pending |
+| CLAR-05 | Phase 197 | Pending |
+| CLAR-06 | Phase 201 | Pending |
+| LEAN-01 | Phase 199 | Pending |
+| LEAN-02 | Phase 196 | Pending |
+| LEAN-03 | Phase 195 | Pending |
+| LEAN-04 | Phase 200 | Pending |
+| LEAN-05 | Phase 196 | Pending |
+| LEAN-06 | Phase 198 | Pending |
+| LEAN-07 | Phase 195 | Pending |
+| RESID-01 | Phase 202 | Pending |
+| RESID-02 | Phase 202 | Pending |
 
 **Coverage:**
 - Milestone requirements: 32 total
-- Mapped to phases: 0 (filled by the roadmap)
+- Mapped to phases: 32
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-11-06*
-*Last updated: 2026-11-06 after initial definition*
+*Last updated: 2026-11-06 after the v1.21 roadmap (traceability filled, 32/32 mapped to Phases 192–202)*

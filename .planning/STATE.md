@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
 status: planning
-last_updated: "2026-11-06T12:54:31.752Z"
+last_updated: "2026-11-06T13:50:25.000Z"
 last_activity: 2026-11-06
 progress:
-  total_phases: 0
+  total_phases: 11
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -27,7 +27,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-06)
 
-**Current focus:** Planning the next milestone (UX, founder 2026-11-06) with `/gsd-new-milestone`. It carries the Phase 188 SC-4 residual follow-up (D-13).
+**Current focus:** v1.21 UX — trustworthy, navigable, lean (Phases 192–202, roadmap written 2026-11-06). Next: `/gsd-plan-phase 192` (PUBLICTRUTH). 202 RESIDCHURN, the Phase 188 SC-4 residual follow-up (D-13), runs in parallel from now.
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -171,16 +171,17 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-11-06 — Milestone v1.21 started
+Phase: 192 (PUBLICTRUTH) — the public site and the demo tell a visitor one true story
+Plan: — (not planned yet)
+Status: Ready to plan. 202 RESIDCHURN runs in parallel from now: its control capture needs a 00:40Z nightly with no deploy between its two captures, so it books that window, and inside it only analytics-service and migration merges are held.
+Last activity: 2026-11-06 — v1.21 roadmap written: 11 phases (192–202), 32/32 requirements mapped
+Progress: [░░░░░░░░░░] 0% (0 of 11 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
 
-**Next: `/gsd-new-milestone` (UX milestone).** v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
+**Next: `/gsd-plan-phase 192` (v1.21 PUBLICTRUTH).** The v1.21 roadmap was written 2026-11-06: 11 phases, 192–202; order and dependencies are in ROADMAP.md § Current Milestone. 202 RESIDCHURN is a parallel track that starts now. v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
 
 **Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
 Load-bearing sequencing (real dependencies, do not reorder):
@@ -2000,4 +2001,5 @@ and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Plan 192 PUBLICTRUTH with /gsd-plan-phase 192
+- Start 202 RESIDCHURN in parallel: book its capture window around the next deploy-free 00:40Z nightly

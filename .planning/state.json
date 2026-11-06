@@ -1,12 +1,68 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.21",
-  "phases": [],
+  "milestone": "v1.21 — UX — trustworthy, navigable, lean",
+  "phases": [
+    {
+      "number": "192",
+      "name": "PUBLICTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "193",
+      "name": "QUIETVIEW",
+      "status": "pending"
+    },
+    {
+      "number": "194",
+      "name": "FIGURETRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "195",
+      "name": "TRIM",
+      "status": "pending"
+    },
+    {
+      "number": "196",
+      "name": "ONESTRATEGYPAGE",
+      "status": "pending"
+    },
+    {
+      "number": "197",
+      "name": "SCREEN",
+      "status": "pending"
+    },
+    {
+      "number": "198",
+      "name": "MYBOOK",
+      "status": "pending"
+    },
+    {
+      "number": "199",
+      "name": "MANAGERHOME",
+      "status": "pending"
+    },
+    {
+      "number": "200",
+      "name": "MANAGERKEYS",
+      "status": "pending"
+    },
+    {
+      "number": "201",
+      "name": "PLAINWORDS",
+      "status": "pending"
+    },
+    {
+      "number": "202",
+      "name": "RESIDCHURN",
+      "status": "pending"
+    }
+  ],
   "next": {
-    "command": "/gsd-discuss-phase",
-    "label": "Discuss the first phase",
-    "reason": "Project initialized — plan your first phase"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step (plan phase 192)",
+    "reason": "Phase 1 of 11 — needs a plan"
   },
-  "updated_at": "2026-11-06T12:54:31.757Z"
+  "updated_at": "2026-11-06T13:50:52.285Z"
 }
