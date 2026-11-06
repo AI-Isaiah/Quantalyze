@@ -23,9 +23,24 @@ Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
 
+## Current Milestone: v1.21 UX — trustworthy, navigable, lean
+
+**Goal:** An allocator or a manager, new or experienced, can trust what every page says, reach the
+next step without a dead end, and is not buried in duplicate surfaces.
+
+**Target features** (from the five-persona UX review, 2026-11-06; order is trust first, founder 2026-11-06):
+- **Trust:** public claims made true and consistent (key storage, TLS, access, fees, encryption, exchange count); chart scrolling no longer silently persists a clipped range; developer and demo text off factsheets; one value per metric across pages; impossible figures gated; a page view writes nothing.
+- **Navigation:** a landing page per role, Compare startable from the UI, factsheet back-navigation and a next step, signed-in users not treated as visitors, "+ Allocation" going to the right place, "how is my book doing?" answered, safer manager key handling, clear naming, degrade warnings that say what to do.
+- **Screening clarity:** column periods and units, stale strategies flagged in ranking, tooltips and a glossary, one name per concept, a shared-account notice, the small consistency fixes.
+- **Bloat:** merge duplicate pages, cut `/portfolios`, hide Decks and Compare until they work, slim the factsheet and My allocation, remove leftover panels.
+- **Carried:** the Phase 188 SC-4 residual follow-up (D-13): a control capture across a nightly with no deploy in between.
+
+**Scope decision (founder 2026-11-06):** fix and trim only. New allocator data (fee, terms and thesis
+fields that managers fill in) is not in v1.21; the empty "— on request" rows are hidden instead.
+
 ## ✅ Shipped: v1.20 Backlog Burndown (2026-08-20 → 2026-11-06)
 
-**Closed 2026-11-06 with audit `tech_debt`** (`.planning/v1.20-MILESTONE-AUDIT.md`): requirements
+**Closed 2026-11-06 with audit `tech_debt`** (`.planning/milestones/v1.20-MILESTONE-AUDIT.md`): requirements
 **62/64** satisfied, phases **142/142** verified `passed`, integration 9/9 seams and 4/4 flows, app
 version through v0.133.23.2. No requirement is unsatisfied or orphaned; the two that are not
 satisfied are accounted for below. Phase numbering ran 158 → 191 with inserted decimals (150 phases
@@ -248,9 +263,9 @@ options MTM smoothing.
 
 <!-- Carried out of v1.20 (closed 2026-11-06). The next milestone is a UX milestone (founder 2026-11-06); its requirements are defined at its start. -->
 
-- **Phase 188 SC-4 residual (founder D-13, 2026-11-06)** — follow-up phase in the next milestone: measure why 1214 stored values changed between two nightlies (control capture across a nightly with no deploy between), and book b3's earlier untrustworthy reasons. Not a requirement ID; owned by the audit's tech-debt list.
+- **Phase 188 SC-4 residual (founder D-13, 2026-11-06)** — follow-up phase in v1.21: measure why 1214 stored values changed between two nightlies (control capture across a nightly with no deploy between), and book b3's earlier untrustworthy reasons. Not a requirement ID; owned by the audit's tech-debt list.
 - **HONEST-07** — still deferred (no site at HEAD, no traceback); revisit only if the failure reappears.
-- **Next milestone: UX** (founder 2026-11-06) — scope to be defined by the new-milestone step.
+- **v1.21 UX** (started 2026-11-06) — requirements in `.planning/REQUIREMENTS.md`; see `## Current Milestone` above.
 
 <!-- v1.8 Flow-Aware Time-Weighted Returns — Phases 73+. See ## Current Milestone above + .planning/REQUIREMENTS.md. -->
 
@@ -453,4 +468,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-11-06 after v1.20 Backlog Burndown milestone (closed with audit tech_debt: 62/64 requirements, DEPS-01 descoped with Phase 165, HONEST-07 deferred; next milestone = UX, carrying the Phase 188 SC-4 residual follow-up per D-13). v1.18 remains parked founder-gated. NOTE: this document's older shipped-milestone sections still jump v1.12 → v1.10 and the `### Active` (v1.7/v1.8) / `## Last Shipped Milestone: v1.6` sections remain stale from the pre-v1.9 ledger-reconciliation gap — full shipped history (v1.13/v1.14/v1.15/v1.19 included) is authoritative in `MILESTONES.md` + `milestones/`.*
+*Last updated: 2026-11-06 at the v1.21 UX milestone start (trust first; fix and trim only). v1.20 closed with audit tech_debt; v1.18 remains parked founder-gated. Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*

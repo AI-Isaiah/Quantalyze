@@ -1,19 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.20
-milestone_name: Backlog Burndown (Phases 158+)
-status: Awaiting next milestone
-stopped_at: v1.20 archived; UX milestone next (/gsd-new-milestone)
-last_updated: "2026-11-06T11:14:57.107Z"
+milestone: v1.21
+milestone_name: UX — trustworthy, navigable, lean
+status: planning
+last_updated: "2026-11-06T12:54:31.752Z"
 last_activity: 2026-11-06
-last_activity_desc: Milestone v1.20 completed and archived
-state_head: b2398b4b1a806cced06fc792b4b3ef91a8bb8e85
 progress:
-  total_phases: 144
-  completed_phases: 144
-  total_plans: 1078
-  completed_plans: 1071
-  percent: 99
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 ## ⭐ STATE lineage
@@ -174,11 +171,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: Milestone v1.20 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-11-06 — Milestone v1.20 completed and archived
-Progress: [██████████] 100%
+Status: Defining requirements
+Last activity: 2026-11-06 — Milestone v1.21 started
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 

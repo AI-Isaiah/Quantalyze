@@ -1,98 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.20 — Backlog Burndown (Phases 158+)",
-  "phases": [
-    {
-      "number": "147",
-      "name": "SCEN-01 engine series",
-      "status": "complete"
-    },
-    {
-      "number": "148",
-      "name": "OWN owner factsheet",
-      "status": "complete"
-    },
-    {
-      "number": "149",
-      "name": "NAV my-strategies ranking",
-      "status": "complete"
-    },
-    {
-      "number": "150",
-      "name": "OWN-03 portfolio question",
-      "status": "complete"
-    },
-    {
-      "number": "151",
-      "name": "AUM book + sizing",
-      "status": "complete"
-    },
-    {
-      "number": "152",
-      "name": "SCEN composer legibility",
-      "status": "complete"
-    },
-    {
-      "number": "153",
-      "name": "WIZFORM + MT5-14",
-      "status": "pending"
-    },
-    {
-      "number": "153.1",
-      "name": "WIZFORM-CODES (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.2",
-      "name": "WIZFORM-FIELD (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.3",
-      "name": "WIZFORM-GW (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.4",
-      "name": "WIZFORM-BUDGET (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.5",
-      "name": "WIZFORM-ABANDON",
-      "status": "complete"
-    },
-    {
-      "number": "153.6",
-      "name": "PARITY (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.7",
-      "name": "WIZFORM-02-CLASS (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "154",
-      "name": "WIZCONT + STALE",
-      "status": "complete"
-    },
-    {
-      "number": "155",
-      "name": "MT5-VERIFY + acceptance",
-      "status": "pending"
-    },
-    {
-      "number": "156",
-      "name": "CONNECT-REFACTOR",
-      "status": "complete"
-    }
-  ],
+  "milestone": "v1.21",
+  "phases": [],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-11-06T11:14:57.152Z"
+  "updated_at": "2026-11-06T12:54:31.757Z"
 }
