@@ -1,5 +1,23 @@
 # Milestones
 
+## v1.20 — Backlog Burndown (Phases 158+) (CLOSED 2026-11-06, v0.68.1.1 → v0.133.23.2)
+
+**150 phases in the roadmap (142 delivered, 8 retired or absorbed), 1078 plans, 1397 tasks, PRs #697–#1207, 2026-08-20 → 2026-11-06.**
+Audit `tech_debt`: 62/64 requirements, 142/142 phases verified, 9/9 integration seams, 4/4 flows.
+Archive: `.planning/milestones/v1.20-ROADMAP.md`, `v1.20-REQUIREMENTS.md`, `v1.20-MILESTONE-AUDIT.md`, phases in `v1.20-phases/`.
+
+### Key Accomplishments
+1. **Ranking integrity (RANK-01..09)** — failed or stale analytics leave published percentiles on both engines; anonymous embeds are explicit projections; the venue is server-authoritative at every key INSERT and stamps √365/√252; the quantstats price-detection sign-flip is dead.
+2. **Honest surfaces (WIZERR-01..13, HONEST-01..06/08, SHARE-01..04)** — the wizard names the real cause of a failure instead of raw exceptions or false copy; freshness badges follow the return series, not the last sync; share links are revocable tokens with an id-keyed public cache.
+3. **CI and test-database discipline (OPS-01..11, VAC-01..08)** — the evicting shared-TEST concurrency group became an advisory-lock mutex and then a private local-stack lane per job; SQL gates are mutation-tested, linted and drift-checked against PROD and TEST.
+4. **Security hygiene (SEC-01..06)** — the planning tree is scrubbed of local identities behind a no-allowlist gate; worker logs are redacted before any line is emitted; credential-carrying requests abort when their panel goes away.
+5. **Ledger-backed accounts (LEDGER-01..04 and the late phases 176–191)** — recurring refresh for ledger venues, marked-to-market NAV on every ingest, derive gaps closed, tiny-base days kept out of stored figures, and the refusal-marker race merged instead of overwritten.
+
+### Deferred at close
+DEPS-01 descoped (Phases 165, 165.1 and 165.2 retired 2026-09-27); HONEST-07 still deferred (no site at HEAD).
+Phase 188's SC-4 residual (1214 stored values moved between two nightlies, cause unmeasured) goes to a follow-up phase in the next milestone (D-13).
+187 BINANCEINCOME, 189 OPTIONREPLAY and 164.6.6.3.6 are owned by TODOS. INT-W2 (deploy gating rests on Railway's setting) and INT-I1 (two `tiny_base_days` producer paths) are recorded in the audit.
+The next milestone is a UX milestone.
 
 ## v1.19 — JOB/RATE: job-lifecycle reliability and the rate limits that hold (CLOSED 2026-08-20, v0.63.0.0 → v0.68.1.0, Phases 143–146 + 146.1, 146.2)
 

@@ -11,8 +11,11 @@ Quantalyze is a platform that connects capital **allocators** with quant
 engine that matches strategies to their book, can act on those recommendations,
 track whether they actually worked, and inspect every strategy through
 institutional-grade factsheets. Strategy managers onboard track records via
-broker API keys (OKX/Bybit), CSV upload, or a read-only MT5 Expert Advisor, and
-get the same factsheet surface. There is also an admin role.
+broker API keys (OKX, Bybit, Binance, Deribit; sFOX dormant behind a flag), CSV upload, or a
+read-only MT5 account sync, and get the same factsheet surface. There is also an admin role.
+Since v1.20 the numbers on every one of those surfaces carry their basis: published rankings
+exclude failed computations, annualization follows the attested venue, a refused or truncated
+read says so by name instead of publishing a partial curve, and a share link is revocable.
 
 ## Core Value
 
@@ -20,48 +23,70 @@ Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
 
-## Current Milestone: v1.20 Backlog Burndown (started 2026-08-20)
+## ✅ Shipped: v1.20 Backlog Burndown (2026-08-20 → 2026-11-06)
 
-**Goal:** Close the largest relevancy-ranked slice of the verified-open backlog (root `TODOS.md`) that
-is agent-deliverable — public-trust correctness, money-path honesty, founder-hit error surfaces,
-CI/deploy integrity, small security hardening, and the booked dependabot campaign — and leave
-TODOS.md telling the truth (included items deleted into `REQUIREMENTS.md`, 31 verified-stale
-entries closed).
+**Closed 2026-11-06 with audit `tech_debt`** (`.planning/v1.20-MILESTONE-AUDIT.md`): requirements
+**62/64** satisfied, phases **142/142** verified `passed`, integration 9/9 seams and 4/4 flows, app
+version through v0.133.23.2. No requirement is unsatisfied or orphaned; the two that are not
+satisfied are accounted for below. Phase numbering ran 158 → 191 with inserted decimals (150 phases
+in the roadmap, 142 delivered).
 
-**Scope basis (2026-08-20):** every candidate was re-verified at HEAD by a 17-agent triage
-(269 items → 211 open / 27 partial / 31 stale; 33 founder-gated set aside). Only verified-open,
-agent-deliverable items are in scope. Research: TARGETED (user call 2026-08-20) — no generic
-ecosystem sweep, but the highest-risk items get research before requirements: the SHARELINK-01
-token lane (cache-poison landmine), the server-authoritative venue-provenance write, the
-dependabot majors (ts 7, jsdom 30, actions majors), the shared-test-db concurrency eviction,
-and the public-ranking percentile change.
+**Delivered:** the largest relevancy-ranked, agent-deliverable slice of the verified-open backlog,
+in the groups it was scoped as — and `TODOS.md` was left telling the truth (included items deleted
+into `REQUIREMENTS.md`, 31 verified-stale entries closed).
+- **RANK (159, 160)** — failed/stale-computation KPIs out of every published percentile; anon
+  `strategy_analytics (*)` splats replaced by explicit projections; `api_keys.exchange` server-authoritative
+  at every INSERT with a census-guarded `REVOKE INSERT`; the √365/√252 stamp derives from the attested
+  venue (null-attestation guarded); quantstats sign-flip and blend-annualization default closed; FILL-arm CAS.
+- **SHARE (164)** — Copy Link always yields a viewable, revocable per-strategy token link; the id stays a
+  non-secret; the token lane never poisons the id-keyed public cache (adversarial acceptance).
+- **WIZERR (161) / HONEST (162, 163)** — thirteen error surfaces stop rendering `UNKNOWN` or false
+  sentences; no raw Python exception as copy; freshness badges follow series recency; real equity curves;
+  the clicked key preselected.
+- **OPS (158, 163) / SEC (163)** — an external FIFO mutex plus a `cancelled`-conclusion watcher close the
+  shared-test-db eviction that silently skipped the Railway deploy (#616); `sql-tests` gated; orphaned e2e
+  specs run; structlog redaction closed at both failure modes; password policy measured; `.planning`
+  username scrubbed with a no-allowlist gate; RPC audit gate; `bridgeComputeLimiter`.
+- **LEDGER (161.1)** — recurring strategy refresh for ledger-backed venues, shipped dormant behind two locks.
+- **VAC (164.3)** — a control that cannot fail is caught by machine: the SQL-gate mutation runner,
+  `sql-gate-lint`, plan-anchor verification and repo-vs-PROD/TEST drift gates run in CI.
+- **Inserted follow-through (164.x, 166–191)** — everything the burndown surfaced and booked as it ran:
+  prod observability and a single periodic prober; MT5 gateway isolation, relogin and native-unit (BTC)
+  accounts; quantstats truth and recompute; credential-trust copy; allocator equity made marked-to-market
+  (NAVMTM) with one stated price rule, the legacy equity curve retired (176), Deribit flow timing (185),
+  derive gaps (186: a truncated or failed read refuses by name, a failing key affects only itself),
+  tiny-base days left out of performance (188), a re-run that never hides a computed factsheet (190),
+  and a refusal-marker race closed (191).
 
-**Target features (REQ groups — see `.planning/REQUIREMENTS.md`):**
-- **RANK — public-trust & provenance correctness:** failed-computation KPIs contaminate public
-  percentiles; anon `strategy_analytics (*)` splat; client-supplied `api_keys.exchange` +
-  forgeable `asset_class` annualization stamp (√365/√252); quantstats sign-flip;
-  blend-annualization crypto default; FILL-arm CAS + fingerprint classification.
-- **SHARE — SHARELINK-01:** the founder-decided revocable share-token lane (Copy Link must always
-  produce a viewable link; id stays a non-secret; token lane must never poison the id-keyed cache).
-- **WIZERR — honest error surfaces:** MT5 gateway wrong-checkbox copy derived from
-  `terminal_info`; "Try another key" draft destruction; orphaned-key false 409; the fourth
-  classifier's coverage law; Retry-After threading; 5xx→UNKNOWN arms; three UNKNOWN dialogs;
-  `KEY_INVALID_FORMAT` split on the remaining 9 sites; CSV floor/copy pairs.
-- **HONEST — user-visible data honesty:** raw Python TypeError as user copy; FRESH badge on an
-  89-day-dead series; missing CAGR/Sharpe on drawer-added rows; equity-curve null; wizard
-  key preselect; stale example badges.
-- **OPS — CI/deploy integrity & reliability:** shared-test-db eviction silently skipping the
-  Railway deploy (#616); `sql-tests` in no aggregator; orphaned e2e specs + DB-types drift gate;
-  TEST stale-pending drain; structlog redaction class; post-commit `createAdminClient` 500 class;
-  flag-monitor honesty trio; INTO STRICT / ORDER BY / body.cancel.
-- **SEC — small hardening:** signup password policy; `.planning` username scrub (public repo);
-  `MUTATING_RPC_NAMES` gap; 30× limiter mismatches (`bridgeComputeLimiter`); tenth IP-keyed
-  route; mid-validate credential POST abort.
-- **DEPS — the booked 9-PR dependabot campaign** (groups first, majors one at a time, full suite each).
+**NOT delivered, and recorded as such:**
+- ⛔ **DEPS-01 descoped.** Phase 165 (and 165.1, 165.2) was retired 2026-09-27 by founder decision
+  ("Land as maintenance, retire the phases"). The dependabot work landed one PR at a time as
+  maintenance, outside any phase.
+- ⏸️ **HONEST-07 still deferred.** The job kind it names is retired, with no site at HEAD and no traceback;
+  re-assessed at the audit, still none. It is not carried as a requirement.
+- ➡️ Out of the milestone by founder decision 2026-11-03: Phase 187 BINANCEINCOME and Phase 189
+  OPTIONREPLAY (venue-specific, moved to `TODOS.md`), and 164.6.6.3.6 MT5SERVERLEARN (kept on its branch).
+  Phases 181 and 182 were absorbed into 176 and superseded, respectively.
 
-**Out of milestone by construction:** founder-gated ops (RESEND key, Zavara activation,
-sFOX/Nautilus go-live, MT5 live parity = v1.18), founder-decision items (AUM basis, retunes),
-and everything verified stale today. Phase numbering continues from **158**.
+**Tech debt carried (named owners in the audit):** Phase 188's **SC-4 residual** — see below, the largest
+item; TODOS entries from 185, 186, 190 and 191; and two integration notes — `analytics-deploy-verify.yml`
+is a scheduled verifier, not a deploy gate (so "deploy only after green CI" rests on Railway's
+check-suite setting, outside repo code), and `tiny_base_days` has two Python producer paths with no
+shared Python constant mirroring the TS flag.
+
+⭐ **Next milestone = a UX milestone** (founder 2026-11-06). It carries the **Phase 188 SC-4 residual**
+as a follow-up phase (founder D-13, 2026-11-06): 1214 stored values changed between two nightlies,
+mostly on scopes outside the fix's code path, moving four books' curves by up to 6.1e-5 relative, cause
+unmeasured. That phase measures it with a control capture across a nightly that has no deploy between,
+and takes up book b3's earlier untrustworthy reasons (`out_of_window_flow`, `window_truncated`).
+188 itself closed on the defect it owned (key C's near-empty days no longer stored; `key_inputs_mismatch`
+cleared from every book).
+
+**Historical scope basis, retained:** every candidate was re-verified at HEAD by a 17-agent triage
+(269 items → 211 open / 27 partial / 31 stale; 33 founder-gated set aside). Research was TARGETED
+(user call 2026-08-20) on the highest-risk items. Out of milestone by construction: founder-gated ops
+(RESEND key, Zavara activation, sFOX/Nautilus go-live, MT5 live parity = v1.18) and founder-decision
+items (AUM basis, retunes). Full detail: `MILESTONES.md` + `milestones/v1.20-*`.
 
 ## ⏸️ PARKED Milestone: v1.18 MT5-VERIFY & founder confirmations (started 2026-08-14, parked 2026-08-20 — founder-gated)
 
@@ -209,7 +234,23 @@ options MTM smoothing.
 - ✓ **Scenario Composer v2 (v1.11, Phases 109–117 + 110.1/115.1)**: every scenario source normalized to ONE daily-series constituent under a coherent manager/allocator role model, with the dailies-canonical backbone tail finished on the allocator surface — role/nav/API guards derive from one predicate (`is_admin` ops-overlay only), dropping the `|| isAdmin` 403 cluster (ROLE); allocator private-by-default strategy contribution via a reusable `ContributionWizardOverlay` with an owner-only `status='private'` finalize path RLS-audited against catalog-wide leak (CONTRIB); the "Data Sources" section deleted so api-key/CSV/catalog/composite each render as ONE badged constituent row, blend parity proven = interpretation A to 1e-9 (CONSTIT); per-key weight + leverage rows on the engine-unit basis (`wᵢ·Lᵢ·rᵢ`) + a max-DD→leverage back-solver, all over the FROZEN `scenario.ts` (WEIGHTS); the 2nd Sharpe/vol/TWR stack deleted behind a golden gate + allocator equity reconstruction onto the backbone (BACKBONE E1/E2, derived path dormant in prod pending two founder-gated ops); context-aware +Allocation/+Strategy (ADDALLOC); tooltip-portal / focus-ring / KPI-value fixes (UIFIX). Per-phase opus verifier + code-review + Fable red team; SC-3 byte-frozen throughout — v0.44.x → v0.45.0.0 (tag `v1.11` @ `a42f4bcf`, PRs #620 + #622)
 - ✓ **Demo-Hero Portfolio Intelligence + Options MTM + Backbone Unification (v1.10, Phases 98–108)**: allocator-dashboard demo-hero surface — Exposure-by-Class / Net-Exposure / Allocation-over-Time widgets on an owner-scoped secretless read layer, optimizer sleeve replacing the hardcoded 10% favorites, Notes storage, shared-`KpiPanel` fold, and a real-PG partial-UNIQUE cross-process fence (PI-01..07); the `cash_settlement ↔ mark_to_market` factsheet toggle swaps the daily return SERIES so all charts follow (single-key + composite) with a per-basis coverage mask + honest gating, cash byte-identical (MTM-01..04); the dailies-canonical backbone finished — `services/basis_series.py::derive_basis_series` the ONE shared route, composite + onboarding routed onto it, the trades-based legacy analytics chain + all 4 dark re-entry points deleted, `USE_COMPUTE_JOBS_QUEUE` mandatory (BB-01..03); leverage as an `r→L·r` dailies transform + the scenario-planner both re-derive off the backbone, ~990 LOC frontend re-scale / second-Sharpe disclosure deleted (LEV-BB, SCEN-BB). Full close pipeline every phase (opus review + opus verifier + Fable red team). Full suite 8161+ green — v0.42.0.0 → v0.43.0.0 (tag `v1.10` @ `32494ba2`)
 
+- ✓ **Backlog Burndown (v1.20, Phases 158–191, 62 of 64 requirements)**: the verified-open, agent-deliverable backlog slice, recorded below by requirement group (62 satisfied; DEPS-01 descoped and HONEST-07 deferred, see Out of Scope / Active):
+- ✓ RANK-01..09 — percentile gate on failed/stale KPIs (both engines), anon `(*)` splats become explicit projections, `api_keys.exchange` server-authoritative at every INSERT, venue-derived √365/√252 stamp, quantstats sign-flip, blend-annualization default, FILL-arm CAS, re-mint fingerprint classification, `withPublishedOrOwner` uid shape — v1.20
+- ✓ SHARE-01..04 — revocable per-strategy share token, id-keyed public cache never poisoned, revoke control, honest affordance class — v1.20
+- ✓ WIZERR-01..13 — honest error surfaces (MT5 gateway copy from `terminal_info`, draft-safe "Try another key", orphaned-key remedy, Retry-After threading, `KEY_INVALID_FORMAT` split, CSV floor/copy pairs, venue-parameterized `AUTH_FAILED`) — v1.20
+- ✓ HONEST-01..06, HONEST-08 — no raw Python exceptions as copy, freshness badges follow series recency (factsheet and discovery), real equity curves, drawer-row CAGR/Sharpe, key preselect — v1.20
+- ✓ OPS-01..11 — shared-test-db eviction closed (FIFO mutex plus `cancelled` watcher, #616), `sql-tests` gated, orphaned e2e specs and DB-types gate, TEST stale-pending drain, structlog redaction class, post-commit `createAdminClient` class, flag-monitor honesty, `INTO STRICT`/`ORDER BY`/`body.cancel` — v1.20 (OPS-08 applied and verified on PROD; TEST still runs the pre-fix body)
+- ✓ SEC-01..06 — hosted password floor measured and accepted, `.planning` username scrub with a no-allowlist gate, RPC audit-coverage decision, `bridgeComputeLimiter`, tenth IP-keyed route, mid-validate POST abort — v1.20
+- ✓ LEDGER-01..04 — recurring strategy refresh for ledger-backed venues, shipped dormant behind two locks — v1.20
+- ✓ VAC-01..08 — mutation runner, disposable-PostgreSQL lane, SQL gate linter, repo-vs-PROD/TEST drift gates, plan-anchor verification, concurrent csv-finalize spec — v1.20
+
 ### Active
+
+<!-- Carried out of v1.20 (closed 2026-11-06). The next milestone is a UX milestone (founder 2026-11-06); its requirements are defined at its start. -->
+
+- **Phase 188 SC-4 residual (founder D-13, 2026-11-06)** — follow-up phase in the next milestone: measure why 1214 stored values changed between two nightlies (control capture across a nightly with no deploy between), and book b3's earlier untrustworthy reasons. Not a requirement ID; owned by the audit's tech-debt list.
+- **HONEST-07** — still deferred (no site at HEAD, no traceback); revisit only if the failure reappears.
+- **Next milestone: UX** (founder 2026-11-06) — scope to be defined by the new-milestone step.
 
 <!-- v1.8 Flow-Aware Time-Weighted Returns — Phases 73+. See ## Current Milestone above + .planning/REQUIREMENTS.md. -->
 
@@ -231,6 +272,10 @@ options MTM smoothing.
 - Consolidating the 3 correlation surfaces (Risk-tab matrix vs reusable heatmap vs `/scenarios`) — code-motion, defer until a feature forces convergence on the WCAG-audited palette.
 - "Decision-memo generator" vision — strong future direction, not this milestone.
 - Scenario export (PDF/CSV) — defer until save/load proves the workflow.
+- DEPS-01 as a phase (v1.20) — Phase 165 and its two inserts were retired 2026-09-27 by founder decision; dependabot PRs land one at a time as maintenance under the green rule, not as milestone scope.
+- Venue-specific go-live work (v1.20, founder 2026-11-03): Binance futures income (Phase 187) and the Deribit option-history replay (Phase 189) live in `TODOS.md`, not in a milestone. Binance, Deribit and sFOX gaps are not milestone scope until the founder re-books them.
+- CSP nonce migration, the D-09 composite `stitch_composite` re-run mechanism, and the FILL-arm recompute guarantee (v1.20) — each phase-scale on its own; deliberately not squeezed into a burndown, still in the backlog.
+- Raising the hosted password floor (v1.20 SEC-01) — measured at 6 characters with no class rule and ACCEPTED by the founder 2026-08-26; revisit on paying clients, a custody/compliance requirement, or evidence of credential stuffing.
 
 ## Last Shipped Milestone: v1.6 Scenario Series-Space Purification (✅ shipped 2026-07-04, tag `v1.6` @ `f78f036b`)
 
@@ -250,14 +295,18 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 - **Pre-revenue, no clients yet** — destructive ops and short soak gates are acceptable; strategies are re-uploadable. Decisions are made autonomously rather than gated on customer impact.
 - The scenario math is **client-side TypeScript** (`src/lib/scenario.ts` + `compute.ts`, frozen by SCENARIO-05 / BODY-02 regression pins). The client-TS-vs-Python split is settled (v1.1.0): heavy compute stays client-side except the one Python optimizer endpoint (Ledoit-Wolf + SLSQP); Monte-Carlo runs in a client Web Worker.
 - The design system was refreshed to a state-of-the-art aesthetic in v1.4 (DESIGN.md is the SoT), with a fluid `--text-*`/`--space-*` token spine in a plain `@theme` block, `radix-ui@1.6.0` scoped to non-native widgets, and `no-raw-font-px`/`no-raw-hex`/`clamp-without-rem` lint guards enforcing conformance.
-- App ships continuously on Vercel (frontend) + Railway (Python analytics); Supabase migrations auto-apply on merge.
+- App ships continuously on Vercel (frontend) + Railway (Python analytics); Supabase migrations auto-apply on merge. Since 2026-09-23 a migration merge that passes the TEST apply reaches PROD with no human stop, so every review a migration needs happens before the merge.
+- After v1.20 (app v0.133.23.2): allocator equity is marked-to-market (NAVMTM) under one stated price rule, the legacy `allocator_equity_snapshots` curve is retired, and days measured against a near-empty account (under 5% of the 30-day peak) are left out of performance rather than read as returns. CI proves its own SQL gates can fail (mutation runner, lint rules, drift gates) and runs the SQL corpus on a private local stack, not shared TEST.
+- Known technical debt at v1.20 close: Phase 188's SC-4 residual (unexplained value churn between nightlies), the per-phase TODOS entries listed in the audit, `analytics-deploy-verify.yml` being a scheduled verifier rather than a deploy gate, and `tiny_base_days` having no shared Python constant. Nyquist validation was discovery-only (4 compliant of 142).
 
 ## Constraints
 
 - **Tech stack**: Next.js 16 App Router (NOT vanilla Next — read `node_modules/next/dist/docs/` before writing route/cache code), React client components, TypeScript; FastAPI/Python analytics-service on Railway; Supabase Postgres + Auth + RLS.
 - **No-invented-data invariant**: degenerate inputs (0/1 active strategy, <10 overlapping days, non-finite returns) render honest empty states — never fabricated zeros, garbage numbers, or false precision.
 - **Design**: DESIGN.md governs all visual decisions (palette, typography, spacing). Read it before any UI.
-- **Convention**: 252-day annualization is product-wide; the scenario engine already honors it. Do not introduce a second convention.
+- **Convention**: annualization is split by metric (v1.8 TWR-05, enforced in v1.20 RANK-04/06): risk metrics (Sharpe, volatility, Sortino) annualize by the venue's frequency (crypto 365, traditional 252), returns/CAGR by the calendar, and a blend counts as crypto for risk if any leg is crypto or unknown. The stamp derives from the server-attested venue, never client input. Do not introduce another convention.
+- **Fail loud, fail alone**: a truncated or failed exchange read refuses by name and the last good stored values stay (186 D-05); a failing key affects only itself and leaves the book that day (186 D-03/D-07; founder rule 2026-10-28). Uncomputable metrics are null, never invented.
+- **Public repo hygiene**: `.planning/` is tracked in a public repo, so no secrets, PROD ids, home paths or account numbers in tracked text. A no-allowlist gate in `npm run lint` enforces the username scrub (SEC-02).
 - **Privacy**: scenario sharing touches RLS — a shared scenario must not leak the allocator's book or another tenant's data.
 
 ## Key Decisions
@@ -293,6 +342,26 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 | **v1.10: leverage evolves from caveat-only re-scale to an `r→L·r` dailies transform that re-derives the WHOLE factsheet** | The v1 caveat-only frontend re-scale (`useLeveragedMetrics`) was a bypass of the backbone; making leverage a dailies preparation transform makes β→L·β / α→L·α fall out honestly and the charts+rail follow, deleting ~780 LOC of disclosure. Still excludes borrow/funding cost (labeled what-if), L=1 by-reference byte-identity. Supersedes the v1 "caveat-only" decision. | ✓ Shipped (v1.10 LEV-BB; scenario-planner followed via SCEN-BB) |
 | **v1.12: a live sFOX API read is `api_verified` ground truth; the custom non-ccxt adapter earns its cost over the CSV path** | CSV track records are `self_reported` — fabricatable. A live read of the real account is ground truth a submitter can't fake (the Phase-111 provenance tier). sFOX is NOT in ccxt, so a bespoke `SfoxClient` is required; read-only is asserted STRUCTURALLY (no write surface, no scope endpoint), never a probed permission triple. | ✓ Shipped dormant (v1.12 SFOX-01/05; flag-OFF, go-live → v1.13) |
 | **v1.12: close as FOUNDATION (flag-OFF) with go-live re-homed, rather than block or fake completion** | v1.12 is code-complete but its acceptance is founder-gated ops (Fly deploy + IP-whitelist, FLIP cutover, live E2) + a real e2e defect + an evidence-gated deribit phase — none landable this session. Shipping the foundation dormant + re-homing the enumerated go-live spine to v1.13 keeps prod safe and the ledger honest. | ✓ Foundation close (v1.12; `close_type: foundation`, re-home table in the audit doc + v1.13 seed) |
+| **v1.20: scope = verified-open, agent-deliverable items only, re-measured at HEAD** | A 17-agent triage (269 items: 211 open, 27 partial, 31 stale, 33 founder-gated) showed the backlog's own recorded remedies were measurably wrong in three places; only re-verified items entered, stale ones were closed, and the phases carry the corrections, not the bullets. | ✓ Good (v1.20; 62/64, audit tech_debt) |
+| **v1.20: OPS-01 fix = an external FIFO mutex plus a `cancelled`-conclusion watcher, not a smaller concurrency group** | Eviction is cross-run, so shrinking the group does not stop a PR from cancelling main CI and silently skipping the Railway deploy (#616). | ✓ Good (v1.20 Phase 158; the mutex later became the shared-TEST serialization) |
+| **v1.20: `api_keys.exchange` is server-authoritative; the √365/√252 stamp derives from the attested venue** | A client-supplied venue could forge the annualization stamp. Deploy writers first, soak, then a census-guarded `REVOKE INSERT`; a null attestation must not read as traditional. | ✓ Good (v1.20 RANK-03/04, Phase 160) |
+| **v1.20: SHARELINK-01 — revocable per-strategy share token; the id stays a non-secret** | Copy Link must always produce a viewable link without making the id a credential. The token lane may never poison the id-keyed public cache (adversarial anon-404 acceptance). | ✓ Good (v1.20 SHARE-01..04, Phase 164) |
+| **v1.20: password floor measured, not raised (founder 2026-08-26)** | The hosted minimum was read from the live endpoint (6, no class rule); the founder accepted it knowingly. The repo pins only what it controls. | ⚠️ Revisit (on paying clients, custody/compliance need, or credential-stuffing evidence) |
+| **v1.20: `.planning` username scrub is forward-only; history rewrite declined (founder 2026-08-26)** | The string was already public, cloned and cached; a `filter-repo` would break open PR refs and not unpublish it. A no-allowlist lint gate stops new leakage. | ✓ Good (v1.20 SEC-02) |
+| **v1.20: Phase 165 DEPS retired; dependabot lands as maintenance (founder 2026-09-27)** | "Land as maintenance, retire the phases": one PR at a time under the green rule needs no phase. DEPS-01 is descoped, not failed. | ✓ Good (v1.20; Phases 165, 165.1, 165.2 retired) |
+| **v1.20: a control that cannot fail is caught by machine (Phase 164.3 VACUITY)** | Red-team review kept finding gates that could not go red. A mutation runner over every `RED-UNDER` arm, a static linter, and ratcheted floors (`WAIVED_CEILING` stays 0) make vacuity a CI failure. | ✓ Good (v1.20 VAC-01..08) |
+| **v1.20: completion is historical; drift is a separate report (founder 2026-09-18)** | A `passed` verification was being demoted to `stale` the moment a covered file changed, so the more carefully a phase was verified the less likely a milestone could close. Use `verified_at_sha` plus `drift_subjects`; the drift report never gates. | ✓ Good (v1.20; repo-owned rule) |
+| **v1.20: the Production migration reviewer gate removed (founder 2026-09-23)** | "It should just apply. I want to develop fast." PROD migrations auto-apply once the TEST apply succeeds; all review moves before the merge. Pre-revenue acceptable. | ⚠️ Revisit (when the first client lands) |
+| **v1.20: a push to main mutates only what the pushed range needs (Phase 164.9.6, D-09)** | The 20-minute `sql-mutation` ceiling is never raised; a founder-scoped exception to the vacuity fence on pushes to main, with a nightly full-corpus run holding the floors. Any doubt runs FULL. | ✓ Good (v1.20) |
+| **v1.20: allocator equity is marked-to-market; the legacy `allocator_equity_snapshots` curve is dropped (Phase 176 D-02)** | One stated price rule everywhere; every reader moves to the derived series. One-way migration (restore from backup to undo). | ✓ Good (v1.20 Phases 167.2.1.1.1, 167.2.1.1.1.1, 176) |
+| **v1.20: Deribit flows are booked at the flow's time, not end of day (Phase 185, founder 2026-11-01 "Book the fix now")** | End-of-day netting turned an intraday deposit into a phantom return on the capital that was actually there. | ✓ Good (v1.20 Phase 185, verified) |
+| **v1.20: a bad read holds last good and names it; a failing key affects only itself (Phase 186 D-02/D-03/D-05/D-07)** | Nothing partial is ever published. Bybit internal transfers are flows (reverses 180 D-02); a dead key leaves the book that day instead of blocking everyone. | ✓ Good (v1.20 Phase 186, verified 7/7, security 36/36) |
+| **v1.20: a day on a tiny base is left out, not shown as performance (Phase 188 D-01..D-08)** | Key C's +47% and -53% days were correct arithmetic on about 0.4% of the account. Under 5% of the 30-day peak the day is null; zero base stays out of the rule; the scenario readers were fixed in the same phase. | ✓ Good (v1.20 Phase 188; key C's rows absent, `key_inputs_mismatch` cleared) |
+| **v1.20: 188 closes on what passed; the SC-4 residual goes to the next milestone (D-13, founder 2026-11-06)** | The re-reading read NOT CONFIRMED under its strict rule (1214 stored values moved between nightlies, cause unmeasured). The founder first chose a control capture, then closed 188 and moved the rest. | ⚠️ Revisit (follow-up phase in the next milestone) |
+| **v1.20: a re-run never un-publishes a computed factsheet (Phase 190 D-02/D-03)** | A pending or computing re-run used to fail the strategy gate and drop the strategy from allocators. It stays published with a quiet "Updating" line. | ✓ Good (v1.20 Phase 190, verified) |
+| **v1.20: the refusal-marker race closes in two PRs, migration first, and the marker counts only on a confirmed write (Phase 191 D-06/D-07)** | Migrations auto-apply on merge and the Vercel deploy is not ordered against the apply; a zero-row update must fail TRANSIENT, not pass silently. | ✓ Good (v1.20 Phase 191, verified 5/5; PROD did not exercise the race in the window, the live two-connection CI probe carries the proof) |
+| **v1.20: venue-specific phases (Binance income 187, Deribit option replay 189) leave the milestone (founder 2026-11-03)** | Not delivered; `TODOS.md` carries them (`187-BINANCEINCOME-NEXT-MILESTONE`, `189-OPTIONREPLAY-NEXT-MILESTONE`). | — Pending (owned by TODOS until re-booked) |
+| **v1.20 close: the next milestone is a UX milestone (founder 2026-11-06)** | v1.20 was correctness and integrity; the product surface comes next, carrying the 188 SC-4 residual follow-up. | — Pending (scope defined at new-milestone) |
 
 ## Evolution
 
@@ -312,6 +381,13 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ## Current State
+
+**v1.20 Backlog Burndown shipped and closed 2026-11-06** (audit `tech_debt`, 62/64 requirements, 142/142
+phases `passed`; DEPS-01 descoped with Phase 165, HONEST-07 still deferred). See the
+`## ✅ Shipped: v1.20` section above. The next milestone is a UX milestone (founder 2026-11-06) and it
+carries the Phase 188 SC-4 residual follow-up (D-13). The paragraphs below are older and historical:
+the "v1.17 in flight" and "Now starting v1.16" notes do not describe the current state, and the
+authoritative shipped history is `MILESTONES.md` + `milestones/`.
 
 **v1.17 in flight — Phase 151 (AUM) complete 2026-08-07** (5/9 phases done: 147–151).
 Direct AUM input + per-strategy dollar sizing, non-ccxt holdings-sync class fix
@@ -377,4 +453,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-08-20 — v1.20 Backlog Burndown milestone opened (scope: RANK + SHARE + WIZERR + HONEST + OPS + SEC + DEPS, ~57 verified-open TODOS.md items; targeted research on the riskiest items; phase numbering continues from 158). v1.18 parked founder-gated. 51 leftover phase dirs archived under honest per-milestone labels (v1.13/v1.14/v1.15/v1.16/v1.17/v1.19-phases). NOTE: this document's older shipped-milestone sections still jump v1.12 → v1.10 and the `### Active` (v1.7/v1.8) / `## Last Shipped Milestone: v1.6` sections remain stale from the pre-v1.9 ledger-reconciliation gap — full shipped history (v1.13/v1.14/v1.15 included) is authoritative in `MILESTONES.md` + `milestones/`.*
+*Last updated: 2026-11-06 after v1.20 Backlog Burndown milestone (closed with audit tech_debt: 62/64 requirements, DEPS-01 descoped with Phase 165, HONEST-07 deferred; next milestone = UX, carrying the Phase 188 SC-4 residual follow-up per D-13). v1.18 remains parked founder-gated. NOTE: this document's older shipped-milestone sections still jump v1.12 → v1.10 and the `### Active` (v1.7/v1.8) / `## Last Shipped Milestone: v1.6` sections remain stale from the pre-v1.9 ledger-reconciliation gap — full shipped history (v1.13/v1.14/v1.15/v1.19 included) is authoritative in `MILESTONES.md` + `milestones/`.*
