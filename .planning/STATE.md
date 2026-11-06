@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 188
 current_phase_name: TINYBASE
 status: executing
-stopped_at: 191 REFUSALRACE closed; 188 TINYBASE awaits its control capture
-last_updated: "2026-11-06T07:25:03.617Z"
+stopped_at: every v1.20 phase closed; milestone audit next
+last_updated: "2026-11-06T08:12:07.380Z"
 last_activity: 2026-11-06
-last_activity_desc: 191 REFUSALRACE closed (verification passed 5/5, SC-5 PROD reading confirmed, security 34/34)
-state_head: 50594c75034a2bf61f4fff7cbc5bf27252220fed
+last_activity_desc: 188 TINYBASE closed (verification passed, security 42/42; SC-4 residual routed to the next milestone, D-13)
+state_head: d42a6d5f9aa83a8fd7002dc5d0bdc191a4dd6e97
 progress:
   total_phases: 144
-  completed_phases: 143
-  total_plans: 1062
-  completed_plans: 1055
+  completed_phases: 144
+  total_plans: 1078
+  completed_plans: 1071
   percent: 99
 ---
 
@@ -172,10 +172,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 191 (REFUSALRACE) — CLOSED 2026-11-06
-Plan: 10 of 10 complete; verification passed 5/5, SC-5 post-deploy PROD reading confirmed, security SECURED 34/34
-Status: Executing — one phase open: 188 TINYBASE (gap closure v0.133.23.0 #1205 shipped and re-derived on PROD; its SC-4 re-reading read NOT CONFIRMED on value churn the fix does not touch, so by founder decision 2026-11-06 a control capture after the 2026-11-07 nightly decides whether it closes with a recorded explanation or takes another round). Closed 2026-11-06: 191 REFUSALRACE (v0.133.22.0 #1200 migration, v0.133.22.3 #1202 writers; verification 5/5; SC-5 confirmed with no refusal or retraction in the window; security 34/34). Closed 2026-11-05: 186 DERIVEGAPS (v0.133.18.6 #1193 tooling, v0.133.21.0 #1197; verification 7/7; SC-5 confirmed; security 36/36). Earlier closes are in the Progress table.
-Last activity: 2026-11-06 — 191 REFUSALRACE closed
+Phase: 188 (TINYBASE) — CLOSED 2026-11-06
+Plan: 16 of 16 complete; verification passed, security SECURED 42/42; SC-4's residual routed to a follow-up phase in the next milestone by founder decision D-13
+Status: Every v1.20 phase is closed; the milestone audit and completion are next, then the UX milestone. Closed 2026-11-06: 188 TINYBASE (v0.133.20.0 #1196, v0.133.23.0 #1205) and 191 REFUSALRACE (v0.133.22.0 #1200, v0.133.22.3 #1202). Closed 2026-11-05: 186 DERIVEGAPS. Earlier closes are in the Progress table.
+Last activity: 2026-11-06 — 188 TINYBASE closed
 Progress: [█████████░] 99%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -1729,7 +1729,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** 191 REFUSALRACE closed; 188 TINYBASE awaits its control capture
+**Stopped At:** every v1.20 phase closed; milestone audit next
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z

@@ -220,7 +220,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 185: DERIBITFLOWTIME — a Deribit day's return is measured against the capital that was in the account, not the overnight balance** — booked 2026-11-01 from the Deribit implausible-returns debug session (founder "Book the fix now (Recommended)"); Deribit flows are netted per day and booked at end of day, so intraday capital never enters the base; store each flow's instant and split the day at it, re-crawl first, caveat on the book until it ships; data integrity, user-facing (completed 2026-11-03: v0.133.18.0 #1187; verification passed 5/5, SECURED 30/30; replanned to value options at market in allocator books (D-04); PROD days above 50% 6 to 2, SC-4 met with key A's two days named (D-14); key C stays on cash with the caveat; the cumulative to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED`)
 - [x] **Phase 186: DERIVEGAPS — the per-key derive refuses a truncated or failed read, reads Bybit internal transfers, and a failing key affects only itself** — booked 2026-11-01 after a read-only check of the per-key derive and compose against the legacy engine's fixes (founder "Book one fix phase (Recommended)" and "Only that key (Recommended)"); a truncated or failed read refuses that key by name, the Bybit derive reads Unified internal transfers (reverses 180 D-02), and a failing key affects only itself (reverses 167.1.2.1.1 D-03); data integrity, user-facing (completed 2026-11-05)
 - [x] **~~Phase 187~~: BINANCEINCOME — Binance futures realized P&L and funding reach the derive (the income call uses the real ccxt method name)** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put binance into todos"): moved out of this milestone, not delivered; TODOS `[187-BINANCEINCOME-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 from the 184 WALLETOFFSET code review (founder "Book a fix phase (Recommended)"); the Binance income reads call `fapiPrivate_get_income`, which does not exist on the pinned ccxt, so futures realized P&L falls back to spot trades and the funding read fails the derive; use the real names, pin every ccxt method the service calls with a test, fix the mocks, PROD count of Binance keys before and after; data integrity, user-facing
-- [ ] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing
+- [x] **Phase 188: TINYBASE — a day measured against a near-empty account does not read as the strategy's performance** — booked 2026-11-01 from 185-03 (founder F7 "Book a fix phase"); key C's 2026-10-27 +46.98% and 2026-10-28 -52.67% are real moves on about 0.4% of the account left after a near-total withdrawal; decide with the founder how a tiny-base day is treated, apply it on every venue, tests RED on key C's shape, PROD reading after deploy; data integrity, user-facing (completed 2026-11-06)
 - [x] **~~Phase 189~~: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values** — ⛔ RETIRED from v1.20 2026-11-03 by founder decision ("put all open phases that are purely about deribit or sfox into todos and not do them in this milestone"): moved out of this milestone, not delivered; TODOS `[189-OPTIONREPLAY-NEXT-MILESTONE]` carries it. Booking lineage: booked 2026-11-01 after the 185 build (founder "Book its own phase"); key C's option-book replay refuses with `LedgerValuationError`, so it stays on cash with the amber caveat; a worker count of its option exercise/expiry rows, then a replay fix; data integrity, user-facing
 - [x] **Phase 190: FACTSHEETQUEUED — finishing the wizard does not queue a redundant re-run, and a re-compute never hides a strategy's computed factsheet** — booked 2026-11-03 from the founder's factsheet report (founder "New phase, start now (Recommended)"); the finalize step queued a second sync_trades after the first computation finished, and a pending or computing status hides analytics already computed; user-facing (completed 2026-11-04: shipped v0.133.19.0 #1194; verification passed with the PROD finalize reading VOID by founder decision, carried to TODOS `190-SC5-POSTDEPLOY-REREAD`; security 25/25)
 - [x] **Phase 191: REFUSALRACE — the derive's refusal marker and a Sync's refresh-marker retraction merge into a job's metadata, so neither write undoes the other** — booked 2026-11-04 from TODOS `186-REFUSAL-MARKER-RMW-RACE` (DERIVEGAPS 186 decision D-13, founder "One narrow round 4 (Recommended)": the race goes to a follow-up phase after 186 ships); both writers replace `compute_jobs.metadata`, so an interleaving loses the refusal marker or the retraction; data integrity (completed 2026-11-06)
@@ -7075,7 +7075,7 @@ Plans:
 **Goal:** A day whose return is measured against a base that is a small fraction of the account's recent capital (after a near-total withdrawal) no longer reads as the strategy's performance on the book's equity curve and stats. The rule is decided with the founder, applies on every venue, and never invents a value.
 **Requirements**: TBD
 **Depends on:** Nothing
-**Plans:** 0 plans
+**Plans:** 16/16 plans complete
 
 **Booking.** Founder 2026-11-01, AskUserQuestion, Phase 185 plan 03 question F7, after the reading explained key C's 2026-10-28 day.
 - "Book a fix phase", chosen over the recommendation "Accept as real (Recommended)".
@@ -7091,8 +7091,68 @@ Plans:
 
 Data integrity, user-facing. Relates to 185 DERIBITFLOWTIME (the 185-03 reading meets its SC-4 "explained" clause; this phase owns what the curve does with such days) and 172 (anchor and tolerance rules).
 
+**D-09 (founder 2026-11-03):** BTC-unit accounts follow the tiny-base rule too ("New rule everywhere (Recommended)"). This supersedes 164.6.6.2 D-25 for days under the threshold.
+
+**D-10 (founder 2026-11-05), deviation:** SC-4 was read without a pre-merge baseline (plan 11 Task 1 was not run before #1196 merged). The founder chose "Substitute reading (Recommended)": key C's two rows gone, stated tiny days against the rule recomputed from stored inputs, no stored row on a named day, and key C's scenario input. Its limit: it cannot prove that no other book's figures changed except on the named days, or that no key-day appeared. Result 2026-11-05: not confirmed (key C's two rows are still stored, 24 rows on named days, 233 stated days not reproduced, three books untrustworthy); at a checkpoint for the founder.
+
+**D-11 and D-12 (founder 2026-11-05), gap closure:** after the failed SC-4 reading the founder chose "Gap closure in 188 (Recommended)". `188-VERIFICATION.md` confirmed the cause: the reconcile delete covers only the measured span, so tiny days at the series edge keep stale rows, which also makes three books `key_inputs_mismatch`. The emptied-stretch days stay named and are re-checked on the derive's own basis ("Keep, re-check on derive basis (Recommended)"; the 42 MT5 days with no anchor stay unchecked). KL-5, the 0-fill of a missing leg day in the composer and shared scenarios, is fixed in the same gap closure ("Fix in 188 gap closure (Recommended)"). **Correction 2026-11-05 (gap planning):** the KL-5 wiring had already shipped in #1196 (commits `58b228d00`, `fe05c62b1`, `83ad5065d`). `188-VERIFICATION.md` read KL-5 from the plan 09 and 10 summaries, which predate those fixes. So plan 188-14 proves the fix site by site with a neuter drill per strategy-leg site and adds a RED test wherever a drill stays green, rather than rebuilding it. D-12 stands as decided.
+
+**D-13 (founder 2026-11-06), deviation:** close 188 on what passed; the rest moves to the next milestone. The SC-4 re-reading against the pre-merge baseline (188-16) read NOT CONFIRMED under its strict rule.
+
+What passed:
+- no scope stores a row on a stated day (24 → 0);
+- key C's 2026-10-27/28 rows are absent;
+- `key_inputs_mismatch` cleared from every book (b2 and b7 are trustworthy again);
+- every emptied-stretch key is explained on the derive's own basis.
+
+What did not:
+- 1214 stored values changed between the two nightlies, mostly on scopes with no stated days and outside the fix's code path, moving four books' curves by up to 6.1e-5 relative;
+- book b3 stays untrustworthy for reasons it already carried (`out_of_window_flow`, `window_truncated`).
+
+The founder first chose "Control capture first", then on the same day said "move the rest of 188 into the next milestone, and close it". So SC-4's residual goes to a follow-up phase booked in the next milestone: the unexplained value churn, measured by a control capture across a nightly with no deploy between, and b3's earlier reasons. 188 closes on the defect it owned.
+
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 188-01-PLAN.md — tracer: key C's shape through a real derive and the real compose; the rule defined once in `tiny_base.py`; marked-era seam in `apply_marks` (SC-1, SC-2, SC-3, SC-5)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 188-02-PLAN.md — realized era: fourth guard `tiny_base_guard` in `chain_linked_twr`, proven on every venue combiner; split by era per D-04 (SC-2, SC-3, SC-5)
+- [x] 188-03-PLAN.md — marked era built out: gap days before a withheld mark, the 30-day window reaching before the first mark (SC-2, SC-5)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 188-04-PLAN.md — quiet days on a near-empty account are left out too, per D-08 (SC-2, SC-5)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 188-05-PLAN.md — stored lists, the P&L hand-off on every venue, the runner's flagged gap (SC-2, SC-5)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 188-06-PLAN.md — TypeScript key and threshold module, `readTinyBaseDays`, cross-language pin (SC-2, SC-5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 188-07-PLAN.md — strategy factsheet: reused headline reason and a muted note naming the days, per D-06 (SC-2, SC-5)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 188-08-PLAN.md — My Allocation book note naming the days, through the 185 caveat path (SC-2, SC-5)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 188-09-PLAN.md — live-book scenario readers, per D-07: the Overview KPIs and the compare panel no longer read a left-out key-day as 0% (SC-2, SC-3, SC-5)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 188-10-PLAN.md — live-book scenario readers, per D-07: the composer, the tab feed and the diversification correlations (SC-2, SC-3, SC-5)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [x] 188-11-PLAN.md — operator, read-only: SC-4 PROD reading, pre-merge baseline against the first nightly after deploy (SC-4)
+
+**Gap closure, wave 1** *(from 188-VERIFICATION.md gaps 1 to 5; founder D-11 and D-12, 2026-11-05)*
+- [x] 188-12-PLAN.md — operator, read-only: the PROD baseline before the fix ships: every key and key-linked strategy series, the stated lists, every book's returns, curve and trust state (SC-4)
+- [x] 188-13-PLAN.md — the reconcile delete covers every day the derive states as left out, at both edges, in key and strategy mode; RED tests; the book is trustworthy after the derive (SC-2, SC-3, SC-4, SC-5)
+- [x] 188-14-PLAN.md — D-12 (KL-5): every strategy-leg site in the composer, the compare panel and a shared scenario fails a test when it stops carrying the left-out days (SC-2, SC-3, SC-5)
+
+**Gap closure, wave 2** *(blocked on gap-closure wave 1)*
+- [x] 188-15-PLAN.md — operator: review, ship with the baseline freshness gate at the merge, deploy, the PROD re-derive through the nightly and the product's enqueue (SC-4)
+
+**Gap closure, wave 3** *(blocked on gap-closure wave 2)*
+- [x] 188-16-PLAN.md — operator, read-only: the SC-4 re-reading against the pre-merge baseline; stated days re-checked on the derive's raw-sliver basis (D-11); the MT5 no-anchor days stated unchecked (SC-4, SC-5)
 
 ### Phase 189: OPTIONREPLAY — a Deribit key whose option history fails to replay gets the smoothed option values
 
@@ -7539,7 +7599,7 @@ kept verbatim.
 | 184 WALLETOFFSET | 7/7 | Complete — shipped v0.133.16.0 and the OKX fix v0.133.16.2; every marked key measured, every venue keeps the wallet base (D-02) | 2026-11-01 |
 | 185 DERIBITFLOWTIME | 10/10 | Complete — shipped v0.133.18.0 #1187 (a Deribit allocator book values open options at market, smoothed basis, cash fallback with the amber caveat); verification 5/5, security 30/30; PROD reading: days above 50% 6 to 2, SC-3 flags shown (key A valued at market, key C on cash with the caveat); SC-4 met with key A's two days named (D-14); the cumulative x3516 to x3836 booked to TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED` | 2026-11-03 |
 | 186 DERIVEGAPS | 14/14 | Complete — shipped the read-only probe v0.133.18.6 #1193 and the fix v0.133.21.0 #1197 (a truncated or failed read refuses the key by name, the Bybit derive counts Unified transfers as flows, a failing key leaves the book on its own); verification 7/7, security 36/36; SC-5 PROD reading confirmed on every gap (Bybit stored flows 0 to positive; no failing key on PROD, so the Gap 1 and Gap 3 exit paths rest on the synthetic tests) | 2026-11-05 |
-| 188 TINYBASE | 0/0 | Not started — booked 2026-11-01 from Phase 185 plan 03 (F7) | - |
+| 188 TINYBASE | 16/16 | Complete — v0.133.20.0 #1196 (a day measured against a near-empty account is left out, named and never read as 0%) and gap closure v0.133.23.0 #1205 (the reconcile delete covers every stated day at both edges); verification passed, security 42/42; on PROD the stored rows on stated days went 24 → 0 and `key_inputs_mismatch` cleared from every book. SC-4's residual (value churn between nightlies outside the fix's path; b3's earlier reasons) moves to a follow-up phase in the next milestone (D-13) | 2026-11-06 |
 | 190 FACTSHEETQUEUED | 9/9 | Complete — shipped v0.133.19.0 #1194 (finalize queues a re-run only when one is needed; a re-compute over a stored result keeps its factsheet with an updating line); verification passed (SC-2 and SC-4 by code and tests with their PROD readings VOID, the 390 px check unmeasured, accepted by the founder 2026-11-03 and carried to TODOS `190-SC5-POSTDEPLOY-REREAD`), SC-3 confirmed on PROD; security 25/25; D-05 surfaces booked to `190-RERUN-SURFACES-NOT-HOLDING` | 2026-11-04 |
 | 191 REFUSALRACE | 10/10 | Complete — PR 1 v0.133.22.0 #1200 (two service-role-only merge functions, applied on PROD) and PR 2 v0.133.22.3 #1202 (the Python marker and both retraction writers call them; a live two-connection probe in CI); verification 5/5, security 34/34; SC-5 PROD reading confirmed (34 derives after the deploy, 0 marker-write failures, 0 Sentry events; no refusal or retraction in the window, so the race itself was not exercised on PROD) | 2026-11-06 |
 

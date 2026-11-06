@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.23.2] - 2026-11-06 — records: close TINYBASE 188
+
+### Added
+- Phase 188 TINYBASE planning records on `main`: the 16 plans and their summaries, context, the review file, the re-verification (passed) and the security audit (42 threats closed, three accepted risks, AR-188-01 to AR-188-03).
+
+### Changed
+- ROADMAP: Phase 188 ticked complete with all 16 plans. Its section carries founder decision D-13, and its Progress row keeps its prose.
+- STATE: every v1.20 phase is closed. The milestone audit and completion come next.
+
+### Notes
+- On PROD the gap closure (#1205) did what it owned. Rows stored on stated days went from 24 to 0, key C's two rows are gone, and `key_inputs_mismatch` cleared from every book. The SC-4 re-reading against the pre-merge baseline still read NOT CONFIRMED on two counts. 1214 stored values changed between nightlies, mostly on scopes the fix's code does not touch, and their cause is unmeasured. Book b3 stays untrustworthy for reasons it already carried. D-13 (founder 2026-11-06) closes 188 on what passed and moves that residual to a follow-up phase in the next milestone.
+
 ## [0.133.23.1] - 2026-11-06 — records: close REFUSALRACE 191
 
 ### Added
