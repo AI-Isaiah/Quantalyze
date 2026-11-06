@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.23.4] - 2026-11-06 — records: start milestone v1.21 UX
+
+### Added
+- `.planning/REQUIREMENTS.md` for v1.21 UX — trustworthy, navigable, lean: 32 requirements in five groups (TRUST-01..06, ROUTE-01..11, CLAR-01..06, LEAN-01..07, RESID-01..02). They come from the five-persona UX review of the live app (2026-11-06) and from Phase 188's SC-4 residual (D-13). TERMS-01/02 (fees, terms, thesis, net vs gross) are recorded as future work. Legal-entity text, dark mode, new venues and MT5 parity are out of scope.
+- The v1.21 roadmap: 11 phases, 192 to 202, with every requirement mapped to exactly one phase. Trust comes first: 192 PUBLICTRUTH, 193 QUIETVIEW, 194 FIGURETRUTH. Then 195 TRIM, 196 ONESTRATEGYPAGE, 197 SCREEN, 198 MYBOOK, 199 MANAGERHOME, 200 MANAGERKEYS and 201 PLAINWORDS. 202 RESIDCHURN runs in parallel from now. Each phase carries its success criteria, its dependencies, and an "Evidence at HEAD" block that separates the findings confirmed in code from the ones still to be measured.
+
+### Changed
+- PROJECT.md has a Current Milestone section for v1.21, and its Active list is updated. Founder scope decisions: trust first, and fix and trim only, with no new manager-entered data.
+- STATE.md and `state.json` move to v1.21: Phase 192, ready to plan.
+
+### Notes
+- Phase 202's control capture needs a 00:40Z nightly with no deploy between its two PROD captures. Inside that window only merges touching `analytics-service/` or `supabase/migrations/**` are held (founder 2026-11-06). Frontend and planning-only merges continue, because they change no stored value.
+- Phases 155 and 157 stay reserved for the parked v1.18 milestone.
+
 ## [0.133.23.3] - 2026-11-06 — records: close milestone v1.20 Backlog Burndown
 
 ### Added

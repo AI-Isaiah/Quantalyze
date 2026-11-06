@@ -1,98 +1,68 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.20 — Backlog Burndown (Phases 158+)",
+  "milestone": "v1.21 — UX — trustworthy, navigable, lean",
   "phases": [
     {
-      "number": "147",
-      "name": "SCEN-01 engine series",
-      "status": "complete"
-    },
-    {
-      "number": "148",
-      "name": "OWN owner factsheet",
-      "status": "complete"
-    },
-    {
-      "number": "149",
-      "name": "NAV my-strategies ranking",
-      "status": "complete"
-    },
-    {
-      "number": "150",
-      "name": "OWN-03 portfolio question",
-      "status": "complete"
-    },
-    {
-      "number": "151",
-      "name": "AUM book + sizing",
-      "status": "complete"
-    },
-    {
-      "number": "152",
-      "name": "SCEN composer legibility",
-      "status": "complete"
-    },
-    {
-      "number": "153",
-      "name": "WIZFORM + MT5-14",
+      "number": "192",
+      "name": "PUBLICTRUTH",
       "status": "pending"
     },
     {
-      "number": "153.1",
-      "name": "WIZFORM-CODES (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.2",
-      "name": "WIZFORM-FIELD (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.3",
-      "name": "WIZFORM-GW (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.4",
-      "name": "WIZFORM-BUDGET (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.5",
-      "name": "WIZFORM-ABANDON",
-      "status": "complete"
-    },
-    {
-      "number": "153.6",
-      "name": "PARITY (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "153.7",
-      "name": "WIZFORM-02-CLASS (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "154",
-      "name": "WIZCONT + STALE",
-      "status": "complete"
-    },
-    {
-      "number": "155",
-      "name": "MT5-VERIFY + acceptance",
+      "number": "193",
+      "name": "QUIETVIEW",
       "status": "pending"
     },
     {
-      "number": "156",
-      "name": "CONNECT-REFACTOR",
-      "status": "complete"
+      "number": "194",
+      "name": "FIGURETRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "195",
+      "name": "TRIM",
+      "status": "pending"
+    },
+    {
+      "number": "196",
+      "name": "ONESTRATEGYPAGE",
+      "status": "pending"
+    },
+    {
+      "number": "197",
+      "name": "SCREEN",
+      "status": "pending"
+    },
+    {
+      "number": "198",
+      "name": "MYBOOK",
+      "status": "pending"
+    },
+    {
+      "number": "199",
+      "name": "MANAGERHOME",
+      "status": "pending"
+    },
+    {
+      "number": "200",
+      "name": "MANAGERKEYS",
+      "status": "pending"
+    },
+    {
+      "number": "201",
+      "name": "PLAINWORDS",
+      "status": "pending"
+    },
+    {
+      "number": "202",
+      "name": "RESIDCHURN",
+      "status": "pending"
     }
   ],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step (plan phase 192)",
+    "reason": "Phase 1 of 11 — needs a plan"
   },
-  "updated_at": "2026-11-06T11:14:57.152Z"
+  "updated_at": "2026-11-06T13:50:52.285Z"
 }

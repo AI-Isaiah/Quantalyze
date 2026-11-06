@@ -2,6 +2,7 @@
 
 ## Milestones
 
+- 🚧 **v1.21 UX — trustworthy, navigable, lean** — Phases 192–202 (started 2026-11-06)
 - ✅ **v1.20 Backlog Burndown** — Phases 158–191 (shipped 2026-11-06)
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
 - ⏸️ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 157 (parked, founder-gated)
@@ -38,6 +39,361 @@ Phase 155 was carried to v1.18 and the title amended to match what was delivered
 Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 </details>
+
+---
+
+## Current Milestone: v1.21 UX — trustworthy, navigable, lean (Phases 192–202)
+
+**Goal:** An allocator or a manager, new or experienced, can trust what every page says, reach the
+next step without a dead end, and is not buried in duplicate surfaces.
+
+**Scope:** 32 requirements — TRUST-01..06, ROUTE-01..11, CLAR-01..06, LEAN-01..07, RESID-01..02 —
+per `.planning/REQUIREMENTS.md`. Source: the five-persona UX review of the live app, 2026-11-06,
+plus the Phase 188 SC-4 residual (188-CONTEXT D-13). Research: skipped (founder 2026-11-06).
+
+**Scope decisions (founder 2026-11-06):** trust first; fix and trim only. No new manager-entered
+data: TERMS-01/02 (fees, terms, thesis, net vs gross, base currency, data source) are Future and
+map to no phase here. The empty "— on request" rows are hidden instead (LEAN-05). Legal entity and
+jurisdiction text in Terms and Privacy stays out of scope: the founder supplies it.
+
+⛔ **Every finding is a claim until its phase re-measures it at HEAD.** The roadmapper spot-checked
+the findings each success criterion rests on at `8e592536` on 2026-11-06; every phase lists what was
+confirmed and what was not under **Evidence at HEAD**. A PROD figure quoted from the review (a
+return, a VaR, an AUM) was read by the reviewers and has not been re-read here.
+
+⭐ **Every phase that touches UI checks the change against `DESIGN.md`** (voice and microcopy,
+Numbers Contract, data density, the dated-document principle) and records the check in its
+UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
+
+**Ordering rationale (dependencies, not preferences):**
+
+- **192–194 first (trust).** 192 is the public site and the demo, the first thing a visitor reads.
+  193 makes viewing a strategy passive. 194 runs after 193 because its metric mismatches must be
+  re-read on full-history views, with no silently saved clipped range distorting them.
+- **195 TRIM before the surfaces it touches.** It removes `/portfolios`, the Tweaks panel, the
+  dark-mode option and the do-nothing toggles, so no later phase polishes a surface that is about
+  to go. It does NOT hide Compare: 197 makes Compare startable (ROUTE-05).
+- **196 ONESTRATEGYPAGE after 193, 194 and 195.** The factsheet becomes the one strategy page and
+  the tearsheet its print view, so the developer text (193) and the tearsheet's own figures (194)
+  are settled first, and the "add to portfolio" next step is replaced after `/portfolios` goes
+  (195). LEAN-05 (the slim factsheet) sits in the same phase so the print view is built once, on
+  the final layout.
+- **197 SCREEN and 198 MYBOOK after 194 and 195.** Discovery columns state the period and
+  definition 194 settles; My allocation's first tab shows the book values 194 reconciles.
+- **199 MANAGERHOME after 198.** ROUTE-01 sends an allocator to My allocation, which must answer
+  "how is my book doing?" first. LEAN-01 merges the two strategies lists before ROUTE-11 adds the
+  health column, so the column is built once, on the merged list.
+- **200 MANAGERKEYS after 192 and 199.** The one security explanation carries 192's corrected
+  account, and adding a strategy's one entry point lives on 199's merged list.
+- **201 PLAINWORDS last of the UX phases.** Renames, tooltips and section numbering apply to the
+  surfaces the earlier phases leave, so nothing is renamed and then deleted.
+- **202 RESIDCHURN is a parallel track, not last in time.** It starts now, beside 192. Its control
+  capture needs a 00:40Z nightly with **no deploy between its two captures**, and the UX phases
+  deploy often, so it books its window, and inside it only `analytics-service/` and migration merges are held.
+
+### Phases (v1.21)
+
+- [ ] **Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story** - Key storage, encryption, TLS, factsheet access, listing cost and exchange count read the same on the home page, `/security`, `/for-quants` and Terms, each matched to a measurement; no key form for anonymous visitors on the home page; `/demo` looks finished
+- [ ] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row
+- [ ] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified
+- [ ] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed
+- [ ] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced"
+- [ ] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named
+- [ ] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden
+- [ ] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step
+- [ ] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
+- [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
+- [ ] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect
+
+### Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story
+
+**Goal:** A first-time visitor reading the home page, `/security`, `/for-quants`, the Terms and `/demo` gets one consistent, true account of how API keys are stored and encrypted, which TLS versions are accepted, who can view a factsheet, what listing costs and how many exchanges are supported, and sees a demo that looks finished. The home page no longer asks an anonymous visitor for a key and secret.
+**Requirements**: TRUST-01, ROUTE-03
+**Depends on:** Nothing (first phase)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: the home page (`src/app/(marketing)/page.tsx:212`) mounts `VerificationSection`, whose form (`src/components/landing/VerificationForm.tsx:219`) says "Your keys are never stored." `/security` describes AES-256-GCM with a Vault-held KEK (`src/app/(marketing)/security/page.tsx:140-143`) and says "We disable TLS 1.0, 1.1, and 1.2 at the edge" (`:108-109`). `/for-quants` describes a per-row Fernet data key (`src/app/(marketing)/for-quants/page.tsx:293`), "Listed to qualified allocators only" (`:300`) and "Free to list" (`:97`). Terms §7 names a success fee (`src/app/(marketing)/legal/terms/page.tsx:73-76`). `/demo` renders "Demo data is loading" (`src/app/(marketing)/demo/page.tsx:359`). `/demo/founder-view` exists as a route.
+- Not confirmed at HEAD: the live TLS 1.2 handshake (a network fact, not a code fact), which pages state 3, 5 or 6 exchanges (the home page reads `EXCHANGES.length`), that `/demo/founder-view` renders empty, and the BTC "—" under the demo's headline (PROD data).
+
+**Success Criteria** (what must be TRUE):
+1. Key storage and encryption are described once, the same way, on the home page, `/security`, `/for-quants` and Terms, and the description matches the code path that stores credentials.
+2. `/security`'s TLS sentence matches a recorded handshake for each TLS version against the production host, and `/for-quants`' sentence about who can view a factsheet matches what a signed-out request for a factsheet returns. Where the founder chooses to change the behaviour instead of the sentence, the decision is recorded in the phase CONTEXT and the ROADMAP.
+3. The listing cost reads the same on `/for-quants` and in Terms §7, and every page that states an exchange count reads it from one shared value.
+4. The home page shows an anonymous visitor no form asking for an API key or secret.
+5. After `/demo` has loaded it shows no loading notice, no "—" under a headline claim (the claim shows its figure or is removed), no empty founder view, and no raw id in place of a strategy name. Never invent data: a demo figure that cannot be computed is removed with its claim, not filled in.
+
+Copy and layout changes are checked against `DESIGN.md` (Voice / microcopy, AI-Slop Ban).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content
+
+**Goal:** Looking at a factsheet or a strategy page is passive. Scrolling over a chart never changes its date range by itself, a narrowed range is always labelled with a one-click reset and is never restored on a later visit, no developer note, placeholder or another strategy's or portfolio's demo content appears, and opening any page writes nothing on the user's behalf.
+**Requirements**: TRUST-02, TRUST-03, TRUST-06
+**Depends on:** Nothing
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: the mouse wheel zooms the factsheet time-series chart (`src/app/factsheet/[id]/v2/TimeSeriesChart.tsx`, `WHEEL_SETTLE_MS`, wheel handler near `:732`). The view state is persisted to the query string and localStorage (`src/app/factsheet/[id]/v2/factsheet-context.tsx:27`, `:258-268`). A "Reset view" control exists (`FactsheetView.tsx:2873`). The factsheet renders "Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB." (`BatchDPanels.tsx:125`), an allocator section tagged "Demo portfolios" with a "Suggested MultiMarket sleeve" row (`BatchDPanels.tsx:303`, `:351`), and "Commercial terms not yet wired through from the strategy registry." (`MandatePanels.tsx:153`). `/strategy/[id]` mounts `StrategyNoteCard` (`src/app/strategy/[id]/page.tsx:210`), whose textarea is `autoFocus` and saves on blur (`src/components/notes/StrategyNoteCard.tsx:42-60`).
+- Not confirmed at HEAD: that this note card is what wrote the empty note row the review saw on PROD (07:47Z, 2026-11-06, left in place). It is a candidate, and the phase measures the write path before fixing it.
+
+**Success Criteria** (what must be TRUE):
+1. Turning the mouse wheel over any factsheet chart leaves the date range and every headline figure unchanged; the range changes only through an explicit control.
+2. A narrowed range is labelled next to the figures it changes, with a one-click reset, and a later visit or reload opens the full history, including for ranges a browser saved before this change.
+3. No factsheet renders a developer note, placeholder copy or demo content: the three strings above are gone, the allocator section shows nothing that belongs to another strategy or portfolio, and a test goes RED if any of them returns.
+4. Opening a strategy page, a factsheet or any page that carries a note, and leaving without typing, writes no row. A read-only PROD count of empty notes is recorded before the fix (rows are left in place), and a test goes RED on today's behaviour.
+
+UI changes are checked against `DESIGN.md` (the dated-document principle: the label for a narrowed range states the dates shown).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
+
+**Goal:** A metric with the same name shows the same value for the same strategy and period on My Strategies, the factsheet, the tearsheet, Scenario and Holdings, and where two figures differ on purpose the label says why. A figure that cannot be meaningful is withheld or plainly qualified, never shown at full confidence.
+**Requirements**: TRUST-04, TRUST-05
+**Depends on:** Phase 193 (mismatches are re-read on full-history views, so a saved clipped range cannot pass for a definition difference)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: the tearsheet shows "Calmar", "VaR (95%)", "CVaR" and "Minimum Allocation" (`src/app/factsheet/[id]/tearsheet/page.tsx:572`, `:582-585`, `:658`). My Strategies and discovery show a "6 Month" column (`src/components/strategy/StrategyTable.tsx:316`).
+- Not confirmed at HEAD (PROD readings from the review): 6 Month −21.31% vs −3.79%, the tearsheet VaR/CVaR at about double the factsheet's, Calmar meaning two things, "Minimum Allocation" equal to AUM, the book's AUM at 293,633 vs $367.9K gross / $284.3K net, and Quantum Drift's +1,698,884,891% next to 0.00% in the lists.
+
+**Success Criteria** (what must be TRUE):
+1. Before any code change, a read-only PROD reading records, for each metric TRUST-04 names, the value each page shows for the same strategy or book and period, and names the cause of each difference.
+2. For the same strategy and period, a metric with the same name shows the same value on My Strategies, the factsheet, the tearsheet, Scenario and Holdings. Where two figures differ on purpose (gross vs net, another period or definition), the label says which. A test goes RED on today's mismatch. The fix lands where the pages read the value, not as a per-page patch, because the tearsheet becomes the factsheet's print view later in this milestone.
+3. No field's label contradicts its value (for example, a "Minimum Allocation" that is really AUM is relabelled or removed).
+4. A cumulative return past a stated plausibility bound, and an annualised ratio on a record shorter than a year, are withheld or carry a plain qualifier on every surface that shows them, and no list shows 0.00% for a figure it does not have.
+5. Never invent data: a withheld figure reads as withheld, never as 0 or a substitute value.
+
+UI changes are checked against `DESIGN.md` (Numbers Contract).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 195: TRIM — leftover and duplicate surfaces are gone
+
+**Goal:** `/portfolios` is removed, Decks is hidden until it works, and the user-visible leftovers are gone: the "Tweaks / Design variations" panel, the dark-mode option, toggles that do nothing useful, the single-card `/browse` and duplicated disclaimers.
+**Requirements**: LEAN-03, LEAN-07
+**Depends on:** Nothing (runs after the trust phases by order, not by need)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: `/portfolios` still renders (`src/app/(dashboard)/portfolios/`, with `[id]`, `documents` and `manage`) and is linked from `ExchangesTabContent.tsx:40,52`, `PortfolioOptimizer.tsx:163`, `AddToPortfolio.tsx:121` and `StrategyBreakdownTable.tsx:220`; the last points at `/portfolios/<id>/strategies/<id>`, which has no page at HEAD. Decks is in the sidebar (`src/components/layout/Sidebar.tsx:141`). The "Design variations · live" panel is `src/app/(dashboard)/allocations/components/Tweaks.tsx:105`, mounted from `AllocationsTabs.tsx:23-25`. The factsheet offers "Dark mode" (`FactsheetView.tsx:2944`) while `DESIGN.md` says "Dark mode: Not planned." The discovery table carries a density setting (`StrategyTable.tsx:578-582`). `/portfolio-pdf/[id]` also exists; the phase decides whether it goes with `/portfolios`.
+- Not confirmed at HEAD: that `/browse` holds exactly one category on PROD (it renders whatever categories the query returns), the view toggle, and where the disclaimer repeats.
+
+**Success Criteria** (what must be TRUE):
+1. `/portfolios` and its sub-routes are gone, a visit to one lands on a named page rather than a 404, and no link in the app points to them. Stored portfolio rows are kept; only the surface goes.
+2. Decks appears in no navigation and no link until it works.
+3. No user sees the "Tweaks / Design variations" panel or a dark-mode option.
+4. The discovery table has no toggle that changes nothing useful at the row counts it shows, `/browse` with one category leads straight to it, and each page shows its disclaimer once.
+5. A test lists every removed route and control and goes RED if one renders or is linked again.
+
+Removals are checked against `DESIGN.md` (Dark mode: Not planned; data density principle). Compare is not hidden here: SCREEN makes it startable.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document
+
+**Goal:** A strategy has one page, the factsheet. The tearsheet is its print view and every other strategy detail route leads to it. A signed-in user is never shown visitor prompts, an owner can open their own unpublished strategy, a signed-in reader has a way back and a next step, a shared factsheet carries a header and a sign-up link, and the factsheet opens as a summary, one chart and one metrics table with the rest under "Advanced".
+**Requirements**: LEAN-02, ROUTE-02, ROUTE-04, LEAN-05
+**Depends on:** Phase 193, Phase 194, Phase 195
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: routes that render a strategy's detail today are `/factsheet/[id]` (re-exports `/factsheet/[id]/v2`), `/factsheet/[id]/tearsheet`, `/strategy/[id]`, `/strategy/[id]/v2` (`StrategyV2Shell`), `/discovery/[slug]/[strategyId]`, `/browse/[slug]/[strategyId]` and `/factsheet-share/[token]`. Visitor prompts render with no session check on `/strategy/[id]` ("Sign up to see full analytics", `src/app/strategy/[id]/page.tsx:220-223`, while the note card beside it is gated on `user`) and on `/browse` (`src/app/browse/layout.tsx:32`, `browse/[slug]/page.tsx:73-80`, `browse/[slug]/[strategyId]/page.tsx:170-179`). `/factsheet-share/[token]` has no sign-up link. `AddToPortfolio` links to `/portfolios`, which TRIM removes. The factsheet shows "— on request" rows (`MandatePanels.tsx:143-146`) and a visible "Wheel to zoom · double-click to reset" hint on every histogram (`HistogramChart.tsx:259-260`).
+- Not confirmed at HEAD: the 8–9 section tabs, the duplicated Returns/VaR/CVaR/skew/kurtosis, the three small-sample warnings (no shared warning string found), and the owner 404 on `/strategy/<id>` for an unpublished strategy.
+
+**Success Criteria** (what must be TRUE):
+1. Every strategy detail route listed above leads to the factsheet, the tearsheet is the factsheet's print view, and existing links and shared URLs keep working.
+2. A signed-in user sees no "Sign up" prompt on `/browse` pages or on a strategy's page. An owner can open their own unpublished strategy, and after the owner has viewed it an anonymous request still gets not-found.
+3. From a factsheet, a signed-in user can go back to the page they came from and take a next step (request an intro, add the strategy to their allocation) without editing a URL. A shared factsheet carries a header and a sign-up link.
+4. The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice, the chart hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
+5. A before/after count of sections, charts, repeated metrics and warnings on three named strategies is recorded, and the print and shared views follow the new layout.
+
+The layout is checked against `DESIGN.md` (dated-document principle, Numbers Contract, data density principle) before planning, in the phase's UI-SPEC.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared
+
+**Goal:** An allocator screening in discovery can read every column without guessing (period, annualisation, track length), sees stale strategies flagged and not ranked as current, learns when two listings draw on one exchange account, and can select strategies and open Compare from the UI.
+**Requirements**: ROUTE-05, CLAR-01, CLAR-02, CLAR-05
+**Depends on:** Phase 194 (columns state the definitions 194 settles, and withheld figures read as withheld), Phase 195 (the do-nothing toggles are already gone)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: `/compare` says adding strategies from the page "is not available yet" (`src/app/(dashboard)/compare/page.tsx:75`, `:266`); its only entry is the factsheet's "Compare strategies" (`FactsheetView.tsx:2885`). Discovery columns come from `StrategyTable.tsx` (`:316` "6 Month"). A staleness test exists (`StrategyTable.stale-analytics.test.tsx`), so the phase first measures what discovery does with a stale row today. A same-account signal exists for an allocator's own keys ("Two of your keys read the same exchange account", `EquityHistoryRebuilding.tsx:237`).
+- Not confirmed at HEAD: the "+" on volatility, the strategy fetched 175 days ago at rank #3, and whether a stored signal links two listed strategies to one exchange account.
+
+**Success Criteria** (what must be TRUE):
+1. An allocator can select strategies in a discovery list and open Compare with them from the UI, and Compare no longer says adding is "not available yet".
+2. Every discovery column header states its period and whether it is annualised, volatility shows no sign, and a track-length column exists.
+3. A strategy whose data is stale (its newest stored day or last successful fetch is older than a threshold the phase states) is flagged in its row and does not rank as if it were current. The phase names the field it reads, and does not use `strategy_analytics.computed_at` as a proxy for data age: a recompute on old data is not fresh data. A test with a stale fixture goes RED on today's ranking.
+4. A listing says when two strategies draw on the same exchange account, using only data already stored (no new manager-entered data). A strategy whose account is not shared shows no notice.
+
+UI changes are checked against `DESIGN.md` (Numbers Contract, data density principle, Trust-Tier Badges).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs
+
+**Goal:** An allocator opening My allocation sees the book's return, risk and holdings at a glance (or exactly what is missing), "+ Allocation" opens the allocator's own flow, Holdings labels positions correctly, and the page has at most three tabs with each position listed once and dust hidden.
+**Requirements**: ROUTE-06, ROUTE-07, ROUTE-08, LEAN-06
+**Depends on:** Phase 194 (the book's values agree across Scenario and Holdings), Phase 195 (the Tweaks panel is already gone)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: six tabs, Overview, Holdings, Outcomes, Mandate, Risk and Scenario (`src/app/(dashboard)/allocations/AllocationsTabs.tsx:70-222`). On every tab but Scenario, "+ Allocation" opens `ContributionWizardOverlay` (`AllocationsTabs.tsx:587-611`), which embeds the manager wizard's `WizardClient` (`ContributionWizardOverlay.tsx:31`). The notice "We are holding back your equity history" is `EquityHistoryRebuilding.tsx:139`. Holdings renders "not allocated" (`HoldingsTable.tsx:504`).
+- Not confirmed at HEAD: cash counted as Spot exposure, the ~40 positions listed three times, the $0–$15 dust rows, and Scenario's three stacked notices.
+
+**Success Criteria** (what must be TRUE):
+1. "+ Allocation" opens an allocator's flow on every tab, never the manager's add-strategy wizard.
+2. The first tab shows the book's return, risk and holdings at a glance, with the same values Scenario and Holdings show, or names exactly what is missing (which key, which days) instead of a generic notice.
+3. Holdings does not call allocated positions "not allocated" and does not count cash as Spot exposure. A test goes RED on today's labels.
+4. My allocation has at most three tabs, lists each position once, and hides dust rows by default behind a control that shows them.
+
+UI changes are checked against `DESIGN.md` (Numbers Contract, data density principle, 9-State Matrix).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health
+
+**Goal:** After sign-in, an allocator, a manager and an admin each land on a page made for their role. A manager has one strategies list (`/strategies` and `/my-strategies` merged) that shows each strategy's health, explains its status chips, and whose degrade warnings name the affected days or key and say what to do.
+**Requirements**: LEAN-01, ROUTE-11, ROUTE-01
+**Depends on:** Phase 194, Phase 198 (an allocator lands on My allocation, which must answer "how is my book doing?" first)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: sign-in sends every role to `/discovery/crypto-sma` (`src/components/auth/LoginForm.tsx:34`), as do `src/app/(auth)/pending-approval/page.tsx:70` and the allocator branch of `src/components/auth/OnboardingWizard.tsx:91-93` (a manager goes to `/strategies` there). The error and not-found pages link "home" to `/discovery/crypto-sma` (`src/app/error.tsx:57`, `src/app/not-found.tsx:16`, `(dashboard)/error.tsx:40`, `admin/error.tsx:51`). The sidebar lists both `/my-strategies` and `/strategies` (`Sidebar.tsx:156`, `:189`, `:321`). The chips "Own capital" and "Team review" come from `src/components/strategy/OwnershipTag.tsx:39-40`. `StrategyTable.tsx` has no "Health" column label.
+- Not confirmed at HEAD: the wording of each degrade warning (the phase inventories them first).
+
+**Success Criteria** (what must be TRUE):
+1. After sign-in, an allocator lands on My allocation, a manager on their strategies list and an admin on the admin dashboard, and every post-sign-in and "go home" destination listed above reads one role-aware choice.
+2. A manager has one strategies list: `/strategies` and `/my-strategies` are one page, the other route leads to it, and the sidebar has one entry.
+3. That list shows each strategy's health, and its status chips ("Team review", "Private", "Own capital" and the rest) have a legend.
+4. Every degrade warning names the affected days or key and says what the user can do. A test goes RED on a warning that names neither.
+
+UI changes are checked against `DESIGN.md` (Error Envelope, Voice / microcopy, Trust-Tier Badges).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place
+
+**Goal:** A manager can see which strategies each key feeds, and nothing re-points a strategy's key without an explicit confirmation. Renaming happens in one place that shows which name is public. Adding a strategy and managing keys each have one entry point, and the security explanation lives in one place.
+**Requirements**: ROUTE-09, ROUTE-10, LEAN-04
+**Depends on:** Phase 192 (the one security explanation carries 192's corrected account), Phase 199 (adding a strategy's one entry point lives on the merged list)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: each key card on the strategy edit page (`src/app/(dashboard)/strategies/[id]/edit/page.tsx`) offers a one-click "Use & Sync" (`src/components/strategy/ApiKeyManager.tsx:1768`). The edit form has a "Strategy Name" field (`StrategyForm.tsx:326`), while "Rename…" lives on the factsheet header (`FactsheetView.tsx:1226`) and in the strategies table (`StrategyTable.tsx:1387`, `RenameStrategyDialog.tsx`). `/strategies` links into the add-strategy wizard four times (`src/app/(dashboard)/strategies/page.tsx:903`, `:973`, `:995`, `:1002`), and My allocation embeds the same wizard (`ContributionWizardOverlay.tsx:31`). In-app copy gives a third encryption description, "per-user KEK" (`AllocatorExchangeManager.tsx:1394`, `:1644`).
+- Not confirmed at HEAD: that "Strategy Name" is a dropdown of preset codenames, that the edit page lists every key on the account, and which two surfaces the review calls the two key managers.
+
+**Success Criteria** (what must be TRUE):
+1. Each key shows which strategies it feeds, and no control changes a strategy's key without an explicit confirmation that names the strategy and both keys. A test goes RED on today's one-click re-point.
+2. A manager renames a strategy in one place, and that place shows which name is public.
+3. Adding a strategy and managing keys each have one entry point; every other entry point leads to it or is gone.
+4. The security explanation lives in one place, matches 192's public account, and every other surface links to it instead of restating it.
+
+UI changes are checked against `DESIGN.md` (Broker Selector Grid, Error Envelope, Voice / microcopy).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed
+
+**Goal:** Specialist terms are explained where they appear, each concept has one name across the app, and the small inconsistencies are fixed: factsheet sections numbered in order, one date format, Escape closes the filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer typo is gone.
+**Requirements**: CLAR-03, CLAR-04, CLAR-06
+**Depends on:** Phase 196, Phase 197, Phase 198, Phase 200 (renames, tooltips and numbering apply to the surfaces those phases leave)
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: factsheet sections run I, II, III, V, IV (`src/app/factsheet/[id]/v2/MetricsColumn.tsx:348-534`). The disclaimer's "notoperate" comes from `</strong>` followed by a line break before "operate" (`src/app/(marketing)/legal/disclaimer/page.tsx:60-61`), which JSX renders without a space. The wizard's egress-IP link goes to `/security#egress-ips` (`WizardIpAllowlistHint.tsx:36`), and `/security` says the static egress IP does not exist until the sFOX egress is stood up (`security/page.tsx:497-522`). The sidebar names the Scenario tab "Bridge" (`Sidebar.tsx:297`). The only "glossary" mention in `src` is in `OptimizerPanel.tsx`.
+- Not confirmed at HEAD: which drawer ignores Escape (`CustomizeDrawer.tsx:64` already handles it), and the three date formats.
+
+**Success Criteria** (what must be TRUE):
+1. Every specialist term (Omega, Ulcer, Common-sense ratio, Kolmogorov-Smirnov, Bridge, mandate, TWR and the like) carries a tooltip or links to a glossary entry wherever it appears.
+2. Each concept has one name across the app (allocation / book / portfolio; watchlist / favorites / star; mandate / preferences / profile), and a test goes RED on a retired word in user-visible copy.
+3. Factsheet sections are numbered in order and dates use one format across the app.
+4. Escape closes the discovery filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer reads "does not operate".
+
+Wording and tooltips are checked against `DESIGN.md` (Voice / microcopy, Typography).
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained
+
+**Goal:** A control capture across a nightly with no deploy in between shows whether stored values move without a code change, each value that moved in 188's re-reading (1214) is attributed to a cause or named as unexplained, and book b3's earlier reasons (`out_of_window_flow`, `window_truncated`) are explained and fixed where they are a defect.
+**Requirements**: RESID-01, RESID-02
+**Depends on:** Nothing. Parallel track: it starts now, beside 192, and is not held for the UX phases.
+**Plans:** 0 plans
+
+**Calendar constraint.** The control capture is two PROD captures with the same SQL around one 00:40Z nightly, with **no deploy between them** (188-CONTEXT D-13). The UX phases deploy often, so this phase books its window before the first capture. Inside the window only merges touching `analytics-service/` or `supabase/migrations/**` are held (founder 2026-11-06); frontend and planning-only merges continue, because they change no stored value. A deploy inside the window voids the pair, and the next deploy-free nightly is used instead. The earliest chance is the 2026-11-07 00:40Z nightly, if no deploy lands between its captures. Whether an earlier pair qualifies (capture `b1` was taken 2026-11-06 07:04:02Z, after that day's nightly) is measured from the deploy history, not assumed.
+
+**Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
+- Confirmed: D-13 and the residual are recorded in `.planning/milestones/v1.20-phases/188-*/188-CONTEXT.md` and `188-16-SUMMARY.md`, and in the v1.20 audit's tech debt. The reason codes are defined in `analytics-service/services/allocator_equity_derive.py` (`WINDOW_TRUNCATED` at `:109`, `OUT_OF_WINDOW_FLOW` at `:121`).
+- Related, not owned here: TODOS `185-BOOK-CUMULATIVE-UNEXPLAINED`.
+
+**Success Criteria** (what must be TRUE):
+1. Two PROD captures with the same SQL bracket one nightly, each preceded by the database marker query with its answer recorded, and the deploy history between them is shown to be empty. Their diff says whether stored values move without a code change, and on which scopes.
+2. Each of the 1214 values that moved in 188's re-reading is attributed to a cause (the nightly's own movement as measured in criterion 1, or a named code path) or listed by scope as unexplained.
+3. Book b3's `out_of_window_flow` and `window_truncated` reasons are each explained from its stored inputs. Where either is a defect it is fixed, with a test that goes RED on today's behaviour, and b3's trust state after the next nightly is recorded.
+4. Never invent data.
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Progress (v1.21)
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 192. PUBLICTRUTH | 0/0 | Not started | - |
+| 193. QUIETVIEW | 0/0 | Not started | - |
+| 194. FIGURETRUTH | 0/0 | Not started | - |
+| 195. TRIM | 0/0 | Not started | - |
+| 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
+| 197. SCREEN | 0/0 | Not started | - |
+| 198. MYBOOK | 0/0 | Not started | - |
+| 199. MANAGERHOME | 0/0 | Not started | - |
+| 200. MANAGERKEYS | 0/0 | Not started | - |
+| 201. PLAINWORDS | 0/0 | Not started | - |
+| 202. RESIDCHURN | 0/0 | Not started | - |
+
+### Requirement Coverage (v1.21)
+
+| Phase | Requirements |
+|-------|--------------|
+| 192 | TRUST-01, ROUTE-03 |
+| 193 | TRUST-02, TRUST-03, TRUST-06 |
+| 194 | TRUST-04, TRUST-05 |
+| 195 | LEAN-03, LEAN-07 |
+| 196 | LEAN-02, ROUTE-02, ROUTE-04, LEAN-05 |
+| 197 | ROUTE-05, CLAR-01, CLAR-02, CLAR-05 |
+| 198 | ROUTE-06, ROUTE-07, ROUTE-08, LEAN-06 |
+| 199 | LEAN-01, ROUTE-11, ROUTE-01 |
+| 200 | ROUTE-09, ROUTE-10, LEAN-04 |
+| 201 | CLAR-03, CLAR-04, CLAR-06 |
+| 202 | RESID-01, RESID-02 |
+
+32/32 mapped, each to exactly one phase. TERMS-01/02 are Future and unmapped by founder decision.
 
 ---
 
@@ -119,7 +475,9 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 
 ## Current position
 
-⭐ **v1.20 Backlog Burndown — CLOSED 2026-11-06.** Next: `/gsd-new-milestone` for the UX milestone (founder 2026-11-06). It carries the Phase 188 SC-4 residual follow-up (D-13).
+🚧 **v1.21 UX — trustworthy, navigable, lean — Phases 192–202, roadmap written 2026-11-06.** Next: `/gsd-plan-phase 192` (PUBLICTRUTH). 202 RESIDCHURN runs in parallel from now: its control capture needs a 00:40Z nightly with no deploy between its two captures.
+
+⭐ **v1.20 Backlog Burndown — CLOSED 2026-11-06.** Its Phase 188 SC-4 residual (D-13) is 202 RESIDCHURN in v1.21.
 
 ⏸️ **v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157)** — PARKED, founder-gated twice over: new MT5 investor passwords AND the founder at the terminal on a trading day. Phase numbers 155 and 157 stay reserved.
 
