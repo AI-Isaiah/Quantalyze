@@ -1,0 +1,85 @@
+# Requirements: Quantalyze
+
+**Defined:** 2026-11-06
+**Core Value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
+
+**Source:** the five-persona UX review of the live app, 2026-11-06 (new allocator, experienced allocator, new manager, experienced manager, first-time visitor), plus the Phase 188 SC-4 residual (D-13). Every finding is a claim until a phase re-measures it at HEAD.
+**Scope decisions (founder 2026-11-06):** trust first; fix and trim only (no new manager-entered data).
+
+## Milestone v1.21 Requirements
+
+### Trust — what the app says is true
+
+- [ ] **TRUST-01**: A visitor reading the home, `/security`, `/for-quants` and Terms pages gets one consistent, true account of how API keys are stored and encrypted, which TLS versions are accepted, who can view a factsheet, what listing costs, and how many exchanges are supported. The home page no longer asks an anonymous visitor for a key and secret.
+- [ ] **TRUST-02**: Scrolling over a factsheet chart never changes its date range by itself. A narrowed range is always labelled with a one-click reset, and is never silently restored on a later visit.
+- [ ] **TRUST-03**: No factsheet shows developer notes, placeholder copy, or demo content that belongs to another strategy or portfolio.
+- [ ] **TRUST-04**: A metric with the same name shows the same value for the same strategy and period on every page (My Strategies, factsheet, tearsheet, Scenario, Holdings). Where two figures differ on purpose (gross vs net, a different period or definition), the label says so.
+- [ ] **TRUST-05**: A figure that cannot be meaningful (an implausible cumulative return, an annualised ratio on a record shorter than a year) is withheld or plainly qualified, never shown at full confidence.
+- [ ] **TRUST-06**: Opening any page writes nothing on the user's behalf (for example, viewing a strategy no longer creates an empty note).
+
+### Route — no dead ends
+
+- [ ] **ROUTE-01**: After sign-in, an allocator, a manager and an admin each land on a page made for their role, not on a discovery category.
+- [ ] **ROUTE-02**: A signed-in user is never shown visitor prompts ("Sign up") on `/browse` or `/strategy/<id>`, and an owner can open their own unpublished strategy.
+- [ ] **ROUTE-03**: `/demo` shows no stuck loading notice, no "—" under a headline claim, no empty founder view and no raw ids.
+- [ ] **ROUTE-04**: From a factsheet, a signed-in user can go back to where they came from and take a next step (request an intro, add to their allocation). A shared factsheet carries a header and a sign-up link.
+- [ ] **ROUTE-05**: An allocator can select strategies in discovery and open Compare from the UI.
+- [ ] **ROUTE-06**: "+ Allocation" on My allocation opens the allocator's flow, not the manager's add-strategy wizard.
+- [ ] **ROUTE-07**: My allocation's first tab answers "how is my book doing?" with the book's return, risk and holdings at a glance, or names exactly what is missing.
+- [ ] **ROUTE-08**: Holdings labels positions correctly: allocated positions are not called "not allocated", and cash is not counted as Spot exposure.
+- [ ] **ROUTE-09**: A manager can see which strategies each key feeds, and no one-click control re-points a strategy's key without an explicit confirmation.
+- [ ] **ROUTE-10**: A manager renames a strategy in one place and can see which name is public.
+- [ ] **ROUTE-11**: Every degrade warning names the affected days or key and says what the user can do. My Strategies shows each strategy's health, and its status chips have a legend.
+
+### Clarity — screening reads plainly
+
+- [ ] **CLAR-01**: Every discovery column states its period and whether it is annualised; volatility carries no sign; a track-length column exists.
+- [ ] **CLAR-02**: A strategy whose data is stale is flagged in discovery and does not rank as if it were current.
+- [ ] **CLAR-03**: Specialist terms (Omega, Ulcer, Common-sense ratio, Kolmogorov-Smirnov, Bridge, mandate, TWR and the like) carry a tooltip or a glossary entry.
+- [ ] **CLAR-04**: Each concept has one name across the app (allocation / book / portfolio; watchlist / favorites / star; mandate / preferences / profile).
+- [ ] **CLAR-05**: A listing says when two strategies draw on the same exchange account.
+- [ ] **CLAR-06**: Factsheet sections are numbered in order, dates use one format, Escape closes the filter drawer, the egress-IP link leads to the IPs (or is removed), and the disclaimer typo is fixed.
+
+### Lean — less to wade through
+
+- [ ] **LEAN-01**: A manager has one strategies list (`/strategies` and `/my-strategies` merged).
+- [ ] **LEAN-02**: A strategy has one page, the factsheet. The tearsheet is its print view and `/strategy/<id>` leads to it.
+- [ ] **LEAN-03**: `/portfolios` is removed and Decks is hidden until it works.
+- [ ] **LEAN-04**: Adding a strategy, managing keys and renaming each have one entry point, and the security explanation lives in one place.
+- [ ] **LEAN-05**: The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice, the keyboard hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
+- [ ] **LEAN-06**: My allocation has at most three tabs, lists positions once, and hides dust rows by default.
+- [ ] **LEAN-07**: User-visible leftovers are gone: the "Tweaks / Design variations" panel, the dark-mode option, toggles that do nothing useful, the single-card `/browse`, and duplicated disclaimers.
+
+### Residual — carried from v1.20
+
+- [ ] **RESID-01**: A control capture across a nightly with no deploy in between shows whether stored values move without a code change, and each moved value from the 188 re-reading (1214) is attributed to a cause or named as unexplained (Phase 188 D-13).
+- [ ] **RESID-02**: Book b3's earlier reasons (`out_of_window_flow`, `window_truncated`) are explained, and fixed where they are a defect.
+
+## Future Requirements
+
+Deferred, tracked, not in this roadmap.
+
+- **TERMS-01**: A manager can enter fees, terms and an investment thesis, and the factsheet shows them (founder 2026-11-06: fix and trim only in v1.21).
+- **TERMS-02**: The factsheet states net vs gross and the base currency, and fills "Data source" for every strategy.
+
+## Out of Scope
+
+| Feature | Reason |
+|---------|--------|
+| Legal entity and jurisdiction text in Terms and Privacy | The founder supplies it; an agent must not invent it. |
+| Dark mode | DESIGN.md says it is not planned; LEAN-07 removes the option instead. |
+| New exchange venues (Binance income, Deribit option replay) | Owned by TODOS (`187-BINANCEINCOME-NEXT-MILESTONE`, `189-OPTIONREPLAY-NEXT-MILESTONE`); not UX. |
+| MT5 parity (v1.18) | Parked, founder-gated. |
+
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+
+**Coverage:**
+- Milestone requirements: 32 total
+- Mapped to phases: 0 (filled by the roadmap)
+
+---
+*Requirements defined: 2026-11-06*
+*Last updated: 2026-11-06 after initial definition*
