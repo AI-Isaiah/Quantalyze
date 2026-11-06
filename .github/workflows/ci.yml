@@ -419,7 +419,7 @@ jobs:
     #
     # ⚠️ THE ACCEPTED CONSEQUENCE, RECORDED HERE RATHER THAN DISCOVERED LATER.
     # Two assertions hosted by this job take REAL `.planning/**` content as their
-    # subject: `src/__tests__/lint-sql-gates.test.ts` reads `.planning/REQUIREMENTS.md`
+    # subject: `src/__tests__/lint-sql-gates.test.ts` reads `.planning/milestones/v1.20-REQUIREMENTS.md`
     # and `.planning/ROADMAP.md` and reddens on a planning sentence that still claims
     # five vacuity shapes, and `src/__tests__/verify-plan-anchors.test.ts` reads Phase
     # 159's real `159-VERIFICATION.md` and reddens on a falsified closing recipe. On a

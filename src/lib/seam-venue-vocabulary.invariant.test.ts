@@ -178,7 +178,7 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
     // from the derived population and has no TypeScript disposition. That is
     // the wizardErrors.ts CSV_VALIDATION_FAILED docblock's third measured
     // reason ("THE CODE IS A RULE NAME"), it predates this change, and it is
-    // booked in .planning/phases/161-wizerr-honest-error-surfaces/
+    // booked in .planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/
     // deferred-items.md rather than absorbed here.
     //
     // 59 → 60 (2026-10-11, Phase 167.1.2.2.2 / TRADESYNC plan 06). ⛔ NOTHING

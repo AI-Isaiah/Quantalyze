@@ -20,7 +20,7 @@ Kept (NOT backlog): `.planning/milestones/*` (shipped history), `.planning/codeb
 Items resolved by intervening milestones (v1.10–v1.14) and stale-but-in-prod-without-issue
 items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **Don't fix**.
 
-**Purged 2026-08-20 (milestone v1.20 Backlog Burndown):** ~56 verified-open items moved into `.planning/REQUIREMENTS.md` (v1.20 scope — RANK/SHARE/WIZERR/HONEST/OPS/SEC/DEPS) and deleted here; ~28 entries verified STALE at HEAD by a 17-agent triage (solved by earlier milestones) and deleted. Founder-gated and remaining open items below are untouched. Snapshot of the pre-purge file: `git show 2e67c4a0:TODOS.md`.
+**Purged 2026-08-20 (milestone v1.20 Backlog Burndown):** ~56 verified-open items moved into `.planning/milestones/v1.20-REQUIREMENTS.md` (v1.20 scope — RANK/SHARE/WIZERR/HONEST/OPS/SEC/DEPS) and deleted here; ~28 entries verified STALE at HEAD by a 17-agent triage (solved by earlier milestones) and deleted. Founder-gated and remaining open items below are untouched. Snapshot of the pre-purge file: `git show 2e67c4a0:TODOS.md`.
 
 ---
 
@@ -94,7 +94,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      distinguishes a guarded-route caller from a prober). See 0.04 for the full shape and the
      explicit warning not to simply dedent the capture out of `if provided:`.
 
-   **C. Phase 161's deferred error-surface items** (`.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`):
+   **C. Phase 161's deferred error-surface items** (`.planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/deferred-items.md`):
    - **D-161-01** — the `first_rule.upper()` CSV code family is invisible to the derived vocabulary
    - **D-161-02** — `formatColumnInDataframeMessage` matches a shape this producer has never emitted
    - **D-161-03** — the column-less message still renders "at row 0"
@@ -386,7 +386,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      real one — so this is unfinished business of that phase, not new scope.
    - **Fix shape:** branch the composite arm's code on the actual verdict instead of hardcoding one,
      mapping `sampled_gapped` to its own reason. One-line fix recorded in
-     `.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
+     `.planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
 
 0.08. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
    2026-08-24 during Phase 161 (WIZERR-03) execution, when the approved `161-UI-SPEC.md` remedy
@@ -639,7 +639,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
    **[159-SEED-01] 15 published `is_example` strategies sit at `computation_status =
    'failed'` while still carrying KPI values — PROD, since 2026-05-27.** Measured by the
-   phase-159 C-M1 census (`.planning/phases/159-rank-public-ranking-integrity/159-CENSUS.md`,
+   phase-159 C-M1 census (`.planning/milestones/v1.20-phases/159-rank-public-ranking-integrity/159-CENSUS.md`,
    run read-only against PROD 2026-08-21): of 18 published strategies in the only category
    (`crypto-sma`), 17 fail the `isComputedAnalytics` gate and 15 of those are seeded example
    rows whose analytics have been `failed` since 2026-05-27 yet still hold `sharpe`/`cagr`.
@@ -1801,7 +1801,7 @@ real cause. An investor key at that broker validates `read_only` end to end.
 
 **Status 2026-10-06 (Phase 164.6.6.3 plan 07): code half shipped, entry stays human_needed.** Phase 164.6.6.3 plans 04 to 06 shipped the code half: the wizard now names the cause before `login()`, as `KEY_MT5_SERVER_UNKNOWN` (wire code `MT5_SERVER_UNKNOWN`, 424, recoverable), at the router and at the worker adapter. The remedy is runbook Step 2d (`docs/runbooks/mt5-go-live.md`): add the server to BOTH terminals and to `MT5_KNOWN_SERVERS`. This entry closes only on Step 2d's live reading, a founder-run yes/no that an investor key at a newly added broker validates `read_only`. Headless resolution was not attempted (D-08).
 
-**2026-10-06 (plan 07, D-03 / D-14): the optional founder-led `servers.dat` / headless-resolution measurement was deferred, not run.** It is optional, never blocks item 0, and could only change the detection SOURCE in a later phase. The founder booked **Phase 164.6.6.3.6 MT5SERVERLEARN** the same day to replace the static `MT5_KNOWN_SERVERS` list with learn-on-successful-validation, gated on this same headless-resolution measurement. Its research input is `.planning/phases/164.6.6.3.6-mt5serverlearn-a-broker-server-the-terminals-can-reach-is-le/164.6.6.3.6-BROKER-SERVERS.md`.
+**2026-10-06 (plan 07, D-03 / D-14): the optional founder-led `servers.dat` / headless-resolution measurement was deferred, not run.** It is optional, never blocks item 0, and could only change the detection SOURCE in a later phase. The founder booked **Phase 164.6.6.3.6 MT5SERVERLEARN** the same day to replace the static `MT5_KNOWN_SERVERS` list with learn-on-successful-validation, gated on this same headless-resolution measurement. Its research input is `.planning/milestones/v1.20-phases/164.6.6.3.6-mt5serverlearn-a-broker-server-the-terminals-can-reach-is-le/164.6.6.3.6-BROKER-SERVERS.md`.
 
 ### MT5-SCRUB-OWED-COPY-01 — the wizard shows an owed-scrub refusal as a network timeout (booked 2026-10-05)
 
@@ -4059,7 +4059,7 @@ per-metric decision.
       (d) THEN write the spec — two concurrent `csv-finalize` POSTs on one never-classified
       `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id`
       holds the winner.
-      Full record: `.planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md`.
+      Full record: `.planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md`.
       ✅ **CLOSED 2026-09-12 — BOTH obligations this entry carried are now satisfied, which is the
       only thing that was ever holding the box.** The ⚠️ note above states the rule plainly: the
       checkbox stayed unchecked NOT because VAC-07 was outstanding but because ticking it would
@@ -5591,7 +5591,7 @@ reader does not "complete" a fix that was never promised.
       18:20:00Z wrote its own `public.cron_runs` row with `status = ok`, a measured
       `gap_minutes = 89` against the `10:25:00` ceiling. The full auditable record — marker query,
       five pre-flights, both live ops, the tick, and the post-commit pre-flight re-run — is
-      `.planning/phases/164.1.1-probercadence-the-prober-s-detection-latency-is-measured-and/164.1.1-PROD-SESSION.md`.
+      `.planning/milestones/v1.20-phases/164.1.1-probercadence-the-prober-s-detection-latency-is-measured-and/164.1.1-PROD-SESSION.md`.
       ⛔ **MEASURED 2026-09-18 over a 273.4 h window, twice independently** (Phase 164.1's
       verifier and the orchestrator, identical figures). `.github/workflows/prod-prober.yml:65`
       declares `cron: "0 * * * *"`. GitHub delivered **75 of 273 expected runs = 27 %**, median
@@ -8812,7 +8812,7 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 
 Five items. Two are live data left unrepaired because plan 162-08 could not reach the PROD
 write lane; one is a founder scope call; two are hygiene. Evidence for all five:
-`.planning/phases/162-honest-what-the-user-sees-is-true/162-CENSUS.md` (§Recompute — NOT
+`.planning/milestones/v1.20-phases/162-honest-what-the-user-sees-is-true/162-CENSUS.md` (§Recompute — NOT
 EXECUTED, §str/None follow-through, §Discovery observation).
 
 - [x] **`D-162-1` CLOSED 2026-08-26 BY DELETION — the 15 rows no longer exist.** ⚠️ Everything
@@ -9061,7 +9061,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 - [ ] **`[167.1.2-C2-R3-IN-05]` A corrupt `key_inputs` row on an older key fails the stitched book permanently (Info, C2 round-3 review IN-05, founder: "It is an informational. Just put it into todos").**
       - **What happens.** When the derive stitches a failing older key's history onto the working key (C2 round-2 fix SFH-R2-03), one corrupt `key_inputs` row on the older key marks the whole book `shared_account_history_truncated`, so the book stays hidden, while the rebuilding line says the history is recomputed once a day.
-      - **Source.** `.planning/phases/167.1.2-accounttruth-one-exchange-account-is-counted-once-and-the-al/167.1.2-C2-REVIEW-R3.md`, IN-05.
+      - **Source.** `.planning/milestones/v1.20-phases/167.1.2-accounttruth-one-exchange-account-is-counted-once-and-the-al/167.1.2-C2-REVIEW-R3.md`, IN-05.
 
 ## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
 
@@ -10077,7 +10077,7 @@ without its `code` tag.
 - **[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]** (logged 2026-10-15, review round 3, after three fixer rounds; owner:
   Phase 167.1.2.2.2.1 plan 13 (PR-B), which MUST land them before plan 14's calibrate is read by the founder).
   Four MEDIUMs on founder-facing readings and one false-stop risk survived round 3
-  (`.planning/phases/167.1.2.2.2.1-okxhistory-an-okx-strategy-s-days-older-than-the-3-month-bil/167.1.2.2.2.1-REVIEW.md`
+  (`.planning/milestones/v1.20-phases/167.1.2.2.2.1-okxhistory-an-okx-strategy-s-days-older-than-the-3-month-bil/167.1.2.2.2.1-REVIEW.md`
   round 3 plus the silent-failure hunt):
   (1) the `MIN_CHAINED_PAIRS` floor applies to every currency with any nonzero pnl/fee/balChg, including excluded
   classes the aggregate never sums (one coin-margined OKX option bill stops the job `too_few_pairs`); scope it to
@@ -11363,11 +11363,11 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   `.planning/**` content are hosted by `frontend-test` — the job the docs-only filter now skips on
   exactly the PR class that can move that subject (logged 2026-09-13, Phase 164.6.3 wave 3).**
   MEASURED at the `164.6.3` branch HEAD, by reading both the assertions and the job's new
-  condition. `src/__tests__/lint-sql-gates.test.ts` reads `.planning/REQUIREMENTS.md` and
+  condition. `src/__tests__/lint-sql-gates.test.ts` reads `.planning/milestones/v1.20-REQUIREMENTS.md` and
   `.planning/ROADMAP.md` from disk — its `G3` arm, *"the PLANNING DOCUMENTS do not claim more shapes
   than the linter ships"* — and reddens on a planning sentence that still claims FIVE vacuity shapes
   while VAC-03 ships four. `src/__tests__/verify-plan-anchors.test.ts` reads Phase 159's real
-  `.planning/phases/159-rank-public-ranking-integrity/159-VERIFICATION.md` and reddens on a
+  `.planning/milestones/v1.20-phases/159-rank-public-ranking-integrity/159-VERIFICATION.md` and reddens on a
   falsified closing recipe. Both are hosted by `frontend-test`, which now carries
   `needs: [changed-paths]` and `if: needs.changed-paths.outputs.docs_only != 'true'`.
   **CONSEQUENCE.** A `.planning/`-only PR that reintroduces the forbidden five-shapes sentence, or
@@ -11417,7 +11417,7 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   substitute for making the entry.
   Source: `.github/workflows/ci.yml`'s `frontend-test` job header, which carries this same record so
   the ledger and the workflow say the same thing — until now only the workflow did; and
-  `.planning/phases/164.6.3-cidocspath-a-docs-only-pr-stops-running-the-code-gates-and-a/164.6.3-02-SUMMARY.md`.
+  `.planning/milestones/v1.20-phases/164.6.3-cidocspath-a-docs-only-pr-stops-running-the-code-gates-and-a/164.6.3-02-SUMMARY.md`.
 
 - [ ] **`[PLANANCHOR-SUMMARY-FILTER-01]` the `-pr` filter strips SUMMARY files, so every COMPLETED
   plan reads as PENDING on `main` forever — and `plan-anchor-verify` keeps its `file:line` anchors
@@ -11445,7 +11445,7 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   and can I prove it still bites" is exactly 164.6's competence, and it already owns the sibling
   `[CI-DOCSPATH-01]`.
   Source: measured live at the PR #767 merge gate; the corrected anchor and its dated reason are
-  in `.planning/phases/164.8-testpreprod-test-becomes-a-real-pre-prod/164.8-05-PLAN.md`.
+  in `.planning/milestones/v1.20-phases/164.8-testpreprod-test-becomes-a-real-pre-prod/164.8-05-PLAN.md`.
 
 ## Phase 146.2 — recorded deferrals (logged 2026-08-19)
 
@@ -11719,7 +11719,7 @@ runaway), and every v1.19 requirement is satisfied as written.
   (`NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` unset; only `.env.example` present)
   and was explicitly barred from running the drain against a live database or improvising
   access. Measured counts were therefore NOT taken, and
-  `.planning/phases/158-ops-ci-a-merge-means-a-deploy/158-OPS04-DRAIN-EVIDENCE.md` carries
+  `.planning/milestones/v1.20-phases/158-ops-ci-a-merge-means-a-deploy/158-OPS04-DRAIN-EVIDENCE.md` carries
   empty BEFORE/AFTER tables marked NOT MEASURED rather than invented numbers. ⚠️ The stale
   backlog keeps growing daily until someone runs this. **Fix:** run the 5-step protocol in
   that evidence file from a checkout with TEST credentials, paste the real tables in, then

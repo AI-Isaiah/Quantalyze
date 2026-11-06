@@ -113,6 +113,9 @@ export const DOCS_ONLY_PREFIXES = [".planning/"];
  * file the round-2 measurement never scanned. The exact set is SEVEN entries:
  * six existing files plus the absent SUMMARY. The founder confirmed on
  * 2026-10-02 that the list may grow past the original three.
+ * ⭐ 2026-11-06 (v1.20 close): NINE entries. The archive moved the phase
+ * files under `.planning/milestones/v1.20-phases/`, and R2-W05 now reads the
+ * real 166.3.1-03 marker and plan by name (it only matched them before).
  * The whole-corpus `--pending` scans in `verify-plan-anchors.test.ts` are NOT
  * listed: `plan-anchor-verify` runs the same scan, unfiltered, on every PR,
  * docs-only PRs included, so the PR board already carries that backstop.
@@ -129,12 +132,14 @@ export const DOCS_ONLY_PREFIXES = [".planning/"];
  */
 export const TEST_READ_PLANNING_PATHS = [
   ".planning/config.json",
-  ".planning/REQUIREMENTS.md",
+  ".planning/milestones/v1.20-REQUIREMENTS.md",
   ".planning/ROADMAP.md",
-  ".planning/phases/159-rank-public-ranking-integrity/159-VERIFICATION.md",
-  ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md",
-  ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md",
-  ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-SUMMARY.md",
+  ".planning/milestones/v1.20-phases/159-rank-public-ranking-integrity/159-VERIFICATION.md",
+  ".planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md",
+  ".planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md",
+  ".planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-SUMMARY.md",
+  ".planning/milestones/v1.20-phases/166.3.1-navbreach-the-deribit-composite-s-member-ledger-reconciles-a/166.3.1-03-DEFERRED.md",
+  ".planning/milestones/v1.20-phases/166.3.1-navbreach-the-deribit-composite-s-member-ledger-reconciles-a/166.3.1-03-PLAN.md",
 ];
 
 /**
@@ -1499,7 +1504,7 @@ const CASES = [
       // docs-only and so dropped the merge-push backstop for these files.
       const r = scratchRepo("push-testread");
       try {
-        let pass = ok(TEST_READ_PLANNING_PATHS.length === 7, `the list carries the seven measured paths (got ${TEST_READ_PLANNING_PATHS.length})`);
+        let pass = ok(TEST_READ_PLANNING_PATHS.length === 9, `the list carries the nine measured paths (got ${TEST_READ_PLANNING_PATHS.length})`);
         pass = ok(TEST_READ_PLANNING_PATHS.every((f) => judge([f])), "CALIBRATION: every listed path is docs-only to judge(), so only the new rule can make it code") && pass;
         let head = r.commit({ "src/a.ts": "export {};\n" });
         // CALIBRATION: a planning file NOT on the list still takes the short path.

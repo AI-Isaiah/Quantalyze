@@ -40,6 +40,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -745,20 +746,16 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
     //
     // So the deferral marker is not enough on its own: the ledger must carry
     // the routing, and no other artifact may still point at the wrong phase.
-    const found = findPendingPlans(REPO_ROOT);
-    const deferred = found.deferred.filter((d) =>
-      d.plan.replace(/\\/g, "/").includes("/164.3-07-PLAN.md"),
-    );
-    if (deferred.length === 0) {
-      // Plan 07 executed or was removed — this pin no longer applies, and the
-      // ledger item should be closed by whoever did that.
-      return;
-    }
+    // v1.20 closed 2026-11-06 and its phase directories moved to
+    // `.planning/milestones/v1.20-phases/`, so plan 07 is no longer in the
+    // pending scan at all. The routing is what must survive the archive: the
+    // marker, the TODOS entry and Phase 159's corrected blocked items are read
+    // from where they now live.
 
     const marker = readFileSync(
       join(
         REPO_ROOT,
-        ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine",
+        ".planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine",
         "164.3-07-DEFERRED.md",
       ),
       "utf8",
@@ -779,7 +776,7 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
 
     // And the falsified recipe must be gone from Phase 159's blocked items.
     const v159 = readFileSync(
-      join(REPO_ROOT, ".planning/phases/159-rank-public-ranking-integrity/159-VERIFICATION.md"),
+      join(REPO_ROOT, ".planning/milestones/v1.20-phases/159-rank-public-ranking-integrity/159-VERIFICATION.md"),
       "utf8",
     );
     expect(
@@ -790,17 +787,16 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
     expect(v159).toContain("blocked on PHASE 164.5");
   });
 
-  it("phase 164.3 plan 07 — the real deferral this repo carries — is exempt and REPORTED", () => {
+  it("phase 164.3 plan 07 — the real deferral this repo carries — never couples a PR to its anchors", () => {
     // Pinned against the real tree, not a fixture: the point of WR-06 is that
-    // THIS plan stops coupling every unrelated PR to its anchors.
+    // THIS plan stops coupling every unrelated PR to its anchors. Since the
+    // v1.20 archive (2026-11-06) the plan lives under
+    // `.planning/milestones/v1.20-phases/`, outside the scan, so it must be in
+    // neither list; the deferral itself is pinned by G2 above.
     const found = findPendingPlans(REPO_ROOT);
-    const deferredPlans = found.deferred.map((d) => d.plan.replace(/\\/g, "/"));
-    expect(deferredPlans).toContain(
-      ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md",
-    );
-    expect(found.pending.map((p) => p.replace(/\\/g, "/"))).not.toContain(
-      ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md",
-    );
+    const all = [...found.pending, ...found.deferred.map((d) => d.plan)].map((p) => p.replace(/\\/g, "/"));
+    expect(all.filter((p) => p.endsWith("/164.3-07-PLAN.md"))).toEqual([]);
+    expect(existsSync(join(REPO_ROOT, ".planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md"))).toBe(true);
   });
 });
 
@@ -948,7 +944,17 @@ describe("the CLI contract", () => {
     // satisfied by making it unsatisfiable. The two markers that exist,
     // 164.3-07-DEFERRED.md and 166.3.1-03-DEFERRED.md (added 2026-10-15,
     // NAVBREACH D-07), must still exempt.
-    const res = spawnSync("node", [VERIFIER, "--pending"], {
+    // Since the v1.20 archive (2026-11-06) both live under
+    // `.planning/milestones/v1.20-phases/`, outside the scan, so the real
+    // marker and plan bytes are replayed into a scratch `.planning/phases/`.
+    const real = (rel: string) => readFileSync(join(REPO_ROOT, rel), "utf8");
+    const root = tree("real-markers", {
+      ".planning/phases/164.3-x/164.3-07-PLAN.md": real(".planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md"),
+      ".planning/phases/164.3-x/164.3-07-DEFERRED.md": real(".planning/milestones/v1.20-phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md"),
+      ".planning/phases/166.3.1-x/166.3.1-03-PLAN.md": real(".planning/milestones/v1.20-phases/166.3.1-navbreach-the-deribit-composite-s-member-ledger-reconciles-a/166.3.1-03-PLAN.md"),
+      ".planning/phases/166.3.1-x/166.3.1-03-DEFERRED.md": real(".planning/milestones/v1.20-phases/166.3.1-navbreach-the-deribit-composite-s-member-ledger-reconciles-a/166.3.1-03-DEFERRED.md"),
+    });
+    const res = spawnSync("node", [join(REPO_ROOT, VERIFIER), "--pending", "--root", root], {
       cwd: REPO_ROOT,
       encoding: "utf8",
     });

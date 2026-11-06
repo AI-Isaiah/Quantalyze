@@ -2,14 +2,12 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 188
-current_phase_name: TINYBASE
-status: executing
-stopped_at: every v1.20 phase closed; milestone audit next
-last_updated: "2026-11-06T08:12:07.380Z"
+status: Awaiting next milestone
+stopped_at: v1.20 archived; UX milestone next (/gsd-new-milestone)
+last_updated: "2026-11-06T11:14:57.107Z"
 last_activity: 2026-11-06
-last_activity_desc: 188 TINYBASE closed (verification passed, security 42/42; SC-4 residual routed to the next milestone, D-13)
-state_head: d42a6d5f9aa83a8fd7002dc5d0bdc191a4dd6e97
+last_activity_desc: Milestone v1.20 completed and archived
+state_head: b2398b4b1a806cced06fc792b4b3ef91a8bb8e85
 progress:
   total_phases: 144
   completed_phases: 144
@@ -29,6 +27,10 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 > ⚠️ **2026-07-16 recovery note (standing):** `ROADMAP.md`, `STATE.md`, `REQUIREMENTS.md` (gitignored local ledgers) were once deleted during a `git checkout` flake-test and reconstructed. Never `git checkout` between commits with live `.planning` ledgers — `git stash -u` / isolated worktree / `git show` instead. Also (v1.15 close lesson): never rewrite these ledgers with `head|sed` pipes — BSD sed truncation destroyed ROADMAP.md once.
 
 ## Project Reference
+
+See: .planning/PROJECT.md (updated 2026-11-06)
+
+**Current focus:** Planning the next milestone (UX, founder 2026-11-06) with `/gsd-new-milestone`. It carries the Phase 188 SC-4 residual follow-up (D-13).
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -172,15 +174,17 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 188 (TINYBASE) — CLOSED 2026-11-06
-Plan: 16 of 16 complete; verification passed, security SECURED 42/42; SC-4's residual routed to a follow-up phase in the next milestone by founder decision D-13
-Status: Every v1.20 phase is closed; the milestone audit and completion are next, then the UX milestone. Closed 2026-11-06: 188 TINYBASE (v0.133.20.0 #1196, v0.133.23.0 #1205) and 191 REFUSALRACE (v0.133.22.0 #1200, v0.133.22.3 #1202). Closed 2026-11-05: 186 DERIVEGAPS. Earlier closes are in the Progress table.
-Last activity: 2026-11-06 — 188 TINYBASE closed
-Progress: [█████████░] 99%
+Phase: Milestone v1.20 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-11-06 — Milestone v1.20 completed and archived
+Progress: [██████████] 100%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
+
+**Next: `/gsd-new-milestone` (UX milestone).** v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
 
 **Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
 Load-bearing sequencing (real dependencies, do not reorder):
@@ -1997,3 +2001,7 @@ and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
 
 **SC-4 is MET, not PARTIAL.** Any artifact still saying PARTIAL is superseded — see
 `164.3.1-CONTEXT.md` § Amendment 2026-09-01.
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
