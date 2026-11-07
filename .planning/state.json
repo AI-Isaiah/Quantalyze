@@ -6,12 +6,12 @@
     {
       "number": "192",
       "name": "PUBLICTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "193",
       "name": "QUIETVIEW",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "194",
@@ -61,8 +61,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 192)",
-    "reason": "Phase 1 of 11 — needs a plan"
+    "label": "Advance to the next step",
+    "reason": "Phases 192 and 193 complete; 194 next to discuss; 195 executing, 202 shipping"
   },
-  "updated_at": "2026-11-06T13:50:52.285Z"
+  "updated_at": "2026-11-07T10:45:45.818Z"
 }

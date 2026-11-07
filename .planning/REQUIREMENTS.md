@@ -10,18 +10,19 @@
 
 ### Trust — what the app says is true
 
-- [ ] **TRUST-01**: A visitor reading the home, `/security`, `/for-quants` and Terms pages gets one consistent, true account of how API keys are stored and encrypted, which TLS versions are accepted, who can view a factsheet, what listing costs, and how many exchanges are supported. The home page no longer asks an anonymous visitor for a key and secret.
-- [ ] **TRUST-02**: Scrolling over a factsheet chart never changes its date range by itself. A narrowed range is always labelled with a one-click reset, and is never silently restored on a later visit.
-- [ ] **TRUST-03**: No factsheet shows developer notes, placeholder copy, or demo content that belongs to another strategy or portfolio.
+- [x] **TRUST-01**: A visitor reading the home, `/security`, `/for-quants` and Terms pages gets one consistent, true account of how API keys are stored and encrypted, which TLS versions are accepted, who can view a factsheet, what listing costs, and how many exchanges are supported. The home page no longer asks an anonymous visitor for a key and secret.
+- [x] **TRUST-02**: Scrolling over a factsheet chart never changes its date range by itself. A narrowed range is always labelled with a one-click reset, and is never silently restored on a later visit.
+- [x] **TRUST-03**: No factsheet shows developer notes, placeholder copy, or demo content that belongs to another strategy or portfolio.
 - [ ] **TRUST-04**: A metric with the same name shows the same value for the same strategy and period on every page (My Strategies, factsheet, tearsheet, Scenario, Holdings). Where two figures differ on purpose (gross vs net, a different period or definition), the label says so.
 - [ ] **TRUST-05**: A figure that cannot be meaningful (an implausible cumulative return, an annualised ratio on a record shorter than a year) is withheld or plainly qualified, never shown at full confidence.
-- [ ] **TRUST-06**: Opening any page writes nothing on the user's behalf (for example, viewing a strategy no longer creates an empty note).
+- [x] **TRUST-06**: Opening any page writes nothing on the user's behalf (for example, viewing a strategy no longer creates an empty note).
 
 ### Route — no dead ends
 
 - [ ] **ROUTE-01**: After sign-in, an allocator, a manager and an admin each land on a page made for their role, not on a discovery category.
 - [ ] **ROUTE-02**: A signed-in user is never shown visitor prompts ("Sign up") on `/browse` or `/strategy/<id>`, and an owner can open their own unpublished strategy.
-- [ ] **ROUTE-03**: `/demo` shows no stuck loading notice, no "—" under a headline claim, no empty founder view and no raw ids.
+- [x] **ROUTE-03**: `/demo` shows no stuck loading notice, no "—" under a headline claim, no empty founder view and no raw ids.
+  - *Amended 2026-11-07 (Phase 192 D-11, founder: "retire the whole demo part"; recorded in 192-CONTEXT.md and the ROADMAP):* the public demo is retired, not repaired. ROUTE-03 is met when `/demo` and every link to it are gone, a request for it gets the same answer as an unknown URL, and no public page links to a retired route. The sentence above is kept as lineage.
 - [ ] **ROUTE-04**: From a factsheet, a signed-in user can go back to where they came from and take a next step (request an intro, add to their allocation). A shared factsheet carries a header and a sign-up link.
 - [ ] **ROUTE-05**: An allocator can select strategies in discovery and open Compare from the UI.
 - [ ] **ROUTE-06**: "+ Allocation" on My allocation opens the allocator's flow, not the manager's add-strategy wizard.
@@ -75,15 +76,15 @@ Deferred, tracked, not in this roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| TRUST-01 | Phase 192 | Pending |
-| TRUST-02 | Phase 193 | Pending |
-| TRUST-03 | Phase 193 | Pending |
+| TRUST-01 | Phase 192 | Satisfied (192-VERIFICATION.md passed, UAT passed 2026-11-07) |
+| TRUST-02 | Phase 193 | Complete |
+| TRUST-03 | Phase 193 | Complete |
 | TRUST-04 | Phase 194 | Pending |
 | TRUST-05 | Phase 194 | Pending |
-| TRUST-06 | Phase 193 | Pending |
+| TRUST-06 | Phase 193 | Complete |
 | ROUTE-01 | Phase 199 | Pending |
 | ROUTE-02 | Phase 196 | Pending |
-| ROUTE-03 | Phase 192 | Pending |
+| ROUTE-03 | Phase 192 | Satisfied as amended by D-11 (192-VERIFICATION.md passed, UAT passed 2026-11-07) |
 | ROUTE-04 | Phase 196 | Pending |
 | ROUTE-05 | Phase 197 | Pending |
 | ROUTE-06 | Phase 198 | Pending |

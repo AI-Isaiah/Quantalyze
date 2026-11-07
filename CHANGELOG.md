@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.25.1] - 2026-11-07 — records: close PUBLICTRUTH 192 and QUIETVIEW 193
+
+### Added
+- Phase 192 PUBLICTRUTH planning records on `main`: the plans and summaries (15 executed, plus the deferral notes for the two plans the founder's demo retirement superseded), context, evidence, research, UI-SPEC, review, security audit, validation and the verification (passed).
+- 192-UAT.md, four of four passed on 2026-11-07. The home verify band and the `/security` At Rest cell were read at 390px and at desktop width on the PR preview, the Lighthouse medians cleared the 0.82 floor (/ 0.86, /browse 0.87, /for-quants 0.93, /security 0.95), and the PR's 29 CI checks, `e2e` and `e2e-seeded` among them, were green on its head.
+- Phase 193 QUIETVIEW planning records on `main`: the seven plans and summaries, context, research, patterns, UI-SPEC, validation, the D-08 read-only count, three review rounds with their fix and disposition notes, the security audit and the verification (passed).
+- 193-UAT.md, one of one passed on 2026-11-07, run on PR #1211's preview. A plain wheel scrolled the page on both charts and left the range label alone, Ctrl+wheel zoomed and showed "Selected range" with "Reset to full history", reset restored the full history, a zoom then reload opened at the full history with nothing written to storage or the URL, and the histogram hint wrapped without overflow at 390px. The PR's 29 CI checks were green on head `59d4b4bdf`, `e2e` and `e2e-seeded` among them, with the five re-baked svg-parity goldens.
+
+### Changed
+- ROADMAP: Phases 192 and 193 ticked complete with their Progress rows dated 2026-11-07. 192 keeps the D-11 founder override that retired the public demo, and 193 keeps the D-01 and D-09 founder overrides (Ctrl/Cmd + wheel, "Allow clearing").
+- REQUIREMENTS: TRUST-01, TRUST-02, TRUST-03 and TRUST-06 are satisfied, and ROUTE-03 is met as amended by D-11.
+- 192-VERIFICATION.md and 193-VERIFICATION.md move from `human_needed` to `passed`, their browser-only checks resolved by the UATs. Both keep `verified_at_sha` and `drift_subjects`.
+- STATE: Phases 192 and 193 are closed (2 of 11 v1.21 phases). The position names 202 RESIDCHURN complete on its branch and shipping next, 195 TRIM executing in parallel, 203 B3TRUNC booked, 194 next to discuss, and 196-201 waiting on dependencies.
+
+### Notes
+- Records only. The code shipped in v0.133.24.0 (#1210) and v0.133.25.0 (#1211).
+- Verification passed does not mean the Nyquist audit ran: 192-VALIDATION.md and 193-VALIDATION.md are still `draft`, and the completion handler warned about both.
+
 ## [0.133.25.0] - 2026-11-07 — QUIETVIEW 193: viewing a strategy changes nothing and shows only its own content
 
 ### Changed
