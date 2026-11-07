@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import { LiveRegion } from "@/components/ui/LiveRegion";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { computeFreshness } from "@/lib/freshness";
@@ -125,10 +124,10 @@ interface Decision {
 }
 
 interface QueueData {
-  // Nullable: the public /api/demo/match route returns `profile: null` when the
-  // seed demo allocator isn't provisioned in this environment (an empty queue
-  // instead of a 500). The header/breadcrumb below null-guard on it.
-  profile: Profile | null;
+  // Never null: `getAllocatorMatchPayload` reads the profile with `.single()`
+  // and `castRow`, so an allocator with no profile row is a thrown error and a
+  // 500 from `/api/admin/match/<id>` (shown by the error state), not a 200.
+  profile: Profile;
   preferences: AllocatorPreferences | null;
   batch: MatchBatch | null;
   candidates: CandidateRow[];
@@ -142,28 +141,12 @@ interface QueueData {
 /**
  * Match queue for a single allocator.
  *
- * Two optional props allow this same component to back both the real
- * founder-facing `/admin/match/[allocator_id]` page and the public
- * read-only `/demo/founder-view` page:
- *
- *   - `forceReadOnly` — hides action buttons, disables the slide-out opener
- *     AND short-circuits every keyboard shortcut so pressing `s`/`u`/`d`/`r`
- *     on the public demo doesn't fire action handlers.
- *   - `sourceApiPath` — swaps the GET source between `/api/admin/match`
- *     (default, auth-gated) and `/api/demo/match` (public, UUID-locked).
- *
- * Both default to backward-compatible values so the existing admin page
- * continues to work unchanged.
+ * Backs the admin-only `/admin/match/[allocator_id]` page and reads
+ * `/api/admin/match/<allocatorId>` (auth-gated). Below 768px the queue is
+ * read-only: write controls are hidden and every write handler returns early
+ * (see `readOnly` below).
  */
-export function AllocatorMatchQueue({
-  allocatorId,
-  forceReadOnly = false,
-  sourceApiPath = "/api/admin/match",
-}: {
-  allocatorId: string;
-  forceReadOnly?: boolean;
-  sourceApiPath?: string;
-}) {
+export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
   const [data, setData] = useState<QueueData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -185,7 +168,7 @@ export function AllocatorMatchQueue({
   //     useMediaQuery's server snapshot is false; `readOnly` is the guard.
   const isLg = useMediaQuery("(min-width: 1024px)");
   const isMd = useMediaQuery("(min-width: 768px)");
-  const readOnly = forceReadOnly || !isMd;
+  const readOnly = !isMd;
 
   // SFH-170-05: the preferences panel's confirm runs `onRecomputeRequested`
   // from a setTimeout that closed over the render in which Save was pressed.
@@ -223,7 +206,7 @@ export function AllocatorMatchQueue({
     setError(null);
     setRecomputeNotice(null);
     try {
-      const res = await fetch(`${sourceApiPath}/${allocatorId}`);
+      const res = await fetch(`/api/admin/match/${allocatorId}`);
       if (loadIdRef.current !== thisLoadId) return; // A newer load is in flight
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -240,7 +223,7 @@ export function AllocatorMatchQueue({
         setLoading(false);
       }
     }
-  }, [allocatorId, sourceApiPath]);
+  }, [allocatorId]);
 
   useEffect(() => {
     load();
@@ -359,7 +342,7 @@ export function AllocatorMatchQueue({
   );
 
   // Keyboard shortcuts — only active at lg+ (1024+) per Sprint 4 T10.1.
-  // `readOnly` (forceReadOnly, or below md) is checked by `guard`.
+  // `readOnly` (below md) is checked by `guard`.
   const guard = useCallback(
     (fn: () => void) => () => {
       if (readOnly) return;
@@ -419,7 +402,7 @@ export function AllocatorMatchQueue({
 
   // Shortcut help overlay: bound to "?" (Shift+/).
   useEffect(() => {
-    if (!isLg || forceReadOnly) return;
+    if (!isLg) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "?") return;
       if (document.activeElement !== document.body) return;
@@ -428,7 +411,7 @@ export function AllocatorMatchQueue({
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isLg, forceReadOnly]);
+  }, [isLg]);
 
   // ─── Render ─────────────────────────────────────────────────────────
 
@@ -469,37 +452,24 @@ export function AllocatorMatchQueue({
 
   return (
     <div className="space-y-6">
-      {/* Public demo read-only banner */}
-      {forceReadOnly && (
-        <ScopedBanner
-          tone="accent"
-          title="Read-only preview"
-          subtitle="Actions disabled on the public demo."
-        />
-      )}
-
       {/* Breadcrumb */}
-      {!forceReadOnly && profile && (
-        <nav className="flex items-center gap-2 text-small text-text-muted">
-          <Link href="/admin/match" className="hover:text-text-primary">
-            Match queue
-          </Link>
-          <span>/</span>
-          <span className="text-text-primary">
-            {profile.display_name || profile.email}
-          </span>
-        </nav>
-      )}
+      <nav className="flex items-center gap-2 text-small text-text-muted">
+        <Link href="/admin/match" className="hover:text-text-primary">
+          Match queue
+        </Link>
+        <span>/</span>
+        <span className="text-text-primary">
+          {profile.display_name || profile.email}
+        </span>
+      </nav>
 
       {/* Read-only mobile banner */}
-      {!forceReadOnly && (
-        <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
-          <p className="text-small text-text-primary">
-            <strong className="font-semibold">Read-only on mobile.</strong>{" "}
-            Open on a tablet or desktop (768px or wider) to record KEEP / SKIP / Send Intro decisions.
-          </p>
-        </div>
-      )}
+      <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
+        <p className="text-small text-text-primary">
+          <strong className="font-semibold">Read-only on mobile.</strong>{" "}
+          Open on a tablet or desktop (768px or wider) to record KEEP / SKIP / Send Intro decisions.
+        </p>
+      </div>
 
       {/* SFH-170-05: a refused recompute is announced at every width. */}
       {recomputeNotice && (
@@ -511,17 +481,14 @@ export function AllocatorMatchQueue({
         </div>
       )}
 
-      {/* Header strip — skipped when the (demo) allocator profile is
-          unprovisioned; a null profile renders just the empty-state below. */}
-      {profile && (
+      {/* Header strip */}
       <Card>
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-h3 font-display text-text-primary">
-              {/* Email only off the public read-only demo, as the breadcrumb above does. */}
               {profile.display_name ||
                 profile.company ||
-                (!forceReadOnly && profile.email) ||
+                profile.email ||
                 "Unknown allocator"}
             </h1>
             {profile.company && (
@@ -552,27 +519,23 @@ export function AllocatorMatchQueue({
 
         {/* Action bar */}
         <div className="mt-4 flex items-center gap-2 flex-wrap">
-          {!forceReadOnly && (
-            <>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleRecompute}
-                disabled={recomputing}
-                className="hidden md:inline-flex"
-              >
-                {recomputing ? "Computing..." : "Recompute now"}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={guard(() => setShowPreferencesPanel(true))}
-                className="hidden md:inline-flex"
-              >
-                Edit preferences
-              </Button>
-            </>
-          )}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleRecompute}
+            disabled={recomputing}
+            className="hidden md:inline-flex"
+          >
+            {recomputing ? "Computing..." : "Recompute now"}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={guard(() => setShowPreferencesPanel(true))}
+            className="hidden md:inline-flex"
+          >
+            Edit preferences
+          </Button>
           {batch && (
             <span className="ml-auto text-micro text-text-muted font-mono tabular-nums">
               {candidates.length} candidates &middot;{" "}
@@ -582,7 +545,6 @@ export function AllocatorMatchQueue({
           )}
         </div>
       </Card>
-      )}
 
       {/* Filter-relaxed callout */}
       {batch?.filter_relaxed && (
@@ -599,17 +561,15 @@ export function AllocatorMatchQueue({
           <p className="text-small text-text-secondary mb-4">
             No candidates yet for this allocator.
           </p>
-          {!forceReadOnly && (
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={handleRecompute}
-              disabled={recomputing}
-              className="hidden md:inline-flex"
-            >
-              {recomputing ? "Computing..." : "Recompute now"}
-            </Button>
-          )}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleRecompute}
+            disabled={recomputing}
+            className="hidden md:inline-flex"
+          >
+            {recomputing ? "Computing..." : "Recompute now"}
+          </Button>
         </Card>
       )}
       {batch && candidates.length === 0 && (
@@ -633,7 +593,6 @@ export function AllocatorMatchQueue({
                 candidate={cand}
                 selected={selectedIdx === i}
                 alreadySent={sentStrategyIds.has(cand.strategy_id)}
-                readOnly={forceReadOnly}
                 onSelect={() => setSelectedIdx(i)}
                 onSendIntro={guard(() => setSendIntroFor(cand))}
               />
@@ -734,7 +693,6 @@ export function AllocatorMatchQueue({
                 alreadySent={sentStrategyIds.has(selectedCandidate.strategy_id)}
                 isKept={thumbsUpIds.has(selectedCandidate.strategy_id)}
                 isSkipped={thumbsDownIds.has(selectedCandidate.strategy_id)}
-                isReadOnly={forceReadOnly}
                 onSendIntro={guard(() => setSendIntroFor(selectedCandidate))}
                 onKeep={guard(() =>
                   handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id),

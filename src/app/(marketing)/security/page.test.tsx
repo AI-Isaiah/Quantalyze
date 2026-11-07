@@ -497,3 +497,184 @@ describe("Phase 164.6.6.3.5 — /security names no address (D-01, S6)", () => {
     }
   });
 });
+
+/**
+ * Phase 192 — PUBLICTRUTH (plan 04, D-01, D-02).
+ *
+ * /security's Key handling section is the one full explanation of key storage.
+ * It states the cipher the code uses (analytics-service/services/encryption.py:
+ * Fernet, AES-128 in CBC mode authenticated with HMAC-SHA256) and where the KEK
+ * lives (the analytics service's own environment, with a per-row KEK version).
+ * The old copy named a 256-bit GCM cipher and a Supabase Vault-held KEK, neither
+ * of which exists in the key path. A visitor forwarding this page to a risk team
+ * is relying on it, so both the prose and the at-a-glance table are pinned.
+ */
+function squash(text: string | null | undefined): string {
+  return (text ?? "").replace(/\s+/g, " ").trim();
+}
+
+describe("Phase 192 — /security is the one full key-storage explanation (D-01, D-02)", () => {
+  it("Key handling names Fernet, the per-row KEK version, and no unsupported cipher or Vault", () => {
+    render(<SecurityPage />);
+    const keyHandling = document.getElementById("key-handling")
+      ?.parentElement as HTMLElement;
+    expect(keyHandling).toBeTruthy();
+    const text = squash(keyHandling.textContent);
+    expect(text).toContain(
+      "We encrypt credential payloads at rest with Fernet (AES-128 in CBC mode, authenticated with HMAC-SHA256).",
+    );
+    expect(text).toContain("each row records which KEK version wrapped it");
+    expect(text).toContain("held only by the Python analytics service");
+    expect(text).not.toMatch(/AES-256/);
+    expect(text).not.toMatch(/Vault/);
+  });
+
+  it("keeps the column-grant clause with both role names in code spans", () => {
+    render(<SecurityPage />);
+    const keyHandling = document.getElementById("key-handling")
+      ?.parentElement as HTMLElement;
+    expect(squash(keyHandling.textContent)).toContain(
+      "the encrypted columns are revoked at the column-grant level from the anon and authenticated Postgres roles.",
+    );
+    const codes = Array.from(keyHandling.querySelectorAll("code")).map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(codes).toEqual(expect.arrayContaining(["anon", "authenticated"]));
+  });
+
+  it("the at-a-glance At Rest row states the same cipher and KEK location as the prose", () => {
+    render(<SecurityPage />);
+    const summary = document.getElementById("data-handling-summary")
+      ?.parentElement as HTMLElement;
+    const atRest = within(summary).getByRole("row", { name: /At Rest/ });
+    const cells = within(atRest)
+      .getAllByRole("cell")
+      .map((c) => squash(c.textContent));
+    expect(cells).toEqual([
+      "Fernet (AES-128-CBC + HMAC-SHA256)",
+      "Per-row DEK wrapped by a KEK held by the analytics service",
+    ]);
+  });
+
+  it("no part of the page still names the unsupported cipher or Vault-held KEK", () => {
+    const { container } = render(<SecurityPage />);
+    const text = squash(container.textContent);
+    expect(text).not.toMatch(/AES-256/);
+    expect(text).not.toMatch(/Supabase Vault/);
+    expect(text).not.toMatch(/Vault-held/);
+  });
+});
+
+/**
+ * Phase 192 — PUBLICTRUTH (plan 04, D-03).
+ *
+ * The TLS sentence follows the four handshakes recorded in 192-EVIDENCE.md
+ * (1.0 and 1.1 refused, 1.2 and 1.3 accepted). The old copy said TLS 1.2 is
+ * disabled, which the production edge contradicts, and claimed internal
+ * service-to-service calls use the same profile, which was never measured.
+ * The certificate and HSTS sentences stay because the evidence records the
+ * served issuer and validity window and the served max-age=31536000 header.
+ * This phase changes the sentence, never the edge's TLS or header behaviour.
+ */
+describe("Phase 192 — /security TLS sentence matches the recorded handshakes (D-03)", () => {
+  it("states TLS 1.3 or TLS 1.2 and that the edge refuses 1.0 and 1.1", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("data-handling")
+      ?.parentElement as HTMLElement;
+    const text = squash(section.textContent);
+    expect(text).toContain(
+      "is encrypted with TLS 1.3 or TLS 1.2. The edge refuses TLS 1.0 and 1.1.",
+    );
+  });
+
+  it("drops the false TLS 1.2 claim and the unmeasured service-to-service claim", () => {
+    const { container } = render(<SecurityPage />);
+    const text = squash(container.textContent);
+    expect(text).not.toContain("TLS 1.0, 1.1, and 1.2");
+    expect(text).not.toContain("We disable TLS 1.0");
+    expect(text).not.toContain(
+      "internal service-to-service calls use the same profile",
+    );
+  });
+
+  it("keeps the recorded HSTS and certificate sentences", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("data-handling")
+      ?.parentElement as HTMLElement;
+    const text = squash(section.textContent);
+    expect(text).toContain("HSTS is enabled for quantalyze.xyz with a one-year max-age.");
+    expect(text).toContain(
+      "Certificates are issued by a public CA and rotated automatically before expiry.",
+    );
+  });
+
+  it("the In Transit row matches the prose", () => {
+    render(<SecurityPage />);
+    const summary = document.getElementById("data-handling-summary")
+      ?.parentElement as HTMLElement;
+    const inTransit = within(summary).getByRole("row", { name: /In Transit/ });
+    const cells = within(inTransit)
+      .getAllByRole("cell")
+      .map((c) => squash(c.textContent));
+    expect(cells[0]).toBe("TLS 1.3, TLS 1.2");
+    expect(cells[1]).toMatch(/^TLS 1\.0 and 1\.1 refused at the edge/);
+    expect(cells[1]).toContain("HSTS enabled");
+  });
+});
+
+/**
+ * Phase 192 — PUBLICTRUTH (plan 04, retention).
+ *
+ * 192-EVIDENCE.md "Retention at HEAD": strategy fills and aggregate analytics
+ * have no scheduled deletion and no retention window; they live as long as the
+ * strategy row, a key disconnect leaves them in place, and account closure
+ * blanks identifying fields on fills without deleting the rows. The old copy
+ * said fills and aggregates are removed when a key is disconnected or the
+ * account is closed, and pointed at a deletion section that does not exist.
+ */
+describe("Phase 192 — /security retention copy states only what the code does", () => {
+  it("does not claim removal on key disconnect or account closure, nor a deletion section", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("data-handling")
+      ?.parentElement as HTMLElement;
+    const text = squash(section.textContent);
+    expect(text).not.toContain("life of the connection");
+    expect(text).not.toContain("for that connection are removed");
+    expect(text).not.toContain("section below on deletion");
+  });
+
+  it("says fills and aggregates are kept while the strategy exists, with no scheduled deletion", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("data-handling")
+      ?.parentElement as HTMLElement;
+    const text = squash(section.textContent);
+    expect(text).toContain("We run no scheduled deletion on fills or aggregates");
+    expect(text).toContain("for as long as the strategy they belong to exists");
+    expect(text).toContain("Disconnecting an exchange key does not by itself remove them.");
+  });
+
+  it("says a key delete removes the credential row only: the strategy and its listing stay (CR-01)", () => {
+    // strategies.api_key_id is ON DELETE SET NULL and a published strategy can
+    // only be archived, so the old "listing reference removed in the same
+    // transaction" sentence contradicted the retention paragraph above it.
+    render(<SecurityPage />);
+    const section = document.getElementById("data-handling")
+      ?.parentElement as HTMLElement;
+    const text = squash(section.textContent);
+    expect(text).not.toContain("delete its strategy from your dashboard");
+    expect(text).not.toContain("listing reference");
+    expect(text).not.toContain("same transaction");
+    expect(text).toContain(
+      "You can delete an exchange key from your dashboard. That removes its encrypted credential row, and the analytics service loses its decryption path immediately. The strategy, its fills and its listing stay; archiving the strategy removes the listing from discovery. A key used by a published composite cannot be deleted: use the contact form to change that composite's keys.",
+    );
+  });
+
+  it("the Compliance paragraph advertises no retention windows", () => {
+    render(<SecurityPage />);
+    const compliance = document.getElementById("compliance-posture")
+      ?.parentElement as HTMLElement;
+    const text = squash(compliance.textContent);
+    expect(text).not.toContain("retention windows");
+    expect(text).toContain("encryption spec, data retention, exchange scopes");
+  });
+});

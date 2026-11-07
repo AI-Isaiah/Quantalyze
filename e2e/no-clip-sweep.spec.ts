@@ -153,7 +153,6 @@ const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/contact", anchor: "main h1" },
   { path: "/for-quants", anchor: "main h1" },
   { path: "/browse", anchor: "main h1" },
-  { path: "/demo", anchor: "#editorial-hero-headline" },
 ];
 
 test.describe("no-clip sweep (VERIFY-03) — public", () => {

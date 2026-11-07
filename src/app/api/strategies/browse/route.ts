@@ -223,7 +223,7 @@ export const GET = withAllocatorAuth(
     // Audit C-0112 — `name` is run through `displayStrategyName` so the
     // raw strategies.name column is suppressed on any row whose
     // `disclosure_tier !== 'institutional'`. This mirrors the rule
-    // applied by /api/demo/match and the Match Queue: codename wins;
+    // applied by the Match Queue: codename wins;
     // institutional rows may surface the real name; exploratory rows
     // missing a codename collapse to a synthetic `Strategy #<id>`.
     // Without this guard, the drawer's case-insensitive search keyed on

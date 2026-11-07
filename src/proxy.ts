@@ -15,7 +15,7 @@ import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 // would be bounced to the dashboard mid-reset. /forgot-password is NOT
 // bounce-exempt: an already-authed user landing there bounces to the dashboard,
 // matching /login + /signup.
-const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/api/og/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/factsheet-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security", "/contact"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/api/og/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/factsheet-share", "/api/benchmark/btc", "/legal", "/for-quants", "/api/for-quants-lead", "/security", "/contact"];
 // 51-REVIEW (red-team): /api/health is a documented public liveness probe, but
 // it was NOT in PUBLIC_ROUTES — the proxy session gate runs BEFORE the route
 // handler, so an unauthenticated uptime/ops probe got 307→login instead of
@@ -71,7 +71,7 @@ export async function proxy(request: NextRequest) {
 
   // Strict route matching: `path === route` handles exact matches and
   // `startsWith(route + "/")` handles nested routes. This prevents false
-  // positives where `/demo` would accidentally match `/demonstration`.
+  // positives where `/legal` would accidentally match `/legalese`.
   const path = request.nextUrl.pathname;
   const isPublicRoute =
     path === "/" ||
@@ -88,7 +88,7 @@ export async function proxy(request: NextRequest) {
   //
   // Two intents here:
   //
-  //   (a) Marketing surfaces (`/demo`, `/for-quants`, `/security`) — admins
+  //   (a) Marketing surfaces (`/for-quants`, `/security`) — admins
   //       and founders viewing the public marketing pages while signed in,
   //       or sharing the landing page with a colleague, stay on the page
   //       instead of being bounced to the dashboard.
@@ -107,7 +107,6 @@ export async function proxy(request: NextRequest) {
   // bounce authed users back to the dashboard (no point seeing the login
   // form once you're in). The test at "authenticated user on /login DOES
   // redirect away" pins that intent.
-  const isDemoRoute = path === "/demo" || path.startsWith("/demo/");
   const isForQuantsRoute =
     path === "/for-quants" || path.startsWith("/for-quants/");
   const isSecurityRoute =
@@ -144,7 +143,6 @@ export async function proxy(request: NextRequest) {
   const isResetPasswordRoute =
     path === "/reset-password" || path.startsWith("/reset-password/");
   const isAuthBounceExempt =
-    isDemoRoute ||
     isForQuantsRoute ||
     isSecurityRoute ||
     isContactRoute ||

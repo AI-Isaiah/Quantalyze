@@ -5,7 +5,7 @@ import { test, expect } from "@playwright/test";
  *
  * The (marketing) Next route group (parens → ZERO URL change) wraps the public
  * marketing/info routes — landing (`/`), `/legal/*`, `/for-quants`, `/security`,
- * `/demo` — in ONE shared server-rendered shell. This canary proves the folder
+ * `/contact` — in ONE shared server-rendered shell. This canary proves the folder
  * move did NOT regress the public boundary or the single-landmark discipline.
  *
  * For each marketing route, as an ANONYMOUS visitor (no auth), it asserts:
@@ -42,8 +42,6 @@ const MARKETING_ROUTES: { path: string; label: string }[] = [
   { path: "/legal/privacy", label: "legal/privacy" },
   { path: "/legal/terms", label: "legal/terms" },
   { path: "/legal/disclaimer", label: "legal/disclaimer" },
-  { path: "/demo", label: "demo" },
-  { path: "/demo/founder-view", label: "demo/founder-view" },
 ];
 
 test.describe("(marketing) route group — anon canary (NAV-04)", () => {

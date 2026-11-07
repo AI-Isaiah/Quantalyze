@@ -13,9 +13,9 @@ import { assertNoReflow } from "./helpers/reflow";
  * rather than false-greening (the W-02 lesson; Pitfall 5).
  *
  * Founder decision 2026-09-27: 390px (iPhone 12) is the narrowest supported
- * width; 320px and 400% zoom are deliberately not required. /browse and /demo
- * render DashboardChrome, so the corrected helper measures `#main-content`
- * there, and a 320px run would demand 320-only fixes nobody asked for.
+ * width; 320px and 400% zoom are deliberately not required. /browse renders
+ * DashboardChrome, so the corrected helper measures `#main-content` there, and
+ * a 320px run would demand 320-only fixes nobody asked for.
  * WCAG 1.4.4 text-resize is unchanged and does not depend on this width.
  *
  * UNSEEDED spec — runs against the placeholder-env build on PUBLIC routes,
@@ -47,10 +47,6 @@ const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/for-quants", anchor: "main h1" },
   // Browse — <main> (browse/layout.tsx) wraps the page <h1>.
   { path: "/browse", anchor: "main h1" },
-  // Demo — no <h1>; EditorialHero renders <h1 id="editorial-hero-headline">.
-  // Anchor on that visible headline so the demo body — not the sticky banner
-  // chrome — is what gates.
-  { path: "/demo", anchor: "#editorial-hero-headline" },
 ];
 
 test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 390px — public", () => {

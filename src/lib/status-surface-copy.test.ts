@@ -2,8 +2,12 @@ import { describe, it, expect } from "vitest";
 import type { ComputeState } from "./compute-state";
 import {
   ANALYTICS_UPDATING_LINE,
+  EXCHANGE_LIST,
   KCS10_PUBLIC_SENTENCE,
   KEY_STATUS_UNREADABLE_NOTE,
+  KEY_STORAGE_LINK,
+  KEY_STORAGE_SENTENCE,
+  LISTING_COST_SENTENCE,
   ownerRemedy,
   ownerStateLine,
   probeUnreadableShareNote,
@@ -802,6 +806,9 @@ describe("170.1 D-09 — grep invariant: no rendered status-surface string carri
       KCS10_PUBLIC_SENTENCE,
       STRATEGIES_LIST_UNREADABLE,
       KEY_STATUS_UNREADABLE_NOTE,
+      KEY_STORAGE_SENTENCE,
+      LISTING_COST_SENTENCE,
+      EXCHANGE_LIST,
     ]) {
       out.add(text);
     }
@@ -845,5 +852,39 @@ describe("FQ190 — the factsheet updating line (phase 190 D-03)", () => {
     for (const banned of ["computing", "pending", "job", "queue", "minute", "%"]) {
       expect(lower).not.toContain(banned);
     }
+  });
+});
+
+describe("192 PUBLICTRUTH shared sentences", () => {
+  // ORACLE INDEPENDENCE: every expected value is typed here, never imported.
+  it("S-KEY is exact and ASCII", () => {
+    expect(KEY_STORAGE_SENTENCE).toBe(
+      "We store your read-only API key encrypted, under a data key of its own, and only our analytics service can decrypt it.",
+    );
+    expect(/[^\x00-\x7F]/.test(KEY_STORAGE_SENTENCE)).toBe(false);
+  });
+
+  it("S-KEY-LINK points at the /security anchor the page keeps byte-identical", () => {
+    expect(KEY_STORAGE_LINK.href).toBe("/security#key-handling");
+    expect(KEY_STORAGE_LINK.label).toBe("How we store keys");
+  });
+
+  it("S-COST is exact, ASCII and states no fee figure", () => {
+    expect(LISTING_COST_SENTENCE).toBe(
+      "Listing a strategy is free. A success fee may apply to matched allocations, as set out in the manager agreement.",
+    );
+    expect(/[^\x00-\x7F]/.test(LISTING_COST_SENTENCE)).toBe(false);
+    expect(/\d|%/.test(LISTING_COST_SENTENCE)).toBe(false);
+  });
+
+  it("S-EXCH is a disjunction over the flag-aware venue list (sFOX off)", () => {
+    // The suite runs with NEXT_PUBLIC_SFOX_ENABLED unset, so EXCHANGES is the
+    // four-venue base list. A second pin on the literal so a reorder fails.
+    const expected = new Intl.ListFormat("en", {
+      style: "long",
+      type: "disjunction",
+    }).format(["Binance", "OKX", "Bybit", "Deribit"]);
+    expect(EXCHANGE_LIST).toBe(expected);
+    expect(EXCHANGE_LIST).toBe("Binance, OKX, Bybit, or Deribit");
   });
 });

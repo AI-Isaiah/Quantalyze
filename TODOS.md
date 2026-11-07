@@ -1438,6 +1438,7 @@ true for 146 and half of 142–145, and **false for 141**.
 - **[170.1.2-PDF-RENDER-NOTFOUND]** (logged 2026-10-20, Phase 170.1.2 LABELS final review after fix round 3, MEDIUM, observability only, not user-facing; owner: the next phase touching `/portfolio-pdf`). `src/app/portfolio-pdf/[id]/page.tsx` reads the portfolio with `.single()`, so zero rows is a PGRST116 error and the new `notFound()` branch for a missing portfolio is unreachable. A portfolio deleted mid-render therefore reports to Sentry as a read failure; the user sees the same 500 sentence either way. Also, both `notFound()` arms (an invalid render token and a missing portfolio) collapse into one `render_status` Sentry event, so the two causes cannot be told apart. **Closed when:** the read uses `.maybeSingle()`, the test mock models PGRST116 (so a `.single()` regression goes RED), and each arm reports its own reason.
 
 - **[170.1.2-DEMO-MATCH-PAYLOAD-EMAIL]** (logged 2026-10-20, Phase 170.1.2 LABELS security audit W1, pre-existing; owner: the next phase touching the demo match route). `maskPayload` in `src/app/api/demo/match/[allocator_id]/route.ts` spreads `payload` with `profile` unmasked, so the public, cached demo JSON carries the seed allocator persona's email even though `/demo/founder-view` no longer renders it. **Closed when:** `profile.email` is masked in `maskPayload` and a route test asserts the response body carries no email.
+  - ✅ **CLOSED 2026-11-07 by Phase 192 PUBLICTRUTH (plan 07).** The entry above is kept as lineage. The route was deleted, so the payload no longer exists.
 
 - **[170.1.2-VERIFIER-RESIDUALS]** (logged 2026-10-20, Phase 170.1.2 LABELS verification W-1 to W-7, none a FAILED truth; owner: the next phase touching each surface). One line each:
   - W-1 (WARNING): `src/components/strategy/TrustTierLabel.tsx` reads `TRUST_TIER_TOKENS[trustTier]` with no guard and no census on `strategy_verifications_trust_tier_check`, so a new tier would make `/admin/csv-status` throw instead of reading a fallback; unreachable today.
@@ -4619,6 +4620,26 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   Phase 175 closed with only one MT5 key derived under the rule (done on attempt 1, no clock configuration fault). The 2026-11-04 00:40Z nightly is the first run that derives all MT5 keys under it.
   Check that every MT5 `derive_broker_dailies` job is `done` with `attempts=1` and that no `compute_jobs.last_error` carries a clock-configuration text. A job that is `done` with `attempts>1` can hide a fault a retry healed, so `attempts=1` is the test, not `done` alone. Read-only, marker query first.
   **Owner / Trigger:** the first session after 2026-11-04 00:40Z. Not a phase; if a key fails, it is a fix against `analytics-service/services/mt5_server_clock.py` and the worker's rule setting.
+
+- **[192-WIZARD-KEY-STORAGE-COPY]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: Phase 200 MANAGERKEYS, LEAN-04 one security explanation). `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx` and `MultiKeyConnectStep.tsx` still show signed-in managers the old cipher and Vault sentence at the moment they paste a key (an "AES-256-GCM envelope encryption" step and a "Railway analytics service can decrypt" step). Phase 192 fixed the four public pages and the packet; 192-CONTEXT D-02 gave manager surfaces to Phase 200, so these two files were routed, not edited. **Closed when:** both render the Phase 192 key-storage sentence or Phase 200's one explanation, pinned by a test that fails on the old sentence.
+
+- **[192-ORPHANED-LANDING-VERIFY]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted, founder to assign). The landing verification section, form, results and progress components under `src/components/landing` are rendered nowhere after Phase 192 turned the home verify band into a sign-up link (no non-test importer outside that directory). `VerificationForm.tsx` still carries its false "never stored" line, and `/api/verify-strategy` stays in `PUBLIC_ROUTES` in `src/proxy.ts` with no caller. The public-truth census does not scan this directory for that reason. **Closed when:** the components are deleted together with their registry entries (`closed-sets.test.ts`, `complete-status-scan.test.ts`) and the public allowlist entry, or reused behind sign-in.
+
+- **[192-SFOX-FLAG-SPLIT]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted). `EXCHANGES` follows `NEXT_PUBLIC_SFOX_ENABLED` while /security's sFOX guide follows `SFOX_ENABLED` (server), and the static security packet's exchange list is pinned under default flags only, so flipping one flag leaves the three public lists disagreeing. **Closed when:** one flag drives all three, or flipping either regenerates the packet and its parity test.
+
+- **[192-DEMO-RETIRE-RESIDUE]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted, founder to assign). What the demo retirement (D-11) left in place by classification, none of it live wiring to a deleted route or module (the residue grep over `src`, `e2e`, `scripts`, `.github`, `analytics-service` and the config files found only comments, seeders and the analytics-service demo-allocator branches). Phase 193 owns the factsheet "Demo portfolios" section and the payload producers, tracked separately below. Items:
+  - `MorningBriefing`'s `dek` variant (`src/components/portfolio/MorningBriefing.tsx`), whose only caller was `/demo`; its docblock still names `/demo`.
+  - The `CandidateDetail` `isReadOnly` and `ShortlistCard` `readOnly` props (`src/components/admin`), which no caller passes since plan 192-12; each still has its own tests.
+  - The seeders' persona steps and comments: `scripts/seed-full-app-demo.ts` (header, `PERSONA_DEFS`, the persona UUID list and step 12, whose `benchmark_comparison` block hard-codes a benchmark value and has drifted from the key the app reads), `scripts/seed-demo-data.ts` persona portfolios, `scripts/seed-demo-profiles.ts` persona ids and its `src/lib/demo.ts` comments.
+  - The analytics-service demo-allocator branches in `analytics-service/routers/match.py` (`_DEMO_ALLOCATOR_ID`: the cron exclusion, load-bearing while the PROD demo rows stay; the `demo_only` recompute universe) and the matching tests, plus comments naming the deleted `/api/demo/match` endpoint. A change there needs mypy and a Railway deploy.
+  - DESIGN.md's meeting-hero rule (line naming `/demo` as its example) and its 2026-04-09 decisions-log row.
+  - `docs/demos/friend-meeting-script.md` step 3, which tells the founder to send the `/demo` URL.
+  - The /for-quants sample label "Sample Strategy (Demo Data)" (`src/app/(marketing)/for-quants/page.tsx`).
+  - The name of `DEMO_PDF_SECRET` (`.env.example` and its readers), which now signs only the portfolio PDF render token.
+  - Comment-only lineage that cites the deleted `demo-pdf-token.ts` or `src/lib/demo.ts` as a precedent: `src/lib/alert-ack-token.ts`, `scenario-share-token.ts`, `strategy-share-token.ts`, `scrub-share-path.ts`, `src/app/scenario-share/[token]/page.tsx`, `src/app/api/allocator/scenario/share/route.ts`, `.github/workflows/sql-mutation-nightly.yml:28`, `README.md:57` ("personas" in a directory listing) and the `src/proxy.test.ts` audit-history header.
+  **Closed when:** each item is removed, or kept by a founder decision recorded under this entry.
+
+- **[193-DEMO-PAYLOAD-PRODUCERS]** (logged 2026-11-07, Phase 192 PUBLICTRUTH, the D-11 fence; owner: Phase 193 QUIETVIEW, TRUST-03 success criterion 3). The factsheet's synthesized demo panels and their producers: `src/lib/factsheet/peer-cohort.ts`, `src/lib/factsheet/allocator.ts` and the synthesized-panel assembly in `src/lib/factsheet/build-payload.ts`, rendered by `src/app/factsheet/[id]/v2/BatchDPanels.tsx` under "Demo cohort" and "Demo portfolios". Phase 192 fenced them off and did not touch them. The id is named in the ROADMAP and in 192-CONTEXT.md D-11 but had no entry until now. **Closed when:** Phase 193 success criterion 3 holds, pinned by its test.
 
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
@@ -11830,11 +11851,12 @@ No spec below is a delete-candidate: every route they target still exists (verif
   (`/security` and `/`), no seed env, no identity — genuinely placeholder-safe, so the unseeded
   batch fits with no conversion work. ⚠️ Overlaps `for-quants-landing`'s `/security` describe;
   wire one of them, not both, or the assertion runs twice under different owners.
-- [ ] **[158-OPS-03] `bridge-flow.spec.ts` — wire-later (unseeded list), with one case to
+- [x] **[158-OPS-03] `bridge-flow.spec.ts` — wire-later (unseeded list), with one case to
   tighten first.** 4 of its 5 cases hit the public `/demo` page (placeholder-safe); the 5th
   (`/allocations`) is written to pass EITHER way — it asserts the login redirect when
   unauthenticated and the InsightStrip when not. ⚠️ That case cannot fail, so wiring it as-is
   buys coverage theatre; split it or gate it properly when wiring.
+  Closed 2026-11-07 by Phase 192 PUBLICTRUTH (D-11, plan 14): the spec was deleted with the retired demo; four of its five cases loaded /demo and the fifth could not fail (this entry's own finding).
 - [ ] **[158-OPS-03] `simulator-flow.spec.ts` — defer.** Gated on `QUANTALYZE_E2E_PASSWORD`, an
   identity env name used by this spec alone and set in no workflow, so wiring it today yields
   an all-skip batch entry. Unblocks by converting to the seed-helper identity contract.
@@ -11879,7 +11901,7 @@ No spec below is a delete-candidate: every route they target still exists (verif
   visible `test.skip` on the authed describe; comment-only echoes of the same pair in
   `match-queue.spec.ts`/`discovery-watchlist.spec.ts` reworded in the same commit. Wiring +
   seed-helper conversion stay deferred per the entry above.
-- [ ] **[158-OPS-03] `portfolio-pdf-demo.spec.ts` — wire-later (unseeded list); the census row
+- [x] **[158-OPS-03] `portfolio-pdf-demo.spec.ts` — wire-later (unseeded list); the census row
   for this spec was WRONG and is corrected here.** The research table recorded "non-@nightly
   cases orphaned", implying a split. Measured at HEAD: BOTH describes carry the `@nightly` tag
   in their titles (`:99`, `:160`), and `nightly.yml:109` runs the spec with `--grep @nightly`,
@@ -11891,6 +11913,7 @@ No spec below is a delete-candidate: every route they target still exists (verif
   per-PR coverage never happened. **Fix:** drop `@nightly` from the token-shape describe title
   and add the spec to the unseeded list, so a regression weakening the hex-regex/indexOf
   verifier guard is caught per-PR rather than up to 24h later.
+  Closed 2026-11-07 by Phase 192 PUBLICTRUTH (D-11, plans 16 and 15): plan 16 deleted the spec and the nightly job that ran it, and plan 15 deleted its endpoint, with the retired demo.
 - [ ] **[158-OPS-03] DB-types residual — defer (fix in its own reviewed change):
   `scenario_shares` lost its hand-patch tripwire comment.** Found while recording
   `158-DB-TYPES-DECISION.md`. `database.types.ts:2326` is a

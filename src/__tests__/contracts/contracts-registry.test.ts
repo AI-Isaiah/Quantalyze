@@ -68,27 +68,26 @@ const REPO_WIDE_ERROR_RULES = [
   // outside src/lib/resilient-fetch.ts, which owns the per-call-site timeout
   // budget and the shared breaker:railway circuit breaker. Wired to "error"
   // repo-wide on a PROVEN-clean baseline (waves 1-3 routed every live seam call
-  // through the core). Its four documented exemptions are asserted below via
+  // through the core). Its three documented exemptions are asserted below via
   // SEAM_ALLOWLIST_EXEMPT, so neither the repo-wide error nor the off-block can
   // silently flip.
   "no-raw-analytics-fetch",
 ] as const;
 
 // Phase 140 / SEAM-01 — `no-raw-analytics-fetch` must RESOLVE to a NON-error
-// level on exactly these four files: the core itself (the only legal home for
-// the base URL) and the three documented `SEAM_EXCLUSIONS` rows in
-// src/lib/resilient-fetch.ts (bespoke debug SSE route + the two /health warmers,
+// level on exactly these three files: the core itself (the only legal home for
+// the base URL) and the two documented `SEAM_EXCLUSIONS` rows in
+// src/lib/resilient-fetch.ts (bespoke debug SSE route + the cron /health warmer,
 // which must not consume breaker failure budget nor be blocked by an open
-// breaker). This list is FROZEN at four (threat T-140-26): a new lint failure
+// breaker). This list is FROZEN at three (threat T-140-26): a new lint failure
 // means a new seam call site, and the fix is to route it through the core, never
-// to add a fifth entry here. It doubles as a minimatch check — an off-glob that
+// to add a fourth entry here. It doubles as a minimatch check — an off-glob that
 // silently fails to match would resolve to error and fail loud, which is exactly
 // how the `\[id\]` char-class trap was caught in phase 54-05.
 const SEAM_ALLOWLIST_EXEMPT: Array<{ rule: string; file: string }> = [
   { rule: "no-raw-analytics-fetch", file: "src/lib/resilient-fetch.ts" },
   { rule: "no-raw-analytics-fetch", file: "src/app/api/debug-key-flow/route.ts" },
   { rule: "no-raw-analytics-fetch", file: "src/app/api/cron/warm-analytics/route.ts" },
-  { rule: "no-raw-analytics-fetch", file: "src/lib/warmup-analytics.ts" },
 ];
 
 // Phase 54 BP-03 — `no-raw-font-px` must RESOLVE to a NON-error level on the
@@ -163,7 +162,7 @@ const CONTRACT_GUARDS: Guard[] = [
   { path: "src/app/(dashboard)/allocations/context/TweaksContext.codec.test.ts", batch: "B7", invariant: "tweaks codec byte-compat + poison-strip" },
   { path: "src/lib/sample-floor.test.ts", batch: "Phase22", invariant: "SAMPLE_FLOOR_OVERLAPPING_DAYS=60 + gate branch behavior (HONEST-02 single source)" },
   { path: "src/lib/seam-constants.pin.test.ts", batch: "140.2", invariant: "seam core tuning values pinned to hand-typed literals: 13 SEAM_BUDGETS timeoutMs + the SeamBudgetKey SET (sorted equality, not length) + all 6 breaker constants + the A-14 cooldown>=window ordering + the two fake<->production literal pins (FAKE_THRESHOLD<->BREAKER_FAILURE_THRESHOLD, FAKE_WINDOW_MS<->BREAKER_WINDOW)" },
-  { path: "src/lib/seam-budgets.invariant.test.ts", batch: "140.2", invariant: "SEAM_ROUTE_BUDGETS row CONTENTS deep-compared to a hand-typed 15-row map (catches a dropped leg from a multi-leg row, which SC-4a/SC-4b cannot see) + on-disk maxDuration parity + the 3-path SEAM_EXCLUSIONS set + the A-12 warmer-exclusion source scan (no excluded path may import or call the core) with both /health warmers pinned as MEMBERS. SC-4b sums within a `branch` and takes the MAXIMUM across branches, because finalize-wizard's composite and single-key paths are mutually exclusive and a sum describes a path no request takes; SC-4e then binds the declared composite `calls` to `MAX_COMPOSITE_MEMBERS` read from the ROUTE FILE on disk (a Next route cannot export it), so raising the fan-out cap without raising the declaration reddens instead of silently certifying headroom the route no longer has" },
+  { path: "src/lib/seam-budgets.invariant.test.ts", batch: "140.2", invariant: "SEAM_ROUTE_BUDGETS row CONTENTS deep-compared to a hand-typed 15-row map (catches a dropped leg from a multi-leg row, which SC-4a/SC-4b cannot see) + on-disk maxDuration parity + the 2-path SEAM_EXCLUSIONS set + the A-12 warmer-exclusion source scan (no excluded path may import or call the core) with the /health warmer pinned as a MEMBER. SC-4b sums within a `branch` and takes the MAXIMUM across branches, because finalize-wizard's composite and single-key paths are mutually exclusive and a sum describes a path no request takes; SC-4e then binds the declared composite `calls` to `MAX_COMPOSITE_MEMBERS` read from the ROUTE FILE on disk (a Next route cannot export it), so raising the fan-out cap without raising the declaration reddens instead of silently certifying headroom the route no longer has" },
   { path: "src/lib/seam-errors.purity.test.ts", batch: "140.2", invariant: "the seam error leaf stays dependency-free: no import / no `export ... from` / no require() / no process.env in src/lib/seam-errors.ts (comment-stripped + anchored source scan), its exported class set pinned as a hand-typed SET, and CircuitOpenError's message pinned as a static string across two retry hints (T-140-05: the public teaser reaches the seam)" },
   { path: "src/lib/seam-discriminator.purity.test.ts", batch: "140.2", invariant: "the seam DISCRIMINATOR leaf stays dependency-free: no import / no `export ... from` / no require() / no process.env in src/lib/seam-discriminator.ts (comment-stripped + anchored source scan), plus its exported surface pinned as a hand-typed SET equal to the guard's own `EXPECTED_EXPORTS` — the `seam*` reader functions `seamBreakerVerdict` / `seamCorrelationId` / `seamDependencyName` / `seamErrorCode` / `seamHumanMessage` (140.5-08 correction: this note read 'exactly three predicates' and the leaf exports five — `grep -c '^export function' src/lib/seam-discriminator.ts` = 5; the pinned SET is named rather than counted). The closed service-dependency vocabulary and the global-key literal are deliberately NOT exported, because the verdict function must stay the ONE key builder (T-140-01)" },
   { path: "src/lib/seam-discriminator.test.ts", batch: "140.2 / SEAMCORE-01", invariant: "the status->breaker-verdict table (ROADMAP SC2), every expectation hand-typed: CALLER (400/401/403/404/422) and CALLER-THROTTLED (429 in all three coexisting wire shapes) and CALLER'S EXCHANGE (424) each record ZERO; SERVICE-PERMANENT (500) records ZERO INCLUDING the bodyless text/plain shape Starlette's ServerErrorMiddleware emits (TRAP-2); SERVICE-TRANSIENT (503) records ONE keyed on its named dependency. Every row is driven TWICE — with its body and with NO body argument — which is what pins that counts/does-not-count is decidable from the status line alone. Plus the T-140-01 half: a 424's venue slug never becomes a key for any venue, an unrecognised or non-string dependency falls back to the global key with a loud diagnostic, and two different dependencies produce two DIFFERENT keys (the leaf-level precondition for OB-8). Code/human extraction branches on `typeof body.detail` per STATUS_CONTRACT 2.1 — reading `body.detail.code` unconditionally regresses both FLAT shapes to UNKNOWN, which is the dead end PYAPIFIX2-01 exists to kill, reintroduced at the consuming layer (ledger row M25)" },
@@ -176,7 +175,7 @@ const CONTRACT_GUARDS: Guard[] = [
   // asserting what the rule actually CATCHES has gone. Registered for SEAM-01
   // because this phase owns it; the other eight rules' fixture files are in the
   // same unregistered state and are not this phase's to claim.
-  { path: "tools/eslint-plugin-quantalyze/tests/no-raw-analytics-fetch.test.ts", batch: "140.2 / SEAM-01", invariant: "RuleTester fixtures pinning WHAT no-raw-analytics-fetch catches: one invalid fixture per documented URL shape (inline template; one binding; an aliased template; an aliased `new URL(path, base)`), the inline-`new URL()` regression, a TWO-HOP declaration-order case pinning that the fixed point resolves at Program:exit, and the two /health warmers' exact `${url.replace(/\\/+$/, \"\")}/health` shape — pinned here because the four-path allowlist makes the rule's verdict on that shape invisible in the real files. Plus TWO discriminators, one per detection property: 'renamed binding' (the rule is init-tracking, not name-matching) and an untainted two-hop alias structurally identical to shape 3 (the fixed point's seed is still the analytics env member, not any binding called `url`). Ledger row M57's targets are the shape-3 and shape-4 fixtures." },
+  { path: "tools/eslint-plugin-quantalyze/tests/no-raw-analytics-fetch.test.ts", batch: "140.2 / SEAM-01", invariant: "RuleTester fixtures pinning WHAT no-raw-analytics-fetch catches: one invalid fixture per documented URL shape (inline template; one binding; an aliased template; an aliased `new URL(path, base)`), the inline-`new URL()` regression, a TWO-HOP declaration-order case pinning that the fixed point resolves at Program:exit, and the /health warmer's exact `${url.replace(/\\/+$/, \"\")}/health` shape (the warmer that fired on the retired demo page was deleted in Phase 192, the cron warmer keeps it) — pinned here because the three-path allowlist makes the rule's verdict on that shape invisible in the real files. Plus TWO discriminators, one per detection property: 'renamed binding' (the rule is init-tracking, not name-matching) and an untainted two-hop alias structurally identical to shape 3 (the fixed point's seed is still the analytics env member, not any binding called `url`). Ledger row M57's targets are the shape-3 and shape-4 fixtures." },
   { path: "src/lib/seam-redaction.test.ts", batch: "140.2 / SEAMCORE-06", invariant: "the redaction leaf, asserted in BOTH directions on ONE realistic undici message: every secret gone AND the ECONNREFUSED syscall token intact. Plus the short-secret REFUSAL (a candidate below MIN_REDACTABLE_SECRET_LENGTH is not substring-replaced, and the refusal is signalled in the line — ledger row M33 lowers that constant and only the preserve side sees it), the preserve-collision signal, the error-NAME shape undici produces, the cause chain SeamBodyReadError attaches since 140.2-05, and the non-Error / circular / hostile-toString inputs (a scrubber that throws runs inside a catch block and would replace the real error with a bookkeeping one). Plus the leaf-purity half: no import, no `export … from`, no require(), and process.env read at CALL time rather than captured at module scope. Every secret value, preserve token and list member hand-typed in the test" },
   { path: "src/lib/seam-log-coverage.test.ts", batch: "140.2 / SEAMCORE-06", invariant: "no console.error/warn in any seam file passes a bare caught identifier or a bare error-shaped binding (the Supabase `*Err` half). The roster is DERIVED from the import edge (`SEAM_FILES` = the hand-typed lib half + `deriveSeamRouteFiles`, mirrored by `EXPECTED_SEAM_FILES`) — 140.5-08 correction: this note read 'the six seam files' and the derivation made it nineteen (4 lib + 15 routes); the roster is named rather than counted, and NOT 'corrected' to another integer (CONTEXT §6b: eight was the pre-140.4-10 figure). Comment-stripped, string-literal-masked (a message containing the word `error` is prose, but `${err}` inside a template interpolation is a reference), quote-aware balanced-paren argument extraction. Allowlist is by REASON, not convenience: scrubSeamError/scrubSeamString wrapping, plus `.retryAfterS`, `.deadlineExceeded` and `.code` — non-string facts from types we define. Carries its own positive control, negative control and a fail-loud lower bound on sites scanned, because a guard asserting an ABSENCE reads as protection while doing nothing if its scanner breaks. Ledger row M42" },
   { path: "src/lib/resilient-fetch.wiring.test.ts", batch: "140.2", invariant: "the 13 budget-key BINDINGS (not the 5 lexical call sites) each pinned to a hand-typed key+path literal, plus the completeness MECHANISM: three families discovered from disk and compared as a SET against a hand-typed 13-member roster, so a 14th binding REUSING an existing key fails even though it breaks no individual pin" },
@@ -395,16 +394,16 @@ describe("[B25] eslint-plugin-quantalyze wiring integrity", () => {
           `file reds the frozen-spine guard, so it must stay off-globbed (BP-03 exemption).`,
       ).toBe(true);
     }
-    // Phase 140 SEAM-01 — the seam allowlist is a CLOSED set of four. Assert
+    // Phase 140 SEAM-01 — the seam allowlist is a CLOSED set of three. Assert
     // both halves: the exemption actually resolves (so the off-glob matches the
     // on-disk path), and the set has not grown (so a lint failure cannot be
     // silenced by widening it instead of routing the call through the core).
     expect(
       SEAM_ALLOWLIST_EXEMPT.length,
-      "The no-raw-analytics-fetch allowlist is frozen at four paths (T-140-26). " +
+      "The no-raw-analytics-fetch allowlist is frozen at three paths (T-140-26). " +
         "A new raw seam fetch means a new call site that belongs in " +
         "resilientFetch() — widening the allowlist re-opens SEAM-01.",
-    ).toBe(4);
+    ).toBe(3);
     for (const { rule, file: allowlisted } of SEAM_ALLOWLIST_EXEMPT) {
       expect(
         existsSync(join(ROOT, allowlisted)),

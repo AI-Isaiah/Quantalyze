@@ -1,3 +1,10 @@
+import Link from "next/link";
+import {
+  KEY_STORAGE_LINK,
+  KEY_STORAGE_SENTENCE,
+  LISTING_COST_SENTENCE,
+} from "@/lib/status-surface-copy";
+
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
 export const metadata = {
@@ -12,7 +19,7 @@ export default function TermsOfServicePage() {
   return (
     <>
       <h1 className="font-display text-page-title text-text-primary">Terms of Service</h1>
-      <p className="text-caption text-text-muted">Last updated: 2026-04-07</p>
+      <p className="text-caption text-text-muted">Last updated: 2026-11-07</p>
 
       <h2>1. Acceptance</h2>
       <p>
@@ -26,7 +33,15 @@ export default function TermsOfServicePage() {
         <strong>not</strong> hold client assets, operate a pooled fund, provide
         investment advice, or act as a broker-dealer. All strategies are
         monitored via read-only exchange APIs and the underlying assets remain
-        under the manager&apos;s custody at their exchange of choice.
+        under the manager&apos;s custody at their exchange of choice.{" "}
+        {KEY_STORAGE_SENTENCE}{" "}
+        <Link
+          href={KEY_STORAGE_LINK.href}
+          className="text-accent underline underline-offset-4"
+        >
+          {KEY_STORAGE_LINK.label}
+        </Link>
+        .
       </p>
 
       <h2>3. Eligibility</h2>
@@ -72,9 +87,7 @@ export default function TermsOfServicePage() {
 
       <h2>7. Fees</h2>
       <p>
-        The platform is currently free for allocators. Managers may be subject
-        to a success fee on matched allocations; the fee structure is disclosed
-        in individual manager agreements.
+        The platform is currently free for allocators. {LISTING_COST_SENTENCE}
       </p>
 
       <h2>8. Termination</h2>

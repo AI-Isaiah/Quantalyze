@@ -22,9 +22,12 @@ name: SQL mutation nightly (full corpus)
 # redeploy of that SHA until it is fixed or re-run green. The founder accepted
 # that coupling (D-11).
 #
-# WHY A SEPARATE FILE. `nightly.yml`'s `preflight` job is red by standing,
-# accepted decision (tech-debt #12), so a red inside that workflow would read
-# as the usual red and nobody would look (T-164.9.6-19).
+# WHY A SEPARATE FILE. `nightly.yml` used to carry a `preflight` job that was
+# red by standing, accepted decision (tech-debt #12), so a red inside that
+# workflow read as the usual red and nobody looked (T-164.9.6-19). That job was
+# retired with the demo-PDF canary in Phase 192, but this lane keeps its own
+# file and its own issue label: the full-corpus reading stays separable from
+# the unrelated npm-audit job that `nightly.yml` still carries.
 #
 # WHY COPIED STEPS AND NOT A REUSABLE WORKFLOW. Vitest slices `ci.yml`'s
 # `sql-mutation` job text and EXECUTES its step bodies; moving the steps into a

@@ -4,12 +4,8 @@ import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  ACTIVE_PORTFOLIO_ID as SEED_ACTIVE_PORTFOLIO_ID,
-  ALLOCATOR_ACTIVE as SEED_ALLOCATOR_ACTIVE,
-  ALLOCATOR_COLD as SEED_ALLOCATOR_COLD,
-  ALLOCATOR_STALLED as SEED_ALLOCATOR_STALLED,
-  COLD_PORTFOLIO_ID as SEED_COLD_PORTFOLIO_ID,
-  STALLED_PORTFOLIO_ID as SEED_STALLED_PORTFOLIO_ID,
+  ACTIVE_PORTFOLIO_ID,
+  STALLED_PORTFOLIO_ID,
   STRATEGY_PROFILES,
   STRATEGY_UUIDS,
   approximateMwr,
@@ -17,27 +13,19 @@ import {
   generatePortfolioAnalyticsJSONB,
   type PortfolioAnalyticsHolding,
 } from "../../scripts/seed-demo-data";
-import {
-  ACTIVE_PORTFOLIO_ID,
-  ALLOCATOR_ACTIVE_ID,
-  ALLOCATOR_COLD_ID,
-  ALLOCATOR_STALLED_ID,
-  COLD_PORTFOLIO_ID,
-  STALLED_PORTFOLIO_ID,
-} from "@/lib/demo";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 
 /**
  * Seed-integrity tests.
  *
- * The canonical source of truth for demo allocator + portfolio UUIDs is
- * `src/lib/demo.ts` (read by the public /demo route). The seed script holds
- * its own parallel copy — this test asserts both copies stay in sync so drift
- * never silently breaks the demo lane.
+ * Pins the seeder's analytics payload: `generatePortfolioAnalyticsJSONB()` must
+ * write rows that round-trip cleanly through `adaptPortfolioAnalytics()`, the
+ * parser the app uses to read `portfolio_analytics`. The seeder's own portfolio
+ * ids are used, since the public demo and its `src/lib/demo.ts` constants were
+ * retired (Phase 192 D-11).
  *
- * It also locks in the shape of `generatePortfolioAnalyticsJSONB()` so the
- * rows it writes round-trip cleanly through `adaptPortfolioAnalytics()` — the
- * same parser the /demo page uses to hydrate its hero cards.
+ * It also keeps demo-seed constant names out of app code (the PURGE census at
+ * the bottom of this file).
  */
 
 describe("seed strategy profiles", () => {
@@ -50,34 +38,6 @@ describe("seed strategy profiles", () => {
     for (let i = 0; i < STRATEGY_PROFILES.length; i++) {
       expect(STRATEGY_PROFILES[i].id).toBe(STRATEGY_UUIDS[i]);
     }
-  });
-});
-
-describe("seed allocator UUIDs match src/lib/demo.ts", () => {
-  it("ALLOCATOR_ACTIVE matches", () => {
-    expect(SEED_ALLOCATOR_ACTIVE).toBe(ALLOCATOR_ACTIVE_ID);
-  });
-
-  it("ALLOCATOR_COLD matches", () => {
-    expect(SEED_ALLOCATOR_COLD).toBe(ALLOCATOR_COLD_ID);
-  });
-
-  it("ALLOCATOR_STALLED matches", () => {
-    expect(SEED_ALLOCATOR_STALLED).toBe(ALLOCATOR_STALLED_ID);
-  });
-});
-
-describe("seed portfolio UUIDs match src/lib/demo.ts", () => {
-  it("ACTIVE_PORTFOLIO_ID matches", () => {
-    expect(SEED_ACTIVE_PORTFOLIO_ID).toBe(ACTIVE_PORTFOLIO_ID);
-  });
-
-  it("COLD_PORTFOLIO_ID matches", () => {
-    expect(SEED_COLD_PORTFOLIO_ID).toBe(COLD_PORTFOLIO_ID);
-  });
-
-  it("STALLED_PORTFOLIO_ID matches", () => {
-    expect(SEED_STALLED_PORTFOLIO_ID).toBe(STALLED_PORTFOLIO_ID);
   });
 });
 
@@ -326,13 +286,14 @@ describe("approximateMwr", () => {
 
 // ---------- PURGE-01 / PURGE-06 import-graph scan (Phase 07 Plan 06) ----------
 //
-// These blocks mechanically enforce that demo-seed constants stay confined to
-// /demo routes + test fixtures. Any new authenticated code path that imports
-// `@/lib/demo` or references `ALLOCATOR_ACTIVE_ID` / `isDemoPortfolioId` will
-// fail CI here.
+// These blocks mechanically enforce that demo-seed constants stay out of app
+// code. The module that held them (`src/lib/demo.ts`) was retired with the
+// public demo (Phase 192 D-11), so any file that references
+// `ALLOCATOR_ACTIVE_ID` / `isDemoPortfolioId` or imports that module path
+// fails CI here, and reintroducing the constants needs an allowlist edit.
 //
-// Citation: `.planning/phases/07-demo-mode-purge/07-RESEARCH.md` §4 is the
-// authoritative call-site table; the allowlist below MUST match that table.
+// Citation: `.planning/phases/07-demo-mode-purge/07-RESEARCH.md` §4 was the
+// original call-site table; the allowlist below keeps only its survivors.
 
 function walk(dir: string, acc: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -357,8 +318,6 @@ const MIGRATIONS_ROOT = resolve(PROJECT_ROOT, "supabase/migrations");
 // Explicit allowlist — every file permitted to reference demo constants.
 // Citation: RESEARCH.md §4 audit table + CONTEXT.md D-14.
 const DEMO_REFERENCE_ALLOWLIST = [
-  "src/lib/demo.ts",
-  "src/lib/demo.test.ts",
   "src/__tests__/seed-integrity.test.ts",
   // admin-only tooling per RESEARCH.md §4 row — allowed even though current
   // grep shows no direct import. Entry kept so future admin-only references
@@ -366,23 +325,15 @@ const DEMO_REFERENCE_ALLOWLIST = [
   "src/lib/admin/match.ts",
 ];
 
-const DEMO_ROUTE_PREFIXES = [
-  // Phase 51 (NAV-04): the /demo PAGE route moved into the (marketing) route
-  // group (folder-only — the URL stays /demo). The api/demo routes did NOT move.
-  "src/app/(marketing)/demo/",
-  "src/app/api/demo/",
-];
-
 const DEMO_PATTERN =
   /ALLOCATOR_ACTIVE_ID|isDemoPortfolioId|from\s+['"]@\/lib\/demo['"]/;
 
 function isAllowed(relPath: string): boolean {
   if (DEMO_REFERENCE_ALLOWLIST.includes(relPath)) return true;
-  if (DEMO_ROUTE_PREFIXES.some((p) => relPath.startsWith(p))) return true;
   return false;
 }
 
-describe("PURGE-01 / PURGE-06: demo constants confined to /demo + test fixtures", () => {
+describe("PURGE-01 / PURGE-06: demo constants stay out of app code", () => {
   it("src/lib/queries.ts has no reference to demo constants", () => {
     const file = resolve(SRC_ROOT, "lib/queries.ts");
     const content = readFileSync(file, "utf-8");
@@ -399,17 +350,15 @@ describe("PURGE-01 / PURGE-06: demo constants confined to /demo + test fixtures"
     expect(offenders).toEqual([]);
   });
 
-  it("no file under src/app/api (excluding /api/demo) references demo constants", () => {
-    const files = walk(resolve(SRC_ROOT, "app/api")).filter(
-      (f) => !relative(PROJECT_ROOT, f).startsWith("src/app/api/demo/"),
-    );
+  it("no file under src/app/api references demo constants", () => {
+    const files = walk(resolve(SRC_ROOT, "app/api"));
     const offenders = files.filter((f) =>
       DEMO_PATTERN.test(readFileSync(f, "utf-8")),
     );
     expect(offenders).toEqual([]);
   });
 
-  it("no file under src/lib (excluding demo.ts/demo.test.ts/admin/match.ts) references demo constants", () => {
+  it("no file under src/lib (excluding admin/match.ts) references demo constants", () => {
     const files = walk(resolve(SRC_ROOT, "lib"));
     const offenders = files.filter((f) => {
       const rel = relative(PROJECT_ROOT, f);

@@ -58,7 +58,8 @@ class PartnerTagConflictError extends Error {
  * pair appears with conflicting tier values in a single CSV (Excel-paste
  * mistake), exactly one row landed and which tier "won" depended on
  * which concurrent worker picked it up first — institutional vs.
- * exploratory differ on whether demo/match masks the row. Fail loud
+ * exploratory differ on whether the Match Queue and the browse listing mask
+ * the row's real name. Fail loud
  * (rule 12) by enumerating the conflicts and returning a 400 with the
  * row pairs surfaced so the admin can re-paste deterministically.
  */
@@ -535,7 +536,8 @@ export async function POST(request: Request): Promise<NextResponse> {
   // strategy_name) pair BEFORE the import phases run. The downstream
   // intra-batch dedup (existingStrategyKeys add-after-check) would land
   // exactly one row but the surviving tier was non-deterministic — and
-  // the tier governs whether demo/match masks the row. Fail loud with
+  // the tier governs whether the Match Queue and the browse listing mask the
+  // row's real name. Fail loud with
   // the conflicting pairs enumerated so the admin can re-paste cleanly.
   {
     const tiersByKey = new Map<string, Set<DisclosureTier>>();

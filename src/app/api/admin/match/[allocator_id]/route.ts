@@ -13,9 +13,8 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // (strategy_id) pairs where a contact_request ALREADY EXISTS so the Send Intro
 // modal can show the already-sent state before submission.
 //
-// The heavy lifting lives in `getAllocatorMatchPayload` — shared with the
-// public `/api/demo/match/[allocator_id]` lane so the two queues can never
-// drift. This route only owns auth.
+// The heavy lifting lives in `getAllocatorMatchPayload`, which has this route
+// as its one caller. This route only owns auth.
 //
 // Payload size budget: < 500 KB at N=30 (enforced in tests).
 export async function GET(

@@ -6,7 +6,7 @@
  * admin-csv-status-axe — all LEFT IN PLACE) to ALL primary routes scanned at
  * BOTH Desktop (1280×800) and a mobile viewport (375×812, Assumption A3):
  *
- *   PUBLIC (run UNSEEDED, no skip): /, /security, /contact, /for-quants, /browse, /demo
+ *   PUBLIC (run UNSEEDED, no skip): /, /security, /contact, /for-quants, /browse
  *   AUTHED (HAS_SEED_ENV self-skip): /allocations, /strategy/[id]/v2,
  *           /discovery/[slug], /strategies/new/wizard
  *   EMBEDDED-FACTSHEET (HAS_SEED_ENV self-skip, scoped serious+critical):
@@ -38,8 +38,8 @@
  * running this spec there regressed three other behaviours (it published a
  * non-example strategy into the crypto-sma category that
  * discovery-hide-examples-default asserts is empty; its public rows re-ran
- * against the real-test-Supabase rebuild and 500'd /demo; and the polluted DB
- * produced spurious wizard axe findings the focused wizard-axe — same surface,
+ * against the real-test-Supabase rebuild and 500'd the since-retired demo
+ * page; and the polluted DB produced spurious wizard axe findings the focused wizard-axe — same surface,
  * same rules — does NOT see). Authed-route a11y stays covered by the focused
  * MA-8 axe specs (discovery-axe / strategy-v2-axe / composer-axe / wizard-axe).
  * Re-enabling the authed/mobile rows needs a hermetic per-spec seeded DB (TODO),
@@ -98,7 +98,6 @@ const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/contact", anchor: "main h1" },
   { path: "/for-quants", anchor: "main h1" },
   { path: "/browse", anchor: "main h1" },
-  { path: "/demo", anchor: "#editorial-hero-headline" },
 ];
 
 // Three viewports — every axe check runs at Desktop, a mobile viewport (375px

@@ -4,10 +4,10 @@
  *
  * Why this helper exists (regression context)
  * --------------------------------------------
- * The first version of `e2e/demo-founder-view.spec.ts` captured only
- * `msg.text()` and filtered by substring on that text. It tried to
- * exclude the expected 500 from `/api/demo/match` under placeholder
- * Supabase env with a clause like `!text.includes("/api/demo/match")`.
+ * An early Playwright spec captured only `msg.text()` and filtered by
+ * substring on that text. It tried to exclude an expected failing request
+ * (say a 500 from `/api/example/flaky`) with a clause like
+ * `!text.includes("/api/example/flaky")`.
  *
  * That clause was a silent no-op: for browser-level resource errors
  * (e.g. a 500 response on a fetch), Chrome emits a console error whose
@@ -39,8 +39,8 @@ export interface ConsoleErrorFilterOptions {
   ignoreTextIncludes?: readonly string[];
   /**
    * Substrings that, if present in EITHER `text` or `url`, mean this
-   * error is expected noise (e.g. `/api/demo/match` under placeholder
-   * Supabase env). Both sides are checked because browser-level
+   * error is expected noise (e.g. `/api/example/flaky`, a request that is
+   * expected to fail). Both sides are checked because browser-level
    * resource errors hide the URL on `location().url`, not in the text.
    */
   ignoreTextOrUrlIncludes?: readonly string[];

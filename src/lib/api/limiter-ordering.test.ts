@@ -147,7 +147,6 @@ const NO_INPUT = new Set([
   // the limit is taken FIRST, before the benchmark_prices read, so the
   // "burn-a-token-on-bad-body" bug cannot occur.
   "benchmark/btc/prices/route.ts",
-  "demo/match/[allocator_id]/route.ts",
   "factsheet/[id]/pdf/route.ts",
   "me/audit-log/export/route.ts",
   "portfolio-pdf/[id]/route.ts",
@@ -194,7 +193,6 @@ const NO_INPUT = new Set([
 // limit-FIRST is intentional here (public/unauth scraper defense).
 const PUBLIC_IP_EXCEPTION = new Set([
   "alerts/ack/route.ts",
-  "demo/portfolio-pdf/[id]/route.ts",
   "factsheet/[id]/tearsheet.pdf/route.ts",
   "for-quants-lead/route.ts",
   "verify-strategy/route.ts",

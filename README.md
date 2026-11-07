@@ -48,10 +48,9 @@ quantalyze/
       (dashboard)/    # Authenticated pages (discovery, strategies, portfolios, allocations, profile, preferences)
         admin/match/  # Founder-only Match Queue (triage + detail + eval dashboard)
         portfolios/   # Portfolio dashboard, management, documents
-      (marketing)/    # Public marketing shell (shared layout): landing, legal/*, for-quants, security, and the editorial /demo hero (?persona=active|cold|stalled) — route group, URLs unchanged
+      (marketing)/    # Public marketing shell (shared layout): landing, legal/*, for-quants, security — route group, URLs unchanged
       api/            # API routes
         cron/         # Vercel Cron handlers (warm-analytics, sync-funding, reconcile-strategies, cleanup-wizard-drafts, cleanup-ack-tokens, founder-lp-report)
-        demo/         # Public demo endpoints (signed-token portfolio-pdf)
         # plus: verify-strategy, portfolio-*, alert-digest, admin/match/*, preferences, factsheet/[id]/pdf
     components/       # React components (ui/, layout/, charts/, strategy/, portfolio/, admin/, preferences/, landing/, auth/)
     hooks/            # Reusable React hooks (useKeyboardShortcuts, useBreakpoint SSR-safe viewport class, useMediaQuery, useTapPin touch tap-to-pin chart reveal)
@@ -62,8 +61,8 @@ quantalyze/
     scripts/          # operational one-offs + read-only ground-truth harnesses (deribit_ground_truth, bybit_reconcile)
     docs/             # tracked evidence docs (deribit-ground-truth.md answers template + evidence/)
   supabase/           # Database migrations (timestamp-named; auto-applied to prod on merge — see CONTRIBUTING.md)
-  e2e/                # Playwright specs (auth, discovery, match-queue, demo-public, portfolio-pdf-demo, ...)
-  .github/workflows/  # CI + watchers/probes (main-CI-cancelled watcher, shared-test-db mutex drill, demo PDF cold-start)
+  e2e/                # Playwright specs (auth, discovery, match-queue, ...)
+  .github/workflows/  # CI + watchers/probes (main-CI-cancelled watcher, shared-test-db mutex drill)
   docs/
     architecture/     # ADRs (RLS authz, observability, error handling, secret handling, ...)
     runbooks/         # Operational runbooks (match-engine.md, bridge-outcome-cron.md, ...)

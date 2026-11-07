@@ -4,7 +4,7 @@ import { MarketingHeaderActions } from "@/components/marketing/MarketingHeaderAc
 
 /**
  * Shared shell for the `(marketing)` route group — landing (`/`), `/legal/*`,
- * `/for-quants`, `/security`, `/demo`. The parens make this a Next route group:
+ * `/for-quants`, `/security`. The parens make this a Next route group:
  * folder-only, ZERO URL change (RESEARCH §route-groups; the route-contract
  * guard's `pageFileToUrl` drops the `(group)` segment, so every wrapped route
  * still resolves at its current URL and stays in `proxy.ts` PUBLIC_ROUTES).
@@ -18,13 +18,13 @@ import { MarketingHeaderActions } from "@/components/marketing/MarketingHeaderAc
  * no "use client" boundary that could defer the page `<h1>`/metadata or shift
  * hydration. The session is read by the async child `<MarketingHeaderActions>`,
  * not by this function. That child calls `createClient`, which reads cookies,
- * so `/security`, `/legal/*` and `/demo` render dynamically
+ * so `/security` and `/legal/*` render dynamically
  * (cookies.md: a request-time cookie read in a layout or page opts the route
  * into dynamic rendering). No cache directive is added here. The landing
  * page's authed redirect stays IN the page, not here.
  *
  * Nested layouts under the group supply their OWN distinct chrome on top of
- * this one: `/legal` adds its tab-nav, `/demo` adds its sticky DemoBanner.
+ * this one: `/legal` adds its tab-nav.
  */
 export default function MarketingLayout({
   children,

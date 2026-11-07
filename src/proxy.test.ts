@@ -218,11 +218,6 @@ describe("proxy public-route gating (anonymous session)", () => {
       // so this MUST be tested with an exact-equality predicate, not a
       // prefix.
       "/",
-      // New public-route additions added with the substring-hardening patch
-      // (C-0186).
-      "/demo",
-      "/demo/match/abc-123",
-      "/api/demo/match/abc-123",
       // Pre-existing public routes — pin them so future PUBLIC_ROUTES edits
       // don't silently drop one.
       "/login",
@@ -283,15 +278,21 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/discovery/momentum/abc-123",
       "/admin",
       "/admin/strategies",
+      // Phase 192 D-11: the public demo was retired. It must never become
+      // public again, so /demo and its sub-paths redirect like any private path.
+      "/demo",
+      "/demo?persona=active",
+      "/demo/founder-view",
+      // Phase 192 D-11: the demo PDF endpoint went with it. /api/demo must
+      // never be public again, so it and its old sub-path redirect too.
+      "/api/demo",
+      "/api/demo/portfolio-pdf/abc-123",
       // C-0186 substring-attack guards. These MUST redirect: the public-route
       // predicate uses `path === route || path.startsWith(route + "/")`, NOT
       // bare `path.startsWith(route)`. A regression that swaps the predicate
       // for the bare prefix would let any of these slip through.
-      "/demonstration", // looks like /demo but is a sibling path
-      "/demo-other", // hyphenated sibling, no separator
       "/loginx", // sibling of /login, no separator
       "/signupwizard", // sibling of /signup
-      "/api/demo-evil", // looks like /api/demo but is a sibling
       "/api/factsheetx", // sibling of /api/factsheet
       // Phase 170.3 (D-01): only /api/og/factsheet is public. The parent, a
       // future OG route and the siblings of the entry must all still 307.
@@ -329,7 +330,7 @@ describe("proxy public-route gating (anonymous session)", () => {
     });
   });
 
-  // ---------- Marketing-exempt branch (signed-in user on /demo, /for-quants, /security) ----------
+  // ---------- Marketing-exempt branch (signed-in user on /for-quants, /security) ----------
   describe("authenticated user on marketing-exempt routes stays on the page", () => {
     // The session branch needs a session object — re-mock just for this
     // sub-block. The existing top-level mock returns `session: null`; here
@@ -353,8 +354,6 @@ describe("proxy public-route gating (anonymous session)", () => {
     });
 
     it.each([
-      "/demo",
-      "/demo/match/abc-123",
       "/for-quants",
       "/for-quants/about",
       "/security",
@@ -402,6 +401,16 @@ describe("proxy public-route gating (anonymous session)", () => {
         expect(res.headers.get("location")).toBeNull();
       },
     );
+
+    it("signed-in GET of the retired /demo is not redirected by the proxy (Next 404s it)", async () => {
+      // Phase 192 D-11: /demo has no route any more. The proxy only gates
+      // signed-out requests, so a signed-in request passes through to the
+      // router, which answers 404. The proxy must not add a redirect of its own.
+      const req = new NextRequest("https://example.com/demo", { method: "GET" });
+      const res = await proxy(req);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("location")).toBeNull();
+    });
 
     it("authenticated user on /login DOES redirect away (not marketing-exempt)", async () => {
       // Sanity: prove the marketing-exempt branch is targeted, not a blanket

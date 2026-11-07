@@ -306,18 +306,6 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     notes: "Public browse strategy detail — covered by the /browse prefix.",
   },
   {
-    route: "/demo",
-    class: "public",
-    notes:
-      "Public demo surface — in PUBLIC_ROUTES + bounce-exempt. Telegram/incognito links in the wild.",
-  },
-  {
-    route: "/demo/founder-view",
-    class: "public",
-    notes:
-      "Founder-side demo twin — covered by the /demo PUBLIC_ROUTES prefix + bounce-exempt.",
-  },
-  {
     route: "/factsheet/:id",
     class: "public",
     notes:

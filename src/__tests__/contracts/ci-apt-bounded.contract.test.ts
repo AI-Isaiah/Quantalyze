@@ -91,7 +91,7 @@ const MAX_STEP_MINUTES = 10;
 /** Slack R6 requires on top of the budget: kill-after + one retry sleep + the local unpack. */
 const R6_SLACK_SECONDS = 60;
 /** The census pins. A deliberate change to the step set moves these knowingly. */
-const EXPECTED_APT_REACHING_STEPS = 18;
+const EXPECTED_APT_REACHING_STEPS = 17;
 const EXPECTED_WRAPPER_CALLERS = 14;
 
 type Workflows = Record<string, string>;
@@ -697,13 +697,27 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     expect(v[0]).toContain("above 10");
   });
 
-  it("R3-nightly-form: the nightly's `- timeout-minutes:` on the step's first line is read, and raising it is flagged", () => {
-    const real = parseAll(WF).filter((s) => s.file === "nightly.yml" && runsPlaywrightDeps(s));
+  it("R3-first-line-timeout-form: a step whose first line is `- timeout-minutes:` is read, and raising it is flagged (synthetic workflow)", () => {
+    // No real workflow uses this form any more (the nightly's Playwright install was the last), so the parser branch
+    // is exercised on a synthetic entry rather than left to rot unseen.
+    const text = [
+      "name: Synthetic",
+      "on: workflow_dispatch",
+      "jobs:",
+      "  probe:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - timeout-minutes: 10",
+      "        run: npx playwright install --with-deps chromium",
+      "",
+    ].join("\n");
+    const syn: Workflows = { ...WF, "first-line-timeout.yml": text };
+    const real = parseAll(syn).filter((s) => s.file === "first-line-timeout.yml" && runsPlaywrightDeps(s));
     expect(real.length).toBe(1);
     expect(real[0].timeout).toBe(10);
-    const m = mutate(WF, "nightly.yml", (t) => sub(t, /^( {6}- )timeout-minutes: 10$/m, "$1timeout-minutes: 30"));
-    expect(r3(m).join("\n")).toContain("nightly.yml");
-    const gone = mutate(WF, "nightly.yml", (t) => sub(t, /^ {6}- timeout-minutes: 10\n {8}run:/m, "      - run:"));
+    const m = mutate(syn, "first-line-timeout.yml", (t) => sub(t, /^( {6}- )timeout-minutes: 10$/m, "$1timeout-minutes: 30"));
+    expect(r3(m).join("\n")).toContain("first-line-timeout.yml");
+    const gone = mutate(syn, "first-line-timeout.yml", (t) => sub(t, /^ {6}- timeout-minutes: 10\n {8}run:/m, "      - run:"));
     expect(r3(gone).join("\n")).toContain("no step timeout-minutes");
   });
 
@@ -800,11 +814,11 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     expect(r6(pg, WRAPPER).length).toBe(1);
   });
 
-  it("census-down: a wrapper call line turned into a comment drops the count to 17", () => {
+  it("census-down: a wrapper call line turned into a comment drops the count to 16", () => {
     const m = mutate(WF, MUTEX_PROBE, (t) => sub(t, WRAPPER_PSQL_LINE, "$1# bash scripts/ci-apt.sh install --provides psql postgresql-client"));
     expect(census(m).aptReaching.length).toBe(EXPECTED_APT_REACHING_STEPS - 1);
     const v = censusViolations(m);
-    expect(v.join("\n")).toContain("17 apt-reaching steps");
+    expect(v.join("\n")).toContain("16 apt-reaching steps");
     expect(v.join("\n")).toContain("13 wrapper callers");
     // The silent-vanish case: every other rule stays green.
     expect(r1(m)).toEqual([]);
@@ -816,14 +830,14 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     const m = insertStepAfterFirst(WF, MUTEX_PROBE, "      - name: Mutant\n        run: until sudo apt-get update; do sleep 5; done");
     expect(r1(m).join("\n")).toContain("Mutant");
     expect(census(m).aptReaching.length).toBe(EXPECTED_APT_REACHING_STEPS + 1);
-    expect(censusViolations(m).join("\n")).toContain("19 apt-reaching steps");
+    expect(censusViolations(m).join("\n")).toContain("18 apt-reaching steps");
     expect(census(m).wrappers.length).toBe(EXPECTED_WRAPPER_CALLERS);
   });
 
-  it("census-up: a duplicated Playwright step block raises the count to 19", () => {
+  it("census-up: a duplicated Playwright step block raises the count to 18", () => {
     const m = duplicateStep(WF, "ci.yml", "Install Playwright Chromium");
     expect(census(m).aptReaching.length).toBe(EXPECTED_APT_REACHING_STEPS + 1);
-    expect(censusViolations(m).join("\n")).toContain("19 apt-reaching steps");
+    expect(censusViolations(m).join("\n")).toContain("18 apt-reaching steps");
     // Wrapper callers did not move.
     expect(census(m).wrappers.length).toBe(EXPECTED_WRAPPER_CALLERS);
   });
