@@ -3,7 +3,7 @@
  *
  * `src/lib/auth/requireRolePage.ts` is exhaustively UNIT-tested
  * (requireRolePage.test.ts): all three branches, the role×surface matrix,
- * deny-by-default. What was NOT tested is the WIRING — the 8 surfaces that each
+ * deny-by-default. What was NOT tested is the WIRING — the 7 surfaces that each
  * hard-code the `need` role argument. A swapped or dropped `need` ships green
  * because no test asserts the literal at the call site. This is exactly the
  * ROLE-02 mis-classification bug class that already bit `/portfolios` once
@@ -13,7 +13,7 @@
  * Strategy: mock `requireRolePage` with a spy that THROWS a sentinel, halting
  * each layout/page right at the guard. This lets us assert ONLY the wiring (the
  * exact `need` literal each surface passes, and that the guard is invoked at
- * all) without mocking the entire downstream data/render tree of 8 surfaces.
+ * all) without mocking the entire downstream data/render tree of 7 surfaces.
  *
  * Neuter-proof: the assertion pins `call[2]` (the 3rd positional arg of
  * `requireRolePage(supabase, user, need)`) to the exact literal for each
@@ -74,7 +74,7 @@ type Surface = {
   invoke: () => Promise<unknown>;
 };
 
-// The 8 guarded surfaces + their hard-coded `need`. Each `invoke` dynamically
+// The 7 guarded surfaces + their hard-coded `need`. Each `invoke` dynamically
 // imports the module (so vi.mock hoisting applies) and calls its default export.
 // Layouts take `{ children }`; pages take no args (or an unused searchParams).
 const SURFACES: Surface[] = [
@@ -83,16 +83,6 @@ const SURFACES: Surface[] = [
     need: "manager",
     invoke: async () => {
       const mod = await import("./strategies/layout");
-      return (mod.default as (p: { children: React.ReactNode }) => unknown)({
-        children: null,
-      });
-    },
-  },
-  {
-    label: "portfolios/layout",
-    need: "allocator",
-    invoke: async () => {
-      const mod = await import("./portfolios/layout");
       return (mod.default as (p: { children: React.ReactNode }) => unknown)({
         children: null,
       });

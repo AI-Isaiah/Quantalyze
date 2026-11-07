@@ -115,10 +115,8 @@ function MetricCell({
 
 function SuggestionRow({
   suggestion,
-  portfolioId,
 }: {
   suggestion: OptimizerSuggestion;
-  portfolioId: string;
 }) {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -158,12 +156,6 @@ function SuggestionRow({
           className="text-caption font-medium text-accent hover:text-accent-hover underline-offset-2 hover:underline"
         >
           View strategy
-        </Link>
-        <Link
-          href={`/portfolios/${portfolioId}/manage?add=${suggestion.strategy_id}`}
-          className="inline-flex items-center justify-center rounded-md bg-accent px-3 py-1.5 text-caption font-medium text-white hover:bg-accent-hover transition-colors"
-        >
-          Add to portfolio
         </Link>
       </div>
     </div>
@@ -210,7 +202,7 @@ export default function PortfolioOptimizer({
     // from `WeightOptimizerSection.tsx`'s `requestWeights` (`setResult(null)`)
     // and used identically at `admin/partner-import/page.tsx`. Without it a
     // failed re-run left the PREVIOUS ranked allocation mounted with live
-    // "Add to portfolio" links under one small red line, which an allocator
+    // action links under one small red line, which an allocator
     // reads as a current answer. Doing it here rather than in the catch also
     // covers the path where `router.refresh()` throws AFTER a successful
     // `setSuggestions` — the only way `error` could otherwise coexist with a
@@ -384,14 +376,10 @@ export default function PortfolioOptimizer({
       {/* This is the branch the stale ranking used to fall through to. It is
           now unreachable with `error` set — which is the whole point of
           SEAMUX-09, so the red line that used to sit under the live
-          "Add to portfolio" links is gone with it. */}
+          suggestion action links is gone with it. */}
       <div className="space-y-3">
         {top.map((s) => (
-          <SuggestionRow
-            key={s.strategy_id}
-            suggestion={s}
-            portfolioId={portfolioId}
-          />
+          <SuggestionRow key={s.strategy_id} suggestion={s} />
         ))}
       </div>
     </Card>

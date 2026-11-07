@@ -6,8 +6,8 @@ import type { NextConfig } from "next";
 // traced imports — the Vercel function bundle shipped without them and every
 // PDF route 500'd at launch with "input directory .../bin does not exist"
 // (found 2026-07-03 via the old /demo "Download IC Report" button; the gap
-// affected the authed portfolio PDF route and both factsheet PDF routes alike,
-// the demo route having since been retired, Phase 192 D-11). Keys are
+// affected both factsheet PDF routes alike and the since-retired portfolio PDF
+// route and demo route, Phase 195 D-03 and Phase 192 D-11). Keys are
 // picomatch route globs with dynamic segments escaped; scoped per-route
 // because the payload is ~70MB — a broad glob would bloat every function.
 const CHROMIUM_BIN = ["./node_modules/@sparticuz/chromium/bin/**/*"];
@@ -153,7 +153,6 @@ assertCanonicalAppUrl(process.env.NEXT_PUBLIC_APP_URL, process.env.VERCEL_ENV);
 
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
-    "/api/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,
     "/api/factsheet/\\[id\\]/pdf": CHROMIUM_BIN,
     "/api/factsheet/\\[id\\]/tearsheet.pdf": CHROMIUM_BIN,
   },
@@ -201,6 +200,30 @@ const nextConfig: NextConfig = {
       {
         source: "/scenarios",
         destination: "/allocations?tab=scenario",
+        permanent: true,
+      },
+      // Phase 195 TRIM (D-03), 2026-11-07: the portfolio report API is retired;
+      // an old link lands on the named retired page. Lockstep with the manifest
+      // redirectFrom (#512).
+      {
+        source: "/api/portfolio-pdf/:id",
+        destination: "/portfolio-pdf/:id",
+        permanent: true,
+      },
+      // Phase 195 TRIM (D-04), 2026-11-07: Decks is hidden until it works. NOT
+      // permanent (307): removing this rule restores the page.
+      {
+        source: "/decks",
+        destination: "/discovery/crypto-sma",
+        permanent: false,
+      },
+      // Phase 195 TRIM (D-01), 2026-11-07: the portfolios surface is retired;
+      // every sub-route, including the bare path and the dead strategies/<id>
+      // target, lands on My allocation. Stored rows kept. Lockstep with the
+      // manifest redirectFrom (#512).
+      {
+        source: "/portfolios/:path*",
+        destination: "/allocations",
         permanent: true,
       },
     ];

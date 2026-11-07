@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } fr
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
-import { FactsheetProvider, useComparator, useToggles, useXRange } from "./factsheet-context";
+import { FactsheetProvider, useComparator, useDisplay, useToggles, useXRange } from "./factsheet-context";
 
 /**
  * B7c — FactsheetProvider ⇄ localStorage integration.
@@ -109,12 +109,15 @@ function renderProvider() {
 function PersistHarness() {
   const { comparator } = useComparator();
   const { xRange, setXRange } = useXRange();
-  const { darkMode } = useToggles();
+  const toggles = useToggles();
+  const display = useDisplay();
   return (
     <>
       <span data-testid="cmp">{comparator}</span>
       <span data-testid="range">{`${xRange[0]}-${xRange[1]}`}</span>
-      <span data-testid="dark">{darkMode ? "dark" : "light"}</span>
+      <span data-testid="cb">{toggles.colorblind ? "on" : "off"}</span>
+      <span data-testid="toggle-keys">{Object.keys(toggles).sort().join(",")}</span>
+      <span data-testid="display-keys">{Object.keys(display).sort().join(",")}</span>
       <button
         data-testid="pan"
         onClick={() => setXRange([10, 120] as const)}
@@ -207,13 +210,13 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
     const replaceSpy = vi.spyOn(window.history, "replaceState");
     // The sibling Overview factsheet shares the /allocations URL and a stored
     // `factsheet-v2:` blob. Seed BOTH a stored comparator and URL params so an
-    // ungated read would bleed that view-state (cmp + dark) into the ephemeral
+    // ungated read would bleed that view-state (cmp + cb) into the ephemeral
     // scenario chart — the exact RT2 cross-tab leak.
     lsStore.set(KEY, JSON.stringify({ cmp: "spx" }));
     window.history.replaceState(
       null,
       "",
-      "/factsheet/test-strategy/v2?cmp=none&dark=1",
+      "/factsheet/test-strategy/v2?cmp=none&cb=1",
     );
     act(() => {
       renderPersist(false);
@@ -228,9 +231,9 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
       await new Promise((r) => setTimeout(r, 150));
     });
     // READ gate (RT2): neither the stored cmp ("spx") nor the URL cmp ("none") /
-    // dark ("1") was adopted — the ephemeral chart stays at the payload defaults.
+    // cb ("1") was adopted — the ephemeral chart stays at the payload defaults.
     expect(screen.getByTestId("cmp").textContent).toBe("btc");
-    expect(screen.getByTestId("dark").textContent).toBe("light");
+    expect(screen.getByTestId("cb").textContent).toBe("off");
     const searchBefore = window.location.search;
     replaceSpy.mockClear();
     act(() => {
@@ -277,7 +280,7 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
  * opens the FULL history; a range a browser saved before this change (a `?range=`
  * in the URL or a `range` field in the stored blob) is never applied and is
  * deleted once on hydration, while the comparator and display toggles (`cmp`,
- * `cb`, `reg`, `dark`) persist exactly as before (UI-SPEC A-5).
+ * `cb`, `reg`) persist exactly as before (UI-SPEC A-5).
  */
 describe("FactsheetProvider — the view range is session-local (D-02)", () => {
   const FULL = "0-199";
@@ -293,23 +296,23 @@ describe("FactsheetProvider — the view range is session-local (D-02)", () => {
     replaceSpy?.mockRestore();
   });
 
-  it("Case A (ordering): a legacy ?range= AND a stored range are both deleted, neither applied; cmp/dark survive (D-02)", async () => {
+  it("Case A (ordering): a legacy ?range= AND a stored range are both deleted, neither applied; cmp/cb survive (D-02)", async () => {
     lsStore.set(KEY, JSON.stringify({ range: "10-120", cmp: "spx" }));
-    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?range=10-120&dark=1");
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?range=10-120&cb=1");
     act(() => {
       renderPersist();
     });
-    // dark=1 and the stored spx are adopted in the same hydration effect run
+    // cb=1 and the stored spx are adopted in the same hydration effect run
     // that handles the legacy range, so once both flip the range branch ran.
     await waitFor(() => {
       expect(screen.getByTestId("cmp").textContent).toBe("spx");
-      expect(screen.getByTestId("dark").textContent).toBe("dark");
+      expect(screen.getByTestId("cb").textContent).toBe("on");
     });
     // Let the write effect's 250ms debounce land so the final URL/blob is read.
     await new Promise((r) => setTimeout(r, 400));
     expect(screen.getByTestId("range").textContent).toBe(FULL);
     expect(window.location.search).not.toContain("range");
-    expect(window.location.search).toContain("dark=1");
+    expect(window.location.search).toContain("cb=1");
     const blob = JSON.parse(lsStore.get(KEY) as string);
     expect("range" in blob).toBe(false);
     expect(blob.cmp).toBe("spx");
@@ -431,22 +434,22 @@ describe("FactsheetProvider — cmp=btc is ignored for a strategy whose returns 
   }
 
   it("starts at none, and a ?cmp=btc URL leaves it at none while the rest of the URL still adopts", async () => {
-    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?cmp=btc&dark=1");
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?cmp=btc&cb=1");
     act(() => {
       renderUnit();
     });
-    // dark=1 is adopted in the SAME effect run that reads cmp, so once it flips
+    // cb=1 is adopted in the SAME effect run that reads cmp, so once it flips
     // the cmp branch has already been evaluated; asserting after it is not vacuous.
-    await waitFor(() => expect(screen.getByTestId("dark").textContent).toBe("dark"));
+    await waitFor(() => expect(screen.getByTestId("cb").textContent).toBe("on"));
     expect(screen.getByTestId("cmp").textContent).toBe("none");
   });
 
   it("a stored cmp of btc is ignored the same way", async () => {
-    lsStore.set(KEY, JSON.stringify({ cmp: "btc", dark: "1" }));
+    lsStore.set(KEY, JSON.stringify({ cmp: "btc", cb: "1" }));
     act(() => {
       renderUnit();
     });
-    await waitFor(() => expect(screen.getByTestId("dark").textContent).toBe("dark"));
+    await waitFor(() => expect(screen.getByTestId("cb").textContent).toBe("on"));
     expect(screen.getByTestId("cmp").textContent).toBe("none");
   });
 
@@ -469,5 +472,32 @@ describe("FactsheetProvider — cmp=btc is ignored for a strategy whose returns 
     await waitFor(() => expect(screen.getByTestId("cmp").textContent).toBe("btc"));
     await new Promise(r => setTimeout(r, 50));
     expect(screen.getByTestId("cmp").textContent).toBe("btc");
+  });
+});
+
+/**
+ * Phase 195 (D-06) — dark mode is gone (DESIGN.md "Dark mode: Not planned").
+ * `?dark=1` in a link and a `dark` value in a blob an older build saved are
+ * trust-boundary inputs that must reach nothing: no flag is exposed, and the
+ * next write never carries the value again.
+ */
+describe("FactsheetProvider — the removed dark option is never read or re-written (D-06)", () => {
+  it("?dark=1 and a stored dark '1' expose no dark flag, and the next write has no dark key", async () => {
+    // `cb` is the hydration sentinel: it is adopted in the same effect run that
+    // would have read `dark`, so once it flips the dark branch (gone) has been passed.
+    lsStore.set(KEY, JSON.stringify({ cb: "1", dark: "1" }));
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?dark=1");
+    act(() => {
+      renderPersist();
+    });
+    await waitFor(() => expect(screen.getByTestId("cb").textContent).toBe("on"));
+    // No context exposes a dark flag or setter, so nothing can render dark.
+    expect(screen.getByTestId("toggle-keys").textContent).not.toMatch(/dark/i);
+    expect(screen.getByTestId("display-keys").textContent).toBe("colorblind");
+    // Let the 250ms write debounce land, then read what was persisted.
+    await new Promise((r) => setTimeout(r, 400));
+    const blob = JSON.parse(lsStore.get(KEY) as string);
+    expect("dark" in blob).toBe(false);
+    expect(blob.cb).toBe("1");
   });
 });

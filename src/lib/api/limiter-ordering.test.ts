@@ -149,7 +149,6 @@ const NO_INPUT = new Set([
   "benchmark/btc/prices/route.ts",
   "factsheet/[id]/pdf/route.ts",
   "me/audit-log/export/route.ts",
-  "portfolio-pdf/[id]/route.ts",
   "strategies/browse/route.ts",
   // Phase 29 / Plan 29-01 — scoped lazy-returns GET. Authenticated
   // (withAllocatorAuth), per-user limiter (`returns:<user.id>`), but NO

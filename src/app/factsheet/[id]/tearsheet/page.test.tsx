@@ -49,9 +49,6 @@ vi.mock("next/link", () => ({
 vi.mock("@/components/charts/Sparkline", () => ({
   Sparkline: () => React.createElement("div", { "data-testid": "sparkline" }),
 }));
-vi.mock("@/components/ui/Disclaimer", () => ({
-  Disclaimer: () => React.createElement("div", { "data-testid": "disclaimer" }),
-}));
 vi.mock("@/components/strategy/FreshnessBadge", () => ({
   FreshnessBadge: () => React.createElement("span"),
 }));
@@ -604,5 +601,49 @@ describe("TearSheet page - rounded-sign tones (170.6 D-03, D-04)", () => {
     const hero = heroValue("Max DD");
     expect(hero.textContent).toBe("-3.42%");
     expect(hero.className).toContain("text-negative");
+  });
+});
+
+describe("TearSheet page - one Risk Disclosure block (195 D-09, UC-19, T-195-09)", () => {
+  // Sentences are pinned as LITERALS: a test reading the page's own constants
+  // cannot fail when a legally required sentence is dropped from them.
+  const SENTENCES = [
+    "Past performance does not guarantee future results.",
+    "Cryptocurrency trading involves substantial risk of total loss.",
+    "This tear sheet is for informational purposes only and does not constitute investment, legal, or tax advice.",
+    "Strategies are monitored via read-only exchange APIs; managers retain asset custody.",
+    "Quantalyze provides analytics only \u2014 no pooling, no fund administration, no custody of client assets.",
+  ];
+
+  it("carries every prior sentence once plus the analytics-only custody sentence, as the one block", async () => {
+    stubAuth({ data: { user: null }, error: null });
+    const { container } = await renderPage();
+    const text = container.textContent ?? "";
+    for (const sentence of SENTENCES) {
+      expect(text.split(sentence).length - 1, sentence).toBe(1);
+    }
+    // The custody box is gone: its capitalised wording appears nowhere.
+    expect(text).not.toContain("Manager retains asset custody");
+
+    const heading = screen.getByRole("heading", { name: "Risk Disclosure" });
+    const section = heading.closest("section") as HTMLElement;
+    expect(section.querySelector("p")?.textContent).toBe(
+      `${SENTENCES.join(" ")} Read the full risk disclaimer at /legal/disclaimer.`,
+    );
+    expect(
+      section.querySelector('a[href="/legal/disclaimer"]'),
+    ).not.toBeNull();
+  });
+
+  it("the Risk Disclosure section sits below the contact CTA", async () => {
+    stubAuth({ data: { user: null }, error: null });
+    await renderPage();
+    const cta = screen.getByText(/Interested in/).closest("section") as HTMLElement;
+    const risk = screen
+      .getByRole("heading", { name: "Risk Disclosure" })
+      .closest("section") as HTMLElement;
+    expect(
+      cta.compareDocumentPosition(risk) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

@@ -17,7 +17,10 @@ vi.mock("@/components/charts/Sparkline", () => ({ Sparkline: () => null }));
 vi.mock("@/components/ui/Disclaimer", () => ({ Disclaimer: () => null }));
 vi.mock("@/components/ui/VerifiedBadge", () => ({ VerifiedBadge: () => null }));
 vi.mock("@/components/strategy/ManagerIdentityPanel", () => ({ ManagerIdentityPanel: () => null }));
-vi.mock("@/lib/queries", () => ({ getPublicStrategyDetail: vi.fn() }));
+vi.mock("@/lib/queries", () => ({
+  getPublicStrategyDetail: vi.fn(),
+  getPopulatedCategorySlugs: async () => ["crypto-sma", "cfd"],
+}));
 
 import PublicStrategyDetailPage from "./page";
 import { getPublicStrategyDetail } from "@/lib/queries";

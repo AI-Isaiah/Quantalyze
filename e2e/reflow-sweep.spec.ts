@@ -47,6 +47,9 @@ const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/for-quants", anchor: "main h1" },
   // Browse — <main> (browse/layout.tsx) wraps the page <h1>.
   { path: "/browse", anchor: "main h1" },
+  // Retired portfolio report (Phase 195 D-03) — public, data-free; its CTAs
+  // wrap (UC-20), so the 390px reflow check is the proof.
+  { path: "/portfolio-pdf/00000000-0000-0000-0000-000000000000", anchor: "main h1" },
 ];
 
 test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 390px — public", () => {

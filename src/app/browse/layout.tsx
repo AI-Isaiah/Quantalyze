@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { Disclaimer } from "@/components/ui/Disclaimer";
 import { LegalFooter } from "@/components/legal/LegalFooter";
 
 export default function BrowseLayout({
@@ -37,7 +36,6 @@ export default function BrowseLayout({
 
       <main className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-8">
         {children}
-        <Disclaimer variant="footer" />
       </main>
       <LegalFooter />
     </div>

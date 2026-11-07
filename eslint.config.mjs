@@ -286,7 +286,6 @@ const eslintConfig = defineConfig([
       // per-surface ratchet ONLY — the repo-wide flip is Phase 54 BP-03.
       "src/app/(dashboard)/admin/**",
       "src/components/admin/**",
-      "src/app/(dashboard)/portfolios/**",
       "src/components/portfolio/**",
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },

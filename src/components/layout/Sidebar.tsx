@@ -122,8 +122,9 @@ function buildNavSections(
       badge: flaggedCount,
     });
     // Phase 51 NAV-01 — surface the genuine allocator orphans that had no nav
-    // entry (direct-link only today): /compare, /decks, and /recommendations are
-    // allocator-owned dashboard surfaces. They live INSIDE the
+    // entry (direct-link only today): /compare and /recommendations are
+    // allocator-owned dashboard surfaces. (Decks is hidden until it works,
+    // Phase 195 D-04, so it has no entry either.) They live INSIDE the
     // showsAllocatorWorkspace branch so they never leak to a manager (T-45-01 /
     // T-51-02 info-disclosure). The role OR-logic derivations above are
     // byte-unchanged. /recommendations is now a top-level nav item per the
@@ -138,7 +139,6 @@ function buildNavSections(
     workspaceItems.push(
       { label: "Recommendations", href: "/recommendations", icon: RecommendIcon },
       { label: "Compare", href: "/compare", icon: CompareIcon },
-      { label: "Decks", href: "/decks", icon: DeckIcon },
     );
     // Phase 149 NAV-01 — the read half of the workspace. Until now the
     // allocator side was WRITE-ONLY: you could add a strategy and then never
@@ -179,12 +179,12 @@ function buildNavSections(
   // (/allocations, above). The phase-32 frozen-spine guard pins this: no
   // Sandbox-route reference may reappear in this file.
   if (showsManagerWorkspace) {
-    // Phase 109 review correction: "Portfolios" is NOT a manager surface —
-    // /portfolios is an allocator feature (14 allocator owners / 0 manager
-    // owners in prod). It was mis-placed here and mis-classified as sell-side
-    // in ROLE-02. Managers get only Strategies. Portfolios stays a deep-link
-    // surface (reached via AddToPortfolio on discovery), not a primary nav item,
-    // per the v0.4.0 pivot — so it is intentionally absent from every workspace.
+    // Phase 109 review correction: the retired portfolio surface was NOT a
+    // manager surface — it was an allocator feature (14 allocator owners / 0
+    // manager owners in prod). It was mis-placed here and mis-classified as
+    // sell-side in ROLE-02. Managers get only Strategies. That surface was
+    // never a primary nav item (v0.4.0 pivot) and is now gone (Phase 195 D-01),
+    // so it is absent from every workspace.
     workspaceItems.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
     );
@@ -648,16 +648,6 @@ function CompareIcon({ className }: { className?: string }) {
       <rect x="2" y="3" width="4" height="10" rx="1" />
       <rect x="10" y="3" width="4" height="10" rx="1" />
       <path d="M8 2v12" />
-    </svg>
-  );
-}
-
-function DeckIcon({ className }: { className?: string }) {
-  // Stacked cards — a "deck" of strategies.
-  return (
-    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="4" y="2" width="9" height="11" rx="1.5" />
-      <path d="M2 4.5v7.5A1.5 1.5 0 003.5 13.5H11" />
     </svg>
   );
 }

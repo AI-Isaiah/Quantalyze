@@ -106,7 +106,6 @@ const MUST_STAMP_NO_STORE: readonly string[] = [
   "keys/[id]/permissions/route.ts",
   "account/deletion-request/route.ts",
   "portfolio-strategies/alias/route.ts",
-  "portfolio-documents/route.ts",
   "me/audit-log/export/route.ts",
   // Phase 150 — see the header note.
   "portfolio-strategies/allocation/route.ts",
@@ -131,8 +130,9 @@ describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS",
   // Vacuity guard: a typo that drops entries from the allowlist must fail,
   // not silently shrink the gate.
   // Lineage 2026-09-25 (Phase 167.2.1 D-01): 37 → 38, the membership route.
-  it("locks the full audited tenant-data surface (38 routes)", () => {
-    expect(MUST_STAMP_NO_STORE.length).toBe(38);
+  // Lineage 2026-11-07 (Phase 195 WR-03): 38 → 37, portfolio-documents deleted.
+  it("locks the full audited tenant-data surface (37 routes)", () => {
+    expect(MUST_STAMP_NO_STORE.length).toBe(37);
     expect(new Set(MUST_STAMP_NO_STORE).size).toBe(MUST_STAMP_NO_STORE.length);
   });
 
@@ -160,7 +160,7 @@ describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS",
       // NOT prove the SUCCESS body specifically is stamped — that intent is
       // pinned by the behavioral `Cache-Control: private, no-store` success
       // assertions on the crown-jewel routes (keys/validate-and-encrypt,
-      // keys/[id]/permissions, preferences, notes, portfolio-documents,
+      // keys/[id]/permissions, preferences, notes,
       // admin/match/allocators) in their route.test.ts files.
       const importsConst =
         /import\s*\{[^}]*\bNO_STORE_HEADERS\b[^}]*\}\s*from\s*["']@\/lib\/api\/headers["']/.test(

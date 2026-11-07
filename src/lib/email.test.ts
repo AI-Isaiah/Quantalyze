@@ -542,6 +542,31 @@ describe("email.ts — notification_dispatches audit trail", () => {
     expect(state.sendCalls[0].html).toContain('href="https://quantalyze.xyz/allocations"');
   });
 
+  // Phase 195 TRIM (D-01), 2026-11-07: the portfolios surface is retired, so the
+  // alert digest's "View in dashboard" link must land on My Allocation. A link to
+  // the retired route would send every alerted allocator through a redirect (and
+  // would silently rot if the redirect rule were ever dropped).
+  it("alert digest 'View in dashboard' link targets /allocations, not the retired portfolios route", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.example.test");
+    vi.resetModules();
+    const { sendAlertDigest } = await import("./email");
+
+    await sendAlertDigest("allocator@example.com", "Core book", [
+      {
+        id: "a-1",
+        severity: "high",
+        message: "Drawdown breached the limit",
+        triggered_at: "2026-11-07T00:00:00Z",
+      },
+    ] as unknown as Parameters<typeof sendAlertDigest>[2]);
+
+    expect(state.sendCalls).toHaveLength(1);
+    const html = state.sendCalls[0].html as string;
+    expect(html).toContain('href="https://app.example.test/allocations"');
+    expect(html).toContain("View in dashboard →");
+    expect(html).not.toContain("/portfolios");
+  });
+
   it("empty recipient short-circuits before any dispatch write or Resend call", async () => {
     const { notifyManagerIntroRequest } = await import("./email");
 

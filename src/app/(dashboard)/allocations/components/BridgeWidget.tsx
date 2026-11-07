@@ -5,7 +5,7 @@
  *
  * Hero Bridge widget — the allocator's portfolio-level entry point to acting
  * on Bridge recommendations. Three variants (full / card / subtle) selected
- * by the Tweaks panel; default is "full" per D-15.
+ * by the `variant` prop; default is "full" per D-15.
  *
  * Scope (Plan 09 stated, S3 accepted):
  *   - Portfolio-level surface: lists ALL flagged holdings and opens the
@@ -48,7 +48,7 @@ export interface BridgeWidgetProps {
    */
   flaggedHoldings: FlaggedHolding[] | null;
   matchDecisionsByHoldingRef: Record<string, { id: string } | null>;
-  /** Driven by the Tweaks panel (Plan 11); default "full" per D-15. */
+  /** Default "full" per D-15. (The Tweaks panel that used to drive this was removed in Phase 195.) */
   variant?: BridgeWidgetVariant;
   /**
    * PR2 (HANDOFF G4) — outcomes feed for the rich "All clear" empty state.
@@ -234,8 +234,7 @@ export function BridgeWidget({
           )}
           {/* F9 H-0087/H-1211/M-0067 — next/Link, not a raw <a>. A raw anchor to
               the same-route `/allocations?tab=outcomes` triggered a full-document
-              reload that wiped in-flight Bridge drawer state, the TweaksProvider
-              panel state, scroll position, and any ScenarioComposer draft. The
+              reload that wiped in-flight Bridge drawer state, scroll position, and any ScenarioComposer draft. The
               sibling InsightStrip already uses <Link>; this matches the SPA-native
               tab navigation idiom (AllocationsTabs changeTab + router.replace). */}
           <Link

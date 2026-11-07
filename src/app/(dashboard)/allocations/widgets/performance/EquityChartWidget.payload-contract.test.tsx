@@ -1,9 +1,8 @@
-import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 import EquityChartWidget from "./EquityChart";
-import { TweaksProvider } from "../../context/TweaksContext";
 import { equityChartWidgetDataSchema } from "../lib/widget-data";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
@@ -49,42 +48,6 @@ function makeSeries(n: number): DailyPoint[] {
   return pts;
 }
 
-// TweaksProvider reads localStorage; jsdom's shim is partial (same idiom as
-// EquityChartWidget.header.test.tsx).
-const lsStore = new Map<string, string>();
-const localStorageMock = {
-  getItem: (k: string) => lsStore.get(k) ?? null,
-  setItem: (k: string, v: string) => {
-    lsStore.set(k, v);
-  },
-  removeItem: (k: string) => {
-    lsStore.delete(k);
-  },
-  clear: () => {
-    lsStore.clear();
-  },
-  key: () => null,
-  length: 0,
-};
-const realLocalStorage = window.localStorage;
-
-beforeEach(() => {
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    writable: true,
-    value: localStorageMock,
-  });
-  lsStore.clear();
-});
-
-afterAll(() => {
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    writable: true,
-    value: realLocalStorage,
-  });
-});
-
 const POINTS = makeSeries(60);
 const BTC_PRICES = {
   prices: POINTS.map((p, i) => ({ date: p.date, close: 60_000 + i * 100 })),
@@ -101,15 +64,13 @@ const READY_SLICE: Pick<MyAllocationDashboardPayload, "equityDailyPoints" | "btc
 
 function mount(data: unknown) {
   return render(
-    <TweaksProvider>
-      <EquityChartWidget
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data={data as any}
-        timeframe="1YTD"
-        width={6}
-        height={4}
-      />
-    </TweaksProvider>,
+    <EquityChartWidget
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      data={data as any}
+      timeframe="1YTD"
+      width={6}
+      height={4}
+    />,
   );
 }
 

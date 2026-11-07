@@ -72,6 +72,28 @@ function renderOptimizer() {
   );
 }
 
+// Phase 195 TRIM (D-02), 2026-11-07, UC-12 (orchestrator-settled): "Add to
+// portfolio" is retired product-wide. The suggestion card sits on /allocations,
+// so repointing the link at My Allocation would be a self-link; the link is
+// removed and "View strategy" stays as the one action.
+describe("PortfolioOptimizer suggestion card (Phase 195 D-02)", () => {
+  it("keeps 'View strategy' and carries no 'Add to portfolio' link", () => {
+    render(
+      <PortfolioOptimizer
+        portfolioId="p1"
+        initialSuggestions={[SUGGESTION]}
+        computedAt="2020-01-01T00:00:00Z"
+        computationStatus="complete"
+      />,
+    );
+
+    const view = screen.getByRole("link", { name: "View strategy" });
+    expect(view).toHaveAttribute("href", `/factsheet/${SUGGESTION.strategy_id}`);
+    expect(screen.queryByRole("link", { name: "Add to portfolio" })).toBeNull();
+    expect(screen.queryByText("Add to portfolio")).toBeNull();
+  });
+});
+
 describe("PortfolioOptimizer metric formatting (F-2 honesty)", () => {
   it("renders correlation as a plain decimal, NOT a percentage", () => {
     renderOptimizer();
@@ -172,9 +194,13 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
     fireEvent.click(screen.getByRole("button", { name: "Re-run" }));
   }
 
-  /** Every live control that would let a user act on the invalidated ranking. */
+  /**
+   * Every live control that would let a user act on the invalidated ranking.
+   * Phase 195 (2026-11-07) retired "Add to portfolio", so the one action control
+   * left on a suggestion card is "View strategy".
+   */
   function addToPortfolioControls() {
-    return screen.queryAllByRole("link", { name: "Add to portfolio" });
+    return screen.queryAllByRole("link", { name: "View strategy" });
   }
 
   it("removes every 'Add to portfolio' control when the re-run hits a breaker 503", async () => {

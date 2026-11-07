@@ -19,8 +19,7 @@
 
   /* GUARD-01 (43-01) — formalize the factsheet-shell `border-text` /
      `text-text-2` utilities for LIGHT mode. They previously had ONLY dark-mode
-     overrides (globals.css `.factsheet-v2-shell[data-theme="dark"]` at the
-     bottom of this file: `.text-text-2` #BAC2D8, `.border-text` #3D4661), so
+     overrides (since removed with dark mode, Phase 195 D-06), so
      under Tailwind v4 the bare `--color-text` / `--color-text-2` tokens were
      UNDEFINED in light mode and resolved to `currentColor` (near-black) — the
      P40-NIT footer/header divider complaint. Adding the light-mode tokens fixes
@@ -186,12 +185,10 @@
   }
 
   /* Phase 50 / STATE-04 — View Transitions collapse to an instant swap under
-     reduced motion. The native `withViewTransition` helper
-     (src/lib/view-transition.ts) already short-circuits to a synchronous
-     update() when this media query matches, so it never even snapshots; this
-     rule is the belt-and-suspenders pass for any ::view-transition pseudo that
-     still slips through (e.g. a CSS `view-transition-name` set without the
-     helper). The `(*)` selector zeros every named/auto VT group. */
+     reduced motion. This rule zeros every named/auto ::view-transition group
+     so a `view-transition-name` set anywhere never animates for a user who
+     asked for reduced motion. The `(*)` selector zeros every named/auto VT
+     group. */
   ::view-transition-old(*),
   ::view-transition-new(*) {
     animation-duration: 0s !important;
@@ -203,62 +200,19 @@ body {
   color: var(--color-text-primary);
 }
 
-/* PR3 (HANDOFF G5) — Tweaks density modifier. Mirrors the truth file's
-   body[data-density="tight"|"loose"] rules from
-   `Allocator Dashboard - Standalone.html` so the panel's Density
-   segmented control compresses or relaxes spacing globally without
-   touching individual components. The `--row-h` and `--density-pad`
-   tokens are read by KpiStrip, HoldingsTable rows, and any tile that
-   opts into density-aware spacing. */
+/* Row-height / padding tokens read by KpiStrip, HoldingsTable rows and the
+   StrategyTable. Fixed at the comfortable step; the Tweaks density modifier
+   and the discovery-table density control were removed in Phase 195
+   (2026-11-07, D-05 / D-07). */
 :root {
   --row-h: 44px;
   --density-pad: 16px;
 }
-body[data-density="tight"] {
-  --row-h: 36px;
-  --density-pad: 12px;
-  font-size: 13px;
-}
-body[data-density="loose"] {
-  --row-h: 52px;
-  --density-pad: 20px;
-}
 
-/* Phase 50 / STATE-04 — TABLE-SCOPED density. The StrategyTable on the public
-   discovery surface (Wave 2 / Plan 50-06) carries its own `data-density` on a
-   `[data-strategy-table]` root, so its density control flips only that table's
-   --row-h / --density-pad and NEVER the global body[data-density] that drives
-   the allocator dashboard (RESEARCH Q2). Reuses the existing token names and
-   the same tight step (36px / 12px) as body[data-density="tight"], but WITHOUT
-   the global `font-size: 13px` — that font shrink must not leak into a public
-   table. `loose` mirrors the global loose step for symmetry. The base
-   [data-strategy-table] inherits the :root 44px/16px default when no density
-   attribute is set. */
-[data-strategy-table][data-density="tight"] {
-  --row-h: 36px;
-  --density-pad: 12px;
-}
-[data-strategy-table][data-density="loose"] {
-  --row-h: 52px;
-  --density-pad: 20px;
-}
-
-/* Allocator dashboard density — apply the --density-pad / --row-h tokens
-   to the actual surfaces an allocator looks at, so the Tweaks density
-   knob produces a visible change instead of toggling unread CSS vars.
-   The selector targets the AllocationsTabs root (data-allocator-dashboard)
-   so the rule only fires on that surface — landing pages, settings, etc.
-   keep their fixed spacing. */
-body[data-density="tight"] [data-allocator-dashboard] {
-  --tab-gap-y: 12px;
-  --tab-pad-block: 8px;
-  --kpi-row-h: 36px;
-}
-body[data-density="loose"] [data-allocator-dashboard] {
-  --tab-gap-y: 24px;
-  --tab-pad-block: 18px;
-  --kpi-row-h: 52px;
-}
+/* Allocator dashboard spacing tokens, read by the tab strip below. The
+   AllocationsTabs root (data-allocator-dashboard) carries them so the rule
+   only fires on that surface — landing pages, settings, etc. keep their
+   fixed spacing. */
 [data-allocator-dashboard] {
   --tab-gap-y: 16px;
   --tab-pad-block: 12px;
@@ -267,16 +221,6 @@ body[data-density="loose"] [data-allocator-dashboard] {
 [data-allocator-dashboard] [data-allocator-tabstrip] {
   padding-block-end: var(--tab-pad-block);
   margin-block-end: var(--tab-gap-y);
-}
-
-/* Tweaks → Outcomes-tile visibility. When the panel toggles the knob to
-   Hide, the body gains data-show-outcomes="false" (see TweaksContext)
-   and both the Outcomes tab button + tabpanel disappear. The selector
-   uses display:none so screen readers and tab-key navigation also skip
-   the hidden surface. */
-body[data-show-outcomes="false"] [data-tab-key="outcomes"],
-body[data-show-outcomes="false"] [data-allocator-panel="outcomes"] {
-  display: none;
 }
 
 /* Typography for the /legal/* routes — avoids a full @tailwindcss/typography
@@ -337,15 +281,6 @@ svg text {
 .font-display {
   font-family: var(--font-serif);
   font-weight: 400;
-}
-
-/* Tweaks → Display font knob (serif | sans). When the knob is set to
-   "sans", every .font-display heading flips to DM Sans without each
-   consumer needing to read the knob value. The default ("serif") leaves
-   the rule above intact. See TweaksContext.tsx. */
-body[data-display-font="sans"] .font-display {
-  font-family: var(--font-sans);
-  font-weight: 500;
 }
 
 /* --- MandateForm range slider — institutional track + precise thumb.
@@ -564,103 +499,21 @@ body[data-display-font="sans"] .font-display {
 }
 
 /* ============================================================
-   Factsheet v2 — dark + colorblind palette overrides (scoped)
+   Factsheet v2 — colorblind palette overrides (scoped)
    ============================================================
    Tailwind v4 `@theme inline` inlines literal hex into utility
-   classes, so `bg-surface` / `text-text-primary` etc. can't be
+   classes, so `bg-accent` / `text-positive` etc. can't be
    runtime-flipped via CSS-variable overrides on a parent.
    We therefore scope explicit utility overrides to the factsheet
-   v2 shell when data-theme="dark" (or data-colorblind="1") is set.
+   v2 shell when data-colorblind="1" is set. (Dark mode was removed,
+   Phase 195 D-06; DESIGN.md "Dark mode: Not planned".)
    ============================================================ */
 
-.factsheet-v2-shell[data-theme="dark"] {
-  background-color: #0B0F1A;
-  color: #E6EAF2;
-}
-
-/* Backgrounds — Stripe/Bloomberg dark elevation ladder */
-.factsheet-v2-shell[data-theme="dark"] .bg-page { background-color: #0B0F1A !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-surface { background-color: #141A26 !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-surface-subtle { background-color: #191F2E !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-track { background-color: #1B2233 !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-accent { background-color: #5EEAD4 !important; color: #0B0F1A !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-accent-hover { background-color: #99F6E4 !important; color: #0B0F1A !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-border { background-color: #2A3144 !important; }
-.factsheet-v2-shell[data-theme="dark"] .hover\:bg-accent-hover:hover { background-color: #99F6E4 !important; color: #0B0F1A !important; }
-.factsheet-v2-shell[data-theme="dark"] .hover\:bg-surface:hover { background-color: #141A26 !important; }
-.factsheet-v2-shell[data-theme="dark"] .hover\:bg-surface-subtle:hover { background-color: #191F2E !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-negative\/5 { background-color: rgba(248, 113, 113, 0.08) !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-positive\/5 { background-color: rgba(74, 222, 128, 0.08) !important; }
-.factsheet-v2-shell[data-theme="dark"] .bg-warning-bg { background-color: #3F2A05 !important; }
-
-/* Text scale (2026-05-20 contrast bump) — all three tiers clear WCAG AAA
-   (≥7:1) on the surface elevation. Pre-bump the muted tier was #7783A0
-   at 4.6:1, only AA — too dim for small-uppercase KPI labels on
-   data-dense factsheets. Now:
-     primary  #E6EAF2 → 14.5:1
-     text-2   #BAC2D8 →  9.8:1
-     muted    #A0AAC2 →  7.5:1
-   Hierarchy preserved (each tier ~30% darker than the one above).
-   Stripe Dashboard's secondary text was the reference. */
-.factsheet-v2-shell[data-theme="dark"] .text-text-primary { color: #E6EAF2 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-text-secondary { color: #BAC2D8 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-text-2 { color: #BAC2D8 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-text-muted { color: #A0AAC2 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-accent { color: #5EEAD4 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-positive { color: #4ADE80 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-negative { color: #F87171 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-warning { color: #FBBF24 !important; }
-.factsheet-v2-shell[data-theme="dark"] .text-warning-700 { color: #FBBF24 !important; }
-
-/* Borders */
-.factsheet-v2-shell[data-theme="dark"] .border-border { border-color: #2A3144 !important; }
-.factsheet-v2-shell[data-theme="dark"] .border-text { border-color: #3D4661 !important; }
-.factsheet-v2-shell[data-theme="dark"] .border-accent { border-color: #5EEAD4 !important; }
-.factsheet-v2-shell[data-theme="dark"] .border-negative { border-color: #F87171 !important; }
-.factsheet-v2-shell[data-theme="dark"] .border-negative\/30 { border-color: rgba(248, 113, 113, 0.4) !important; }
-.factsheet-v2-shell[data-theme="dark"] .border-border\/30 { border-color: rgba(42, 49, 68, 0.5) !important; }
-.factsheet-v2-shell[data-theme="dark"] .border-border\/60 { border-color: rgba(42, 49, 68, 0.75) !important; }
-.factsheet-v2-shell[data-theme="dark"] .divide-border > * + * { border-color: #2A3144 !important; }
-
-/* Hover states retained where light-mode used the same surface */
-.factsheet-v2-shell[data-theme="dark"] .hover\:underline:hover { text-decoration: underline; }
-
-/* Colorblind override layered on top — strategy/positive shifts to muted
-   Oxford Blue (light) or sky-blue (dark); negative shifts to Claret. */
+/* Colorblind override — strategy/positive shifts to muted
+   Oxford Blue; negative shifts to Claret. */
 .factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .bg-accent {
   background-color: #002554 !important;
 }
 .factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .text-accent { color: #002554 !important; }
 .factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .text-positive { color: #002554 !important; }
 .factsheet-v2-shell[data-theme="light"][data-colorblind="1"] .text-negative { color: #990019 !important; }
-.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .bg-accent { background-color: #4A8FCC !important; color: #FFFFFF !important; }
-.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-accent { color: #4A8FCC !important; }
-.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-positive { color: #4A8FCC !important; }
-.factsheet-v2-shell[data-theme="dark"][data-colorblind="1"] .text-negative { color: #E26A77 !important; }
-
-/* ============================================================
-   TweaksContext accent-intensity override (NEW-C22-02/03)
-   ============================================================
-   When allocations/TweaksContext sets accentIntensity = "full" it
-   writes data-accent-intensity="full" on <html> (CSS attribute) rather
-   than inline style properties, so the dark factsheet's scoped palette
-   rules below can re-declare --color-* and win the cascade inside their
-   own subtree. Inline style.setProperty beats class !important for custom
-   properties; attribute-driven CSS rules do not.
-   ============================================================ */
-
-/* Light-mode "full" accent */
-html[data-accent-intensity="full"] {
-  --color-accent: #0E9F84;
-  --color-accent-hover: #0B8870;
-  --color-chart-strategy: #0E9F84;
-}
-
-/* Dark factsheet — re-assert the dark palette so the "full" attribute on
-   the ancestor <html> doesn't leak light-mode hex into dark contexts. */
-html[data-accent-intensity="full"] .factsheet-v2-shell[data-theme="dark"] {
-  --color-accent: #5EEAD4;
-  --color-accent-hover: #99F6E4;
-  --color-chart-strategy: #5EEAD4;
-}
-

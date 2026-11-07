@@ -6,7 +6,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { formatUnsignedPercent, signTone } from "@/lib/factsheet/display-sign";
 import { Sparkline } from "@/components/charts/Sparkline";
-import { Disclaimer } from "@/components/ui/Disclaimer";
+import { ANALYTICS_ONLY_TEXT } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
@@ -670,32 +670,8 @@ export default async function TearSheetPage({
         </dl>
       </section>
 
-      {/* Custody disclosure */}
-      <section className="mb-6">
-        <Disclaimer variant="custody" />
-      </section>
-
-      {/* Risk disclosure */}
-      <section className="mb-6 border-t border-border pt-4">
-        <h2 className="mb-2 text-sm font-semibold text-text-primary">Risk Disclosure</h2>
-        <p className="text-fixed-10 text-text-muted leading-relaxed">
-          Past performance does not guarantee future results. Cryptocurrency
-          trading involves substantial risk of total loss. This tear sheet is
-          for informational purposes only and does not constitute investment,
-          legal, or tax advice. Strategies are monitored via read-only exchange
-          APIs; managers retain asset custody. Read the full risk disclaimer at{" "}
-          <Link
-            href="/legal/disclaimer"
-            className="underline hover:text-text-primary"
-          >
-            /legal/disclaimer
-          </Link>
-          .
-        </p>
-      </section>
-
       {/* Contact CTA */}
-      <section className="mb-2 rounded-lg border border-accent/30 bg-accent/5 p-4 text-center">
+      <section className="mb-6 rounded-lg border border-accent/30 bg-accent/5 p-4 text-center">
         <p className="text-sm font-semibold text-text-primary">
           Interested in {displayName}?
         </p>
@@ -709,6 +685,26 @@ export default async function TearSheetPage({
         >
           View full factsheet →
         </Link>
+      </section>
+
+      {/* Risk disclosure */}
+      <section className="mb-2 border-t border-border pt-4">
+        <h2 className="mb-2 text-sm font-semibold text-text-primary">Risk Disclosure</h2>
+        <p className="text-fixed-10 text-text-muted leading-relaxed">
+          Past performance does not guarantee future results. Cryptocurrency
+          trading involves substantial risk of total loss. This tear sheet is
+          for informational purposes only and does not constitute investment,
+          legal, or tax advice. Strategies are monitored via read-only exchange
+          APIs; managers retain asset custody. {ANALYTICS_ONLY_TEXT} Read the
+          full risk disclaimer at{" "}
+          <Link
+            href="/legal/disclaimer"
+            className="underline hover:text-text-primary"
+          >
+            /legal/disclaimer
+          </Link>
+          .
+        </p>
       </section>
 
       {/* Print + PDF buttons — hidden in print/PDF output */}

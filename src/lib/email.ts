@@ -998,7 +998,7 @@ export async function sendAlertDigest(
         ${alertsHtml}
       </table>
       <p style="margin-top:24px;">
-        <a href="${APP_URL}/portfolios" style="color:${BRAND_COLOR};font-weight:500;">
+        <a href="${APP_URL}/allocations" style="color:${BRAND_COLOR};font-weight:500;">
           View in dashboard →
         </a>
       </p>

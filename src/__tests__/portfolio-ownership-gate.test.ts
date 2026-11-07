@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *
  * `assertPortfolioOwnership(portfolioId, userId)` is the single source of
  * truth for IDOR protection across every portfolio-* API route
- * (portfolio-alerts, portfolio-documents, portfolio-pdf, portfolio-optimizer,
+ * (portfolio-alerts, portfolio-pdf, portfolio-optimizer,
  * alerts/critical). Every route test MOCKS it (`assertPortfolioOwnership:
  * async () => true`), so the function's own query shape — the
  * `.eq('id').eq('user_id').maybeSingle()` filter chain and the

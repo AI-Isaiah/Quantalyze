@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
+import { Disclaimer } from "@/components/ui/Disclaimer";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategiesByCategory, getPercentiles } from "@/lib/queries";
+import { getBrowseCategories } from "../browse-categories";
 import type { Metadata } from "next";
 
 export async function generateMetadata({
@@ -34,16 +36,22 @@ export default async function PublicCategoryPage({
   // returns null for a peer set under 5 strategies (or on a transient DB/RLS
   // error) → passed as undefined so the table renders no suffix (honest
   // absence), never a fabricated rank.
-  const [strategies, percentiles] = await Promise.all([
+  const [strategies, percentiles, { onlySlug }] = await Promise.all([
     getStrategiesByCategory(slug),
     getPercentiles(slug),
+    getBrowseCategories(),
   ]);
 
   return (
     <>
       <Breadcrumb
         items={[
-          { label: "Browse", href: "/browse" },
+          // /browse redirects here when this is the only category (D-08), so
+          // the root crumb must not link back to it. On any OTHER slug the
+          // redirect lands on the populated category, so the link stays.
+          onlySlug === slug
+            ? { label: "Browse" }
+            : { label: "Browse", href: "/browse" },
           { label: meta.name },
         ]}
       />
@@ -80,6 +88,8 @@ export default async function PublicCategoryPage({
           Sign up free
         </Link>
       </div>
+
+      <Disclaimer variant="footer" />
     </>
   );
 }

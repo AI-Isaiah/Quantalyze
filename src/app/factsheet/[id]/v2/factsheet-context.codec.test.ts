@@ -4,7 +4,7 @@ import { factsheetViewStateCodec } from "./factsheet-context";
 /**
  * B7c — factsheetViewStateCodec unit coverage.
  *
- * The factsheet view-state (comparator / colorblind / regimes / dark; the range
+ * The factsheet view-state (comparator / colorblind / regimes; the range
  * is session-local since Phase 193 D-02 and only decoded, for the legacy purge)
  * persists to `factsheet-v2:${strategyId}` as an UNVERSIONED
  * `JSON.stringify(state)` blob. The B7 migration onto `useCrossTabStorage`
@@ -19,16 +19,16 @@ import { factsheetViewStateCodec } from "./factsheet-context";
  */
 
 // A LEGACY pre-B7 blob: the exact shape the hand-rolled persist effect wrote,
-// range included. `cb`/`reg`/`dark` are the literal string "1"; off fields were
+// range and the since-removed dark field included. `cb`/`reg` are the literal string "1"; off fields were
 // `undefined` and therefore OMITTED by JSON.stringify (so a full blob carries
 // only the keys that are on). Phase 193 (D-02): the range is no longer written
 // by anything, but it is still DECODED so hydration can detect and delete it.
 const LEGACY_BLOB = '{"range":"3-42","cmp":"btc","cb":"1","reg":"1","dark":"1"}';
 // The range-free canonical blob: what every write produces since D-02.
-const CANONICAL_BLOB = '{"cmp":"btc","cb":"1","reg":"1","dark":"1"}';
+const CANONICAL_BLOB = '{"cmp":"btc","cb":"1","reg":"1"}';
 
 describe("factsheetViewStateCodec — unversioned byte-compat", () => {
-  it("decodes a pre-B7 unversioned blob as 'ok' and still surfaces its legacy range (decode-only, D-02)", () => {
+  it("decodes a pre-B7 unversioned blob as 'ok', surfaces its legacy range (decode-only, D-02) and drops its stored dark value (D-06)", () => {
     const result = factsheetViewStateCodec.decode(LEGACY_BLOB);
     expect(result.outcome).toBe("ok");
     expect(result.reason).toBeNull();
@@ -37,8 +37,18 @@ describe("factsheetViewStateCodec — unversioned byte-compat", () => {
       cmp: "btc",
       cb: "1",
       reg: "1",
-      dark: "1",
     });
+    expect(result.value).not.toHaveProperty("dark");
+  });
+
+  it("a stored dark '1' decodes to no dark field, and the re-encoded blob carries no dark key (D-06)", () => {
+    // WHY: dark mode is gone (DESIGN.md "Dark mode: Not planned"). A blob an
+    // older build saved must not keep the value alive: decode folds it away, so
+    // the very next write (which encodes the decoded view) is dark-free.
+    const decoded = factsheetViewStateCodec.decode('{"cmp":"btc","dark":"1"}');
+    expect(decoded.outcome).toBe("ok");
+    expect(decoded.value).not.toHaveProperty("dark");
+    expect(factsheetViewStateCodec.encode(decoded.value)).toBe('{"cmp":"btc"}');
   });
 
   it("encode(decode(blob).value) reproduces a range-free canonical blob byte-for-byte (NO version field)", () => {
@@ -60,7 +70,6 @@ describe("factsheetViewStateCodec — unversioned byte-compat", () => {
       cmp: "none",
       cb: undefined,
       reg: undefined,
-      dark: undefined,
     });
     expect(encoded).toBe('{"cmp":"none"}');
   });
@@ -105,20 +114,20 @@ describe("factsheetViewStateCodec — fail-loud reset outcomes", () => {
 describe("factsheetViewStateCodec — per-field salvage (codec level)", () => {
   it("one drifted field folds away while valid fields survive", () => {
     // `cmp:"doge"` is outside the comparator union → dropped; range survives.
-    const raw = JSON.stringify({ range: "5-50", cmp: "doge", dark: "1" });
+    const raw = JSON.stringify({ range: "5-50", cmp: "doge", cb: "1" });
     const result = factsheetViewStateCodec.decode(raw);
     expect(result.outcome).toBe("ok");
     expect(result.value.range).toBe("5-50"); // preserved
     expect(result.value.cmp).toBeUndefined(); // drifted comparator dropped
-    expect(result.value.dark).toBe("1"); // preserved
+    expect(result.value.cb).toBe("1"); // preserved
   });
 
   it("a non-'1' / non-true toggle value folds to off (undefined)", () => {
-    const raw = JSON.stringify({ cb: "yes", reg: 1, dark: "1" });
+    const raw = JSON.stringify({ cb: "yes", reg: 1, cmp: "spx" });
     const result = factsheetViewStateCodec.decode(raw);
     expect(result.value.cb).toBeUndefined(); // "yes" is not "1"/true
     expect(result.value.reg).toBeUndefined(); // numeric 1 is not "1"/true
-    expect(result.value.dark).toBe("1"); // valid → kept
+    expect(result.value.cmp).toBe("spx"); // valid → kept
   });
 
   it("a non-string range folds away (not a usable window)", () => {

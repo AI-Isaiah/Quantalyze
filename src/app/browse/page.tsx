@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { getPopulatedCategorySlugs } from "@/lib/queries";
+import { redirect } from "next/navigation";
+import { Disclaimer } from "@/components/ui/Disclaimer";
+import { getBrowseCategories } from "./browse-categories";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
@@ -10,17 +11,14 @@ export const metadata: Metadata = {
 };
 
 export default async function BrowsePage() {
-  let populatedSlugs: string[] = [];
-  try {
-    populatedSlugs = await getPopulatedCategorySlugs();
-  } catch {
-    // Show all categories if query fails
-  }
+  const { categories, onlySlug } = await getBrowseCategories();
 
-  const categories =
-    populatedSlugs.length > 0
-      ? DISCOVERY_CATEGORIES.filter((c) => populatedSlugs.includes(c.slug))
-      : DISCOVERY_CATEGORIES;
+  // D-08: one populated category makes the card grid a one-card menu, so go
+  // straight to it (rule: ./browse-categories). redirect() throws, so there is
+  // no try/catch around it.
+  if (onlySlug) {
+    redirect(`/browse/${onlySlug}`);
+  }
 
   return (
     <>
@@ -65,7 +63,7 @@ export default async function BrowsePage() {
             </h2>
             <p className="mt-2 text-sm text-text-secondary">
               Sign up to access detailed performance reports, request
-              introductions to managers, and build portfolios.
+              introductions to managers, and model an allocation.
             </p>
           </div>
           <Link
@@ -76,6 +74,8 @@ export default async function BrowsePage() {
           </Link>
         </div>
       </div>
+
+      <Disclaimer variant="footer" />
     </>
   );
 }

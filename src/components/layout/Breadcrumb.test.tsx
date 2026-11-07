@@ -56,3 +56,31 @@ describe("Breadcrumb a11y — keyboard focus ring (NAV-02, RED until 51-03)", ()
     expect(className).toMatch(/accent/);
   });
 });
+
+describe("Breadcrumb a11y — unlinked non-leaf crumb (Phase 195 WR-01)", () => {
+  it("gives aria-current to the last item only when a non-last item has no href", () => {
+    const { container } = render(
+      <Breadcrumb
+        items={[{ label: "Browse" }, { label: "Crypto SMA" }]}
+      />,
+    );
+    // Exactly one element in the nav is the current page, and it is the leaf.
+    const current = container.querySelectorAll("[aria-current]");
+    expect(current).toHaveLength(1);
+    expect(screen.getByText("Crypto SMA")).toHaveAttribute("aria-current", "page");
+    // The unlinked non-leaf is plain muted text: no aria-current, and not drawn
+    // in the current-page style.
+    const root = screen.getByText("Browse");
+    expect(root).not.toHaveAttribute("aria-current");
+    expect(root.className).not.toContain("font-medium");
+    expect(root.className).not.toContain("text-text-primary");
+  });
+
+  it("leaf behaviour is unchanged: the last item still carries aria-current and its style", () => {
+    const { container } = render(<Breadcrumb items={ITEMS} />);
+    expect(container.querySelectorAll("[aria-current]")).toHaveLength(1);
+    const leaf = screen.getByText("Bridge candidate");
+    expect(leaf).toHaveAttribute("aria-current", "page");
+    expect(leaf.className).toContain("font-medium");
+  });
+});

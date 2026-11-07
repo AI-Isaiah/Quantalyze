@@ -1,409 +1,69 @@
-import { notFound } from "next/navigation";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { captureToSentry } from "@/lib/sentry-capture";
-import { extractAnalytics } from "@/lib/queries";
-import { isRankableAnalyticsRow } from "@/lib/closed-sets";
-import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
-import { Disclaimer } from "@/components/ui/Disclaimer";
-import { drawdownTone } from "@/lib/factsheet/display-sign";
-import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
-import { verifyPdfRenderToken } from "@/lib/pdf-render-token";
-import { formatDataVintage } from "./vintage";
-import type { Portfolio, StrategyAnalytics } from "@/lib/types";
+import Link from "next/link";
 import type { Metadata } from "next";
+import { Button } from "@/components/ui/Button";
+import { LegalFooter } from "@/components/legal/LegalFooter";
 
-export async function generateMetadata({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ id: string }>;
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
-}): Promise<Metadata> {
-  const { id } = await params;
-  const sp = await searchParams;
-  const renderToken = typeof sp.renderToken === "string" ? sp.renderToken : null;
-  if (!verifyPdfRenderToken(id, renderToken)) {
-    return { title: "Unauthorized", robots: "noindex" };
-  }
-  const admin = createAdminClient();
-  const { data, error } = await admin
-    .from("portfolios")
-    .select("name")
-    .eq("id", id)
-    .single();
-  if (error) {
-    captureToSentry(new Error(error.message), {
-      tags: { route: "portfolio-pdf/[id]/page", stage: "generate-metadata" },
-    });
-  }
-  const name = (data as { name?: string } | null)?.name;
-  return {
-    title: name ? `${name} portfolio report` : "Portfolio report",
-    robots: "noindex",
-  };
-}
-
-type StrategyRow = {
-  strategy_id: string;
-  name: string;
-  weight: number | null;
-  twr: number | null;
-  sharpe: number | null;
-  max_dd: number | null;
-  contribution: number | null;
+/**
+ * Phase 195 TRIM (D-03), 2026-11-07 — the portfolio report is RETIRED.
+ *
+ * `/portfolio-pdf/<id>` used to render a stored portfolio as a printable
+ * report behind an HMAC render token. The renderer, its API route and the
+ * token module are deleted. This page is what remains: a named landing for an
+ * old share link, so the holder is told the report was retired instead of
+ * meeting a login wall, a 404 or a generic error.
+ *
+ * It reads NOTHING but the URL: no database row, no token check, no session,
+ * and it does not even read the `id` segment. The same page renders for any
+ * id, with or without `?renderToken=`, signed in or signed out. `/portfolio-pdf`
+ * stays in `src/proxy.ts` PUBLIC_ROUTES and bounce-exempt for that reason.
+ *
+ * It shows no figures, so it carries no disclaimer block (UC-9); the
+ * `LegalFooter` links are navigation, not a disclaimer.
+ */
+export const metadata: Metadata = {
+  title: "Portfolio report retired",
+  robots: "noindex",
 };
 
-export default async function PortfolioPdfPage({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ id: string }>;
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
-}) {
-  const { id } = await params;
-  const sp = await searchParams;
-  const renderToken = typeof sp.renderToken === "string" ? sp.renderToken : null;
-
-  if (!verifyPdfRenderToken(id, renderToken)) {
-    // Non-2xx so the PDF route's status guard refuses it; a 200 "Unauthorized."
-    // div would be printed and delivered as the report.
-    notFound();
-  }
-
-  const admin = createAdminClient();
-
-  const [portfolioRes, analyticsRes, strategiesRes] = await Promise.all([
-    admin.from("portfolios").select("*").eq("id", id).single(),
-    admin
-      .from("portfolio_analytics")
-      .select("*")
-      .eq("portfolio_id", id)
-      .order("computed_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    admin
-      .from("portfolio_strategies")
-      .select(
-        // STALE-01: `computation_status` joins the per-constituent embed. It is
-        // the only column that separates a finished run's KPIs from the ones a
-        // failed run left behind — see the row gate below.
-        `*, strategies (id, name, strategy_analytics (cagr, sharpe, max_drawdown, volatility, computation_status))`,
-      )
-      .eq("portfolio_id", id)
-      .order("added_at", { ascending: false }),
-  ]);
-
-  // A failed read must fail the render: swallowing it prints an empty report
-  // as a 200 PDF. Each message names the read and the portfolio.
-  if (portfolioRes.error) {
-    throw new Error(
-      `portfolio read failed for portfolio ${id}: ${portfolioRes.error.message}`,
-    );
-  }
-  if (analyticsRes.error) {
-    throw new Error(
-      `portfolio analytics read failed for portfolio ${id}: ${analyticsRes.error.message}`,
-    );
-  }
-  if (strategiesRes.error) {
-    throw new Error(
-      `portfolio strategies read failed for portfolio ${id}: ${strategiesRes.error.message}`,
-    );
-  }
-
-  const { data: portfolio } = portfolioRes;
-  if (!portfolio) {
-    // Non-2xx for the same reason as the token gate above.
-    notFound();
-  }
-
-  // Route ALL portfolio_analytics reads through the adapter so malformed
-  // JSONB (proto-key pollution, empty strings as numbers, legacy shape
-  // drift) can never crash or silently corrupt the PDF render. Matches the
-  // convention in `/demo` and `/portfolios/[id]`.
-  const analytics = adaptPortfolioAnalytics(analyticsRes.data);
-  const strategiesRaw = strategiesRes.data;
-
-  const strategyList = (strategiesRaw ?? []) as Array<{
-    strategy_id: string;
-    current_weight: number | null;
-    strategies: {
-      id: string;
-      name: string;
-      strategy_analytics: unknown;
-    } | null;
-  }>;
-
-  const attribution = analytics?.attribution_breakdown ?? null;
-
-  const rows: StrategyRow[] = strategyList.map((ps) => {
-    const s = ps.strategies;
-    const raw = s
-      ? (extractAnalytics(s.strategy_analytics) as StrategyAnalytics | null)
-      : null;
-    // STALE-01 — a portfolio mixes OTHER managers' published strategies, and
-    // this document leaves the platform: it is rendered behind an HMAC render
-    // token, printed to PDF and emailed on. A number that is wrong here is
-    // wrong in a file the recipient keeps, with no page to correct it on.
-    //
-    // The constituent's TWR / Sharpe / Max DD are read straight off its
-    // `strategy_analytics` row, so a `failed` run's leftovers were printed
-    // beside a confident "Data as of …" vintage line. Withhold them through the
-    // SHARED terminal-success predicate; each of the three cells already
-    // renders `formatPercent`/`formatNumber`'s em-dash on a null, and the row
-    // keeps its NAME, its WEIGHT and its persisted CONTRIBUTION — none of which
-    // are products of the strategy's own analytics job.
-    //
-    // The portfolio-level KPI strip above comes from `portfolio_analytics`, a
-    // DIFFERENT table with its own status vocabulary already handled by
-    // `adaptPortfolioAnalytics`. Untouched here.
-    const a = isRankableAnalyticsRow(raw) ? raw : null;
-    const attr = attribution?.find((x) => x.strategy_id === ps.strategy_id);
-    // Persisted attribution rows expose contribution + allocation_effect.
-    // Weight comes from portfolio_strategies, TWR from the strategy's own analytics.
-    return {
-      strategy_id: ps.strategy_id,
-      name: s?.name ?? "Unnamed strategy",
-      weight: ps.current_weight ?? null,
-      twr: a?.cagr ?? null,
-      sharpe: a?.sharpe ?? null,
-      max_dd: a?.max_drawdown ?? null,
-      contribution: attr?.contribution ?? null,
-    };
-  });
-
-  const p = portfolio as Portfolio;
-  const generatedAt = new Date().toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-
-  // B14: the render date ("Generated …") is NOT the data vintage. Surface the
-  // analytics `computed_at` so a report rendered today off week-old analytics
-  // doesn't read as current (formatDataVintage routes through the freshness SoT).
-  //
-  // Read from the adapted `analytics` (line 97), NOT the raw row: this file
-  // mandates every portfolio_analytics read go through adaptPortfolioAnalytics
-  // (see comment above), so the vintage line stays consistent with the KPI
-  // body — when the adapter rejects a malformed/unknown-status row both go
-  // null together (vintage falls to "Data freshness unavailable"), never a
-  // confident "Data as of …" header over an em-dash body.
-  const dataVintage = formatDataVintage(analytics?.computed_at ?? null);
-
-  const kpis = [
-    { label: "AUM", value: formatCurrency(analytics?.total_aum) },
-    { label: "TWR (total)", value: formatPercent(analytics?.total_return_twr) },
-    { label: "Portfolio Sharpe", value: formatNumber(analytics?.portfolio_sharpe) },
-    { label: "Volatility", value: formatPercent(analytics?.portfolio_volatility) },
-    { label: "Max Drawdown", value: formatPercent(analytics?.portfolio_max_drawdown) },
-    { label: "Avg Correlation", value: formatNumber(analytics?.avg_pairwise_correlation) },
-  ];
-
-  const correlationMatrix = analytics?.correlation_matrix ?? null;
-  const correlationKeys = correlationMatrix
-    ? Object.keys(correlationMatrix)
-    : [];
-  const strategyNameById = new Map(
-    strategyList
-      .filter((s) => s.strategies)
-      .map((s) => [s.strategy_id, s.strategies!.name] as const),
-  );
-  // A stored matrix can still carry a strategy that has since left the
-  // portfolio. Its name exists in `strategies`; read it rather than print an id
-  // fragment into a document that leaves the platform.
-  const missingIds = correlationKeys.filter((k) => !strategyNameById.has(k));
-  if (missingIds.length > 0) {
-    const { data: departed, error: departedError } = await admin
-      .from("strategies")
-      .select("id, name")
-      .in("id", missingIds);
-    if (departedError) {
-      throw new Error(
-        `correlation names read failed for portfolio ${id}: ${departedError.message}`,
-      );
-    }
-    for (const r of departed ?? []) {
-      if (r.name) strategyNameById.set(r.id, r.name);
-    }
-  }
-  // Two unresolved keys under one label would print identical headers; number
-  // them only then, so the common single miss still reads "Unnamed strategy".
-  const unresolvedKeys = correlationKeys.filter((k) => !strategyNameById.has(k));
-  const correlationLabel = (k: string) =>
-    strategyNameById.get(k) ??
-    (unresolvedKeys.length > 1
-      ? `Unnamed strategy ${unresolvedKeys.indexOf(k) + 1}`
-      : "Unnamed strategy");
-
+export default function PortfolioReportRetiredPage() {
   return (
-    <div className="max-w-[800px] mx-auto p-8 bg-white print:p-4">
-      <div className="flex items-center justify-between border-b border-border pb-4 mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-text-primary">{p.name}</h1>
-          {p.description && (
-            <p className="text-sm text-text-muted mt-1">{p.description}</p>
-          )}
-        </div>
-        <div className="text-right">
-          <p className="text-xs font-semibold text-accent">
-            Portfolio Report
+    <>
+      <main className="min-h-full bg-page">
+        <article className="mx-auto max-w-2xl px-6 py-16">
+          <p className="text-micro font-mono uppercase tracking-[0.22em] text-text-muted">
+            Portfolio report · Retired
           </p>
-          <p className="text-fixed-10 text-text-muted">Generated {generatedAt}</p>
-          <p className="text-fixed-10 text-text-muted">{dataVintage}</p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        {kpis.map((kpi) => (
-          <div
-            key={kpi.label}
-            className="rounded-lg border border-border p-3"
-          >
-            <p className="text-fixed-10 text-text-muted uppercase tracking-wide">
-              {kpi.label}
-            </p>
-            <p className="text-lg font-bold font-metric text-text-primary mt-1">
-              {kpi.value}
-            </p>
+          <h1 className="mt-2 font-display text-page-title leading-tight text-text-primary">
+            This portfolio report has been retired
+          </h1>
+          <p className="mt-4 text-body leading-normal text-text-secondary">
+            The link you followed opened a portfolio report. We no longer
+            publish portfolio reports, so this report is not available here or
+            as a PDF.
+          </p>
+          <p className="mt-2 text-body leading-normal text-text-secondary">
+            If you hold an allocation with us, its current figures are on My
+            Allocation once you sign in. You can also browse the strategies we
+            list.
+          </p>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link href="/browse">
+              <Button variant="primary" size="md">
+                Browse verified strategies
+              </Button>
+            </Link>
+            <Link href="/allocations">
+              <Button variant="secondary" size="md">
+                Open My Allocation
+              </Button>
+            </Link>
           </div>
-        ))}
-      </div>
-
-      {analytics?.narrative_summary && (
-        <div className="mb-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-2">
-            Morning Briefing
-          </h2>
-          <p className="text-xs text-text-secondary leading-relaxed">
-            {analytics.narrative_summary}
+          <p className="mt-8 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
+            Retired 2026-11-07
           </p>
-        </div>
-      )}
-
-      <div className="mb-6">
-        <h2 className="text-sm font-semibold text-text-primary mb-2">
-          Strategy Breakdown
-        </h2>
-        {rows.length === 0 ? (
-          <p className="text-xs text-text-muted">
-            No strategies in this portfolio.
-          </p>
-        ) : (
-          <table className="w-full text-fixed-10">
-            <thead>
-              <tr className="border-b border-border">
-                <th className="text-left py-1 px-1 font-medium text-text-muted">
-                  Strategy
-                </th>
-                <th className="text-right py-1 px-1 font-medium text-text-muted">
-                  Weight
-                </th>
-                <th className="text-right py-1 px-1 font-medium text-text-muted">
-                  TWR
-                </th>
-                <th className="text-right py-1 px-1 font-medium text-text-muted">
-                  Sharpe
-                </th>
-                <th className="text-right py-1 px-1 font-medium text-text-muted">
-                  Max DD
-                </th>
-                <th className="text-right py-1 px-1 font-medium text-text-muted">
-                  Contribution
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr
-                  key={row.strategy_id}
-                  className="border-b border-border/30"
-                >
-                  <td className="py-1 px-1 font-medium text-text-primary">
-                    {row.name}
-                  </td>
-                  <td className="text-right py-1 px-1 font-metric text-text-secondary">
-                    {row.weight != null ? formatPercent(row.weight) : "\u2014"}
-                  </td>
-                  <td className="text-right py-1 px-1 font-metric text-text-primary">
-                    {formatPercent(row.twr)}
-                  </td>
-                  <td className="text-right py-1 px-1 font-metric text-text-primary">
-                    {formatNumber(row.sharpe)}
-                  </td>
-                  <td
-                    className={`text-right py-1 px-1 font-metric ${
-                      drawdownTone(row.max_dd, 2, 100) === "negative"
-                        ? "text-negative"
-                        : "text-text-primary"
-                    }`}
-                  >
-                    {formatPercent(row.max_dd)}
-                  </td>
-                  <td className="text-right py-1 px-1 font-metric text-text-primary">
-                    {row.contribution != null
-                      ? formatPercent(row.contribution)
-                      : "\u2014"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {correlationMatrix && correlationKeys.length > 0 && (
-        <div className="mb-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-2">
-            Correlation Matrix
-          </h2>
-          <table className="w-full text-fixed-10">
-            <thead>
-              <tr className="border-b border-border">
-                <th className="text-left py-1 px-1 font-medium text-text-muted">
-                  Strategy
-                </th>
-                {correlationKeys.map((k) => (
-                  <th
-                    key={k}
-                    className="text-right py-1 px-1 font-medium text-text-muted"
-                  >
-                    {correlationLabel(k)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {correlationKeys.map((rowKey) => (
-                <tr key={rowKey} className="border-b border-border/30">
-                  <td className="py-1 px-1 font-medium text-text-primary">
-                    {correlationLabel(rowKey)}
-                  </td>
-                  {correlationKeys.map((colKey) => {
-                    const val = correlationMatrix[rowKey]?.[colKey];
-                    return (
-                      <td
-                        key={colKey}
-                        className="text-right py-1 px-1 font-metric text-text-primary"
-                      >
-                        {val != null ? formatNumber(val) : "\u2014"}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/*
-       * Portfolio PDFs may mix tiers across constituent strategies. Until the
-       * portfolio aggregate provenance is tracked, fall back to the no-claim
-       * default so the footer never asserts "exchange-API verified" on a
-       * portfolio whose constituents include CSV-uploaded strategies.
-       */}
-      <Disclaimer variant="factsheet" trustTier={null} />
-    </div>
+        </article>
+      </main>
+      <LegalFooter />
+    </>
   );
 }

@@ -428,7 +428,9 @@ describe("page-title census — self-tests (the matchers can fail)", () => {
 describe("page-title census — the title contract across src/app", () => {
   it("scans a real population (an empty scan would pass vacuously)", () => {
     expect(allRouteFiles.length).toBeGreaterThan(50);
-    expect(titledGroupPages.length).toBeGreaterThan(35);
+    // Phase 195 (2026-11-07): the four portfolios pages were deleted, taking the
+    // titled-page population from 38 to 34, so the vacuity floor moves 35 -> 30.
+    expect(titledGroupPages.length).toBeGreaterThan(30);
     expect(titledGroupPages).toContain("src/app/(dashboard)/decks/page.tsx");
     expect(titledGroupPages).toContain("src/app/(auth)/login/page.tsx");
     for (const carveOut of REDIRECT_ONLY_PAGES) {

@@ -61,17 +61,18 @@ census that a human has to update, never in silence:
 
   2. **A two-tier, count-pinned census** (``_TS_PAYLOAD_FILES`` /
      ``_TS_BENIGN_FILES``). Value-token discrimination alone cannot separate the
-     remaining three, because each is a quoted literal in a non-DB position, so they
+     remaining three (two since Phase 195), because each is a quoted literal in a non-DB position, so they
      are named explicitly WITH their expected count:
 
        * ``src/lib/utils.ts`` ``EMPTY_ANALYTICS`` — an in-memory placeholder object
          literal, not a DB write. (It DOES carry ``computing_started_at: null``, added
          by plan 142-06, so it would pass — but it would be passing for the wrong
          reason, which is precisely why it is classified rather than counted.)
-       * ``src/app/(dashboard)/portfolios/[id]/page.tsx`` — a ``portfolio_analytics``
-         payload in ``chooseAnalytics``. This is the TypeScript twin of the
-         ``routers/portfolio.py`` trap the Python half is chain-scoped to survive: a
-         naive widen would flag the WRONG table's payload.
+       * (Phase 195, 2026-11-07: the portfolios detail page, whose ``chooseAnalytics``
+         carried a ``portfolio_analytics`` payload, was DELETED with the retired
+         portfolios surface, so this row is gone. That payload was the TypeScript
+         twin of the ``routers/portfolio.py`` trap the Python half is chain-scoped
+         to survive: a naive widen would flag the WRONG table's payload.)
        * ``src/lib/types.ts`` — a string-literal TYPE (``a is T & { … : "complete" }``)
          inside a type predicate. Quoted, therefore invisible to mechanism 1.
 
@@ -939,8 +940,8 @@ _TS_PAYLOAD_FILES: Final[dict[str, int]] = {
 # reddens its count. Each entry is justified in the module docstring; do not add a
 # file here without writing down why it can never be a strategy_analytics payload.
 _TS_BENIGN_FILES: Final[dict[str, int]] = {
-    # `chooseAnalytics` fallback row — the WRONG table (portfolio_analytics).
-    "src/app/(dashboard)/portfolios/[id]/page.tsx": 1,
+    # Phase 195 (2026-11-07): the portfolios detail page row (`chooseAnalytics`,
+    # the WRONG table, portfolio_analytics) is gone: the page was deleted.
     # A string-literal TYPE inside a type predicate, not a value.
     "src/lib/types.ts": 1,
     # `EMPTY_ANALYTICS` — an in-memory placeholder, never sent to PostgREST.
@@ -1182,7 +1183,8 @@ def test_typescript_writer_census_counts() -> None:
       csv-finalize/route.ts ×1 — ``writeFailedStrategyAnalyticsPlaceholder``;
       keys/sync/route.ts ×1 — the ``stampCompositeFailedUnlessComplete`` argument.
 
-    BENIGN tier — 3: the portfolios page's wrong-table row, ``src/lib/types.ts``'s
+    BENIGN tier — 2 (was 3 until Phase 195, 2026-11-07, when the portfolios page's
+    wrong-table row went with the deleted page): ``src/lib/types.ts``'s
     string-literal type, ``EMPTY_ANALYTICS``. Justified individually in the module
     docstring.
 
@@ -1192,7 +1194,7 @@ def test_typescript_writer_census_counts() -> None:
     EXPECTED_PER_FILE: Final[dict[str, int]] = _TS_PAYLOAD_FILES
     EXPECTED_TOTAL = 4
     EXPECTED_BENIGN_PER_FILE: Final[dict[str, int]] = _TS_BENIGN_FILES
-    EXPECTED_BENIGN_TOTAL = 3
+    EXPECTED_BENIGN_TOTAL = 2
 
     hits = _scan_typescript()
     actual: dict[str, int] = {}

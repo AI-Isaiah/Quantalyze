@@ -13,8 +13,8 @@ import { fitBaselineY } from "@/lib/chart-ticks";
 
 /** Resolve the heatmap mixing trio from the central palette. */
 function useHeatmapBase(): { base: string; accent: string; negative: string } {
-  const { darkMode, colorblind } = useToggles();
-  const p = resolvePalette({ darkMode, colorblind });
+  const { colorblind } = useToggles();
+  const p = resolvePalette({ colorblind });
   return { base: p.base, accent: p.accent, negative: p.negative };
 }
 
@@ -678,17 +678,15 @@ export function tintFor(
   if (maxAbs <= 0 || !Number.isFinite(v)) return { bg: "var(--color-surface-subtle, #FBFCFD)", fg: "var(--color-text-muted)" };
   const t = Math.max(-1, Math.min(1, v / maxAbs));
   // Foreground candidates: text-primary-ish for low-intensity cells (legible
-  // on near-base bg), base color (white in light, slate in dark) for
-  // high-intensity cells.
-  const isDark = palette.base !== "#FFFFFF";
-  const lowFg = isDark ? "#F1F5F9" : "#1A1A2E";
-  const highFg = palette.base === "#FFFFFF" ? "#FFFFFF" : "#0F172A";
+  // on near-base bg), base color (white) for high-intensity cells.
+  const lowFg = "#1A1A2E";
+  const highFg = "#FFFFFF";
   if (t === 0) return { bg: palette.base, fg: "var(--color-text-muted)" };
   const target = t > 0 ? palette.accent : palette.negative;
   let a = Math.pow(Math.abs(t), 0.75);
   // AA floor (heatmap labels are text-micro/normal → 4.5:1 required). Deepen
   // the mix — bounded, terminal: at a=1 the full accent/negative passes with
-  // at least one candidate in both light and dark palettes — until the
+  // at least one candidate in both light palettes — until the
   // better-contrast candidate clears the floor, then use that candidate.
   for (let i = 0; i < 8; i++) {
     const bg = mixHex(palette.base, target, a);

@@ -39,12 +39,18 @@ export function Breadcrumb({ items }: BreadcrumbProps) {
             >
               {item.label}
             </Link>
-          ) : (
+          ) : i === items.length - 1 ? (
             // Phase 51 NAV-02 — the leaf (current page) advertises itself to AT.
-            // Intermediate linked crumbs do NOT carry aria-current.
+            // Intermediate linked crumbs do NOT carry aria-current. Only the
+            // LAST item is the current page, so an unlinked non-leaf (below)
+            // never claims it.
             <span aria-current="page" className="text-text-primary font-medium">
               {item.label}
             </span>
+          ) : (
+            // Phase 195 WR-01 — an unlinked crumb that is not the leaf is plain
+            // muted text: no aria-current, no current-page styling.
+            <span>{item.label}</span>
           )}
         </span>
       ))}

@@ -12,10 +12,11 @@ import { Sidebar } from "./Sidebar";
  *
  * 51-REVIEW override (2026-06-28): the user OVERRODE the Recommendations
  * half of that decision. Recommendations is again a top-level allocator
- * nav item (alongside Compare + Decks) so the daily match output is not a
+ * nav item (alongside Compare) so the daily match output is not a
  * dead-end. Scenarios stays a tab (its top-level route is a redirect-stub).
+ * Decks left the nav in Phase 195 (D-04): hidden until it works.
  *
- *   Allocator view: My allocation + Recommendations + Compare + Decks.
+ *   Allocator view: My allocation + Recommendations + Compare.
  *     (Discovery + Account handle the rest. No Strategies, no Portfolios,
  *     no Scenarios top-level entry.)
  *
@@ -265,7 +266,7 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
  * the moment these surfaces are rendered together.
  */
 describe("Sidebar workspace — My Strategies entry (Phase 149 NAV-01)", () => {
-  it("renders an <a> to /my-strategies for an allocator, between Decks and Add a Strategy", () => {
+  it("renders an <a> to /my-strategies for an allocator, between Compare and Add a Strategy", () => {
     const { container } = render(
       <Sidebar populatedSlugs={[]} isAllocator={true} />,
     );
@@ -277,14 +278,15 @@ describe("Sidebar workspace — My Strategies entry (Phase 149 NAV-01)", () => {
     expect(entry!.tagName).toBe("A");
     expect(entry!.textContent).toContain("My Strategies");
 
-    // UI-SPEC Delta 1 position: after the Recommendations/Compare/Decks block,
+    // UI-SPEC Delta 1 position: after the Recommendations/Compare block,
     // directly above the write CTA the founder pointed at (which stays last).
-    const decks = container.querySelector('a[href="/decks"]');
-    expect(decks).not.toBeNull();
+    // Decks is hidden (Phase 195 D-04), so Compare is the anchor now.
+    const compare = container.querySelector('a[href="/compare"]');
+    expect(compare).not.toBeNull();
     const addStrategy = screen.getByRole("button", { name: "Add a Strategy" });
 
     expect(
-      decks!.compareDocumentPosition(entry!) &
+      compare!.compareDocumentPosition(entry!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
@@ -312,6 +314,58 @@ describe("Sidebar workspace — My Strategies entry (Phase 149 NAV-01)", () => {
     expect(
       buttons.filter((b) => b.textContent?.trim() === "My Strategies"),
     ).toEqual([]);
+  });
+});
+
+/**
+ * Phase 195 TRIM (D-04) — Decks is hidden until it works. `/decks` redirects to
+ * discovery and the nav entry is gone for every role; the Decks code stays on
+ * disk so bringing it back is removing a gate. The portfolios surface is gone
+ * (D-01), so no nav item may point at it either. Selectors are by HREF: the
+ * discovery categories "Crypto Decks" / "TradFi Decks" are categories, not the
+ * Decks surface, and must keep rendering.
+ */
+describe("Sidebar workspace — Decks hidden, no portfolios link (Phase 195 D-04)", () => {
+  const ROLES = [
+    { label: "allocator", props: { isAllocator: true } },
+    { label: "manager", props: { isManager: true } },
+    { label: "admin", props: { isAdmin: true } },
+    { label: "both", props: { isAllocator: true, isManager: true } },
+  ] as const;
+
+  for (const { label, props } of ROLES) {
+    it(`renders no Decks anchor and no /portfolios anchor for ${label}`, () => {
+      const { container } = render(
+        <Sidebar populatedSlugs={["crypto-sma"]} {...props} />,
+      );
+      expect(container.querySelector('a[href="/decks"]')).toBeNull();
+      expect(container.querySelector('a[href^="/portfolios"]')).toBeNull();
+    });
+  }
+
+  it("lists the allocator workspace as My allocation, Recommendations, Compare, My Strategies, Add a Strategy", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    const nav = screen.getByRole("navigation", { name: /primary|main|sidebar/i });
+    const labels = within(nav)
+      .getAllByRole("link")
+      .map((a) => a.textContent?.trim() ?? "");
+    const workspace = [
+      "My allocation",
+      "Recommendations",
+      "Compare",
+      "My Strategies",
+    ];
+    const indexes = workspace.map((l) => labels.findIndex((t) => t.includes(l)));
+    expect(indexes.every((i) => i >= 0)).toBe(true);
+    expect([...indexes].sort((a, b) => a - b)).toEqual(indexes);
+    expect(labels.some((t) => /^Decks$/.test(t))).toBe(false);
+  });
+
+  it("keeps the TradFi Decks discovery category (a category, not the Decks surface)", () => {
+    const { container } = render(
+      <Sidebar populatedSlugs={["tradfi-decks"]} isAllocator={true} />,
+    );
+    expect(container.querySelector('a[href="/discovery/tradfi-decks"]')).not.toBeNull();
   });
 });
 

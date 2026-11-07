@@ -10,7 +10,6 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { toWealth, type WealthPoint } from "@/lib/scenario";
 import { useTapPin } from "@/hooks/useTapPin";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
-import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 import { formatRelativeTime } from "@/lib/utils";
@@ -632,13 +631,8 @@ export function EquityChart({
   const [visibilityMode, setVisibilityMode] = useState<VisibilityMode>("both");
   const hasScenario = !!scenarioSeries && scenarioSeries.length > 0;
 
-  // PR3 (HANDOFF G5) — Tweaks-context knobs. `chartStyle` gates the
-  // gradient area fill so the prototype's Line / Area segmented control
-  // flips the visual; `showBench` gates the BTC dashed overlay + legend
-  // chip. Outside the provider both default to truthy values matching
-  // the existing render.
-  const chartStyle = useTweakValue("chartStyle");
-  const showBench = useTweakValue("showBench");
+  // Phase 195 D-05: the Tweaks panel is gone. The chart always draws the
+  // gradient area fill and the BTC dashed overlay + legend chip.
 
   // ResizeObserver — fall back to a fixed 960 in jsdom / older runtimes.
   // The svg is exactly its wrapper's content width at every width (Phase
@@ -785,9 +779,8 @@ export function EquityChart({
   // benchmark + every overlay, the y-tick walker, the path/area string
   // builders, and the smart x-tick density loop) used to run inline in the
   // component body. Because hover state (`hoverIdx`, set on every mousemove
-  // via handleMove) and the TweaksContext subscription (`useTweakValue`,
-  // which re-renders on ANY context change — including panelOpen toggles)
-  // live in the same body, every one of those events re-executed this O(N)
+  // via handleMove) and the (since removed) TweaksContext subscription
+  // lived in the same body, every one of those events re-executed this O(N)
   // + O(overlays*N) work. On the ALL period with a multi-year history and
   // ~20 overlays the array hits ~50k values and the per-month x-tick loop
   // does an O(N) linear search — multi-hundred-ms per mouse pixel and per
@@ -1634,7 +1627,7 @@ export function EquityChart({
         }}
       >
         <LegendSwatch color="var(--color-chart-strategy)" label="Portfolio" />
-        {showBench && visibleBenchmarkNormalized && (
+        {visibleBenchmarkNormalized && (
           <LegendSwatch
             color="var(--color-chart-benchmark)"
             label={
@@ -1803,9 +1796,8 @@ export function EquityChart({
           )}
 
           {/* Benchmark (dashed) — normalized to period start so it
-              departs from the 0% baseline alongside the portfolio.
-              Hidden when Tweaks → Benchmark overlay = Off. */}
-          {showBench && visibleBenchmarkNormalized && (
+              departs from the 0% baseline alongside the portfolio. */}
+          {visibleBenchmarkNormalized && (
             <path
               d={toPath(visibleBenchmarkNormalized)}
               fill="none"
@@ -1841,15 +1833,12 @@ export function EquityChart({
               );
             })}
 
-          {/* Portfolio area + line. Tweaks → Equity chart = Line drops
-              the gradient fill so the chart renders as a stroke-only
-              line, mirroring the prototype tweak. Phase 10 / 10-04:
-              when the visibility toggle is on "scenario", the live
+          {/* Portfolio area + line. Phase 10 / 10-04: when the visibility toggle is on "scenario", the live
               baseline reads as a de-emphasized reference (0.3 opacity)
               so the scenario projection takes visual priority — when
               the toggle is on "live" or "both" (default) the existing
               full-opacity rendering is preserved verbatim. */}
-          {chartStyle === "area" && visibilityMode !== "scenario" && (
+          {visibilityMode !== "scenario" && (
             <path d={toArea(visibleNormalized)} fill="url(#eq-grad)" />
           )}
           <path
@@ -2197,8 +2186,6 @@ function TooltipRow({
 function EquityChartWidgetInner({
   data: d,
 }: { data: EquityChartWidgetData } & BaseWidgetProps) {
-  const showBench = useTweakValue("showBench");
-
   // Stabilize the array reference so downstream useMemo deps (minDate,
   // periodReturn) don't churn on every render. The `?? []` literal
   // would otherwise build a new empty array each call, defeating
@@ -2428,7 +2415,7 @@ function EquityChartWidgetInner({
               color="var(--color-chart-strategy)"
               label="Portfolio"
             />
-            {showBench && hasBenchmark && (
+            {hasBenchmark && (
               <HeaderLegendSwatch
                 color="var(--color-chart-benchmark)"
                 label="BTC"

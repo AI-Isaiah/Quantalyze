@@ -573,7 +573,7 @@ describe("StrategyTable managerRows — note row (D-06)", () => {
 //
 // The private-link control in the Actions cell opens a NATIVE <dialog>; on close
 // the browser returns focus to the node that opened it. If the row remounted
-// while the dialog was alive (a sort, a density change, a search), that node
+// while the dialog was alive (a sort, a search), that node
 // would be gone and focus would fall to <body> (founder UAT #4). The mechanism
 // is the Fragment keyed by `s.id`: React MOVES a keyed row on a re-sort and
 // keeps its subtree. This probe counts real mounts and unmounts of the slot AND
@@ -641,7 +641,7 @@ describe("StrategyTable managerRows — the actions slot mounts once (D-01)", ()
     probe.cleanups.clear();
   });
 
-  it("mount once: a sort, a density change and a search that keeps the row never remount a slot", () => {
+  it("mount once: a sort and a search that keeps the row never remount a slot", () => {
     renderManager({ rows: PROBE_ROWS, managerRows: probeManagerRows() });
     for (const r of PROBE_ROWS) expect(probe.mounts.get(r.id)).toBe(1);
 
@@ -676,10 +676,6 @@ describe("StrategyTable managerRows — the actions slot mounts once (D-01)", ()
     const afterSecond = visibleOrder();
     expectSameNodes();
     expect(afterSecond.join()).toBe(before.join()); // back to the default order
-
-    // Density: compact and back.
-    fireEvent.click(screen.getByRole("button", { name: "Compact" }));
-    fireEvent.click(screen.getByRole("button", { name: "Comfortable" }));
 
     // A search every probed row survives ("Mgr" is in every name).
     fireEvent.change(screen.getByPlaceholderText("Search strategies..."), {

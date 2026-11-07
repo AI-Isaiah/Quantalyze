@@ -66,8 +66,6 @@ const COMMIT = '[data-testid="scenario-footer-commit"]';
 const NAV = 'nav[aria-label="Primary mobile"]';
 const ALLOC_ANCHOR = 'h1:has-text("My allocation")';
 const TABLIST = '[role="tablist"][aria-label="Allocation surfaces"]';
-const TWEAKS_TOGGLE = "[data-tweaks-toggle]";
-const TWEAKS_PANEL = '[role="dialog"][aria-label="Tweaks"]';
 // ResponsiveTable prefixes its hint, so match the name, not the whole string.
 const CONSTITUENT = { name: /^Strategies and weights/ };
 // Tailwind md. Below it the bottom nav is in the layout; at and above it is not.
@@ -247,59 +245,6 @@ test.describe("allocations tab strip — SC2-(a)", () => {
           centre >= exportBox.y - 1 && centre <= exportBox.y + exportBox.height + 1,
           `V960: tablist centre y=${centre} is outside the Export row ${exportBox.y}..${exportBox.y + exportBox.height}`,
         ).toBe(true);
-      }
-    });
-  }
-});
-
-test.describe("Tweaks — N-TWEAKS", () => {
-  test.skip(
-    !HAS_SEED_ENV,
-    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
-  );
-
-  for (const vp of VIEWPORTS) {
-    test(`${vp.id}: toggle intersects neither the nav nor the footer, and is not fixed`, async ({
-      page,
-    }) => {
-      test.setTimeout(120_000);
-      await page.setViewportSize({ width: vp.width, height: vp.height });
-      await openComposedScenario(page);
-
-      const toggle = page.locator(TWEAKS_TOGGLE);
-      await expect(toggle, `${vp.id}: Tweaks toggle missing`).toBeVisible();
-      const toggleBox = await boxOf(toggle, `${vp.id} tweaks toggle`);
-      const position = await toggle.evaluate((el) => getComputedStyle(el).position);
-      expect(position, `${vp.id}: Tweaks toggle position is ${position}`).not.toBe("fixed");
-
-      if (vp.width < MD_PX) {
-        const navBox = await boxOf(page.locator(NAV), `${vp.id} Primary mobile`);
-        expect(
-          rectsIntersect(toggleBox, navBox),
-          `${vp.id}: Tweaks toggle intersects Primary mobile`,
-        ).toBe(false);
-      }
-      const footer = page.locator(FOOTER);
-      if ((await footer.count()) > 0) {
-        const footerBox = await footer.boundingBox();
-        if (footerBox) {
-          expect(
-            rectsIntersect(toggleBox, footerBox),
-            `${vp.id}: Tweaks toggle intersects the scenario footer`,
-          ).toBe(false);
-        }
-      }
-
-      if (vp.width < MD_PX) {
-        await toggle.click();
-        const panel = page.locator(TWEAKS_PANEL);
-        await expect(panel, `${vp.id}: Tweaks panel did not open`).toBeVisible();
-        const panelBox = await boxOf(panel, `${vp.id} Tweaks panel`);
-        const navBox = await boxOf(page.locator(NAV), `${vp.id} Primary mobile`);
-        expect(
-          rectsIntersect(panelBox, navBox),
-          `${vp.id}: Tweaks panel intersects Primary mobile`,
-        ).toBe(false);
       }
     });
   }

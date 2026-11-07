@@ -8,6 +8,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getPublicStrategyDetail } from "@/lib/queries";
+import { getBrowseCategories } from "../../browse-categories";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
 import { drawdownTone } from "@/lib/factsheet/display-sign";
@@ -34,7 +35,10 @@ export default async function PublicStrategyDetailPage({
 }) {
   const { slug, strategyId } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
-  const result = await getPublicStrategyDetail(strategyId);
+  const [result, { onlySlug }] = await Promise.all([
+    getPublicStrategyDetail(strategyId),
+    getBrowseCategories(),
+  ]);
 
   if (!result || !result.analytics) {
     return (
@@ -51,7 +55,12 @@ export default async function PublicStrategyDetailPage({
     <>
       <Breadcrumb
         items={[
-          { label: "Browse", href: "/browse" },
+          // /browse redirects to the category when it is the only one (D-08),
+          // so on that category the root crumb must not link back to it. Under
+          // any OTHER slug the redirect lands elsewhere, so the link stays.
+          onlySlug === slug
+            ? { label: "Browse" }
+            : { label: "Browse", href: "/browse" },
           { label: cat?.name ?? slug, href: `/browse/${slug}` },
           { label: displayName },
         ]}
@@ -91,8 +100,6 @@ export default async function PublicStrategyDetailPage({
           strategyCodename={displayName}
         />
       </div>
-
-      <Disclaimer variant="custody" className="mb-6" />
 
       {/* Hero metrics */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -187,7 +194,10 @@ export default async function PublicStrategyDetailPage({
         </div>
       </div>
 
-      <Disclaimer variant="strategy" trustTier={strategy.trust_tier} />
+      {/* D-09: the one disclaimer block on this page (custody + provenance +
+          general risk), last content element, replacing the custody box, the
+          bottom strategy paragraph and the layout footer. */}
+      <Disclaimer variant="strategy-page" trustTier={strategy.trust_tier} />
     </>
   );
 }

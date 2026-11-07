@@ -1,10 +1,9 @@
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { render, screen, within, waitFor, fireEvent } from "@testing-library/react";
+import { describe, it, expect } from "vitest";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 import EquityChartWidget from "./EquityChart";
 import type { OverlaySeries } from "./EquityChart";
-import { TweaksProvider } from "../../context/TweaksContext";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 // ---------------------------------------------------------------------------
@@ -12,7 +11,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 //
 // PR4 #1 lifted period/customRange/pickerOpen state into EquityChartWidget
 // and added a ~180-line single-row header: title + HeaderLegendSwatch chips
-// (Portfolio always; BTC when `showBench && hasBenchmark`; one per overlay) +
+// (Portfolio always; BTC when `hasBenchmark`; one per overlay) +
 // period toggle + sync stamp ("data stale" vs "sync just now"). The whole
 // point of the lift is that the inner <EquityChart> is rendered with
 // `hideHeader`/`hideLegend` so the user does NOT see a duplicated header/
@@ -22,7 +21,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 // asserts the "Equity curve" title renders — it never exercises the swatch
 // conditionals, the stale stamp, or the hideHeader/hideLegend dedup. These
 // tests pin those paths so a regression (e.g. dropping the `hideLegend`
-// prop, or forwarding a stale `showBench`) surfaces loudly.
+// prop) surfaces loudly.
 // ---------------------------------------------------------------------------
 
 // next/navigation is consumed transitively by CustomRangePicker / chart
@@ -54,73 +53,16 @@ function makeSeries(n: number): DailyPoint[] {
   return pts;
 }
 
-// TweaksProvider hydrates `showBench` from localStorage in a post-mount
-// effect. Stub a complete Map-backed store (jsdom's shim is partial) and
-// seed before render, then use async queries that retry until hydration
-// lands — same idiom as BridgeHeroWidget.test.tsx.
-const lsStore = new Map<string, string>();
-const localStorageMock = {
-  getItem: (k: string) => lsStore.get(k) ?? null,
-  setItem: (k: string, v: string) => {
-    lsStore.set(k, v);
-  },
-  removeItem: (k: string) => {
-    lsStore.delete(k);
-  },
-  clear: () => {
-    lsStore.clear();
-  },
-  key: () => null,
-  length: 0,
-};
-const realLocalStorage = window.localStorage;
-
-afterAll(() => {
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    writable: true,
-    value: realLocalStorage,
-  });
-});
-
-function seedTweaks(partial: Record<string, unknown>): void {
-  window.localStorage.setItem(
-    "allocations.tweaks",
-    JSON.stringify({
-      density: "comfortable",
-      accentIntensity: "muted",
-      displayFont: "serif",
-      bridgeVariant: "full",
-      chartStyle: "area",
-      showBench: true,
-      showOutcomes: true,
-      ...partial,
-    }),
-  );
-}
-
-beforeEach(() => {
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    writable: true,
-    value: localStorageMock,
-  });
-  lsStore.clear();
-});
-
 describe("M-1068 — EquityChartWidget single-row header", () => {
   it("renders the 'Equity curve' title and an always-present Portfolio legend swatch in the header strip", () => {
-    seedTweaks({});
     render(
-      <TweaksProvider>
-        <EquityChartWidget
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          data={{ equityDailyPoints: makeSeries(60) } as any}
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        data={{ equityDailyPoints: makeSeries(60) } as any}
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
     expect(screen.getByText("Equity curve")).toBeInTheDocument();
     // The header strip carries aria-label="Series legend"; Portfolio chip is
@@ -129,93 +71,59 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
     expect(within(legend).getByText("Portfolio")).toBeInTheDocument();
   });
 
-  it("renders the BTC swatch when btcBenchmark is present AND showBench=true; hidden when showBench=false", async () => {
-    // showBench defaults to true; assert BTC chip appears with a benchmark.
-    seedTweaks({ showBench: true });
-    const { unmount } = render(
-      <TweaksProvider>
-        <EquityChartWidget
-          data={
-            {
-              equityDailyPoints: makeSeries(60),
-              btcBenchmark: makeSeries(60),
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            } as any
-          }
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
-    );
-    const legendOn = screen.getByLabelText("Series legend");
-    expect(within(legendOn).getByText("BTC")).toBeInTheDocument();
-    unmount();
-
-    // showBench=false → BTC chip suppressed even though a benchmark exists.
-    seedTweaks({ showBench: false });
+  it("renders the BTC swatch when btcBenchmark is present", () => {
+    // Phase 195 D-05: the benchmark overlay toggle is gone, so the chip is
+    // always shown when a benchmark exists.
     render(
-      <TweaksProvider>
-        <EquityChartWidget
-          data={
-            {
-              equityDailyPoints: makeSeries(60),
-              btcBenchmark: makeSeries(60),
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            } as any
-          }
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        data={
+          {
+            equityDailyPoints: makeSeries(60),
+            btcBenchmark: makeSeries(60),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any
+        }
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
-    // The hydration effect flips showBench → false; wait for the BTC chip to
-    // disappear from the (single) legend strip.
-    await waitFor(() => {
-      const legendOff = screen.getByLabelText("Series legend");
-      expect(within(legendOff).queryByText("BTC")).toBeNull();
-    });
+    const legend = screen.getByLabelText("Series legend");
+    expect(within(legend).getByText("BTC")).toBeInTheDocument();
   });
 
-  it("does NOT render a BTC swatch when there is no benchmark, regardless of showBench", () => {
-    seedTweaks({ showBench: true });
+  it("does NOT render a BTC swatch when there is no benchmark", () => {
     render(
-      <TweaksProvider>
-        <EquityChartWidget
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          data={{ equityDailyPoints: makeSeries(60) } as any}
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        data={{ equityDailyPoints: makeSeries(60) } as any}
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
     const legend = screen.getByLabelText("Series legend");
     expect(within(legend).queryByText("BTC")).toBeNull();
   });
 
   it("renders one HeaderLegendSwatch per equityOverlay (labels appear in the header strip)", () => {
-    seedTweaks({});
     const overlays: OverlaySeries[] = [
       { id: "o1", label: "Momentum", color: "#FF6600", points: makeSeries(60) },
       { id: "o2", label: "Carry", color: "#00AAFF", points: makeSeries(60) },
     ];
     render(
-      <TweaksProvider>
-        <EquityChartWidget
-          data={
-            {
-              equityDailyPoints: makeSeries(60),
-              equityOverlays: overlays,
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            } as any
-          }
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        data={
+          {
+            equityDailyPoints: makeSeries(60),
+            equityOverlays: overlays,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any
+        }
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
     const legend = screen.getByLabelText("Series legend");
     expect(within(legend).getByText("Momentum")).toBeInTheDocument();
@@ -223,22 +131,19 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
   });
 
   it("shows 'data stale' (and NOT 'sync just now') when allKeysStale=true with no lastSyncAt", () => {
-    seedTweaks({});
     const { container } = render(
-      <TweaksProvider>
-        <EquityChartWidget
-          data={
-            {
-              equityDailyPoints: makeSeries(60),
-              allKeysStale: true,
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            } as any
-          }
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        data={
+          {
+            equityDailyPoints: makeSeries(60),
+            allKeysStale: true,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any
+        }
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
     expect(container.textContent).toContain("data stale");
     expect(container.textContent).not.toContain("sync just now");
@@ -253,17 +158,14 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
     // has — the exact staleness lie B14 exists to eliminate. The stamp must
     // surface the honest onboarding copy instead. This assertion FAILS against
     // the pre-fix `: "sync just now"` branch.
-    seedTweaks({});
     const { container } = render(
-      <TweaksProvider>
-        <EquityChartWidget
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          data={{ equityDailyPoints: makeSeries(60) } as any}
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        data={{ equityDailyPoints: makeSeries(60) } as any}
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
     expect(container.textContent).toContain("no sync yet");
     expect(container.textContent).not.toContain("sync just now");
@@ -271,22 +173,19 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
   });
 
   it("renders exactly ONE 'Series legend' strip — the inner EquityChart receives hideHeader/hideLegend so its own legend is suppressed (no duplicate row)", () => {
-    seedTweaks({});
     const { container } = render(
-      <TweaksProvider>
-        <EquityChartWidget
-          data={
-            {
-              equityDailyPoints: makeSeries(60),
-              btcBenchmark: makeSeries(60),
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            } as any
-          }
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        data={
+          {
+            equityDailyPoints: makeSeries(60),
+            btcBenchmark: makeSeries(60),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any
+        }
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
     // If hideLegend were dropped, the inner chart would render its OWN
     // aria-label="Series legend" row and the user would see two legends.
@@ -303,17 +202,14 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
   // anchors the fallback to localMidnightToday() (== max) so today stays
   // selectable.
   it("empty-data CUSTOM picker stays usable (min<=max → at least one day cell selectable) [H-1227]", () => {
-    seedTweaks({});
     render(
-      <TweaksProvider>
-        <EquityChartWidget
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          data={{ equityDailyPoints: [] } as any}
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        data={{ equityDailyPoints: [] } as any}
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
     // The header's period tabs render even while the inner chart body warms up.
     fireEvent.click(screen.getByRole("tab", { name: "CUSTOM" }));
