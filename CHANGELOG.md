@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.133.25.0] - 2026-11-07 — QUIETVIEW 193: viewing a strategy changes nothing and shows only its own content
+
+### Changed
+- **Wheel zoom on the factsheet charts needs Ctrl or Cmd (D-01, founder override of the recommendation, 2026-11-06).** A plain mouse wheel over the time-series chart or the histogram now scrolls the page and leaves the date range and every headline figure unchanged. `wheel-zoom.ts` carries the gate, the hint names Ctrl/Cmd and the legend wraps.
+- **The view range is session-local (D-02).** `factsheet-context.tsx` no longer writes the range to localStorage or the URL query string, and the codec cannot write one. A range a browser saved before this change is ignored and deleted once on load, so a later visit or reload opens the full history.
+- **A narrowed range is labelled and resettable (D-03).** The rail shows the range beside the figures it changes, with a one-click "Reset to full history".
+
+### Removed
+- **The synthesized peer cohort panel (D-04).** The peer percentile panel now reads only the scenario blend's real ranking, and the peer gate lost its api arm. Synthesized data was invented data.
+- **The demo allocator section (D-05).** The factsheet no longer mounts "Demo portfolios" / "Suggested MultiMarket sleeve" or links to it. `AllocatorSection`, `DemoBadge`, their helpers and tests are deleted.
+- **Two demo sentences (D-06).** The "Commercial terms not yet wired through from the strategy registry" row and the footer demo sentence are gone, together with the developer sentence.
+
+### Fixed
+- **Opening a note and leaving writes nothing (D-09, D-10).** `StrategyNoteCard`, `HoldingNoteRow`, `BridgeOutcomeNoteSection` and the holding detail Notes tab share one blur predicate, `shouldSaveNoteOnBlur` in `src/components/notes/should-save-note.ts`: save when the text changed, and save a blank draft only when it clears a note that was saved non-blank. The strategy note textarea no longer takes `autoFocus`.
+  - **Founder override of the literal D-09 wording, 2026-11-07, "Allow clearing".** The wording said non-empty only. Deleting a saved note's text and leaving still clears it. Recorded in CONTEXT and the ROADMAP.
+  - **Refinement, "Keep it, record it".** After a failed save the server state is unknown, so clearing a note whose save was never confirmed saves an empty string.
+- **Review fixes.** A blur during an in-flight save compares against the value last sent, not the stale one (WR-01). The Save failed retry sends the current draft after a failed save (WR-01 round 2). A failed note load on `HoldingNoteRow` and `BridgeOutcomeNoteSection` is now an error state with Retry that never saves while set, instead of an empty editor over an unread note (WR-02).
+
+### Tests
+- **D-07 guard.** `FactsheetBody.no-demo-content.test.tsx` renders the real factsheet body and goes RED if any of the three removed strings, or content belonging to another strategy or portfolio, comes back.
+- **D-10 cases.** Open-and-leave sends no write on each of the four note surfaces, plus in-flight-save, retry and load-error cases, window-gesture and session-range provider tests. `BatchDPanels.null-honest.test.tsx` is deleted with the panel it covered.
+
+### Notes
+- **D-08, read-only PROD count before the fix.** 2 empty notes and 2 zero-length saves existed. Rows were left in place and nothing was written or deleted.
+- **Booked, not fixed:** `[193-DEMO-PAYLOAD-PRODUCERS]` (the factsheet payload still computes and ships the peer cohort and the allocator blends that nothing renders now) and `[193-STRATEGY-NOTE-LOAD-ERROR]` (`src/app/strategy/[id]/page.tsx` treats a failed note read as no note). Both are in `TODOS.md`.
+
 ## [0.133.24.0] - 2026-11-07 — PUBLICTRUTH 192: the public site tells one true story, and the public demo is retired
 
 ### Changed
