@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, fireEvent, screen, act } from "@testing-library/react";
+import { render, fireEvent, screen, act, within } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
@@ -20,13 +20,13 @@ import { FactsheetBody } from "./FactsheetView";
  * unit, which factsheet-context.provider.test.tsx already covers): it spies on
  * BOTH persistence sinks — `window.localStorage.setItem` AND
  * `window.history.replaceState` — drives a real view-state interaction in the
- * rendered body (the Display "Dark mode" toggle, which flips `darkMode` state →
- * a `?dark=1` URL rewrite + a `factsheet-v2:` localStorage blob on the REAL
+ * rendered body (the Display "Colorblind palette" toggle, which flips `colorblind`
+ * state → a `?cb=1` URL rewrite + a `factsheet-v2:` localStorage blob on the REAL
  * route), advances past the 250ms write debounce, and asserts ZERO writes
  * SCOPED to the factsheet keyspace/URL.
  *
  * SCOPING (Pitfall 5): the assertions filter on the factsheet keyspace predicate
- * (`/^factsheet-v2|^factsheet-collapse/` for localStorage, `?range|?cmp|?dark`
+ * (`/^factsheet-v2|^factsheet-collapse/` for localStorage, `?range|?cmp|?cb|?dark`
  * for the URL) — NOT a blanket "setItem was never called". The legitimate
  * composer-collapse UI-pref key `composer-collapse:controls`
  * (ScenarioComposer.tsx) is OUT of scope and must NOT be flagged. This test
@@ -37,7 +37,7 @@ import { FactsheetBody } from "./FactsheetView";
  * FALSIFIABILITY (Rule 9): if `persist={false}` were removed from the mount
  * (default true), the write effect would fire and BOTH spies would record a
  * factsheet-keyspace write — every assertion below goes RED. Verified by
- * momentary mutation during authoring (toggle persist → true): the `?dark=1`
+ * momentary mutation during authoring (toggle persist → true): the `?cb=1`
  * URL rewrite + the `factsheet-v2:` blob appear and the predicates trip.
  *
  * localStorage + sentry are stubbed because FactsheetProvider's persistence
@@ -76,7 +76,7 @@ Object.defineProperty(window, "localStorage", {
 
 // Healthy full-resolution returns series (~300 points → the body is fully
 // populated: every panel has real data, the ControlBar renders all actions
-// including the Display menu's Dark-mode toggle).
+// including the Display menu's Colorblind toggle).
 function makeReturnsSeries(n: number, drift = 0.0015): DailyPoint[] {
   const pts: DailyPoint[] = [];
   const d = new Date(Date.UTC(2023, 0, 1));
@@ -99,7 +99,7 @@ const populatedPayload = buildScenarioFactsheetPayload({
 // these (or a URL mutation carrying one of the view-state params) is the RT2
 // cross-tab-bleed surface this guard forbids under persist={false}.
 const FACTSHEET_KEY_RE = /^factsheet-v2|^factsheet-collapse/;
-const FACTSHEET_URL_PARAM_RE = /[?&](range|cmp|dark)=/;
+const FACTSHEET_URL_PARAM_RE = /[?&](range|cmp|cb|dark)=/;
 
 /** Keyspace-scoped predicate: a setItem call writing into the factsheet keyspace. */
 function isFactsheetKeyWrite(call: unknown[]): boolean {
@@ -142,7 +142,7 @@ afterEach(() => {
 });
 
 describe("FactsheetBody — PERMANENT no-cross-tab-bleed gate (GUARD-04, RT2 class)", () => {
-  it("persist={false}: a Dark-mode toggle writes NOTHING to the factsheet keyspace or URL", async () => {
+  it("persist={false}: a Colorblind-palette toggle writes NOTHING to the factsheet keyspace or URL", async () => {
     const setItemSpy = vi.spyOn(window.localStorage, "setItem");
     const replaceSpy = vi.spyOn(window.history, "replaceState");
 
@@ -163,13 +163,13 @@ describe("FactsheetBody — PERMANENT no-cross-tab-bleed gate (GUARD-04, RT2 cla
     setItemSpy.mockClear();
     replaceSpy.mockClear();
 
-    // Drive a real view-state mutation in the body: the Display "Dark mode"
-    // toggle flips `darkMode` false→true. On the REAL route (persist=true) this
-    // fires the debounced write effect → `?dark=1` URL rewrite + a
+    // Drive a real view-state mutation in the body: the Display "Colorblind
+    // palette" toggle flips `colorblind` false→true. On the REAL route (persist=true)
+    // this fires the debounced write effect → `?cb=1` URL rewrite + a
     // `factsheet-v2:` localStorage blob. Under persist={false} the effect's
     // `|| !persist` early-return must suppress BOTH halves.
     act(() => {
-      fireEvent.click(screen.getByText("Dark mode"));
+      fireEvent.click(screen.getByText("Colorblind palette"));
     });
 
     // Give the 250ms write debounce ample room to fire if the gate were absent.
@@ -186,7 +186,7 @@ describe("FactsheetBody — PERMANENT no-cross-tab-bleed gate (GUARD-04, RT2 cla
     expect(lsStore.has(`factsheet-v2:${populatedPayload.strategyId}`)).toBe(false);
 
     // URL WRITE gate (keyspace-scoped predicate): no replaceState rewrote a
-    // factsheet view-state param (?range / ?cmp / ?dark).
+    // factsheet view-state param (?range / ?cmp / ?cb / ?dark).
     const factsheetUrlWrites = replaceSpy.mock.calls.filter(isFactsheetUrlWrite);
     expect(factsheetUrlWrites).toEqual([]);
     expect(window.location.search).toBe(urlBefore);
@@ -297,7 +297,60 @@ describe("FactsheetBody — PERMANENT no-cross-tab-bleed gate (GUARD-04, RT2 cla
     expect(isFactsheetKeyWrite(["factsheet-v2:abc", "{}"])).toBe(true);
     expect(isFactsheetKeyWrite(["factsheet-collapse:abc", "{}"])).toBe(true);
     expect(isFactsheetUrlWrite([null, "", "/allocations?tab=scenario"])).toBe(false);
+    expect(isFactsheetUrlWrite([null, "", "/allocations?cb=1"])).toBe(true);
     expect(isFactsheetUrlWrite([null, "", "/allocations?dark=1"])).toBe(true);
     expect(isFactsheetUrlWrite([null, "", "/factsheet/x/v2?range=10-120"])).toBe(true);
+  });
+});
+
+/**
+ * Phase 195 (D-06, UI-SPEC S-7, UC-14) — the Display menu lost "Dark mode".
+ * Colorblind then Regimes remain, and the badge counts only those two, so a
+ * regression that re-adds a third row or a stale badge term fails here. The
+ * article is always `data-theme="light"`.
+ */
+describe("FactsheetBody — Display menu has no Dark mode (D-06)", () => {
+  function displayDetails(): HTMLElement {
+    return screen.getByText("Display", { selector: "summary" }).closest("details") as HTMLElement;
+  }
+
+  it("lists Colorblind palette then Regimes overlay and nothing else", () => {
+    act(() => {
+      renderBodyNoPersist();
+    });
+    const rows = within(displayDetails()).getAllByRole("button");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("Colorblind palette");
+    expect(rows[1].textContent).toContain("Regimes overlay");
+    expect(displayDetails().textContent).not.toMatch(/dark/i);
+  });
+
+  it("the badge counts Colorblind and Regimes only: none at 0, then 1, then 2", () => {
+    act(() => {
+      renderBodyNoPersist();
+    });
+    const summary = () => screen.getByText("Display", { selector: "summary" });
+    expect(summary().textContent).toBe("Display");
+    act(() => {
+      fireEvent.click(screen.getByText("Colorblind palette"));
+    });
+    expect(summary().textContent).toBe("Display1");
+    act(() => {
+      fireEvent.click(screen.getByText("Regimes overlay"));
+    });
+    expect(summary().textContent).toBe("Display2");
+  });
+
+  it("the article is always light, with or without the colorblind palette", () => {
+    act(() => {
+      renderBodyNoPersist();
+    });
+    const article = document.getElementById("factsheet-main") as HTMLElement;
+    expect(article.getAttribute("data-theme")).toBe("light");
+    act(() => {
+      fireEvent.click(screen.getByText("Colorblind palette"));
+    });
+    expect(article.getAttribute("data-theme")).toBe("light");
+    expect(article.getAttribute("data-colorblind")).toBe("1");
   });
 });

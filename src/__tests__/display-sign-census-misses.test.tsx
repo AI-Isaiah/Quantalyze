@@ -9,7 +9,6 @@ import {
 } from "@/app/(dashboard)/allocations/widgets/attribution/AlphaBetaDecomposition";
 import { formatPcrPercent } from "@/app/(dashboard)/allocations/components/ScenarioComposer";
 import { ReplacementCard } from "@/components/portfolio/ReplacementCard";
-import { formatRiskShareTooltip } from "@/components/portfolio/RiskAttribution";
 import type { ComputedMetrics } from "@/lib/scenario";
 import type { BridgeCandidate } from "@/lib/types";
 
@@ -75,25 +74,6 @@ describe("ScenarioComposer percent contribution to risk follows the rounded sign
   it("a hedge keeps its minus: -0.123 prints -12.3%; 0.456 prints 45.6%", () => {
     expect(formatPcrPercent(-0.123)).toBe("-12.3%");
     expect(formatPcrPercent(0.456)).toBe("45.6%");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Portfolio: the risk-attribution bar tooltip
-// ---------------------------------------------------------------------------
-
-describe("RiskAttribution tooltip follows the rounded sign (D-02)", () => {
-  it("a hedge's share of -0.0004 (-0.04%) prints 0.0%, not -0.0%", () => {
-    expect(formatRiskShareTooltip(-0.0004)).toBe("0.0%");
-  });
-
-  it("a share of 0 prints 0.0%", () => {
-    expect(formatRiskShareTooltip(0)).toBe("0.0%");
-  });
-
-  it("a hedge keeps its minus and a normal share keeps its digits: -0.123 prints -12.3%, 0.456 prints 45.6%", () => {
-    expect(formatRiskShareTooltip(-0.123)).toBe("-12.3%");
-    expect(formatRiskShareTooltip(0.456)).toBe("45.6%");
   });
 });
 

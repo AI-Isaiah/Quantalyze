@@ -442,17 +442,6 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
     expect(container).toHaveClass("max-w-full");
   });
 
-  it("widens the /portfolios data surface to max-w-full (Phase 53 APPLY-04)", () => {
-    const container = contentContainerFor("/portfolios");
-    expect(container).toHaveClass("max-w-full");
-    expect(container).not.toHaveClass("max-w-7xl");
-  });
-
-  it("widens nested portfolio detail routes (/portfolios/abc/manage) to max-w-full", () => {
-    const container = contentContainerFor("/portfolios/abc/manage");
-    expect(container).toHaveClass("max-w-full");
-  });
-
   it("widens the /admin data surface to max-w-full (Phase 53 APPLY-04)", () => {
     const container = contentContainerFor("/admin");
     expect(container).toHaveClass("max-w-full");
@@ -598,7 +587,6 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
     "src/app/(dashboard)/compare",
     "src/app/(dashboard)/discovery",
     "src/app/(dashboard)/admin",
-    "src/app/(dashboard)/portfolios",
     "src/app/(dashboard)/my-strategies",
     "src/components",
   ];

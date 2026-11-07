@@ -72,4 +72,101 @@ test.describe("selective route moves — anon redirect canary (NAV-01)", () => {
       `/scenarios 308 Location was "${location}" — the move must land on the composer, NOT /login (the #512 regression class)`,
     ).not.toContain("/login");
   });
+
+  // Phase 195 TRIM (D-03), 2026-11-07 — the portfolio report is retired. An old
+  // link by EITHER URL must end on the named retired page, never a login wall,
+  // a 404, or a JSON/PDF error.
+  test("/api/portfolio-pdf/:id 308-redirects to the retired page (never 307→login)", async ({
+    request,
+  }) => {
+    const res = await request.get("/api/portfolio-pdf/x", { maxRedirects: 0 });
+
+    expect(
+      res.status(),
+      `/api/portfolio-pdf/x returned HTTP ${res.status()} — expected a 308 permanent redirect (next.config.ts redirects())`,
+    ).toBe(308);
+
+    const location = res.headers()["location"] ?? "";
+    expect(
+      location,
+      `/api/portfolio-pdf/x 308 Location was "${location}" — expected /portfolio-pdf/x (the retired-report page)`,
+    ).toContain("/portfolio-pdf/x");
+    expect(
+      location,
+      `/api/portfolio-pdf/x 308 Location was "${location}" — an old report link must not land on /login (the #512 regression class)`,
+    ).not.toContain("/login");
+  });
+
+  test("/portfolio-pdf/:id renders the retired page to an anonymous visitor", async ({
+    request,
+  }) => {
+    // No auth, no render token, redirects off: the page itself must answer 200.
+    const res = await request.get(
+      "/portfolio-pdf/00000000-0000-0000-0000-000000000000",
+      { maxRedirects: 0 },
+    );
+
+    expect(
+      res.status(),
+      `/portfolio-pdf/<id> returned HTTP ${res.status()} — expected 200 (public retired-report page, no login wall, no 404)`,
+    ).toBe(200);
+    expect(await res.text()).toContain("This portfolio report has been retired");
+  });
+
+  // Phase 195 TRIM (D-04), 2026-11-07 — Decks is hidden until it works. The
+  // redirect is temporary (307) so removing the rule restores the page, and it
+  // lands on discovery, never the auth form.
+  test("/decks 307-redirects to discovery (never 307→login)", async ({
+    request,
+  }) => {
+    const res = await request.get("/decks", { maxRedirects: 0 });
+
+    expect(
+      res.status(),
+      `/decks returned HTTP ${res.status()} — expected a 307 temporary redirect (next.config.ts redirects())`,
+    ).toBe(307);
+
+    const location = res.headers()["location"] ?? "";
+    expect(
+      location,
+      `/decks 307 Location was "${location}" — expected /discovery/crypto-sma`,
+    ).toContain("/discovery/crypto-sma");
+    expect(
+      location,
+      `/decks 307 Location was "${location}" — a hidden surface must not bounce to /login (the #512 regression class)`,
+    ).not.toContain("/login");
+  });
+
+  // Phase 195 TRIM (D-01), 2026-11-07 — the portfolios surface is retired.
+  // Every sub-route, including the bare path (assumption A3: `:path*` matches
+  // it) and the dead strategies/<id> target, answers one 308 to My allocation,
+  // never the login form. Query strings are forwarded by Next (accepted).
+  for (const path of [
+    "/portfolios",
+    "/portfolios/x",
+    "/portfolios/x/manage?add=y",
+    "/portfolios/x/documents",
+    "/portfolios/x/strategies/y",
+  ]) {
+    test(`${path} 308-redirects to /allocations (never 307→login)`, async ({
+      request,
+    }) => {
+      const res = await request.get(path, { maxRedirects: 0 });
+
+      expect(
+        res.status(),
+        `${path} returned HTTP ${res.status()} — expected a 308 permanent redirect (next.config.ts redirects())`,
+      ).toBe(308);
+
+      const location = res.headers()["location"] ?? "";
+      expect(
+        location,
+        `${path} 308 Location was "${location}" — expected /allocations`,
+      ).toContain("/allocations");
+      expect(
+        location,
+        `${path} 308 Location was "${location}" — a retired surface must not bounce to /login (the #512 regression class)`,
+      ).not.toContain("/login");
+    });
+  }
 });

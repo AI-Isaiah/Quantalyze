@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { Disclaimer } from "./Disclaimer";
+import { Disclaimer, ANALYTICS_ONLY_TEXT } from "./Disclaimer";
 
 describe("Disclaimer", () => {
   it("renders footer variant by default", () => {
@@ -57,5 +57,109 @@ describe("Disclaimer", () => {
     const { container } = render(<Disclaimer className="custom-class" />);
     const el = container.querySelector("p");
     expect(el?.className).toContain("custom-class");
+  });
+
+  // Phase 195 / D-09 — the one combined block on /browse/<cat>/<id>. Sentences
+  // are pinned as LITERALS (not imported constants): a test that reads the
+  // constants cannot fail when a legally required sentence is dropped from them.
+  describe("strategy-page variant (D-09, T-195-09)", () => {
+    const MONITORING = "Strategy monitored via read-only exchange API.";
+    const CUSTODY_CORE =
+      "Manager retains asset custody. Quantalyze provides analytics only — no pooling, no fund administration, no custody of client assets.";
+    const CUSTODY = `${MONITORING} ${CUSTODY_CORE}`;
+    const GENERAL =
+      "Not financial advice. Past performance does not guarantee future results. Cryptocurrency trading involves substantial risk of loss.";
+    const PROVENANCE = {
+      api_verified:
+        "Data verified from exchange API. Quantalyze does not independently audit trading strategies.",
+      csv_uploaded:
+        "Performance data uploaded by the manager as a daily-return series and not independently verified by Quantalyze or by an exchange API.",
+      self_reported:
+        "Performance data is self-reported by the manager and not independently verified by Quantalyze.",
+    } as const;
+
+    it("api_verified renders the UI-SPEC S-5 paragraph verbatim", () => {
+      const { container } = render(
+        <Disclaimer variant="strategy-page" trustTier="api_verified" />,
+      );
+      expect(container.querySelector("p")?.textContent).toBe(
+        `${CUSTODY} ${PROVENANCE.api_verified} ${GENERAL}`,
+      );
+      expect(container.textContent).toContain("Data verified from exchange API.");
+    });
+
+    it("csv_uploaded does NOT claim exchange-API monitoring, and keeps custody + its own provenance (WR-01)", () => {
+      const { container } = render(
+        <Disclaimer variant="strategy-page" trustTier="csv_uploaded" />,
+      );
+      const text = container.querySelector("p")?.textContent;
+      expect(text).toBe(`${CUSTODY_CORE} ${PROVENANCE.csv_uploaded} ${GENERAL}`);
+      expect(text).not.toContain("monitored via read-only exchange API");
+      expect(text).toContain("Manager retains asset custody.");
+      expect(text).toContain(PROVENANCE.csv_uploaded);
+    });
+
+    it("self_reported and a missing tier do NOT claim exchange-API monitoring either (WR-01)", () => {
+      for (const tier of ["self_reported", undefined, null] as const) {
+        const { container, unmount } = render(
+          <Disclaimer variant="strategy-page" trustTier={tier} />,
+        );
+        const text = container.querySelector("p")?.textContent;
+        expect(text).toBe(`${CUSTODY_CORE} ${PROVENANCE.self_reported} ${GENERAL}`);
+        expect(text).not.toContain("monitored via read-only exchange API");
+        expect(text).toContain("Manager retains asset custody.");
+        unmount();
+      }
+    });
+
+    it("carries every legally required sentence exactly once for its tier", () => {
+      const sentences = [
+        "Manager retains asset custody.",
+        "Quantalyze provides analytics only — no pooling, no fund administration, no custody of client assets.",
+        "Not financial advice.",
+        "Past performance does not guarantee future results.",
+        "Cryptocurrency trading involves substantial risk of loss.",
+      ];
+      for (const tier of ["api_verified", "csv_uploaded", "self_reported"] as const) {
+        const { container, unmount } = render(
+          <Disclaimer variant="strategy-page" trustTier={tier} />,
+        );
+        const text = container.textContent ?? "";
+        // The monitoring sentence is true of api_verified only (WR-01).
+        const required =
+          tier === "api_verified" ? [MONITORING, ...sentences] : sentences;
+        for (const sentence of [...required, PROVENANCE[tier]]) {
+          expect(text.split(sentence).length - 1, `${tier}: ${sentence}`).toBe(1);
+        }
+        unmount();
+      }
+    });
+
+    it("drops only the duplicate 'is not indicative of' sentence", () => {
+      const { container } = render(
+        <Disclaimer variant="strategy-page" trustTier="api_verified" />,
+      );
+      expect(container.textContent).not.toContain("is not indicative of future results");
+    });
+
+    it("uses the footer frame classes", () => {
+      const { container } = render(
+        <Disclaimer variant="strategy-page" trustTier="api_verified" />,
+      );
+      const cls = container.querySelector("p")?.className ?? "";
+      for (const c of ["text-center", "py-6", "border-t", "border-border", "mt-12"]) {
+        expect(cls).toContain(c);
+      }
+    });
+  });
+
+  it("exports the analytics-only sentence, which the custody variant still contains verbatim", () => {
+    expect(ANALYTICS_ONLY_TEXT).toBe(
+      "Quantalyze provides analytics only — no pooling, no fund administration, no custody of client assets.",
+    );
+    const { container } = render(<Disclaimer variant="custody" />);
+    expect(container.querySelector("p")?.textContent).toBe(
+      `Strategy monitored via read-only exchange API. Manager retains asset custody. ${ANALYTICS_ONLY_TEXT}`,
+    );
   });
 });

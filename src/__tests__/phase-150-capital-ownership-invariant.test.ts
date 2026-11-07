@@ -388,19 +388,15 @@ const SEED_SECDEF_MIGRATION =
  */
 const SEED_DEMO_DATA = "scripts/seed-demo-data.ts";
 const SEED_FULL_APP_DEMO = "scripts/seed-full-app-demo.ts";
-// Phase 166.4.1 D-07: a loopback-only seed for the local portfolio-page check.
-// It refuses any non-loopback Supabase before a client exists and never sets
-// `capital_ownership` (P2b walks it). Its rows were written through the local
-// lane's real D-03-A triggers without raising.
-const SEED_PORTFOLIO_BENCHMARK_LOCAL = "scripts/seed-portfolio-benchmark-local.ts";
-
+// Phase 195 TRIM (D-02), 2026-11-07: the two browser-direct writers
+// (AddToPortfolio, MigrationWizard) and the loopback benchmark seed were deleted
+// with the retired portfolios surface, so the census is the allocation route and
+// the two seeds that stay. Stored rows are kept; the table's guards live in the
+// database and are pinned below, untouched.
 const SANCTIONED_POSITION_WRITERS: readonly string[] = [
   ALLOCATION_ROUTE,
-  "src/components/portfolio/AddToPortfolio.tsx",
-  "src/components/portfolio/MigrationWizard.tsx",
   SEED_DEMO_DATA,
   SEED_FULL_APP_DEMO,
-  SEED_PORTFOLIO_BENCHMARK_LOCAL,
 ];
 
 /** The pure-data seed fixture module — strategy owners live here. */
@@ -414,7 +410,6 @@ const SEED_DEMO_PROFILES = "scripts/seed-demo-profiles.ts";
 const SEED_SCRIPTS: readonly string[] = [
   SEED_DEMO_DATA,
   SEED_FULL_APP_DEMO,
-  SEED_PORTFOLIO_BENCHMARK_LOCAL,
   SEED_DEMO_PROFILES,
 ];
 
@@ -681,7 +676,11 @@ describe("OWN-03 — one predicate, one census", () => {
     expect(markLiteralSpellers()).toEqual([CAPITAL_OWNERSHIP]);
   });
 
-  it("P2 — exactly six files across src/ AND scripts/ create a portfolio_strategies row, and they are the sanctioned six", () => {
+  it("P2 — exactly three files across src/ AND scripts/ create a portfolio_strategies row, and they are the sanctioned three", () => {
+    // Phase 195 (2026-11-07): this was six until the two browser-direct writers
+    // and the loopback benchmark seed were deleted. The comments below describe
+    // the pre-195 set; the census itself is now the allocation route plus the two
+    // seeds, and the same two-directional rot-guard applies to all three.
     // Two-directional rot-guard (the B10 SANCTIONED idiom): a NEW offender
     // fails, and an allowlisted file that stops matching fails too. The second
     // direction is the one that matters over time — a census that can quietly
@@ -975,18 +974,11 @@ describe("OWN-03 — the D-03-A invariant at the table layer (SOURCE facts; the 
       `${CAPITAL_OWNERSHIP} no longer reads the capital_ownership token out of ` +
         `the trigger message — the two 23514 arms cannot be separated without it`,
     ).toContain("capital_ownership=");
-
-    for (const consumer of [
-      "src/components/portfolio/AddToPortfolio.tsx",
-      "src/components/portfolio/MigrationWizard.tsx",
-    ]) {
-      expect(
-        stripComments(readSource(consumer)),
-        `${consumer} no longer routes its 23514 arm through the shared ` +
-          `capitalOwnershipRefusalMessage mapper — the two browser-direct ` +
-          `writers of this table must answer identically`,
-      ).toContain("capitalOwnershipRefusalMessage");
-    }
+    // Phase 195 (2026-11-07): the two browser-direct consumers of the mapper
+    // (AddToPortfolio, MigrationWizard) were deleted with the portfolios
+    // surface, so the per-component routing loop that stood here is gone. The
+    // token is still pinned at its single home above, and the RAISE format
+    // assertions earlier in this test are unchanged.
   });
 
   it("P4b — the weight_snapshots seed-trigger SECURITY DEFINER repair survives", () => {

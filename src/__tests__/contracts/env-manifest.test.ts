@@ -87,9 +87,8 @@ const TEST_ONLY_KEYS = new Set([
 // App config read via a computed accessor (`const E = "FOO"; process.env[E]`),
 // invisible to the literal grep. Documented in .env.example but exempt from the
 // "documented ⇒ read literally" dead-entry check. Keep this in step with the
-// `process.env[SECRET_ENV]`-style reads in src/ (alert-ack-token.ts,
-// pdf-render-token.ts).
-const INDIRECT_READS = new Set(["ALERT_ACK_SECRET", "DEMO_PDF_SECRET"]);
+// `process.env[SECRET_ENV]`-style read in src/ (alert-ack-token.ts).
+const INDIRECT_READS = new Set(["ALERT_ACK_SECRET"]);
 
 function collectSourceFiles(dir: string): string[] {
   const out: string[] = [];

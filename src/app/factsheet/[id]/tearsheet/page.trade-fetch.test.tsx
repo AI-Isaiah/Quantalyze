@@ -53,9 +53,6 @@ vi.mock("next/link", () => ({
 vi.mock("@/components/charts/Sparkline", () => ({
   Sparkline: () => React.createElement("div", { "data-testid": "sparkline" }),
 }));
-vi.mock("@/components/ui/Disclaimer", () => ({
-  Disclaimer: () => React.createElement("div", { "data-testid": "disclaimer" }),
-}));
 vi.mock("@/components/strategy/FreshnessBadge", () => ({
   FreshnessBadge: () => React.createElement("span", { "data-testid": "data-pill" }, "Data pill"),
 }));

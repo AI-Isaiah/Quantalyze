@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
-type DisclaimerVariant = "footer" | "strategy" | "factsheet" | "custody";
+type DisclaimerVariant = "footer" | "strategy" | "factsheet" | "custody" | "strategy-page";
 
 /**
  * Subset of `Strategy.trust_tier` accepted here. `null`/`undefined` is treated
@@ -14,7 +14,7 @@ type DisclaimerTrustTier = "api_verified" | "csv_uploaded" | "self_reported" | n
 interface DisclaimerProps {
   variant?: DisclaimerVariant;
   /**
-   * Drives the data-provenance sentence on `strategy` and `factsheet` variants.
+   * Drives the data-provenance sentence on `strategy`, `factsheet` and `strategy-page` variants.
    * Omit for `footer`/`custody` (which carry no provenance claim).
    */
   trustTier?: DisclaimerTrustTier;
@@ -24,7 +24,15 @@ interface DisclaimerProps {
 const FOOTER_TEXT =
   "Not financial advice. Past performance does not guarantee future results. Cryptocurrency trading involves substantial risk of loss.";
 
-const CUSTODY_TEXT = `Strategy monitored via read-only exchange API. Manager retains asset custody. ${PLATFORM_NAME} provides analytics only — no pooling, no fund administration, no custody of client assets.`;
+/**
+ * The analytics-only custody sentence, exported so the tearsheet's Risk
+ * Disclosure can carry it without retyping legal copy (Phase 195 D-09).
+ */
+export const ANALYTICS_ONLY_TEXT = `${PLATFORM_NAME} provides analytics only — no pooling, no fund administration, no custody of client assets.`;
+
+const CUSTODY_CORE = `Manager retains asset custody. ${ANALYTICS_ONLY_TEXT}`;
+
+const CUSTODY_TEXT = `Strategy monitored via read-only exchange API. ${CUSTODY_CORE}`;
 
 const FACTSHEET_PREAMBLE =
   "This document is for informational purposes only and does not constitute financial advice, an offer to sell, or a solicitation to buy any securities or investment products. Past performance does not guarantee future results. Cryptocurrency trading involves substantial risk of total loss.";
@@ -54,13 +62,23 @@ export function Disclaimer({ variant = "footer", trustTier, className }: Disclai
     case "factsheet":
       text = `${FACTSHEET_PREAMBLE} ${provenanceFor(trustTier)}`;
       break;
+    case "strategy-page":
+      // Phase 195 D-09: the one block on /browse/<cat>/<id>, custody ->
+      // provenance -> general risk, each sentence once. FOOTER_TEXT already
+      // carries the "Past performance" statement, so the `strategy` variant's
+      // duplicate suffix is not repeated. The exchange-API monitoring sentence
+      // is only true of api_verified data, so every other tier (csv_uploaded,
+      // self_reported, missing) carries the custody text without it.
+      text = `${trustTier === "api_verified" ? CUSTODY_TEXT : CUSTODY_CORE} ${provenanceFor(trustTier)} ${FOOTER_TEXT}`;
+      break;
   }
 
   return (
     <p
       className={cn(
         "text-xs text-text-muted leading-relaxed",
-        variant === "footer" && "text-center py-6 border-t border-border mt-12",
+        (variant === "footer" || variant === "strategy-page") &&
+          "text-center py-6 border-t border-border mt-12",
         variant === "strategy" && "mt-8 px-1",
         variant === "factsheet" && "mt-6 pt-4 border-t border-border",
         variant === "custody" &&

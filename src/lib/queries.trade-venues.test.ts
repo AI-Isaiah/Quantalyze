@@ -308,13 +308,14 @@ describe("getMyStrategies - D-06: the owner list is out of scope", () => {
   });
 });
 
-describe("D-06 scope: the four out-of-scope SyncBadge mounts do not name the venue", () => {
+describe("D-06 scope: the two out-of-scope SyncBadge mounts do not name the venue", () => {
   /**
    * Source-reading on purpose: these files mount <SyncBadge> deep inside
    * components that need a full page to render, and the contract is the PROPS
    * they pass. Measured 2026-10-14, the reason each stays untouched:
-   * CompositionDonut, StrategyBreakdownTable and /recommendations render no
-   * venue label today (they pass no `exchange`), and StrategyHeader passes
+   * /recommendations renders no venue label today (it passes no `exchange`;
+   * Phase 195, 2026-11-07, deleted CompositionDonut and StrategyBreakdownTable,
+   * the other two such mounts, with the retired portfolios page), and StrategyHeader passes
    * `exchange` but its badge renders nothing (null stamp, null series end) and
    * no page mounts the component. This pin holds until
    * `[170.6.1-SYNCBADGE-OTHER-MOUNTS]` decides whether they should name the
@@ -322,8 +323,6 @@ describe("D-06 scope: the four out-of-scope SyncBadge mounts do not name the ven
    */
   const MOUNTS = [
     "src/components/strategy/StrategyHeader.tsx",
-    "src/components/portfolio/CompositionDonut.tsx",
-    "src/components/portfolio/StrategyBreakdownTable.tsx",
     "src/app/(dashboard)/recommendations/page.tsx",
   ];
 

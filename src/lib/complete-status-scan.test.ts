@@ -77,7 +77,6 @@ function collectSourceFiles(dir: string): string[] {
 // site — and when adding, first confirm `isComputedAnalytics()` is not the right
 // call instead (it almost always is for computation-status gates).
 const ALLOWLIST: Record<string, number> = {
-  "app/(dashboard)/portfolios/[id]/page.tsx": 3,
   "app/api/verify-strategy/[id]/status/route.ts": 1,
   "app/strategy/[id]/page.tsx": 1,
   "components/landing/VerificationProgress.tsx": 2,

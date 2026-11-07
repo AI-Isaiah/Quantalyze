@@ -13,12 +13,6 @@ import { render, screen } from "@testing-library/react";
 import { ReplacementCard } from "./ReplacementCard";
 import PortfolioOptimizer, { type OptimizerSuggestion } from "./PortfolioOptimizer";
 import { PortfolioImpactPanel, formatDelta } from "./PortfolioImpactPanel";
-import {
-  attributionFill,
-  formatAttributionTick,
-  formatAttributionTooltip,
-} from "./AttributionBar";
-import { RETURN_FORMATTER } from "./PortfolioEquityCurve";
 import { CorrelationHeatmap, correlationBg } from "./CorrelationHeatmap";
 import type { BridgeCandidate, SimulatorCandidate } from "@/lib/types";
 
@@ -245,45 +239,8 @@ describe("170.6-09 PortfolioImpactPanel chip tone follows the rounded sign (D-03
 });
 
 // ---------------------------------------------------------------------------
-// Task 2 - AttributionBar, PortfolioEquityCurve, CorrelationHeatmap
+// Task 2 - CorrelationHeatmap (AttributionBar and PortfolioEquityCurve went with /portfolios, 195-06)
 // ---------------------------------------------------------------------------
-
-describe("170.6-09 AttributionBar - tick, tooltip and fill on the rounded sign", () => {
-  it("the axis tick prints a rounded zero unsigned", () => {
-    expect(formatAttributionTick(-0.0004)).toBe("0.0%");
-    expect(formatAttributionTick(0)).toBe("0.0%");
-    expect(formatAttributionTick(0.0004)).toBe("0.0%");
-  });
-  it("the axis tick keeps non-zero digits and signs", () => {
-    expect(formatAttributionTick(0.012)).toBe("+1.2%");
-    expect(formatAttributionTick(-0.012)).toBe("-1.2%");
-  });
-  it("the tooltip prints a rounded zero unsigned", () => {
-    expect(formatAttributionTooltip(0)).toBe("0.00%");
-    expect(formatAttributionTooltip(-0.00004)).toBe("0.00%");
-  });
-  it("the tooltip keeps non-zero digits and signs", () => {
-    expect(formatAttributionTooltip(0.0123)).toBe("+1.23%");
-    expect(formatAttributionTooltip(-0.0123)).toBe("-1.23%");
-  });
-  it("a contribution that rounds to 0.00% is filled muted; positive green; negative red", () => {
-    expect(attributionFill(-0.00004)).toBe("#94A3B8");
-    expect(attributionFill(0)).toBe("#94A3B8");
-    expect(attributionFill(0.01)).toBe("#15803D");
-    expect(attributionFill(-0.01)).toBe("#DC2626");
-  });
-});
-
-describe("170.6-09 PortfolioEquityCurve - return tick", () => {
-  it("a growth of 0.9996 (-0.04%) prints '0.0%'", () => {
-    expect(RETURN_FORMATTER(0.9996)).toBe("0.0%");
-    expect(RETURN_FORMATTER(1)).toBe("0.0%");
-  });
-  it("non-zero ticks keep their digits", () => {
-    expect(RETURN_FORMATTER(1.05)).toBe("5.0%");
-    expect(RETURN_FORMATTER(0.95)).toBe("-5.0%");
-  });
-});
 
 describe("170.6-09 CorrelationHeatmap - cell text and aria-label on the rounded sign (D-06 fill unchanged)", () => {
   const matrix = {

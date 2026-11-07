@@ -37,7 +37,7 @@ export function ExchangesTabContent({
                 Real portfolio
               </p>
               <Link
-                href={`/portfolios/${activePortfolio.id}`}
+                href="/allocations"
                 className="mt-1 block text-base font-semibold text-text-primary hover:text-accent"
               >
                 {activePortfolio.name}
@@ -49,10 +49,10 @@ export function ExchangesTabContent({
               </p>
             </div>
             <Link
-              href={`/portfolios/${activePortfolio.id}`}
+              href="/allocations"
               className="text-xs px-3 py-2 rounded-md border border-border bg-surface text-text-secondary hover:text-text-primary hover:bg-bg-secondary"
             >
-              Open portfolio →
+              Open My Allocation →
             </Link>
           </div>
         </Card>

@@ -60,10 +60,15 @@ test.describe("Public browsing flow", () => {
     await expect(page).toHaveURL(/\/browse/);
   });
 
-  test("browse page loads strategy categories", async ({ page }) => {
+  test("browse page with one populated category goes straight to it", async ({
+    page,
+  }) => {
+    // Phase 195 D-08: the seeded DB has exactly one populated category
+    // (crypto-sma), so /browse redirects server-side instead of painting a
+    // one-card menu.
     const response = await page.goto("/browse");
     expect(response?.status()).toBeLessThan(400);
-    await expect(page.locator("h1")).toContainText("Browse");
+    await expect(page).toHaveURL(/\/browse\/crypto-sma$/);
   });
 
   test("browse category page shows strategies without auth", async ({

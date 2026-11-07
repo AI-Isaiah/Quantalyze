@@ -191,7 +191,9 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   {
     route: "/decks",
     class: "private",
-    notes: "Allocator decks surface — session-gated.",
+    redirectFrom: "/decks",
+    notes:
+      "HIDDEN 2026-11-07 (Phase 195 D-04): next.config redirect to /discovery/crypto-sma until Decks works; removing the redirect restores the page; page, DeckCard and getDecks kept.",
   },
   {
     route: "/discovery/:slug",
@@ -224,23 +226,10 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   },
   {
     route: "/portfolios",
-    class: "private",
-    notes: "Manager/admin portfolios list — session-gated.",
-  },
-  {
-    route: "/portfolios/:id",
-    class: "private",
-    notes: "Portfolio detail — session-gated.",
-  },
-  {
-    route: "/portfolios/:id/documents",
-    class: "private",
-    notes: "Portfolio documents — session-gated.",
-  },
-  {
-    route: "/portfolios/:id/manage",
-    class: "private",
-    notes: "Portfolio management — session-gated.",
+    class: "exception",
+    redirectFrom: "/portfolios/:path*",
+    notes:
+      "RETIRED 2026-11-07 (Phase 195 D-01): config-level 308 to /allocations for every sub-route; no backing page; stored portfolios and portfolio_strategies rows kept",
   },
   {
     route: "/preferences",
@@ -360,7 +349,7 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     route: "/portfolio-pdf/:id",
     class: "public",
     notes:
-      "Share-token PDF deep link — covered by the /portfolio-pdf PUBLIC_ROUTES prefix + bounce-exempt. NEVER MOVE.",
+      "RETIRED 2026-11-07 (Phase 195 D-03): the page is a data-free retired-report landing; stays public and bounce-exempt (the /portfolio-pdf PUBLIC_ROUTES prefix) so an old share link never lands on a login wall or a 404.",
   },
   {
     route: "/factsheet-share/:token",
@@ -404,6 +393,13 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     class: "exception",
     notes:
       "EXCEPTION (route.ts handler, no page.tsx — so Rule 4 page-existence is skipped). It IS now in PUBLIC_ROUTES (proxy.ts): 51-REVIEW corrected the prior FALSE note ('returns before the session gate matters') — the proxy session gate runs BEFORE the route handler, so an anon liveness/ops probe was 307→login until /api/health was added to PUBLIC_ROUTES. The anon-reachable behavior is pinned by proxy.test (api routes are governed by PUBLIC_ROUTES + proxy.test, not the page-walk guard).",
+  },
+  {
+    route: "/api/portfolio-pdf/:id",
+    class: "exception",
+    redirectFrom: "/api/portfolio-pdf/:id",
+    notes:
+      "RETIRED 2026-11-07 (Phase 195 D-03): config-level 308 to /portfolio-pdf/:id; no backing route.ts",
   },
   {
     route: "/factsheet-share/gone",

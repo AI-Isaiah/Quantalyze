@@ -159,7 +159,6 @@ const CONTRACT_GUARDS: Guard[] = [
   { path: "src/__tests__/vercel-cron-limits.test.ts", batch: "Cron", invariant: "vercel.json ≤10 crons with sub-daily allowlist" },
   { path: "src/__tests__/widget-state-no-duplicate-empty.test.ts", batch: "UI", invariant: "EmptyState reuse (no duplicate copy) grep sweep" },
   { path: "src/app/factsheet/[id]/v2/factsheet-context.codec.test.ts", batch: "B7c", invariant: "factsheet view-state codec byte-compat + poison-strip" },
-  { path: "src/app/(dashboard)/allocations/context/TweaksContext.codec.test.ts", batch: "B7", invariant: "tweaks codec byte-compat + poison-strip" },
   { path: "src/lib/sample-floor.test.ts", batch: "Phase22", invariant: "SAMPLE_FLOOR_OVERLAPPING_DAYS=60 + gate branch behavior (HONEST-02 single source)" },
   { path: "src/lib/seam-constants.pin.test.ts", batch: "140.2", invariant: "seam core tuning values pinned to hand-typed literals: 13 SEAM_BUDGETS timeoutMs + the SeamBudgetKey SET (sorted equality, not length) + all 6 breaker constants + the A-14 cooldown>=window ordering + the two fake<->production literal pins (FAKE_THRESHOLD<->BREAKER_FAILURE_THRESHOLD, FAKE_WINDOW_MS<->BREAKER_WINDOW)" },
   { path: "src/lib/seam-budgets.invariant.test.ts", batch: "140.2", invariant: "SEAM_ROUTE_BUDGETS row CONTENTS deep-compared to a hand-typed 15-row map (catches a dropped leg from a multi-leg row, which SC-4a/SC-4b cannot see) + on-disk maxDuration parity + the 2-path SEAM_EXCLUSIONS set + the A-12 warmer-exclusion source scan (no excluded path may import or call the core) with the /health warmer pinned as a MEMBER. SC-4b sums within a `branch` and takes the MAXIMUM across branches, because finalize-wizard's composite and single-key paths are mutually exclusive and a sum describes a path no request takes; SC-4e then binds the declared composite `calls` to `MAX_COMPOSITE_MEMBERS` read from the ROUTE FILE on disk (a Next route cannot export it), so raising the fan-out cap without raising the declaration reddens instead of silently certifying headroom the route no longer has" },
@@ -323,6 +322,16 @@ describe("[B25] contracts registry — by-construction invariant guards", () => 
     // The row: the canonical-domain script, the D-10 lint gate that
     // refuses any tracked mention of the retiring third-party domain.
     //
+    // ── Phase 195 TRIM / D-05 — LOWERED 64 → 63. One row removed, one step: the
+    // tweaks codec guard is deleted with the codec it guarded (TweaksContext.tsx).
+    // The finding class closes by removal, not by silence: no code reads the
+    // stored allocations.tweaks value any more, and the AllocationsTabs
+    // stale-value test pins that a stored value changes nothing. Re-measured
+    // before the edit, not assumed:
+    //   $ grep -a -c '^  { path:' src/__tests__/contracts/contracts-registry.test.ts
+    //   64                                   # BEFORE this plan's edit, against a floor of 64
+    //   63                                   # AFTER — one row removed by this plan
+    //
     // ⚠️ THIS CLOSES SLACK, NOT A CLASS. Raising the floor stops rows being
     // dropped silently; it does nothing about guards that were never
     // registered, and the registry is a HAND-TYPED ROSTER — coverage-law row 2,
@@ -336,7 +345,7 @@ describe("[B25] contracts registry — by-construction invariant guards", () => 
     expect(
       CONTRACT_GUARDS.length,
       "CONTRACT_GUARDS shrank unexpectedly — did a registry entry get dropped?",
-    ).toBeGreaterThanOrEqual(64);
+    ).toBeGreaterThanOrEqual(63);
   });
 
   it.each(CONTRACT_GUARDS)("guard exists: $path [$batch]", ({ path }) => {

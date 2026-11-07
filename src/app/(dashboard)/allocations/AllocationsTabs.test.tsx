@@ -367,16 +367,26 @@ describe("AllocationsTabs — Phase 170 item (a) narrow header strip", () => {
     expect(addBtn.className.split(/\s+/)).toContain("shrink-0");
   });
 
-  // WHY: AD-05 removes the floating chip. Exactly one toggle, and it lives
-  // in the action row with Export, so it cannot cover the nav or the
-  // scenario footer from a second root-level mount.
-  it("[AD-05] exactly one Tweaks toggle renders, in the same container as Export", () => {
+  // WHY: Phase 195 D-05 removed the Tweaks panel for every user. The header
+  // action row must read Export then the add button, with no Tweaks button and
+  // no empty slot where it stood (UC-5): an allocator should never see a
+  // control that no longer does anything.
+  it("[D-05] the header action row holds Export then the add button, and no Tweaks control", () => {
     setSearchParams("");
     const { container } = render(<AllocationsTabs {...STUB_PROPS} />);
-    const toggles = container.querySelectorAll("[data-tweaks-toggle]");
-    expect(toggles).toHaveLength(1);
+    expect(container.querySelector("[data-tweaks-toggle]")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /tweaks/i }),
+    ).toBeNull();
     const exportBtn = screen.getByRole("button", { name: "Export" });
-    expect(toggles[0].parentElement).toBe(exportBtn.parentElement);
+    const addBtn = screen.getByRole("button", {
+      name: /Add allocation|Add strategy/i,
+    });
+    const row = exportBtn.parentElement as HTMLElement;
+    expect(addBtn.parentElement).toBe(row);
+    // Export, then the add button, and nothing else between or after them.
+    expect(exportBtn.nextElementSibling).toBe(addBtn);
+    expect(addBtn.nextElementSibling).toBeNull();
   });
 });
 
@@ -923,9 +933,9 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P ui_v2 flag (C-0336 / H-
     // B7: the ui_v2 read routes through useCrossTabStorage; a getItem throw is
     // caught + logged by the primitive (tagged with the key + the actual
     // error), replacing the old readUiV2Flag try/catch breadcrumb. Default V2
-    // behaviour is preserved (the flag falls back to "default"). The co-mounted
-    // TweaksProvider also reads localStorage through the primitive, so we
-    // target the ui_v2-keyed breadcrumb specifically rather than the first one.
+    // behaviour is preserved (the flag falls back to "default"). Other
+    // co-mounted readers may log through the primitive too, so we target the
+    // ui_v2-keyed breadcrumb specifically rather than the first one.
     const matching = warnSpy.mock.calls.find(
       (c) =>
         typeof c[0] === "string" &&
@@ -1210,7 +1220,38 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
   });
 });
 
-describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
+// Phase 195 D-05 — the Tweaks panel is gone, so a value an allocator stored
+// under allocations.tweaks while it existed must change nothing. Every knob
+// resolves to its default with no storage read and no DOM attribute write
+// (threat T-195-07: a stored value used to hide the Outcomes tab and the
+// benchmark line). These tests seed the FULL set of non-default values and
+// assert none of it leaks into the shell.
+const TWEAK_DOM_ATTRS = [
+  ["body", "data-density"],
+  ["body", "data-display-font"],
+  ["body", "data-show-outcomes"],
+  ["html", "data-accent-intensity"],
+] as const;
+
+function clearTweakAttrs() {
+  for (const [el, attr] of TWEAK_DOM_ATTRS) {
+    (el === "body" ? document.body : document.documentElement).removeAttribute(
+      attr,
+    );
+  }
+}
+
+const STALE_TWEAKS_VALUE = JSON.stringify({
+  density: "tight",
+  accentIntensity: "full",
+  displayFont: "sans",
+  bridgeVariant: "subtle",
+  chartStyle: "line",
+  showBench: false,
+  showOutcomes: false,
+});
+
+describe("AllocationsTabs — a stored Tweaks value changes nothing (Phase 195 D-05)", () => {
   // Same localStorage shim pattern as the cluster-P describe above —
   // jsdom's default Storage doesn't permit direct setItem here. The
   // module-load descriptor is restored in afterEach.
@@ -1247,7 +1288,7 @@ describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
       configurable: true,
       value: storageShim,
     });
-    document.body.removeAttribute("data-show-outcomes");
+    clearTweakAttrs();
   });
   afterEach(() => {
     if (ORIGINAL_LOCALSTORAGE_DESCRIPTOR) {
@@ -1257,90 +1298,49 @@ describe("AllocationsTabs — Tweaks showOutcomes redirect guard", () => {
         ORIGINAL_LOCALSTORAGE_DESCRIPTOR,
       );
     }
-    document.body.removeAttribute("data-show-outcomes");
+    clearTweakAttrs();
   });
 
-  it("bounces user off ?tab=outcomes when showOutcomes flips to false", async () => {
-    // Pre-seed the Tweaks panel with showOutcomes=false. The user is
-    // sitting on ?tab=outcomes. On mount the OutcomesTabRedirectGuard
-    // effect should call history.replaceState to remove the tab param
-    // (default overview).
-    window.localStorage.setItem(
-      "allocations.tweaks",
-      JSON.stringify({
-        density: "comfortable",
-        accentIntensity: "muted",
-        displayFont: "serif",
-        bridgeVariant: "full",
-        chartStyle: "area",
-        showBench: true,
-        showOutcomes: false,
-      }),
-    );
+  it("renders the Outcomes tab and stays on ?tab=outcomes when a stale value says showOutcomes=false", async () => {
+    window.localStorage.setItem("allocations.tweaks", STALE_TWEAKS_VALUE);
     setSearchParams("tab=outcomes");
     await act(async () => {
       render(<AllocationsTabs {...STUB_PROPS} />);
     });
-    // changeTab("overview") delegates to history.replaceState with the tab
-    // param stripped — that's how the redirect manifests.
-    expect(mockHistoryReplace).toHaveBeenCalled();
-    const urls = historyUrls();
-    expect(urls[urls.length - 1]).not.toMatch(/tab=outcomes/);
-    expect(mockReplace).not.toHaveBeenCalled();
-  });
-
-  it("does NOT redirect when showOutcomes is true (default) and user is on outcomes", async () => {
-    setSearchParams("tab=outcomes");
-    await act(async () => {
-      render(<AllocationsTabs {...STUB_PROPS} />);
-    });
-    // The guard's effect fires but the `if (!showOutcomes && ...)` branch
-    // doesn't trigger. history.replaceState should NOT have been called by
-    // the guard. (Other code paths may call it — assert no call mentions
-    // stripping ?tab=outcomes specifically.)
+    expect(screen.getByRole("tab", { name: "Outcomes" })).toBeTruthy();
+    // No redirect off Outcomes: nothing stripped the tab param.
     expect(mockReplace).not.toHaveBeenCalled();
     for (const url of historyUrls()) {
       if (url.includes("/allocations") && !url.includes("tab=")) {
-        // A call that strips the tab param shouldn't happen here.
-        throw new Error(
-          `Unexpected redirect-to-overview from guard with showOutcomes=true: ${url}`,
-        );
+        throw new Error(`Unexpected redirect off Outcomes: ${url}`);
       }
     }
   });
 
-  it("keyboard arrow-nav skips the hidden Outcomes tab (red-team fix)", async () => {
-    // Persist showOutcomes=false BEFORE mount so the provider hydrates
-    // into that state and its effect sets body[data-show-outcomes=false]
-    // (we can't just setAttribute manually — the provider's effect would
-    // clobber it on the default-true hydration tick).
-    window.localStorage.setItem(
-      "allocations.tweaks",
-      JSON.stringify({
-        density: "comfortable",
-        accentIntensity: "muted",
-        displayFont: "serif",
-        bridgeVariant: "full",
-        chartStyle: "area",
-        showBench: true,
-        showOutcomes: false,
-      }),
-    );
+  it("sets none of the Tweaks DOM attributes from a stale stored value", async () => {
+    window.localStorage.setItem("allocations.tweaks", STALE_TWEAKS_VALUE);
     setSearchParams("");
     await act(async () => {
       render(<AllocationsTabs {...STUB_PROPS} />);
     });
-    // Provider hydrated post-mount → confirm the attribute is in place
-    // before exercising the handler.
-    expect(document.body.getAttribute("data-show-outcomes")).toBe("false");
+    for (const [el, attr] of TWEAK_DOM_ATTRS) {
+      const node = el === "body" ? document.body : document.documentElement;
+      expect(node.hasAttribute(attr), `${el}[${attr}]`).toBe(false);
+    }
+  });
+
+  it("keyboard arrow-nav reaches Outcomes (the tab is always present)", async () => {
+    window.localStorage.setItem("allocations.tweaks", STALE_TWEAKS_VALUE);
+    setSearchParams("");
+    await act(async () => {
+      render(<AllocationsTabs {...STUB_PROPS} />);
+    });
     const holdings = screen.getByRole("tab", { name: "Holdings" });
     holdings.focus();
     mockHistoryReplace.mockClear();
-    // ArrowRight from Holdings should land on Mandate (not Outcomes).
     fireEvent.keyDown(holdings, { key: "ArrowRight" });
     const urls = historyUrls();
     const lastUrl = urls[urls.length - 1] ?? "";
-    expect(lastUrl).toMatch(/tab=mandate/);
-    expect(lastUrl).not.toMatch(/tab=outcomes/);
+    expect(lastUrl).toMatch(/tab=outcomes/);
   });
 });

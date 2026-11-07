@@ -18,7 +18,7 @@ import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
 // is expected to pass after the corresponding fix in the same PR.
 //
 // Findings:
-//   CRITICAL-01   audit/tech-debt-round-1.md       portfolio-pdf IDOR
+//   CRITICAL-01   audit/tech-debt-round-1.md       portfolio-pdf IDOR (retired with the renderer, Phase 195 D-03)
 //   CRITICAL-02   audit/tech-debt-round-1.md       VERSION / package.json drift
 //   SD-CRITICAL-01 audit/system-design-round-1.md  analytics-client no timeout
 //   SD-CRITICAL-02 audit/system-design-round-1.md  vercel.json missing crons
@@ -32,27 +32,6 @@ const readText = (relPath: string) => readFileSync(join(REPO_ROOT, relPath), "ut
 const readJson = <T>(relPath: string): T => JSON.parse(readText(relPath)) as T;
 
 describe("Critical regression guards", () => {
-  describe("[CRITICAL-01] portfolio-pdf IDOR", () => {
-    it("portfolio-pdf page must gate admin-client access with auth or signed token", () => {
-      const src = readText("src/app/portfolio-pdf/[id]/page.tsx");
-      const usesAdminClient = /createAdminClient\s*\(/.test(src);
-      if (!usesAdminClient) {
-        // Fix landed via a different route (e.g. switched to anon client under RLS).
-        // That's a valid fix — the test is satisfied.
-        return;
-      }
-      // If it still uses the admin client, it MUST have an auth/token gate.
-      const hasAuthGate =
-        /\.auth\.getUser\s*\(/.test(src) ||
-        /verifyDemoPdfToken|verifyPdfToken|verifyPortfolioPdfToken|verifyPdfRenderToken/.test(src) ||
-        /timingSafeEqual/.test(src);
-      expect(
-        hasAuthGate,
-        "src/app/portfolio-pdf/[id]/page.tsx uses createAdminClient() without an auth/token gate (IDOR)",
-      ).toBe(true);
-    });
-  });
-
   describe("[CRITICAL-02] VERSION / package.json drift", () => {
     it("VERSION file must equal package.json version", () => {
       const versionFile = readText("VERSION").trim();
@@ -201,7 +180,6 @@ describe("Critical regression guards", () => {
     const pdfRoutes = [
       "src/app/api/factsheet/[id]/pdf/route.ts",
       "src/app/api/factsheet/[id]/tearsheet.pdf/route.ts",
-      "src/app/api/portfolio-pdf/[id]/route.ts",
     ];
 
     for (const route of pdfRoutes) {

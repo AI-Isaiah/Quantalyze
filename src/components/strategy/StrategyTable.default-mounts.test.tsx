@@ -64,6 +64,12 @@
  * the badge-and-sync row beneath the name (the same 11 rows) gained
  * @max-3xl:flex-wrap so that cap can take effect.
  *
+ * NEXT SURGICAL EDIT 2026-11-07 (Phase 195 D-07): density strip removed from all
+ * three mounts by hand. The bordered band above the header row (the "Table
+ * density" group with its Comfortable and Compact buttons, 503 characters per
+ * mount) is deleted from the discovery, browse and myStrategiesOwner strings;
+ * nothing else moved and the fixture was not regenerated.
+ *
  * The clock is frozen (Date only; timers stay real so RTL's async helpers keep
  * working): SyncBadge and the empty-series state derive from `Date.now()`.
  */

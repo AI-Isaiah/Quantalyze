@@ -16,7 +16,6 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { NowrapWords } from "@/components/ui/NowrapWords";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
-import { withViewTransition } from "@/lib/view-transition";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { sparklineColor } from "@/lib/sparkline-color";
 import {
@@ -575,19 +574,12 @@ export function StrategyTable({
   // Public surfaces keep both view modes — this collapses to `viewMode` there.
   const effectiveViewMode = visibility === "owner-all-statuses" ? "table" : viewMode;
 
-  // STATE-03 dense reshape — table-scoped density ("comfortable" = the :root
-  // 44px/16px default, "compact" = the [data-strategy-table][data-density="tight"]
-  // 36px/12px step from globals.css). This data-density attribute lands on the
-  // TABLE ROOT only (never <body>), so it cannot leak into the allocator
-  // dashboard's global body[data-density] knob (RESEARCH Q2 / globals.css §50).
-  const [density, setDensity] = useState<"comfortable" | "compact">("comfortable");
-
   // Visible scroll-cue gate. The cue (and the ResponsiveTable aria announcement
   // it pairs with) is only meaningful while the table has MORE to scroll to the
   // right (2026-10-13 Phase 170.6.1 D-02): once the region is scrolled to its
   // end the fade and hint go, so they never sit over the last column. Measured
   // from the scroll container on mount, resize, scroll, and whenever the
-  // rendered column set changes (density/paging).
+  // rendered column set changes (paging).
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [hasMoreToScroll, setHasMoreToScroll] = useState(false);
 
@@ -719,20 +711,6 @@ export function StrategyTable({
   const handleCloseCustomize = useCallback(() => {
     setCustomizeOpen(false);
   }, []);
-
-  // STATE-04 — the row-height change cross-fades via the native View-Transition
-  // helper (250ms crossfade), falling back to an instant swap under
-  // prefers-reduced-motion / no-API support / SSR. No-op when the value is
-  // already active so a repeat click doesn't trigger a needless snapshot. The
-  // closure reads the current `density` each render (useCallback dep), so the
-  // guard is correct without an updater-function side effect.
-  const handleDensityChange = useCallback(
-    (next: "comfortable" | "compact") => {
-      if (density === next) return;
-      withViewTransition(() => setDensity(next));
-    },
-    [density],
-  );
 
   function handleColumnSort(key: TableSortKey) {
     if (tableSortKey === key) {
@@ -947,7 +925,7 @@ export function StrategyTable({
 
   // STATE-03 scroll-cue gate. Measure the scroll container's overflow whenever
   // the rendered layout can change width: on mount, on viewport resize, and on
-  // density / page / view-mode / row-count changes (each can grow or shrink the
+  // page / view-mode / row-count changes (each can grow or shrink the
   // table). The cue is purely a visible hint — its SR equivalent is the
   // ResponsiveTable region aria-label, so this only drives the aria-hidden cue.
   useEffect(() => {
@@ -999,7 +977,7 @@ export function StrategyTable({
       window.removeEventListener("resize", measure);
       el.removeEventListener("scroll", measure);
     };
-  }, [density, page, effectiveViewMode, paged.length]);
+  }, [page, effectiveViewMode, paged.length]);
 
   // Column count for the "no rows" placeholder. Leading rank column (1) +
   // Strategy + Return% + CAGR + Sharpe + Max DD (5), then Volatility + 6 Month
@@ -1098,48 +1076,10 @@ export function StrategyTable({
         ) : effectiveViewMode === "table" ? (
           <div
             data-strategy-table=""
-            data-density={density === "compact" ? "tight" : undefined}
             ref={setFrame}
             style={frameStyle}
             className="relative isolate border border-border bg-surface"
           >
-            {/* Density control \u2014 table-SCOPED (drives the data-density on this
-                root only, never <body>, so it cannot flip the allocator
-                dashboard). Wrapped through withViewTransition for the
-                reduced-motion-safe row-height crossfade (STATE-04). */}
-            <div className="flex items-center justify-end border-b border-border px-4 py-2">
-              <div
-                role="group"
-                aria-label="Table density"
-                className="inline-flex overflow-hidden rounded-lg border border-border"
-              >
-                <button
-                  type="button"
-                  aria-pressed={density === "comfortable"}
-                  onClick={() => handleDensityChange("comfortable")}
-                  className={`px-3 py-1 text-caption transition-colors ${
-                    density === "comfortable"
-                      ? "bg-page text-accent"
-                      : "text-text-muted hover:text-text-primary"
-                  }`}
-                >
-                  Comfortable
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={density === "compact"}
-                  onClick={() => handleDensityChange("compact")}
-                  className={`border-l border-border px-3 py-1 text-caption transition-colors ${
-                    density === "compact"
-                      ? "bg-page text-accent"
-                      : "text-text-muted hover:text-text-primary"
-                  }`}
-                >
-                  Compact
-                </button>
-              </div>
-            </div>
-
             {/* ResponsiveTable is the SINGLE scroll region \u2014 it owns the
                 role=region + unique aria-label landmark (the SR scroll-affordance
                 announcement) and, via `className`, doubles as the @container
@@ -1399,7 +1339,7 @@ export function StrategyTable({
                     return (
                       // Keyed by s.id (never the loop index): the pair, and the
                       // row's actions slot inside it, must keep their identity
-                      // across a sort, a density change and a search, so the
+                      // across a sort and a search, so the
                       // private-link modal's native dialog keeps its opener node
                       // (D-01, founder UAT #4).
                       <Fragment key={s.id}>

@@ -46,28 +46,25 @@ interface TogglesContextValue {
   setColorblind: (next: boolean) => void;
   regimes: boolean;
   setRegimes: (next: boolean) => void;
-  darkMode: boolean;
-  setDarkMode: (next: boolean) => void;
 }
 
 /**
  * RegimesContext is split out from TogglesContext because regimes drives
- * chart compute (overlay bands) while dark/colorblind only affect CSS vars
+ * chart compute (overlay bands) while colorblind only affects CSS vars
  * on the shell. Charts that subscribe to RegimesContext alone don't
- * re-render on dark-mode toggles, which is the whole point of the split.
+ * re-render on colorblind toggles, which is the whole point of the split.
  */
 interface RegimesContextValue {
   regimes: boolean;
 }
 
 /**
- * DisplayContext = colorblind + darkMode (the two flags that flow into the
- * shell's CSS-variable injection). Peeled out so FactsheetShell can subscribe
+ * DisplayContext = colorblind (the flag that flows into the shell's
+ * CSS-variable injection). Peeled out so FactsheetShell can subscribe
  * without re-rendering on regimes flips or every xRange pan frame.
  */
 interface DisplayContextValue {
   colorblind: boolean;
-  darkMode: boolean;
 }
 
 const PayloadContext = createContext<FactsheetPayload | null>(null);
@@ -90,14 +87,12 @@ const MIN_VISIBLE_SAMPLES = 5;
  *   cb     — colorblind toggle: the string "1" when on (or `true` from a URL
  *            param's bare presence), absent when off
  *   reg    — regimes overlay toggle: same "1"/`true`/absent domain as `cb`
- *   dark   — dark-mode toggle: same "1"/`true`/absent domain as `cb`
  */
 type PersistedState = {
   range?: string;
   cmp?: ComparatorKey;
   cb?: string | true;
   reg?: string | true;
-  dark?: string | true;
 };
 
 const COMPARATOR_VALUES: ReadonlySet<ComparatorKey> = new Set([
@@ -112,11 +107,12 @@ const COMPARATOR_VALUES: ReadonlySet<ComparatorKey> = new Set([
  * when the persisted value is missing or outside its domain, so a single
  * drifted field (a rolled-back comparator key, a hand-edited blob) folds away
  * while every valid field survives. Unknown extra keys are dropped (the
- * projection only reads the five known fields). `range` is still read, only so
+ * projection only reads the four known fields; a `dark` an older build saved
+ * is therefore dropped, Phase 195 D-06). `range` is still read, only so
  * hydration can detect a legacy stored range and delete it (D-02); it is never
  * applied.
  *
- * `cb`/`reg`/`dark` are stored as the literal string "1" (the write effect
+ * `cb`/`reg` are stored as the literal string "1" (the write effect
  * below only ever writes "1"); we keep `=== true` too so a URL param's bare
  * presence (`?cb`) read back from a prior URL-only session still coerces. Any
  * other value folds to undefined (off).
@@ -129,7 +125,6 @@ function parsePersistedFields(r: Record<string, unknown>): PersistedState {
   }
   if (r.cb === "1" || r.cb === true) out.cb = r.cb;
   if (r.reg === "1" || r.reg === true) out.reg = r.reg;
-  if (r.dark === "1" || r.dark === true) out.dark = r.dark;
   return out;
 }
 
@@ -198,7 +193,7 @@ export function FactsheetProvider({
    * (D-02): it also never PURGES a legacy range; that one-shot delete lives
    * behind this same gate. The READ effect is ALSO gated (RT2 review fix): the
    * scenario chart shares the `/allocations` URL with the Overview factsheet,
-   * which DOES write `?cmp/?dark` there, so an ungated read would let
+   * which DOES write `?cmp/?cb` there, so an ungated read would let
    * that sibling-tab view-state bleed into the ephemeral scenario chart. The
    * hooks still fire unconditionally (Rules of Hooks); the gate is an early
    * no-op INSIDE each effect body, after `hydrated.current` is latched.
@@ -213,7 +208,6 @@ export function FactsheetProvider({
   const [xRange, setXRangeRaw] = useState<readonly [number, number]>(fullRange);
   const [colorblind, setColorblind] = useState(false);
   const [regimes, setRegimes] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
 
   // setXRange fires 60+ times/sec during pan/zoom. Wrapping the write in a
   // transition lets React interrupt expensive chart-stack reconciliations
@@ -315,8 +309,8 @@ export function FactsheetProvider({
     // RT2 review fix — when persistence is OFF (the composer's ephemeral
     // scenario chart), do NOT hydrate from the shared URL/localStorage. This
     // chart lives on the /allocations route alongside the Overview factsheet,
-    // which DOES write ?cmp/?dark to that SAME URL; adopting them would
-    // bleed the sibling tab's view-state (dark-mode, comparator) into the
+    // which DOES write ?cmp/?cb to that SAME URL; adopting them would
+    // bleed the sibling tab's view-state (colorblind, comparator) into the
     // scenario chart. An ephemeral chart starts from its
     // own defaults — there is nothing legitimate for it to hydrate.
     if (!persist) return;
@@ -327,7 +321,7 @@ export function FactsheetProvider({
     // DELETED here, once: dropping the field from the codec alone would not purge
     // it, because a blob that is never re-written keeps its old bytes forever. The
     // purge goes through the storage primitive, never raw `localStorage` (B25).
-    // `cmp`/`cb`/`reg`/`dark` are untouched (UI-SPEC A-5). Nothing is written when
+    // `cmp`/`cb`/`reg` are untouched (UI-SPEC A-5). Nothing is written when
     // there is no legacy range, so an empty visitor causes no storage write.
     if (params.has("range")) {
       params.delete("range");
@@ -362,12 +356,8 @@ export function FactsheetProvider({
     if (cbRaw === "1" || cbRaw === true) setColorblind(true);
     const regRaw = get("reg");
     if (regRaw === "1" || regRaw === true) setRegimes(true);
-    const darkRaw = get("dark");
-    if (darkRaw === "1" || darkRaw === true) {
-      setDarkMode(true);
-    }
-    // Display defaults to "everything off" — no system-preference inference
-    // for dark mode. The user opts in explicitly via the Display popover.
+    // Display defaults to "everything off". Dark mode was removed (Phase 195, D-06):
+    // a `dark` param or stored value is never read.
   }, [payload.strategyId, payload.dates.length, payload.returnsUnit, storageHydrated, storedView, setStoredView, removeStored, persist]);
 
   // Debounced write-back — only fires after hydration so we don't blow away
@@ -386,14 +376,12 @@ export function FactsheetProvider({
         cmp: comparator,
         cb: colorblind ? "1" : undefined,
         reg: regimes ? "1" : undefined,
-        dark: darkMode ? "1" : undefined,
       };
       const params = new URLSearchParams(window.location.search);
       if (state.cmp && state.cmp !== payload.activeComparator) params.set("cmp", state.cmp);
       else params.delete("cmp");
       if (state.cb) params.set("cb", "1"); else params.delete("cb");
       if (state.reg) params.set("reg", "1"); else params.delete("reg");
-      if (state.dark) params.set("dark", "1"); else params.delete("dark");
       const qs = params.toString();
       const next = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
       window.history.replaceState(null, "", next);
@@ -404,7 +392,7 @@ export function FactsheetProvider({
     return () => {
       if (writeTimer.current) clearTimeout(writeTimer.current);
     };
-  }, [comparator, colorblind, regimes, darkMode, payload.strategyId, payload.dates.length, payload.activeComparator, setStoredView, persist]);
+  }, [comparator, colorblind, regimes, payload.strategyId, payload.dates.length, payload.activeComparator, setStoredView, persist]);
 
   // Identity-stable value objects so each context only re-emits when its
   // own slice changes. The lower-churn contexts can stay shallow-equal
@@ -418,11 +406,11 @@ export function FactsheetProvider({
     [comparator],
   );
   const togglesValue = useMemo<TogglesContextValue>(
-    () => ({ colorblind, setColorblind, regimes, setRegimes, darkMode, setDarkMode }),
-    [colorblind, regimes, darkMode],
+    () => ({ colorblind, setColorblind, regimes, setRegimes }),
+    [colorblind, regimes],
   );
   const regimesValue = useMemo<RegimesContextValue>(() => ({ regimes }), [regimes]);
-  const displayValue = useMemo<DisplayContextValue>(() => ({ colorblind, darkMode }), [colorblind, darkMode]);
+  const displayValue = useMemo<DisplayContextValue>(() => ({ colorblind }), [colorblind]);
 
   return (
     <PayloadContext.Provider value={payload}>
@@ -476,7 +464,7 @@ export function useRegimes(): boolean {
   return v.regimes;
 }
 
-/** Subscribe to colorblind + darkMode (CSS-var flags). Re-renders only on those flips. */
+/** Subscribe to colorblind (the CSS-var flag). Re-renders only on that flip. */
 export function useDisplay(): DisplayContextValue {
   const v = useContext(DisplayContext);
   if (!v) throw new Error("useDisplay must be used inside <FactsheetProvider>");

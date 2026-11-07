@@ -19,6 +19,7 @@ import type { Strategy } from "@/lib/types";
 const getPublicStrategyDetail = vi.fn();
 vi.mock("@/lib/queries", () => ({
   getPublicStrategyDetail: (id: string) => getPublicStrategyDetail(id),
+  getPopulatedCategorySlugs: async () => ["crypto-sma", "cfd"],
 }));
 
 import PublicStrategyDetailPage from "./page";

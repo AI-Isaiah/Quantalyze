@@ -36,17 +36,15 @@ function contrastRatio(c1: string, c2: string): number {
 }
 
 const VARIANTS = [
-  { darkMode: false, colorblind: false },
-  { darkMode: true, colorblind: false },
-  { darkMode: false, colorblind: true },
-  { darkMode: true, colorblind: true },
+  { colorblind: false },
+  { colorblind: true },
 ] as const;
 
 describe("tintFor — WCAG AA contrast sweep (heatmap labels are text-micro → 4.5:1)", () => {
   for (const mode of VARIANTS) {
     const p = resolvePalette(mode);
     const palette = { base: p.base, accent: p.accent, negative: p.negative };
-    const label = `dark=${mode.darkMode} colorblind=${mode.colorblind}`;
+    const label = `colorblind=${mode.colorblind}`;
 
     it(`every intensity from full-negative to full-positive passes 4.5:1 (${label})`, () => {
       const failures: string[] = [];

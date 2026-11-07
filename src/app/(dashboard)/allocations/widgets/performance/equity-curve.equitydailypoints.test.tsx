@@ -6,7 +6,6 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import DrawdownChart, { deriveSnapshotDrawdowns } from "./DrawdownChart";
 import EquityChartWidget from "./EquityChart";
-import { TweaksProvider } from "../../context/TweaksContext";
 
 // CustomRangePicker / chart chrome consume next/navigation transitively — stub
 // so the widget mounts under jsdom without a router context.
@@ -181,28 +180,6 @@ describe("deriveSnapshotDrawdowns — WR-01 boundary regression", () => {
 // api_verified-grade treatment (the RD-2 honesty invariant).
 // ---------------------------------------------------------------------------
 
-// A Map-backed localStorage stub (jsdom's shim is partial) so TweaksProvider
-// hydrates cleanly. Registered via vi.stubGlobal so vi.unstubAllGlobals() in
-// afterEach fully removes it — the Node-22 leaked-stub class
-// (reference_ci_node22_vs_local_node25).
-function makeLocalStorageStub(): Storage {
-  const store = new Map<string, string>();
-  return {
-    getItem: (k: string) => store.get(k) ?? null,
-    setItem: (k: string, v: string) => {
-      store.set(k, v);
-    },
-    removeItem: (k: string) => {
-      store.delete(k);
-    },
-    clear: () => {
-      store.clear();
-    },
-    key: () => null,
-    length: 0,
-  } as Storage;
-}
-
 // A positive-anchored dense series so the inner chart mounts (not warm-up).
 function makeSeries(n: number, start = 100_000): DailyPoint[] {
   const pts: DailyPoint[] = [];
@@ -217,22 +194,14 @@ function makeSeries(n: number, start = 100_000): DailyPoint[] {
 }
 
 describe("EquityChartWidget — equity provenance indicator (115.1 / RD-2)", () => {
-  afterEach(() => {
-    // Node-22 leaked-stub hygiene: fully undo the localStorage stub.
-    vi.unstubAllGlobals();
-  });
-
   function renderWidget(data: Record<string, unknown>) {
-    vi.stubGlobal("localStorage", makeLocalStorageStub());
     return render(
-      <TweaksProvider>
-        <EquityChartWidget
-          data={data as unknown as WidgetProps["data"]}
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        data={data as unknown as WidgetProps["data"]}
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
   }
 
@@ -300,21 +269,16 @@ describe("EquityChartWidget — provenance freshness minute-tick gate (Finding 3
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
-    // Node-22 leaked-stub hygiene (mirrors the provenance describe above).
-    vi.unstubAllGlobals();
   });
 
   function renderWidget(data: Record<string, unknown>) {
-    vi.stubGlobal("localStorage", makeLocalStorageStub());
     return render(
-      <TweaksProvider>
-        <EquityChartWidget
-          data={data as unknown as WidgetProps["data"]}
-          timeframe="1YTD"
-          width={6}
-          height={4}
-        />
-      </TweaksProvider>,
+      <EquityChartWidget
+        data={data as unknown as WidgetProps["data"]}
+        timeframe="1YTD"
+        width={6}
+        height={4}
+      />,
     );
   }
 

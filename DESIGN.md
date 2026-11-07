@@ -250,7 +250,7 @@ absence.
     where more width is strictly more information, so it gets all of it.
   - ⛔ **The shell is the SOLE owner of the wide measure.** Nothing inside an
     `isWide` tree (`/allocations`, `/compare`, `/discovery`, `/admin`,
-    `/portfolios`, `/my-strategies`, `/strategies`
+    `/my-strategies`, `/strategies`
     (index only; `/strategies/new/wizard` and `/strategies/<id>/edit` stay at
     `max-w-7xl`)) may set a `max-w-[Npx]` on its **page or body shell**.
     `/my-strategies` capping itself at 1920px while

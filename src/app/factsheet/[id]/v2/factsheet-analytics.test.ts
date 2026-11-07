@@ -85,11 +85,11 @@ describe("[164 SHARE-01] every other lane still tracks", () => {
   it("fires normally on the id route", async () => {
     setPathname("/factsheet/44444444-4444-4444-8444-444444444444/v2");
 
-    trackFactsheetEvent("factsheet_v2_toggle_dark", { on: true });
+    trackFactsheetEvent("factsheet_v2_toggle_colorblind", { on: true });
     await flush();
 
     expect(captureMock).toHaveBeenCalledTimes(1);
-    expect(captureMock.mock.calls[0][0]).toBe("factsheet_v2_toggle_dark");
+    expect(captureMock.mock.calls[0][0]).toBe("factsheet_v2_toggle_colorblind");
     expect(captureMock.mock.calls[0][1]).toMatchObject({
       on: true,
       source_layer: "factsheet_v2",

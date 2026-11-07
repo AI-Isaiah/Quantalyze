@@ -153,6 +153,8 @@ const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/contact", anchor: "main h1" },
   { path: "/for-quants", anchor: "main h1" },
   { path: "/browse", anchor: "main h1" },
+  // Retired portfolio report (Phase 195 D-03) — public, data-free.
+  { path: "/portfolio-pdf/00000000-0000-0000-0000-000000000000", anchor: "main h1" },
 ];
 
 test.describe("no-clip sweep (VERIFY-03) — public", () => {

@@ -18,7 +18,6 @@ type PostHogModule = typeof import("posthog-js").default;
 
 export type FactsheetV2Event =
   | "factsheet_v2_view"
-  | "factsheet_v2_toggle_dark"
   | "factsheet_v2_toggle_colorblind"
   | "factsheet_v2_toggle_regimes"
   | "factsheet_v2_section_toggle"

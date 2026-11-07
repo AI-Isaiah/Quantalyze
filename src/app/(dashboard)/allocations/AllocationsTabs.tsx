@@ -20,9 +20,6 @@ import type {
 import { ScenarioComparePanel } from "./components/ScenarioComparePanel";
 import type { ScenarioComparePanelProps } from "./components/ScenarioComparePanel";
 import type { SavedScenarioRow } from "./components/ScenarioComposer";
-import { TweaksProvider, useTweakValue } from "./context/TweaksContext";
-import { TweaksToggle } from "./components/TweaksToggle";
-import { Tweaks } from "./components/Tweaks";
 import { computeTabStripScroll } from "@/lib/tab-strip-scroll";
 
 // Plan 170-08 imports the scroll math from the lib module. Re-exported here
@@ -626,31 +623,17 @@ export function AllocationsTabs(
     // now part of that set (a visible tab), so arrow-nav reaches it for
     // free — no separate keyboard-nav array. It also stays reachable via
     // "+ Allocation" / direct ?tab=scenario URL.
-    //
-    // Tweaks showOutcomes=Hide path: when the user hides the Outcomes
-    // tab via the Tweaks panel, the CSS rule in globals.css drops the
-    // button from the visible surface. The keyboard handler ALSO needs
-    // to skip it; otherwise ArrowRight from Holdings would focus a
-    // display:none button (silent no-op), mutate the URL to
-    // ?tab=outcomes, then OutcomesTabRedirectGuard would bounce the user
-    // back to Overview a frame later — a visible flicker for sighted
-    // users and a focus blackhole for screen-reader users. Read the body
-    // attribute the TweaksContext effect maintains.
-    const outcomesHidden =
-      typeof document !== "undefined" &&
-      document.body.getAttribute("data-show-outcomes") === "false";
-    const keyboardKeys = outcomesHidden
-      ? VISIBLE_TAB_KEYS.filter((k) => k !== "outcomes")
-      : VISIBLE_TAB_KEYS;
-    const idx = keyboardKeys.indexOf(key);
+    // Phase 195 D-05: the Outcomes tab is always present (the Tweaks knob
+    // that could hide it is gone), so no tab is skipped here.
+    const idx = VISIBLE_TAB_KEYS.indexOf(key);
     if (idx < 0) return;
     let next: TabKey | null = null;
-    const len = keyboardKeys.length;
-    if (e.key === "ArrowRight") next = keyboardKeys[(idx + 1) % len];
+    const len = VISIBLE_TAB_KEYS.length;
+    if (e.key === "ArrowRight") next = VISIBLE_TAB_KEYS[(idx + 1) % len];
     else if (e.key === "ArrowLeft")
-      next = keyboardKeys[(idx - 1 + len) % len];
-    else if (e.key === "Home") next = keyboardKeys[0];
-    else if (e.key === "End") next = keyboardKeys[len - 1];
+      next = VISIBLE_TAB_KEYS[(idx - 1 + len) % len];
+    else if (e.key === "Home") next = VISIBLE_TAB_KEYS[0];
+    else if (e.key === "End") next = VISIBLE_TAB_KEYS[len - 1];
     if (next) {
       e.preventDefault();
       changeTab(next);
@@ -762,7 +745,6 @@ export function AllocationsTabs(
     props.apiKeysCount === 0 && !props.mandateIsSet;
 
   return (
-    <TweaksProvider>
     <div data-allocator-dashboard>
       {showOnboardingBanner && (
         <div className="mb-6">
@@ -784,9 +766,6 @@ export function AllocationsTabs(
               {entityName}
             </p>
           ) : null}
-          {/* Tweaks display-font knob (serif | sans). `.font-display` resolves
-              to Instrument Serif by default and flips to DM Sans when the
-              user picks Sans via the Tweaks panel — see globals.css. */}
           <h1 className="font-display text-fixed-28 leading-none tracking-tight text-text-primary">
             My allocation
           </h1>
@@ -912,10 +891,6 @@ export function AllocationsTabs(
             </svg>
             <span>Export</span>
           </button>
-          {/* Phase 170 / AD-05 — inline at every width, between Export and
-              + Allocation. The root-level mount is removed so exactly one
-              toggle renders. <Tweaks /> stays at the dashboard root. */}
-          <TweaksToggle />
           {/* Phase 116 / ADDALLOC-01/02/03 — primary context-aware header
               button. Its label, action, and aria-label are derived from
               activeTab: on Scenario it reads "+ Strategy" and opens the
@@ -1027,9 +1002,6 @@ export function AllocationsTabs(
             />
           ))}
       </div>
-      {/* Phase 170 / AD-05 — the toggle lives in the header action row.
-          The panel stays mounted here so it is available on every tab. */}
-      <Tweaks />
       {/* Phase 116 / ADDALLOC-02 — tab-agnostic host for the "+ Allocation"
           onboarding wizard. Rendered unconditionally (null while closed) so the
           header button can open it on Holdings / Overview where ScenarioComposer
@@ -1039,12 +1011,7 @@ export function AllocationsTabs(
         onClose={handleContributeClose}
         onSuccess={handleContributeSuccess}
       />
-      {/* Tweaks showOutcomes knob: when the user disables the Outcomes tab
-          while currently viewing it, redirect to Overview so they don't sit
-          on a CSS-hidden panel with no way back via the (now hidden) tab. */}
-      <OutcomesTabRedirectGuard activeTab={activeTab} onRedirect={changeTab} />
     </div>
-    </TweaksProvider>
   );
 }
 
@@ -1210,23 +1177,4 @@ function ScenarioTabContent({
       )}
     </div>
   );
-}
-
-// Lives inside <TweaksProvider> so `useTweakValue` resolves; runs an effect
-// that bounces the user off the Outcomes tab when its visibility knob flips
-// to Hide. No DOM output.
-function OutcomesTabRedirectGuard({
-  activeTab,
-  onRedirect,
-}: {
-  activeTab: TabKey;
-  onRedirect: (key: TabKey) => void;
-}) {
-  const showOutcomes = useTweakValue("showOutcomes");
-  useEffect(() => {
-    if (!showOutcomes && activeTab === "outcomes") {
-      onRedirect("overview");
-    }
-  }, [showOutcomes, activeTab, onRedirect]);
-  return null;
 }

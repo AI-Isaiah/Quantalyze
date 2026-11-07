@@ -120,6 +120,10 @@ export async function proxy(request: NextRequest) {
   const isStrategyRoute =
     path === "/strategy" || path.startsWith("/strategy/");
   const isBrowseRoute = path === "/browse" || path.startsWith("/browse/");
+  // Phase 195 TRIM (D-03), 2026-11-07: `/portfolio-pdf/:id` is now the
+  // retired-report landing (no data, no render token). It stays public and
+  // bounce-exempt so a signed-in owner opening an old link also sees the
+  // retired page instead of being sent to the dashboard.
   const isPortfolioPdfRoute =
     path === "/portfolio-pdf" || path.startsWith("/portfolio-pdf/");
   const isLegalRoute = path === "/legal" || path.startsWith("/legal/");

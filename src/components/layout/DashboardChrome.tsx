@@ -99,8 +99,8 @@ export function DashboardChrome({
 
   // Phase 52/53 (v1.4) — wide fluid-fill for the DATA/TABLE surfaces only.
   // P52 raised the allocator journey (/allocations, /compare, /discovery/*);
-  // P53 (APPLY-04) adds the two remaining data-dense trees (/admin, /portfolios,
-  // incl. their sub-paths). ⚠️ The allocator pages USED to each set their own
+  // P53 (APPLY-04) adds the remaining data-dense tree (/admin, incl. its
+  // sub-paths). ⚠️ The allocator pages USED to each set their own
   // page-level `max-w-[1920px]` cap; those are all removed as of 2026-08-09 and
   // this SHELL is now the sole owner of the wide measure for every data surface
   // (the @container data tables reshape within whatever width it grants). Two
@@ -139,7 +139,7 @@ export function DashboardChrome({
   // `strategies` is NOT inside the `(\/|$)` alternation above: a prefix match
   // would widen them too.
   const isWide =
-    /^\/(allocations|compare|discovery|admin|portfolios|my-strategies)(\/|$)/.test(
+    /^\/(allocations|compare|discovery|admin|my-strategies)(\/|$)/.test(
       pathname,
     ) || /^\/strategies$/.test(pathname);
 

@@ -2,7 +2,6 @@ import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
 import { BookIntroCall } from "@/components/strategy/BookIntroCall";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
-import { AddToPortfolio } from "@/components/portfolio/AddToPortfolio";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
@@ -160,7 +159,6 @@ export default async function StrategyDetailPage({
             Tear Sheet
           </a>
         )}
-        <AddToPortfolio strategyId={strategy.id} />
         <BookIntroCall strategyName={displayName} />
         <RequestIntroButton strategyId={strategy.id} />
       </div>

@@ -612,9 +612,8 @@ describe("StrategyTable — prefs mirror per scope (F9 M-0475/M-0476)", () => {
 // sticky first column class contract; (b) HONEST values — each metric sits in
 // its own always-rendered cell (2026-10-13 Phase 170.6.1 D-01 retired the
 // priority collapse and its per-row disclosure) and a genuinely-null source
-// stays the honest-null em-dash, never a fabricated 0; (c) the table-scoped density
-// control flips data-density on the TABLE ROOT (not <body>), wrapped in the
-// reduced-motion-safe View-Transition helper; (d) the WatchlistTabs role=tabpanel
+// stays the honest-null em-dash, never a fabricated 0; (c) the table frame carries no
+// density control and no data-density (removed in Phase 195 D-07); (d) the WatchlistTabs role=tabpanel
 // / aria-labelledby wiring (Plan 50-05 contract) still resolves through the
 // reshape. These are structural DOM/ARIA assertions, mirroring the file's style.
 
@@ -825,26 +824,27 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     expect(document.querySelector("details")).toBeNull();
   });
 
-  it("the density control has accessible name 'Table density' and toggling sets data-density on the TABLE ROOT (not <body>)", async () => {
+  // WHY: Phase 195 D-07 removed the density control. The table is fixed at the
+  // comfortable 44px rows, so the frame carries no data-density and no group
+  // named "Table density" exists; the table/grid view toggle (a real choice
+  // between reading figures and scanning cards) is untouched.
+  it("renders no 'Table density' group, no Comfortable/Compact buttons and no data-density; the view toggle stays", async () => {
     const user = userEvent.setup();
     render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
 
-    const group = screen.getByRole("group", { name: "Table density" });
-    expect(group).toBeDefined();
+    expect(screen.queryByRole("group", { name: "Table density" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Comfortable" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Compact" })).toBeNull();
 
-    // The data-density carrier is the [data-strategy-table] root, NOT <body>.
+    // The settle marker stays; the density attribute does not exist.
     const tableRoot = document.querySelector("[data-strategy-table]") as HTMLElement;
     expect(tableRoot).not.toBeNull();
-    // Comfortable (default) leaves data-density unset — inherits :root 44px.
-    expect(tableRoot.getAttribute("data-density")).toBeNull();
+    expect(tableRoot.hasAttribute("data-density")).toBe(false);
 
-    await user.click(screen.getByRole("button", { name: "Compact" }));
-    expect(tableRoot.getAttribute("data-density")).toBe("tight");
-    // The global <body> density (allocator dashboard knob) is untouched.
-    expect(document.body.getAttribute("data-density")).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "Comfortable" }));
-    expect(tableRoot.getAttribute("data-density")).toBeNull();
+    // The view toggle still switches table -> grid.
+    expect(screen.getByRole("button", { name: "Table view" })).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "Grid view" }));
+    expect(document.querySelector("[data-strategy-table]")).toBeNull();
   });
 
   it("the WatchlistTabs role=tabpanel / aria-labelledby wiring still resolves through the reshape (Plan 50-05 contract)", () => {

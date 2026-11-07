@@ -93,7 +93,6 @@ const SCAN_FILES = [
   "src/lib/portfolio-insights.ts",
   "src/lib/dollar-validation.ts",
   "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx",
-  "src/app/portfolio-pdf/[id]/page.tsx",
   "src/app/(dashboard)/recommendations/page.tsx",
 ] as const;
 
@@ -118,7 +117,6 @@ const CENSUS_FILES = [
   "src/app/api/og/factsheet/[id]/route.tsx",
   "src/components/strategy-v2/HeadlineMetricsPanel.tsx",
   "src/components/strategy-v2/TradeAndPositionPanel.tsx",
-  "src/components/portfolio/BenchmarkComparison.tsx",
   // Table F: every other surface
   "src/components/charts/MonthlyHeatmap.tsx",
   "src/components/charts/DailyHeatmap.tsx",
@@ -143,19 +141,15 @@ const CENSUS_FILES = [
   "src/app/(dashboard)/allocations/widgets/risk/RiskDecomposition.tsx",
   "src/app/(dashboard)/allocations/widgets/risk/VarExpectedShortfall.tsx",
   "src/lib/bridge-outcome-label.ts",
-  "src/components/portfolio/AttributionBar.tsx",
   "src/components/portfolio/ReplacementCard.tsx",
   "src/components/portfolio/PortfolioOptimizer.tsx",
   "src/components/portfolio/PortfolioImpactPanel.tsx",
-  "src/components/portfolio/PortfolioEquityCurve.tsx",
   "src/components/portfolio/CorrelationHeatmap.tsx",
-  "src/components/portfolio/StrategyBreakdownTable.tsx",
   "src/components/strategy/StrategyTable.tsx",
   "src/components/strategy/HoldingFactsheet.tsx",
   "src/components/strategy/CompareEquityOverlay.tsx",
   "src/components/strategy/CompareCorrelationMatrix.tsx",
   "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx",
-  "src/app/portfolio-pdf/[id]/page.tsx",
   "src/app/(dashboard)/recommendations/page.tsx",
   // The formatter module the rest delegate to
   "src/lib/utils.ts",
@@ -985,52 +979,16 @@ export const ALLOWLIST: Allowlist = {
       reason: "The CHART_NEGATIVE token and its hex value: the definition site of the colour.",
     },
   },
-  "src/components/portfolio/AlertsList.tsx": {
-    R5: {
-      count: 1,
-      reason: "Alerts load/acknowledge error line, a sentence.",
-    },
-  },
-  "src/components/portfolio/AllocationEventForm.tsx": {
-    R5: {
-      count: 1,
-      reason: "Form error line, a sentence.",
-    },
-  },
-  "src/components/portfolio/CompositionDonut.tsx": {
-    R6: {
-      count: 1,
-      reason: "A portfolio weight in the donut tooltip: non-negative.",
-    },
-  },
   "src/components/portfolio/CorrelationHeatmap.tsx": {
     R6: {
       count: 1,
       reason: "The average ABSOLUTE correlation `Avg |ρ|`: non-negative by definition.",
     },
   },
-  "src/components/portfolio/CreatePortfolioForm.tsx": {
-    R5: {
-      count: 1,
-      reason: "Form error line, a sentence.",
-    },
-  },
-  "src/components/portfolio/DocumentUpload.tsx": {
-    R5: {
-      count: 1,
-      reason: "Upload error line, a sentence.",
-    },
-  },
   "src/components/portfolio/InsightStrip.tsx": {
     R5: {
       count: 1,
       reason: "SEVERITY_DOT's `high` entry (`bg-negative`): an insight-severity dot keyed by Severity ('high' | 'medium' | 'low'), not by any figure's sign.",
-    },
-  },
-  "src/components/portfolio/MigrationWizard.tsx": {
-    R5: {
-      count: 1,
-      reason: "Wizard error line, a sentence.",
     },
   },
   "src/components/portfolio/PortfolioImpactPanel.tsx": {
@@ -1053,12 +1011,6 @@ export const ALLOWLIST: Allowlist = {
       reason: "The 'Optimizer failed' error box (`border-negative/30 bg-negative/5`) and its heading; no figure.",
     },
   },
-  "src/components/portfolio/RemoveStrategyButton.tsx": {
-    R5: {
-      count: 2,
-      reason: "The Remove button's hover-to-danger text and its removal error line; no figure.",
-    },
-  },
   "src/components/portfolio/ReplacementCard.tsx": {
     R5: {
       count: 1,
@@ -1069,12 +1021,6 @@ export const ALLOWLIST: Allowlist = {
     R5: {
       count: 3,
       reason: "The replacement panel's error box (`border-negative/20 bg-negative/5`) and its error line, a sentence.",
-    },
-  },
-  "src/components/portfolio/RiskAttribution.tsx": {
-    R7: {
-      count: 1,
-      reason: "`assessable` (`share !== null && weight !== null && share >= 0`) is a VALIDITY guard that picks between a dash and a verdict. It never picks a colour from a sign: the verdict's red or green comes from `overweight` (`share > weight * 1.3`), and a negative share is excluded from assessment on purpose (169 WR-R2-02).",
     },
   },
   "src/components/strategy-v2/TradeAndPositionPanel.tsx": {

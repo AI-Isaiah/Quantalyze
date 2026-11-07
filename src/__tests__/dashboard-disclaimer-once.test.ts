@@ -115,7 +115,7 @@ describe("dashboard disclaimer census — one footer disclaimer per dashboard ro
   it("scans a real population (an empty scan would pass vacuously)", () => {
     expect(files.length).toBeGreaterThan(100);
     expect(files).toContain("src/app/(dashboard)/recommendations/page.tsx");
-    expect(files).toContain("src/app/(dashboard)/portfolios/[id]/page.tsx");
+    expect(files).toContain("src/app/(dashboard)/allocations/page.tsx");
     expect(files.some(isTestPath)).toBe(false);
   });
 

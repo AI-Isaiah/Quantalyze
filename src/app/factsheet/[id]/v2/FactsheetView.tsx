@@ -413,7 +413,7 @@ export function FactsheetBody({
   renameTarget,
   ownerShare,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
-  const { colorblind, darkMode } = useDisplay();
+  const { colorblind } = useDisplay();
   // Phase 164 / SHARE-04 — the live-link fact, held HERE because two children on
   // opposite sides of the tree read it (the notice above the masthead, the share
   // + revoke controls in the ControlBar) and because minting or revoking must
@@ -430,8 +430,8 @@ export function FactsheetBody({
   );
   // Centralised palette — resolve once, apply as CSS custom properties on
   // the article container so descendants pick up the new tokens via var().
-  const resolved = resolvePalette({ darkMode, colorblind });
-  const shellStyle = paletteToCssVars(resolved, darkMode);
+  const resolved = resolvePalette({ colorblind });
+  const shellStyle = paletteToCssVars(resolved);
   // 2026-05-20: gate event-study panels on having a comparator. The
   // Win/Loss-Event signature panels render "of —" with empty bands when
   // no benchmark is selected because they aggregate the BENCHMARK
@@ -451,7 +451,7 @@ export function FactsheetBody({
       <article
         id="factsheet-main"
         tabIndex={-1}
-        data-theme={darkMode ? "dark" : "light"}
+        data-theme="light"
         data-colorblind={colorblind ? "1" : "0"}
         className="factsheet-v2-shell mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-10 py-6 sm:py-10 lg:py-12"
         style={{ background: "var(--color-page)", ...shellStyle }}
@@ -2899,14 +2899,14 @@ function ControlBar({
 }
 
 /**
- * Display-preferences disclosure — bundles Dark / Colorblind / Regimes
+ * Display-preferences disclosure — bundles Colorblind / Regimes
  * toggles behind a single dropdown so the ControlBar isn't a wall of pills
  * on mobile. Native <details> + <summary> for keyboard + screen-reader
  * accessibility and zero JS dependency.
  */
 function DisplayMenu() {
-  const { colorblind, setColorblind, regimes, setRegimes, darkMode, setDarkMode } = useToggles();
-  const activeCount = (darkMode ? 1 : 0) + (colorblind ? 1 : 0) + (regimes ? 1 : 0);
+  const { colorblind, setColorblind, regimes, setRegimes } = useToggles();
+  const activeCount = (colorblind ? 1 : 0) + (regimes ? 1 : 0);
   return (
     <details className="relative">
       <summary className="list-none cursor-pointer px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
@@ -2914,8 +2914,7 @@ function DisplayMenu() {
         {activeCount > 0 && (
           <span
             className="inline-block px-1 rounded-sm text-micro"
-            // Light: white on Oxford-green = 12:1. Dark: white on bright teal
-            // = 1.5:1 (unreadable). Use page bg (dark slate) on teal in dark.
+            // White on Oxford-green = 12:1.
             style={{ background: "var(--color-accent)", color: "var(--color-page)" }}
           >
             {activeCount}
@@ -2923,15 +2922,6 @@ function DisplayMenu() {
         )}
       </summary>
       <div className="absolute right-0 lg:right-auto lg:left-0 top-full z-10 mt-1 min-w-[200px] bg-surface border border-border rounded-sm shadow-sm py-1">
-        <DisplayItem
-          label="Dark mode"
-          on={darkMode}
-          onToggle={() => {
-            setDarkMode(!darkMode);
-            trackFactsheetEvent("factsheet_v2_toggle_dark", { on: !darkMode });
-          }}
-          hint="Slate palette for low-light viewing"
-        />
         <DisplayItem
           label="Colorblind palette"
           on={colorblind}
