@@ -133,9 +133,8 @@ export function TermsPanel() {
         <Term label="Currency basis">Returns reported in decimal · compounded</Term>
       </dl>
 
-      {/* Fees / commercial terms slot. Renders as a contractual placeholder
-          until the strategy registry exposes mgmt/perf fee fields. Each row is
-          honest about being not-yet-provided rather than fabricating. */}
+      {/* Fees / commercial terms slot. Each row states that the terms come from
+          the manager on request, rather than fabricating a figure. */}
       <h4 className="mt-4 mb-2 text-fixed-10 font-semibold uppercase tracking-[0.18em] text-text-muted border-b border-border/60 pb-1">
         Fees & Subscription
       </h4>
@@ -150,8 +149,7 @@ export function TermsPanel() {
       </dl>
 
       <p className="mt-2 text-fixed-10 italic text-text-muted">
-        Commercial terms not yet wired through from the strategy registry. Allocators should request
-        the full fund offering memorandum directly from the manager before subscribing.
+        Allocators should request the full fund offering memorandum directly from the manager before subscribing.
       </p>
     </section>
   );

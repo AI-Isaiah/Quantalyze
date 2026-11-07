@@ -873,8 +873,8 @@ export const ALLOWLIST: Allowlist = {
   },
   "src/app/factsheet/[id]/v2/BatchDPanels.tsx": {
     R6: {
-      count: 3,
-      reason: "The Kolmogorov-Smirnov D and p-value (both in [0, 1]) and the target portfolio volatility (non-negative).",
+      count: 2,
+      reason: "The Kolmogorov-Smirnov D and p-value (both in [0, 1]).",
     },
   },
   "src/app/factsheet/[id]/v2/CrossSignaturePanels.tsx": {

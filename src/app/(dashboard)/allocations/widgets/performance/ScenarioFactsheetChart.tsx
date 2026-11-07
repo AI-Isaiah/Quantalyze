@@ -40,9 +40,9 @@ import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
  *     the shared `xRange` via `setXRange` over the scenario date axis (NOT the
  *     legacy `sliceByPeriod`). It lives in the body's `topSlot` so it stays a
  *     provider descendant and `useXRange` resolves.
- *   - persist=false (T-38-03-01): a scenario pan on the dashboard tab never
- *     rewrites the allocator's URL (`?range=`) nor writes a `factsheet-v2:`
- *     localStorage blob. The factsheet never passes persist; only this mount does.
+ *   - persist=false (T-38-03-01): this mount never rewrites the allocator's
+ *     dashboard URL nor writes, reads or purges a `factsheet-v2:` localStorage
+ *     blob. The factsheet never passes persist; only this mount does.
  *
  * The "PROJECTED — hypothetical" honesty pill and the "BTC Benchmark" toggle are
  * composer-owned chrome rendered by the call site AROUND this component — they

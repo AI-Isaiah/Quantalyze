@@ -23,8 +23,11 @@ type ComparatorKey = FactsheetPayload["activeComparator"];
  *   - ComparatorContext: medium churn (picker swap).
  *   - TogglesContext: low churn (display preferences).
  *
- * Persistence: xRange + comparator + toggles round-trip through the URL
- * query string and localStorage so refresh and link-sharing preserve view.
+ * Persistence: the comparator + the display toggles round-trip through the URL
+ * query string and localStorage so refresh and link-sharing preserve them. The
+ * visible range (xRange) is session-local and never persisted (Phase 193 D-02):
+ * every visit opens the full history, and a range an older build saved is
+ * deleted once on load.
  */
 
 interface XRangeContextValue {
@@ -78,8 +81,11 @@ const MIN_VISIBLE_SAMPLES = 5;
 
 /**
  * The persisted factsheet view-state shape. Both the URL query string and the
- * localStorage blob carry these five fields:
- *   range  — `"${startIdx}-${endIdx}"` (the x-axis window; absent ⇒ full range)
+ * localStorage blob carry these fields:
+ *   range  — LEGACY, decode-only (Phase 193 D-02): `"${startIdx}-${endIdx}"`, what
+ *            older builds wrote. Nothing writes it any more
+ *            ({@link factsheetViewStateCodec}.encode drops it); it stays in the
+ *            type so hydration can detect a stored range and delete it.
  *   cmp    — the active comparator key ("btc" | "spx" | "none")
  *   cb     — colorblind toggle: the string "1" when on (or `true` from a URL
  *            param's bare presence), absent when off
@@ -106,7 +112,9 @@ const COMPARATOR_VALUES: ReadonlySet<ComparatorKey> = new Set([
  * when the persisted value is missing or outside its domain, so a single
  * drifted field (a rolled-back comparator key, a hand-edited blob) folds away
  * while every valid field survives. Unknown extra keys are dropped (the
- * projection only reads the five known fields).
+ * projection only reads the five known fields). `range` is still read, only so
+ * hydration can detect a legacy stored range and delete it (D-02); it is never
+ * applied.
  *
  * `cb`/`reg`/`dark` are stored as the literal string "1" (the write effect
  * below only ever writes "1"); we keep `=== true` too so a URL param's bare
@@ -163,11 +171,13 @@ export const factsheetViewStateCodec: StorageCodec<PersistedState> = {
     return { value: parsePersistedFields(r), outcome: "ok", reason: null };
   },
   encode(value: PersistedState): string {
-    // Byte-compatible with the pre-B7 `JSON.stringify(state)` write — no
-    // version envelope, so a round-trip is byte-identical and existing blobs
-    // survive. The write effect below constructs `state` with the same field
-    // order (range, cmp, cb, reg, dark) the pre-B7 effect used.
-    return JSON.stringify(value);
+    // Byte-compatible with the pre-B7 `JSON.stringify(state)` write for every
+    // RANGE-FREE blob — no version envelope, so a round-trip is byte-identical
+    // and existing blobs survive. The legacy `range` is decoded only so
+    // hydration can delete it (D-02); it is dropped here so no write, from any
+    // caller, can carry a range again.
+    const { range: _legacyRange, ...rest } = value;
+    return JSON.stringify(rest);
   },
 };
 
@@ -183,11 +193,12 @@ export function FactsheetProvider({
    * effects (the URL `history.replaceState` half AND the `setStoredView`
    * localStorage half) AND the hydration READ effect. The factsheet never
    * passes it, so its link-sharing round-trip is byte-identical. The composer
-   * mount (Phase 38) passes `persist={false}` so a scenario pan on the dashboard
-   * tab never rewrites the allocator's dashboard URL (`?range=`) nor writes a
-   * `factsheet-v2:` blob. The READ effect is ALSO gated (RT2 review fix): the
+   * mount (Phase 38) passes `persist={false}` so a scenario mount never rewrites
+   * the allocator's dashboard URL nor writes a `factsheet-v2:` blob. Phase 193
+   * (D-02): it also never PURGES a legacy range; that one-shot delete lives
+   * behind this same gate. The READ effect is ALSO gated (RT2 review fix): the
    * scenario chart shares the `/allocations` URL with the Overview factsheet,
-   * which DOES write `?range/?cmp/?dark` there, so an ungated read would let
+   * which DOES write `?cmp/?dark` there, so an ungated read would let
    * that sibling-tab view-state bleed into the ephemeral scenario chart. The
    * hooks still fire unconditionally (Rules of Hooks); the gate is an early
    * no-op INSIDE each effect body, after `hydrated.current` is latched.
@@ -218,8 +229,7 @@ export function FactsheetProvider({
   // emit indices in `(cashLen-1, mtmLen-1]`; without this widening the old
   // cash-sized clamp clipped them, leaving the recent MTM days PERMANENTLY
   // unreachable (the reported harm). `fullRange` below deliberately STAYS
-  // cash-sized so the initial/reset window and the URL full-range sentinel are
-  // byte-identical under cash.
+  // cash-sized so the initial/reset window is byte-identical under cash.
   const setXRange = useCallback(
     (next: readonly [number, number]) => {
       const maxIdx =
@@ -280,7 +290,7 @@ export function FactsheetProvider({
   //
   // The key stays `factsheet-v2:${strategyId}` with the UNVERSIONED
   // `JSON.stringify(state)` shape so existing stored views survive byte-for-byte.
-  const { value: storedView, setValue: setStoredView, isHydrated: storageHydrated } =
+  const { value: storedView, setValue: setStoredView, removeStored, isHydrated: storageHydrated } =
     useCrossTabStorage<PersistedState>({
       key: `factsheet-v2:${payload.strategyId}`,
       initial: EMPTY_PERSISTED,
@@ -305,24 +315,37 @@ export function FactsheetProvider({
     // RT2 review fix — when persistence is OFF (the composer's ephemeral
     // scenario chart), do NOT hydrate from the shared URL/localStorage. This
     // chart lives on the /allocations route alongside the Overview factsheet,
-    // which DOES write ?range/?cmp/?dark to that SAME URL; adopting them would
-    // bleed the sibling tab's view-state (dark-mode, comparator, a foreign-axis
-    // range index) into the scenario chart. An ephemeral chart starts from its
+    // which DOES write ?cmp/?dark to that SAME URL; adopting them would
+    // bleed the sibling tab's view-state (dark-mode, comparator) into the
+    // scenario chart. An ephemeral chart starts from its
     // own defaults — there is nothing legitimate for it to hydrate.
     if (!persist) return;
     const params = new URLSearchParams(window.location.search);
-    const get = (k: keyof PersistedState) =>
-      params.get(k) ?? storedView[k];
-    const maxIdx = payload.dates.length - 1;
-
-    const rangeRaw = get("range");
-    if (typeof rangeRaw === "string") {
-      const [s, e] = rangeRaw.split("-").map(n => parseInt(n, 10));
-      if (Number.isFinite(s) && Number.isFinite(e) && s >= 0 && e <= maxIdx && e - s >= MIN_VISIBLE_SAMPLES - 1) {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setXRangeRaw([s, e] as const);
-      }
+    // Phase 193 (QUIETVIEW, D-02): the view range is session-local, so a `range`
+    // from the URL or from the stored blob is NEVER applied (every visit opens the
+    // full history, from the first painted frame). A range an older build saved is
+    // DELETED here, once: dropping the field from the codec alone would not purge
+    // it, because a blob that is never re-written keeps its old bytes forever. The
+    // purge goes through the storage primitive, never raw `localStorage` (B25).
+    // `cmp`/`cb`/`reg`/`dark` are untouched (UI-SPEC A-5). Nothing is written when
+    // there is no legacy range, so an empty visitor causes no storage write.
+    if (params.has("range")) {
+      params.delete("range");
+      const qs = params.toString();
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`,
+      );
     }
+    if (storedView.range !== undefined) {
+      const { range: _legacyRange, ...rest } = storedView;
+      if (Object.keys(rest).length === 0) removeStored(EMPTY_PERSISTED);
+      else setStoredView(rest);
+    }
+    const get = (k: Exclude<keyof PersistedState, "range">) =>
+      params.get(k) ?? storedView[k];
+
     const cmpRaw = get("cmp");
     // Phase 164.6.6.2 (D-10, UI-SPEC A7, T-164.6.6.2-20): a strategy whose returns are
     // in a native unit has no BTC comparator, so a `cmp=btc` from the URL or the stored
@@ -332,6 +355,7 @@ export function FactsheetProvider({
       cmpRaw === "spx" ||
       cmpRaw === "none"
     ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setComparator(cmpRaw);
     }
     const cbRaw = get("cb");
@@ -344,7 +368,7 @@ export function FactsheetProvider({
     }
     // Display defaults to "everything off" — no system-preference inference
     // for dark mode. The user opts in explicitly via the Display popover.
-  }, [payload.strategyId, payload.dates.length, payload.returnsUnit, storageHydrated, storedView, persist]);
+  }, [payload.strategyId, payload.dates.length, payload.returnsUnit, storageHydrated, storedView, setStoredView, removeStored, persist]);
 
   // Debounced write-back — only fires after hydration so we don't blow away
   // URL/stored state before we've read it. The URL half is a synchronous
@@ -359,16 +383,12 @@ export function FactsheetProvider({
     if (writeTimer.current) clearTimeout(writeTimer.current);
     writeTimer.current = setTimeout(() => {
       const state: PersistedState = {
-        range: `${xRange[0]}-${xRange[1]}`,
         cmp: comparator,
         cb: colorblind ? "1" : undefined,
         reg: regimes ? "1" : undefined,
         dark: darkMode ? "1" : undefined,
       };
       const params = new URLSearchParams(window.location.search);
-      const fullRangeStr = `0-${payload.dates.length - 1}`;
-      if (state.range && state.range !== fullRangeStr) params.set("range", state.range);
-      else params.delete("range");
       if (state.cmp && state.cmp !== payload.activeComparator) params.set("cmp", state.cmp);
       else params.delete("cmp");
       if (state.cb) params.set("cb", "1"); else params.delete("cb");
@@ -384,7 +404,7 @@ export function FactsheetProvider({
     return () => {
       if (writeTimer.current) clearTimeout(writeTimer.current);
     };
-  }, [xRange, comparator, colorblind, regimes, darkMode, payload.strategyId, payload.dates.length, payload.activeComparator, setStoredView, persist]);
+  }, [comparator, colorblind, regimes, darkMode, payload.strategyId, payload.dates.length, payload.activeComparator, setStoredView, persist]);
 
   // Identity-stable value objects so each context only re-emits when its
   // own slice changes. The lower-churn contexts can stay shallow-equal

@@ -271,12 +271,51 @@ describe("HistogramChart zoom ticks (D-02, D-06)", () => {
     );
     const svg = r.container.querySelector("svg")!;
     await act(async () => {
-      fireEvent.wheel(svg, { deltaY: -577, clientX: 850, clientY: 100 });
+      fireEvent.wheel(svg, { deltaY: -577, ctrlKey: true, clientX: 850, clientY: 100 });
     });
     const hint = r.container.querySelector("header p")!.textContent ?? "";
     expect(hint, hint).toMatch(/zoom 0\.00% … /);
     expect(hint).not.toContain("-0.00%");
     expect(hint).not.toContain("+0.00%");
+  });
+
+  it("a plain wheel leaves the histogram zoom alone and does not block the page scroll; the hint names Ctrl/Cmd (D-01)", async () => {
+    // D-01 (founder, 2026-11-06): the same rule as the time-series charts. A plain wheel is a
+    // page scroll: it must not narrow the value axis and must not be default-prevented. Ctrl or
+    // Cmd + wheel is the explicit zoom control. The hint is what tells a reader so.
+    const payload = { ...basePayload(), strategyReturns: around(0, 0.01) } as FactsheetPayload;
+    const r = render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <HistogramChart />
+      </FactsheetProvider>,
+    );
+    const svg = r.container.querySelector("svg")!;
+    const headerText = () => r.container.querySelector("header p")!.textContent ?? "";
+    const resetButton = () => r.queryByRole("button", { name: "Reset zoom" });
+
+    let plainNotCancelled = false;
+    await act(async () => {
+      plainNotCancelled = fireEvent.wheel(svg, { deltaY: -577, clientX: 850, clientY: 100 });
+    });
+    expect(plainNotCancelled, "a plain wheel is not default-prevented").toBe(true);
+    expect(headerText(), "a plain wheel does not zoom").not.toContain(" · zoom ");
+    expect(resetButton(), "a plain wheel leaves no Reset zoom button").toBeNull();
+
+    let ctrlNotCancelled = true;
+    await act(async () => {
+      ctrlNotCancelled = fireEvent.wheel(svg, { deltaY: -577, ctrlKey: true, clientX: 850, clientY: 100 });
+    });
+    expect(ctrlNotCancelled, "a Ctrl wheel is default-prevented").toBe(false);
+    expect(headerText(), headerText()).toMatch(/zoom 0\.00% … /);
+    expect(resetButton(), "a Ctrl wheel zooms, so Reset zoom renders").not.toBeNull();
+
+    const hint = Array.from(r.container.querySelectorAll("span")).find((n) =>
+      (n.textContent ?? "").includes("to zoom"),
+    );
+    expect(hint?.textContent?.trim()).toBe("Ctrl/Cmd + wheel to zoom · double-click to reset");
+    // UI-SPEC E3: the longer hint wraps under the legend names at 390 px instead of clipping.
+    expect(hint?.parentElement?.className).toContain("flex-wrap");
+    expect(hint?.parentElement?.className).toContain("gap-y-1");
   });
 
   it("a plain +-1.1% window still prints signed ends", () => {

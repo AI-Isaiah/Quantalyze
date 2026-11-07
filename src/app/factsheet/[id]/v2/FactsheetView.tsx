@@ -82,7 +82,6 @@ import {
   useFullHistoryWithheld,
   windowCoverageNote,
 } from "./MetricsColumn";
-import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
 import { MasterBrush } from "./MasterBrush";
@@ -377,7 +376,8 @@ function FactsheetShell({
 export interface FactsheetBodyOptions extends OwnerLaneProps {
   /** Suppress the strategy-name header (caller already provides its own). */
   hideHeader?: boolean;
-  /** Suppress the demo allocator-portfolio section (skip on allocator dashboards). */
+  /** A no-op since QUIETVIEW (Phase 193 D-05 removed the demo allocator section).
+   *  Kept so existing callers compile; removal is booked with `[193-DEMO-PAYLOAD-PRODUCERS]`. */
   hideAllocatorSection?: boolean;
   /** Suppress the QSF footer + disclaimer (caller already provides closing chrome). */
   hideFooter?: boolean;
@@ -396,8 +396,7 @@ export interface FactsheetBodyOptions extends OwnerLaneProps {
 
 /**
  * Full factsheet article body — strategy header + KpiStrip + SectionNav +
- * ControlBar + MasterBrush + all panel sections + MetricsColumn + (optional)
- * AllocatorSection + Footer. Pure JSX with the palette + skip-link wrapper.
+ * ControlBar + MasterBrush + all panel sections + MetricsColumn + Footer. Pure JSX with the palette + skip-link wrapper.
  *
  * Must be mounted inside a FactsheetProvider. `factsheet-context.tsx`
  * exports both pieces.
@@ -405,7 +404,6 @@ export interface FactsheetBodyOptions extends OwnerLaneProps {
 export function FactsheetBody({
   payload,
   hideHeader = false,
-  hideAllocatorSection = false,
   hideFooter = false,
   topSlot,
   scenarioMode = false,
@@ -568,17 +566,6 @@ export function FactsheetBody({
           <div id="factsheet-metrics" className="contents" />
           <MetricsColumnWithBasis scenarioMode={scenarioMode} />
         </div>
-
-        {/* AllocatorSection uses demo blended portfolios — derivable data only
-            for api-ingested strategies. Suppress for CSV uploads per the
-            no-invented-data contract. (NEW-C20-01) */}
-        {!hideAllocatorSection && payload.ingestSource === "api" && (
-          <div id="factsheet-allocator" className="mt-12">
-            <LazyMount minHeight={400}>
-              <AllocatorSection />
-            </LazyMount>
-          </div>
-        )}
 
         {!hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
@@ -1940,7 +1927,7 @@ function KpiStrip() {
           role="status"
           aria-live="polite"
         >
-          {`What-if projection at ${appliedLeverage}× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer, allocator, and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.`}
+          {`What-if projection at ${appliedLeverage}× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.`}
         </p>
       )}
       {/* Phase 169.1 (SC10, D-27): the range the strip's figures cover, from the
@@ -2195,7 +2182,6 @@ function SectionNav() {
   const { key: cmpKey } = useActiveComparator();
   // FINDING-10 (b06-silentfailure): Filter out sections whose content is
   // conditionally suppressed so the nav doesn't contain dead anchors.
-  // "Allocator" is only rendered when ingestSource === "api" (no-invented-data).
   // "Signatures" is only rendered when (hasComparator OR a native returns unit) AND ingestSource === "api".
   const hasComparator = cmpKey !== "none";
   const sections: { id: string; label: string }[] = React.useMemo(() => [
@@ -2207,9 +2193,6 @@ function SectionNav() {
       ? [{ id: "factsheet-signatures", label: "Signatures" }]
       : []),
     { id: "factsheet-streak", label: "Streaks" },
-    ...(payload.ingestSource === "api"
-      ? [{ id: "factsheet-allocator", label: "Allocator" }]
-      : []),
     { id: "factsheet-metrics", label: "Metrics" },
   ], [payload.ingestSource, payload.returnsUnit, hasComparator]);
   const [active, setActive] = React.useState<string | null>(null);
@@ -3024,8 +3007,6 @@ function FactsheetFooter({
         Returns computed from the strategy&apos;s daily series. Benchmark returns are
         taken from daily closes over the strategy&apos;s own intervals, never past a
         benchmark&apos;s last close. Risk-free rate set to 0%. Past performance is not indicative of future results.
-        Demo cohorts and demo portfolios are flagged inline; production replaces them
-        with platform data.
       </p>
       <div className="text-right">
         <p className="font-mono text-micro tracking-[0.18em] text-text-primary">{stamp}</p>

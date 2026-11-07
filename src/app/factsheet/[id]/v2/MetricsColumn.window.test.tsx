@@ -241,6 +241,22 @@ describe("the metrics rail follows the zoom window (SC10, D-27)", () => {
     );
   });
 
+  it("the rail's Reset to full history returns the full history and keeps focus on the label (D-03)", async () => {
+    const payload = endedRecord();
+    mount(payload);
+    expect(screen.queryByTestId("range-reset-rail")).toBeNull();
+    await click("zoom");
+    const btn = screen.getByTestId("range-reset-rail");
+    expect(btn.textContent).toBe("Reset to full history");
+    await click("range-reset-rail");
+    expect(screen.getByTestId("range-eyebrow-rail").textContent).toBe(
+      `Full history: ${isoToMonthDay(payload.dates[0])} – ${isoToMonthDay(payload.dates[399])}`,
+    );
+    expect(screen.queryByTestId("range-reset-rail")).toBeNull();
+    expect(screen.queryByTestId("range-reset-strip")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("range-eyebrow-rail"));
+  });
+
   it("after a reset every rail cell and row reads exactly as before the zoom", async () => {
     const payload = openRecord();
     const { container } = mount(payload);

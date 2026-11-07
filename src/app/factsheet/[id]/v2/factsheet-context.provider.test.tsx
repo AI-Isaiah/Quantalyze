@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
@@ -108,11 +108,12 @@ function renderProvider() {
  */
 function PersistHarness() {
   const { comparator } = useComparator();
-  const { setXRange } = useXRange();
+  const { xRange, setXRange } = useXRange();
   const { darkMode } = useToggles();
   return (
     <>
       <span data-testid="cmp">{comparator}</span>
+      <span data-testid="range">{`${xRange[0]}-${xRange[1]}`}</span>
       <span data-testid="dark">{darkMode ? "dark" : "light"}</span>
       <button
         data-testid="pan"
@@ -189,7 +190,9 @@ describe("FactsheetProvider — storage integration (B7c)", () => {
  * as before (the existing B7c suite above pins that path). These cases pin the
  * SECOND direction the composer (Plan 03) relies on: `persist={false}` must
  * suppress BOTH write halves so a scenario mount never rewrites the dashboard
- * URL (`?range=`) nor writes a `factsheet-v2:` localStorage blob.
+ * URL nor writes a `factsheet-v2:` localStorage blob. (Phase 193 D-02: the view
+ * range is no longer persisted at all, so a pan writes neither half for ANY
+ * mount; the D-02 describe below pins that.)
  */
 function renderPersist(persist?: boolean) {
   return render(
@@ -200,43 +203,6 @@ function renderPersist(persist?: boolean) {
 }
 
 describe("FactsheetProvider — persist opt-out (38-02)", () => {
-  it("default (persist omitted) writes BOTH the URL ?range= and the localStorage blob after a pan", async () => {
-    const replaceSpy = vi.spyOn(window.history, "replaceState");
-    // Seed a stored comparator so hydration latches deterministically (cmp →
-    // "spx"); the write effect is armed only after hydrated.current is true.
-    lsStore.set(KEY, JSON.stringify({ cmp: "spx" }));
-    act(() => {
-      renderPersist();
-    });
-    await waitFor(() =>
-      expect(screen.getByTestId("cmp").textContent).toBe("spx"),
-    );
-    replaceSpy.mockClear();
-    act(() => {
-      fireEvent.click(screen.getByTestId("pan"));
-    });
-    // URL half: the debounced effect calls history.replaceState with ?range=.
-    await waitFor(() => {
-      expect(window.location.search).toContain("range=10-120");
-    });
-    expect(replaceSpy).toHaveBeenCalled();
-    // localStorage half: the blob now carries the panned range. Wrapped in
-    // waitFor (matching the sibling test above) because the URL and localStorage
-    // writes share ONE debounced effect but land at different times within it:
-    // replaceState runs synchronously, while setStoredView routes through
-    // useCrossTabStorage (debounceMs:0) whose actual localStorage write is
-    // deferred to a follow-up commit-time effect. So the URL waitFor above can
-    // pass a tick before the blob is written, and a synchronous read here raced
-    // it (flake: "expected undefined to be '10-120'", frontend-test shard 1 on
-    // PR #531).
-    await waitFor(() => {
-      const raw = lsStore.get(KEY);
-      expect(raw).toBeTruthy();
-      expect(JSON.parse(raw as string).range).toBe("10-120");
-    });
-    replaceSpy.mockRestore();
-  });
-
   it("persist={false} gates BOTH reads and writes: it never adopts the sibling tab's stored/URL view-state (RT2) nor rewrites the shared URL/localStorage after a pan", async () => {
     const replaceSpy = vi.spyOn(window.history, "replaceState");
     // The sibling Overview factsheet shares the /allocations URL and a stored
@@ -301,6 +267,128 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
     // No write surface was created either.
     expect(lsStore.get(KEY)).toBeUndefined();
     expect(window.location.search).toBe("");
+  });
+});
+
+/**
+ * Phase 193 (QUIETVIEW, D-02, TRUST-02) — the visible range is session-local.
+ *
+ * A pan, zoom or reset never writes the URL or localStorage; on load every visit
+ * opens the FULL history; a range a browser saved before this change (a `?range=`
+ * in the URL or a `range` field in the stored blob) is never applied and is
+ * deleted once on hydration, while the comparator and display toggles (`cmp`,
+ * `cb`, `reg`, `dark`) persist exactly as before (UI-SPEC A-5).
+ */
+describe("FactsheetProvider — the view range is session-local (D-02)", () => {
+  const FULL = "0-199";
+  // The spy is created INSIDE each test, before render (so the file-level URL
+  // reset in beforeEach is never counted), and restored in afterEach: a failing
+  // assertion must not leave it installed, with its accumulated calls, for the
+  // next case.
+  let replaceSpy: MockInstance<typeof window.history.replaceState>;
+  const spyReplaceState = () => {
+    replaceSpy = vi.spyOn(window.history, "replaceState");
+  };
+  afterEach(() => {
+    replaceSpy?.mockRestore();
+  });
+
+  it("Case A (ordering): a legacy ?range= AND a stored range are both deleted, neither applied; cmp/dark survive (D-02)", async () => {
+    lsStore.set(KEY, JSON.stringify({ range: "10-120", cmp: "spx" }));
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?range=10-120&dark=1");
+    act(() => {
+      renderPersist();
+    });
+    // dark=1 and the stored spx are adopted in the same hydration effect run
+    // that handles the legacy range, so once both flip the range branch ran.
+    await waitFor(() => {
+      expect(screen.getByTestId("cmp").textContent).toBe("spx");
+      expect(screen.getByTestId("dark").textContent).toBe("dark");
+    });
+    // Let the write effect's 250ms debounce land so the final URL/blob is read.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(screen.getByTestId("range").textContent).toBe(FULL);
+    expect(window.location.search).not.toContain("range");
+    expect(window.location.search).toContain("dark=1");
+    const blob = JSON.parse(lsStore.get(KEY) as string);
+    expect("range" in blob).toBe(false);
+    expect(blob.cmp).toBe("spx");
+  });
+
+  it("Case B: a pan writes neither a ?range= nor a range field (D-02)", async () => {
+    spyReplaceState();
+    lsStore.set(KEY, JSON.stringify({ cmp: "spx" }));
+    act(() => {
+      renderPersist();
+    });
+    // Hydration latched (and the write effect is armed) once cmp flips.
+    await waitFor(() =>
+      expect(screen.getByTestId("cmp").textContent).toBe("spx"),
+    );
+    // Adopting the stored spx moved `comparator` off the payload default, so a
+    // 250ms write is already pending. Wait for IT to land before clearing the
+    // spies, or the silence assertion below would measure a write the pan did
+    // not cause.
+    await waitFor(() => {
+      expect(window.location.search).toBe("?cmp=spx");
+      expect(localStorageMock.setItem).toHaveBeenCalledWith(KEY, expect.any(String));
+    });
+    replaceSpy.mockClear();
+    localStorageMock.setItem.mockClear();
+    act(() => {
+      fireEvent.click(screen.getByTestId("pan"));
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(replaceSpy).not.toHaveBeenCalled();
+    expect(localStorageMock.setItem).not.toHaveBeenCalled();
+    expect(window.location.search).not.toContain("range");
+    expect(JSON.parse(lsStore.get(KEY) as string)).toEqual({ cmp: "spx" });
+    // The pan itself still works in memory.
+    expect(screen.getByTestId("range").textContent).toBe("10-120");
+  });
+
+  it("Case C: a blob whose only field is a legacy range is removed (key gone), nothing rewritten", async () => {
+    spyReplaceState();
+    lsStore.set(KEY, JSON.stringify({ range: "10-120" }));
+    act(() => {
+      renderPersist();
+    });
+    await waitFor(() =>
+      expect(localStorageMock.removeItem).toHaveBeenCalledWith(KEY),
+    );
+    // Past the write effect's 250ms debounce, so any write hydration scheduled
+    // has landed before the assertions.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(localStorageMock.removeItem).toHaveBeenCalledWith(KEY);
+    expect(lsStore.has(KEY)).toBe(false);
+    expect(localStorageMock.setItem).not.toHaveBeenCalled();
+    expect(replaceSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId("range").textContent).toBe(FULL);
+  });
+
+  it("Case D (empty visitor, HEAD-green pin): nothing stored and no ?range= makes no storage write/removal and no replaceState", async () => {
+    spyReplaceState();
+    act(() => {
+      renderPersist();
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(localStorageMock.setItem).not.toHaveBeenCalled();
+    expect(localStorageMock.removeItem).not.toHaveBeenCalled();
+    expect(replaceSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId("range").textContent).toBe(FULL);
+  });
+
+  it("Case E (persist={false}, HEAD-green pin): neither reads nor purges a stored/URL range", async () => {
+    const seed = JSON.stringify({ range: "10-120", cmp: "spx" });
+    lsStore.set(KEY, seed);
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?range=10-120");
+    act(() => {
+      renderPersist(false);
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(lsStore.get(KEY)).toBe(seed);
+    expect(window.location.search).toContain("range=10-120");
+    expect(screen.getByTestId("range").textContent).toBe(FULL);
   });
 });
 
