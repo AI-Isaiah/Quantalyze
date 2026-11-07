@@ -96,7 +96,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story** - Key storage, encryption, TLS, factsheet access, listing cost and exchange count read the same on the home page, `/security`, `/for-quants` and Terms, each matched to a measurement; no key form for anonymous visitors on the home page; `/demo` looks finished (completed 2026-11-07)
 - [x] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row (completed 2026-11-07)
 - [ ] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified
-- [ ] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed
+- [x] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed (completed 2026-11-07)
 - [ ] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced"
 - [ ] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named
 - [ ] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden
@@ -104,7 +104,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [ ] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
 - [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
-- [ ] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input
+- [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 
 ### Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story
 
@@ -232,7 +232,7 @@ Plans:
 **Goal:** `/portfolios` is removed, Decks is hidden until it works, and the user-visible leftovers are gone: the "Tweaks / Design variations" panel, the dark-mode option, toggles that do nothing useful, the single-card `/browse` and duplicated disclaimers.
 **Requirements**: LEAN-03, LEAN-07
 **Depends on:** Nothing (runs after the trust phases by order, not by need)
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -249,7 +249,13 @@ Plans:
 Removals are checked against `DESIGN.md` (Dark mode: Not planned; data density principle). Compare is not hidden here: SCREEN makes it startable.
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 195-01-PLAN.md — Wave 1: retire the portfolio report as a named public page and hide Decks (D-03, D-04)
+- [x] 195-02-PLAN.md — Wave 2: `/portfolios` redirects to My allocation, and Add to portfolio is removed (D-01, D-02)
+- [x] 195-03-PLAN.md — Wave 1: remove the Tweaks panel and the discovery table density toggle (D-05, D-07)
+- [x] 195-04-PLAN.md — Wave 2: remove the factsheet dark-mode option (D-06)
+- [x] 195-05-PLAN.md — Wave 1: single-category `/browse` goes straight to it; one disclaimer per page (D-08, D-09)
+- [x] 195-06-PLAN.md — Wave 3: delete the components that only served `/portfolios` (D-01)
+- [x] 195-07-PLAN.md — Wave 4: D-10 guard test with neuter, RED and restore proofs; full phase gates (D-10)
 
 ### Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document
 
@@ -437,12 +443,12 @@ Founder decisions 2026-11-07 (202-CONTEXT.md D-14 closed, D-15 to D-17): D-14 cl
 ### Phase 203: B3TRUNC — why book b3 carries window_truncated
 
 **Goal:** Find why book b3 carries `window_truncated`, using Phase 202's evidence as input (202-REPORT.md, the 202-03 and 202-07 SUMMARYs, 202-CONTEXT D-14 to D-17). Phase 202 kept b3's `window_truncated` as `unexplained` and did not re-open it (founder D-17, 2026-11-07, "book the investigation as a phase").
-**Requirements**: TBD
+**Requirements**: RESID-02 (the window_truncated half)
 **Depends on:** Phase 202
-**Plans:** 0 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 203 to break down)
+- [x] 203-01-PLAN.md — Wave 1: b3's `window_truncated` explained as intended (D-01 second branch); a characterization test that can fail and 203-REPORT.md (RESID-02)
 
 ### Progress (v1.21)
 
@@ -451,7 +457,7 @@ Plans:
 | 192. PUBLICTRUTH | 15/15 | Complete | 2026-11-07 |
 | 193. QUIETVIEW | 7/7 | Complete | 2026-11-07 |
 | 194. FIGURETRUTH | 0/0 | Not started | - |
-| 195. TRIM | 0/0 | Not started | - |
+| 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
 | 197. SCREEN | 0/0 | Not started | - |
 | 198. MYBOOK | 0/0 | Not started | - |
@@ -459,7 +465,7 @@ Plans:
 | 200. MANAGERKEYS | 0/0 | Not started | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
-| 203. B3TRUNC | 0/0 | Not started | - |
+| 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
 
 ### Requirement Coverage (v1.21)
 

@@ -45,16 +45,16 @@
 
 - [ ] **LEAN-01**: A manager has one strategies list (`/strategies` and `/my-strategies` merged).
 - [ ] **LEAN-02**: A strategy has one page, the factsheet. The tearsheet is its print view and `/strategy/<id>` leads to it.
-- [ ] **LEAN-03**: `/portfolios` is removed and Decks is hidden until it works.
+- [x] **LEAN-03**: `/portfolios` is removed and Decks is hidden until it works.
 - [ ] **LEAN-04**: Adding a strategy, managing keys and renaming each have one entry point, and the security explanation lives in one place.
 - [ ] **LEAN-05**: The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice, the keyboard hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
 - [ ] **LEAN-06**: My allocation has at most three tabs, lists positions once, and hides dust rows by default.
-- [ ] **LEAN-07**: User-visible leftovers are gone: the "Tweaks / Design variations" panel, the dark-mode option, toggles that do nothing useful, the single-card `/browse`, and duplicated disclaimers.
+- [x] **LEAN-07**: User-visible leftovers are gone: the "Tweaks / Design variations" panel, the dark-mode option, toggles that do nothing useful, the single-card `/browse`, and duplicated disclaimers.
 
 ### Residual — carried from v1.20
 
 - [x] **RESID-01**: A control capture across a nightly with no deploy in between shows whether stored values move without a code change, and each moved value from the 188 re-reading (1214) is attributed to a cause or named as unexplained (Phase 188 D-13).
-- [ ] **RESID-02**: Book b3's earlier reasons (`out_of_window_flow`, `window_truncated`) are explained, and fixed where they are a defect.
+- [x] **RESID-02**: Book b3's earlier reasons (`out_of_window_flow`, `window_truncated`) are explained, and fixed where they are a defect.
 
 ## Future Requirements
 
@@ -101,13 +101,13 @@ Deferred, tracked, not in this roadmap.
 | CLAR-06 | Phase 201 | Pending |
 | LEAN-01 | Phase 199 | Pending |
 | LEAN-02 | Phase 196 | Pending |
-| LEAN-03 | Phase 195 | Pending |
+| LEAN-03 | Phase 195 | Complete |
 | LEAN-04 | Phase 200 | Pending |
 | LEAN-05 | Phase 196 | Pending |
 | LEAN-06 | Phase 198 | Pending |
-| LEAN-07 | Phase 195 | Pending |
+| LEAN-07 | Phase 195 | Complete |
 | RESID-01 | Phase 202 | Complete |
-| RESID-02 | Phase 202, Phase 203 | Pending |
+| RESID-02 | Phase 202, Phase 203 | Complete |
 
 **Coverage:**
 - Milestone requirements: 32 total
