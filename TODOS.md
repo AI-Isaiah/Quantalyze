@@ -1484,6 +1484,35 @@ true for 146 and half of 142–145, and **false for 141**.
 - **[166.3.1-STITCH-ATTEMPT1-STALL]** (logged 2026-10-15, NAVBREACH plan 05, MEDIUM; owner: the next phase touching the job worker or `stitch_composite`). Run 2's `stitch_composite` was claimed, then showed no update for about 25 minutes and was reclaimed by the worker's own recovery; attempt 2 ran to `done`, 49 minutes after the enqueue in total against about 18 minutes for run 1. Cause not investigated. Done when the worker logs for that window say why the first attempt stalled (a deploy restart, a lost heartbeat, a hung venue call) and the cause is fixed or recorded as benign.
 - **[CI-LIVE-DB-LANE-GATEWAY-502]** (logged 2026-10-15, main CI run 38711968694 on the #1042 merge; owner: the next phase touching `scripts/local-stack/run.sh` or the live-DB lane). `frontend-live-db-lane` failed once: the claim RPC call in `compute-jobs-audit-2026-05-07-g10b.test.ts` (arm "P12-harm: a parented child is not claimable before its parent is done") received "An invalid response was received from the upstream server" from the runner-private local stack's gateway, so the execution ledger flagged one NEW failing arm. The same arm passed on the PR's own run and on main's next push; the lane passed 22 of the last 23 executed runs. Not a fan-in logic failure. Done when a second occurrence is either absent over the next 50 lane runs (close), or, if it recurs, the gateway or PostgREST log for that window names the cause and it is fixed at the source (never a retry around the arm).
 
+### 202-KIT-RESIDUALS-01 — four review survivors in Phase 202's untracked capture kit, to fix before the kit is reused (booked 2026-11-07, Phase 202 review round 3)
+
+**Why it is open.** Phase 202's capture and attribution kit lives untracked under `~/.cache/quantalyze/residchurn/bin/`. After three review rounds, four findings survive. None changes a Phase 202 number, because every c1 job is `done` and every judge TABLE entry has kind None. Each one would mislead a future capture:
+
+- (1) `check_capture.py` `nightly_coverage` names a skipped subject as re-derived when its later job is `failed_final`. The check is time only and never tests `status in COVERING`.
+- (2) `codepath_judge.py` prints a fixed `reason=` token, so it would be false for a TABLE entry whose kind the scope lacks.
+- (3) The gate proves a job finished, not that it wrote rows.
+- (4) Scopes with no job row in pre are invisible to coverage, and the `of N` denominator counts job subjects, not scopes.
+
+Details are in `202-REVIEW.md` Round 3 and `202-REVIEW-DISPOSITION.md`.
+
+**Owner:** Phase 203 B3TRUNC if it reuses the kit; otherwise unrouted.
+
+**Trigger.** Any reuse of the residchurn kit for a new PROD capture.
+
+**What closing it means.** (1) and (2) are fixed with a RED self-test case each. (3) and (4) are printed by the gate: written versus finished, and the unjobbed scopes by name.
+
+### 202-MT5-CLOCK-LEAD-01 — confirm or rule out the MT5 server-clock switch as the cause of the (d) values Phase 202 left unexplained (booked 2026-11-07, Phase 202)
+
+**Why it is open.** Phase 202 (RESIDCHURN) left s6, s9 and s10 (72 of 188's 1214 moved values, b0 to b1) and s2, s5, s8 and s13 (87 values, c0 to c1) in bucket (d), unexplained. Founder decision D-16 ("Don't widen; book it") kept them in (d) under the rule as fixed. Plan 05 and plan 07 measured a lead that is not a code commit: the worker's MT5 server-clock setting (`resolve_mt5_server_clock()`, `mt5_server_clock.py`), recorded as a fixed offset from 2026-11-01 and switched to the US rule on 2026-11-03. In both pairs, the set of MT5 strategies re-derived across the switch equals the set that moved, and the changed days fall in US-rule summer. The winter control is not clean: 29 winter rows vanished from s9 (b0 to b1) and from s2 (c0 to c1), the same 29 days. The lead comes from the repo's record of the setting, not a read of the Railway variables, and no derive was replayed.
+
+**It is not the only candidate, and the c0 to c1 pair is not code-identical.** The four c0 to c1 scopes were not written by one commit on both sides: their c0 rows came from worker commit 099a9f166947 (the derives of 2026-11-03) and their c1 rows from ba3c9012858e, with 8 analytics-service commits between (#1190, #1193, #1194, #1196, #1197, #1200, #1202, #1205), among them #1196 TINYBASE and #1205 (stale-row delete). Plan 05's judge, run on that pair, found none of them entered as producing the changed-day kinds, but it weighs changed days only: #1196 and #1205 were not weighed against the 29 vanished rows. The ten OKX and Bybit scopes (1106 values) are the code-identical evidence (same code both sides); the four MT5 strategies are a straddle, as s6, s9 and s10 were. Closing this entry therefore also means weighing the TINYBASE deletions against the vanished rows. ⚠️ **Prediction 4 is not evidence for the lead.** The quiet control for s6, s9 and s10 (that they stay unmoved across a nightly) is untested: none of the three was re-derived between c0 and c1 (their latest derives, 2026-11-06 00:25Z, 00:25Z and 01:25Z, predate c0), so "did not move" means no job wrote them. Whoever closes this entry must not cite it. Evidence: `202-05-SUMMARY.md`, `202-07-SUMMARY.md`, `202-REPORT.md`, and scratch `~/.cache/quantalyze/residchurn/codepath/clock-candidate.json` and `codepath/c0c1-writers.out`.
+
+**Owner: unrouted.** Founder to assign.
+
+**Trigger.** The next phase that touches MT5 strategy-mode day bucketing or the server-clock setting, or the next MT5 re-derive across a DST boundary.
+
+**What closing it means.** One test confirms or rules out the lead and records the result. Either replay a moved scope's derive under both clock settings and show the moved days match, or read the worker's recorded setting history and show it does not fit. If confirmed, name the bucket the founder assigns. If ruled out, the values stay (d) with the lead struck.
+
 ### ALLOCSYNC-CAPTION-01 — the AllocatorSyncStatus pill and helper line are text-xs inside the /strategies note row, whose other lines are text-caption (booked 2026-10-09, Phase 170.7)
 
 **Why it is open.** The Phase 170.7 UI-SPEC accepted this typography residue. `AllocatorSyncStatus` is a

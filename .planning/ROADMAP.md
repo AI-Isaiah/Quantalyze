@@ -103,7 +103,8 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [ ] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step
 - [ ] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
 - [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
-- [ ] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect
+- [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
+- [ ] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input
 
 ### Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story
 
@@ -394,9 +395,11 @@ Plans:
 **Goal:** A control capture across a nightly with no deploy in between shows whether stored values move without a code change, each value that moved in 188's re-reading (1214) is attributed to a cause or named as unexplained, and book b3's earlier reasons (`out_of_window_flow`, `window_truncated`) are explained and fixed where they are a defect.
 **Requirements**: RESID-01, RESID-02
 **Depends on:** Nothing. Parallel track: it starts now, beside 192, and is not held for the UX phases.
-**Plans:** 0 plans
+**Plans:** 8/8 plans complete
 
 **Calendar constraint.** The control capture is two PROD captures with the same SQL around one 00:40Z nightly, with **no deploy between them** (188-CONTEXT D-13). The UX phases deploy often, so this phase books its window before the first capture. Inside the window only merges touching `analytics-service/` or `supabase/migrations/**` are held (founder 2026-11-06); frontend and planning-only merges continue, because they change no stored value. A deploy inside the window voids the pair, and the next deploy-free nightly is used instead. The earliest chance is the 2026-11-07 00:40Z nightly, if no deploy lands between its captures. Whether an earlier pair qualifies (capture `b1` was taken 2026-11-06 07:04:02Z, after that day's nightly) is measured from the deploy history, not assumed.
+
+**Amendment 2026-11-06 (founder, recorded also as the D-04 amendment in `202-CONTEXT.md`).** "No deploy between" is proven by content, not by an empty deployment list: every Railway deployment in the `c0`→`c1` window, on both the API and the worker services, must have an empty `git diff --stat <c0-live commit>..<its commit> -- analytics-service supabase/migrations`, and the PROD migration ledger gains no row. Other merges may land meanwhile, as long as they do not touch those paths. Success criterion 1's "deploy history between them is shown to be empty" is read under this rule. The text above is kept as lineage.
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
 - Confirmed: D-13 and the residual are recorded in `.planning/milestones/v1.20-phases/188-*/188-CONTEXT.md` and `188-16-SUMMARY.md`, and in the v1.20 audit's tech debt. The reason codes are defined in `analytics-service/services/allocator_equity_derive.py` (`WINDOW_TRUNCATED` at `:109`, `OUT_OF_WINDOW_FLOW` at `:121`).
@@ -409,7 +412,37 @@ Plans:
 4. Never invent data.
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 202-01-PLAN.md — Tracer: b1 rows reproduce c0's 54 PROD digests (b1 stands for c0, D-10 cleared); the self-checking c1 SQL kit and capture gate (RESID-01, RESID-02) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 202-02-PLAN.md — The 1214 reproduced under 188's rule with size bands, clusters, the additive-offset oracle and D-08 buckets on b0/b1; the control rule of the final attribution fixed and hashed before c1 (RESID-01) [Wave 2]
+- [x] 202-03-PLAN.md — Book b3's two reasons replayed from stored inputs with the repo's own functions; b1 verdict (RESID-02) [Wave 2]
+- [x] 202-04-PLAN.md — Before the nightly: Railway deploy anchor on both services, ledger triple, per-subject jobs, book prefix basis (RESID-01) [Wave 2]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 202-05-PLAN.md — s6/s9/s10: which worker commit wrote each side, code path named only under the evidence rule (RESID-01) [Wave 3]
+- [x] 202-06-PLAN.md — c1 after the nightly; content-based no-deploy proof (D-04 amended) and pair verdict; moved scopes and predictions 1/4/5 (RESID-01, RESID-02) [Wave 3]
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 202-07-PLAN.md — Moved-scope rows, criterion 1, the final attribution of the 1214, b3 on c1 (D-12 or D-13), the phase report (RESID-01, RESID-02) [Wave 4]
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 202-08-PLAN.md — D-12 contingency: fires only on a measured c1 defect; founder chooses the fix, RED-first (RESID-02) [Wave 5]
+
+Founder decision D-14 (2026-11-07, 202-CONTEXT.md): book b6's curve leaving out k20's days is its own finding. Plan 07 investigates why the compose omits k20, read-only, and reports it beside the b3 verdict. b3's `window_truncated` stays `unexplained`.
+
+Founder decisions 2026-11-07 (202-CONTEXT.md D-14 closed, D-15 to D-17): D-14 closed as "Intended, no flag", because the omitted departed keys are unknown-account keys that `departed_history_inclusion` excludes by default. **Founder deviation D-15, "Use the plan's wording":** the attribution of record for the 1214 is a 0 / b 1142 / c 0 / d 72, with a one-day offset stretch not scored as a fail. This overrides the pinned `final_attribution.py` reading (a 0 / b 36 / c 0 / d 1178), which stays printed as lineage, and the script is not edited. D-16, "Don't widen; book it": the MT5 server-clock setting is the measured lead for the (d) scopes and a TODOS follow-up is booked. D-17, "book the investigation as a phase": b3 is not re-opened in 202, plan 08 changes no code, and b3's `window_truncated` investigation is a new follow-up phase.
+
+### Phase 203: B3TRUNC — why book b3 carries window_truncated
+
+**Goal:** Find why book b3 carries `window_truncated`, using Phase 202's evidence as input (202-REPORT.md, the 202-03 and 202-07 SUMMARYs, 202-CONTEXT D-14 to D-17). Phase 202 kept b3's `window_truncated` as `unexplained` and did not re-open it (founder D-17, 2026-11-07, "book the investigation as a phase").
+**Requirements**: TBD
+**Depends on:** Phase 202
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 203 to break down)
 
 ### Progress (v1.21)
 
@@ -425,7 +458,8 @@ Plans:
 | 199. MANAGERHOME | 0/0 | Not started | - |
 | 200. MANAGERKEYS | 0/0 | Not started | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |
-| 202. RESIDCHURN | 0/0 | Not started | - |
+| 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
+| 203. B3TRUNC | 0/0 | Not started | - |
 
 ### Requirement Coverage (v1.21)
 

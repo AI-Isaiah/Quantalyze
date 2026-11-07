@@ -53,7 +53,7 @@
 
 ### Residual — carried from v1.20
 
-- [ ] **RESID-01**: A control capture across a nightly with no deploy in between shows whether stored values move without a code change, and each moved value from the 188 re-reading (1214) is attributed to a cause or named as unexplained (Phase 188 D-13).
+- [x] **RESID-01**: A control capture across a nightly with no deploy in between shows whether stored values move without a code change, and each moved value from the 188 re-reading (1214) is attributed to a cause or named as unexplained (Phase 188 D-13).
 - [ ] **RESID-02**: Book b3's earlier reasons (`out_of_window_flow`, `window_truncated`) are explained, and fixed where they are a defect.
 
 ## Future Requirements
@@ -106,8 +106,8 @@ Deferred, tracked, not in this roadmap.
 | LEAN-05 | Phase 196 | Pending |
 | LEAN-06 | Phase 198 | Pending |
 | LEAN-07 | Phase 195 | Pending |
-| RESID-01 | Phase 202 | Pending |
-| RESID-02 | Phase 202 | Pending |
+| RESID-01 | Phase 202 | Complete |
+| RESID-02 | Phase 202, Phase 203 | Pending |
 
 **Coverage:**
 - Milestone requirements: 32 total

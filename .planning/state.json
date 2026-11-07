@@ -56,13 +56,18 @@
     {
       "number": "202",
       "name": "RESIDCHURN",
+      "status": "complete"
+    },
+    {
+      "number": "203",
+      "name": "B3TRUNC",
       "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phases 192 and 193 complete; 194 next to discuss; 195 executing, 202 shipping"
+    "reason": "Phases 192, 193 and 202 complete; 203 and 194 next to discuss; 195 executing"
   },
   "updated_at": "2026-11-07T10:45:45.818Z"
 }
