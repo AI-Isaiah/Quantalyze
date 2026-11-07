@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.133.24.0] - 2026-11-07 — PUBLICTRUTH 192: the public site tells one true story, and the public demo is retired
+
+### Changed
+- **Key storage reads the same everywhere and matches the code.** Home, `/for-quants` and Terms §2 now show one shared sentence, `KEY_STORAGE_SENTENCE` in `src/lib/status-surface-copy.ts`, with a link to `/security#key-handling`. `/security` carries the one full account:
+  - Fernet (AES-128-CBC with HMAC-SHA256);
+  - a fresh data key per credential;
+  - a KEK held only by the analytics service;
+  - a per-row KEK version;
+  - no SELECT grant on the encrypted columns.
+
+  The old AES-256-GCM and Supabase Vault claims are gone from the pages and from the security packet (`scripts/build-security-packet.html`, `public/security-packet.pdf` rebuilt).
+- **TLS sentence.** `/security` and the packet now say TLS 1.3 and 1.2 are accepted and 1.0 and 1.1 refused. This matches the handshakes recorded on 2026-11-06. Behaviour is unchanged.
+- **Retention and the exchange list.** The copy now matches the code. Fills and aggregates have no scheduled deletion and stay while the strategy exists. The packet lists the four venues from `EXCHANGES`.
+- **Deleting a key** is described as the code does it, on `/for-quants`, `/security` and the packet. The credential row goes, the strategy's key link becomes NULL, and the strategy, its fills and its listing stay until it is archived. The app's own exception is named: a key used by a published composite cannot be deleted.
+- **Factsheet visibility.** `/for-quants` now says a published factsheet is listed on Browse and opens for anyone without signing in, under its codename. Terms §7 and `/for-quants` share one listing-cost sentence, `LISTING_COST_SENTENCE`.
+- **The home page no longer asks an anonymous visitor for an API key and secret.** The verify band is a "Create an account" link to `/signup`.
+- **Lighthouse budget.** `lighthouserc.json` drops `/demo`. `minScore` rises from 0.65 to 0.82: the lowest per-route median across 22 runs on main is 0.84 (`/browse`), minus 0.02. `_ratchet` records the run ids and states that lhci asserts best-of-3.
+
+### Removed
+- **The public demo, by founder decision on 2026-11-07 (Phase 192 D-11: "retire the whole demo part").** The following are gone:
+  - `/demo` with its layout, tests, `PUBLIC_ROUTES` entry, bounce exemption, route-manifest row and `/demo/:path*` CDN header block;
+  - `/demo/founder-view`;
+  - the public service-role route `/api/demo/match`;
+  - `/api/demo/portfolio-pdf` with `src/lib/demo-pdf-token.ts`;
+  - `src/lib/demo.ts` and `src/lib/personas.ts`.
+
+  A signed-out request for a retired path now gets the same 307 to `/login` as an unknown URL. PROD demo rows are untouched: nothing was written or deleted.
+- **Demo-only components and readers:** EditorialHero, WinnersLosersStrip, `src/lib/winners-losers.ts`, WhatWedDoCard, CounterfactualStrip, NextFiveMillionCard and `src/lib/demo-recommendations.ts`, each with its census rows.
+- **The admin match queue's public-demo mode** (`forceReadOnly` and `sourceApiPath`), and its now-dead null-profile branch.
+- **`src/lib/warmup-analytics.ts`, the per-request warmer fired by the demo render.** The daily `warm-analytics` cron stays.
+- **Demo e2e and visual checks:**
+  - `e2e/demo-public.spec.ts`;
+  - `e2e/demo-screenshot.spec.ts` and its three PNG baselines;
+  - `e2e/bridge-flow.spec.ts`;
+  - `e2e/portfolio-pdf-demo.spec.ts`;
+  - the screenshot bake input, env and upload step in `ci.yml`;
+  - the seeded `/demo` rows in the no-clip, axe and reflow sweeps;
+  - the `/demo` rows in the marketing-shell canary.
+- **`nightly.yml` loses its `preflight` and `demo-pdf-coldstart` jobs.** Only `npm-audit` remains.
+
+### Tests
+- `src/__tests__/public-truth-census.test.tsx` adds a source census and a rendered census:
+  - **Source census** over the public marketing tree and the packet HTML. Comments are stripped and matching runs on whole-file, whitespace-collapsed text, so a phrase wrapped across lines is still caught. It bans the old false claims, raw-id labels (literal, template and JSX forms, plus the shared `displayStrategyName` helper) and links to a retired route.
+  - **Rendered census** of home, `/security`, `/for-quants` and Terms.
+
+  Its self-test runs the real matcher on planted files.
+- Literal pins for the shared sentences, the deletion copy and the visibility row in `public-truth-copy.test.tsx`, `security/page.test.tsx` and `security-packet-date-drift.test.ts`. That last test also pins page/packet parity.
+- `ci-apt-bounded`: `EXPECTED_APT_REACHING_STEPS` 18 → 17. The R3 timeout-form case moves to a synthetic workflow.
+- `contracts-registry` is frozen at three paths and `seam-budgets` at two exclusions, after the warmer is deleted.
+- `seed-integrity` uses the seeder's own ids.
+- `proxy.test.ts` pins that signed-out `/demo` and `/api/demo` redirect.
+- A new critical-regressions pin requires the Lighthouse report upload to include hidden files and to fail on an empty upload.
+- Every new or moved gate was shown RED with its fix neutered, then restored from a byte backup.
+
+### Fixed
+- **The `lighthouse-mobile-report` artifact was always empty.** `actions/upload-artifact` skips the hidden `.lighthouseci/` directory and the step ignored a missing upload. It now sets `include-hidden-files: true` and `if-no-files-found: error`.
+- ADR-0008 and ADR-0014 no longer cite deleted modules.
+
+### Notes
+- Several commits on this branch built work the retirement later deleted:
+  - the EditorialHero null-cell removal;
+  - the `/demo` loud-failure, truth and label fixes, including restricting unheld labels to `displayStrategyName`;
+  - the unseeded "fails loud" spec;
+  - moving the `/demo` sweep rows to the seeded lane.
+
+  They are in the history. Their files are removed in this release.
+- Booked in TODOS.md:
+  - `[192-WIZARD-KEY-STORAGE-COPY]`, owned by Phase 200: the signed-in key wizard still shows the old cipher sentence;
+  - `[192-ORPHANED-LANDING-VERIFY]`: the orphaned `/api/verify-strategy` and landing components;
+  - `[192-SFOX-FLAG-SPLIT]`;
+  - `[192-DEMO-RETIRE-RESIDUE]`: comments, seeder persona steps and the analytics-service demo-allocator exclusion, which matters while the PROD rows stay;
+  - `[193-DEMO-PAYLOAD-PRODUCERS]`, owned by Phase 193.
+
+  `[170.1.2-DEMO-MATCH-PAYLOAD-EMAIL]` is closed.
+- The 0.82 Lighthouse floor is derived from main and has not yet been measured on this branch's own code. This PR's `lighthouse-mobile` run is the first reading.
+- Two `src/lib/factsheet/compute.conventions.test.ts` inline snapshots (fixtures B and C) fail on `main` at `ba3c90128` before this branch and are inside Phase 193's area. They are not touched here.
+
 ## [0.133.23.4] - 2026-11-06 — records: start milestone v1.21 UX
 
 ### Added
