@@ -21,7 +21,7 @@
     {
       "number": "195",
       "name": "TRIM",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "196",
@@ -61,13 +61,13 @@
     {
       "number": "203",
       "name": "B3TRUNC",
-      "status": "pending"
+      "status": "complete"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phases 192, 193 and 202 complete; 203 and 194 next to discuss; 195 executing"
+    "reason": "Phases 192, 193, 195, 202 and 203 complete; 194 planned, 194.1 booked behind it"
   },
-  "updated_at": "2026-11-07T10:45:45.818Z"
+  "updated_at": "2026-11-07T14:57:12.742Z"
 }

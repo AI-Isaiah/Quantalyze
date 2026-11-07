@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.26.2] - 2026-11-07 — records: close 203 B3TRUNC and 195 TRIM
+
+Records only. One records commit plus this release commit; no source change.
+
+### Changed
+- Phase 203 B3TRUNC closed (code shipped in v0.133.25.3, PR #1214): phase directory added, ROADMAP plan list and Complete status, the coverage table gains a 203 row, and RESID-02 is marked Complete now that 202 (the out-of-window half) and 203 (the `window_truncated` half, intended behaviour) both passed verification.
+- Phase 195 TRIM closed (code shipped in v0.133.26.0, PR #1215): phase directory, seven plans ticked, LEAN-03 and LEAN-07 Complete. UAT recorded as passed from preview and production checks; the stale-Tweaks-storage item rests on unit tests only and says so.
+- STATE's Current Position corrected by hand after `phase complete` moved it to 194: 192, 193, 202, 203 and 195 are complete, 194 is planned with 194.1 booked behind it, 196-201 are not started.
+
+### Notes
+- TODOS gains six 195 follow-ups: the `/browse` empty-versus-error message, `/portfolios` dead code, stale comments naming deleted files, alert digest emails linking to `/allocations`, removing `DEMO_PDF_SECRET` (founder), and the every-tier exchange-monitoring wording (routed to Phase 196).
+
 ## [0.133.26.1] - 2026-11-07 — security: dompurify past three CRITICAL advisories; the npm-audit gate is green again
 
 Security hotfix. Main's scheduled "Nightly probes" run `42382490370` went red on its `npm-audit` job (`npm audit --omit=dev --audit-level=high`) once three new DOMPurify advisories were published as CRITICAL. A red check on main's head can block a deploy of that SHA, so this ships on its own. Three commits on `fix/audit-dompurify`: the lockfile fix, this release commit, and a lockfile regeneration under CI's npm 10.9.9 so `npm ci` matches. Only `package-lock.json`, `VERSION`, `package.json` (version field only) and this file change. No source, migration, `supabase/**` or `.planning/**` edit.

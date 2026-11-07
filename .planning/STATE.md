@@ -5,17 +5,17 @@ milestone_name: UX — trustworthy, navigable, lean
 current_phase: 194
 current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 status: planning
-stopped_at: Phases 192, 193 and 202 complete; 195 executing, 203 and 194 next to discuss
-last_updated: "2026-11-07T10:45:45.791Z"
+stopped_at: Phases 192, 193, 202, 203 and 195 complete; 194 planned, 194.1 booked behind it
+last_updated: "2026-11-07T14:57:12.710Z"
 last_activity: 2026-11-07
-last_activity_desc: Phase 202 complete (verified); 203 and 194 next to discuss
-state_head: 7f667bb2929414755db5ed3f5517c9fc39068188
+last_activity_desc: Phases 203 B3TRUNC and 195 TRIM complete (verified)
+state_head: 3ba04e9a012df72c71add7c95e89dc6ba5300c32
 progress:
   total_phases: 12
-  completed_phases: 3
-  total_plans: 30
-  completed_plans: 30
-  percent: 25
+  completed_phases: 5
+  total_plans: 38
+  completed_plans: 38
+  percent: 42
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 192 (PUBLICTRUTH), 193 (QUIETVIEW) and 202 (RESIDCHURN) are complete; 195 (TRIM) is executing in parallel; 203 (B3TRUNC) and 194 (FIGURETRUTH) are next to discuss
-Plan: 202 RESIDCHURN verified passed (4/4) and security secured (0 open); RESID-02's window_truncated half is Phase 203 B3TRUNC
-Status: Phases 192, 193 and 202 complete. 195 TRIM executing. 203 B3TRUNC and 194 FIGURETRUTH are next to discuss. 196-201 wait on their dependencies.
-Last activity: 2026-11-07 — Phase 202 complete
-Progress: [███░░░░░░░] 25% (3 of 12 phases)
+Phase: 192 (PUBLICTRUTH), 193 (QUIETVIEW), 202 (RESIDCHURN), 203 (B3TRUNC) and 195 (TRIM) are complete; 194 (FIGURETRUTH) is planned, with 194.1 booked and blocked behind it
+Plan: 203 B3TRUNC verified passed (5/5; RESID-02 complete) and 195 TRIM verified passed (12/12, UAT complete; UC-6 rests on unit tests only); 194 FIGURETRUTH planned, not yet executing
+Status: Phases 192, 193, 202, 203 and 195 complete. 194 planned; 194.1 booked and blocked behind 194. 196-201 not started.
+Last activity: 2026-11-07 — Phases 203 and 195 complete
+Progress: [████░░░░░░] 42% (5 of 12 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1754,7 +1754,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-06T20:36:19.383Z
-**Stopped At:** Phase 202 complete (verified); 203 B3TRUNC and 194 next to discuss
+**Stopped At:** Phases 203 B3TRUNC and 195 TRIM complete; 194 planned, 194.1 booked behind it
 **Resume File:** .planning/phases/192-publictruth-the-public-site-and-the-demo-tell-a-visitor-one/192-VERIFICATION.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
