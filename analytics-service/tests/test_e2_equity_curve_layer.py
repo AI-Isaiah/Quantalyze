@@ -356,6 +356,85 @@ def test_is_trustworthy_benign_vs_blocking_degradation():
     assert DegradeReason.OUT_OF_WINDOW_FLOW in ke.degrade_reasons
 
 
+# ── B3TRUNC (Phase 203): staggered starts + a common end == window_truncated ONLY ─
+
+def test_staggered_starts_common_end_carry_window_truncated_only():
+    """WHY (Phase 203): a book whose keys open on DIFFERENT days but all end on the
+    last day is ``window_truncated`` BY CONSTRUCTION, because one key's first day
+    differs from the union's first day. It carries NO stale-mark carry and NO
+    rotation, and it stays trustworthy: the token is benign and is not in the
+    blocking set.
+
+    This is the shape of book b3's token (Phase 203, RESID-02). b3's seven member
+    keys open on seven different days, so b3 carries the token whatever its tails do.
+    The token is therefore never the reason a book is untrusted; b3's trust is
+    decided by its blocking reason (``out_of_window_flow``), not by this one. The
+    test fails if the token stops being raised for unequal starts, or if it ever
+    becomes blocking.
+    """
+    from services.allocator_equity_derive import DegradeReason, segment_coverage
+
+    # key-A opens day 0, key-B day 1, key-C day 2; all three end on the last day.
+    a = replay_key_equity(_flat_returns(), [], _ZERO_FLOW_ANCHOR)
+    b_returns = pd.Series([0.10, 0.10, 0.10], index=_DAYS[1:], name="key-B")
+    b = replay_key_equity(b_returns, [], 133100.0)
+    c_returns = pd.Series([0.10, 0.10], index=_DAYS[2:], name="key-C")
+    c = replay_key_equity(c_returns, [], 121000.0)
+    keys = {"key-A": a, "key-B": b, "key-C": c}
+
+    out = allocator_equity_curve(keys)
+    assert out.equity is not None
+    assert out.flags["window_truncated"] is True
+    assert out.flags["n_tail_days_carried"] == 0  # every key reaches the last day
+    assert out.flags["rotated_out_keys"] == []
+    assert out.flags["n_keys"] == 3
+    assert out.degrade_reasons == frozenset({DegradeReason.WINDOW_TRUNCATED})
+    assert out.is_trustworthy is True
+
+    # The curve spans the union, with hand-derivable daily sums of each key's
+    # backward roll: A = 100000/110000/121000/133100, B = 110000/121000/133100 from
+    # day 1, C = 110000/121000 from day 2 (each key's last level is its own anchor).
+    assert list(out.equity.index) == _DAYS
+    expected = [100000.0, 220000.0, 352000.0, 387200.0]
+    for day, exp in zip(_DAYS, expected):
+        assert out.equity[day] == pytest.approx(exp, abs=1e-6), day
+    assert out.equity.iloc[-1] == pytest.approx(133100.0 + 133100.0 + 121000.0, abs=1e-6)
+
+    # Passing the seams explicitly, as compose_allocator_equity does, changes nothing.
+    seams = segment_coverage(
+        {"key-A": a.equity, "key-B": b.equity, "key-C": c.equity}
+    ).seams
+    seamed = allocator_equity_curve(keys, seams=seams)
+    assert seamed.degrade_reasons == frozenset({DegradeReason.WINDOW_TRUNCATED})
+    assert seamed.is_trustworthy is True
+
+    # Control: identical windows do not raise the token.
+    same = allocator_equity_curve({
+        "key-A": a,
+        "key-A2": replay_key_equity(_flat_returns(), [], _ZERO_FLOW_ANCHOR),
+    })
+    assert same.flags["window_truncated"] is False
+    assert same.degrade_reasons == frozenset()
+    assert same.is_trustworthy is True
+
+    # The other half of the predicate: a COMMON start where one key ENDS EARLY. A and
+    # B share every day B covers, so the coverage segments {A, B} -> {A} share a key
+    # and emit no seam: B is not rotated out, it is a carried stale mark. The token
+    # must still be raised (key_last differs), together with STALE_MARK_CARRY.
+    early_returns = pd.Series([0.10, 0.10, 0.10], index=_DAYS[:3], name="key-B")
+    early = allocator_equity_curve({
+        "key-A": a,
+        "key-B": replay_key_equity(early_returns, [], 121000.0),
+    })
+    assert early.flags["window_truncated"] is True
+    assert early.flags["n_tail_days_carried"] == 1  # B carried across the last day
+    assert early.flags["rotated_out_keys"] == []
+    assert early.degrade_reasons == frozenset(
+        {DegradeReason.WINDOW_TRUNCATED, DegradeReason.STALE_MARK_CARRY}
+    )
+    assert early.is_trustworthy is True
+
+
 # ── C-idx: a non-ISO-day (Datetime) index fails loud at the module boundary ────
 
 def test_datetime_index_fails_loud_at_module_boundary():

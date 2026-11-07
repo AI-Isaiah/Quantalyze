@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.25.3] - 2026-11-07 — B3TRUNC 203: book b3's window_truncated is explained (intended)
+
+Phase 203 B3TRUNC: why book b3 carries `window_truncated`. Two commits on the phase branch, one non-planning change (a test); the planning records ship in a separate records PR. Verdict: intended behaviour, benign and non-blocking. b3's seven member keys open on seven different days, so the token is true by construction.
+
+### Added
+- `analytics-service/tests/test_e2_equity_curve_layer.py` pins both halves of the rule behind `window_truncated`: staggered key starts with a common end (three keys opening on days 0, 1 and 2, all ending on the last day), and a key that ends early. The staggered case asserts the token is raised, no tail days are carried, no key is rotated out, `degrade_reasons` is exactly the one benign token, the book stays trustworthy, and the hand-derivable union levels; an identical-windows control raises nothing.
+- The test can fail: under two neuters of a byte copy of `allocator_equity_derive.py` (the comparison replaced by `False`, and the token moved into the blocking set) it went RED, and the file was restored byte-identical each time.
+
+### Notes
+- Finding: `window_truncated` is one boolean over unequal member windows. It sits under the BENIGN header of `DegradeReason` and is absent from `_BLOCKING_REASONS`, so it cannot make a book untrusted; b2, b5 and b7 carry it while trustworthy. b3 is untrustworthy because of `out_of_window_flow` (202, correct behaviour), not because of this token.
+- No production code change: `git diff -- analytics-service/services` is empty. No PROD write and no re-derive; a derive would reproduce the token for as long as b3's member windows differ.
+- Limit A1: key C's last 11 days were not read. Its equity index reaches the book's last day while its last stored return day is earlier; that is inferred from the stored reason set, not read, and whether those days are real marks or carried is not shown. The verdict does not rest on it.
+- RESID-02 closes with Phase 203: its `window_truncated` half is explained, and 202's `unexplained` reading is closed by the predictor over the keys a book counts.
+
 ## [0.133.25.2] - 2026-11-07 — records: close RESIDCHURN 202
 
 Phase 202 RESIDCHURN closes: 59 commits on its branch, grouped by theme below (planning and decision records, eight plans and their summaries, the capture kit and attribution, three review rounds, verification and security, and the closing and booking commits). Records only, no code, no analytics-service, no supabase.
