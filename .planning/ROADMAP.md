@@ -93,8 +93,8 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 
 ### Phases (v1.21)
 
-- [ ] **Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story** - Key storage, encryption, TLS, factsheet access, listing cost and exchange count read the same on the home page, `/security`, `/for-quants` and Terms, each matched to a measurement; no key form for anonymous visitors on the home page; `/demo` looks finished
-- [ ] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row
+- [x] **Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story** - Key storage, encryption, TLS, factsheet access, listing cost and exchange count read the same on the home page, `/security`, `/for-quants` and Terms, each matched to a measurement; no key form for anonymous visitors on the home page; `/demo` looks finished (completed 2026-11-07)
+- [x] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row (completed 2026-11-07)
 - [ ] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified
 - [ ] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed
 - [ ] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced"
@@ -110,7 +110,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 **Goal:** A first-time visitor reading the home page, `/security`, `/for-quants`, the Terms and `/demo` gets one consistent, true account of how API keys are stored and encrypted, which TLS versions are accepted, who can view a factsheet, what listing costs and how many exchanges are supported, and sees a demo that looks finished. The home page no longer asks an anonymous visitor for a key and secret.
 **Requirements**: TRUST-01, ROUTE-03
 **Depends on:** Nothing (first phase)
-**Plans:** 0 plans
+**Plans:** 15/15 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -126,15 +126,54 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 
 Copy and layout changes are checked against `DESIGN.md` (Voice / microcopy, AI-Slop Ban).
 
+**Founder override, 2026-11-07 (D-11 in 192-CONTEXT.md, recorded under the CLAUDE.md deviation policy):** the public demo is retired in code. Plan 192-06 measured the demo's missing data as `strategies-missing`. The founder's answer was "delete demo", which he clarified as "Page only", and then: "retire the whole demo part".
+- This retires `/demo`, its sub-routes, API routes, components, demo-only readers and persona wiring, its e2e and visual specs, and every link to it.
+- PROD demo rows stay untouched. No PROD writes or deletes are made.
+- Plan 192-06 is superseded. Its evidence records `D-08 repair: not needed (demo retired, founder 2026-11-07)`.
+- Plan 192-08's screenshot gate is retired ("Retire it (Recommended)"), and no seeded-render baseline is booked.
+- Success criterion 5 now reads: `/demo` and every link to it are gone, and no public page links to a retired route.
+- D-07 still holds. D-08, D-09 and D-10 are amended in CONTEXT.
+- Plan 192-10's ship gate no longer needs a demo repair.
+- Phase 193 keeps the factsheet "Demo portfolios" section and `[193-DEMO-PAYLOAD-PRODUCERS]`.
+
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 192-01-PLAN.md
+- [x] 192-02-PLAN.md
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 192-03-PLAN.md
+- [x] 192-04-PLAN.md
+- [x] 192-05-PLAN.md
+- [x] 192-06-PLAN.md — SUPERSEDED by D-11 (demo retired); Task 3 never executed, no SUMMARY (192-06-DEFERRED.md)
+- [x] 192-07-PLAN.md
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 192-08-PLAN.md — SUPERSEDED by D-11; its retire work moved to 192-14, no SUMMARY (192-08-DEFERRED.md)
+- [x] 192-09-PLAN.md
+- [x] 192-11-PLAN.md — retire the /demo page, its proxy entry, headers and manifest row; a placeholder build shows /demo matches an unknown URL (307 to /login signed out; absent from the route manifest)
+- [x] 192-12-PLAN.md — the match queue drops its demo read-only mode and demo source path
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 192-13-PLAN.md — delete the demo-only components and readers and their census rows
+- [x] 192-14-PLAN.md — delete the demo e2e and pixel specs, the bake plumbing and the seeded /demo rows
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 192-16-PLAN.md — retire the nightly demo-PDF canary and its spec; the apt census moves from 18 to 17 steps
+- [x] 192-17-PLAN.md — delete the demo-page analytics warmer and move the seam exclusion censuses
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 192-15-PLAN.md — retire /api/demo and the demo PDF token, then the demo and persona libraries
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 192-10-PLAN.md — ship gate on the retired state, public-truth census, TODOS bookings
 
 ### Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content
 
 **Goal:** Looking at a factsheet or a strategy page is passive. Scrolling over a chart never changes its date range by itself, a narrowed range is always labelled with a one-click reset and is never restored on a later visit, no developer note, placeholder or another strategy's or portfolio's demo content appears, and opening any page writes nothing on the user's behalf.
 **Requirements**: TRUST-02, TRUST-03, TRUST-06
 **Depends on:** Nothing
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -143,14 +182,25 @@ Plans:
 
 **Success Criteria** (what must be TRUE):
 1. Turning the mouse wheel over any factsheet chart leaves the date range and every headline figure unchanged; the range changes only through an explicit control.
+   ⛔ **AMENDED 2026-11-06 (QUIETVIEW D-01, founder override of the recommendation):** a plain wheel over a factsheet chart no longer zooms and scrolls the page; zoom stays on Ctrl/Cmd + wheel, which this criterion counts as an explicit control. The founder chose "Ctrl+wheel zoom" over removing wheel zoom entirely. Recorded in the phase CONTEXT as D-01; the deviation policy requires both records.
 2. A narrowed range is labelled next to the figures it changes, with a one-click reset, and a later visit or reload opens the full history, including for ranges a browser saved before this change.
 3. No factsheet renders a developer note, placeholder copy or demo content: the three strings above are gone, the allocator section shows nothing that belongs to another strategy or portfolio, and a test goes RED if any of them returns.
 4. Opening a strategy page, a factsheet or any page that carries a note, and leaving without typing, writes no row. A read-only PROD count of empty notes is recorded before the fix (rows are left in place), and a test goes RED on today's behaviour.
 
 UI changes are checked against `DESIGN.md` (the dated-document principle: the label for a narrowed range states the dates shown).
 
+**Founder override, 2026-11-07 (D-09 in `193-CONTEXT.md`, "Allow clearing"):** a note saves on blur when its text changed; a blank draft saves only when it clears a note that was saved non-empty. SC-4 is unchanged: opening and leaving writes no row.
+
+**Founder decision, 2026-11-07 (D-09 refinement in `193-CONTEXT.md`, "Keep it, record it"):** after a failed save the server state is unknown, so clearing a note whose save never got confirmed saves `""`. This refines the "Allow clearing" override and needs no code change.
+
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 193-01-PLAN.md
+- [x] 193-02-PLAN.md
+- [x] 193-03-PLAN.md
+- [x] 193-04-PLAN.md
+- [x] 193-05-PLAN.md
+- [x] 193-06-PLAN.md
+- [x] 193-07-PLAN.md
 
 ### Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 
@@ -365,8 +415,8 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 192. PUBLICTRUTH | 0/0 | Not started | - |
-| 193. QUIETVIEW | 0/0 | Not started | - |
+| 192. PUBLICTRUTH | 15/15 | Complete | 2026-11-07 |
+| 193. QUIETVIEW | 7/7 | Complete | 2026-11-07 |
 | 194. FIGURETRUTH | 0/0 | Not started | - |
 | 195. TRIM | 0/0 | Not started | - |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |

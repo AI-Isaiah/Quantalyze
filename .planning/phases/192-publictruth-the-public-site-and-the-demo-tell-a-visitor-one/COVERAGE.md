@@ -1,0 +1,1 @@
+No external API integration: the phase rewrites public marketing copy, finishes /demo from existing database reads and removes the founder-view route; the detector matched copy text ("connect a read-only API key", "At Rest ... wraps"), not an integration.

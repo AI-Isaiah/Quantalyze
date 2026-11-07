@@ -2,15 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
+current_phase: 194
+current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 status: planning
-last_updated: "2026-11-06T13:50:25.000Z"
-last_activity: 2026-11-06
+stopped_at: Phases 192 and 193 complete; 202 shipping, 195 executing, 194 next to discuss
+last_updated: "2026-11-07T10:45:45.791Z"
+last_activity: 2026-11-07
+last_activity_desc: Phase 193 complete (PR #1211 merged, UAT passed); 194 next to discuss
+state_head: 7f667bb2929414755db5ed3f5517c9fc39068188
 progress:
   total_phases: 11
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 2
+  total_plans: 22
+  completed_plans: 22
+  percent: 18
 ---
 
 ## ⭐ STATE lineage
@@ -27,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-06)
 
-**Current focus:** v1.21 UX — trustworthy, navigable, lean (Phases 192–202, roadmap written 2026-11-06). Next: `/gsd-plan-phase 192` (PUBLICTRUTH). 202 RESIDCHURN, the Phase 188 SC-4 residual follow-up (D-13), runs in parallel from now.
+**Current focus:** Phase 192 — PUBLICTRUTH — the public site and the demo tell a visitor one true story (executing). 202 RESIDCHURN, the Phase 188 SC-4 residual follow-up (D-13), runs in parallel.
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -171,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 192 (PUBLICTRUTH) — the public site and the demo tell a visitor one true story
-Plan: — (not planned yet)
-Status: Ready to plan. 202 RESIDCHURN runs in parallel from now: its control capture needs a 00:40Z nightly with no deploy between its two captures, so it books that window, and inside it only analytics-service and migration merges are held.
-Last activity: 2026-11-06 — v1.21 roadmap written: 11 phases (192–202), 32/32 requirements mapped
-Progress: [░░░░░░░░░░] 0% (0 of 11 phases)
+Phase: 192 (PUBLICTRUTH) and 193 (QUIETVIEW) are complete; 194 (FIGURETRUTH) is next to discuss
+Plan: 202 RESIDCHURN complete on its branch and shipping next; 195 TRIM executing in parallel; 203 B3TRUNC booked
+Status: Phases 192 and 193 complete (PRs #1210 and #1211 merged, UAT passed 2026-11-07). 194 is next to discuss. 196-201 wait on their dependencies.
+Last activity: 2026-11-07 — Phase 193 complete
+Progress: [██░░░░░░░░] 18% (2 of 11 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1729,9 +1734,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** every v1.20 phase closed; milestone audit next
-**Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
+**Last Date:** 2026-11-06T20:36:19.383Z
+**Stopped At:** Phase 193 complete, ready to plan Phase 194
+**Resume File:** .planning/phases/192-publictruth-the-public-site-and-the-demo-tell-a-visitor-one/192-VERIFICATION.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
