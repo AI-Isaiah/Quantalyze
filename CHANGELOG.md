@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.133.26.0] - 2026-11-07 — TRIM 195: /portfolios, Decks, Tweaks, dark mode and density are gone; one disclaimer per page
+
+Phase 195 TRIM (LEAN-03, LEAN-07). 22 code commits on `feat/195-trim`, grouped below: retired routes, removed controls, dark mode, duplicate surfaces, deleted components, the trim guard, and the review fixes. No migration, no `supabase/**` edit, no row touched.
+
+### Removed
+- **`/portfolios` (D-01, 068e4afd3).** The page tree `src/app/(dashboard)/portfolios/**` is deleted, and every `/portfolios/:path*` URL answers a permanent (308) redirect to `/allocations`. The route-contract manifest swaps the four page entries for one `exception` entry with `redirectFrom: "/portfolios/:path*"`, so `check:route-contract` reads 52 page routes (56 before). Every census that read the tree moved with it, including the analytics-service `_TS_BENIGN_FILES` writer census (3 rows to 2).
+- **Add to portfolio (D-02, c4eeb2e59).** `AddToPortfolio`, `MigrationWizard`, `StrategyBreakdownTable`, the loopback benchmark seed and its e2e spec are deleted. The discovery strategy page has no replacement control, and the PortfolioOptimizer suggestion card keeps "View strategy" only. `SANCTIONED_POSITION_WRITERS` is now the allocation route plus the two seeds that stay.
+- **The 14 components that only rendered `/portfolios` (a9261bf0c, c1f0d811e),** with their 7 tests, after an importer proof per name. The display-sign census loses 3 `CENSUS_FILES` entries and 7 exemption keys (population 191 to 177, `POPULATION_FLOOR` stays 150). The SyncBadge mounts pin drops `CompositionDonut`.
+- **The portfolio report (574a295e6, 4e3a24ddc).** The renderer, its API route, the HMAC render-token module, the `vintage` helper and eight test files are deleted. `/api/portfolio-pdf/:id` redirects (308) to `/portfolio-pdf/:id`, a named retired page: server component, noindex, reads nothing (not even the `id` segment). The PDF-generation block leaves `.env.example`, and the limiter registry, critical-regressions, node-env and env-manifest censuses move.
+- **Decks from navigation (9a6606b15).** The sidebar drops it for every role, and `/decks` is a temporary (307) redirect to `/discovery/crypto-sma`, so removing one config rule restores it. The Decks page, `DeckCard`, `getDecks` and the deck categories are byte-unchanged.
+- **The Tweaks panel and context (ffff6311a, a7fd669af).** The `/allocations` shell has no Tweaks provider, header toggle, floating panel or `OutcomesTabRedirectGuard`, and its CSS (`data-density`, `data-show-outcomes`, `data-display-font`, the `html[data-accent-intensity]` block) is deleted. `TweaksContext.tsx` is gone; `EquityChart` always draws the area fill and the BTC benchmark. A stale `allocations.tweaks` value in storage changes nothing. `src/lib/view-transition.ts` went with its only caller.
+- **The discovery table density strip (f995f29ef).** The view toggle and the settle marker stay.
+- **Dark mode (D-05, 1e1443688, 08e196e02).** The factsheet Display menu is Colorblind palette then Regimes overlay. `?dark=1` and a stored `dark: "1"` are never read, the codec drops the field so the next write omits it, and `data-theme` is always `light`. `palette.ts` loses `DARK` and `COLORBLIND_DARK`, `HeatmapPanels.tsx` its dark branch, `globals.css` all 38 `data-theme="dark"` rules. The colorblind palette stays, and the tint-contrast sweep keeps its 4.5:1 thresholds on the two light modes.
+- **The caller-less `/api/portfolio-documents` route (WR-03, c575d1f51)** and its census row.
+
+### Changed
+- **`/browse` with one populated category redirects to it (D-08, 6ecfd2851).** The redirect runs outside the try/catch and only when the read is non-empty and exactly one category survives; zero, two or more, or a rejected read render as before. The sign-up line now ends "and model an allocation."
+- **One disclaimer per page (D-09, 81e968753, fef4cf218).** `/browse/<cat>/<id>` goes from three blocks to one `strategy-page` block after the sign-up CTA. The browse layout no longer mounts a footer; `/browse` and `/browse/<cat>` mount `<Disclaimer variant="footer" />` themselves. The tearsheet keeps one Risk Disclosure block, below the contact CTA, with the analytics-only text folded in so no sentence is lost.
+- **Links that pointed at `/portfolios` point at `/allocations` (c4eeb2e59):** the Exchanges tab card and action ("Open My Allocation") and the portfolio-alert email's "View in dashboard". DESIGN.md drops `/portfolios` from the wide-shell list.
+
+### Fixed
+- **The strategy-page disclaimer claims exchange-API monitoring only for `api_verified` (WR-01, e587587cd).** It said so for every trust tier before.
+- **The Browse crumb (WR-02, 2864b9868, 8b5e4c0df).** On the one category `/browse` redirects to, and on its strategy pages, the "Browse" crumb is plain text instead of a link back into the redirect. Every other category keeps the link. One shared rule in `src/app/browse/browse-categories.ts` drives both the redirect and the crumb.
+- **Breadcrumb marks only the last item current (WR-01 round 2, afd974efa).** `aria-current` and the current-page style moved off every non-link item.
+
+### Tests
+- **The trim guard, `src/__tests__/trim-removed-surfaces.test.tsx` (D-10, e0ebb7863).** It lists every removed route and control and fails if one comes back: routes on disk, redirect positive controls, no in-app link to a retired route, the removed controls, Sidebar and StrategyTable render probes, and the per-page disclaimer counts. Seven self-tests prove each matcher fires on a reinstatement and ignores comments. A population floor and render probes fence it against vacuity.
+- **The guard hardened in review (WR-04, 7ffdba541):** case-insensitive matchers, a `dark` view-state key needle, and pinned redirect permanence.
+
+### Notes
+- Verification `human_needed`, 12 of 12 must-haves verified; security SECURED, 13 of 13 threats closed; review clean at MEDIUM+ after 3 rounds.
+- Open UAT, needs a real browser or the PR's CI: a stale stored Tweaks value renders every default on `/allocations` (UC-6); a factsheet with `?dark=1` or a stored dark value renders light (UC-7); `/portfolio-pdf/<id>` reflows at 320px (UC-20); the redirect status codes in `e2e/route-redirects.spec.ts` and the data-driven `/browse` redirect against a running server; and the `strategy-page` disclaimer wording on `/browse/<cat>/<id>`.
+- `/portfolios/x/manage?add=y` lands on `/allocations?add=y`, and `/allocations` reads no `add` param. Accepted deviation from UI-SPEC S-1.
+- Carried from review, below MEDIUM, not fixed: the tearsheet and the `custody` Disclaimer variant still say "Strategy monitored via read-only exchange API" for every tier, the claim WR-01 removed from the strategy page. Left for Phase 196 ONESTRATEGYPAGE to decide. Also carried: a lint comment that cites the deleted `/api/portfolio-documents` route, `DOC_TYPES` / `DocType` / `PortfolioDocument` with no runtime user, the "Exchange-verified" meta description on the strategy page, no guard against `/api/portfolio-documents` coming back, an inert crumb that looks like a resting link, and no browse-page test that renders the real `Breadcrumb`.
+- The full vitest run carries 2 pre-existing failures in `src/lib/factsheet/compute.conventions.test.ts` (fixtures B and C, a last-digit floating-point snapshot). No factsheet compute file changed in this phase.
+
 ## [0.133.25.3] - 2026-11-07 — B3TRUNC 203: book b3's window_truncated is explained (intended)
 
 Phase 203 B3TRUNC: why book b3 carries `window_truncated`. Two commits on the phase branch, one non-planning change (a test); the planning records ship in a separate records PR. Verdict: intended behaviour, benign and non-blocking. b3's seven member keys open on seven different days, so the token is true by construction.
