@@ -21,6 +21,7 @@
 ### Tests
 - **D-07 guard.** `FactsheetBody.no-demo-content.test.tsx` renders the real factsheet body and goes RED if any of the three removed strings, or content belonging to another strategy or portfolio, comes back.
 - **D-10 cases.** Open-and-leave sends no write on each of the four note surfaces, plus in-flight-save, retry and load-error cases, window-gesture and session-range provider tests. `BatchDPanels.null-honest.test.tsx` is deleted with the panel it covered.
+- **Three svg-parity goldens re-baked.** The desktop and 2560 px full-page goldens in `e2e/svg-chart-parity.spec.ts-snapshots/` still showed the removed demo allocator section (470 px and 479 px taller than the page now). The 320 px end-of-year bars crop moved from 42 px to 43 px tall, a subpixel shift from the content above it. They were baked by the CI `bake_svg_goldens` dispatch and reviewed against the old images, and the other 26 goldens are unchanged.
 
 ### Notes
 - **D-08, read-only PROD count before the fix.** 2 empty notes and 2 zero-length saves existed. Rows were left in place and nothing was written or deleted.
