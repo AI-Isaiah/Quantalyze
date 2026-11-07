@@ -13,21 +13,21 @@ vi.mock("@/hooks/useBreakpoint", () => ({
 import { FactsheetProvider } from "./factsheet-context";
 import { BasisProvider } from "./basis-context";
 import { LeverageProvider, useLeverage } from "./leverage-context";
-import { AllocatorSection } from "./BatchDPanels";
 import { SignaturesSection } from "./SignaturePanels";
 import { CrossSignaturesSection } from "./CrossSignaturePanels";
 
 /**
  * Test-the-wiring (crit-7, CLAUDE.md Rule 9): the H-1 `BaseLeverageNote` is rendered on
- * FOUR panels but only the PeerPercentilePanel call site was asserted
- * (FactsheetView.leverage.test.tsx). This file pins the other three — Allocator, event
- * Signatures, Cross-signatures — so removing `<BaseLeverageNote>` from any of them turns
- * the corresponding test RED (the verbatim label vanishes). Each asserts the note is
+ * several panels but only the PeerPercentilePanel call site is asserted
+ * (FactsheetView.leverage.test.tsx). This file pins the other two — event Signatures and
+ * Cross-signatures — so removing `<BaseLeverageNote>` from either turns the corresponding
+ * test RED (the verbatim label vanishes). The allocator section was removed in QUIETVIEW
+ * (D-05), so it is no longer pinned here. Each asserts the note is
  * ABSENT at L=1 (inserted-only, byte-identical baseline) and PRESENT with the exact
  * per-panel label at L=2.
  *
  * These sections gate on an `ingestSource: "api"` payload (eventSignatures /
- * benchEventSignatures / allocatorPortfolios are api-arm-only), so the fixture is a real
+ * benchEventSignatures are api-arm-only), so the fixture is a real
  * `buildFactsheetPayload` api payload. Its `markets: ["crypto"]` gives periodsPerYear=365
  * and it is non-composite, so leverage is eligible on the default cash basis → the note
  * fires exactly at L≠1.
@@ -80,11 +80,6 @@ function renderSectionAtLeverage(node: React.ReactElement, leverage: number) {
 
 describe("BaseLeverageNote wiring — H-1 'base 1×' note on the server-side panels", () => {
   const cases: Array<{ name: string; node: React.ReactElement; label: string }> = [
-    {
-      name: "AllocatorSection",
-      node: <AllocatorSection />,
-      label: "Allocator analysis shown at base 1× leverage",
-    },
     {
       name: "SignaturesSection",
       node: <SignaturesSection />,

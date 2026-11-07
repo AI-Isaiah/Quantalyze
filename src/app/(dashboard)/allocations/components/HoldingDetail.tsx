@@ -21,10 +21,11 @@
  * is mounted at a time). This component is purely the tab body.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NoteRender } from "@/components/notes/NoteRender";
 import { NoteSaveStatus } from "@/components/notes/NoteSaveStatus";
 import { useNoteAutoSave } from "@/components/notes/useNoteAutoSave";
+import { shouldSaveNoteOnBlur } from "@/components/notes/should-save-note";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
 // Phase 169 review round 1 IN-04: the ONE money module (DESIGN.md Currency
@@ -73,6 +74,15 @@ export function HoldingDetail({
   // noteLoadError so we render an error+retry affordance instead of dropping the
   // user into an empty editor that onNoteBlur would PUT over their unread note.
   const [noteLoadError, setNoteLoadError] = useState(false);
+
+  // Phase 193 D-09: last note content known to be persisted. Seeded from the
+  // GET ("" on a 404) and advanced only when a save reports "saved", so a
+  // failed save stays dirty and a later blur retries.
+  const [notePersisted, setNotePersisted] = useState("");
+  const pendingSaveRef = useRef("");
+  // Focus moves only from an explicit Edit click, once the textarea mounts.
+  const noteTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const focusOnEditRef = useRef(false);
   const [initialSavedAt, setInitialSavedAt] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -95,6 +105,8 @@ export function HoldingDetail({
             typeof parsed.updated_at === "string" ? parsed.updated_at : null;
           setNoteContent(c);
           setNoteDraft(c);
+          setNotePersisted(c);
+          pendingSaveRef.current = c;
           setInitialSavedAt(ts ? new Date(ts) : null);
           setNoteEditing(!c);
         } else if (!cancelled && res.status === 404) {
@@ -136,11 +148,35 @@ export function HoldingDetail({
     initialSavedAt,
   );
 
+  useEffect(() => {
+    if (saveState === "saved") setNotePersisted(pendingSaveRef.current);
+  }, [saveState]);
+
+  useEffect(() => {
+    if (noteEditing && focusOnEditRef.current) {
+      focusOnEditRef.current = false;
+      noteTextareaRef.current?.focus();
+    }
+  }, [noteEditing]);
+
   function onNoteBlur() {
     // Never persist a draft when the initial load failed — we don't know the
     // server-side content, so a save here would clobber it (data-loss fence).
     if (noteLoadError) return;
+    // While a save is in flight the server will end at what was last sent, so
+    // compare against that, not the last confirmed value (WR-01).
+    const baseline = saveState === "saving" ? pendingSaveRef.current : notePersisted;
+    // A failed save leaves the server state unknown (a superseded save may have
+    // committed), so "Save failed — retry" must really retry: send the draft.
+    if (saveState !== "error" && !shouldSaveNoteOnBlur(noteDraft, baseline)) {
+      // Nothing to write (D-09): show what is stored.
+      setNoteDraft(baseline);
+      setNoteContent(baseline);
+      setNoteEditing(baseline === "");
+      return;
+    }
     const payload = noteDraft;
+    pendingSaveRef.current = payload;
     setNoteContent(payload);
     void save(payload);
     if (payload) setNoteEditing(false);
@@ -239,7 +275,7 @@ export function HoldingDetail({
                   onChange={(e) => setNoteDraft(e.target.value)}
                   onBlur={onNoteBlur}
                   placeholder="No note yet. Start typing to add one."
-                  autoFocus
+                  ref={noteTextareaRef}
                   rows={4}
                   className="w-full resize-none rounded border border-border bg-surface p-2 font-mono text-fixed-13 leading-[1.6] focus:border-accent focus:outline-none"
                 />
@@ -254,7 +290,10 @@ export function HoldingDetail({
                   )}
                   <button
                     type="button"
-                    onClick={() => setNoteEditing(true)}
+                    onClick={() => {
+                      focusOnEditRef.current = true;
+                      setNoteEditing(true);
+                    }}
                     className="mt-2 text-xs text-accent underline hover:text-accent-hover"
                   >
                     Edit

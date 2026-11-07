@@ -230,7 +230,7 @@ describe("TimeSeriesChart gestures hold the windowed view and derive once (169.1
     const before = bootCalls.n;
     let prev = live();
     for (let k = 1; k <= 6; k++) {
-      await ev(() => fireEvent.wheel(svg, { deltaY: -100, clientX: PLOT_X, clientY: PLOT_Y }));
+      await ev(() => fireEvent.wheel(svg, { deltaY: -100, ctrlKey: true, clientX: PLOT_X, clientY: PLOT_Y }));
       expect(live(), `tick ${k}`).not.toEqual(prev);
       prev = live();
       expectHeldOnStart(`tick ${k}`);
@@ -262,7 +262,7 @@ describe("TimeSeriesChart gestures hold the windowed view and derive once (169.1
   it("an unmount mid-wheel-burst releases the hold and leaves no settle timer behind", async () => {
     const { svg, getByTestId } = await mountZoomed();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await ev(() => fireEvent.wheel(svg, { deltaY: -100, clientX: PLOT_X, clientY: PLOT_Y }));
+    await ev(() => fireEvent.wheel(svg, { deltaY: -100, ctrlKey: true, clientX: PLOT_X, clientY: PLOT_Y }));
     expectHeldOnStart("mid-burst");
     await ev(() => fireEvent.click(getByTestId("unmount-a")));
     expect(last(strip).scope).toMatchObject({ startIdx: live()[0], endIdx: live()[1] });
@@ -277,5 +277,46 @@ describe("TimeSeriesChart gestures hold the windowed view and derive once (169.1
     expectHeldOnStart("after the other chart unmounted");
     await ev(() => fireEvent.pointerUp(svg, { pointerId: 1, clientX: PLOT_X + 60, clientY: PLOT_Y }));
     expect(last(strip).scope).toMatchObject({ startIdx: live()[0], endIdx: live()[1] });
+  });
+
+  it("a plain wheel leaves the range alone and does not block the page scroll; Ctrl and Cmd still zoom (D-01)", async () => {
+    // D-01 (founder, 2026-11-06): the range changes only through an explicit control. A plain
+    // wheel is a scroll, so it must neither narrow the range every figure follows nor be
+    // default-prevented (a cancelled wheel traps the page scroll over the chart).
+    const { svg } = await mountZoomed();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const before = live();
+    let plainNotCancelled = false;
+    await ev(() => {
+      plainNotCancelled = fireEvent.wheel(svg, { deltaY: -100, clientX: PLOT_X, clientY: PLOT_Y });
+    });
+    expect(plainNotCancelled, "a plain wheel is not default-prevented").toBe(true);
+    expect(live(), "a plain wheel leaves the live range").toEqual(before);
+    expectHeldOnStart("after a plain wheel");
+    expect(last(strip).scope).toMatchObject({ kind: "selected", startIdx: 100, endIdx: 199 });
+    expect(vi.getTimerCount(), "a plain wheel starts no settle timer").toBe(0);
+
+    let ctrlNotCancelled = true;
+    await ev(() => {
+      ctrlNotCancelled = fireEvent.wheel(svg, { deltaY: -100, ctrlKey: true, clientX: PLOT_X, clientY: PLOT_Y });
+    });
+    expect(ctrlNotCancelled, "a Ctrl wheel is default-prevented, so the browser does not zoom the page").toBe(false);
+    expect(live(), "a Ctrl wheel zooms").not.toEqual(before);
+
+    await ev(() => vi.advanceTimersByTime(WHEEL_SETTLE_MS * 2));
+    const afterCtrl = live();
+    let metaNotCancelled = true;
+    await ev(() => {
+      metaNotCancelled = fireEvent.wheel(svg, { deltaY: -100, metaKey: true, clientX: PLOT_X, clientY: PLOT_Y });
+    });
+    expect(metaNotCancelled, "a Cmd wheel is default-prevented").toBe(false);
+    expect(live(), "a Cmd wheel zooms").not.toEqual(afterCtrl);
+
+    await ev(() => vi.advanceTimersByTime(WHEEL_SETTLE_MS * 2));
+    const afterMeta = live();
+    await ev(() => {
+      fireEvent.wheel(svg, { deltaY: 0, ctrlKey: true, clientX: PLOT_X, clientY: PLOT_Y });
+    });
+    expect(live(), "a Ctrl wheel with deltaY 0 changes nothing").toEqual(afterMeta);
   });
 });

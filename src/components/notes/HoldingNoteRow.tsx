@@ -18,10 +18,11 @@
  * textarea blur (not unmount) to persist — same shape as NotesWidget.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NoteRender } from "./NoteRender";
 import { useNoteAutoSave } from "./useNoteAutoSave";
 import { NoteSaveStatus } from "./NoteSaveStatus";
+import { shouldSaveNoteOnBlur } from "./should-save-note";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 
 // ---------------------------------------------------------------- icon glyph
@@ -150,6 +151,11 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
   // Before the fetch resolves, the loading gate below renders — we
   // do not flip editing until we know what the server has.
   const [editing, setEditing] = useState(false);
+  // WR-02: a failed load is a DISTINCT state from "no note yet" — only a
+  // genuine 404 means empty. Any other failure sets loadError, and nothing is
+  // saved while it is set, so typing can never overwrite an unread server note.
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,20 +177,27 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
             typeof parsed.updated_at === "string" ? parsed.updated_at : null;
           setContent(c);
           setDraft(c);
+          setPersisted(c);
+          pendingSaveRef.current = c;
           setInitialSavedAt(ts ? new Date(ts) : null);
           // Existing content → read mode with Edit affordance.
           // Empty string → edit mode so placeholder guides first-time users.
           setEditing(!c);
-        } else if (!cancelled) {
-          // 404 or any other non-OK status (401/403/500/etc.) → default to
-          // empty edit mode so the user isn't blocked from writing.
-          // save-state will surface errors on first blur.
+        } else if (!cancelled && res.status === 404) {
+          // Genuine "no note yet" → empty edit mode so the placeholder guides input.
           setEditing(true);
+        } else if (!cancelled) {
+          // 401/403/429/5xx → load failed. Do NOT enter edit mode (typing there
+          // would overwrite the unread server note on blur).
+          console.error("[HoldingNoteRow] notes load failed", res.status, scope_ref);
+          setLoadError(true);
         }
-      } catch {
-        // Network error — default to empty edit mode so the user
-        // isn't blocked from writing. save-state will surface errors.
-        if (!cancelled) setEditing(true);
+      } catch (err) {
+        // Network drop / JSON parse error → same loud-fail path as a 5xx.
+        if (!cancelled) {
+          console.error("[HoldingNoteRow] notes load failed", err, scope_ref);
+          setLoadError(true);
+        }
       } finally {
         if (!cancelled) setInitialLoaded(true);
       }
@@ -192,13 +205,39 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
     return () => {
       cancelled = true;
     };
-  }, [scope_ref]);
+  }, [scope_ref, loadAttempt]);
+
+  function retryLoad() {
+    setLoadError(false);
+    setInitialLoaded(false);
+    setLoadAttempt((n) => n + 1);
+  }
 
   const { saveState, lastSavedAt, save } = useNoteAutoSave(
     "holding",
     scope_ref,
     initialSavedAt,
   );
+
+  // Phase 193 D-09: last content known to be persisted. Seeded from the GET
+  // ("" only on a 404; any other failed load sets loadError and nothing saves)
+  // and advanced only when a save reports "saved", so a failed save stays
+  // dirty and a later blur retries.
+  const [persisted, setPersisted] = useState("");
+  const pendingSaveRef = useRef("");
+  useEffect(() => {
+    if (saveState === "saved") setPersisted(pendingSaveRef.current);
+  }, [saveState]);
+
+  // Focus moves only from an explicit Edit click, once the textarea mounts.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const focusOnEditRef = useRef(false);
+  useEffect(() => {
+    if (editing && focusOnEditRef.current) {
+      focusOnEditRef.current = false;
+      textareaRef.current?.focus();
+    }
+  }, [editing]);
 
   // Loading gate: render a skeleton inside the same <tr><td> shell so that
   // the HTML5 table content model is satisfied (<tbody> only permits <tr>
@@ -220,7 +259,23 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
   }
 
   const onBlurTextarea = () => {
+    // Never persist a draft when the initial load failed — we don't know the
+    // server-side content, so a save here would clobber it (data-loss fence).
+    if (loadError) return;
+    // While a save is in flight the server will end at what was last sent, so
+    // compare against that, not the last confirmed value (WR-01).
+    const baseline = saveState === "saving" ? pendingSaveRef.current : persisted;
+    // A failed save leaves the server state unknown (a superseded save may have
+    // committed), so "Save failed — retry" must really retry: send the draft.
+    if (saveState !== "error" && !shouldSaveNoteOnBlur(draft, baseline)) {
+      // Nothing to write (D-09): show what is stored.
+      setDraft(baseline);
+      setContent(baseline);
+      setEditing(baseline === "");
+      return;
+    }
     const payload = draft;
+    pendingSaveRef.current = payload;
     setContent(payload);
     void save(payload);
     // Only flip back to read mode when there's content; empty-state stays
@@ -236,13 +291,24 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
     >
       <td colSpan={props.colSpan} className="p-0">
         <div className="px-4 py-3 bg-surface border-t border-border">
-          {editing ? (
+          {loadError ? (
+            <div role="alert" className="text-xs text-text-muted">
+              <p>Couldn&apos;t load your note. Your saved note is safe.</p>
+              <button
+                type="button"
+                onClick={retryLoad}
+                className="mt-2 text-xs text-accent underline hover:text-accent-hover"
+              >
+                Retry
+              </button>
+            </div>
+          ) : editing ? (
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onBlur={onBlurTextarea}
               placeholder="No note yet. Start typing to add one."
-              autoFocus
+              ref={textareaRef}
               rows={4}
               className="w-full resize-none rounded border border-border p-2 font-mono text-fixed-13 leading-[1.6] focus:border-accent focus:outline-none"
             />
@@ -257,14 +323,19 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
               )}
               <button
                 type="button"
-                onClick={() => setEditing(true)}
+                onClick={() => {
+                  focusOnEditRef.current = true;
+                  setEditing(true);
+                }}
                 className="mt-2 text-xs text-accent underline hover:text-accent-hover"
               >
                 Edit
               </button>
             </div>
           )}
-          <NoteSaveStatus saveState={saveState} lastSavedAt={lastSavedAt} />
+          {loadError ? null : (
+            <NoteSaveStatus saveState={saveState} lastSavedAt={lastSavedAt} />
+          )}
         </div>
       </td>
     </tr>

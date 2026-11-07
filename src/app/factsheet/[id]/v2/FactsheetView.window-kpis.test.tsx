@@ -540,3 +540,83 @@ describe("the window holds across basis and leverage and never fabricates a figu
     expect(within(document.body).queryByText(/stationary block-bootstrap resamples/)).toBeNull();
   });
 });
+
+/**
+ * Phase 193 plan 05 (D-03, TRUST-02) — a narrowed range carries a one-click
+ * "Reset to full history" beside the label that already names its dates. The
+ * control lives in the shared RangeEyebrow, so the strip and the rail cannot
+ * drift apart. It calls `resetXRange()` and nothing else, then hands focus to
+ * the label (the button unmounts once the range is full, so focus would
+ * otherwise fall to <body>, WCAG 2.4.3).
+ */
+describe("RangeEyebrow reset to full history (D-03)", () => {
+  // Byte-for-byte the ControlBar "Reset view" recipe, plus the print opt-out.
+  const RECIPE =
+    "px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] factsheet-v2-no-print";
+
+  it("at full history no reset control renders on either surface (D-03)", () => {
+    mount(build400());
+    expect(screen.queryByTestId("range-reset-strip")).toBeNull();
+    expect(screen.queryByTestId("range-reset-rail")).toBeNull();
+  });
+
+  it("a selected range keeps the label text and shows the reset control on both surfaces (D-03)", async () => {
+    const payload = build400();
+    mount(payload);
+    await click("zoom");
+    expect(screen.getByTestId("range-eyebrow-strip").textContent).toBe(
+      `Selected range: ${isoToMonthDay(payload.dates[100])} – ${isoToMonthDay(payload.dates[299])}`,
+    );
+    const btn = screen.getByTestId("range-reset-strip");
+    expect(btn.tagName).toBe("BUTTON");
+    expect(btn.getAttribute("type")).toBe("button");
+    expect(btn.textContent).toBe("Reset to full history");
+    expect(btn.className).toBe(RECIPE);
+    expect(screen.getByTestId("range-reset-rail")).toBeTruthy();
+  });
+
+  it("one click returns the full history, removes both controls and focuses the label (D-03)", async () => {
+    const payload = build400();
+    mount(payload);
+    const before = stripCells();
+    await click("zoom");
+    expect(stripCells()).not.toEqual(before);
+    await click("range-reset-strip");
+    expect(screen.getByTestId("range-eyebrow-strip").textContent).toBe(
+      `Full history: ${isoToMonthDay(payload.dates[0])} – ${isoToMonthDay(payload.dates[399])}`,
+    );
+    expect(screen.queryByTestId("range-reset-strip")).toBeNull();
+    expect(screen.queryByTestId("range-reset-rail")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("range-eyebrow-strip"));
+    expect(stripCells()).toEqual(before);
+  });
+
+  it("the className prop sits on a wrapping flex row, not on the label (D-03)", () => {
+    mount(build400());
+    const wrap = screen.getByTestId("range-eyebrow-strip").parentElement!;
+    expect(wrap.className).toContain("mt-6");
+    expect(wrap.className).toContain("flex");
+    expect(wrap.className).toContain("flex-wrap");
+    expect(screen.getByTestId("range-eyebrow-strip").className).not.toContain("mt-6");
+  });
+
+  it("one index short of the full history and the 5-sample minimum show the reset (D-03)", async () => {
+    const first = mount(build400(), [0, 398]);
+    await click("zoom");
+    expect(screen.getByTestId("range-eyebrow-strip").textContent).toMatch(/^Selected range/);
+    expect(screen.getByTestId("range-reset-strip")).toBeTruthy();
+    first.unmount();
+
+    mount(build400(), [100, 104]);
+    await click("zoom");
+    expect(screen.getByTestId("range-eyebrow-strip").textContent).toMatch(/^Selected range/);
+    expect(screen.getByTestId("range-reset-strip")).toBeTruthy();
+  });
+
+  it("a range equal to the full history shows no reset (D-03)", async () => {
+    mount(build400(), [0, 399]);
+    await click("zoom");
+    expect(screen.getByTestId("range-eyebrow-strip").textContent).toMatch(/^Full history/);
+    expect(screen.queryByTestId("range-reset-strip")).toBeNull();
+  });
+});

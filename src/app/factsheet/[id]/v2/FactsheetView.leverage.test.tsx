@@ -321,7 +321,7 @@ function renderBody(payload: FactsheetPayload) {
 // The reworded what-if disclosure (UI-SPEC Copywriting Contract, verbatim). {L}=2.
 const CAPTION_PREFIX = "What-if projection at";
 const CAPTION_L2 =
-  "What-if projection at 2× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer, allocator, and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.";
+  "What-if projection at 2× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.";
 // Clamp messages (UI-SPEC error copy, verbatim — MAX_LEVERAGE interpolated to 10).
 const CLAMP_MAX_MSG =
   "Leverage clamped to 10× — the maximum in this what-if projection.";

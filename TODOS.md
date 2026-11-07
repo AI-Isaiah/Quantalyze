@@ -13624,3 +13624,17 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 - **The updating line at 390 px.** View a re-running factsheet at 390 px. Expected: the line wraps inside the header with no sideways scroll (the UI-SPEC overflow row). Today only a component test covers it.
 
 **Owner / Trigger:** unowned. Trigger: the next wizard contribution finalized on PROD. Closed when the SC-2 reading is recorded with `wizard_contributions_finalized_after_deploy` at least 1, SC-4 is observed on PROD, and the 390 px rendering is observed, or the founder rules otherwise.
+
+## Phase 193 (QUIETVIEW) — routed items (logged 2026-11-06)
+
+### [193-DEMO-PAYLOAD-PRODUCERS] — the factsheet payload still computes and ships the synthesized peer cohort and the demo allocator portfolios that QUIETVIEW stopped rendering (booked 2026-11-06, Phase 193 D-04/D-05, RESEARCH Open Question 3, DATA INTEGRITY)
+
+**Reading.** QUIETVIEW removed both panels at the render site only (D-04, D-05). `buildFactsheetPayload` (`src/lib/factsheet/build-payload.ts`) still computes `peerPercentile` from the seeded cohort in `src/lib/factsheet/peer-cohort.ts` and the `allocatorPortfolios` blends, and ships both in the server payload and the cached factsheet payload, so invented numbers still reach the client though nothing renders them. The removal stayed UI-only because dropping the fields touches `src/lib/factsheet/types.ts`, the `build-payload.test.ts.snap` snapshot, about 13 test files and the `unstable_cache` key version in `src/app/factsheet/[id]/v2/page.tsx`. `FactsheetBodyOptions.hideAllocatorSection` stays a documented no-op so its callers compile.
+
+**Owner / Trigger:** unowned. Trigger: the next phase that edits the api arm of `build-payload.ts`, the payload union in `types.ts` or the factsheet cache key. Action: drop both fields and their producers (keeping the csv `scenarioPeer`, which ranks against the real verified universe), bump the cache key, update the snapshot and the tests that read the fields, and remove the `hideAllocatorSection` prop with its callers. Closed when no payload carries either field, or the founder rules otherwise.
+
+### [193-STRATEGY-NOTE-LOAD-ERROR] — the strategy page treats a failed `user_notes` read as "no note", so the note card opens empty over an unread note (booked 2026-11-07, Phase 193 review WR-02 follow-up, DATA INTEGRITY)
+
+**Reading.** `src/app/strategy/[id]/page.tsx` reads the note with `.maybeSingle()` and keeps only `data`, so a read error passes `initialNoteContent = ""` to `StrategyNoteCard`. The card then shows no note, and a user who types and leaves sends a PATCH that overwrites the note they never saw. Phase 193 fixed the same shape on `HoldingNoteRow` and `BridgeOutcomeNoteSection` (review WR-02, a load-error state with Retry and no save while it is set, copied from `HoldingDetail`). It left this file alone because the page sat outside the phase's note-surface scope. Reaching the defect takes a DB read error followed by a deliberate keystroke.
+
+**Owner / Trigger:** unowned. Trigger: the next phase that edits `src/app/strategy/[id]/page.tsx` or `StrategyNoteCard`. Action: read `error` from the note query and pass a load-failed signal to `StrategyNoteCard`, which then shows HoldingDetail's load-error copy and Retry and never saves while it is set. Add a test that a failed read followed by typing and leaving sends no PATCH. Closed when a failed read can no longer open an editable empty card.

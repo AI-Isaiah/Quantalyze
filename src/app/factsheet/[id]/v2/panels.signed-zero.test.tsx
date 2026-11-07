@@ -25,7 +25,7 @@ vi.mock("@/hooks/useBreakpoint", () => ({
 
 import { FactsheetProvider } from "./factsheet-context";
 import { StressWindowsPanel } from "./StressWindowsPanel";
-import { AllocatorSection, OwnBookDeltaPanel, StyleDriftPanel } from "./BatchDPanels";
+import { OwnBookDeltaPanel, StyleDriftPanel } from "./BatchDPanels";
 import { BootstrapCIPanel, CalmarByYearPanel } from "./AnalyticalPanels";
 import { CorrelationsMatrixPanel, CorrelationStripPanel, EndOfYearBarsPanel, QuantileBoxPlotPanel } from "./DistributionPanels";
 
@@ -258,61 +258,6 @@ describe("OwnBookDeltaPanel: signed zero and favourability tone (D-02, D-03, O-4
     const cell = ownBookCell({ sharpe: 0.1, sortino: 0.1, max_dd: -0.0004 }, "Max DD (blend vs book)");
     expect(cell.textContent).toBe("0.0pp");
     expect(hasTone(cell)).toBe(false);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/* Allocator section                                                   */
-/* ------------------------------------------------------------------ */
-
-function allocatorValue(patch: Record<string, number | null>, label: string): HTMLElement {
-  const base = apiPayload();
-  const portfolios = base.allocatorPortfolios;
-  if (!portfolios || portfolios.length === 0) throw new Error("fixture must carry allocator portfolios");
-  const payload: FactsheetPayload = {
-    ...base,
-    allocatorPortfolios: [{ ...portfolios[0], ...patch }, ...portfolios.slice(1)],
-  };
-  const { container } = mount(payload, <AllocatorSection />);
-  return rowCells(container, label)[1];
-}
-
-describe("AllocatorSection: signed zero and drawdown tone (D-02, D-04)", () => {
-  it("a Max Drawdown of 0 prints '0.0%' with no negative colour (today red)", () => {
-    const cell = allocatorValue({ max_dd: 0 }, "Max Drawdown");
-    expect(cell.textContent).toBe("0.0%");
-    expect(styleOf(cell)).not.toContain(NEGATIVE);
-  });
-
-  it("a Max Drawdown of -0.0004 prints '0.0%' with no negative colour", () => {
-    const cell = allocatorValue({ max_dd: -0.0004 }, "Max Drawdown");
-    expect(cell.textContent).toBe("0.0%");
-    expect(styleOf(cell)).not.toContain(NEGATIVE);
-  });
-
-  it("a Max Drawdown of -0.052 prints '-5.2%' in the negative colour", () => {
-    const cell = allocatorValue({ max_dd: -0.052 }, "Max Drawdown");
-    expect(cell.textContent).toBe("-5.2%");
-    expect(styleOf(cell)).toContain(NEGATIVE);
-  });
-
-  it("a Max Drawdown of +0.004 (never green) prints '0.4%' with no colour", () => {
-    const cell = allocatorValue({ max_dd: 0.004 }, "Max Drawdown");
-    expect(cell.textContent).toBe("0.4%");
-    expect(hasTone(cell)).toBe(false);
-  });
-
-  it("'Correlation with MultiMarket' of -0.004 prints '0.00'; +0.35 prints '+0.35'", () => {
-    expect(allocatorValue({ corr: -0.004 }, "Correlation with MultiMarket").textContent).toBe("0.00");
-    expect(allocatorValue({ corr: 0.004 }, "Correlation with MultiMarket").textContent).toBe("0.00");
-    expect(allocatorValue({ corr: 0.35 }, "Correlation with MultiMarket").textContent).toBe("+0.35");
-  });
-
-  it("'Cum. Return' of -0.0004 prints '0.0%'; the tail mean of -0.00004 prints '0.00%'", () => {
-    expect(allocatorValue({ cum_ret: -0.0004 }, "Cum. Return (full window)").textContent).toBe("0.0%");
-    expect(allocatorValue({ cum_ret: 0.0123 }, "Cum. Return (full window)").textContent).toBe("+1.2%");
-    expect(allocatorValue({ tail_mm_mean: -0.00004 }, "MultiMarket mean return").textContent).toBe("0.00%");
-    expect(allocatorValue({ tail_mm_median: 0.00004 }, "MultiMarket median return").textContent).toBe("0.00%");
   });
 });
 

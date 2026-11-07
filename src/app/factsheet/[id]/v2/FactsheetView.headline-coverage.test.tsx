@@ -1649,7 +1649,7 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
         // settle timer is faked so a slow runner cannot release the hold mid-assertion.
         vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
         await act(async () => {
-          fireEvent.wheel(svg!, { deltaY: 100_000, clientX: 400, clientY: 100 });
+          fireEvent.wheel(svg!, { deltaY: 100_000, ctrlKey: true, clientX: 400, clientY: 100 });
         });
         // Premise B: the gesture is still held, so the windowed view (the rail) has NOT moved off the slice.
         expect(

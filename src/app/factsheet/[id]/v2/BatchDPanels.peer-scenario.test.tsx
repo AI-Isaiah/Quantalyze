@@ -16,8 +16,8 @@ import { PeerPercentilePanel } from "./BatchDPanels";
  *      bars render; the verbatim disclosure copy
  *      "hypothetical blend · ranked vs verified strategies · sample/252 basis"
  *      renders (plain 10px muted, NOT italic — the api footnote IS italic).
- *   2. API path (regression guard): the existing "Demo cohort" badge + the
- *      italic synthesized-cohort footnote are byte-unchanged.
+ *   2. API path (Phase 193 D-04): the synthesized demo-cohort arm is gone, so the
+ *      panel renders nothing for an api payload even when `peerPercentile` is set.
  *   3. SUPPRESSION: csv with a null scenarioPeer → the panel renders nothing.
  *
  * FactsheetProvider's persistence primitive touches localStorage + sentry on
@@ -147,17 +147,17 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
     expect(container.querySelector("section")).toBeTruthy();
   });
 
-  it("api path: 'Demo cohort' badge + italic synthesized-cohort footnote UNCHANGED (regression guard)", () => {
+  it("api path renders nothing: the demo cohort arm is gone (D-04)", () => {
     const peer: PeerPercentilePayload = { cohortSize: 50, sharpe: 60, sortino: 55, max_dd: 48 };
-    const { getByText, queryByText } = renderPanel(apiPayload(peer));
+    // Premise: the api payload really carries a rank, so an empty panel is the
+    // panel's own decision and not an absent field.
+    const payload = apiPayload(peer);
+    expect(payload.ingestSource === "api" && payload.peerPercentile).toEqual(peer);
+    const { container, queryByText } = renderPanel(payload);
 
-    // The demo badge + the italic footnote are exactly as before.
-    expect(getByText(/Demo cohort/i)).toBeTruthy();
-    const footnote = getByText(/Synthesized peer cohort/i);
-    expect(footnote).toBeTruthy();
-    expect(footnote.className).toContain("italic");
-
-    // The scenario disclosure must NOT appear on the api path.
+    expect(container.innerHTML).toBe("");
+    expect(queryByText(/Demo cohort/i)).toBeNull();
+    expect(queryByText(/Synthesized peer cohort/i)).toBeNull();
     expect(queryByText(DISCLOSURE)).toBeNull();
   });
 
@@ -168,9 +168,9 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
   it.each([
     ["NaN", Number.NaN],
     ["null (JSON round-trip)", null],
-  ])("api path: a Sharpe rank of %s renders a dash and no bar fill", (_label, sharpe) => {
+  ])("scenario path: a Sharpe rank of %s renders a dash and no bar fill", (_label, sharpe) => {
     const peer = { cohortSize: 20, sharpe, sortino: 55, max_dd: 48 } as unknown as PeerPercentilePayload;
-    const { getByText, container } = renderPanel(apiPayload(peer));
+    const { getByText, container } = renderPanel(csvPayload(peer));
     const row = getByText("Sharpe").parentElement!;
     expect(row.lastElementChild!.textContent).toBe("—");
     expect(row.querySelector(".bg-accent")).toBeNull();

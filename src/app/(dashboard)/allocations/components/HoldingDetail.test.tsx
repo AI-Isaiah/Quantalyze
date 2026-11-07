@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { HoldingDetail } from "./HoldingDetail";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 
@@ -28,9 +29,11 @@ vi.mock("@/components/notes/NoteSaveStatus", () => ({
 // `save` is a module-level spy so the loud-fail tests can assert that a
 // failed/errored note load NEVER triggers a destructive PUT on blur.
 const saveSpy = vi.fn();
+// WR-01: a test sets this to "saving" to model a save whose response is open.
+let mockSaveState: "idle" | "saving" | "error" = "idle";
 vi.mock("@/components/notes/useNoteAutoSave", () => ({
   useNoteAutoSave: () => ({
-    saveState: "idle",
+    saveState: mockSaveState,
     lastSavedAt: null,
     save: saveSpy,
   }),
@@ -267,5 +270,119 @@ describe("HoldingDetail — H-0091", () => {
       ),
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+// Phase 193 D-10: opening the Notes tab and leaving without typing writes
+// nothing. `useNoteAutoSave` is mocked here, so the write is `saveSpy`.
+describe("HoldingDetail Notes — opening writes nothing (D-10)", () => {
+  function stubNotesGet(res: { ok: boolean; status: number; content?: string }) {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: res.ok,
+        status: res.status,
+        json: () =>
+          Promise.resolve({
+            content: res.content ?? "",
+            updated_at: "2026-04-01T00:00:00Z",
+          }),
+      }),
+    ) as unknown as typeof fetch;
+  }
+
+  beforeEach(() => {
+    saveSpy.mockClear();
+    mockSaveState = "idle";
+  });
+
+  async function openNotes(user: ReturnType<typeof userEvent.setup>) {
+    render(<HoldingDetail row={makeRow()} />);
+    await user.click(screen.getByRole("tab", { name: "Notes" }));
+  }
+
+  it("404: the textarea is not focused on open, and focus then blur with no typing does not save", async () => {
+    stubNotesGet({ ok: false, status: 404 });
+    const user = userEvent.setup();
+    await openNotes(user);
+    const ta = await screen.findByPlaceholderText(/No note yet/i);
+    expect(document.activeElement).not.toBe(ta);
+    await user.click(ta);
+    await user.click(document.body);
+    await act(async () => {});
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText(/No note yet/i)).toHaveValue("");
+  });
+
+  it("saved note: Edit focuses the textarea; blur with no change does not save and returns to read mode", async () => {
+    stubNotesGet({ ok: true, status: 200, content: "Seeded note body" });
+    const user = userEvent.setup();
+    await openNotes(user);
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const ta = screen.getByRole("textbox");
+    expect(document.activeElement).toBe(ta);
+    await user.click(document.body);
+    await act(async () => {});
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByTestId("note-render")).toHaveTextContent("Seeded note body");
+  });
+
+  it("typing x then blur calls save exactly once with x (positive arm)", async () => {
+    stubNotesGet({ ok: false, status: 404 });
+    const user = userEvent.setup();
+    await openNotes(user);
+    const ta = await screen.findByPlaceholderText(/No note yet/i);
+    await user.click(ta);
+    await user.type(ta, "x");
+    await user.click(document.body);
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(1));
+    expect(saveSpy).toHaveBeenCalledWith("x");
+  });
+
+  it("saved note cleared and blurred saves the clear once (Q-1, founder override 2026-11-07)", async () => {
+    stubNotesGet({ ok: true, status: 200, content: "Seeded note body" });
+    const user = userEvent.setup();
+    await openNotes(user);
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByRole("textbox"));
+    await user.click(document.body);
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(1));
+    expect(saveSpy).toHaveBeenCalledWith("");
+  });
+
+  it("WR-01: a blur while a save is in flight compares against the value last sent, so edit back to the original is saved", async () => {
+    stubNotesGet({ ok: true, status: 200, content: "x" });
+    const user = userEvent.setup();
+    await openNotes(user);
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByRole("textbox"));
+    await user.type(screen.getByRole("textbox"), "y");
+    await user.click(document.body);
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(1));
+    expect(saveSpy).toHaveBeenLastCalledWith("y");
+
+    // The y save has not answered (saveState "saving"). Edit back to x and leave.
+    mockSaveState = "saving";
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByRole("textbox"));
+    await user.type(screen.getByRole("textbox"), "x");
+    await user.click(document.body);
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(2));
+    expect(saveSpy).toHaveBeenLastCalledWith("x");
+  });
+
+  it("WR-01 round 2: after a failed save the next blur sends the draft even when it equals the last confirmed value", async () => {
+    stubNotesGet({ ok: true, status: 200, content: "x" });
+    const user = userEvent.setup();
+    await openNotes(user);
+    // The hook reports a failed save ("Save failed — retry"). The mocked hook
+    // never confirms a save, so the confirmed value is still the loaded x.
+    mockSaveState = "error";
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    // Leave with the draft unchanged: this is the user's retry, and a superseded
+    // save may have changed the server, so it must send.
+    await user.click(document.body);
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(1));
+    expect(saveSpy).toHaveBeenLastCalledWith("x");
   });
 });

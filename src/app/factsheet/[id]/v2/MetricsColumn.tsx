@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import type { ComparatorBlock, ComparatorSummary, FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
@@ -12,7 +12,7 @@ import { joinGuardPhrases } from "@/lib/factsheet/headline-basis";
 import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
 import { pct, pctSigned, ppDelta, ratio, signed } from "./format";
-import { usePayload, useActiveComparator } from "./factsheet-context";
+import { usePayload, useActiveComparator, useXRange } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
@@ -467,19 +467,17 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
 
       <EditorialSection label="III" name="Style" scopeNote={selected ? FULL_HISTORY_NOTE : undefined}>
         <StyleDriftPanel />
-        {/* PeerPercentile renders for api strategies (demo/synthesized cohort)
-            OR — Phase 42 (PEER-01, ADR-0025) — for the scenario BLEND, which
-            carries an additive `scenarioPeer` ranked vs the REAL verified
+        {/* PeerPercentile ranks the scenario BLEND — Phase 42 (PEER-01, ADR-0025):
+            it carries an additive `scenarioPeer` ranked vs the REAL verified
             universe (never an ingestSource flip; the three genuinely-synthetic
             panels stay structurally absent). The explicit `ingestSource ===
             "csv"` narrow is required before reading the csv-only `scenarioPeer`
-            field (Pitfall 3 — mirrors the B6 narrowing discipline). With
-            scenarioMode=false (every existing call site) the second disjunct is
-            dead and the api path is byte-identical. (NEW-C20-01) */}
-        {(payload.ingestSource === "api" ||
-          (scenarioMode &&
-            payload.ingestSource === "csv" &&
-            payload.scenarioPeer != null)) && <PeerPercentilePanel />}
+            field (Pitfall 3 — mirrors the B6 narrowing discipline). Phase 193
+            (D-04) removed the api demo-cohort arm: a strategy factsheet no
+            longer mounts this panel, so no synthesized cohort can be shown. */}
+        {scenarioMode && payload.ingestSource === "csv" && payload.scenarioPeer != null && (
+          <PeerPercentilePanel />
+        )}
         {/* Phase 42 (PEER-05): the blend-vs-live-book signed delta, AFTER the
             peer panel (UI-SPEC §III). scenarioMode-gated here — the panel ALSO
             null-guards on its csv-only `scenarioOwnBookDelta` carve-out (silently
@@ -818,6 +816,16 @@ export function monthRowLabel(end: string, now: Date = new Date()): string {
  * figures come from, so the label and the numbers cannot describe different spans
  * (T-169-43). DESIGN.md data-eyebrow voice: Geist Mono, uppercase, the 0.18em
  * tracking step, `text-micro`, muted; dates in the rail's own format.
+ *
+ * Phase 193 (D-03, TRUST-02) — while a range is SELECTED the label carries a
+ * one-click "Reset to full history" beside it, on both surfaces. The control
+ * calls `resetXRange()` and nothing else (comparator, sections, Y override and
+ * toggles stay as the user set them), and it is the ControlBar "Reset view"
+ * recipe plus `factsheet-v2-no-print`: the dated label prints, the button does
+ * not. A narrowed range is a fact, not an error, so it is never toned red or
+ * amber. The button unmounts the moment the range is full, so focus moves to
+ * the label (`tabIndex={-1}`) instead of falling to <body> (WCAG 2.4.3). The
+ * label text itself stays byte-identical; `className` moved to the wrapping row.
  */
 export function RangeEyebrow({
   scope,
@@ -828,14 +836,33 @@ export function RangeEyebrow({
   surface: "strip" | "rail";
   className?: string;
 }) {
+  const { resetXRange } = useXRange();
+  const labelRef = useRef<HTMLParagraphElement>(null);
   const head = scope.kind === "full" ? "Full history" : "Selected range";
   return (
-    <p
-      data-testid={`range-eyebrow-${surface}`}
-      className={`font-mono text-micro uppercase tracking-[0.18em] text-text-muted ${className}`}
-    >
-      {`${head}: ${isoToMonthDay(scope.start)} – ${isoToMonthDay(scope.end)}`}
-    </p>
+    <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 ${className}`}>
+      <p
+        ref={labelRef}
+        tabIndex={-1}
+        data-testid={`range-eyebrow-${surface}`}
+        className="font-mono text-micro uppercase tracking-[0.18em] text-text-muted"
+      >
+        {`${head}: ${isoToMonthDay(scope.start)} – ${isoToMonthDay(scope.end)}`}
+      </p>
+      {scope.kind === "selected" && (
+        <button
+          type="button"
+          data-testid={`range-reset-${surface}`}
+          onClick={() => {
+            resetXRange();
+            labelRef.current?.focus();
+          }}
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] factsheet-v2-no-print"
+        >
+          Reset to full history
+        </button>
+      )}
+    </div>
   );
 }
 

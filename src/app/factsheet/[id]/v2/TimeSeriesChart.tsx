@@ -20,6 +20,7 @@ import {
   placeMarksStartLabel,
 } from "@/lib/nav-marks-start";
 import { formatIsoDate } from "../trade-fetch-lines";
+import { isZoomWheel } from "./wheel-zoom";
 
 const VB_W = 880;
 // `left` is the minimum gutter: it grows from the widest y tick label (see `padLeft`).
@@ -723,6 +724,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
 
   const onWheel = useCallback(
     (e: ReactWheelEvent<SVGSVGElement>) => {
+      // D-01: a plain wheel is a page scroll, not a range change.
+      if (!isZoomWheel(e)) return;
       if (e.deltaY === 0) return;
       const svg = svgRef.current;
       if (!svg) return;
@@ -812,12 +815,13 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     [xStart, xEnd, xSpan, n, setXRange, resetXRange],
   );
 
-  // Wheel listener attached non-passively so we can preventDefault on the SVG
-  // (the React onWheel handler is passive in modern React, can't preventDefault).
+  // Wheel listener attached non-passively so a Ctrl/Cmd zoom can cancel the browser's own
+  // page zoom (the React onWheel handler is passive in modern React, can't preventDefault).
+  // A plain wheel is left alone so the page scrolls over the chart (D-01).
   useEffect(() => {
     const el = svgRef.current;
     if (!el) return;
-    const handler = (ev: WheelEvent) => { if (ev.cancelable) ev.preventDefault(); };
+    const handler = (ev: WheelEvent) => { if (isZoomWheel(ev) && ev.cancelable) ev.preventDefault(); };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
   }, []);
@@ -845,7 +849,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     <figure className="flex flex-col gap-2" style={cvStyle}>
       <span id={chartHelpId} className="sr-only">
         Arrow keys pan the timeline. Plus and minus zoom around the center.
-        Home or zero resets the view. Mouse wheel zooms toward the cursor.
+        Home or zero resets the view. Hold Control or Command and turn the mouse wheel to zoom toward the cursor; the wheel alone scrolls the page.
         Drag inside the plot to pan; drag the left axis to scale Y; drag the
         bottom axis to scale X.
       </span>

@@ -7,6 +7,7 @@ import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
+import { isZoomWheel } from "./wheel-zoom";
 
 const VB_W = 880;
 // Desktop viewBox height = today's literal (200). CHART-03 portrait: a taller
@@ -162,6 +163,8 @@ export function HistogramChart() {
 
   const onWheel = useCallback(
     (e: ReactWheelEvent<SVGSVGElement>) => {
+      // D-01: a plain wheel is a page scroll, not a zoom.
+      if (!isZoomWheel(e)) return;
       if (e.deltaY === 0) return;
       const svg = svgRef.current;
       if (!svg) return;
@@ -197,11 +200,12 @@ export function HistogramChart() {
 
   const onDoubleClick = useCallback(() => setZoom(null), []);
 
-  // Non-passive wheel listener so we can preventDefault (mirrors TimeSeriesChart).
+  // Non-passive wheel listener so a Ctrl/Cmd zoom can cancel the browser's own page zoom
+  // (mirrors TimeSeriesChart). A plain wheel is left alone so the page scrolls (D-01).
   useEffect(() => {
     const el = svgRef.current;
     if (!el) return;
-    const handler = (ev: WheelEvent) => { if (ev.cancelable) ev.preventDefault(); };
+    const handler = (ev: WheelEvent) => { if (isZoomWheel(ev) && ev.cancelable) ev.preventDefault(); };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
   }, []);
@@ -245,7 +249,7 @@ export function HistogramChart() {
         )}
       </header>
 
-      <div className="flex gap-3 text-[11px]">
+      <div className="flex flex-wrap gap-3 gap-y-1 text-[11px]">
         <span className="inline-flex items-center gap-1.5">
           <span aria-hidden className="inline-block w-2.5 h-2.5" style={{ background: "var(--color-accent)" }} />
           <span className="text-text-2">{payload.strategyName}</span>
@@ -257,7 +261,7 @@ export function HistogramChart() {
           </span>
         )}
         <span className="ml-auto text-[10px] italic text-text-muted">
-          Wheel to zoom · double-click to reset
+          Ctrl/Cmd + wheel to zoom · double-click to reset
         </span>
       </div>
 

@@ -1,21 +1,16 @@
 "use client";
 
-import { useState } from "react";
 import { usePayload } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, BaseLeverageNote } from "./basis-context";
-import { isoToMonthDay } from "./MetricsColumn";
-import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
-import { pct as pctUnsigned, pctSigned, signed } from "./format";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 /**
  * Batch D analytical panels. Three pieces:
  *   - StyleDriftPanel: real strategy returns split 50/50 + KS test
- *   - PeerPercentilePanel: synthesized cohort (tagged "Demo cohort")
- *   - AllocatorSection: demo portfolios (tagged "Demo portfolios"),
- *     interactive picker that re-renders sleeve + tail metrics
+ *   - PeerPercentilePanel: the scenario blend ranked against the verified universe
+ *   - OwnBookDeltaPanel: the scenario blend against the allocator's own book
  *
- * The demo badges are visual contract: production gates these panels by
- * ingest source (real peer data, real allocator portfolio upload).
+ * The demo allocator section was removed in QUIETVIEW (D-05).
  */
 
 export function StyleDriftPanel() {
@@ -84,23 +79,19 @@ export function StyleDriftPanel() {
 export function PeerPercentilePanel() {
   const payload = usePayload();
   const basis = useBasisOrCash();
-  // Dual-read (Phase 42, PEER-01, ADR-0025): the peer rank lives on the api arm
-  // (`peerPercentile`, demo cohort) OR — for the scenario BLEND — on the csv arm
-  // (`scenarioPeer`, ranked vs the REAL verified universe). The explicit
-  // ingestSource narrow before each field access is required by the B6
-  // discriminated union (a csv read of an api-only field, or vice-versa, is a
-  // compile error). The parent (MetricsColumn) gates which arm reaches here.
-  const isScenario = payload.ingestSource === "csv";
-  const p =
-    payload.ingestSource === "api"
-      ? payload.peerPercentile
-      : (payload.scenarioPeer ?? null);
+  // Phase 193 (QUIETVIEW, D-04): this panel ranks the scenario BLEND against the
+  // REAL verified universe (the csv arm's `scenarioPeer`, Phase 42 PEER-01,
+  // ADR-0025). The synthesized demo-cohort arm was removed: an api factsheet
+  // renders nothing here. The explicit ingestSource narrow before the field read
+  // is required by the B6 discriminated union (a read of a csv-only field on the
+  // api arm is a compile error).
+  const p = payload.ingestSource === "csv" ? (payload.scenarioPeer ?? null) : null;
   if (!p) return null;
   return (
     <section>
       <header className="mb-2 flex items-baseline justify-between border-b border-text pb-1">
         <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">
-          Peer Percentile {!isScenario && <DemoBadge>Demo cohort</DemoBadge>}
+          Peer Percentile
         </h3>
         <span className="text-micro font-mono uppercase tracking-wider text-text-muted">
           N={p.cohortSize}
@@ -111,20 +102,13 @@ export function PeerPercentilePanel() {
         <PercentileBar label="Sortino" pct={p.sortino} />
         <PercentileBar label="Max DD (shallower = better)" pct={p.max_dd} />
       </div>
-      {/* Disclosure copy (PEER-02). The api/demo-cohort path keeps its existing
-          ITALIC synthesized-cohort footnote byte-identical. The scenario BLEND
-          path shows the hypothetical disclosure — PLAIN 10px muted (not italic),
-          U+00B7 middle-dot separators — that the blend is ranked vs the REAL
-          verified universe on the engine's sample/252 basis (42-UI-SPEC §1). */}
-      {isScenario ? (
-        <p className="mt-2 text-micro text-text-muted">
-          hypothetical blend · ranked vs verified strategies · sample/252 basis
-        </p>
-      ) : (
-        <p className="mt-2 text-micro italic text-text-muted">
-          Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
-        </p>
-      )}
+      {/* Disclosure copy (PEER-02): the scenario BLEND shows the hypothetical
+          disclosure — PLAIN 10px muted (not italic), U+00B7 middle-dot separators —
+          that the blend is ranked vs the REAL verified universe on the engine's
+          sample/252 basis (42-UI-SPEC §1). */}
+      <p className="mt-2 text-micro text-text-muted">
+        hypothetical blend · ranked vs verified strategies · sample/252 basis
+      </p>
       {/* F6 (phase 103, no-invented-data): this is a CROSS-STRATEGY panel — the
           rank compares this book against a peer cohort computed on the
           cash-settlement basis. The cohort is NOT recomputed per basis (there is no
@@ -265,169 +249,6 @@ function PercentileBar({ label, pct }: { label: string; pct: number | null }) {
   );
 }
 
-export function AllocatorSection() {
-  const payload = usePayload();
-  // B6 — allocatorPortfolios lives only on the "api" arm; narrow INLINE (not an
-  // early return — the useState below must stay unconditional per rules-of-hooks)
-  // so a csv payload yields null and a csv field-read is a compile error. The
-  // parent already gates this on ingestSource === "api". (RED-TEAM-M2)
-  const portfolios = payload.ingestSource === "api" ? payload.allocatorPortfolios : null;
-  const [active, setActive] = useState(portfolios?.[0]?.key ?? "");
-  if (!portfolios || portfolios.length === 0) return null;
-  const p = portfolios.find(x => x.key === active) ?? portfolios[0];
-  // Phase 169.4 D-70(4): a blend's prices can end before the strategy's last
-  // date (a fixture's last close, a weekday leg on a weekend-ending book); one
-  // dated caption says so. A blend with too few priced days has null figures,
-  // each rendered as the em-dash, never 0.
-  const lastDate = payload.dates[payload.dates.length - 1];
-  const unmeasured = p.cum_ret === null;
-  // Review SFH MEDIUM-2: a failed price read is named as the cause; "too few days"
-  // is kept for a genuine sparse overlap of priced legs.
-  const pricesCaption =
-    p.unavailable_leg != null
-      ? `${p.unavailable_leg} prices are unavailable right now, so this portfolio cannot be measured.`
-      : p.through === null
-        ? "Prices unavailable for this portfolio — too few days with every leg priced to measure it."
-        : p.through !== lastDate
-          ? `Prices through ${isoToMonthDay(p.through)}${
-              unmeasured
-                ? " — too few days with every leg priced to measure this portfolio."
-                : "; figures cover the days every leg is priced."
-            }`
-          : null;
-
-  return (
-    <section className="mt-12 border-t border-border pt-8">
-      <header className="mb-4">
-        <h2 className="text-lg font-semibold uppercase tracking-wider text-text-primary">
-          Allocator Portfolio Analysis <DemoBadge>Demo portfolios</DemoBadge>
-        </h2>
-        <p className="mt-1 text-xs text-text-muted">
-          Pick a sample portfolio to preview sleeve sizing and tail co-movement.
-          Production will accept a CSV upload (<code className="font-mono text-micro">date,nav</code>) or pick
-          from saved allocator portfolios.
-        </p>
-        {/* H-1 (Phase 107 Fable red team): allocator sleeve sizing / tail co-movement is
-            a server-side model run, not re-derivable client-side under a leverage
-            what-if, so it stays at base 1×. Honest per-panel note at L≠1. */}
-        <BaseLeverageNote payload={payload} label="Allocator analysis shown at base 1× leverage" />
-      </header>
-
-      <div className="flex flex-wrap gap-2 mb-2">
-        {portfolios.map(opt => (
-          <button
-            key={opt.key}
-            type="button"
-            onClick={() => setActive(opt.key)}
-            className={
-              "px-3 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border transition-colors " +
-              (opt.key === active
-                ? "bg-accent text-white border-accent"
-                : "bg-surface-subtle text-text-2 border-border hover:bg-surface")
-            }
-          >
-            {opt.name}
-          </button>
-        ))}
-      </div>
-      <p className={"text-micro italic text-text-muted " + (pricesCaption ? "mb-1" : "mb-6")}>{p.composition}</p>
-      {pricesCaption && <p className="text-micro text-text-muted mb-6">{pricesCaption}</p>}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <div>
-          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary border-b border-text pb-1 mb-2">
-            Sleeve Sizing
-          </h3>
-          <p className="text-micro text-text-muted italic mb-2">
-            Target portfolio vol = {(p.vol_target * 100).toFixed(0)}% · search 1% allocation grid for closest blended vol
-          </p>
-          <table className="w-full text-caption">
-            <tbody>
-              <KvRow k="Portfolio Vol (ann)" v={pctUnsigned(p.ann_vol)} />
-              <KvRow k="Correlation with MultiMarket" v={signed(p.corr)} />
-              <KvRow k="Cum. Return (full window)" v={pctSigned(p.cum_ret)} />
-              <KvRow k="Max Drawdown" v={pctUnsigned(p.max_dd)} negative={drawdownTone(p.max_dd, 1, 100) === "negative"} />
-              <KvSep />
-              <KvRow k="Suggested MultiMarket sleeve" v={pctRound(p.sleeve_pct)} accent />
-              <KvRow k="Blended Vol at sleeve %" v={pctUnsigned(p.blend_vol)} />
-            </tbody>
-          </table>
-        </div>
-
-        <div>
-          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary border-b border-text pb-1 mb-2">
-            Tail Co-Movement
-          </h3>
-          <p className="text-micro text-text-muted italic mb-2">
-            Rolling 21-day windows where the portfolio drew ≥ 5% · MultiMarket&apos;s same-window behaviour
-          </p>
-          <table className="w-full text-caption">
-            <tbody>
-              <KvRow k="Stress windows in sample" v={p.tail_count === null ? "—" : String(p.tail_count)} />
-              <KvRow k="MultiMarket mean return" v={pctSigned(p.tail_mm_mean, 2)} />
-              <KvRow k="MultiMarket median return" v={pctSigned(p.tail_mm_median, 2)} />
-              <KvRow k="Windows MM was positive" v={pctRound(p.tail_mm_pos)} accent />
-            </tbody>
-          </table>
-          {p.tail_windows !== null && (
-            <p className="mt-2 text-micro italic text-text-muted">{tailCaption(p.tail_count, p.tail_windows, p.tail_mm_pos)}</p>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/**
- * Review SFH HIGH-2: the tail caption claims only what was measured. It names the
- * windows examined (every leg priced) and says nothing about a window outside
- * them; with none examined it says so rather than asserting the portfolio never
- * drew ≥ 5%.
- */
-function tailCaption(count: number | null, windows: number, pos: number | null): string {
-  // Review round 2 WR-01: with no window examined the count is null (the table
-  // reads "—"), and this sentence is the only claim made.
-  if (windows === 0 || count === null) return "No 21-day window with every leg priced, so no stress window could be measured.";
-  const examined = `${windows} 21-day window${windows === 1 ? "" : "s"} with every leg priced`;
-  if (count === 0) return `The portfolio did not draw ≥ 5% in any of the ${examined}.`;
-  return `${count} of the ${examined} ${count === 1 ? "was a stress window" : "were stress windows"}; MultiMarket was positive in ${pctRound(pos)} of them.`;
-}
-
-function DemoBadge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="ml-2 inline-block px-1.5 py-0.5 text-micro font-mono uppercase tracking-wider align-middle bg-surface-subtle text-text-muted border border-border rounded-sm">
-      {children}
-    </span>
-  );
-}
-
-function KvRow({ k, v, accent, negative }: { k: string; v: string; accent?: boolean; negative?: boolean }) {
-  return (
-    <tr className="border-b border-border/30 last:border-0">
-      <td className="py-1 pr-2 text-text-2">{k}</td>
-      <td
-        className={
-          "py-1 pl-2 text-right font-mono tabular-nums " +
-          (accent ? "text-accent text-body" : negative ? "text-text-primary" : "text-text-primary")
-        }
-        style={negative ? { color: "var(--color-negative, currentColor)" } : undefined}
-      >
-        {v}
-      </td>
-    </tr>
-  );
-}
-
-function KvSep() {
-  return (
-    <tr>
-      <td colSpan={2} className="py-1">
-        <hr className="border-t border-border" />
-      </td>
-    </tr>
-  );
-}
-
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
 function monthYear(iso: string): string {
@@ -451,13 +272,4 @@ function fmtDelta(a: number, b: number, kind: DriftKind): string {
   const d = b - a;
   if (kind === "pct" || kind === "pctSigned") return formatFixedSigned(d, { dp: 1, scale: 100, suffix: "pp", plus: true });
   return formatFixedSigned(d, { dp: 2, plus: true });
-}
-
-// Phase 169.4 D-70(4): an allocator figure is null when its blend cannot be
-// measured; null or non-finite renders the em-dash (DESIGN.md), never 0. The
-// signed and unsigned percent and the signed ratio come from ./format (170.6 D-05).
-
-function pctRound(v: number | null): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return `${Math.round(v * 100)}%`;
 }
