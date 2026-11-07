@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.25.2] - 2026-11-07 — records: close RESIDCHURN 202
+
+Phase 202 RESIDCHURN closes: 59 commits on its branch, grouped by theme below (planning and decision records, eight plans and their summaries, the capture kit and attribution, three review rounds, verification and security, and the closing and booking commits). Records only, no code, no analytics-service, no supabase.
+
+### Added
+- Phase 202 planning records on `main`: context, research, patterns, validation, the eight plans and summaries, `202-REPORT.md`, three review rounds with `202-REVIEW.md` and `202-REVIEW-DISPOSITION.md`, `202-SECURITY.md` and `202-VERIFICATION.md`.
+- Phase 203 B3TRUNC, booked with `/gsd-phase add` after the founder's D-17: why book b3 carries `window_truncated`. Its phase directory, ROADMAP section, overview bullet and Progress row.
+- TODOS `202-MT5-CLOCK-LEAD-01`: confirm or rule out the MT5 server-clock switch of 2026-11-03 as the cause of the (d) values (unrouted, founder to assign). The four c0 to c1 scopes were written by different worker commits on the two sides, so the pair is not code-identical.
+- TODOS `202-KIT-RESIDUALS-01`: four review survivors in the untracked capture kit (a skipped subject named as re-derived, a fixed `reason=` token, finished versus wrote rows, scopes with no job row invisible to coverage), to fix before the kit is reused. No Phase 202 number depends on them.
+
+### Changed
+- ROADMAP: Phase 202 ticked complete with its Progress row dated 2026-11-07, 192 and 193 kept Complete, 195 unchanged, and the Phase 203 section added. REQUIREMENTS: RESID-01 satisfied; RESID-02 stays Pending, mapped to Phase 202 and Phase 203, because the `window_truncated` half is Phase 203's.
+- STATE: 192, 193 and 202 complete, 195 TRIM executing in parallel, 203 B3TRUNC and 194 FIGURETRUTH next to discuss, 196-201 waiting on dependencies; progress 3 of 12 phases. `state.json` agrees.
+
+### Notes
+- Attribution of the 1214 values 188 left moved, of record (D-15): a 0, b 1142, c 0, d 72. The pinned script's own reading (a 0, b 36, c 0, d 1178) is kept printed as lineage and the script was not edited.
+- Across the deploy-free nightly, 14 of 54 scopes moved on stored days. Ten scopes (1106 values) moved with identical code on both sides, on a constant additive offset after the inputs changed. For the other four (87 values, plus 29 vanished rows on one) the writing code differs between the captures, so they are not a clean nightly.
+- Book b3: `out_of_window_flow` is correct behaviour and `window_truncated` stays unexplained only because of book b6's disagreeing line. b6's curve counts one key (D-14 finding).
+- Founder decisions, 2026-11-07. D-14: intended, no flag. D-15: use the plan's wording, recorded as a founder DEVIATION from the pinned rule. D-16: do not widen bucket (c), book the MT5 clock lead. D-17: do not re-open b3 inside 202, book the investigation as Phase 203.
+- Prediction 4 is untested, not held: the three MT5 scopes were not re-derived between the captures.
+- Limits recorded in the report: the physical origin of the NAV offset is not established, no strategy derive was replayed, and PROD's MCP session renders floats at 15 significant digits, so equality claims can only under-count a change.
+- Verification passed (4 of 4); security SECURED (36 of 36, 0 open). `phase complete 202` ran on the branch. All PROD reads were read-only.
+
 ## [0.133.25.1] - 2026-11-07 — records: close PUBLICTRUTH 192 and QUIETVIEW 193
 
 ### Added

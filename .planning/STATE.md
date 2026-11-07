@@ -5,17 +5,17 @@ milestone_name: UX — trustworthy, navigable, lean
 current_phase: 194
 current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 status: planning
-stopped_at: Phases 192 and 193 complete; 202 shipping, 195 executing, 194 next to discuss
+stopped_at: Phases 192, 193 and 202 complete; 195 executing, 203 and 194 next to discuss
 last_updated: "2026-11-07T10:45:45.791Z"
 last_activity: 2026-11-07
-last_activity_desc: Phase 193 complete (PR #1211 merged, UAT passed); 194 next to discuss
+last_activity_desc: Phase 202 complete (verified); 203 and 194 next to discuss
 state_head: 7f667bb2929414755db5ed3f5517c9fc39068188
 progress:
-  total_phases: 11
-  completed_phases: 2
-  total_plans: 22
-  completed_plans: 22
-  percent: 18
+  total_phases: 12
+  completed_phases: 3
+  total_plans: 30
+  completed_plans: 30
+  percent: 25
 ---
 
 ## ⭐ STATE lineage
@@ -32,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-06)
 
-**Current focus:** Phase 192 — PUBLICTRUTH — the public site and the demo tell a visitor one true story (executing). 202 RESIDCHURN, the Phase 188 SC-4 residual follow-up (D-13), runs in parallel.
+**Current focus:** Phase 192 — PUBLICTRUTH — the public site and the demo tell a visitor one true story (executing). 202 RESIDCHURN is complete.
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 192 (PUBLICTRUTH) and 193 (QUIETVIEW) are complete; 194 (FIGURETRUTH) is next to discuss
-Plan: 202 RESIDCHURN complete on its branch and shipping next; 195 TRIM executing in parallel; 203 B3TRUNC booked
-Status: Phases 192 and 193 complete (PRs #1210 and #1211 merged, UAT passed 2026-11-07). 194 is next to discuss. 196-201 wait on their dependencies.
-Last activity: 2026-11-07 — Phase 193 complete
-Progress: [██░░░░░░░░] 18% (2 of 11 phases)
+Phase: 192 (PUBLICTRUTH), 193 (QUIETVIEW) and 202 (RESIDCHURN) are complete; 195 (TRIM) is executing in parallel; 203 (B3TRUNC) and 194 (FIGURETRUTH) are next to discuss
+Plan: 202 RESIDCHURN verified passed (4/4) and security secured (0 open); RESID-02's window_truncated half is Phase 203 B3TRUNC
+Status: Phases 192, 193 and 202 complete. 195 TRIM executing. 203 B3TRUNC and 194 FIGURETRUTH are next to discuss. 196-201 wait on their dependencies.
+Last activity: 2026-11-07 — Phase 202 complete
+Progress: [███░░░░░░░] 25% (3 of 12 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -383,6 +383,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P08 | 9 min | 2 tasks | 4 files |
 | Phase 170 P09 | 18 min | 3 tasks | 6 files |
 | Phase 170 P10 | 13 min | 2 tasks | 9 files |
+| Phase 202 P01 | 70 min | 3 tasks | 5 files |
+| Phase 202 P02 | 15 min | 3 tasks | 7 files |
+| Phase 202 P03 | 25 min | 2 tasks | 1 files |
+| Phase 202 P06 | 7 min | 3 tasks | 1 files |
+| Phase 202 P05 | 25 min | 2 tasks | 1 files |
+| Phase 202 P07 | 25min | 3 tasks | 2 files |
+| Phase 202 P08 | 15 min | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -667,6 +674,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2.1.1.1.1 inserted after Phase 167.2.1.1.1: MARKSOURCE: one stated mark rule on every path; the two allocator equity curves agree while positions are open; last-bar uPnL spike gone (founder 2026-10-22, "Or several phases")
 - Phase 167.2.1.1.2 inserted after Phase 167.2.1.1: ACCTREBUILD: a Bybit-backed account's past allocation history is rebuilt whole-account or refused; OKX-holding accounts get a 90-day rebuild (founder 2026-10-22, split from UPNLVENUES D-04, "Add an OKX 90-day path", "Split Phases if Necessary")
 - Phase 167.2.1.1.2.1 inserted after Phase 167.2.1.1.2: TRADEPAGES: the allocator history rebuild reads every trade page on OKX and Bybit (founder 2026-10-23, from ACCTREBUILD SC-3; data-integrity) (URGENT)
+- Phase 203 added (2026-11-07, /gsd-phase add, founder D-17 "book the investigation as a phase"): B3TRUNC, from RESIDCHURN plan 07 (why book b3 carries window_truncated)
 
 ### Decisions
 
@@ -1030,6 +1038,17 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.9.3]: 164.9.3-04: each CLAIMPAIR twin mutates ONE body and ONE partition (OR TRUE inserted before the pre-rank NOT EXISTS, body chosen by measured nth) and stands down only that body-by-partition anchor; the VAC-04 acks are derived locally from --diff-bodies against origin/main and were cross-checked read-only against the PR's VAC-04 PROD MATCH hashes
 - [Phase 164.9.3]: 164.9.3-05: the mutation runner and pg-lane run WITHOUT the shared lane lock (coordinator correction: the lock guards only the local-stack lane); both floors were pushed to measured+1 in ONE full run, whose two defects named each floor
 - [Phase 164.9.3]: 164.9.3-06: the release is a MINOR bump to 0.108.0.0 (the migration changes the PROD claim path and auto-applies on merge); SC3 stays OPEN as a ship precondition in 164.9.3-MIGRATION-REVIEW.md (three reviewers before merge)
+- [Phase 202]: 202-02: offset stretches are cut at the key mark day S (realized-basis era only); the literal reading is printed beside it
+- [Phase 202]: 202-02: a strategy without a strategy-to-key map is unlinked and lands in (d) until plan 05 re-runs with strat_keys
+- [Phase 202]: 202-02: final_attribution.py pinned at sha256 prefix 8a62ca3b1215; contradicts is judged for (b) scopes only and before unbound
+- [Phase 202]: 202-03: b3 out_of_window_flow is correct behaviour (k15 bybit, not full-history; counterfactual still blocks); window_truncated left unexplained by the plan rule because b6's prediction disagrees with its stored reason; decision on how to read b6 is open
+- [Phase 202]: 202-06: groups.json is a list of lists with the group representative first (final_attribution.py's parse shape); all 14 moved scopes are singleton series, so 14 whole-scope row reads
+- [Phase 202]: 202-06: c1 pair valid by the D-04 amended content rule; 14 of 54 scopes and 6 of 7 books moved across a deploy-free nightly; prediction 1 failed (s2, s5, s8, s13 outside the set), 4 and 5 held
+- [Phase 202]: 202-05: no commit between the two worker commits meets the evidence rule for s6, s9 and s10 (evidence.json is empty), so they stay (d); s1, s15 and s16 pass the offset test and move to (b): b 1142, d 72
+- [Phase 202]: 202-05: lead outside the rule, the worker MT5 server clock went from fixed 7200 to the US rule on 2026-11-03; every MT5 strategy re-derived across it moved (s6, s9, s10 and s2, s5, s8, s13); bucket wording for a recorded worker setting needs a founder decision
+- [Phase 202]: 202-07: final_attribution.py (hash 8a62ca3b1215) run unchanged gives b 36, d 1178 of the 1214; the alternative reading with undefined one-day stretches not counted gives b 1142, d 72. Both reported; the founder then chose the alternative (D-15), so the attribution of record is a 0, b 1142, c 0, d 72 and the pinned reading is lineage.
+- [Phase 202]: 202-07: D-12 routed by the plan's rule to reopened=yes reason=component_disagrees (b6 truncation line, plan 03 rule unamended per D-14); returned to the founder as a checkpoint. D-14: b6's curve counts k18 alone, named at function level only.
+- [Phase 202]: D-14 closed to D-17 (founder 2026-11-07): D-14 closed as intended behaviour, no flag (b6 and b5 omit unknown-account revoked Bybit keys by `departed_history_inclusion`); D-15 an undefined one-day stretch is not a fail (b 1142, d 72 of record); D-16 bucket (c) is not widened, the MT5 clock lead is booked as TODOS 202-MT5-CLOCK-LEAD-01; D-17 b3 is not re-opened, its `window_truncated` investigation is Phase 203 B3TRUNC
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1735,7 +1754,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-06T20:36:19.383Z
-**Stopped At:** Phase 193 complete, ready to plan Phase 194
+**Stopped At:** Phase 202 complete (verified); 203 B3TRUNC and 194 next to discuss
 **Resume File:** .planning/phases/192-publictruth-the-public-site-and-the-demo-tell-a-visitor-one/192-VERIFICATION.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
