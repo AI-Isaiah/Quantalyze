@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.26.1] - 2026-11-07 — security: dompurify past three CRITICAL advisories; the npm-audit gate is green again
+
+Security hotfix. Main's scheduled "Nightly probes" run `42382490370` went red on its `npm-audit` job (`npm audit --omit=dev --audit-level=high`) once three new DOMPurify advisories were published as CRITICAL. A red check on main's head can block a deploy of that SHA, so this ships on its own. Two commits on `fix/audit-dompurify`: the lockfile fix and this release commit. Only `package-lock.json`, `VERSION`, `package.json` (version field only) and this file change. No source, migration, `supabase/**` or `.planning/**` edit.
+
+### Security
+- **dompurify 3.4.16 -> 3.4.17 (CRITICAL).** Fixes GHSA-cg2g-xh64-v4q7 (`SAFE_FOR_TEMPLATES` bypass: split template expressions survive in attached shadow-root content on DOM output modes), GHSA-mrv2-3pqr-j5jr (`IN_PLACE`: a hook that removes a parent or sibling leaves the detached subtree's event handlers armed, an incomplete fix for GHSA-p98j-92pf-mc4p) and GHSA-c6gr-qvv4-5v3f (the SMIL `attributeName=href` guard is skipped under `PARSER_MEDIA_TYPE` `application/xhtml+xml`). dompurify is not a direct dependency. It arrives only through `posthog-js`, and no file under `src/` imports it, so `package.json`'s dependency ranges are unchanged.
+- **glob 13.0.6 -> 14.0.4 and its nested minimatch 10.2.6 -> 11.0.5 (moderate).** Fixes GHSA-3g3m-2fjr-6pw4 (glob's AbortSignal cancellation bypass) and GHSA-g3hv-75wg-m249 (minimatch globparts amplification). The only way to reach a patched glob is through `@sentry/bundler-plugins`, so the `@sentry/*` family moves 11.8.0 -> 11.11.0 (`@sentry/conventions` 0.27.0 -> 0.30.0, `path-scurry` 2.0.2 -> 3.0.0, new `@isaacs/nonrecursive-glob-match` 1.1.0). That is a minor bump inside the existing `^11.8.0` range.
+- **ip-address 10.7.3 -> 10.7.6 (moderate).** Fixes GHSA-rxp7-6hxx-x8q5 (quadratic-time zone-identifier match in `Address6`).
+
+### Changed
+- **The lockfile drops 12 orphaned optional-peer entries** under `puppeteer-core/node_modules` (`proxy-agent`, `pac-proxy-agent`, `socks-proxy-agent` and their dependencies), plus top-level `proxy-agent-negotiate` and `quickjs-wasi`. `npm ls` already marked them extraneous, and puppeteer-core 25.16.0 declares none of them. The lockfile's root `version`, which had gone stale at 0.133.11.4, now reads 0.133.26.1.
+
+### Notes
+- Run as `npm audit fix --omit=dev`, never `--force`, so dev-only advisories and their bumps stay out of this hotfix. `npm audit --omit=dev --audit-level=high` now reports `found 0 vulnerabilities`, exit 0. The full audit, dev dependencies included, still lists dev-only advisories (`body-parser`, `extract-zip`, `qs`, `uuid`, `zod`, and `minimatch` under `@typescript-eslint`). The gate does not read those, and this ship does not touch them.
+- Neither banned package from the project rules shows up anywhere in `package-lock.json`.
+
 ## [0.133.26.0] - 2026-11-07 — TRIM 195: /portfolios, Decks, Tweaks, dark mode and density are gone; one disclaimer per page
 
 Phase 195 TRIM (LEAN-03, LEAN-07). 22 code commits on `feat/195-trim`, grouped below: retired routes, removed controls, dark mode, duplicate surfaces, deleted components, the trim guard, and the review fixes. No migration, no `supabase/**` edit, no row touched.
