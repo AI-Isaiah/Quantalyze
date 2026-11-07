@@ -103,7 +103,7 @@ const eslintConfig = defineConfig([
       // keep hammering a deployment the breaker has already judged down.
       //
       // Clean baseline, PROVEN rather than assumed: after waves 1-3 the
-      // whole-repo scan for the env var returns comment-only hits plus the four
+      // whole-repo scan for the env var returns comment-only hits plus the three
       // allowlisted files below, so "error" costs nothing today and fails CI by
       // construction on a tenth seam. This is the ONLY mechanism that keeps
       // SEAM-01 true after the merge — the third seam existed for months
@@ -112,7 +112,7 @@ const eslintConfig = defineConfig([
     },
   },
   // SEAM-01 allowlist — the CLOSED set of files that may legitimately hold the
-  // analytics base URL and fetch it directly. FOUR paths, and adding a fifth is
+  // analytics base URL and fetch it directly. THREE paths, and adding a fourth is
   // the wrong fix for a lint failure: a new violation means a new seam call
   // site, which belongs in the core (threat T-140-26). Every entry corresponds
   // to the core itself or to a documented SEAM_EXCLUSIONS row in
@@ -124,11 +124,10 @@ const eslintConfig = defineConfig([
       // Bespoke SSE/heartbeat route with client-abort propagation the core does
       // not model. Pins its own maxDuration.
       "src/app/api/debug-key-flow/**",
-      // Health warmers. These must NOT consume breaker failure budget (a cold
+      // Health warmer. This must NOT consume breaker failure budget (a cold
       // /health probe failing IS the normal case) and must NOT be blocked by an
       // open breaker, because a successful /health is the recovery signal.
       "src/app/api/cron/warm-analytics/**",
-      "src/lib/warmup-analytics.ts",
     ],
     rules: { "quantalyze/no-raw-analytics-fetch": "off" },
   },
@@ -256,15 +255,13 @@ const eslintConfig = defineConfig([
       // Phase 53 (v1.4) — Plan 53-03 marketing/security body migration.
       // SCOPED to the PAGE BODIES only (per-file, mirroring the allocations/
       // factsheet per-file precedent above): the shared P51 (marketing) shell —
-      // legal/layout.tsx, demo/layout.tsx — and the for-quants component files
+      // legal/layout.tsx — and the for-quants component files
       // (RequestCallModal.tsx, ForQuantsCtas.tsx) still carry raw-font debt and
       // stay at the repo-wide `warn` (deferred to a later 53/54 surface). The
       // /security tree is its own clean glob (page.tsx is the only file).
       "src/app/(marketing)/security/**",
       "src/app/(marketing)/page.tsx",
       "src/app/(marketing)/for-quants/page.tsx",
-      "src/app/(marketing)/demo/page.tsx",
-      "src/app/(marketing)/demo/founder-view/page.tsx",
       "src/app/(marketing)/legal/disclaimer/page.tsx",
       "src/app/(marketing)/legal/privacy/page.tsx",
       "src/app/(marketing)/legal/terms/page.tsx",

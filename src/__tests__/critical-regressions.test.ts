@@ -202,7 +202,6 @@ describe("Critical regression guards", () => {
       "src/app/api/factsheet/[id]/pdf/route.ts",
       "src/app/api/factsheet/[id]/tearsheet.pdf/route.ts",
       "src/app/api/portfolio-pdf/[id]/route.ts",
-      "src/app/api/demo/portfolio-pdf/[id]/route.ts",
     ];
 
     for (const route of pdfRoutes) {
@@ -920,6 +919,29 @@ describe("Critical regression guards", () => {
         );
       });
 
+      // Phase 192 round-2 SFH-3: `.lighthouseci/` is hidden too. With the
+      // default exclusion and `if-no-files-found: ignore` the lighthouse
+      // upload went green while uploading nothing, and lighthouserc.json
+      // tells readers to read the measured floor from this artifact.
+      it("ci.yml lighthouse-mobile report upload must include hidden files and fail on no files", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const step = findOrFail(
+          src,
+          /-\s*name:\s*Upload Lighthouse reports[\s\S]*?(?=\n\s{0,6}-\s|\n[a-z]|$)/,
+          "ci.yml: lighthouse-mobile upload step name not found",
+        );
+        expectMatch(
+          step,
+          /include-hidden-files:\s*true/,
+          "lighthouse-mobile upload step missing include-hidden-files: true — .lighthouseci/ silently excluded",
+        );
+        expectMatch(
+          step,
+          /if-no-files-found:\s*error/,
+          "lighthouse-mobile upload step must set if-no-files-found: error — an empty upload must not pass green",
+        );
+      });
+
       // retro-PR188-F2 (pr-test-analyzer #41, HIGH/9) + F6/F7
       // (red-team #26/#37, HIGH/8-9): the playwright-report artifact
       // upload MUST be gated so it does not fire on the seed-gated path
@@ -1042,15 +1064,14 @@ describe("Critical regression guards", () => {
     // the CI command or guts the redirect assertion inside it.
     describe("H-1024 — placeholder-env e2e lane covers protected-route redirect", () => {
       // The UNCONDITIONAL invocation is the placeholder-env "Start server
-      // and run Playwright" step's normal command. As of v0.35.0.22 that
-      // step carries a workflow_dispatch bake branch
-      // (demo-screenshot --update-snapshots) BEFORE the normal command, so
-      // the FIRST `npx playwright test e2e/...` line is no longer the
-      // unconditional lane. Anchor on e2e/smoke.spec.ts: it appears ONLY on
-      // the normal unconditional command — never on a single-spec bake
-      // branch or the seed-gated lane (which is a separate, vars-gated
-      // step) — so this still isolates the right command AND a
-      // seed-gated-only addition of auth coverage can't satisfy this test.
+      // and run Playwright" step's normal command. That step used to carry
+      // a workflow_dispatch bake branch before the normal command (retired
+      // with the demo in Phase 192), and the anchor below was written for
+      // it. Anchor on e2e/smoke.spec.ts: it still separates the
+      // unconditional command from any single-spec bake branch and from the
+      // seed-gated lane (which is a separate, vars-gated step) — so this
+      // isolates the right command AND a seed-gated-only addition of auth
+      // coverage can't satisfy this test.
       function unconditionalPlaywrightCmd(src: string): string {
         return findOrFail(
           src,
@@ -2742,39 +2763,6 @@ describe("Critical regression guards", () => {
           ).toBe(true);
         });
       }
-    });
-
-    // B24 — nightly fail-loud canary guard (H-1026 / B23 M-0849). The
-    // demo-pdf probe's missing-DEMO_PDF_SECRET branch must `::error::` +
-    // `exit 1` so the `if: failure()` issue path fires. A silent `exit 0`
-    // there re-opens the regression this workflow exists to catch (a
-    // rotated/lost secret silently disabling the cold-start canary). Pin the
-    // fail-loud contract at the source-text level so a rebase can't quietly
-    // revert it.
-    describe("nightly demo-pdf canary fails loud on missing DEMO_PDF_SECRET", () => {
-      it("nightly.yml missing-secret guard emits ::error:: + exit 1, never exit 0", () => {
-        const src = readText(".github/workflows/nightly.yml");
-        const guard = findOrFail(
-          src,
-          /if \[ -z "\$DEMO_PDF_SECRET" \]; then([\s\S]*?)\n\s*fi/m,
-          "nightly.yml: DEMO_PDF_SECRET missing-secret guard block not found",
-        );
-        expectMatch(
-          guard,
-          /::error::/,
-          "nightly DEMO_PDF_SECRET guard must emit ::error:: (fail loud, not ::warning::)",
-        );
-        expectMatch(
-          guard,
-          /exit 1/,
-          "nightly DEMO_PDF_SECRET guard must `exit 1` so the if: failure() issue path fires",
-        );
-        expectNoMatch(
-          guard,
-          /exit 0/,
-          "nightly DEMO_PDF_SECRET guard must NOT `exit 0` — silent-green regression (H-1026 / M-0849)",
-        );
-      });
     });
 
     // retro-PR193-M-4 (migration-reviewer MEDIUM/8): the

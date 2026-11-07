@@ -8,11 +8,10 @@ import {
   formatDecompositionTooltip,
 } from "@/app/(dashboard)/allocations/widgets/attribution/AlphaBetaDecomposition";
 import { formatPcrPercent } from "@/app/(dashboard)/allocations/components/ScenarioComposer";
-import { WhatWedDoCard } from "@/components/portfolio/WhatWedDoCard";
 import { ReplacementCard } from "@/components/portfolio/ReplacementCard";
 import { formatRiskShareTooltip } from "@/components/portfolio/RiskAttribution";
 import type { ComputedMetrics } from "@/lib/scenario";
-import type { BridgeCandidate, OptimizerSuggestionRow } from "@/lib/types";
+import type { BridgeCandidate } from "@/lib/types";
 
 /**
  * Phase 170.6 plan 12 (D-02, D-03, D-05) — the figures the single-source guard found that
@@ -201,38 +200,8 @@ describe("KpiStrip delta pill at the noise floor keeps its direction word and co
 });
 
 // ---------------------------------------------------------------------------
-// Portfolio: the optimizer score and the Bridge composite score
+// Portfolio: the Bridge composite score
 // ---------------------------------------------------------------------------
-
-function suggestion(partial: Partial<OptimizerSuggestionRow> = {}): OptimizerSuggestionRow {
-  return {
-    strategy_id: "x",
-    strategy_name: "Vega Volatility Harvester",
-    corr_with_portfolio: 0.08,
-    sharpe_lift: 0.18,
-    dd_improvement: 0.012,
-    score: 0.142,
-    ...partial,
-  };
-}
-
-describe("WhatWedDoCard optimizer score follows the rounded sign (D-02)", () => {
-  it("a score of -0.003 prints 0.00, not -0.00", () => {
-    render(<WhatWedDoCard suggestions={[suggestion({ score: -0.003 })]} />);
-    expect(screen.getByText(/Optimizer score 0\.00 on the/)).toBeInTheDocument();
-    expect(screen.queryByText(/-0\.00/)).toBeNull();
-  });
-
-  it("an ordinary score keeps its digits: 0.142 prints 0.14", () => {
-    render(<WhatWedDoCard suggestions={[suggestion({ score: 0.142 })]} />);
-    expect(screen.getByText(/Optimizer score 0\.14 on the/)).toBeInTheDocument();
-  });
-
-  it("a score that is negative at the printed precision keeps its minus: -0.142 prints -0.14", () => {
-    render(<WhatWedDoCard suggestions={[suggestion({ score: -0.142 })]} />);
-    expect(screen.getByText(/Optimizer score -0\.14 on the/)).toBeInTheDocument();
-  });
-});
 
 function candidate(partial: Partial<BridgeCandidate> = {}): BridgeCandidate {
   return {

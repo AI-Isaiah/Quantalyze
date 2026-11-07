@@ -20,10 +20,7 @@ import {
 } from "./AttributionBar";
 import { RETURN_FORMATTER } from "./PortfolioEquityCurve";
 import { CorrelationHeatmap, correlationBg } from "./CorrelationHeatmap";
-import { WinnersLosersStrip } from "./WinnersLosersStrip";
-import { EditorialHero } from "./EditorialHero";
-import { WhatWedDoCard } from "./WhatWedDoCard";
-import type { BridgeCandidate, OptimizerSuggestionRow, AttributionRow, SimulatorCandidate } from "@/lib/types";
+import type { BridgeCandidate, SimulatorCandidate } from "@/lib/types";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn(), push: vi.fn(), replace: vi.fn() }),
@@ -317,107 +314,5 @@ describe("170.6-09 CorrelationHeatmap - cell text and aria-label on the rounded 
       />,
     );
     expect(screen.getByLabelText("Alpha and Beta: -0.35 correlation").textContent).toBe("-0.35");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Task 3 - WinnersLosersStrip, EditorialHero, WhatWedDoCard
-// ---------------------------------------------------------------------------
-
-function attrRow(id: string, name: string, contribution: number): AttributionRow {
-  return { strategy_id: id, strategy_name: name, contribution, allocation_effect: 0 };
-}
-
-describe("170.6-09 WinnersLosersStrip - tone from the rounded contribution", () => {
-  // The strip drops an exact-zero contribution (computeWinnersLosers), so a rounded zero reaches
-  // it only as a tiny non-zero value, on either side.
-  it("a contribution of -0.00004 prints '0.00%' with neither green nor red", () => {
-    render(<WinnersLosersStrip attribution={[attrRow("a", "Alpha", -0.00004)]} />);
-    const cell = screen.getByText("0.00%");
-    expect(cell.className).not.toContain("text-positive");
-    expect(cell.className).not.toContain("text-negative");
-    expect(cell.className).toContain("text-text-primary");
-  });
-
-  it("a contribution of +0.00004 prints '0.00%' with neither green nor red", () => {
-    render(<WinnersLosersStrip attribution={[attrRow("a", "Alpha", 0.00004)]} />);
-    const cell = screen.getByText("0.00%");
-    expect(cell.className).not.toContain("text-positive");
-    expect(cell.className).not.toContain("text-negative");
-  });
-
-  it("0.012 is green and -0.012 is red", () => {
-    render(
-      <WinnersLosersStrip attribution={[attrRow("a", "Alpha", 0.012), attrRow("b", "Beta", -0.012)]} />,
-    );
-    expect(screen.getByText("+1.20%").className).toContain("text-positive");
-    expect(screen.getByText("-1.20%").className).toContain("text-negative");
-  });
-});
-
-describe("170.6-09 EditorialHero - drawdown tone (D-04)", () => {
-  function hero(portfolioMaxDrawdown: number | null, benchmarkMaxDrawdown: number | null = null) {
-    return render(
-      <EditorialHero
-        headline="x"
-        numbers={{ portfolioTwr: null, benchmarkTwr: null, portfolioMaxDrawdown, benchmarkMaxDrawdown }}
-      />,
-    );
-  }
-
-  it("a drawdown of -0.00004 prints '0.00%' and is not red", () => {
-    hero(-0.00004);
-    const dd = screen.getByText("0.00%");
-    expect(dd.className).not.toContain("text-negative");
-    expect(dd.className).toContain("text-text-primary");
-  });
-
-  it("a drawdown of exactly 0 is not red", () => {
-    hero(0);
-    expect(screen.getByText("0.00%").className).not.toContain("text-negative");
-  });
-
-  it("a drawdown of -0.0342 is red", () => {
-    hero(-0.0342);
-    expect(screen.getByText("-3.42%").className).toContain("text-negative");
-  });
-
-  it("a missing drawdown stays muted", () => {
-    hero(-0.0342, null);
-    const dashes = screen.getAllByText("—");
-    expect(dashes.length).toBeGreaterThan(0);
-    for (const d of dashes) expect(d.className).toContain("text-text-muted");
-  });
-
-  it("a positive drawdown value (bad data) is never green", () => {
-    hero(0.05);
-    const dd = screen.getByText("+5.00%");
-    expect(dd.className).not.toContain("text-positive");
-    expect(dd.className).not.toContain("text-negative");
-  });
-});
-
-describe("170.6-09 WhatWedDoCard - correlation target", () => {
-  function sug(partial: Partial<OptimizerSuggestionRow> = {}): OptimizerSuggestionRow {
-    return {
-      strategy_id: "x",
-      strategy_name: "Vega Volatility Harvester",
-      corr_with_portfolio: 0.08,
-      sharpe_lift: 0.18,
-      dd_improvement: 0.012,
-      score: 0.142,
-      ...partial,
-    };
-  }
-
-  it("a correlation target of -0.004 reads 'toward 0.00', never '-0.00'", () => {
-    const { container } = render(<WhatWedDoCard suggestions={[sug({ corr_with_portfolio: -0.004 })]} />);
-    expect(container.textContent).toContain("reduce average correlation toward 0.00");
-    expect(container.textContent).not.toContain("-0.00");
-  });
-
-  it("a non-zero negative correlation target keeps its sign", () => {
-    const { container } = render(<WhatWedDoCard suggestions={[sug({ corr_with_portfolio: -0.25 })]} />);
-    expect(container.textContent).toContain("reduce average correlation toward -0.25");
   });
 });

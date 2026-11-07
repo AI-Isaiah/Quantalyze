@@ -8,9 +8,9 @@ import {
 /**
  * Regression tests for the Playwright console error filter.
  *
- * These tests pin down the specific bug that broke `e2e/demo-founder-view.spec.ts`
- * in CI on commit 0089cee: the original spec captured only `msg.text()` and tried
- * to exclude `/api/demo/match` by substring-matching the text. But Chrome's
+ * These tests pin down the specific bug that broke a Playwright spec in CI on
+ * commit 0089cee: the original spec captured only `msg.text()` and tried to
+ * exclude `/api/example/flaky` by substring-matching the text. But Chrome's
  * browser-level resource errors emit the text `"Failed to load resource: the
  * server responded with a status of 500 (...)"` and the URL lives separately
  * on `msg.location().url`. The filter was a silent no-op for exactly the case
@@ -38,7 +38,7 @@ describe("isUnexpectedConsoleError", () => {
   it("filters out Hydration warnings via ignoreTextIncludes", () => {
     const err: CapturedConsoleError = {
       text: "Hydration failed because the initial UI does not match",
-      url: "http://localhost:3000/demo",
+      url: "http://localhost:3000/some-page",
     };
     expect(
       isUnexpectedConsoleError(err, {
@@ -62,17 +62,17 @@ describe("isUnexpectedConsoleError", () => {
   // ---- THE BUG THAT BROKE CI ----
   // These cases pin down the regression. Chrome emits a generic
   // "Failed to load resource" text that has NO trace of the URL. The
-  // original filter substring-matched the text with "/api/demo/match"
+  // original filter substring-matched the text with "/api/example/flaky"
   // and that never hit because the URL was on .location().url.
   describe("browser resource error regression (commit 0089cee)", () => {
-    it("filters a 500 on /api/demo/match when the URL field matches", () => {
+    it("filters a 500 on /api/example/flaky when the URL field matches", () => {
       const err: CapturedConsoleError = {
         text: CHROME_500_TEXT,
-        url: "http://localhost:3000/api/demo/match/11111111-1111-4111-8111-111111111111",
+        url: "http://localhost:3000/api/example/flaky/11111111-1111-4111-8111-111111111111",
       };
       expect(
         isUnexpectedConsoleError(err, {
-          ignoreTextOrUrlIncludes: ["/api/demo/match"],
+          ignoreTextOrUrlIncludes: ["/api/example/flaky"],
         }),
       ).toBe(false);
     });
@@ -84,11 +84,11 @@ describe("isUnexpectedConsoleError", () => {
       // is redundant" and removing the URL check.
       const err: CapturedConsoleError = {
         text: CHROME_500_TEXT,
-        url: "http://localhost:3000/api/demo/match/11111111-1111-4111-8111-111111111111",
+        url: "http://localhost:3000/api/example/flaky/11111111-1111-4111-8111-111111111111",
       };
       expect(
         isUnexpectedConsoleError(err, {
-          ignoreTextIncludes: ["/api/demo/match"],
+          ignoreTextIncludes: ["/api/example/flaky"],
         }),
       ).toBe(true); // <-- the bug: treated as unexpected
     });
@@ -98,12 +98,12 @@ describe("isUnexpectedConsoleError", () => {
       // path produce a single console error whose text DOES contain the
       // URL. The ignoreTextOrUrlIncludes option handles both cases.
       const err: CapturedConsoleError = {
-        text: "Failed to fetch /api/demo/match/some-id: NetworkError",
-        url: "http://localhost:3000/demo/founder-view",
+        text: "Failed to fetch /api/example/flaky/some-id: NetworkError",
+        url: "http://localhost:3000/some-page",
       };
       expect(
         isUnexpectedConsoleError(err, {
-          ignoreTextOrUrlIncludes: ["/api/demo/match"],
+          ignoreTextOrUrlIncludes: ["/api/example/flaky"],
         }),
       ).toBe(false);
     });
@@ -112,11 +112,11 @@ describe("isUnexpectedConsoleError", () => {
   it("combines ignoreTextIncludes and ignoreTextOrUrlIncludes", () => {
     const errs: CapturedConsoleError[] = [
       // Expected: hydration noise
-      { text: "Hydration mismatch at div", url: "http://localhost:3000/demo" },
-      // Expected: /api/demo/match 500 (URL match)
+      { text: "Hydration mismatch at div", url: "http://localhost:3000/some-page" },
+      // Expected: /api/example/flaky 500 (URL match)
       {
         text: CHROME_500_TEXT,
-        url: "http://localhost:3000/api/demo/match/abc",
+        url: "http://localhost:3000/api/example/flaky/abc",
       },
       // Unexpected: real TypeError
       {
@@ -127,7 +127,7 @@ describe("isUnexpectedConsoleError", () => {
 
     const unexpected = filterUnexpectedConsoleErrors(errs, {
       ignoreTextIncludes: ["Hydration", "NEXT_REDIRECT", "Failed to fetch"],
-      ignoreTextOrUrlIncludes: ["/api/demo/match"],
+      ignoreTextOrUrlIncludes: ["/api/example/flaky"],
     });
 
     expect(unexpected).toHaveLength(1);

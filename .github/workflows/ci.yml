@@ -5,10 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Manual one-shot triggers for re-baking e2e screenshot baselines. Inert for
-  # normal CI (push/PR) — both inputs default false and only change the e2e
-  # job's behaviour when explicitly checked on a dispatch. Must live on the
-  # default branch for `gh workflow run` / the UI to see them.
+  # Manual one-shot trigger for re-baking the e2e SVG chart goldens. Inert for
+  # normal CI (push/PR) — the input defaults false and only changes the
+  # e2e-seeded job's behaviour when explicitly checked on a dispatch. Must live
+  # on the default branch for `gh workflow run` / the UI to see it.
   workflow_dispatch:
     inputs:
       bake_svg_goldens:
@@ -16,15 +16,6 @@ on:
           Bake e2e/svg-chart-parity.spec.ts goldens: the seeded e2e job runs
           ONLY that spec with --update-snapshots and uploads the generated PNGs
           as an artifact for per-chart human review. Never auto-commits them.
-        type: boolean
-        default: false
-        required: false
-      bake_demo_screenshots:
-        description: >-
-          Bake e2e/demo-screenshot.spec.ts baselines: the placeholder-env e2e
-          step runs ONLY that spec with --update-snapshots and uploads the
-          regenerated PNGs as an artifact for per-shot human review. Never
-          auto-commits them.
         type: boolean
         default: false
         required: false
@@ -6188,8 +6179,9 @@ jobs:
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
-    # Next.js build. Scope: auth, smoke, and the public /demo specs
-    # (demo-public + demo-founder-view) plus the public sweep specs.
+    # Next.js build. Scope: auth, smoke and the public sweep specs. The public
+    # /demo specs and its screenshot baselines were retired with the demo
+    # (Phase 192, D-11).
     #
     # CI speed (2026-07-02): the seed-gated batch that used to run
     # SEQUENTIALLY after this one (4.8m after a 6.1m smoke pass) moved to
@@ -6198,14 +6190,6 @@ jobs:
     # test-Supabase env, so its artifacts are C-0293(c)-safe by
     # construction.
     #
-    # demo-screenshot.spec.ts: its chromium-linux baseline PNGs are now
-    # committed (generated in the Playwright Linux Docker image), so its 3
-    # viewport toHaveScreenshot comparisons run unconditionally in the
-    # spec list below (tech-debt #25 — executing the codebase's own
-    # documented "once baselines land, drop the --grep gate" next step).
-    # The former C-0300 --grep sentinel gate (whose only job was to fail
-    # until baselines landed) has been dropped; the sentinel test itself
-    # is harmless and still runs as part of the full spec.
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⭐ EXPLICIT, not inherited: this job would skip anyway through
@@ -6383,20 +6367,7 @@ jobs:
           # now runs on its own runner in the parallel e2e-seeded job, so this
           # is no longer protecting a downstream WR-04 guard in THIS job).
           set +e
-          if [ "${BAKE_DEMO_SCREENSHOTS}" = "true" ]; then
-            # One-shot baseline bake (workflow_dispatch input bake_demo_screenshots).
-            # Run ONLY demo-screenshot with --update-snapshots so no other spec's
-            # baselines are touched; the regenerated PNGs (taken in THIS
-            # placeholder env — the same env they're diffed against — so no
-            # jammy-vs-ubuntu divergence) upload as an artifact for per-shot human
-            # review. NEVER auto-committed here (the locked "no blind
-            # --update-snapshots" rule) — a follow-up PR lands the reviewed PNGs.
-            npx playwright test e2e/demo-screenshot.spec.ts \
-              --update-snapshots \
-              --timeout 60000
-          else
-            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts e2e/og-public.spec.ts e2e/api-key-flow.spec.ts e2e/sync-analytics-flow.spec.ts
-          fi
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts e2e/og-public.spec.ts e2e/api-key-flow.spec.ts e2e/sync-analytics-flow.spec.ts
           PW_EXIT=$?
           set -e
           # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
@@ -6445,13 +6416,9 @@ jobs:
           # outcome-gated report upload below keep the failure visible.
           exit $PW_EXIT
         env:
-          # workflow_dispatch one-shot baseline-bake toggle (drives the if/else
-          # in the run block above). Renders "true" only on a manual dispatch
-          # with bake_demo_screenshots checked; "false" on every push/PR run.
-          BAKE_DEMO_SCREENSHOTS: ${{ github.event_name == 'workflow_dispatch' && inputs.bake_demo_screenshots }}
           # C-0293(c): runtime env mirrors the placeholder build above.
-          # The unconditional spec set (auth, smoke, demo-public,
-          # demo-founder-view, onboarding-banner-smoke) does NOT
+          # The unconditional spec set (auth, smoke,
+          # onboarding-banner-smoke) does NOT
           # authenticate against a real Supabase — placeholder is
           # correct here. The seed-gated step below uses real env
           # against a separately-rebuilt `.next/` (never uploaded).
@@ -6478,20 +6445,6 @@ jobs:
           # literal localhost origin scoped to this step, and prod sets
           # NEXT_PUBLIC_SITE_URL to the canonical host.
           NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000
-      # Baseline bake (workflow_dispatch input bake_demo_screenshots): upload
-      # ONLY the demo-screenshot snapshot PNGs — page images, no .next bundle /
-      # trace.zip / page HTML — so the C-0293(c) secret-in-artifact concern that
-      # gates the playwright-report upload below does NOT apply here. These PNGs
-      # are the per-shot review material; a human eyeballs each, then a follow-up
-      # PR commits them. if-no-files-found: error fails loud if nothing was baked.
-      - name: Upload baked demo screenshots for review (workflow_dispatch bake only)
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.bake_demo_screenshots }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: demo-screenshots-baked
-          path: e2e/demo-screenshot.spec.ts-snapshots/**/*.png
-          if-no-files-found: error
-          retention-days: 7
       # This job never carries real test-Supabase env (the seeded batch is
       # its own job below), so a failure report here can only embed
       # placeholder values — the C-0293(c) artifact-leak concern does not
@@ -7220,7 +7173,7 @@ jobs:
 
   lighthouse-mobile:
     # Phase 48-05 / A11Y-03: mobile Lighthouse performance budget over the
-    # 5 PUBLIC routes (lighthouserc.json).
+    # 4 PUBLIC routes (lighthouserc.json).
     #
     # ADVISORY since 2026-07-02 (CI speed, user decision): no longer in the
     # `frontend` aggregator's needs/result-check — it was the merge gate's
@@ -7352,4 +7305,10 @@ jobs:
           name: lighthouse-mobile-report
           path: .lighthouseci/
           retention-days: 7
-          if-no-files-found: ignore
+          # .lighthouseci/ is a hidden directory: upload-artifact skips hidden
+          # paths unless told otherwise, so with `ignore` this step went green
+          # while uploading nothing (Phase 192 round-2 SFH-3). `error` is
+          # deliberate: if lhci dies before it writes the directory, a second
+          # red on this step is louder, not worse.
+          include-hidden-files: true
+          if-no-files-found: error

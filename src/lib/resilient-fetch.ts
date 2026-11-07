@@ -1072,8 +1072,6 @@ export const SEAM_EXCLUSIONS: Record<string, string> = {
     "Bespoke SSE/heartbeat design with client-abort propagation via AbortSignal.any([req.signal, ...]) that the core does not model. Already pins its own maxDuration=300.",
   "src/app/api/cron/warm-analytics/route.ts":
     "/health cold-start probe. Must NOT consume breaker failure budget — a cold probe failing IS the normal case — and must NOT be blocked by an open breaker, because a successful /health is precisely the recovery signal.",
-  "src/lib/warmup-analytics.ts":
-    "Same reasoning as cron/warm-analytics: a 10s fire-and-forget /health warmer. Counting its failures would trip the breaker during routine warmup.",
 };
 
 // ---------------------------------------------------------------------------

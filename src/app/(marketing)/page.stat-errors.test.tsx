@@ -35,10 +35,6 @@ vi.mock("next/navigation", () => ({
   },
 }));
 
-vi.mock("@/components/landing/VerificationSection", () => ({
-  VerificationSection: () => null,
-}));
-
 // withPublishedOnly is applied to a thenable; the mock builder is its own thenable.
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({

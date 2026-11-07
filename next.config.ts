@@ -5,8 +5,9 @@ import type { NextConfig } from "next";
 // serverExternalPackages list, but its `bin/**` brotli payload is ASSETS, not
 // traced imports — the Vercel function bundle shipped without them and every
 // PDF route 500'd at launch with "input directory .../bin does not exist"
-// (found 2026-07-03 via the /demo "Download IC Report" button; affects the
-// demo + authed portfolio PDFs and both factsheet PDFs alike). Keys are
+// (found 2026-07-03 via the old /demo "Download IC Report" button; the gap
+// affected the authed portfolio PDF route and both factsheet PDF routes alike,
+// the demo route having since been retired, Phase 192 D-11). Keys are
 // picomatch route globs with dynamic segments escaped; scoped per-route
 // because the payload is ~70MB — a broad glob would bloat every function.
 const CHROMIUM_BIN = ["./node_modules/@sparticuz/chromium/bin/**/*"];
@@ -152,7 +153,6 @@ assertCanonicalAppUrl(process.env.NEXT_PUBLIC_APP_URL, process.env.VERCEL_ENV);
 
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
-    "/api/demo/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,
     "/api/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,
     "/api/factsheet/\\[id\\]/pdf": CHROMIUM_BIN,
     "/api/factsheet/\\[id\\]/tearsheet.pdf": CHROMIUM_BIN,
@@ -301,30 +301,6 @@ const nextConfig: NextConfig = {
         // `src/app/PlausibleScript.tsx`, Sentry in `src/instrumentation.ts`.
         source: "/factsheet-share/:path*",
         headers: [{ key: "Referrer-Policy", value: "no-referrer" }],
-      },
-      {
-        // Audit-2026-05-07 P334: tightened from s-maxage=60 to s-maxage=10
-        // and added `Vary: Cookie` so per-session demo state (sb-* auth
-        // cookies that gate the founder-view route) is keyed correctly
-        // at the CDN. With s-maxage=60 a logged-in founder's response
-        // could be served to a logged-out visitor for up to a minute,
-        // since Vercel keys on URL only by default. 10 seconds is a tight
-        // burst-absorber — enough to catch the 100 RPS thunder you get
-        // when a /demo link is shared on Twitter, not so long that a
-        // stale snapshot misleads the next reviewer. /demo/founder-view
-        // inherits the same policy since it's the founder-side
-        // read-only twin of /demo.
-        source: "/demo/:path*",
-        headers: [
-          {
-            key: "Cache-Control",
-            value: "public, s-maxage=10, stale-while-revalidate=300",
-          },
-          {
-            key: "Vary",
-            value: "Cookie",
-          },
-        ],
       },
     ];
     // Phase 164.9.4 (D-14): derive the configured Supabase origin into the

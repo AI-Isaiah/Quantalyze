@@ -75,12 +75,14 @@ export default function SecurityPage() {
               <p>
                 The data we persist is: read-only exchange API credentials
                 (encrypted), raw trade fills, and aggregate analytics
-                (Sharpe, Sortino, drawdown, daily returns) — all kept for
-                the life of the connection so factsheet and historical
-                breakdowns stay reproducible. When you disconnect an
-                exchange key or close your account, fills and aggregates
-                for that connection are removed (see the section below on
-                deletion).
+                (Sharpe, Sortino, drawdown, daily returns). We run no
+                scheduled deletion on fills or aggregates: they are kept for
+                as long as the strategy they belong to exists, so factsheet
+                and historical breakdowns stay reproducible. Deleting a
+                strategy removes its fills and aggregates. Disconnecting an
+                exchange key does not by itself remove them. Closing your
+                account deletes your stored API keys and blanks identifying
+                fields on fills.
               </p>
               <p>
                 Tenant isolation is enforced at the database. Row-Level
@@ -98,18 +100,22 @@ export default function SecurityPage() {
                 cannot cross tenants.
               </p>
               <p>
-                You can revoke a key and delete its strategy from your
-                dashboard in one click. The encrypted credential row and the
-                listing reference are removed in the same transaction; the
-                analytics service loses its decryption path immediately.
+                You can delete an exchange key from your dashboard. That
+                removes its encrypted credential row, and the analytics
+                service loses its decryption path immediately. The strategy,
+                its fills and its listing stay; archiving the strategy
+                removes the listing from discovery. A key used by a published
+                composite cannot be deleted: use the contact form to change
+                that composite&apos;s keys.
               </p>
               <p>
-                All traffic between your browser, our web tier, the analytics
-                service, and the exchanges is encrypted in transit with TLS
-                1.3. We disable TLS 1.0, 1.1, and 1.2 at the edge; internal
-                service-to-service calls use the same profile. Certificates
-                are issued by a public CA and rotated automatically before
-                expiry. HSTS is enabled for{" "}
+                Traffic between your browser and{" "}
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
+                  quantalyze.xyz
+                </code>{" "}
+                is encrypted with TLS 1.3 or TLS 1.2. The edge refuses TLS
+                1.0 and 1.1. Certificates are issued by a public CA and
+                rotated automatically before expiry. HSTS is enabled for{" "}
                 <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
                   quantalyze.xyz
                 </code>{" "}
@@ -137,14 +143,15 @@ export default function SecurityPage() {
                 check and the encrypt are a single atomic round-trip.
               </p>
               <p>
-                Credential payloads are encrypted at rest with AES-256-GCM
-                envelope encryption. Each row has its own data encryption key
-                (DEK) generated at encrypt time; the DEK is wrapped by a
-                platform key encryption key (KEK) stored in Supabase Vault.
-                Only the Python analytics service, running under the
-                service-role client, can unwrap the DEK. The Next.js web tier
-                cannot, and neither can your own dashboard — the encrypted
-                columns are revoked at the column-grant level from the{" "}
+                We encrypt credential payloads at rest with Fernet (AES-128
+                in CBC mode, authenticated with HMAC-SHA256). Each credential
+                row gets its own data encryption key (DEK), generated when
+                the key is saved. A platform key encryption key (KEK), held
+                only by the Python analytics service, wraps the DEK, and each
+                row records which KEK version wrapped it so the KEK can be
+                rotated. The Next.js web tier cannot unwrap a DEK, and
+                neither can your own dashboard: the encrypted columns are
+                revoked at the column-grant level from the{" "}
                 <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
                   anon
                 </code>{" "}
@@ -208,7 +215,7 @@ export default function SecurityPage() {
               </p>
               <p>
                 The downloadable security packet below restates the
-                encryption spec, retention windows, exchange scopes, and
+                encryption spec, data retention, exchange scopes, and
                 incident-response contact on one page — suitable for
                 forwarding to a risk team.
               </p>
@@ -274,9 +281,9 @@ export default function SecurityPage() {
                   >
                     In Transit
                   </th>
-                  <td className="py-3 pr-4">TLS 1.3</td>
+                  <td className="py-3 pr-4">TLS 1.3, TLS 1.2</td>
                   <td className="py-3 text-text-secondary">
-                    Edge and service-to-service; HSTS enabled
+                    TLS 1.0 and 1.1 refused at the edge; HSTS enabled
                   </td>
                 </tr>
                 <tr className="border-b border-border">
@@ -286,9 +293,11 @@ export default function SecurityPage() {
                   >
                     At Rest
                   </th>
-                  <td className="py-3 pr-4">AES-256-GCM</td>
+                  <td className="py-3 pr-4">
+                    Fernet (AES-128-CBC + HMAC-SHA256)
+                  </td>
                   <td className="py-3 text-text-secondary">
-                    Per-row DEK wrapped by Vault-held KEK
+                    Per-row DEK wrapped by a KEK held by the analytics service
                   </td>
                 </tr>
                 <tr>
@@ -389,7 +398,7 @@ export default function SecurityPage() {
               coordinated disclosure are published on this page.
             </p>
             <p className="mt-3 text-caption text-text-muted">
-              Last reviewed: 2026-10-07.
+              Last reviewed: 2026-11-07.
             </p>
           </section>
         </article>

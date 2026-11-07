@@ -9,9 +9,9 @@ import { createHmac, timingSafeEqual } from "crypto";
  * a token gate, anyone who knows a portfolio UUID can view the full report
  * HTML — an IDOR vulnerability.
  *
- * The API routes (`/api/portfolio-pdf/[id]` and `/api/demo/portfolio-pdf/[id]`)
- * generate a render token and append it to the Puppeteer URL. The page verifies
- * the token before rendering. TTL is 2 minutes (enough for Puppeteer to load).
+ * The API route (`/api/portfolio-pdf/[id]`) generates a render token and
+ * appends it to the Puppeteer URL. The page verifies the token before
+ * rendering. TTL is 2 minutes (enough for Puppeteer to load).
  */
 
 const RENDER_TTL_SECONDS = 120; // 2 minutes

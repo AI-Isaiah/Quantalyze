@@ -20,7 +20,7 @@
  * No client directive: server pages call these functions.
  */
 
-import { EXCHANGE_DISPLAY } from "./closed-sets";
+import { EXCHANGE_DISPLAY, EXCHANGES } from "./closed-sets";
 import type { ComputeState, RecipientArm } from "./compute-state";
 // Type-only (Phase 167.2.1): erased at build, so this copy module pulls in
 // none of the builder's server-side imports.
@@ -679,3 +679,44 @@ export function untrustedKeyCaption(
   const noun = keyCount >= 2 ? "Exchange keys" : "Exchange key";
   return `${noun} ${MIDDLE_DOT} ${names.join(", ")}`;
 }
+
+// ── Phase 192 PUBLICTRUTH — the shared public sentences ───────────────────
+//
+// Source: 192-UI-SPEC.md § Copywriting Contract (shared sentences). One
+// constant per public fact, rendered by the home page, /for-quants and Terms,
+// so a fact cannot be true on one surface and stale on another. Pinned
+// character for character by status-surface-copy.test.ts. ASCII apostrophes
+// only. Each clause was checked against the `D-01 code facts:` line of
+// 192-EVIDENCE.md before it shipped.
+
+/**
+ * S-KEY. The one short key-storage sentence. Every clause is true at HEAD
+ * (192-EVIDENCE.md, `D-01 code facts: S-KEY clauses true`); a clause the
+ * evidence marks false is deleted, never softened.
+ */
+export const KEY_STORAGE_SENTENCE =
+  "We store your read-only API key encrypted, under a data key of its own, and only our analytics service can decrypt it.";
+
+/** S-KEY link. Follows the sentence; `key-handling` is an anchor id on /security. */
+export const KEY_STORAGE_LINK = {
+  href: "/security#key-handling",
+  label: "How we store keys",
+} as const;
+
+/**
+ * S-COST. States cost without inventing a fee figure or a legal term: the
+ * success fee is "may apply" and the agreement owns the detail.
+ */
+export const LISTING_COST_SENTENCE =
+  "Listing a strategy is free. A success fee may apply to matched allocations, as set out in the manager agreement.";
+
+/**
+ * S-EXCH. The venues a manager can connect, derived from EXCHANGES so the
+ * list follows NEXT_PUBLIC_SFOX_ENABLED and no venue name or count is typed
+ * into copy. EXCHANGES is already display labels (closed-sets.ts maps each
+ * code through EXCHANGE_DISPLAY), so no map is needed here.
+ */
+export const EXCHANGE_LIST = new Intl.ListFormat("en", {
+  style: "long",
+  type: "disjunction",
+}).format(EXCHANGES);

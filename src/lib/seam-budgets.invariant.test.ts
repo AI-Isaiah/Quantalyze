@@ -294,8 +294,7 @@ function deriveSeamRouteFiles(apiRoot: string): string[] {
 }
 
 /**
- * The two `SEAM_EXCLUSIONS` entries that are ROUTES (the third is a lib
- * module), hand-typed here.
+ * The two `SEAM_EXCLUSIONS` entries, both ROUTES, hand-typed here.
  *
  * Asserted below as a POSITIVE FACT about why they are absent from the
  * derivation, NOT carried as an allow-list: neither imports the core, which is
@@ -539,9 +538,9 @@ const EXPECTED_ROUTE_BUDGETS: Record<
 };
 
 /**
- * The three documented exclusion paths, typed here as literals.
+ * The two documented exclusion paths, typed here as literals.
  *
- * Complements — never replaces — the `>= 3` count assertion, the on-disk
+ * Complements — never replaces — the `>= 2` count assertion, the on-disk
  * existence check and the non-empty-reason check below. Those three catch a
  * table that is emptied, stale or lazily filled; this one catches a path being
  * SWAPPED, which leaves all three green.
@@ -549,11 +548,10 @@ const EXPECTED_ROUTE_BUDGETS: Record<
 const EXPECTED_EXCLUSION_PATHS: string[] = [
   "src/app/api/debug-key-flow/route.ts",
   "src/app/api/cron/warm-analytics/route.ts",
-  "src/lib/warmup-analytics.ts",
 ];
 
 /**
- * The two `/health` warmers, typed here as a literal set that must be PRESENT.
+ * The `/health` warmer, typed here as a literal set that must be PRESENT.
  *
  * ⚠️ THIS IS NOT A DUPLICATE of `EXPECTED_EXCLUSION_PATHS` above, and collapsing
  * the two would delete a property. That one is a SET EQUALITY over the whole
@@ -564,7 +562,7 @@ const EXPECTED_EXCLUSION_PATHS: string[] = [
  * silently removing that warmer from the guard below, because the guard
  * iterates the table. Membership is what keeps the guard's own reach pinned.
  *
- * A-12, which is why these two specifically may never enter the core: a cold
+ * A-12, which is why this one specifically may never enter the core: a cold
  * `/health` probe FAILING is the normal case, so a warmer routed through the
  * core would feed `recordSeamFailure` on every cold start, trip the breaker,
  * and the open breaker would then short-circuit the recovery probe — the
@@ -573,7 +571,6 @@ const EXPECTED_EXCLUSION_PATHS: string[] = [
  */
 const WARMER_EXCLUSION_PATHS: string[] = [
   "src/app/api/cron/warm-analytics/route.ts",
-  "src/lib/warmup-analytics.ts",
 ];
 
 /**
@@ -1299,21 +1296,21 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
   });
 
   describe("structural completeness", () => {
-    it("documents at least the three known non-core seam call sites", () => {
+    it("documents at least the two known non-core seam call sites", () => {
       // An unexplained absence from SEAM_ROUTE_BUDGETS is indistinguishable
       // from an oversight — the third seam survived for months on exactly that
       // silence. Emptying the exclusions table must not be a quiet way to make
       // this file's other assertions easier to satisfy.
-      expect(Object.keys(SEAM_EXCLUSIONS).length).toBeGreaterThanOrEqual(3);
+      expect(Object.keys(SEAM_EXCLUSIONS).length).toBeGreaterThanOrEqual(2);
     });
 
-    it("excludes exactly the three hand-typed paths (SET equality, not count)", () => {
-      // The `>= 3` assertion above cannot see a path being SWAPPED for another,
+    it("excludes exactly the two hand-typed paths (SET equality, not count)", () => {
+      // The `>= 2` assertion above cannot see a path being SWAPPED for another,
       // and the on-disk existence check below is satisfied by ANY real file. A
       // sorted SET equality against a roster typed in this file is what pins
-      // WHICH paths are exempt — the two /health warmers must stay excluded
-      // (their failures are the normal case and would trip the breaker during
-      // routine warmup) and nothing else may quietly join them.
+      // WHICH paths are exempt — the cron /health warmer must stay excluded
+      // (its failures are the normal case and would trip the breaker during
+      // routine warmup) and nothing else may quietly join it.
       expect(
         Object.keys(SEAM_EXCLUSIONS).sort(),
         "The SEAM_EXCLUSIONS path set drifted. An exclusion is a decision that " +
@@ -1324,7 +1321,7 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       ).toEqual([...EXPECTED_EXCLUSION_PATHS].sort());
     });
 
-    it("SEAM_EXCLUSIONS holds exactly 3 rows — the fence for both it.each blocks (D-14a)", () => {
+    it("SEAM_EXCLUSIONS holds exactly 2 rows — the fence for both it.each blocks (D-14a)", () => {
       // CLASS-γ CLOSURE. Both `it.each(Object.keys(SEAM_EXCLUSIONS))` blocks in
       // this describe iterate the map UNDER TEST, so shrinking the table shrinks
       // the case list instead of failing it, and emptying it yields zero cases
@@ -1334,23 +1331,23 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       //
       // ⚠️ HONEST SCOPE, so nobody over-credits this line. Unlike that sibling,
       // these two blocks were NOT actually exposed: the set equality at
-      // "excludes exactly the three hand-typed paths" already reds on a shrink,
+      // "excludes exactly the two hand-typed paths" already reds on a shrink,
       // a swap OR a growth, and is strictly stronger than any count. What this
-      // adds is EXACTNESS where only a `>= 3` floor sat, and CO-LOCATION — the
+      // adds is EXACTNESS where only a `>= 2` floor sat, and CO-LOCATION — the
       // guard beside the `it.each` no longer depends on a sibling `it` surviving
       // a future edit. It is the third member of the enumerated class, fenced
       // for the same reason the other two are: the class is closed by
       // enumeration, not by fixing the one instance someone happened to name.
       expect(
         Object.keys(SEAM_EXCLUSIONS).length,
-        "SEAM_EXCLUSIONS no longer holds exactly 3 rows. An exclusion is a " +
+        "SEAM_EXCLUSIONS no longer holds exactly 2 rows. An exclusion is a " +
           "decision that a Railway call site deliberately gets no budget and no " +
           "breaker — adding one silently is how the third, unbudgeted seam " +
           "survived for months, and REMOVING one silently drops that path out " +
           "of both source scans below, which is the A-12 guard's entire reach. " +
           "Change this literal in the same commit as the row and its roster " +
           "entry; never to make a diff pass.",
-      ).toBe(3);
+      ).toBe(2);
     });
 
     it.each(Object.keys(SEAM_EXCLUSIONS))(
@@ -1373,7 +1370,7 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       }
     });
 
-    it("keeps both /health warmers in the exclusion table (membership, not equality)", () => {
+    it("keeps the /health warmer in the exclusion table (membership, not equality)", () => {
       // See WARMER_EXCLUSION_PATHS: the set equality above cannot see a warmer
       // being dropped from the table AND from the roster in one commit, which
       // would silently narrow the reach of the source scan below.
@@ -1397,8 +1394,8 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       (excludedPath) => {
         // A-12, mechanically. Before this assertion, adding a resilientFetch()
         // call inside a warmer reddened ZERO tests and ZERO lint rules: the
-        // ESLint allowlist sets `no-raw-analytics-fetch` to "off" on both warmer
-        // paths — which permits a raw fetch, it does not forbid the core — and
+        // ESLint allowlist sets `no-raw-analytics-fetch` to "off" on the warmer
+        // path — which permits a raw fetch, it does not forbid the core — and
         // the contradiction check below fires only if the author ALSO adds the
         // path to SEAM_ROUTE_BUDGETS. SC6's warmer clause had no guard to
         // extend; this is it.
@@ -1407,8 +1404,8 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         );
 
         const reason =
-          `An excluded path must not consume the core. For the two /health ` +
-          `warmers the consequence is A-12: a cold probe failing is the NORMAL ` +
+          `An excluded path must not consume the core. For the /health ` +
+          `warmer the consequence is A-12: a cold probe failing is the NORMAL ` +
           `case, so routing one through the core feeds recordSeamFailure on ` +
           `every cold start, trips breaker:railway, and the open breaker then ` +
           `short-circuits the recovery probe — the mitigation becomes the ` +

@@ -93,7 +93,6 @@ const SCAN_FILES = [
   "src/lib/portfolio-insights.ts",
   "src/lib/dollar-validation.ts",
   "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx",
-  "src/app/(marketing)/demo/page.tsx",
   "src/app/portfolio-pdf/[id]/page.tsx",
   "src/app/(dashboard)/recommendations/page.tsx",
 ] as const;
@@ -150,16 +149,12 @@ const CENSUS_FILES = [
   "src/components/portfolio/PortfolioImpactPanel.tsx",
   "src/components/portfolio/PortfolioEquityCurve.tsx",
   "src/components/portfolio/CorrelationHeatmap.tsx",
-  "src/components/portfolio/WhatWedDoCard.tsx",
-  "src/components/portfolio/WinnersLosersStrip.tsx",
-  "src/components/portfolio/EditorialHero.tsx",
   "src/components/portfolio/StrategyBreakdownTable.tsx",
   "src/components/strategy/StrategyTable.tsx",
   "src/components/strategy/HoldingFactsheet.tsx",
   "src/components/strategy/CompareEquityOverlay.tsx",
   "src/components/strategy/CompareCorrelationMatrix.tsx",
   "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx",
-  "src/app/(marketing)/demo/page.tsx",
   "src/app/portfolio-pdf/[id]/page.tsx",
   "src/app/(dashboard)/recommendations/page.tsx",
   // The formatter module the rest delegate to
@@ -864,12 +859,6 @@ export const ALLOWLIST: Allowlist = {
       reason: "The 'sync is taking much longer than expected' notice, a status sentence, not a figure.",
     },
   },
-  "src/app/(marketing)/demo/page.tsx": {
-    R6: {
-      count: 2,
-      reason: "Demo holding weight in percent and the demo recommendation's integer score: both non-negative demo fixtures.",
-    },
-  },
   "src/app/factsheet/[id]/trade-fetch-lines.tsx": {
     R5: {
       count: 1,
@@ -1030,12 +1019,6 @@ export const ALLOWLIST: Allowlist = {
     R5: {
       count: 1,
       reason: "Upload error line, a sentence.",
-    },
-  },
-  "src/components/portfolio/EditorialHero.tsx": {
-    R8: {
-      count: 2,
-      reason: "Both cells are drawdowns; `negative` marks 'this cell is a drawdown' and metricValueClass paints it red only when drawdownTone is negative at the printed 2 dp, so the flag can neither redden a rounded zero nor make a drawdown green.",
     },
   },
   "src/components/portfolio/InsightStrip.tsx": {

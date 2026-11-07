@@ -1,6 +1,7 @@
 {
   "_comment": "Phase 48 / A11Y-03 — mobile Lighthouse perf budget on PUBLIC routes only (headless can't auth; no authed URLs -> no info-disclosure to temporary-public-storage, T-48-05-INFO). lhci runs against the PRODUCTION next build via `npm run start` (NOT next dev — Pitfall 6). NOTE: there is NO `preset: \"mobile\"` in Lighthouse 12.x (CLI `preset` only accepts perf/experimental/desktop; the Wave-0 stub's `preset:\"mobile\"` was an invalid value that failed `lhci collect`). Mobile IS the Lighthouse DEFAULT form-factor, set here EXPLICITLY via settings.formFactor + settings.screenEmulation (MotoG-class) so the config is unambiguous and self-documenting.",
   "_baseline": "Baselined 2026-06-28 (plan 48-05 Task 1), Lighthouse 12.6.1, mobile form-factor, simulated mobileSlow4G throttling. Measured categories:performance per route (single run): / 0.93, /security 0.94, /for-quants 0.92, /browse 0.94, /demo 0.67 (lowest). minScore seeded at 0.60 — 7 points UNDER the lowest measured (/demo) per the coverage-ratchet philosophy: low enough to absorb local-vs-CI + single-run noise, high enough that a real regression fails the build. The FIRST CI run on a GitHub Actions runner (3-run median, CI throttling) establishes the true CI baseline to ratchet UP from over time (do NOT set a hard 0.90+ day one — flaky-red).",
+  "_demo_retired": "2026-11-07 (Phase 192, D-11) — /demo left the URL list with the retired public demo. The _baseline and _ratchet figures below were derived with /demo included (revision 1), and /demo was the LOWEST route (0.67), so the 0.65 floor was set against it. [Lineage: minScore stayed unchanged until a CI run measured the four remaining public routes (/, /security, /for-quants, /browse); only then was it to be re-derived.] RE-DERIVED 2026-11-07 (Phase 192 review WR-04): minScore 0.65 -> 0.85, then 0.85 -> 0.82 (round-2 review WR-03, the 0.85 had no noise margin), see _ratchet below for the measurement.",
   "ci": {
     "collect": {
       "startServerCommand": "npm run start",
@@ -10,8 +11,7 @@
         "http://localhost:3000/",
         "http://localhost:3000/security",
         "http://localhost:3000/for-quants",
-        "http://localhost:3000/browse",
-        "http://localhost:3000/demo"
+        "http://localhost:3000/browse"
       ],
       "numberOfRuns": 3,
       "settings": {
@@ -27,13 +27,13 @@
         }
       }
     },
-    "_ratchet": "Ratcheted 2026-06-30 (plan 54-04 / VERIFY-03) from 0.60 -> 0.65. Data-driven 'under-actual' floor = lowest measured median - 0.02. The lowest measured route is /demo at 0.67 (the documented 2026-06-28 single-run baseline above); 0.67 - 0.02 = 0.65. NOTE: that 0.67 was a single run, not the CI 3-run median this gate uses. The lhci report now uploads UNCONDITIONALLY (ci.yml lighthouse-mobile, if: always()), so the next CI run's .lighthouseci/manifest.json reports the true per-route 3-run-median floor. CI-CONFIRM (deferred-to-CI): if any of the 5 public routes measures below 0.65 on that run, lower minScore to (that route's median - 0.02) and update this comment with the measured value + date.",
+    "_ratchet": "RE-DERIVED AGAIN 2026-11-07 (Phase 192 round-2 review WR-03): 0.85 -> 0.82. The 0.85 below was derived from three main runs and had no noise margin. Wider sample: the per-route median LHR (the report the lighthouse-mobile job prints and uploads) of 17 main push runs, 2026-11-03 to 2026-11-06, all on code that did not change these routes; re-scanned read-only 2026-11-07. Ranges of the categories:performance median: / 0.85-0.88, /security 0.94-0.98, /for-quants 0.92-0.95, /browse 0.84-0.89. LOWEST observed median: /browse 0.84 in run 41840603606 (2026-11-04); the lowest on / is 0.85 in run 41775323624 (2026-11-04). Derivation per the rule: lowest observed median 0.84 - 0.02 = 0.82. WHAT THE GATE ASSERTS: lhci's default aggregationMethod is optimistic (node_modules/@lhci/utils/src/assertions.js, getStandardAssertionResults, aggregationMethod = 'optimistic'), so the assertion passes if the BEST of the 3 runs of a route reaches minScore. It does not assert on the 3-run median; the medians above are the closest readable figure, and the best-of-3 is at or above the median by construction, so a floor under the lowest median is conservative. The aggregation method was deliberately NOT changed. The measurement was NOT repeated on this phase's own code (the branch had no CI run when the floor was re-derived); the first lighthouse-mobile run after merge is the check. Previous text, kept as dated lineage: RE-DERIVED 2026-11-07 (Phase 192 review WR-04): 0.65 -> 0.85. Source: lhci per-route median LHR (the report lhci uploads to temporary-public-storage and prints in the lighthouse-mobile job log) of CI run 42232378806 on main (2026-11-06, head ba3c9012), Lighthouse 12.6.1, mobile, simulate throttling, 3 runs per route. categories:performance medians: / 0.87, /security 0.95, /for-quants 0.92, /browse 0.87 (/demo 0.86 in that run, ignored: the route is retired, D-11). Cross-checked on main runs 42215767857 (/ 0.87, /security 0.95, /for-quants 0.93, /browse 0.88) and 42187867973 (/ 0.88, /security 0.95, /for-quants 0.93, /browse 0.89). Derivation per the rule below: lowest measured median 0.87 (/ and /browse) - 0.02 = 0.85. NOTE: the .lighthouseci/ artifact the next paragraph relies on was NOT downloadable (upload-artifact skips hidden directories by default and if-no-files-found is ignore), so the medians were read from the uploaded reports instead. Previous text, kept as dated lineage: Ratcheted 2026-06-30 (plan 54-04 / VERIFY-03) from 0.60 -> 0.65. Data-driven 'under-actual' floor = lowest measured median - 0.02. The lowest measured route is /demo at 0.67 (the documented 2026-06-28 single-run baseline above); 0.67 - 0.02 = 0.65. NOTE: that 0.67 was a single run, not the CI 3-run median this gate uses. The lhci report now uploads UNCONDITIONALLY (ci.yml lighthouse-mobile, if: always()), so the next CI run's .lighthouseci/manifest.json reports the true per-route 3-run-median floor. CI-CONFIRM (deferred-to-CI): if any of the 5 public routes measures below 0.65 on that run, lower minScore to (that route's median - 0.02) and update this comment with the measured value + date.",
     "assert": {
       "assertions": {
         "categories:performance": [
           "error",
           {
-            "minScore": 0.65
+            "minScore": 0.82
           }
         ]
       }

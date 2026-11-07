@@ -88,7 +88,7 @@ const TEST_ONLY_KEYS = new Set([
 // invisible to the literal grep. Documented in .env.example but exempt from the
 // "documented ⇒ read literally" dead-entry check. Keep this in step with the
 // `process.env[SECRET_ENV]`-style reads in src/ (alert-ack-token.ts,
-// demo-pdf-token.ts, pdf-render-token.ts).
+// pdf-render-token.ts).
 const INDIRECT_READS = new Set(["ALERT_ACK_SECRET", "DEMO_PDF_SECRET"]);
 
 function collectSourceFiles(dir: string): string[] {

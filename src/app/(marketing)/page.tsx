@@ -5,7 +5,11 @@ import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 import { withPublishedOnly } from "@/lib/visibility";
 import { EXCHANGES } from "@/lib/constants";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { VerificationSection } from "@/components/landing/VerificationSection";
+import {
+  EXCHANGE_LIST,
+  KEY_STORAGE_LINK,
+  KEY_STORAGE_SENTENCE,
+} from "@/lib/status-surface-copy";
 
 type SocialProofStats = {
   strategies: number | null;
@@ -198,18 +202,40 @@ export default async function Home() {
         </div>
       </section>
 
-      {/* Verify Your Strategy */}
-      <section className="mx-auto max-w-6xl px-6 py-20" id="verify">
-        <div className="mx-auto max-w-2xl text-center mb-12">
-          <h2 className="font-display text-h2 tracking-tight text-text-primary">
-            Verify Your Performance
-          </h2>
-          <p className="mt-4 text-text-secondary">
-            Connect your exchange API key (read-only) and get an instant performance report.
-            See how your strategy stacks up.
-          </p>
+      {/* Verify your track record — a sign-up band. The page asks an anonymous
+          visitor for no key: connecting one happens after sign-up. The section id
+          stays so old links still land here. */}
+      <section id="verify" className="border-t border-border bg-white">
+        <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
+          <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="font-display text-h2 tracking-tight text-text-primary">
+                Verify your track record
+              </h2>
+              <p className="mt-3 max-w-2xl text-body leading-relaxed text-text-secondary">
+                Create an account, then connect a read-only API key from{" "}
+                {EXCHANGE_LIST}. We compute your performance from the
+                exchange&apos;s own trade history, not from figures you report.
+              </p>
+              <p className="mt-4 max-w-2xl text-caption text-text-muted">
+                {KEY_STORAGE_SENTENCE}{" "}
+                <Link
+                  href={KEY_STORAGE_LINK.href}
+                  className="text-accent underline underline-offset-4"
+                >
+                  {KEY_STORAGE_LINK.label}
+                </Link>
+                .
+              </p>
+            </div>
+            <Link
+              href="/signup"
+              className="inline-flex shrink-0 items-center justify-center rounded-lg bg-accent px-6 py-3 text-body font-medium text-white hover:bg-accent-hover transition-colors"
+            >
+              Create an account
+            </Link>
+          </div>
         </div>
-        <VerificationSection />
       </section>
 
       {/* Social Proof */}

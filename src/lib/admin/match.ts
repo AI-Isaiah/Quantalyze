@@ -6,14 +6,10 @@ import { castRow, castRowOrNull, castRows } from "@/lib/supabase/cast";
  * Shared payload builder for the per-allocator Match Queue.
  *
  * Why this helper exists
- *   Two routes need byte-identical SELECT logic:
- *     1. /api/admin/match/[allocator_id] — auth-gated; admin-only.
- *     2. /api/demo/match/[allocator_id] — public, HARD-LOCKED to the seed
- *        ALLOCATOR_ACTIVE UUID.
- *   Keeping the SELECT logic inline in both routes drifted in earlier
- *   sprints (demo route forgot a column; admin route forgot a filter).
- *   Extracting them into this single helper guarantees the two routes
- *   can never diverge again.
+ *   /api/admin/match/[allocator_id] — auth-gated; admin-only — is the
+ *   helper's one caller. A second, public demo route used to share it
+ *   (removed in Phase 192); the SELECT logic stays in one place so a
+ *   future caller cannot drift from it.
  *
  *   The caller is responsible for auth/authorization. This helper only
  *   knows "give me the payload for allocator X using admin credentials".
@@ -45,7 +41,7 @@ export const ALLOCATOR_PREFERENCES_COLUMNS =
 // Every name here MUST exist on the strategy_analytics table — PostgREST 400s
 // the whole projection if one does not, and (because the admin client does not
 // throwOnError) that 42703 is silently swallowed, blanking the ENTIRE analytics
-// panel for every candidate on both the admin Match-queue and the public demo.
+// panel for every candidate on the admin Match-queue.
 // `total_aum` was wrongly listed here through 0.24.15.x: it lives on
 // portfolio_analytics, never strategy_analytics (per-strategy AUM comes from
 // strategies.aum on the candidate join, masked separately for exploratory tiers).
@@ -121,12 +117,10 @@ export async function getAllocatorMatchPayload(
         "id, display_name, company, email, role, allocator_status, preferences_updated_at",
       )
       .eq("id", allocatorId)
-      // This is the ONLY `.single()` in this fan-out. The public demo route
-      // (/api/demo/match) depends on that: it maps a PGRST116 from here to
-      // "seed demo allocator not provisioned" and degrades to an empty queue
-      // instead of 500. If you add another `.single()` below, update that
-      // route to an explicit profile-existence pre-check (PGRST116 would no
-      // longer uniquely mean "profile absent").
+      // This is the ONLY `.single()` in this fan-out. If you add another
+      // `.single()` below, a caller that maps PGRST116 to "profile absent"
+      // needs an explicit profile-existence pre-check instead (PGRST116
+      // would no longer uniquely mean "profile absent").
       .single(),
     admin
       .from("match_decisions")

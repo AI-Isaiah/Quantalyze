@@ -14,11 +14,9 @@ import { safeCompare } from "@/lib/timing-safe-compare";
  * a `Bearer ${CRON_SECRET}` header. We accept both verbs so the route also
  * works for manual curl-based health probes during incident response.
  *
- * Why a cron AND a per-request warmup?
- *   - Cron is a once-daily safety net for the idle case (belt).
- *   - Per-request warmup (`src/lib/warmup-analytics.ts`), fired on demo-page
- *     render, is the actual hot-keeping mechanism between cron ticks
- *     (suspenders) — and on daily cadence it does essentially all the work.
+ * Until 2026-11-07 a per-request warmer also fired when the public demo page
+ * rendered. Phase 192 retired the demo (D-11) and deleted that warmer, so this
+ * daily cron is the one `/health` warmer.
  *
  * Schedule + secret: see `vercel.json`.
  */

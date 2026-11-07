@@ -34,7 +34,7 @@ Secrets for internal service communication.
 |--------|---------|---------------|
 | `ANALYTICS_SERVICE_KEY` | Next.js -> FastAPI | `X-Service-Key` header |
 | `CRON_SECRET` | Vercel Cron -> Next.js | `Authorization: Bearer` header |
-| `HMAC_SECRET` | Demo PDF token signing | HMAC-SHA256 |
+| `HMAC_SECRET` | Portfolio PDF render token signing | HMAC-SHA256 |
 
 **Management**: Set in Vercel + Railway env UIs. Rotation requires
 updating both sides simultaneously (or a short grace period where both
@@ -121,7 +121,8 @@ A rotation runbook should be created for each class, covering:
 - Admin client: `src/lib/supabase/admin.ts` (line 5) -- service role key.
 - CRON_SECRET: `src/app/api/cron/warm-analytics/route.ts` (line 39),
   `src/app/api/alert-digest/route.ts` (line 22).
-- HMAC_SECRET: `src/lib/demo-pdf-token.ts`.
+- HMAC_SECRET: `src/lib/pdf-render-token.ts` (reads `DEMO_PDF_SECRET`; the demo
+  PDF token module this line used to cite was retired in Phase 192).
 - Postgres GUC pattern: `supabase/migrations/20260408113029_cron_heartbeat.sql`
   (lines 144-151).
 - Envelope encryption: `analytics-service/services/encryption.py`.

@@ -4,6 +4,12 @@ import {
   FactsheetPreview,
   type FactsheetPreviewMetric,
 } from "@/components/strategy/FactsheetPreview";
+import {
+  EXCHANGE_LIST,
+  KEY_STORAGE_LINK,
+  KEY_STORAGE_SENTENCE,
+  LISTING_COST_SENTENCE,
+} from "@/lib/status-surface-copy";
 import { ForQuantsCtas } from "./ForQuantsCtas";
 
 /**
@@ -94,7 +100,7 @@ export default function ForQuantsPage() {
 
             <p className="mt-6 max-w-2xl text-body leading-relaxed text-text-secondary">
               Read-only exchange API keys, codename anonymization, founder-routed
-              allocator intros. Free to list.
+              allocator intros. {LISTING_COST_SENTENCE}
             </p>
 
             <ForQuantsCtas location="hero" />
@@ -173,7 +179,21 @@ export default function ForQuantsPage() {
                 className="grid gap-1 py-5 md:grid-cols-[240px_1fr] md:gap-8"
               >
                 <dt className="font-medium text-text-primary">{atom.title}</dt>
-                <dd className="text-text-secondary">{atom.body}</dd>
+                <dd className="text-text-secondary">
+                  {atom.body}
+                  {atom.link && (
+                    <>
+                      {" "}
+                      <Link
+                        href={atom.link.href}
+                        className="text-accent underline underline-offset-4"
+                      >
+                        {atom.link.label}
+                      </Link>
+                      .
+                    </>
+                  )}
+                </dd>
               </div>
             ))}
           </dl>
@@ -237,8 +257,8 @@ export default function ForQuantsPage() {
           </h2>
           <p className="mt-3 max-w-2xl text-text-secondary">
             Allocators see a single-page report generated from your real
-            exchange trades. Your firm name stays hidden until you accept an
-            intro.
+            exchange trades. A visitor who is not signed in never sees your
+            firm name.
           </p>
 
           <div className="mt-10">
@@ -283,26 +303,31 @@ export default function ForQuantsPage() {
 
 // --- static content ---
 
-const TRUST_ATOMS: { title: string; body: string }[] = [
+const TRUST_ATOMS: {
+  title: string;
+  body: string;
+  link?: { href: string; label: string };
+}[] = [
   {
     title: "Read-only keys verified at submission",
     body: "Trading and withdrawal permissions are rejected at submission — for example, \"Key has trading permissions. Please use a read-only key.\" Any key we can't positively verify as read-only is rejected too, and the check runs server-side, so you cannot bypass it.",
   },
   {
     title: "Envelope encryption at rest",
-    body: "Every credential is encrypted with a per-row Fernet data key, itself wrapped by a KEK stored in Supabase Vault. Only the Python analytics service running under the service role can decrypt — not the web tier, not your own dashboard.",
+    body: KEY_STORAGE_SENTENCE,
+    link: KEY_STORAGE_LINK,
   },
   {
     title: "Codename anonymization",
-    body: "Your firm name is never public. You pick a codename at listing time and allocators see only the codename until you explicitly accept an intro.",
+    body: "You pick a codename at listing time. A visitor who is not signed in sees the codename, never your firm name.",
   },
   {
-    title: "Listed to qualified allocators only",
-    body: "Allocators attest to accredited-investor status at sign-up and the listing is gated by role. Retail discovery never sees your factsheet.",
+    title: "Public, under your codename",
+    body: "A published factsheet is listed on Browse and opens for anyone, without signing in. It shows your codename, never your firm name.",
   },
   {
-    title: "Delete anytime",
-    body: "One click removes the key and the listing. The encrypted credential row is deleted in the same transaction.",
+    title: "Delete a key",
+    body: "Deleting a key removes its encrypted credential row at once, so the analytics service can no longer use it. Your listing stays until you archive it. A key used by a published composite cannot be deleted: use the contact form to change that composite's keys.",
   },
   {
     title: "Security contact",
@@ -314,7 +339,7 @@ const HOW_STEPS: { n: string; title: string; body: string }[] = [
   {
     n: "01",
     title: "Paste your read-only exchange API key",
-    body: "Binance, OKX, or Bybit. We validate the key has no trading or withdrawal permissions before it is encrypted and stored.",
+    body: `${EXCHANGE_LIST}. We check that the key has no trading or withdrawal permissions before we encrypt and store it.`,
   },
   {
     n: "02",
@@ -324,6 +349,6 @@ const HOW_STEPS: { n: string; title: string; body: string }[] = [
   {
     n: "03",
     title: "Your strategy is listed under a codename",
-    body: "Qualified allocators browse the factsheet under your codename. Intro requests are routed through the founder for quality.",
+    body: "Allocators read the factsheet under your codename. Intro requests are routed through the founder.",
   },
 ];

@@ -45,11 +45,12 @@
  * CEILING (honest) — CORRECTED in 140.2-04. This block previously read
  * "tainting is ONE hop … the shape has never appeared in this repo", and that
  * self-assessment was wrong on both counts. The ceiling was real, and BOTH
- * shapes it missed occur here: the two `/health` warmers
- * (`src/lib/warmup-analytics.ts`, `src/app/api/cron/warm-analytics/route.ts`)
- * build their URL from a binding taken off the env read, and they are green
- * only because they are PATH-allowlisted in eslint.config.mjs — not because
- * the rule cleared them. Taint now propagates TRANSITIVELY through local
+ * shapes it missed occur here: the cron `/health` warmer
+ * (`src/app/api/cron/warm-analytics/route.ts`) builds its URL from a binding
+ * taken off the env read, and it is green only because it is PATH-allowlisted
+ * in eslint.config.mjs — not because the rule cleared it. A second warmer with
+ * the same shape existed until Phase 192 deleted it with the demo.
+ * Taint now propagates TRANSITIVELY through local
  * declarators, so `const a = process.env.X; const u = new URL("/x", a);
  * fetch(u)` is reported, and the fixed point is computed at `Program:exit` so
  * an alias declared AFTER the fetch is caught too.
@@ -71,8 +72,8 @@
  * NO IN-FILE ESCAPE HATCH — deliberate, and a departure from the `B<n>
  * sanctioned-exception:` convention the sibling rules use. The legitimate
  * non-core call sites are a CLOSED, enumerated set (the core itself plus the
- * `SEAM_EXCLUSIONS` health warmers and the bespoke debug SSE route), and they
- * are allowlisted by PATH in eslint.config.mjs where adding a fifth entry is
+ * `SEAM_EXCLUSIONS` cron health warmer and the bespoke debug SSE route), and they
+ * are allowlisted by PATH in eslint.config.mjs where adding a fourth entry is
  * visible in review. A greppable in-file comment would let a new seam be
  * minted by editing only the file that introduces it, which is the exact
  * failure this rule exists to prevent.

@@ -62,8 +62,10 @@ Assign each mechanism a workload class:
 1. **Infra health pings** (analytics warmup) -> Vercel Cron via
    `vercel.json`. Schedule: daily (`0 0 * * *`). Originally every 5 minutes;
    downgraded 2026-04-10 on the Hobby plan (see
-   `docs/runbooks/vercel-cron-upgrade.md`). The per-request warmup in
-   `src/lib/warmup-analytics.ts` is now the primary cold-start mitigation.
+   `docs/runbooks/vercel-cron-upgrade.md`). A per-request warmup fired on
+   the public demo page's render was the primary cold-start mitigation. It
+   was deleted with the demo on 2026-11-07 (Phase 192 D-11, plan 192-17),
+   so this daily ping is the only scheduled warmer left.
 
 2. **Cross-service orchestration** (match engine recompute, data sync) ->
    Supabase pg_cron calling FastAPI directly. Keeps secrets in DB GUCs,

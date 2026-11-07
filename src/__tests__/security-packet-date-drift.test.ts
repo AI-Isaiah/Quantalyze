@@ -22,6 +22,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { EXCHANGES } from "@/lib/closed-sets";
 
 const HTML_PATH = resolve(
   process.cwd(),
@@ -93,5 +94,93 @@ describe("security packet ↔ /security page date parity (M-0943)", () => {
         `/security page last-reviewed (${pageDate}) — bump BOTH per the ` +
         `build-security-packet runbook step 2`,
     ).toBe(pageDate);
+  });
+});
+
+/**
+ * Phase 192 — PUBLICTRUTH (plan 04, D-01, D-03, D-06).
+ *
+ * The downloadable packet is forwarded to allocator risk teams, so a packet
+ * that contradicts /security breaks the one-true-story requirement as surely
+ * as a page would. These are pure file reads on the two sources; the PDF itself
+ * is rebuilt from the HTML by `node scripts/build-security-packet.mjs`.
+ */
+describe("packet facts match /security (192)", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+  const page = readFileSync(PAGE_PATH, "utf8");
+
+  it("both state the cipher the code uses (Fernet) and neither names an unsupported one", () => {
+    const cipher = "Fernet (AES-128-CBC + HMAC-SHA256)";
+    expect(html).toContain(cipher);
+    expect(page).toContain(cipher);
+    expect(html).not.toMatch(/AES-256/);
+    expect(html).not.toMatch(/Vault/);
+  });
+
+  it("the packet's In transit row states the TLS versions /security states (D-03)", () => {
+    // /security: "TLS 1.3 or TLS 1.2. The edge refuses TLS 1.0 and 1.1."
+    expect(page).toContain("TLS 1.3 or TLS 1.2");
+    const row = html.match(/<dt>In transit<\/dt>\s*<dd>([^<]*)<\/dd>/);
+    if (!row) {
+      throw new Error(
+        'build-security-packet.html: "<dt>In transit</dt>" row not found (markup refactored?)',
+      );
+    }
+    expect(row[1]).toContain("TLS 1.3");
+    expect(row[1]).toContain("TLS 1.2");
+    expect(row[1]).toContain("TLS 1.0 and 1.1 refused");
+  });
+
+  it("the packet's Supported exchanges list is EXCHANGES, not a frozen three-venue list (D-06)", () => {
+    const row = html.match(
+      /<dt>Supported exchanges<\/dt>\s*<dd>([\s\S]*?)<\/dd>/,
+    );
+    if (!row) {
+      throw new Error(
+        'build-security-packet.html: "<dt>Supported exchanges</dt>" row not found (markup refactored?)',
+      );
+    }
+    const listed = row[1].replace(/\s+/g, " ").trim();
+    const expected = new Intl.ListFormat("en", {
+      style: "long",
+      type: "disjunction",
+    }).format(EXCHANGES);
+    expect(listed).toContain(expected);
+  });
+
+  it("the packet's Deletion row agrees with /security: a key delete leaves the strategy and its listing (CR-01)", () => {
+    // strategies.api_key_id is ON DELETE SET NULL; a published strategy can only be archived.
+    const row = html.match(/<dt>Deletion<\/dt>\s*<dd>([\s\S]*?)<\/dd>/);
+    if (!row) {
+      throw new Error(
+        'build-security-packet.html: "<dt>Deletion</dt>" row not found (markup refactored?)',
+      );
+    }
+    const cell = row[1].replace(/\s+/g, " ").trim();
+    expect(cell).not.toMatch(/single transaction/i);
+    expect(cell).not.toMatch(/listing removal/i);
+    expect(cell).toContain("Deleting a key removes its encrypted credential row");
+    expect(cell).toContain("The strategy, its fills and its listing stay");
+    // The database refuses to delete a key a published composite uses.
+    expect(cell).toContain(
+      "A key used by a published composite cannot be deleted: use the contact form to change that composite's keys",
+    );
+    // The same claim, in the same words, on the page the packet is linked from.
+    expect(page.replace(/\s+/g, " ")).toContain(
+      "The strategy, its fills and its listing stay",
+    );
+    expect(page.replace(/\s+/g, " ")).toContain(
+      "A key used by a published composite cannot be deleted",
+    );
+  });
+
+  it("the packet states no retention window the code does not enforce (192-EVIDENCE 'Retention at HEAD')", () => {
+    // Nothing deletes strategy fills or aggregates on a schedule, so a
+    // "30 days; hard-deleted by daily job" row is a claim with no code behind it.
+    expect(html).not.toMatch(/30 days/);
+    expect(html).not.toMatch(/hard-deleted/i);
+    expect(html).not.toMatch(/indefinitely/i);
+    expect(html).toMatch(/<dt>Raw fills retention<\/dt>\s*<dd>\s*No scheduled deletion/);
+    expect(html).toMatch(/<dt>Aggregate analytics<\/dt>\s*<dd>\s*No scheduled deletion/);
   });
 });
