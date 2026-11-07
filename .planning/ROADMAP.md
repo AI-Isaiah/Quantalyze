@@ -482,8 +482,9 @@ Plans:
 | 200 | ROUTE-09, ROUTE-10, LEAN-04 |
 | 201 | CLAR-03, CLAR-04, CLAR-06 |
 | 202 | RESID-01, RESID-02 |
+| 203 | RESID-02 (the window_truncated half) |
 
-32/32 mapped, each to exactly one phase. TERMS-01/02 are Future and unmapped by founder decision.
+32/32 mapped, each to exactly one phase, except RESID-02, which 202 and 203 share (203 owns the window_truncated half). TERMS-01/02 are Future and unmapped by founder decision.
 
 ---
 
