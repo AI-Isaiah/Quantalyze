@@ -142,14 +142,15 @@ def _stat(res, key: str):
 
 
 class TestEveryHeadlineStatOnTheSuffix:
-    @pytest.mark.parametrize("tail_len", [60, 140], ids=["tail60", "tail140"])
+    @pytest.mark.parametrize("tail_len", [60, 200], ids=["tail60", "tail200"])
     @pytest.mark.parametrize("stat", _ALL_STATS)
     def test_every_headline_stat_equals_the_suffix_only_compute(self, stat, tail_len):
         """The oracle (Rule 9): for each headline stat, the full broken series
         equals the series the TEST sliced after its own last NaN (index 207).
-        tail60 leaves the suffix under the 63 / 126-day window minimums (the window
-        stats must then read None, exactly as the suffix-only compute does); tail140
-        clears both, so the window stats compare two finite numbers."""
+        tail60 leaves the suffix under the 91 / 182-day calendar windows (194 D-03:
+        the window stats must then read None, exactly as the suffix-only compute
+        does); tail200 (a 200-day daily record) covers both, so the window stats
+        compare two finite numbers."""
         full = _broken_series(_NANS, tail_len=tail_len)
         suffix_only = full.iloc[208:]
         assert not suffix_only.isna().any()
@@ -158,9 +159,9 @@ class TestEveryHeadlineStatOnTheSuffix:
         assert _same(got, want), f"{stat}: full={got!r} suffix-only={want!r}"
 
     def test_the_window_stats_are_measured_in_the_long_fixture(self):
-        """Fixture honesty: in tail140 the oracle compares two finite window
+        """Fixture honesty: in tail200 the oracle compares two finite window
         returns, so a stat that always returned None could not pass for free."""
-        want = compute_all_metrics(_broken_series(_NANS, tail_len=140).iloc[208:])
+        want = compute_all_metrics(_broken_series(_NANS, tail_len=200).iloc[208:])
         assert want.metrics_json["six_month_return"] is not None
         assert _inner(want, "three_month") is not None
         assert want.metrics_json["max_drawdown"] < 0.0

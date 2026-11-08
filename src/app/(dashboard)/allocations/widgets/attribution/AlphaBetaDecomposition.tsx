@@ -8,7 +8,15 @@ import { annualizationPeriods } from "@/lib/closed-sets";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { jointMetrics, MIN_PAIRED_OBSERVATIONS, pairedFloorReason } from "@/lib/factsheet/joint";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import { formatNumber } from "@/lib/utils";
 import { ALLOCATOR_PORTFOLIO_ASSET_CLASS } from "@/lib/factsheet/allocator-portfolio-payload";
+import {
+  figureRecord,
+  gateAnnualized,
+  coveredDays,
+  widenedShortNote,
+  widenedWithheldReason,
+} from "@/lib/figure-gate";
 import {
   BarChart,
   Bar,
@@ -64,8 +72,15 @@ export type BookAlphaBeta =
   | { kind: "btc_unavailable" }
   | { kind: "below_floor"; pairedCount: number; floor: number }
   | { kind: "undefined_beta"; benchmarkFlat: boolean }
+  // 194 review V-b: the book's TOTAL record is under D-15's minimum, so the annualised
+  // alpha is withheld exactly as the Overview's is. `reason` is the figure-gate sentence.
+  // Beta is not annualised, so it and its return contribution stay (review WR-04); each is
+  // null when it does not exist (a non-finite beta, D7), never a substitute number.
+  | { kind: "withheld"; reason: string; beta: number | null; betaContribution: number | null }
   | {
       kind: "ok";
+      /** Calendar days of paired overlap when under one year (D-15's muted note), else absent. */
+      shortOverlapDays?: number;
       alpha: number;
       beta: number;
       pairedCount: number;
@@ -89,6 +104,11 @@ export type BookAlphaBeta =
  * None either below `MIN_PAIRED_OBSERVATIONS` paired intervals (169.4 review
  * SFH MEDIUM-4): the comparator block drops its joint under the same constant,
  * so the widget and the Overview show one number or neither does.
+ * 194 D-15 (review V-b): the same holds for the book's TOTAL record. `buildComparatorBlock`
+ * withholds alpha with `gateAnnualized(record, overlapSpan)`; so does this, on the record
+ * built from the book's own first and last return date (crypto basis, no stored count: the
+ * Overview passes none for the book either). Withheld is no figure and no chart; short
+ * (a cleared record whose paired overlap is under a year) keeps the figure with the note.
  */
 export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
   // D-02 fail-closed: anything other than an explicit "ready" is not ready.
@@ -104,18 +124,40 @@ export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
   const aligned = alignCoveredReturns(btc.prices, btc.dropped, dates, COMPARATOR_CALENDARS.btc);
   const strat: number[] = [];
   const bench: number[] = [];
+  let firstPaired = -1;
+  let lastPaired = -1;
   for (let i = 0; i < aligned.paired.length; i++) {
     const b = aligned.returns[i];
     if (aligned.paired[i] && b != null) {
       strat.push(book[i].value);
       bench.push(b);
+      if (firstPaired < 0) firstPaired = i;
+      lastPaired = i;
     }
   }
   if (strat.length < MIN_PAIRED_OBSERVATIONS) {
     return { kind: "below_floor", pairedCount: strat.length, floor: MIN_PAIRED_OBSERVATIONS };
   }
 
+  const record = figureRecord({
+    seriesStart: dates[0],
+    seriesEnd: dates[dates.length - 1],
+    observations: null,
+    periodsPerYear: BOOK_PERIODS_PER_YEAR,
+  });
+  const overlapSpan = coveredDays(dates[firstPaired], dates[lastPaired]);
+  const gate = gateAnnualized(record, overlapSpan);
   const { alpha, beta } = jointMetrics(strat, bench, 0, BOOK_PERIODS_PER_YEAR);
+  if (gate === "withheld") {
+    const betaOk = Number.isFinite(beta);
+    return {
+      kind: "withheld",
+      reason: widenedWithheldReason("overlap", record),
+      beta: betaOk ? beta : null,
+      betaContribution: betaOk ? beta * compound(bench) : null,
+    };
+  }
+
   // Founder decision D7 (2026-09-26): a beta that does not exist (BTC has no
   // dispersion over the paired intervals, or a return is non-finite) is an
   // absence, NaN from `jointMetrics`. Alpha is built on beta, so both read "—"
@@ -135,6 +177,7 @@ export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
     totalReturn,
     betaContribution,
     residual: totalReturn - alpha - betaContribution,
+    ...(gate === "short" ? { shortOverlapDays: overlapSpan } : {}),
   };
 }
 
@@ -209,6 +252,47 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
     );
   }
 
+  if (result.kind === "withheld") {
+    // 194 V-b: the Overview withholds this alpha on the same record; one number or neither.
+    return (
+      <div className="flex h-full flex-col">
+        <div className="mb-3 flex items-baseline gap-2 px-3 pt-2">
+          <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+            Alpha
+          </span>
+          <span
+            className="text-2xl font-metric tabular-nums font-bold text-text-primary"
+            data-testid="alpha-value"
+          >
+            —
+          </span>
+          <span className="text-xs text-text-muted">annualized</span>
+        </div>
+        <p className="px-3 text-xs text-text-muted" data-testid="alpha-withheld-reason">
+          {result.reason}
+        </p>
+        {result.beta !== null && result.betaContribution !== null && (
+          <>
+            <div className="mt-3 flex items-baseline gap-2 px-3">
+              <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+                Beta
+              </span>
+              <span
+                className="text-2xl font-metric tabular-nums font-bold text-text-primary"
+                data-testid="beta-value"
+              >
+                {formatNumber(result.beta)}
+              </span>
+            </div>
+            <p className="px-3 text-xs text-text-muted" data-testid="beta-contribution">
+              {`Beta contributed ${formatFixedSigned(result.betaContribution, { dp: 1, scale: 100, suffix: "%", plus: true })} of the book's return over the paired window.`}
+            </p>
+          </>
+        )}
+      </div>
+    );
+  }
+
   if (result.kind === "undefined_beta") {
     // D7: "—" with no sign colour (DESIGN.md: a "—" never carries a semantic
     // colour) and no chart, plus one muted line naming why.
@@ -251,6 +335,11 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
         </span>
         <span className="text-xs text-text-muted">annualized</span>
       </div>
+      {result.shortOverlapDays !== undefined && (
+        <p className="px-3 pb-2 text-xs text-text-muted" data-testid="alpha-short-note">
+          {widenedShortNote("overlap", result.shortOverlapDays)}
+        </p>
+      )}
 
       {/* Stacked bar chart */}
       <div className="flex-1 min-h-0">

@@ -1108,7 +1108,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): `armsSeen` 859 -> 791, the -68 arms of the four retired gate files (test_replace_allocator_equity_snapshots_window.sql 15, test_allocator_equity_pre_terminus_flag.sql 2, test_refresh_fanout_zero_snapshot_bootstrap.sql 31, test_refresh_fanout_owed_key_reconstruct.sql 20); copied from ONE full lane run (`coverage: files 79/106`, `arms: 791/791/0`, `biting: 791`). MEASURED: this file's run read `expected 791 to be 859`.
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `armsSeen` 791 -> 801, the +10 twinned arms of the NEW gate test_compute_job_metadata_merge.sql (arms 1 to 10; arm 11 is an untwinned control). MEASURED: this file's run read `expected 801 to be 791`, and the narrowed runner run printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): `armsSeen` 801 -> 803, the +2 twinned arms 12 and 13 of test_compute_job_metadata_merge.sql (the marker mentions compute_jobs only in its UPDATE; the retraction reaches compute_jobs first in its UPDATE). MEASURED: this file's run read `expected 803 to be 802` once arm 12 alone was counted.
-    expect(armsSeen).toBe(803);
+    // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, plan 20): `armsSeen` 803 -> 809, the +6 twinned arms 7 to 12 of test_get_verified_cohort_rank_gate.sql (the D-15 cohort record gate). MEASURED: this file's run read `expected 809 to be 803`, and the narrowed runner run on that file printed `arms: 11/11/0`, `biting: 11`.
+    // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): `armsSeen` 809 -> 811, the +2 twinned arms 13 and 14 of test_get_verified_cohort_rank_gate.sql (the min-N floor per rank, and the Max DD decile over the whole cohort). Read off the runner's own `arms:` line.
+    expect(armsSeen).toBe(811);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1152,7 +1154,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): `stepsSeen` 975 -> 888, the -87 file steps of the four retired gate files. MEASURED: this file's run read `expected 888 to be 975`.
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `stepsSeen` 888 -> 896, the +8 file steps (arms 3 to 10, one `edit` each); arms 1 and 2 are `sql` steps, which this walk skips. MEASURED: this file's run read `expected 896 to be 888`.
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): `stepsSeen` 896 -> 898, the +2 file steps (arms 12 and 13, one `edit` each), the same +2 as `needles.length`. MEASURED: this file's run passes at 898 and not at 897.
-    expect(stepsSeen).toBe(898);
+    // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, plan 20): `stepsSeen` 898 -> 923, +25 file steps: arms 7 to 12 carry 2 + 3 + 2 + 3 + 3 + 9 `edit` steps (the runner replaces one occurrence per step, so a three-copy predicate edit is three steps), and arm 0 gains 3 (it now renames in both migrations of the chain).
+    // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): `stepsSeen` 923 -> 927, +4 file steps: arm 13 carries 1 `edit` step, arm 14 carries 2, and arm 0 gains 1 (the Max DD numerator it renames now occurs twice in the migration, the second being the migration check that reads it back).
+    expect(stepsSeen).toBe(927);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2112,7 +2116,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): `needles.length` 975 -> 888, the same -87 file steps.
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `needles.length` 888 -> 896, the same +8 file steps. MEASURED: this file's run read `expected 896 to be 888`.
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): `needles.length` 896 -> 898, the +2 file steps (arms 12 and 13, one `edit` each). MEASURED: this file's run read `expected 898 to be 897` once arm 12 alone was counted.
-    expect(needles.length).toBe(898);
+    // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, plan 20): `needles.length` 898 -> 923, the same +25 file steps as `stepsSeen`.
+    // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): `needles.length` 923 -> 927, the same +4 file steps as `stepsSeen`.
+    expect(needles.length).toBe(927);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

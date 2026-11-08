@@ -8,6 +8,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
+import { canViewAum, withViewerAum } from "@/lib/factsheet/viewer-aum";
 import {
   isCapitalOwnership,
   type CapitalOwnership,
@@ -27,6 +28,7 @@ import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { provenanceFingerprint } from "@/lib/factsheet/provenance-fingerprint";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
+import { buildFactsheetJsonLd } from "@/lib/factsheet/json-ld";
 import {
   deriveComputeState,
   recipientArm,
@@ -269,7 +271,8 @@ function buildFactsheetPayloadCached(
     // Bumped v18→v19 (Phase 167.1.2.2.2.1 OKXHISTORY plan 05, 2026-10-15): the payload gains the required `reconstructedRanges` (the spans of days rebuilt from the venue's bills archive, read from `series_provenance.reconstructed_ranges`, which feeds the "rebuilt from the OKX archive" line on both surfaces). A v18 entry lacks the field, so for the 1 h TTL drain a rebuilt strategy's page would show no reconstructed line. A provenance write already busts the key through `provenanceKey`; this bump is for the new payload shape.
     // Not a payload-shape bump (Phase 167.1.2.2.2.1 OKXHISTORY review round 1, F5 / IN-01): the payload gained the OPTIONAL `reconstructedRangesUnavailable` (true when `series_provenance.reconstructed_ranges` was present but malformed, so the header says the record is unavailable). v19 is unreleased (main is at v18, so no deployed cache holds a v19 entry), the field is optional, and a v19 entry without it reads as false, the same render as before, so the version stays v19. If v19 ever ships before this phase does, bump to v20 here.
     // Bumped v19→v20 (Phase 190 FACTSHEETQUEUED, 2026-11-03): the payload gains the required `analyticsUpdating`, and a pending or computing row over a stored success result now builds where a v19 entry under the same key holds the withheld null (`unstable_cache` stores it); under v19 that placeholder would outlive the deploy for the 1 h TTL.
-    ["factsheet-v2-payload-v20", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
+    // Bumped v20→v21 (Phase 194 FIGURETRUTH, 2026-11-07, one bump for the phase): the payload gains fields a v20 entry lacks. Plan 04: the `figureRecord` and the figure overlay on the headline scalars. Plan 14: `rollingWindow.annualization` and the `rollingWindow1y` / `strategyRollingVol1y` / `strategyRollingSharpe1y` / `strategyRollingSortino1y` keys (`null` under 365 days). Plan 21: the comparator `jointAnnualization` and `rollingVol1y` / `rollingSharpe1y` / `rollingSortino1y`. Plan 23: `rollingCalendarStats`, which computes those 365-day series from the stored `rolling_metrics` `*_1y` keys the recompute writes. All four ship before any deploy, so one version covers them; under v20 a cached entry would draw the factsheet with no record verdict for the 1 h TTL drain.
+    ["factsheet-v2-payload-v21", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -377,7 +380,7 @@ export default async function FactsheetV2Page({
     withPublishedOnly(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at, computation_status, trades_fetched_at, series_provenance )")
+        .select("id, user_id, name, codename, disclosure_tier, strategy_analytics ( computed_at, computation_status, trades_fetched_at, series_provenance )")
         .eq("id", id),
     )
       .maybeSingle(),
@@ -467,7 +470,7 @@ export default async function FactsheetV2Page({
     const { data: ownRow, error: probeError } = await withPublishedOrOwner(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at, computation_status, trades_fetched_at, series_provenance )")
+        .select("id, user_id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at, computation_status, trades_fetched_at, series_provenance )")
         .eq("id", id),
       user.id,
     ).maybeSingle();
@@ -823,28 +826,35 @@ export default async function FactsheetV2Page({
   // tier does not vanish when the viewer toggles to the USD view.
   const payloadWithTrust: FactsheetPayload = withTrustTier(payload, trustTier);
 
+  // 194 D-22: AUM follows D-06 on the public factsheet. Only a signed-in allocator or the
+  // strategy's own manager sees the AUM chip, and the JSON-LD (which a crawler reads
+  // anonymously) carries it only for them. Decided per request here, never on the cached
+  // payload. Asked only when the strategy has an AUM at all, so the common no-AUM render pays
+  // nothing; the lookup reuses this request's client and a server-validated `getUser()`, and
+  // fails closed. The owner lane is the owner by construction (`ownerUid`).
+  let showAum = false;
+  if (payloadWithTrust.aum != null) {
+    if (lane === "owner") {
+      showAum = true;
+    } else {
+      let viewerId: string | null = null;
+      try {
+        const { data, error } = await supabase.auth.getUser();
+        if (!error && data?.user != null) viewerId = data.user.id;
+      } catch (err) {
+        console.error("[factsheet/v2/page] aum viewer lookup failed:", err);
+      }
+      showAum = await canViewAum(supabase, viewerId, signature.user_id, "[factsheet/v2/page]");
+    }
+  }
+
   // JSON-LD FinancialProduct schema — helps Google + LLMs identify the page
   // as a structured financial-product listing. Content is server-built and
   // JSON-stringified; we additionally escape `</` to defang any name/desc
   // value attempting to close the embedded script tag.
-  const jsonLd = {
-    "@context": "https://schema.org",
-    "@type": "FinancialProduct",
-    name: payloadWithTrust.strategyName,
-    description: payloadWithTrust.description ?? undefined,
-    provider: { "@type": "Organization", name: "Quantalyze" },
-    feesAndCommissionsSpecification: payloadWithTrust.aum != null ? `AUM ${payloadWithTrust.aum}` : undefined,
-    // FINDING-7 (b06-silentfailure): Only publish CAGR as a machine-readable
-    // interestRate when it is a finite number AND the strategy is API-verified.
-    // NaN/Infinity serialize to null in JSON (benign but misleading), and CSV
-    // strategies with short track records should not have their annualized CAGR
-    // ingested by crawlers as a verified yield figure.
-    interestRate:
-      Number.isFinite(payloadWithTrust.strategyMetrics.cagr) &&
-      payloadWithTrust.ingestSource === "api"
-        ? payloadWithTrust.strategyMetrics.cagr
-        : undefined,
-  };
+  // 194 plan 16: the object is built by the pure `buildFactsheetJsonLd` (src/lib/factsheet/json-ld.ts),
+  // which gates `interestRate` on the record verdict; the `</` escaping stays here.
+  const jsonLd = buildFactsheetJsonLd(payloadWithTrust, { showAum });
   const jsonLdStr = JSON.stringify(jsonLd).replace(/</g, "\\u003c");
 
   return (
@@ -865,7 +875,10 @@ export default async function FactsheetV2Page({
           (150-RESEARCH § Pattern 5). The route enforces the same restriction
           server-side regardless. */}
       <FactsheetView
-        payload={payloadWithTrust}
+        payload={withViewerAum(payloadWithTrust, showAum)}
+        // 194 D-22 — a per-request render prop like the lane props below: the cached payload
+        // carries `aum` for everyone, and this viewer decision is what shows the chip.
+        showAum={showAum}
         viewerNotice={lane === "owner" ? "owner_unpublished" : undefined}
         ownershipMark={lane === "owner" ? ownershipMark : undefined}
         // Phase 164 / SHARE-04 — a THIRD lane-derived render prop under the same

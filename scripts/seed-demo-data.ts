@@ -110,12 +110,20 @@ interface GeneratedAnalytics {
   max_drawdown: number;
   six_month_return: number;
   sparkline_returns: number[];
+  /**
+   * 194 D-17: the cumulative wealth curve the KPIs above were computed from, one
+   * `{date, value}` point per daily return, in the shape the analytics service
+   * stores. A stored annualised KPI always has its return series, so the figure
+   * gate can size the record instead of printing figures with no length caption.
+   */
+  returns_series: Array<{ date: string; value: number }>;
 }
 
-function generateAnalytics(profile: StrategyProfile, seed: number): GeneratedAnalytics {
+export function generateAnalytics(profile: StrategyProfile, seed: number): GeneratedAnalytics {
   const rng = mulberry32(seed);
 
-  // 365 daily log returns with the profile's mean + vol
+  // 365 daily log returns with the profile's mean + vol. D-20 counts the days the returns
+  // cover, so 365 daily returns are a full year and carry no short-track note.
   const dailyMean = profile.annualizedReturn / 365;
   const dailyVol = profile.annualizedVol / Math.sqrt(365);
 
@@ -162,6 +170,18 @@ function generateAnalytics(profile: StrategyProfile, seed: number): GeneratedAna
       cumulativeSeries[sixMonthIdx] -
     1;
 
+  // One point per daily return (cumulativeSeries[0] is the starting 1), dated so
+  // the last return lands on today (UTC).
+  const todayMs = Date.UTC(
+    new Date().getUTCFullYear(),
+    new Date().getUTCMonth(),
+    new Date().getUTCDate(),
+  );
+  const returnsSeries = cumulativeSeries.slice(1).map((value, i) => ({
+    date: new Date(todayMs - (days - 1 - i) * 86_400_000).toISOString().slice(0, 10),
+    value,
+  }));
+
   return {
     cumulative_return: cumulative - 1,
     cagr,
@@ -172,6 +192,7 @@ function generateAnalytics(profile: StrategyProfile, seed: number): GeneratedAna
     max_drawdown: maxDd,
     six_month_return: sixMonthReturn,
     sparkline_returns: cumulativeSeries.map((v) => v - 1),
+    returns_series: returnsSeries,
   };
 }
 
@@ -972,6 +993,8 @@ async function main() {
       max_drawdown: analytics.max_drawdown,
       six_month_return: analytics.six_month_return,
       sparkline_returns: analytics.sparkline_returns,
+      // 194 D-17: the KPIs above never land without the series they came from.
+      returns_series: analytics.returns_series,
     }, { onConflict: "strategy_id" });
     if (aErr) throw aErr;
   }

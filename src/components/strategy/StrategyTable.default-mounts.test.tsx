@@ -70,6 +70,14 @@
  * mount) is deleted from the discovery, browse and myStrategiesOwner strings;
  * nothing else moved and the fixture was not regenerated.
  *
+ * NEXT SURGICAL EDIT 2026-11-07 (Phase 194 plan 06, D-05/D-09): ONE hunk in the
+ * myStrategiesOwner string only. The "Owner No Analytics" row's Volatility cell, a
+ * null figure printed as an em dash, read text-text-secondary and now reads
+ * text-text-muted, because a null cell carries no tone. Discovery and browse did not
+ * move: their rows carry no record scalars and every figure is finite, so the new
+ * gate is a no-op and the status line is absent at zero. The finite Volatility cell
+ * keeps its class string byte for byte. The fixture was not regenerated.
+ *
  * The clock is frozen (Date only; timers stay real so RTL's async helpers keep
  * working): SyncBadge and the empty-series state derive from `Date.now()`.
  */

@@ -16,6 +16,7 @@
  */
 
 import type { RollWindowPick } from "./types";
+import { ONE_YEAR_DAYS, coveredDays, spanDays } from "@/lib/figure-gate";
 import { mean } from "@/lib/portfolio-math-utils";
 import { beta, dispersion, sharpe } from "@/lib/return-stats";
 
@@ -132,4 +133,76 @@ export function rollingSortino(
     out[i] = dd > 0 ? (m * periodsPerYear) / dd : null;
   }
   return out;
+}
+
+/**
+ * 194 D-14 (founder, 2026-11-07, "Add a 365-day window"): the rolling window, in
+ * CALENDAR days, whose filled windows span a year and so show without the short
+ * note. Python twin: `ROLLING_1Y_WINDOW_DAYS` in analytics-service/services/metrics.py
+ * (`rolling-calendar.test.ts` pins the pair).
+ */
+export const ROLL_WINDOW_1Y_DAYS = ONE_YEAR_DAYS;
+
+/**
+ * Rolling annualized volatility, Sharpe and Sortino over a CALENDAR window, the twin of
+ * `_rolling_calendar_stats` in analytics-service/services/metrics.py. Both are proven
+ * equal on `analytics-service/tests/fixtures/rolling_1y_vectors.json` (closed-form
+ * expected values, read by pytest and vitest).
+ *
+ * The point at index i aggregates the returns dated after `dates[i] - windowDays` days,
+ * up to and including `dates[i]`, and exists only when the returns from `dates[0]` to
+ * `dates[i]` cover `windowDays` days (`coveredDays`, D-21: 365 daily returns fill a
+ * 365-day window; the window itself already holds 365 days); every other index is `null`, as is a
+ * window with no ratio. `dates` are ISO yyyy-mm-dd, ascending, one per return. Non-finite
+ * returns are skipped inside a window (pandas skipna), and the downside root divides by
+ * the window's own count.
+ *
+ * ONE definition, the producer's (D-01; A-194-D14-02): the SAMPLE standard deviation
+ * (ddof 1), so a point is not the factsheet's row-window figure, which stays on the
+ * population standard deviation (ddof 0). Sharpe is null where the standard deviation
+ * does not clear the residue floor; Sortino is null where no return is below 0 (MAR).
+ */
+export function rollingCalendarStats(
+  rets: number[],
+  dates: string[],
+  windowDays: number,
+  periodsPerYear: number,
+): {
+  vol: Array<number | null>;
+  sharpe: Array<number | null>;
+  sortino: Array<number | null>;
+} {
+  const n = Math.min(rets.length, dates.length);
+  const vol: Array<number | null> = new Array(rets.length).fill(null);
+  const sharpeOut: Array<number | null> = new Array(rets.length).fill(null);
+  const sortino: Array<number | null> = new Array(rets.length).fill(null);
+  const sqrtN = Math.sqrt(periodsPerYear);
+  let start = 0;
+  for (let i = 0; i < n; i++) {
+    // Window = (dates[i] - windowDays, dates[i]]: drop every date exactly windowDays
+    // or more before dates[i]. That window holds windowDays covered days; the warm-up
+    // below asks for the same count (D-21), so a point exists from the first full window.
+    while (spanDays(dates[start], dates[i]) >= windowDays) start++;
+    if (coveredDays(dates[0], dates[i]) < windowDays) continue;
+    // 194 D-17 (review R4 WR-02): a window whose span is not a number (a date that is not a date,
+    // here or at its start, where the drop loop above cannot step over it) emits no point. This
+    // also covers a malformed first date: the loop then never leaves index 0, so the span is NaN.
+    if (!Number.isFinite(spanDays(dates[start], dates[i]))) continue;
+    const w = rets.slice(start, i + 1).filter(Number.isFinite);
+    if (w.length < 2) continue;
+    const { sd } = dispersion(w, 1);
+    vol[i] = sd * sqrtN;
+    sharpeOut[i] = sharpe(w, { periodsPerYear, ddof: 1 });
+    let downSq = 0;
+    let hasNeg = false;
+    for (const x of w) {
+      if (x < 0) {
+        downSq += x * x;
+        hasNeg = true;
+      }
+    }
+    const dd = hasNeg ? Math.sqrt(downSq / w.length) * sqrtN : 0;
+    sortino[i] = dd > 0 ? (mean(w) * periodsPerYear) / dd : null;
+  }
+  return { vol, sharpe: sharpeOut, sortino };
 }

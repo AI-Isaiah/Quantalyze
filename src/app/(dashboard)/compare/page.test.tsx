@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
+import { COMPARE_ANALYTICS_COLUMNS } from "@/lib/queries";
 
 // ---------------------------------------------------------------------------
 // Module-level mocks — must be hoisted
@@ -989,5 +990,160 @@ describe("ComparePage — zero, one and many ids (N-CMP)", () => {
     render(Page as React.ReactElement);
     expect(screen.queryByText(ONE_COMPARE)).toBeNull();
     expect(screen.queryByText(/not available yet/i)).toBeNull();
+  });
+});
+
+/**
+ * Phase 194 plan 10 (D-04 as superseded by D-15) — CompareTable's annualised rows
+ * are judged on each strategy's TOTAL record, and the page builds that record on the
+ * server: first and last `returns_series` date, the effective `headline_since`, the
+ * stored `record_observations` alias and the strategy's `asset_class`. The expected
+ * sentences are typed by hand from D-15 (crypto: 90 calendar days; non-crypto: 60
+ * observations), read off the real CompareTable's Sharpe cell.
+ */
+describe("ComparePage — the total record behind CompareTable (194 plan 10)", () => {
+  const ID = "11111111-2222-4333-8444-555555555555";
+  const COMPUTED_AT = "2026-10-30T10:00:00.123456+00:00";
+  const SAME_INSTANT = "2026-10-30T10:00:00.123Z";
+
+  /** A returns_series of one point per calendar day from `start`, `count` points. */
+  const dailySeries = (start: string, count: number) => {
+    const t0 = Date.parse(`${start}T00:00:00Z`);
+    return Array.from({ length: count }, (_, i) => ({
+      date: new Date(t0 + i * 86_400_000).toISOString().slice(0, 10),
+      value: 0.001,
+    }));
+  };
+
+  const row = (
+    assetClass: "crypto" | "traditional",
+    analytics: Record<string, unknown>,
+  ) => {
+    const base = makeSampleStrategy(ID, "Strategy Alpha");
+    return {
+      ...base,
+      asset_class: assetClass,
+      strategy_analytics: { ...base.strategy_analytics, computed_at: COMPUTED_AT, ...analytics },
+    };
+  };
+
+  const sharpeSpan = async (): Promise<HTMLElement> => {
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({ searchParams: Promise.resolve({ ids: ID }) });
+    render(Page as React.ReactElement);
+    const tr = Array.from(document.querySelectorAll("tbody tr")).find(
+      (r) => r.querySelector("td")?.textContent === "Sharpe",
+    );
+    return tr!.querySelectorAll("td")[1].querySelector("span.font-metric") as HTMLElement;
+  };
+
+  beforeEach(() => {
+    adminAnswer = { kind: "none" };
+    overlayItems = [];
+    matrixItems = [];
+    mockHoldingData = [];
+    mockStrategyError = null;
+    strategySelectCalls.length = 0;
+  });
+
+  it("a chain-broken crypto row's record starts at its headline_since, not at its first return", async () => {
+    // First return 2026-01-01, last 2026-06-30 (180 days): a span from the first return
+    // would clear 90 days. The headline compounds from 2026-04-12, which covers 80 days to the end.
+    mockStrategyData = [
+      row("crypto", {
+        returns_series: [
+          { date: "2026-01-01", value: 0 },
+          { date: "2026-06-30", value: 0.01 },
+        ],
+        twr_chain_broken: "true",
+        headline_since: "2026-04-12",
+      }),
+    ];
+    const span = await sharpeSpan();
+    expect(span.getAttribute("title")).toBe("Withheld until the record reaches 90 days (80 days so far).");
+  });
+
+  it("the headline_since of the EFFECTIVE flags generation decides, so a bound last-success snapshot counts", async () => {
+    // The live aliases are a clean derive's (no marker, no headline_since); the stored
+    // curve and headline are the last success's, chain-broken from 2026-04-12.
+    mockStrategyData = [
+      row("crypto", {
+        returns_series: [
+          { date: "2026-01-01", value: 0 },
+          { date: "2026-06-30", value: 0.01 },
+        ],
+        cumulative_method: null,
+        twr_chain_broken: null,
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "simple",
+        last_success_twr_chain_broken: "true",
+        last_success_headline_since: "2026-04-12",
+      }),
+    ];
+    const span = await sharpeSpan();
+    expect(span.getAttribute("title")).toBe("Withheld until the record reaches 90 days (80 days so far).");
+  });
+
+  it("a record with no headline_since spans first to last return and clears 90 days (positive control)", async () => {
+    mockStrategyData = [
+      row("crypto", {
+        returns_series: [
+          { date: "2026-01-01", value: 0 },
+          { date: "2026-06-30", value: 0.01 },
+        ],
+      }),
+    ];
+    const span = await sharpeSpan();
+    expect(span.getAttribute("title")).toBeNull();
+    expect(span.textContent).toContain("1.50");
+  });
+
+  it("the record's observations are the stored alias, not the length of the capped returns_series", async () => {
+    // 120 stored points over 120 days would clear the 90-day fallback and any count of
+    // `returns_series`; the stored alias says the record holds 59 observations, under 60.
+    mockStrategyData = [
+      row("traditional", { returns_series: dailySeries("2026-01-01", 120), record_observations: 59 }),
+    ];
+    const span = await sharpeSpan();
+    expect(span.getAttribute("title")).toBe("Withheld until the record reaches 60 trading days (59 so far).");
+  });
+
+  it("an alias of 60 observations over 119 days shows the figures with the short-track marker", async () => {
+    mockStrategyData = [
+      row("traditional", { returns_series: dailySeries("2026-01-01", 120), record_observations: 60 }),
+    ];
+    const span = await sharpeSpan();
+    expect(span.getAttribute("title")).toBeNull();
+    expect(span.textContent).toContain("<1y");
+  });
+
+  it("appends the one count alias at the page's select call site and leaves COMPARE_ANALYTICS_COLUMNS alone", async () => {
+    mockStrategyData = [row("crypto", {})];
+    await sharpeSpan();
+    const cols = strategySelectCalls.find((c) => c.includes("strategy_analytics")) ?? "";
+    const embed = /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "";
+    const parts = embed.split(",").map((c) => c.trim());
+    expect(parts.filter((p) => p === "record_observations:metrics_json->record_observations")).toHaveLength(1);
+    // The shared projection constant (and its exact-set pin in queries) is untouched.
+    expect(COMPARE_ANALYTICS_COLUMNS).not.toContain("record_observations");
+  });
+
+  it("neither the count alias nor the record reaches the overlay or the matrix", async () => {
+    mockStrategyData = [
+      row("crypto", {
+        returns_series: [
+          { date: "2026-01-01", value: 0 },
+          { date: "2026-06-30", value: 0.01 },
+        ],
+        record_observations: 180,
+        headline_since: "2026-04-12",
+      }),
+    ];
+    await sharpeSpan();
+    for (const it of [...overlayItems, ...matrixItems]) {
+      expect(it.analytics).not.toHaveProperty("record_observations");
+      expect(it.analytics).not.toHaveProperty("headline_since");
+      expect(it).not.toHaveProperty("figureRecord");
+    }
   });
 });

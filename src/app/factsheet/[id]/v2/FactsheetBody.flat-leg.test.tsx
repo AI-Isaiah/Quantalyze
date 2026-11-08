@@ -94,7 +94,9 @@ describe("a flat strategy leg on the factsheet (D-04, B13), Section IV", () => {
   });
 
   it("Tracking Error keeps its number, the benchmark's own volatility", () => {
-    mount({ ...build(), activeComparator: "btc" });
+    // 194 plan 21 (D-15): a 400-day record, because a 29-day crypto record is under the 90-day
+    // minimum and its tracking error is withheld by the record gate, which this test is not about.
+    mount({ ...build(START, () => 0, 400), activeComparator: "btc" });
     expect(rowCell("Tracking Error").textContent).toMatch(/^\d+\.\d+%$/);
   });
 
@@ -119,7 +121,8 @@ describe("a flat strategy leg on the factsheet (D-04, B13), Section IV", () => {
   });
 
   it("control: a leg that varies shows numbers in §IV and no flat-leg reason", () => {
-    mount({ ...build(START, i => ((i % 7) - 3) / 1000), activeComparator: "btc" });
+    // 194 plan 21 (D-15): 400 days, so the record clears the 90-day crypto minimum and alpha shows.
+    mount({ ...build(START, i => ((i % 7) - 3) / 1000, 400), activeComparator: "btc" });
     expect(rowCell("Beta").textContent).toMatch(/^-?\d+\.\d{2}$/);
     expect(rowCell("Alpha (ann)").textContent).toMatch(/%$/);
     expect(screen.queryByTestId("joint-flat-leg-reason")).toBeNull();
@@ -174,7 +177,8 @@ describe("a flat strategy leg on the factsheet (D-04, B13), the KPI strip", () =
   });
 
   it("control: a leg that varies shows numbers in the α/IR cells and no flat-leg line anywhere", () => {
-    mount({ ...build(START, i => ((i % 7) - 3) / 1000), activeComparator: "btc" });
+    // 194 plan 21 (D-15): 400 days, so the record clears the 90-day crypto minimum and alpha shows.
+    mount({ ...build(START, i => ((i % 7) - 3) / 1000, 400), activeComparator: "btc" });
     expect(stripCell("α vs BTC").textContent).toMatch(/%$/);
     expect(stripCell("IR vs BTC").textContent).toMatch(/^-?\d+\.\d{2}$/);
     expect(reasonsBySlot()).toEqual({ strip: [], four: [] });

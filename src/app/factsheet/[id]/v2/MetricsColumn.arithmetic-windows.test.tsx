@@ -137,14 +137,15 @@ function pctSigned(v: number | null | undefined): string {
   return `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`;
 }
 
-/** D-11's cutoffs for a record ending END_ISO (UTC). */
+/** D-11's cutoffs for a record ending END_ISO (UTC), with Phase 194 D-03's 91-day 3 Month. */
 function cutoffs(): Record<"mtd" | "ytd" | "p3m" | "p6m" | "p1y", Date> {
   const last = new Date(`${END_ISO}T00:00:00Z`);
   const back = (days: number) => new Date(last.getTime() - days * DAY);
   return {
     mtd: new Date(Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), 0)),
     ytd: new Date(Date.UTC(last.getUTCFullYear() - 1, 11, 31)),
-    p3m: back(90),
+    // Phase 194 D-03: 3 Month is a 91-calendar-day window (6 Month 182). It was 90.
+    p3m: back(91),
     p6m: back(182),
     p1y: back(365),
   };

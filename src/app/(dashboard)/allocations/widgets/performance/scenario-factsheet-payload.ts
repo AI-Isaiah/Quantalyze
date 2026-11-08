@@ -63,10 +63,14 @@ import {
   rollingVol,
   rollingSharpe,
   rollingSortino,
+  rollingCalendarStats,
   pickRollingWindow,
   ROLL_WINDOW_90D,
   ROLL_WINDOW_30D,
+  ROLL_WINDOW_1Y_DAYS,
 } from "@/lib/factsheet/rolling";
+import { coveredDays, figureRecord, gateRollingWindow } from "@/lib/figure-gate";
+import type { FigureRecord } from "@/lib/figure-gate";
 import { streakLengths, streakHistogram } from "@/lib/factsheet/streak";
 import { calmarByYear } from "@/lib/factsheet/calmar-by-year";
 import { bootstrapCI } from "@/lib/factsheet/bootstrap";
@@ -226,6 +230,15 @@ function notEnoughWindow(): RollWindowPick {
   return { window: 0, label: "", enough: false };
 }
 
+/**
+ * 194 D-11 / D-15 (2026-11-07): the empty blend's rolling window. There is no record to
+ * gate and no window to draw, so the verdict is withheld with cause `record` (days 0),
+ * the same shape every builder gives a window it cannot draw.
+ */
+function emptyBlendRollingWindow(): RollWindowPick {
+  return { ...notEnoughWindow(), annualization: { state: "withheld", days: 0, cause: "record" } };
+}
+
 /** Safe-empty streaks block — the degenerate-path default (no win/loss runs). */
 function emptyStreaks(): FactsheetCsvPayload["streaks"] {
   return {
@@ -302,7 +315,14 @@ type ReturnsBody = {
   strategyRollingSharpe: FactsheetCsvPayload["strategyRollingSharpe"];
   strategyRollingSortino: FactsheetCsvPayload["strategyRollingSortino"];
   rollingWindow: FactsheetCsvPayload["rollingWindow"];
+  /** 194 D-14: the 365-calendar-day window beside `rollingWindow`; the four keys are `null` under 365 days. */
+  rollingWindow1y: RollWindowPick | null;
+  strategyRollingVol1y: Array<number | null> | null;
+  strategyRollingSharpe1y: Array<number | null> | null;
+  strategyRollingSortino1y: Array<number | null> | null;
   rollingBetaWindow: FactsheetCsvPayload["rollingBetaWindow"];
+  /** 194 D-15: the blend's TOTAL record (its overlap count); `null` for the empty blend. */
+  figureRecord: FigureRecord | null;
   strategyWorst10: FactsheetCsvPayload["strategyWorst10"];
   strategyMetrics: ComputeSummary;
   streaks: FactsheetCsvPayload["streaks"];
@@ -339,8 +359,13 @@ function buildReturnsBody(
       strategyRollingVol: [],
       strategyRollingSharpe: [],
       strategyRollingSortino: [],
-      rollingWindow: notEnoughWindow(),
+      rollingWindow: emptyBlendRollingWindow(),
+      rollingWindow1y: null,
+      strategyRollingVol1y: null,
+      strategyRollingSharpe1y: null,
+      strategyRollingSortino1y: null,
       rollingBetaWindow: notEnoughWindow(),
+      figureRecord: null,
       strategyWorst10: [],
       strategyMetrics: emptyComputeSummary(),
       streaks: emptyStreaks(),
@@ -371,6 +396,47 @@ function buildReturnsBody(
   // reuse its `eq`/`dd` directly (no redundant second pass) — strategyDrawdowns
   // and the Worst-10 table (also off `dd`) are the SAME series by construction.
   const { eq, dd, ...strategyMetrics } = compute(rets, datesR, 0, periodsPerYear);
+
+  // 194 D-15 (2026-11-07): the blend's TOTAL record, built once from the dates the rolling
+  // series run over, their count (the blend's overlap, not a stored count) and the
+  // `periodsPerYear` this builder receives (the composer's `blendPeriodsPerYear` of the
+  // legs: a blend with one crypto leg is crypto; never re-derived here).
+  const record = figureRecord({
+    seriesStart: datesR[0],
+    seriesEnd: datesR[datesR.length - 1],
+    observations: rets.length,
+    periodsPerYear,
+  });
+  // D-11 / D-15: the verdict rides the window it describes, beside the same pick.
+  const rollingPick: RollWindowPick = {
+    ...rollWindow,
+    annualization: gateRollingWindow(record, datesR, { rows: rollWindow.window }, rollWindow.enough),
+  };
+  // D-14 (additive): from 365 calendar days the 1y window is ALSO carried, beside the row
+  // window and never in its place; under 365 days the four keys are `null`, so every
+  // payload has one shape (the factsheet builder's rule, and the parity guard's).
+  let rolling1y: {
+    window: RollWindowPick | null;
+    vol: Array<number | null> | null;
+    sharpe: Array<number | null> | null;
+    sortino: Array<number | null> | null;
+  } = { window: null, vol: null, sharpe: null, sortino: null };
+  if (coveredDays(datesR[0], datesR[datesR.length - 1]) >= ROLL_WINDOW_1Y_DAYS) {
+    const cal = rollingCalendarStats(rets, datesR, ROLL_WINDOW_1Y_DAYS, periodsPerYear);
+    const first = datesR.findIndex((d) => coveredDays(datesR[0], d) >= ROLL_WINDOW_1Y_DAYS);
+    rolling1y = {
+      window: {
+        window: first + 1,
+        label: "1y",
+        enough: true,
+        calendarDays: ROLL_WINDOW_1Y_DAYS,
+        annualization: gateRollingWindow(record, datesR, { calendarDays: ROLL_WINDOW_1Y_DAYS }, true),
+      },
+      vol: cal.vol,
+      sharpe: cal.sharpe,
+      sortino: cal.sortino,
+    };
+  }
   const { wins, losses } = streakLengths(rets);
   const MAX_LEN = 14;
 
@@ -382,8 +448,13 @@ function buildReturnsBody(
     strategyRollingVol: rollingVol(rets, rollWindow.window, periodsPerYear),
     strategyRollingSharpe: rollingSharpe(rets, rollWindow.window, periodsPerYear),
     strategyRollingSortino: rollingSortino(rets, rollWindow.window, periodsPerYear),
-    rollingWindow: rollWindow,
+    rollingWindow: rollingPick,
+    rollingWindow1y: rolling1y.window,
+    strategyRollingVol1y: rolling1y.vol,
+    strategyRollingSharpe1y: rolling1y.sharpe,
+    strategyRollingSortino1y: rolling1y.sortino,
     rollingBetaWindow: rollBetaWindow,
+    figureRecord: record,
     strategyWorst10: worstDrawdowns(dd, 10),
     strategyMetrics,
     streaks: {
@@ -511,6 +582,10 @@ export function buildScenarioFactsheetPayload(
     strategyRollingSharpe: body.strategyRollingSharpe,
     strategyRollingSortino: body.strategyRollingSortino,
     rollingWindow: body.rollingWindow,
+    rollingWindow1y: body.rollingWindow1y,
+    strategyRollingVol1y: body.strategyRollingVol1y,
+    strategyRollingSharpe1y: body.strategyRollingSharpe1y,
+    strategyRollingSortino1y: body.strategyRollingSortino1y,
     rollingBetaWindow: body.rollingBetaWindow,
     strategyDrawdowns,
     strategyWorst10: body.strategyWorst10,
@@ -541,5 +616,8 @@ export function buildScenarioFactsheetPayload(
     // hides its observation warning on a payload with no basis, so dropping it
     // here would blank a warning this surface has a basis for.
     periodsPerYear,
+    // 194 D-15: the blend's TOTAL record, read by the rail (plan 04), the rolling note
+    // (plan 15) and the peer panel (plan 16). Present-only: the empty blend has none.
+    ...(body.figureRecord ? { figureRecord: body.figureRecord } : {}),
   };
 }

@@ -154,6 +154,10 @@ function makeMarked(over: {
       ? "own_capital"
       : over.capital_ownership) as OwnCapitalStrategy["capital_ownership"],
     mtd: over.mtd ?? null,
+    // 194 D-15: an unknown record (no deciding input) leaves the stored Sharpe as-is.
+    figure_span_days: null,
+    figure_observations: null,
+    figure_crypto: false,
     strategy_analytics: over.analytics ?? null,
   };
 }

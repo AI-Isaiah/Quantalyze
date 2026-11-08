@@ -15,9 +15,20 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * ⛔ The expected string below is written out BY HAND and must stay that way.
  * Recomputing it from `PERCENTILE_METRICS` would make the pin agree with
  * whatever the source says, so it could never fail.
+ *
+ * 2026-11-07, Phase 194 plan 18 (D-11 as superseded by D-15) - THE PIN MOVED, on purpose.
+ * The KPI list is still the first seven columns, byte for byte, and the gate column is
+ * still the eighth. What changed is what follows them: the four scalar record aliases
+ * (first and last return date, headline start, observation count) that let the scorer
+ * judge each row's TOTAL record, and the strategy's own `asset_class` beside `id`. They
+ * ride ALONGSIDE the KPI list (`PERCENTILE_SPAN_COLUMNS`), never inside
+ * `PERCENTILE_METRICS`, because the scorer ranks every member of that array. No series
+ * array or flags blob is projected: a `returns_series`, `data_quality_flags` or
+ * `metrics_json` WITHOUT a `->` path would be a leak (T-194-35) and is asserted absent
+ * below.
  */
 const PINNED_KPI_PROJECTION =
-  "strategy_analytics (cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return, computation_status)";
+  "strategy_analytics (cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return, computation_status, series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations)";
 
 const recorded = vi.hoisted(() => ({ selects: [] as string[] }));
 
@@ -53,18 +64,32 @@ beforeEach(() => {
 describe("percentile KPI projection — byte pin (Phase 159 D-03, Phase 166 D-18)", () => {
   it("getPercentiles() without a category projects the pinned KPI list byte-for-byte", async () => {
     await getPercentiles();
-    expect(recorded.selects).toEqual([`id, ${PINNED_KPI_PROJECTION}`]);
+    expect(recorded.selects).toEqual([`id, asset_class, ${PINNED_KPI_PROJECTION}`]);
   });
 
   it("getPercentiles(slug) projects the same pinned KPI list byte-for-byte", async () => {
     await getPercentiles("some-slug");
     expect(recorded.selects).toEqual([
-      `id, discovery_categories!inner(slug), ${PINNED_KPI_PROJECTION}`,
+      `id, asset_class, discovery_categories!inner(slug), ${PINNED_KPI_PROJECTION}`,
     ]);
   });
 
   it("getOwnRowPercentiles() projects the same pinned KPI list byte-for-byte", async () => {
     await getOwnRowPercentiles([]);
-    expect(recorded.selects).toEqual([`id, ${PINNED_KPI_PROJECTION}`]);
+    expect(recorded.selects).toEqual([`id, asset_class, ${PINNED_KPI_PROJECTION}`]);
+  });
+
+  it("the span aliases are scalar JSON paths: no series array, flags blob or metrics blob rides along", async () => {
+    await getPercentiles();
+    await getPercentiles("some-slug");
+    await getOwnRowPercentiles([]);
+    expect(recorded.selects).toHaveLength(3);
+    for (const select of recorded.selects) {
+      // Every reference to a blob column is an aliased `->` / `->>` path, never the bare column.
+      for (const blob of ["returns_series", "data_quality_flags", "metrics_json"]) {
+        const bare = new RegExp(`(^|[\\s,(])${blob}(?![-\\w])`);
+        expect(select, `${blob} must not be projected whole`).not.toMatch(bare);
+      }
+    }
   });
 });

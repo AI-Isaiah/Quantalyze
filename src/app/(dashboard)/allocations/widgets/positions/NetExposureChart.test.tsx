@@ -134,7 +134,8 @@ describe("NetExposureChart — a11y + header + legend", () => {
     expect(img).toBeTruthy();
     expect(screen.getByText("Net exposure over time")).toBeTruthy();
     expect(screen.getByText("as of 2026-01-12")).toBeTruthy();
-    expect(screen.getByText("Net")).toBeTruthy();
-    expect(screen.getByText("Gross")).toBeTruthy();
+    // D-08: the legend chips name their quantity.
+    expect(screen.getByText("Net exposure")).toBeTruthy();
+    expect(screen.getByText("Gross exposure")).toBeTruthy();
   });
 });

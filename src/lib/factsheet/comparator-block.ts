@@ -2,41 +2,9 @@ import type { ComparatorBlock, ComparatorSummary, ComputeResult } from "./types"
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq } from "./compute";
 import { gateFlatLeg, jointMetrics, MIN_PAIRED_OBSERVATIONS } from "./joint";
-import { rollingVol, rollingSharpe, rollingSortino, rollingBeta } from "./rolling";
-
-/**
- * Phase 170.6 (D-07, founder 2026-10-13): the fewest ELAPSED CALENDAR DAYS, from the
- * comparator's first covered date to its last, that its annualized figures are shown
- * on. Below it Sharpe, Sortino, Calmar, CAGR and annualized volatility are NaN (the
- * rail prints "—"): a week of SPX annualized reads as a year (a Sharpe of 10.24 was
- * seen on PROD). Cumulative return and max drawdown stay; they are not annualized.
- *
- * Calendar days, not observations (O-5), so the rule does not depend on the
- * comparator's calendar (SPX has about 63 weekdays in 90 days, BTC 90) and matches
- * `recordCoversWindow`. This is the ONE definition: `summaryOf` below applies it and the
- * rail's reason line (`MetricsColumn`, via {@link comparatorAnnualizationWithheld}) names it;
- * both import this constant and neither restates the 90.
- */
-export const COMPARATOR_ANNUALIZATION_FLOOR_DAYS = 90;
-
-/**
- * True when a comparator summary has a measured cumulative return but its annualized set is
- * withheld, which is exactly what a sub-floor overlap produces (`summaryOf` below makes
- * `ann_vol` NaN while `cum_ret` stays). It is the reader's cue to say WHY the cells are a
- * dash (170.6 SFH-1): "too short to annualize" must not read the same as "no data". A null
- * summary (no comparator data at all) is not withheld, it is absent.
- */
-export function comparatorAnnualizationWithheld(summary: ComparatorSummary | null | undefined): boolean {
-  return summary != null && Number.isFinite(summary.cum_ret) && !Number.isFinite(summary.ann_vol);
-}
-
-const DAY_MS = 86_400_000;
-
-/** Elapsed calendar days from the first to the last of ascending ISO dates; 0 for fewer than two. */
-function elapsedDays(dates: readonly string[]): number {
-  if (dates.length < 2) return 0;
-  return Math.round((Date.parse(`${dates[dates.length - 1]}T00:00:00Z`) - Date.parse(`${dates[0]}T00:00:00Z`)) / DAY_MS);
-}
+import { rollingVol, rollingSharpe, rollingSortino, rollingBeta, rollingCalendarStats } from "./rolling";
+import { gateAnnualized, ONE_YEAR_DAYS, coveredDays } from "@/lib/figure-gate";
+import type { FigureRecord } from "@/lib/figure-gate";
 
 /**
  * Build one comparator block from aligned strategy + benchmark return series.
@@ -103,6 +71,13 @@ export function buildComparatorBlock(
   // figures cover (a Dated row's `headlineCoversFrom`). Null (default) adds nothing, so
   // every existing call is unchanged.
   spanStart: string | null = null,
+  // 194 D-11 / D-15 (2026-11-07, plan 21): the strategy's TOTAL (full-history) record. Never a
+  // record built from a selected range. Absent or null is the `null` state: the joint is kept.
+  figureRecord?: FigureRecord | null,
+  // 194 D-14 (2026-11-07, plan 21): the calendar days of the strategy bundle's 1y window
+  // (`rollingWindow1y.calendarDays`). Set, the block ALSO carries the comparator's own
+  // 365-day series beside its row series; absent, the three 1y keys are absent.
+  rollCalendarDays?: number,
 ): ComparatorBlock {
   const aligned = toAlignment(bench, dates);
   const benchReturns = aligned.returns;
@@ -116,37 +91,43 @@ export function buildComparatorBlock(
       coveredDates.push(dates[i]);
     }
   }
+  // 194 D-16 (round 2 WR-01): the span the comparator's own summary covers, carried only when
+  // under one year so the rail can give the benchmark column the muted under-1y note.
+  const coveredSpan =
+    coveredDates.length >= 2 ? coveredDays(coveredDates[0], coveredDates[coveredDates.length - 1]) : null;
+  const coveredShortSpanDays = coveredSpan != null && coveredSpan < ONE_YEAR_DAYS ? coveredSpan : null;
+  // 194 D-17 (review R4 WR-02): a covered span that is not a number means a covered date is
+  // present but not a date. The benchmark's annualized cells then dash (NaN), never show with
+  // the under-1y note silently dropped.
+  const coveredSpanUnreadable = coveredSpan != null && !Number.isFinite(coveredSpan);
   const benchSummary =
     coveredReturns.length > 0 ? compute(coveredReturns, coveredDates, 0, benchPeriodsPerYear) : null;
   // Phase 169.5 review WR-01: past coverage on the comparator's OWN calendar
   // (`isPastCoverage` in align.ts, the rule the picker caption also calls), never a
   // raw-date compare: a weekday comparator's Friday close covers a weekend last date.
   const pastThrough = aligned.coveredToEnd !== true;
-  // Phase 170.6 (D-07): `covered` are the dates `b` was computed over. Under
-  // COMPARATOR_ANNUALIZATION_FLOOR_DAYS elapsed days the five annualized figures are NaN,
-  // the idiom `gateFlatLeg` uses for withheld joint figures, so the rail's NaN-to-dash path
-  // prints "—". Applied to `summary` and `summarySince` alike; `benchSummary` itself (the
-  // vol-match scale reads its `ann_vol`) is untouched.
-  const summaryOf = (b: ComputeResult, covered: readonly string[]): ComparatorSummary => {
-    const annualizes = elapsedDays(covered) >= COMPARATOR_ANNUALIZATION_FLOOR_DAYS;
-    return {
-      cum_ret: b.cum_ret,
-      cagr: annualizes ? b.cagr : NaN,
-      ann_vol: annualizes ? b.ann_vol : NaN,
-      sharpe: annualizes ? b.sharpe : NaN,
-      sortino: annualizes ? b.sortino : NaN,
-      calmar: annualizes ? b.calmar : NaN,
-      max_dd: b.max_dd,
-      longest_dd: b.longest_dd,
-      mtd: pastThrough ? null : b.mtd,
-      ytd: pastThrough ? null : b.ytd,
-      p3m: pastThrough ? null : b.p3m,
-      p6m: pastThrough ? null : b.p6m,
-      p1y: pastThrough ? null : b.p1y,
-      win_rate: b.win_rate,
-      profit_factor: b.profit_factor,
-    };
-  };
+  // 194 D-16 (founder 2026-11-07, review WR-01), superseding Phase 170.6 D-07's 90-day overlap
+  // gate: the five annualized figures are NEVER withheld here for the length of the overlap or
+  // of a zoomed slice. D-15's TOTAL-record gate (`gateAnnualized`, read by the rail) is the only
+  // withhold, and a window under one year carries its one muted note. Applied to `summary` and
+  // `summarySince` alike; `benchSummary` itself (the vol-match scale reads its `ann_vol`) is untouched.
+  const summaryOf = (b: ComputeResult): ComparatorSummary => ({
+    cum_ret: b.cum_ret,
+    cagr: coveredSpanUnreadable ? NaN : b.cagr,
+    ann_vol: coveredSpanUnreadable ? NaN : b.ann_vol,
+    sharpe: coveredSpanUnreadable ? NaN : b.sharpe,
+    sortino: coveredSpanUnreadable ? NaN : b.sortino,
+    calmar: coveredSpanUnreadable ? NaN : b.calmar,
+    max_dd: b.max_dd,
+    longest_dd: b.longest_dd,
+    mtd: pastThrough ? null : b.mtd,
+    ytd: pastThrough ? null : b.ytd,
+    p3m: pastThrough ? null : b.p3m,
+    p6m: pastThrough ? null : b.p6m,
+    p1y: pastThrough ? null : b.p1y,
+    win_rate: b.win_rate,
+    profit_factor: b.profit_factor,
+  });
   // B19: the same summary over the covered returns dated on or after `spanStart` (dates
   // are ISO, so a string compare is a date compare), on the same comparator basis. The
   // slice is of the COMPARATOR's covered returns; the strategy leg is not involved.
@@ -155,7 +136,7 @@ export function buildComparatorBlock(
     const from = coveredDates.findIndex(d => d >= spanStart);
     if (from >= 0) {
       const sinceDates = coveredDates.slice(from);
-      summarySince = summaryOf(compute(coveredReturns.slice(from), sinceDates, 0, benchPeriodsPerYear), sinceDates);
+      summarySince = summaryOf(compute(coveredReturns.slice(from), sinceDates, 0, benchPeriodsPerYear));
     }
   }
 
@@ -175,7 +156,33 @@ export function buildComparatorBlock(
   // Phase 164.6.6.3.3 (D-04, B13): a flat strategy leg reads NaN ("—") for beta, alpha,
   // information ratio and captures, and the block carries `flatLeg`. The gate is the
   // shared `gateFlatLeg` (see joint.ts), the one `computeV2Joint` also calls.
-  const { joint, flatLeg } = gateFlatLeg(rawJoint, pairedStrat);
+  const { joint: flatGated, flatLeg } = gateFlatLeg(rawJoint, pairedStrat);
+  // 194 D-11 as superseded by D-15 (2026-11-07, plan 21): alpha, information ratio, tracking
+  // error and Treynor are annualized, so they are withheld, as NaN (the `gateFlatLeg` idiom,
+  // every reader prints a dash), ONLY when the strategy's TOTAL record is under D-15's
+  // minimum. The overlap (first to last PAIRED date) only qualifies the figure: under a year
+  // it is `short` and the values stay. A selected range never withholds: `windowView` and the
+  // leverage arm re-derive this block with the view's own total record. Beta, correlation,
+  // R-squared and the captures are not annualized and are never touched here (A-194-D11-03).
+  let joint = flatGated;
+  let jointAnnualization: ComparatorBlock["jointAnnualization"];
+  // 194 D-17 (review R4 WR-02): an overlap whose span is not a number (a paired date that is
+  // not a date) is withheld with its own `unreadable` marker, unless the record itself is
+  // under the minimum (then its own reason stands).
+  if (flatGated != null && pairedIdx.length >= 2) {
+    const overlapSpan = coveredDays(dates[pairedIdx[0]], dates[pairedIdx[pairedIdx.length - 1]]);
+    const unreadableOverlap = !Number.isFinite(overlapSpan);
+    const state = figureRecord != null ? gateAnnualized(figureRecord, overlapSpan) : "null";
+    if (state === "withheld" || unreadableOverlap) {
+      joint = { ...flatGated, alpha: NaN, info_ratio: NaN, tracking_error: NaN, treynor: NaN };
+      jointAnnualization =
+        state === "withheld"
+          ? { state, days: unreadableOverlap ? 0 : overlapSpan }
+          : { state: "withheld", days: 0, unreadable: true };
+    } else if (state === "short") {
+      jointAnnualization = { state, days: overlapSpan };
+    }
+  }
 
   const coveredEquity = cumEq(coveredReturns);
   const cumulative = scatterCovered(benchReturns, coveredEquity);
@@ -197,19 +204,42 @@ export function buildComparatorBlock(
   // than two covered returns, or a flat comparator), has nothing to match
   // either. There is no `× 1.00` fallback: that factor was never measured.
   const benchVol = benchSummary?.ann_vol;
+  // 194 R5 SFH-M2: an unreadable covered span dashes the benchmark's vol (NaN above), but the
+  // scale reads the UN-gated `benchSummary.ann_vol`, so it would still draw a vol-matched curve
+  // and a "BTC × 0.83" label from a figure the column shows as withheld. No curve, no label.
   const vmAvailable =
+    !coveredSpanUnreadable &&
     Number.isFinite(stratAnnVol) && benchVol != null && Number.isFinite(benchVol) && benchVol > 0;
   const vmScale = vmAvailable ? stratAnnVol / (benchVol as number) : NaN;
   const volMatched = vmAvailable
     ? scatterCovered(benchReturns, cumEq(coveredReturns.map(r => r * vmScale)))
     : null;
+  // 194 D-14 (2026-11-07, plan 21): ADDITIVE. When the strategy bundle carries a 1y window the
+  // comparator ALSO gets its own 365-calendar-day volatility, Sharpe and Sortino, over the same
+  // covered returns and dates `rollingOverCovered` reads and on the comparator's own basis, so
+  // the benchmark line drawn against the strategy's 1y line is the same window. The row series
+  // below are untouched in every case, and rolling beta stays as is (A-194-D11-04). Without
+  // `rollCalendarDays` the three keys are absent: the basis merge replaces `comparators` whole,
+  // so a cash comparator's 1y series can never survive onto a basis view.
+  let rolling1y: Pick<ComparatorBlock, "rollingVol1y" | "rollingSharpe1y" | "rollingSortino1y"> | undefined;
+  if (rollCalendarDays != null) {
+    const cal = rollingCalendarStats(coveredReturns, coveredDates, rollCalendarDays, benchPeriodsPerYear);
+    rolling1y = {
+      rollingVol1y: scatterCovered(benchReturns, cal.vol),
+      rollingSharpe1y: scatterCovered(benchReturns, cal.sharpe),
+      rollingSortino1y: scatterCovered(benchReturns, cal.sortino),
+    };
+  }
   return {
     name: label,
     shortName: short,
-    summary: benchSummary ? summaryOf(benchSummary, coveredDates) : null,
+    summary: benchSummary ? summaryOf(benchSummary) : null,
     ...(spanStart != null ? { summarySince } : {}),
     joint,
     jointWithheld,
+    ...(jointAnnualization ? { jointAnnualization } : {}),
+    ...(coveredShortSpanDays != null ? { coveredShortSpanDays } : {}),
+    ...(coveredSpanUnreadable ? { coveredSpanUnreadable: true as const } : {}),
     ...(flatLeg ? { flatLeg: true as const } : {}),
     cumulative,
     cumVsBench,
@@ -217,6 +247,7 @@ export function buildComparatorBlock(
     rollingVol: rollingOverCovered(benchReturns, rollWindowDays, w => rollingVol(w, w.length, benchPeriodsPerYear)),
     rollingSharpe: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSharpe(w, w.length, benchPeriodsPerYear)),
     rollingSortino: rollingOverCovered(benchReturns, rollWindowDays, w => rollingSortino(w, w.length, benchPeriodsPerYear)),
+    ...rolling1y,
     volMatched,
     volMatchedLabel: vmAvailable ? `${short} × ${vmScale.toFixed(2)}` : null,
     rollingBeta: rollingBetaOverPaired(stratReturns, aligned, rollBetaWindowDays),
@@ -229,7 +260,10 @@ export function buildComparatorBlock(
  * (one per non-null entry of `returns`, in order) back on the full axis, null at
  * every uncovered index.
  */
-function scatterCovered(returns: ReadonlyArray<number | null>, perCovered: readonly number[]): Array<number | null> {
+function scatterCovered(
+  returns: ReadonlyArray<number | null>,
+  perCovered: ReadonlyArray<number | null>,
+): Array<number | null> {
   let j = 0;
   return returns.map(r => (r == null ? null : perCovered[j++]));
 }

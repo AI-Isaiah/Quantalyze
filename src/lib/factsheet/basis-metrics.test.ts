@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { hasBasisHeadline, overlayBasisScalars } from "./basis-metrics";
+import { hasBasisHeadline, overlayBasisScalars, overlayStoredFigureDefs } from "./basis-metrics";
+import type { StoredFigureDefs } from "./basis-metrics";
 
 /**
  * Round-2 H-1/M-1 — the availability criterion + the STRICT by-basis overlay.
@@ -123,5 +124,53 @@ describe("H-1 overlayBasisScalars — STRICT: null/non-finite scalar → NaN, ne
       mark_to_market: { ...FULL },
     };
     expect(overlayBasisScalars(cashBase, byBasis.cash_settlement)).toBe(cashBase);
+  });
+});
+
+/**
+ * Phase 194 (D-01, T-194-07): the stored 6 Month, 3 Month, VaR 95% and CVaR 95% win at
+ * full history only behind `figure_defs_version >= 2`. A row written before the
+ * recompute stores VaR/CVaR under the old definition, so overlaying it would show a
+ * figure whose meaning differs from the one the page labels.
+ */
+describe("overlayStoredFigureDefs (194 D-01)", () => {
+  const COMPUTED = { p6m: 0.11, p3m: 0.05, var95: -0.02, cvar95: -0.03, cagr: 0.3 };
+  const stored = (over: Partial<StoredFigureDefs> = {}): StoredFigureDefs => ({
+    figureDefsVersion: 2,
+    sixMonth: 0.2,
+    threeMonth: 0.1,
+    var95: -0.04,
+    cvar95: -0.06,
+    ...over,
+  });
+
+  it("marker present: the stored four replace the computed four and nothing else moves", () => {
+    expect(overlayStoredFigureDefs(COMPUTED, stored())).toEqual({
+      p6m: 0.2,
+      p3m: 0.1,
+      var95: -0.04,
+      cvar95: -0.06,
+      cagr: 0.3,
+    });
+  });
+
+  it("marker present: a stored null stays missing, never the computed value", () => {
+    const out = overlayStoredFigureDefs(COMPUTED, stored({ sixMonth: null, threeMonth: null, var95: null, cvar95: null }));
+    expect(out.p6m).toBeNull();
+    expect(out.p3m).toBeNull();
+    expect(out.var95).toBeNaN();
+    expect(out.cvar95).toBeNaN();
+  });
+
+  it.each([
+    ["marker absent (null)", stored({ figureDefsVersion: null })],
+    ["marker below the current version", stored({ figureDefsVersion: 1 })],
+  ])("%s: the computed figures stand", (_label, s) => {
+    expect(overlayStoredFigureDefs(COMPUTED, s)).toBe(COMPUTED);
+  });
+
+  it("no stored object: the computed figures stand", () => {
+    expect(overlayStoredFigureDefs(COMPUTED, undefined)).toBe(COMPUTED);
+    expect(overlayStoredFigureDefs(COMPUTED, null)).toBe(COMPUTED);
   });
 });

@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260821120000_get_verified_cohort_rank_computed_gate.sql
+-- source migration: 20261107140000_get_verified_cohort_rank_span_gate.sql
 -- ==========================================================================
 -- STEP 1: get_verified_cohort_rank SECURITY DEFINER RPC (full re-base)
 -- ==========================================================================
@@ -25,7 +25,12 @@ DECLARE
   -- Cell-size floor (T-42-02). Below this the cohort is too thin to rank a
   -- hypothetical without near-identifying an individual strategy.
   v_min_n CONSTANT INT := 20;
-  v_n     INT;
+  -- D-15 record minimum, the SQL twins of MIN_ANNUALIZATION_DAYS and MIN_ANNUALIZATION_OBS in
+  -- src/lib/figure-gate.ts. A vitest pin reads the snapshot of this function and asserts both.
+  v_min_span_days CONSTANT INT := 90;
+  v_min_obs CONSTANT INT := 60;
+  v_n     INT;   -- the annualised cohort (record predicate applied): Sharpe/Sortino denominator, cohort_n
+  v_n_all INT;   -- the whole cohort (no record predicate): the Max DD denominator (D-18)
 BEGIN
   -- Caller-identity guard (T-42-03): the route layer (withAuth +
   -- assertProfileApproved) is the primary gate; this is defense-in-depth so
@@ -52,9 +57,14 @@ BEGIN
   -- min-N count rows the percentiles do not. A status gate is required because
   -- a failed computation can retain KPI values, so the IS NOT NULL predicates
   -- alone admit dead rows (159-CENSUS.md: 17 of 18 published PROD strategies).
-  SELECT count(*) INTO v_n
+  -- D-11 / D-15 / D-18: r.rec_ok is false for a strategy whose TOTAL record determinably fails the
+  -- minimum (see the migration header). Character-identical in the count query and the rank query; an
+  -- undeterminable record has rec_ok true. v_n counts the rec_ok rows (the annualised cohort), v_n_all
+  -- counts every cohort row (the Max DD cohort).
+  SELECT count(*) FILTER (WHERE r.rec_ok), count(*) INTO v_n, v_n_all
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
+  CROSS JOIN LATERAL (SELECT NOT COALESCE(CASE WHEN s.asset_class IS DISTINCT FROM 'crypto' AND (a.metrics_json->>'record_observations') ~ '^\d{1,9}$' THEN (a.metrics_json->>'record_observations')::int < v_min_obs WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' AND (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') - GREATEST(public.ledger_refresh_parse_series_date(a.returns_series->0->>'date'), CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') END) + 1 < v_min_span_days END, false) AS rec_ok) r
   WHERE s.status = 'published'
     AND a.computation_status IN ('complete', 'complete_with_warnings')
     AND a.sharpe IS NOT NULL
@@ -67,8 +77,11 @@ BEGIN
 
   -- Min-N gate (T-42-02): below the floor, return a single honest-empty row
   -- carrying the real cohort_n but NULL percentiles. Never rank against a
-  -- thin/illustrative set — prevents cell-size inference.
-  IF v_n < v_min_n THEN
+  -- thin/illustrative set — prevents cell-size inference. D-18: the floor applies per rank. This
+  -- early return fires on the LARGER population (v_n_all, the Max DD set); v_n <= v_n_all, so it also
+  -- covers every case where no rank can be computed. When v_n_all clears the floor but v_n does not,
+  -- the rank query below NULLs Sharpe and Sortino and still ranks Max DD.
+  IF v_n_all < v_min_n THEN
     RETURN QUERY SELECT v_n, NULL::INT, NULL::INT, NULL::INT;
     RETURN;
   END IF;
@@ -94,14 +107,18 @@ BEGIN
   -- RANK-01: this WHERE clause is character-identical to the count query's
   -- above, INCLUDING the terminal-success gate. They are one cohort definition
   -- written twice; keep them in lockstep.
+  -- D-18: the Sharpe and Sortino numerators count only r.rec_ok rows and divide by v_n (the annualised
+  -- cohort, NULL when v_n is under the floor); the Max DD numerator counts every cohort row and divides
+  -- by v_n_all. A strategy under the D-15 minimum therefore leaves the annualised peer sets only.
   RETURN QUERY
   SELECT
     v_n,
-    (round( round(100.0 * count(*) FILTER (WHERE a.sharpe  <= p_sharpe)  / v_n) / 10.0 ) * 10)::INT,
-    (round( round(100.0 * count(*) FILTER (WHERE a.sortino <= p_sortino) / v_n) / 10.0 ) * 10)::INT,
-    (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n)) / 10.0 ) * 10)::INT
+    CASE WHEN v_n >= v_min_n THEN (round( round(100.0 * count(*) FILTER (WHERE r.rec_ok AND a.sharpe  <= p_sharpe)  / v_n) / 10.0 ) * 10)::INT END,
+    CASE WHEN v_n >= v_min_n THEN (round( round(100.0 * count(*) FILTER (WHERE r.rec_ok AND a.sortino <= p_sortino) / v_n) / 10.0 ) * 10)::INT END,
+    (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)) / 10.0 ) * 10)::INT
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
+  CROSS JOIN LATERAL (SELECT NOT COALESCE(CASE WHEN s.asset_class IS DISTINCT FROM 'crypto' AND (a.metrics_json->>'record_observations') ~ '^\d{1,9}$' THEN (a.metrics_json->>'record_observations')::int < v_min_obs WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' AND (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') - GREATEST(public.ledger_refresh_parse_series_date(a.returns_series->0->>'date'), CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') END) + 1 < v_min_span_days END, false) AS rec_ok) r
   WHERE s.status = 'published'
     AND a.computation_status IN ('complete', 'complete_with_warnings')
     AND a.sharpe IS NOT NULL

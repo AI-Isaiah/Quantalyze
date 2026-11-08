@@ -151,6 +151,7 @@ import type { NotBuildableReason } from "./fetch-and-build-payload";
 import { buildFactsheetPayload } from "./build-payload";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { withPublishedOrOwner } from "@/lib/visibility";
+import { gateAnnualized } from "@/lib/figure-gate";
 
 // Synthetic, UUID-shaped ids: `withPublishedOrOwner` fails closed on a non-UUID.
 const OWNER_ID = "00000000-0000-4000-8000-0000000000a1";
@@ -1582,5 +1583,87 @@ describe("phase 190 plan 05 — a re-run over a stored success result builds fro
     const built = await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility);
     expect(built).toMatchObject({ reason: null, conventionsDegraded: true });
     expect(fake.analyticsSelects).not.toContain("conventions:payload->conventions");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 194 plan 04 (D-01, D-15, T-194-20) - the stored figure definitions reach
+// the payload through the PRODUCTION fetch path.
+// ---------------------------------------------------------------------------
+describe("194 plan 04 - stored figures and the figure record through fetchAndBuildPayload", () => {
+  const SEVEN = { cumulative_return: 0.05, volatility: 0.12, max_drawdown: -0.04, cagr: 0.31, sharpe: 1.4, sortino: 2.1, calmar: 3.0 };
+  const ALIASES = {
+    six_month_return: 0.777,
+    figure_defs_version: 2,
+    three_month: 0.333,
+    var_1d_95: -0.0555,
+    cvar: -0.0888,
+    record_observations: 4242,
+  };
+
+  it("the strategies select carries the six tokens and never a bare metrics_json", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN }));
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    const select = fake.strategySelects.join(" ");
+    for (const token of [
+      "six_month_return",
+      "figure_defs_version:metrics_json->figure_defs_version",
+      "three_month:metrics_json->three_month",
+      "var_1d_95:metrics_json->var_1d_95",
+      "cvar:metrics_json->cvar",
+      "record_observations:metrics_json->record_observations",
+    ]) {
+      expect(select).toContain(token);
+    }
+    // The payload reaches anonymous viewers: no `metrics_json` that is not `_by_basis` or an arrow path.
+    expect(select).not.toMatch(/metrics_json(?!_by_basis|->)/);
+  });
+
+  it("a stored row with the marker: p6m, p3m, var95 and cvar95 equal the stored values, not compute()'s", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN, ...ALIASES }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.strategyMetrics.p6m).toBe(0.777);
+    expect(payload?.strategyMetrics.p3m).toBe(0.333);
+    expect(payload?.strategyMetrics.var95).toBe(-0.0555);
+    expect(payload?.strategyMetrics.cvar95).toBe(-0.0888);
+  });
+
+  it("a stored row WITHOUT the marker keeps the computed figures", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN, ...ALIASES, figure_defs_version: null }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.strategyMetrics.p6m).not.toBe(0.777);
+    expect(payload?.strategyMetrics.var95).not.toBe(-0.0555);
+    expect(payload?.strategyMetrics.cvar95).not.toBe(-0.0888);
+  });
+
+  it("figureRecord.observations is the stored count, which differs from the series length", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN, ...ALIASES }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.figureRecord?.observations).toBe(4242);
+    expect(payload?.figureRecord?.crypto).toBe(true);
+    expect(payload?.figureRecord?.spanDays).toBe(30);
+  });
+
+  it("figureRecord.observations is null when the row has no stored count, never the series' own count", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN, ...ALIASES, record_observations: null }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.figureRecord?.observations).toBeNull();
+  });
+
+  it("a non-crypto row with no stored count and 60 weekday returns inside 90 days is withheld", async () => {
+    // 60 weekdays from 2024-01-02 span 84 calendar days (< 90): the interim rule (A-194-D15-02).
+    const weekdays: { date: string; value: number }[] = [];
+    for (let d = Date.parse("2024-01-02T00:00:00Z"); weekdays.length < 60; d += 86_400_000) {
+      const dow = new Date(d).getUTCDay();
+      if (dow === 0 || dow === 6) continue;
+      weekdays.push({ date: new Date(d).toISOString().slice(0, 10), value: ((weekdays.length % 7) - 3) / 1000 });
+    }
+    const row = single({ daily_returns: weekdays, ...SEVEN });
+    seed({ ...row, asset_class: "traditional" });
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.figureRecord?.crypto).toBe(false);
+    expect(payload?.figureRecord?.observations).toBeNull();
+    expect(payload?.figureRecord?.spanDays).toBeLessThan(90);
+    expect(gateAnnualized(payload!.figureRecord!)).toBe("withheld");
   });
 });

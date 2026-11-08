@@ -72,11 +72,11 @@ function unitPayload(unit: string, over: Partial<FactsheetPayload> = {}): Factsh
 
 function renderFactsheet(
   payload: FactsheetPayload,
-  extra: { renameTarget?: { id: string; name: string } } = {},
+  extra: { renameTarget?: { id: string; name: string }; showAum?: boolean } = {},
 ) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter {...extra} />
+      <FactsheetBody payload={payload} hideAllocatorSection hideFooter showAum {...extra} />
     </FactsheetProvider>,
   );
 }
@@ -223,6 +223,21 @@ describe("A12 / D-21 — the AUM chip never shows a USD figure as if it were BTC
     const chip = aumChip(container);
     expect(chip.querySelectorAll("p")[1].textContent).toBe("$2M/ $10M");
     expect(chip.querySelector('[aria-label="Capacity utilization 20%"]')).not.toBeNull();
+  });
+
+  it("D-22: the chip is for an allocator or the manager only; without showAum it is absent whatever the payload holds", () => {
+    const hasChip = (c: HTMLElement) =>
+      Array.from(c.querySelectorAll("header p")).some((p) => (p.textContent ?? "").startsWith("AUM"));
+    expect(hasChip(renderFactsheet(usdPayload(AUM), { showAum: false }).container)).toBe(false);
+    expect(hasChip(renderFactsheet(usdPayload(AUM), { showAum: true }).container)).toBe(true);
+    // A mount that never decided (no prop at all) fails closed.
+    const p = usdPayload(AUM);
+    const { container } = render(
+      <FactsheetProvider payload={p} persist={false}>
+        <FactsheetBody payload={p} hideAllocatorSection hideFooter />
+      </FactsheetProvider>,
+    );
+    expect(hasChip(container)).toBe(false);
   });
 
   it("a unit with no AUM at all still draws no chip, as today", () => {

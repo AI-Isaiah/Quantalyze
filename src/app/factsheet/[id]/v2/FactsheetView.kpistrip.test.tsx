@@ -450,11 +450,12 @@ describe("FactsheetView hero strip — HARD-04 insufficient_window server-truth 
     } as unknown as FactsheetPayload;
   }
 
-  it("renders the server-truth caveat when dataQuality.insufficientWindow is true", () => {
-    const { getByText } = renderComposite(insufficientWindowPayload(true));
-    expect(
-      getByText(/annualized metrics are flagged as computed on an insufficient window/),
-    ).toBeInTheDocument();
+  // Phase 194 (D-04 as superseded by D-15, D-13): the amber server-flag sentence is RETIRED. The
+  // strip's one muted note speaks from the shared record gate, so the flag alone prints nothing.
+  it("the retired amber sentence does not render when dataQuality.insufficientWindow is true", () => {
+    const { queryByText } = renderComposite(insufficientWindowPayload(true));
+    expect(queryByText(/annualized metrics are flagged as computed on an insufficient window/)).not.toBeInTheDocument();
+    expect(queryByText(/Track record under 90 days/)).not.toBeInTheDocument();
   });
 
   it("does NOT render the caveat when insufficientWindow is absent/false", () => {
@@ -481,11 +482,10 @@ describe("FactsheetView hero strip — HARD-04 insufficient_window server-truth 
     } as unknown as FactsheetPayload;
   }
 
-  it("SINGLE-KEY (composite:false): renders the server-truth caveat when insufficientWindow is true", () => {
-    const { getByText } = renderComposite(singleKeyInsufficientWindowPayload(true));
-    expect(
-      getByText(/annualized metrics are flagged as computed on an insufficient window/),
-    ).toBeInTheDocument();
+  it("SINGLE-KEY (composite:false): the retired amber sentence does not render when insufficientWindow is true", () => {
+    const { queryByText } = renderComposite(singleKeyInsufficientWindowPayload(true));
+    expect(queryByText(/annualized metrics are flagged as computed on an insufficient window/)).not.toBeInTheDocument();
+    expect(queryByText(/Track record under 90 days/)).not.toBeInTheDocument();
   });
 
   it("SINGLE-KEY (composite:false): does NOT render the caveat when insufficientWindow is false", () => {
@@ -924,10 +924,14 @@ describe("FactsheetView KPI strip — 164.6.6.3.3 plan 09: tone and sign from th
     info_ratio?: number;
   };
 
-  /** A real 30-day payload paired with BTC, then the five cells overridden (cash view returns it by reference). */
+  /**
+   * A real 120-day crypto payload paired with BTC, then the five cells overridden (cash view returns it by
+   * reference). 120 days, not 30: a crypto record under D-15's 90-day minimum withholds CAGR (plan 08), and
+   * this block is about the cell's tone and sign, not the record gate.
+   */
   function mountWith(over: Over) {
     const start = "2026-04-27";
-    const n = 30;
+    const n = 120;
     const rows: DailyReturn[] = Array.from({ length: n }, (_, i) => ({
       date: addDays(start, i),
       value: ((i % 7) - 3) / 1000,

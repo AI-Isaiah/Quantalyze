@@ -471,3 +471,171 @@ class TestBaselineWindowAlignment:
             "a duplicate-timestamp portfolio must dedupe to its clean twin, not "
             "amplify/raise through the per-candidate alignment join"
         )
+
+
+# ---------------------------------------------------------------------------
+# 194 D-11 / D-15: the span each lift is measured over, and the verdict of the
+# two records it compares. Expected spans are computed from the fixture's own
+# dates, never from the code under test.
+# ---------------------------------------------------------------------------
+
+_CRYPTO = {"s1": "crypto", "c1": "crypto"}
+
+
+def _daily(n, start, seed):
+    dates = pd.date_range(start, periods=n, freq="D")
+    rng = np.random.default_rng(seed)
+    return pd.Series(rng.normal(0.001, 0.02, n), index=dates)
+
+
+def test_lift_span_is_the_overlap_window_and_short_overlap_never_withholds():
+    """400-day book, 400-day candidate that overlaps only the book's last 60 days."""
+    book = _daily(400, "2025-01-01", 1)
+    cand = _daily(400, "2025-12-07", 2)  # starts on book day 340, runs past the book's end
+    overlap = book.index.intersection(cand.index)
+    assert len(overlap) == 60
+    expected_span = (overlap[-1] - overlap[0]).days + 1  # 60: D-20 counts the days the returns cover
+    out = find_improvement_candidates(
+        {"s1": book}, {"c1": cand}, {"s1": 1.0}, asset_classes=_CRYPTO
+    )
+    assert out[0]["sharpe_lift_span_days"] == expected_span == 60
+    assert out[0]["sharpe_lift_state"] == "short"
+    assert out[0]["sharpe_lift_failing_record"] is None
+
+
+def test_lift_withheld_when_the_candidate_record_is_under_the_minimum():
+    book = _daily(400, "2025-01-01", 3)
+    cand = _daily(50, "2025-03-01", 4)  # fully inside the book: 50 obs, 50 days covered
+    out = find_improvement_candidates(
+        {"s1": book}, {"c1": cand}, {"s1": 1.0}, asset_classes=_CRYPTO
+    )
+    assert out[0]["sharpe_lift_state"] == "withheld"
+    assert out[0]["sharpe_lift_span_days"] == 50
+    assert out[0]["sharpe_lift_failing_record"] == {
+        "span_days": 50,
+        "observations": len(cand),  # 50
+        "crypto": True,
+    }
+    # The stored lift itself is still emitted, unscaled: the gate is a display rule.
+    assert out[0]["sharpe_lift"] is not None
+
+
+def test_lift_candidate_of_unknown_class_gets_the_crypto_rule_like_the_book():
+    """194 R2-M3: a candidate with NO asset class is crypto for the gate, exactly as an
+    unknown book leg is (`blend_gate_crypto`). A 70-observation / 70-day record clears the
+    non-crypto 60-observation minimum but not the crypto 90-day one, so it is withheld."""
+    book = _daily(400, "2025-01-01", 7)
+    cand = _daily(70, "2025-03-01", 8)  # inside the book: 70 obs, 70 days covered
+    span = 70
+    assert len(cand) >= 60 and span < 90
+    out = find_improvement_candidates(
+        {"s1": book}, {"c1": cand}, {"s1": 1.0}, asset_classes={"s1": "crypto"}
+    )
+    assert out[0]["sharpe_lift_state"] == "withheld"
+    assert out[0]["sharpe_lift_failing_record"] == {
+        "span_days": span,
+        "observations": len(cand),
+        "crypto": True,
+    }
+    # The same record with a KNOWN traditional class clears (the control that proves the
+    # unknown-class rule, not the length, is what withholds).
+    known = find_improvement_candidates(
+        {"s1": book}, {"c1": cand}, {"s1": 1.0}, asset_classes={"s1": "crypto", "c1": "traditional"}
+    )
+    assert known[0]["sharpe_lift_state"] == "short"
+
+
+@pytest.mark.parametrize("n,expected_span,expected_state", [(364, 364, "short"), (365, 365, "full"), (400, 400, "full")])
+def test_lift_span_and_state_at_one_year(n, expected_span, expected_state):
+    book = _daily(n, "2025-01-01", 5)
+    cand = _daily(n, "2025-01-01", 6)
+    assert (book.index[-1] - book.index[0]).days + 1 == expected_span  # D-20: 365 daily returns cover 365 days
+    out = find_improvement_candidates(
+        {"s1": book}, {"c1": cand}, {"s1": 1.0}, asset_classes=_CRYPTO
+    )
+    assert out[0]["sharpe_lift_span_days"] == expected_span
+    assert out[0]["sharpe_lift_state"] == expected_state
+    assert isinstance(out[0]["sharpe_lift_span_days"], int)
+
+
+def test_gate_fields_do_not_change_score_lift_or_order():
+    """w1=1, w2=w3=0 makes score == sharpe_lift, so the expected value is an independent
+    recomputation from the existing helpers (`_compute_sharpe`), and the order is the
+    descending order of that recomputed lift."""
+    from services.portfolio_optimizer import _compute_sharpe
+
+    book = _daily(300, "2025-01-01", 7)
+    cands = {f"c{i}": _daily(300, "2025-01-01", 20 + i) for i in range(4)}
+    out = find_improvement_candidates(
+        {"s1": book}, cands, {"s1": 1.0}, w1=1.0, w2=0.0, w3=0.0,
+        add_weight=0.10, asset_classes={"s1": "traditional"},
+    )
+    expected = {}
+    for cid, c in cands.items():
+        blended = 0.9 * book + 0.1 * c
+        expected[cid] = _compute_sharpe(blended, periods_per_year=252) - _compute_sharpe(
+            book, periods_per_year=252
+        )
+    assert [r["strategy_id"] for r in out] == sorted(expected, key=lambda k: expected[k], reverse=True)
+    for r in out:
+        assert r["sharpe_lift"] == pytest.approx(expected[r["strategy_id"]], abs=1e-9)
+        assert r["score"] == pytest.approx(expected[r["strategy_id"]], abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 194 D-11/D-15: the narrative's recommendation sentence follows the lift verdict.
+# ---------------------------------------------------------------------------
+
+
+def _narrative_analytics(**suggestion_extra):
+    return {
+        "attribution_breakdown": [
+            {"strategy_name": "Alpha", "contribution": 0.05},
+            {"strategy_name": "Laggard", "contribution": -0.01},
+        ],
+        "optimizer_suggestions": [
+            {"strategy_name": "NewCo", "sharpe_lift": 0.3, **suggestion_extra}
+        ],
+        "risk_decomposition": [
+            {"strategy_name": "Alpha", "marginal_risk_pct": 50, "weight_pct": 40},
+        ],
+        "portfolio_sharpe": 1.0,
+    }
+
+
+_LEGACY_SENTENCE = (
+    "If you trim Laggard and redistribute to NewCo, expected Sharpe moves from 1.00 to 1.30"
+)
+
+
+def test_narrative_withheld_lift_is_not_quoted_and_logs_no_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger=_OPTIMIZER_LOGGER):
+        narrative = generate_narrative(
+            _narrative_analytics(sharpe_lift_state="withheld", sharpe_lift_span_days=49)
+        )
+    assert "expected Sharpe moves" not in narrative
+    assert not [r for r in caplog.records if "recommendation suppressed" in r.message], (
+        "withholding is the rule, not a missing prerequisite: the M-0904 warning must not fire"
+    )
+
+
+@pytest.mark.parametrize("span", [60, 200])
+def test_narrative_short_lift_is_qualified_with_the_overlap(span):
+    narrative = generate_narrative(
+        _narrative_analytics(sharpe_lift_state="short", sharpe_lift_span_days=span)
+    )
+    assert f"{_LEGACY_SENTENCE}, measured over {span} days of overlap, under one year" in narrative
+
+
+def test_narrative_short_lift_formats_thousands_separator():
+    narrative = generate_narrative(
+        _narrative_analytics(sharpe_lift_state="short", sharpe_lift_span_days=1234)
+    )
+    assert ", measured over 1,234 days of overlap, under one year" in narrative
+
+
+@pytest.mark.parametrize("extra", [{"sharpe_lift_state": "full", "sharpe_lift_span_days": 400}, {}])
+def test_narrative_full_or_legacy_lift_sentence_is_unchanged(extra):
+    narrative = generate_narrative(_narrative_analytics(**extra))
+    assert _LEGACY_SENTENCE in narrative
+    assert f"{_LEGACY_SENTENCE}," not in narrative and "under one year" not in narrative

@@ -128,13 +128,30 @@ describe("computeExpectedShortfall", () => {
     expect(es95).toBeLessThanOrEqual(var95);
   });
 
-  it("ES is the mean of the tail (returns <= VaR)", () => {
-    const values = DAILY_RETURNS.map((d) => d.value);
-    const var95 = computeVaR(values, 0.95);
-    const tail = values.filter((v) => v <= var95);
-    const expectedES = tail.reduce((s, v) => s + v, 0) / tail.length;
-    const es95 = computeExpectedShortfall(values, 0.95);
-    expect(es95).toBeCloseTo(expectedES, 10);
+  it("194 D-02: CVaR is the mean of the worst max(1, k) returns and EXCLUDES the VaR element", () => {
+    // n = 40, k = floor(0.05 * 40) = 2. Sorted ascending:
+    //   [-0.10, -0.06, -0.03, 0.01 x 37]
+    //   VaR  = sorted[2]          = -0.03
+    //   CVaR = mean(sorted[0:2])  = (-0.10 + -0.06) / 2 = -0.08
+    // The old inclusive tail (every return <= VaR) would give (-0.10 - 0.06 - 0.03) / 3 = -0.0633...
+    const values = [...Array(18).fill(0.01), -0.03, ...Array(19).fill(0.01), -0.06, -0.10];
+    expect(values).toHaveLength(40);
+    expect(computeVaR(values, 0.95)).toBe(-0.03);
+    expect(computeExpectedShortfall(values, 0.95)).toBeCloseTo(-0.08, 12);
+  });
+
+  it("194 D-02: a tail narrower than one return still averages the single worst return", () => {
+    // n = 5 at 0.95: k = floor(0.25) = 0, max(1, 0) = 1 -> CVaR = sorted[0] = -0.05, VaR = sorted[0].
+    const values = [0.03, -0.05, 0.08, -0.02, 0.01];
+    expect(computeVaR(values, 0.95)).toBe(-0.05);
+    expect(computeExpectedShortfall(values, 0.95)).toBe(-0.05);
+  });
+
+  it("an empty input is 0 for both, a confidence above 1 clamps to the worst return", () => {
+    expect(computeVaR([], 0.95)).toBe(0);
+    expect(computeExpectedShortfall([], 0.95)).toBe(0);
+    // confidence 1.5 -> tail clamps to 0 -> k = 0 (a negative k would index off the front).
+    expect(computeVaR([-0.05, 0.01, 0.02], 1.5)).toBe(-0.05);
   });
 
   it("M-0541: confidence=0 clamps to the last index (no undefined / NaN poisoning)", () => {
@@ -147,6 +164,8 @@ describe("computeExpectedShortfall", () => {
     // And the undefined must not propagate NaN into Expected Shortfall.
     const es0 = computeExpectedShortfall(values, 0);
     expect(Number.isFinite(es0)).toBe(true);
+    // tail 1 -> k = 5 -> mean of all five = (-0.05 - 0.02 + 0.01 + 0.03 + 0.08) / 5 = 0.01
+    expect(es0).toBeCloseTo(0.01, 12);
   });
 });
 

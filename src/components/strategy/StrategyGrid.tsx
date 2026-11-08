@@ -11,6 +11,8 @@ import { TrustTierLabel } from "./TrustTierLabel";
 import { HealthScore } from "./HealthScore";
 import { StarToggle } from "./StarToggle";
 import { formatPercent, formatCurrency, metricColor } from "@/lib/utils";
+import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
+import { annualizedCell, rowRecord } from "./annualized-cell";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 type StrategyWithAnalytics = Strategy & {
@@ -59,7 +61,14 @@ export function StrategyGrid({
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-      {strategies.map((s) => (
+      {strategies.map((s) => {
+        // 194 review V-a: the same row record and verdict as the table's CAGR cell, so a
+        // short record is a dash with its reason here too, and `<1y` marks a cleared
+        // record under a year (D-15, D-69).
+        const record = rowRecord(s);
+        const gate = gateAnnualized(record);
+        const cagrShown = gatedValue(s.analytics.cagr, gate);
+        return (
         <div key={s.id} className="relative">
           <Link
             href={`${basePath}/${categorySlug}/${s.id}`}
@@ -197,8 +206,8 @@ export function StrategyGrid({
                 </div>
                 <div className="text-xs">
                   <span className="text-text-muted">CAGR </span>
-                  <span className={`font-metric font-medium ${metricColor(s.analytics.cagr, "percent")}`}>
-                    {formatPercent(s.analytics.cagr)}
+                  <span className={`font-metric font-medium ${metricColor(cagrShown, "percent")}`}>
+                    {annualizedCell(formatPercent(cagrShown), gate, record)}
                   </span>
                 </div>
               </div>
@@ -218,7 +227,8 @@ export function StrategyGrid({
             </div>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

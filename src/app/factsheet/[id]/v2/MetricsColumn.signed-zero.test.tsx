@@ -60,7 +60,8 @@ function basePayload(): FactsheetPayload {
     { benchmarkPrices: { prices: PRICES, through: PRICES[PRICES.length - 1].date, dropped: [] } },
   );
   if (!p) throw new Error("fixture must build");
-  return { ...p, activeComparator: "btc" };
+  // 194 D-15: these cases test the formatter, so the record is a cleared one; the gate has its own test.
+  return { ...p, activeComparator: "btc", figureRecord: { spanDays: 400, observations: null, crypto: true } };
 }
 
 /** The base payload with chosen strategy scalars overwritten. */

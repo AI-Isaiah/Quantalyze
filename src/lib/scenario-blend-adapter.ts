@@ -37,7 +37,12 @@
  * null entries, reproducing today's compacted `{ date, value }[]` (length
  * n − window + 1, first point dated at the window's last day).
  */
-import { rollingVol, rollingSharpe, rollingSortino } from "@/lib/factsheet/rolling";
+import {
+  rollingVol,
+  rollingSharpe,
+  rollingSortino,
+  rollingCalendarStats,
+} from "@/lib/factsheet/rolling";
 import { quantileSummary } from "@/lib/factsheet/quantiles";
 
 /** Below this many usable points every series collapses to []/{}. */
@@ -106,7 +111,10 @@ function zipDrop(
  */
 export function deriveBlendPanels(
   portfolioDaily: { date: string; value: number }[],
-  window: number, // 63 | 126 | 252 (3M/6M/12M toggle)
+  // 63 | 126 | 252 rows (3M/6M/12M toggle), or (194 D-14) a calendar window
+  // `{ calendarDays: 365 }` drawn through `rollingCalendarStats`: a span of dates,
+  // never a row count, so a gap in the dates puts fewer rows inside it.
+  window: number | { calendarDays: number },
   periodsPerYear = 252, // #597 — 252 traditional (default) / 365 crypto
 ): BlendPanelSeries {
   // ── Degenerate guard FIRST (re-homed VERBATIM, WR-02 pin) ─────────────
@@ -120,7 +128,7 @@ export function deriveBlendPanels(
   if (
     hasNonFinite ||
     portfolioDaily.length < MIN_USABLE ||
-    portfolioDaily.length < window
+    (typeof window === "number" && portfolioDaily.length < window)
   ) {
     // A non-finite value poisons the ENTIRE series → 0 USABLE points (report 0,
     // NOT the finite count) so the composer's `usableN < window` gate renders
@@ -147,6 +155,26 @@ export function deriveBlendPanels(
   const quantiles: Record<string, QuantileWhiskers> = {
     All: [q.min, q.p25, q.p50, q.p75, q.max],
   };
+
+  // ── 194 D-14: the calendar window. Plan 23's `rollingCalendarStats` on the same
+  //    dates and returns the row path uses, at the same basis. A series spanning
+  //    under the window has no point, so all three series are [] (`usableN` as today). ──
+  if (typeof window !== "number") {
+    const stats = rollingCalendarStats(
+      rets,
+      portfolioDaily.map((p) => p.date),
+      window.calendarDays,
+      periodsPerYear,
+    );
+    return {
+      histogramSeries,
+      quantiles,
+      rollingSharpe: { sharpe_365d: zipDrop(stats.sharpe, portfolioDaily) },
+      rollingVol: zipDrop(stats.vol, portfolioDaily),
+      rollingSortino: zipDrop(stats.sortino, portfolioDaily),
+      usableN,
+    };
+  }
 
   // ── Rolling series — backbone POPULATION-std primitives at the EXPLICIT
   //    window (toggle-preserving); zip + drop every null (see zipDrop). ──

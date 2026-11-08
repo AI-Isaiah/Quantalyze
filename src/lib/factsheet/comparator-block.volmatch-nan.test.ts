@@ -70,6 +70,7 @@ describe("vol-matched comparator with no finite strategy vol (169.1 review-fix D
       markets: ["crypto"],
       strategyName: "Idle Strategy",
       benchmarkPrices: { unavailable: true },
+      figureRecord: null,
     });
     expect(Number.isNaN(bundle.strategyMetrics.ann_vol)).toBe(true);
     for (const key of ["spx", "btc"] as const) {

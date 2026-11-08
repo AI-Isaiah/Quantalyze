@@ -36,6 +36,7 @@ describe("deriveSeriesBundle on a composite with a covered day (D-15, WR-01)", (
     strategyName: "composite",
     missingSegments: GAPS,
     benchmarkPrices: { unavailable: true },
+    figureRecord: null,
   });
   const want = compute(SERVER_INPUT, SERVER_INPUT.map((_, i) => addDays(START, i)), 0, P);
 

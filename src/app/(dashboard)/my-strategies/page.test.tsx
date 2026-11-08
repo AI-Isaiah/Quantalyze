@@ -74,9 +74,13 @@ type Fixtures = {
 const recorded: Recorded[] = [];
 let fixtures: Fixtures;
 
-/** Is this the PERCENTILE_ANALYTICS_COLUMNS population projection? */
+/**
+ * Is this the PERCENTILE_ANALYTICS_COLUMNS population projection? Phase 194 plan 18 put the
+ * strategy's `asset_class` between `id` and the analytics embed (it picks the record's
+ * annualisation convention), so the shape is `id, [asset_class,] strategy_analytics (`.
+ */
 const isPopulationShape = (r: Recorded) =>
-  r.table === "strategies" && /^id,\s*strategy_analytics \(/.test(r.select);
+  r.table === "strategies" && /^id,\s*(asset_class,\s*)?strategy_analytics \(/.test(r.select);
 /** Is this the `getMyStrategies` own-rows projection? */
 const isOwnRowsShape = (r: Recorded) =>
   r.table === "strategies" && r.select.startsWith("*, strategy_analytics");

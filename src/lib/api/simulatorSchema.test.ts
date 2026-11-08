@@ -152,6 +152,30 @@ describe("SimulatorResponseSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  // 194 D-15 (2026-11-07): `annualization_periods` is the risk clock the producer annualised
+  // both Sharpes at. Optional on the strict ok branch so a frontend that meets an older
+  // analytics deploy (no field) parses instead of 500ing; present, it must be a positive integer.
+  it.each([365, 252])("194 D-15: an ok response carrying annualization_periods %i parses", (n) => {
+    const result = SimulatorResponseSchema.safeParse({ ...validResponse, annualization_periods: n });
+    expect(result.success).toBe(true);
+    if (result.success && result.data.status === "ok") {
+      expect(result.data.annualization_periods).toBe(n);
+    }
+  });
+
+  it("194 D-15: an ok response without annualization_periods still parses (older analytics deploy)", () => {
+    expect("annualization_periods" in validResponse).toBe(false);
+    expect(SimulatorResponseSchema.safeParse(validResponse).success).toBe(true);
+  });
+
+  it.each([252.5, 0, -252, "252"])(
+    "194 D-15: rejects annualization_periods %s on the strict ok branch",
+    (bad) => {
+      const result = SimulatorResponseSchema.safeParse({ ...validResponse, annualization_periods: bad });
+      expect(result.success).toBe(false);
+    },
+  );
+
   // M-0982 (B9 boundary parity): max_drawdown is negative-by-convention
   // (simulator_scoring.py: "MaxDD is a negative number"), so .max(0) rejects a
   // producer sign-flip at the wire — the one genuine invariant the bare schema

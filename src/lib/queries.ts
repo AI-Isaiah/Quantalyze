@@ -6,6 +6,7 @@ import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS, seriesEndOf, isUuid } from "./utils";
 import {
+  annualizationPeriods,
   blendPeriodsPerYear,
   deriveEmptySeriesState,
   isComputedAnalytics,
@@ -19,6 +20,7 @@ import {
   hasStoredAnalyticsResult,
   usesLastSuccessSnapshot,
 } from "./stored-analytics-result";
+import { figureRecord, type FigureRecord } from "@/lib/figure-gate";
 import { NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import {
   curveMethodFromFlags,
@@ -102,6 +104,7 @@ import { TINY_BASE_DAYS_FLAG, readTinyBaseDays } from "@/lib/tiny-base-flag";
 import {
   PERCENTILE_METRICS,
   scoreAgainstPopulation,
+  withholdShortRecordRanks,
   type CommaSpaceJoined,
   type PercentileMap,
 } from "./percentile-core";
@@ -220,6 +223,100 @@ const PERCENTILE_ANALYTICS_COLUMNS = PERCENTILE_METRICS.join(", ") as CommaSpace
 >;
 
 /**
+ * Phase 194 plan 18 (D-11 as superseded by D-15, 2026-11-07) - the four scalar aliases
+ * that let the percentile scorer judge each row's TOTAL record the way every other
+ * surface does (`figureRecord` / `gateAnnualized`, figure-gate.ts). Same alias forms as
+ * `RECORD_SPAN_SELECT` (record-span-read.ts) and `CATEGORY_RANKING_ANALYTICS_COLUMNS`:
+ * the first and last return date, the chain-broken headline start, and the stored count
+ * of return observations. Scalars only; `returns_series`, `data_quality_flags` and
+ * `metrics_json` are never projected whole (T-194-35).
+ *
+ * Like `PERCENTILE_GATE_COLUMN`, a SEPARATE constant each projection site composes
+ * ALONGSIDE the byte-frozen KPI list, never appended to it or to `PERCENTILE_METRICS`:
+ * the scorer ranks every member of that array, and a date is not a KPI.
+ */
+//
+// Typed `string` on purpose, NOT a literal: postgrest-js parses a select string at the type
+// level and its parser cannot read the `->-1` index of the `series_end` alias, so a literal
+// here types every row as a `ParserError`. `CATEGORY_RANKING_ANALYTICS_COLUMNS` is composed
+// the same way for the same reason; the callers cast the rows they read.
+const PERCENTILE_SPAN_COLUMNS: string =
+  "series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations";
+
+/**
+ * 194 D-15: the TOTAL record of one percentile row, from the four span aliases (or the
+ * owner list's shaped copies of them) and the strategy's `asset_class`
+ * (`annualizationPeriods`: crypto 365, everything else 252). A value that is not a date
+ * string or a finite count is null, which the gate reads as "cannot be determined" and
+ * which therefore keeps the row's ranks.
+ */
+function percentileRecord(
+  assetClass: string | null | undefined,
+  a: {
+    series_start?: unknown;
+    series_end?: unknown;
+    headline_since?: unknown;
+    record_observations?: unknown;
+  },
+  strategyId: string,
+): FigureRecord {
+  const day = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+  const record = figureRecord({
+    seriesStart: day(a.series_start),
+    seriesEnd: day(a.series_end),
+    headlineSince: day(a.headline_since),
+    observations: typeof a.record_observations === "number" ? a.record_observations : null,
+    periodsPerYear: annualizationPeriods(assetClass),
+  });
+  // 194 R5 SFH-M3: an unreadable record leaves the annualised peer sets silently; report it
+  // here, at the producer (never from a render-time gate), with the three dates that decide it.
+  if (record.unreadable) {
+    captureToSentry(new Error("percentile record unreadable: a series date is not a date"), {
+      tags: { op: "percentileRecord", reason: "figure-record-unreadable" },
+      level: "error",
+      extra: {
+        strategyId,
+        seriesStart: day(a.series_start),
+        seriesEnd: day(a.series_end),
+        headlineSince: day(a.headline_since),
+      },
+    });
+  }
+  return record;
+}
+
+/**
+ * The KPI record the scorer sees: the seven `PERCENTILE_METRICS` and nothing else, so the
+ * span aliases never enter a scored record.
+ */
+function kpiRecord(a: Record<string, unknown>): Record<string, number | null> {
+  const out: Record<string, number | null> = {};
+  for (const metric of PERCENTILE_METRICS) {
+    const v = a[metric];
+    out[metric] = typeof v === "number" ? v : null;
+  }
+  return out;
+}
+
+/**
+ * The percentile select both callers send. Returns a plain `string` so postgrest-js does not
+ * parse it at the type level (see `PERCENTILE_SPAN_COLUMNS`); `embedPrefix` is the optional
+ * category embed that sits between `asset_class` and the analytics embed. One composition,
+ * so the two callers and the three projections cannot disagree (pinned byte-for-byte by
+ * `queries.percentile-columns.test.ts`).
+ */
+function percentileSelect(embedPrefix = ""): string {
+  return `id, asset_class, ${embedPrefix}strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}, ${PERCENTILE_SPAN_COLUMNS})`;
+}
+
+/** One row of either percentile read: the strategy's id and class and its analytics embed. */
+type PercentileSourceRow = {
+  id: string;
+  asset_class?: string | null;
+  strategy_analytics: unknown;
+};
+
+/**
  * Compute percentile ranks for each published strategy across key metrics.
  * Returns null when fewer than 5 published strategies exist (not enough data).
  *
@@ -236,23 +333,21 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 
   // RANK-01: the gate column rides ALONGSIDE the byte-frozen KPI list, never
   // appended to it. Both select branches below interpolate this one composition,
-  // so the categorized and uncategorized projections cannot disagree.
-  const analyticsColumns = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}` as const;
-
+  // so the categorized and uncategorized projections cannot disagree. 194 plan 18:
+  // the four record aliases ride in the same place for the same reason, and the
+  // strategy's own `asset_class` (anon-readable, STRATEGY_PUBLIC_COLUMNS) is selected
+  // beside `id` to pick the record's annualisation convention.
   const query = categorySlug
     ? withPublishedOnly(
         supabase
           .from("strategies")
-          .select(`id, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`)
+          .select(percentileSelect("discovery_categories!inner(slug), "))
           .eq("discovery_categories.slug", categorySlug),
       )
-    : withPublishedOnly(
-        supabase
-          .from("strategies")
-          .select(`id, strategy_analytics (${analyticsColumns})`),
-      );
+    : withPublishedOnly(supabase.from("strategies").select(percentileSelect()));
 
-  const { data: strategies, error } = await query;
+  const { data, error } = await query;
+  const strategies = data as unknown as PercentileSourceRow[] | null;
   // NEW-C03-05: split error vs genuinely-empty so a transient DB/RLS outage
   // is logged rather than silently appearing as "market too small to rank".
   // captureToSentry ensures ops alerting fires (console.error alone is only
@@ -268,14 +363,24 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   // Extract analytics for each strategy
   const rows: { id: string; analytics: Record<string, number | null> }[] = [];
   for (const s of strategies) {
-    const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
+    const a = extractAnalytics(s.strategy_analytics);
     if (!a) continue;
     // RANK-01: a non-computed row (failed/pending/computing) neither RECEIVES a
     // published percentile nor JOINS the population others are scored against.
     // Dropping it here — before `rows` — is what makes the floor below count the
     // honest denominator, mirroring the RPC's gated min-N cohort.
     if (!isRankableAnalyticsRow(a)) continue;
-    rows.push({ id: s.id, analytics: castRow<Record<string, number | null>>(a, "analytics") });
+    // 194 D-11 / D-15: a strategy whose TOTAL record fails the minimum has its five
+    // annualised metrics nulled BEFORE scoring, so it neither receives a rank for them
+    // nor adds a value to anyone else's population. Max drawdown and cumulative return
+    // are untouched. A row whose record cannot be determined keeps its ranks.
+    rows.push({
+      id: s.id,
+      analytics: withholdShortRecordRanks(
+        kpiRecord(a as unknown as Record<string, unknown>),
+        percentileRecord(s.asset_class, a, s.id),
+      ),
+    });
   }
 
   if (rows.length < 5) return null;
@@ -451,6 +556,17 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * object. `shapeRowAnalytics` drops the three `last_success_*` aliases, so they
  * never reach a client component. `queries.test.ts` pins the exact set.
  *
+ * Phase 194 plan 06 (D-15, 2026-11-07) — THREE more scalar aliases, so the list can
+ * judge each row's TOTAL record the way every other surface does (`figureRecord` /
+ * `gateAnnualized` in `figure-gate.ts`): `series_start:returns_series->0->>date` (the
+ * FIRST point's date, the `->0` form the `series_end` measurement above used as its
+ * control), `headline_since:data_quality_flags->>headline_since` (a chain-broken row's
+ * headline covers only the suffix) and `record_observations:metrics_json->record_observations`
+ * (the count of headline returns, projected the way `three_month` is). Two dates and one
+ * count: never the array, the flags blob or the metrics blob. `queries.test.ts` pins the
+ * exact set and the allowed `->>` forms. A non-rankable row is blanked by
+ * `shapeRowAnalytics` and loses all three, like the other scalars.
+ *
  * Phase 170.7 (D-09) — exported for a SECOND consumer, the manager's
  * `/strategies` owner list (plan 06), which embeds the same columns so its
  * rows are shaped by `shapeRowAnalytics` exactly like Discovery's. It stays an
@@ -458,7 +574,7 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * (RANK-02): a wildcard would put the private blobs above on the wire.
  */
 export const CATEGORY_RANKING_ANALYTICS_COLUMNS =
-  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit, trades_fetched_at";
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, series_start:returns_series->0->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations, native_unit:data_quality_flags->>native_unit, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit, trades_fetched_at";
 
 /**
  * Phase 170.6.1.1 (ANONKEYID) review round 1 (WR-01, SFH-1, SFH-2). The three
@@ -748,6 +864,37 @@ function shapedNativeUnit(a: StrategyAnalytics) {
 }
 
 /**
+ * Phase 194 plan 06 (D-15) — the three record scalars a list row's gate reads, each
+ * from the alias when the read projected it (the anon ranked read) and otherwise
+ * derived from the owner's wildcard embed, exactly as `series_end` and `three_month`
+ * are. The owner arm takes the EARLIEST date in `returns_series`, so it does not rely
+ * on the stored order (the `series_end` precondition above). A value that does not
+ * read as a date or a finite count is null, never a guess.
+ */
+function shapedRecordScalars(a: StrategyAnalytics): {
+  series_start: string | null;
+  headline_since: string | null;
+  record_observations: number | null;
+} {
+  const isoDay = (v: unknown): string | null =>
+    typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null;
+  let series_start = isoDay(a.series_start);
+  if (!series_start && Array.isArray(a.returns_series)) {
+    for (const p of a.returns_series) {
+      const d = isoDay((p as { date?: unknown } | null)?.date);
+      if (d && (series_start === null || d < series_start)) series_start = d;
+    }
+  }
+  const mj = a.metrics_json as Record<string, unknown> | null;
+  const obs = a.record_observations ?? mj?.record_observations;
+  return {
+    series_start,
+    headline_since: isoDay(a.headline_since ?? a.data_quality_flags?.headline_since),
+    record_observations: typeof obs === "number" && Number.isFinite(obs) ? obs : null,
+  };
+}
+
+/**
  * Hand a row's stored figures through (terminal success, or a re-run over a
  * stored success), with `series_end` resolved and its unit parsed. The three
  * `last_success_*` aliases are evidence INPUTS of the admission rule; they are
@@ -756,7 +903,7 @@ function shapedNativeUnit(a: StrategyAnalytics) {
 function shapeStoredAnalytics(a: StrategyAnalytics): StrategyAnalytics {
   const native_unit = shapedNativeUnit(a);
   const shaped = withResolvedSeriesEnd(a);
-  const out: StrategyAnalytics = { ...shaped, native_unit };
+  const out: StrategyAnalytics = { ...shaped, native_unit, ...shapedRecordScalars(a) };
   delete out.last_success_cumulative_method;
   delete out.last_success_computed_at;
   delete out.last_success_native_unit;
@@ -1193,19 +1340,22 @@ export type OwnRowPercentiles = {
  * this helper.
  */
 export async function getOwnRowPercentiles(
-  ownRows: readonly { id: string; analytics: StrategyAnalytics }[],
+  ownRows: readonly {
+    id: string;
+    analytics: StrategyAnalytics;
+    /** The strategy's class (`RankedStrategyRow` carries it): picks the record's annualisation convention. */
+    asset_class?: string | null;
+  }[],
 ): Promise<OwnRowPercentiles | null> {
   const supabase = await createClient();
 
   // RANK-01: same composition as getPercentiles — the gate column rides
-  // ALONGSIDE the byte-frozen KPI list, never appended to it.
-  const { data: strategies, error } = await withPublishedOnly(
-    supabase
-      .from("strategies")
-      .select(
-        `id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN})`,
-      ),
+  // ALONGSIDE the byte-frozen KPI list, never appended to it, and so do the four
+  // 194 record aliases (PERCENTILE_SPAN_COLUMNS) beside `asset_class`.
+  const { data, error } = await withPublishedOnly(
+    supabase.from("strategies").select(percentileSelect()),
   );
+  const strategies = data as unknown as PercentileSourceRow[] | null;
 
   if (error) {
     console.error("[queries.getOwnRowPercentiles] supabase error:", error.message ?? error);
@@ -1217,15 +1367,22 @@ export async function getOwnRowPercentiles(
 
   const populationRows: { id: string; analytics: Record<string, number | null> }[] = [];
   for (const s of strategies) {
-    const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
+    const a = extractAnalytics(s.strategy_analytics);
     if (!a) continue;
     // RANK-01: the SAME shared gate getPercentiles uses — deliberately the one
     // helper and not a local predicate, so the owner surface and the public
     // surface can never disagree about who is in the comparison set.
     if (!isRankableAnalyticsRow(a)) continue;
+    // 194 D-11 / D-15: the SAME helper getPercentiles applies, so a published row that
+    // fails the total-record minimum neither ranks nor counts for the five annualised
+    // metrics here either, and an own row that is also published (resolved below by
+    // identity) is scored as this already-gated row.
     populationRows.push({
       id: s.id,
-      analytics: castRow<Record<string, number | null>>(a, "analytics"),
+      analytics: withholdShortRecordRanks(
+        kpiRecord(a as unknown as Record<string, unknown>),
+        percentileRecord(s.asset_class, a, s.id),
+      ),
     });
   }
 
@@ -1249,7 +1406,15 @@ export async function getOwnRowPercentiles(
       (r) =>
         populationById.get(r.id) ?? {
           id: r.id,
-          analytics: castRow<Record<string, number | null>>(r.analytics, "analytics"),
+          // 194 D-11 / D-15, subject side: a draft or private row whose TOTAL record fails
+          // the minimum is told no rank for the five annualised metrics, exactly as a
+          // published one is. Its record comes from its own shaped analytics (series_start,
+          // series_end, headline_since, record_observations: `shapedRecordScalars`) and the
+          // strategy's `asset_class`. A row that carries none of them keeps its ranks.
+          analytics: withholdShortRecordRanks(
+            kpiRecord(r.analytics as unknown as Record<string, unknown>),
+            percentileRecord(r.asset_class, r.analytics, r.id),
+          ),
         },
     );
 
@@ -2621,10 +2786,71 @@ export interface OwnCapitalStrategy {
    * function on the same input, not a reimplementation.
    */
   mtd: number | null;
+  /**
+   * 194 D-15 (2026-11-07): the strategy's TOTAL record, as three scalars computed
+   * SERVER-side by `figureRecordScalars` and the ONLY record data that cross the RSC
+   * boundary for this panel (no series, flags or metrics blob). `figure_span_days` is
+   * the calendar span from the first to the last resolved return date (from
+   * `headline_since` when chain-broken), `null` when the strategy has no dated series;
+   * `figure_observations` is the stored `record_observations` count, `null` before the
+   * recompute that writes it; `figure_crypto` is `annualizationPeriods(asset_class) === 365`.
+   * `toStrategyRows` hands them to `gateAnnualized`, so the Holdings Sharpe is withheld
+   * or marked `<1y` by the same rule as every other surface.
+   */
+  figure_span_days: number | null;
+  figure_observations: number | null;
+  figure_crypto: boolean;
   strategy_analytics: Pick<
     StrategyAnalytics,
     "cagr" | "sharpe" | "volatility" | "max_drawdown"
   > | null;
+}
+
+/**
+ * 194 D-15 (2026-11-07): the three record scalars both Holdings producers emit
+ * (`getOwnCapitalStrategies`, `getMyAllocationDashboard`), computed once here so the two
+ * halves of the Holdings table cannot disagree about one strategy's record. `series` is
+ * the placeholder-free RESOLVED series (date-ascending), read BEFORE any native-to-USD
+ * conversion so a price outage cannot shorten a record. A `headline_since` that is not an
+ * ISO day is ignored, never guessed. The record is judged by `figureRecord`, the
+ * constructor every other surface uses.
+ */
+function figureRecordScalars(input: {
+  series: ReadonlyArray<{ date: string }>;
+  dataQualityFlags: unknown;
+  recordObservations: unknown;
+  assetClass: string | null | undefined;
+  strategyId: string;
+}): Pick<OwnCapitalStrategy, "figure_span_days" | "figure_observations" | "figure_crypto"> {
+  const { series, dataQualityFlags, recordObservations, assetClass, strategyId } = input;
+  const since = (dataQualityFlags as { headline_since?: unknown } | null | undefined)
+    ?.headline_since;
+  const record = figureRecord({
+    seriesStart: series[0]?.date ?? null,
+    seriesEnd: series[series.length - 1]?.date ?? null,
+    headlineSince:
+      typeof since === "string" && /^\d{4}-\d{2}-\d{2}/.test(since) ? since.slice(0, 10) : null,
+    observations: typeof recordObservations === "number" ? recordObservations : null,
+    periodsPerYear: annualizationPeriods(assetClass),
+  });
+  // 194 R5 SFH-M3: reported at the producer, once per call, never from a render-time gate.
+  if (record.unreadable) {
+    captureToSentry(new Error("holdings figure record unreadable: a series date is not a date"), {
+      tags: { op: "figureRecordScalars", reason: "figure-record-unreadable" },
+      level: "error",
+      extra: {
+        strategyId,
+        seriesStart: series[0]?.date ?? null,
+        seriesEnd: series[series.length - 1]?.date ?? null,
+        headlineSince: typeof since === "string" ? since : null,
+      },
+    });
+  }
+  return {
+    figure_span_days: record.spanDays,
+    figure_observations: record.observations,
+    figure_crypto: record.crypto,
+  };
 }
 
 /**
@@ -2683,6 +2909,7 @@ export async function getOwnCapitalStrategies(
       disclosure_tier,
       status,
       capital_ownership,
+      asset_class,
       strategy_analytics (
         daily_returns,
         cagr,
@@ -2690,7 +2917,8 @@ export async function getOwnCapitalStrategies(
         volatility,
         max_drawdown,
         returns_series,
-        data_quality_flags
+        data_quality_flags,
+        record_observations:metrics_json->record_observations
       )
       `,
     )
@@ -2749,11 +2977,23 @@ export async function getOwnCapitalStrategies(
   // PostgREST returns a one-to-one embed as an object but a one-to-many embed
   // as an array; the dashboard path (:3941) tolerates both and so does this.
   return (data ?? []).map((row) => {
-    const rowObj = row as unknown as Record<string, unknown>;
+    // 194 D-15: `asset_class` is selected ONLY to decide `figure_crypto`; it is
+    // dropped here so the payload carries exactly the fields the type declares.
+    const { asset_class: assetClass, ...rowObj } = row as unknown as Record<
+      string,
+      unknown
+    >;
     const analyticsObj = analyticsOf(rowObj);
 
     let strategy_analytics: OwnCapitalStrategy["strategy_analytics"] = null;
     let mtd: number | null = null;
+    let record = figureRecordScalars({
+      series: [],
+      dataQualityFlags: null,
+      recordObservations: null,
+      assetClass: assetClass as string | null | undefined,
+      strategyId: String(rowObj.id),
+    });
     if (analyticsObj) {
       // 164.6.6.2.2 D-05: `data_quality_flags` is selected ONLY so the curve is
       // read by the row's own method; the raw blob is stripped like the series
@@ -2762,6 +3002,8 @@ export async function getOwnCapitalStrategies(
         returns_series: _rs,
         daily_returns: _dr,
         data_quality_flags: _dqf,
+        // 194 D-15: read below for `figure_observations`, then dropped like the flags.
+        record_observations: _ro,
         ...analyticsRest
       } = analyticsObj;
       // Phase 164.6.6.2.1 D-11: the MTD below is in USD for a native-unit row,
@@ -2769,6 +3011,20 @@ export async function getOwnCapitalStrategies(
       // halves agree. The unit is parsed from the flags BEFORE they are dropped.
       const returns_unit = nativeUnitOf(analyticsObj);
       const dqf = analyticsObj.data_quality_flags;
+      // 194 D-15: the placeholder-free resolved series, read BEFORE any USD
+      // conversion, so it is both the non-native MTD input and the record's span.
+      const resolved = resolveDailyReturnSeries(
+        analyticsObj.daily_returns,
+        analyticsObj.returns_series,
+        curveMethodFromFlags(dqf),
+      );
+      record = figureRecordScalars({
+        series: resolved,
+        dataQualityFlags: dqf,
+        recordObservations: analyticsObj.record_observations,
+        assetClass: assetClass as string | null | undefined,
+        strategyId: String(rowObj.id),
+      });
       mtd = computeMtd(
         returns_unit != null
           ? // WR-02: absent days stay NaN placeholders so the day after a gap is
@@ -2783,11 +3039,7 @@ export async function getOwnCapitalStrategies(
               returns_unit,
               btcCloses,
             )
-          : resolveDailyReturnSeries(
-              analyticsObj.daily_returns,
-              analyticsObj.returns_series,
-              curveMethodFromFlags(dqf),
-            ),
+          : resolved,
       );
       strategy_analytics =
         analyticsRest as OwnCapitalStrategy["strategy_analytics"];
@@ -2796,6 +3048,7 @@ export async function getOwnCapitalStrategies(
     return {
       ...rowObj,
       mtd,
+      ...record,
       strategy_analytics,
     } as unknown as OwnCapitalStrategy;
   });
@@ -3191,6 +3444,18 @@ export interface MyAllocationDashboardPayload {
        * only this three-valued presentation string crosses to the client.
        */
       series_state: SeriesState;
+      /**
+       * 194 D-15 (2026-11-07): the strategy's TOTAL record as three scalars, computed
+       * SERVER-side by `figureRecordScalars` off the placeholder-free resolved series
+       * (before any USD conversion) and the ONLY record data that cross the boundary
+       * for the Holdings Sharpe gate: no series, flags or metrics blob is added.
+       * Same meaning as on `OwnCapitalStrategy`, so a positioned row and a marked row
+       * of one strategy get one verdict. Optional only so legacy hand-built fixtures
+       * compile; `getMyAllocationDashboard` ALWAYS sets them.
+       */
+      figure_span_days?: number | null;
+      figure_observations?: number | null;
+      figure_crypto?: boolean;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -6421,7 +6686,8 @@ export const getMyAllocationDashboard = cache(
               max_drawdown,
               data_quality_flags,
               returns_series,
-              computation_status
+              computation_status,
+              record_observations:metrics_json->record_observations
             )
           )
           `,
@@ -6649,6 +6915,8 @@ export const getMyAllocationDashboard = cache(
           data_quality_flags: _dqf,
           returns_series: _rs,
           computation_status: _cs,
+          // 194 D-15: read below for `figure_observations`, then dropped.
+          record_observations: _ro,
           ...analyticsRest
         } = analyticsObj;
         // P3: keep the intermediate at the Record<string, unknown> idiom this
@@ -6795,6 +7063,13 @@ export const getMyAllocationDashboard = cache(
             native_unpriced,
             ...(strategyTinyBaseDays.length > 0 ? { tiny_base_days: strategyTinyBaseDays } : {}),
             series_state,
+            ...figureRecordScalars({
+              series: resolvedDailyReturns,
+              dataQualityFlags: dqf,
+              recordObservations: analyticsObj?.record_observations,
+              assetClass: strategy.asset_class,
+              strategyId: row.strategy_id as string,
+            }),
             strategy_analytics: strategyAnalyticsForPayload,
           },
         },

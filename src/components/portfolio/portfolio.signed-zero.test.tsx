@@ -183,6 +183,7 @@ function impactResponse(deltas: ImpactDeltas): SimulatorCandidate {
     portfolio_id: "p1",
     status: "ok",
     overlap_days: 200,
+    annualization_periods: 252,
     partial_history: false,
     current_metrics_reliable: true,
     deltas,

@@ -2692,7 +2692,7 @@
       "consecutive_wins": 8,
       "correlation": 0.040770326490318295,
       "cpc_index": 0.5090142556782696,
-      "cvar": -0.027724972787671658,
+      "cvar": -0.028192093685001335,
       "drawdown_episodes": [
         {
           "depth_pct": -0.242434776360137,
@@ -2727,6 +2727,7 @@
           "trough_date": "2025-01-02"
         }
       ],
+      "figure_defs_version": 2,
       "gain_pain": 0.033890679387509524,
       "info_ratio": -0.386871785356601,
       "kelly_criterion": 0.017170345942251242,
@@ -2741,6 +2742,7 @@
       "r_squared": 0.0016622195221271503,
       "r_squared_status": "ok",
       "recovery_factor": 0.1807251739470478,
+      "record_observations": 252,
       "risk_of_ruin": [
         {
           "loss_pct": 10.0,
@@ -2768,12 +2770,12 @@
       "smart_sharpe": 0.20532593866123616,
       "smart_sortino": 0.2913298667073062,
       "tail_ratio": 0.9589498451334649,
-      "three_month": 0.09868203135662457,
+      "three_month": 0.08730672162017328,
       "time_in_market": 1.0,
       "treynor": 0.9815108724421955,
       "ulcer_index": 0.13339796931864364,
       "upi": 0.16179844081267633,
-      "var_1d_95": -0.021825406727215196,
+      "var_1d_95": -0.02211952201971554,
       "var_1m_99": -0.12130815956121718,
       "win_loss_ratio": 1.1,
       "worst_day": -0.053619010101036084,
@@ -5378,10 +5380,13 @@
           "date": "2025-12-18",
           "value": 2.7061
         }
-      ]
+      ],
+      "volatility_1y": [],
+      "sharpe_1y": [],
+      "sortino_1y": []
     },
     "sharpe": 0.20636319580855123,
-    "six_month_return": 0.0649440908471961,
+    "six_month_return": 0.020780202832033634,
     "sortino": 0.292801594967451,
     "sparkline_drawdown": [
       0.0,

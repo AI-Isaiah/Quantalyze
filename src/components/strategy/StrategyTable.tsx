@@ -28,6 +28,7 @@ import {
   type RangeFilter,
 } from "./StrategyFilters";
 import { StrategyGrid } from "./StrategyGrid";
+import { rowRecord, annualizedCell } from "./annualized-cell";
 import { SyncBadge } from "./SyncBadge";
 import { StarToggle } from "./StarToggle";
 import { WatchlistTabs } from "./WatchlistTabs";
@@ -39,10 +40,9 @@ import { ReturnsUnitChip } from "./ReturnsUnitChip";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { signTone, drawdownTone } from "@/lib/factsheet/display-sign";
 import { formatPercent, formatNumber, formatCurrency, formatIsoDay } from "@/lib/utils";
-import {
-  isComputedAnalytics,
-  deriveEmptySeriesState,
-} from "@/lib/closed-sets";
+import { isComputedAnalytics, deriveEmptySeriesState } from "@/lib/closed-sets";
+import { gateAnnualized, gatedValue, notShownLine } from "@/lib/figure-gate";
+import { compareWithMissingLast, isMissingFigure, rangeMatches } from "@/lib/list-figures";
 import {
   DEFAULTS,
   useDiscoveryPrefs,
@@ -489,43 +489,44 @@ interface StrategyTableProps {
   onRename?: (s: StrategyWithAnalytics) => void;
 }
 
-// --- Range filter helper ---
+// --- Range filter and sort: the D-09 missing-figure contract ---
+//
+// Phase 194 plan 06 (D-09). The range filter is `rangeMatches` and the sort is
+// `compareWithMissingLast` (lib/list-figures.ts): a missing figure (null, non-finite,
+// or an annualised figure the gate withholds) never matches an active range and sorts
+// after every finite value in both directions. This file substitutes no number for a
+// missing figure.
 
-function matchesRange(value: number | null | undefined, range: RangeFilter, scale: number): boolean {
-  if (range.from === "" && range.to === "") return true;
-  const v = value ?? 0;
-  const scaled = v * scale;
-  if (range.from !== "" && scaled < parseFloat(range.from)) return false;
-  if (range.to !== "" && scaled > parseFloat(range.to)) return false;
-  return true;
-}
+/** The annualised keys the D-15 gate withholds, as the list reads them. */
+type GatedKey = "cagr" | "sharpe" | "volatility" | "calmar";
 
-function matchesRangeRaw(value: number | null | undefined, range: RangeFilter): boolean {
-  if (range.from === "" && range.to === "") return true;
-  const v = value ?? 0;
-  if (range.from !== "" && v < parseFloat(range.from)) return false;
-  if (range.to !== "" && v > parseFloat(range.to)) return false;
-  return true;
+/** A stored annualised figure as the list may use it: null when the row's record withholds it. */
+function gatedMetric(s: StrategyWithAnalytics, key: GatedKey): number | null {
+  return gatedValue(s.analytics[key], gateAnnualized(rowRecord(s)));
 }
 
 // --- Sort value getter ---
 
-function getSortValue(s: StrategyWithAnalytics, key: TableSortKey): number | string {
+function getSortValue(s: StrategyWithAnalytics, key: TableSortKey): number | string | null {
   switch (key) {
     case "name":
       return s.name;
     case "aum":
-      return s.aum ?? 0;
+      return s.aum ?? null;
     case "computed_at":
       return s.analytics.computed_at ?? "";
     case "six_month_return":
-      return s.analytics.six_month_return ?? 0;
+      return s.analytics.six_month_return ?? null;
     case "created_at":
       // ISO timestamps compare chronologically as strings. A missing date
       // sorts as "" (oldest), never as an invented date.
       return s.created_at ?? "";
+    case "cagr":
+    case "sharpe":
+    case "volatility":
+      return gatedMetric(s, key);
     default:
-      return (s.analytics[key as keyof StrategyAnalytics] as number) ?? 0;
+      return (s.analytics[key as keyof StrategyAnalytics] as number | null | undefined) ?? null;
   }
 }
 
@@ -735,7 +736,7 @@ export function StrategyTable({
     setPage(0);
   }
 
-  const filtered = useMemo(() => {
+  const { rows: filtered, missingExcluded, notShownLabels } = useMemo(() => {
     // Phase 149 / NAV-01 — the in-component publication predicate, now
     // parameterized rather than deleted (deleting it would widen the SHARED
     // component for /discovery and /browse, the roadmap's leak trap).
@@ -805,35 +806,63 @@ export function StrategyTable({
       });
     }
 
-    // Advanced: capital ranges (raw dollar values)
-    result = result.filter((s) => matchesRangeRaw(s.aum, advancedFilters.aum));
-    result = result.filter((s) => matchesRangeRaw(s.max_capacity, advancedFilters.maxCapacity));
-
-    // Advanced: performance ranges (analytics are decimal ratios, user enters %)
-    // For percentage filters: user enters e.g. "50" meaning 50%, stored as 0.5
-    result = result.filter((s) => matchesRange(s.analytics.cumulative_return, advancedFilters.cumulativeReturn, 100));
-    result = result.filter((s) => matchesRange(s.analytics.cagr, advancedFilters.cagr, 100));
-    result = result.filter((s) => matchesRange(s.analytics.max_drawdown, advancedFilters.maxDrawdown, 100));
-    result = result.filter((s) => matchesRange(s.analytics.volatility, advancedFilters.volatility, 100));
-    result = result.filter((s) => matchesRangeRaw(s.analytics.sharpe, advancedFilters.sharpe));
-    result = result.filter((s) => matchesRange(s.analytics.six_month_return, advancedFilters.sixMonth, 100));
-    result = result.filter((s) => matchesRangeRaw(s.analytics.calmar, advancedFilters.calmar));
-
-    // 3M: from the aliased JSONB key when present, else the metrics_json blob.
+    // Advanced: every range filter, in ONE pass through `rangeMatches` (D-09).
+    // Analytics are decimal ratios and the user types a percentage ("50" means 50%,
+    // stored as 0.5), hence scale 100 on the percentage keys. A missing figure (null,
+    // or an annualised figure the row's record withholds) never matches an active
+    // range, a range containing 0 included. Each distinct row that an active range
+    // filter excluded because its figure is missing is counted once, for the
+    // "Not shown" line; a row out of range by value alone is not.
     //
-    // Phase 159 (159-03 / RANK-02): the ANON list read
-    // (`getStrategiesByCategory`) no longer ships the whole `metrics_json`
-    // blob — it projects this one key as `three_month:metrics_json->three_month`
-    // (MEASURED against TEST: the embed alias returns a real number). The
-    // OWNER read (`getMyStrategies`) keeps its wildcard embed under the D-02
-    // exemption and still carries the blob. Reading the alias first with a
-    // blob fallback is what keeps the filter identical on BOTH surfaces —
-    // dropping the fallback would silently degrade /my-strategies.
-    if (advancedFilters.threeMonth.from !== "" || advancedFilters.threeMonth.to !== "") {
+    // 3M: from the aliased JSONB key when present, else the metrics_json blob.
+    // Phase 159 (159-03 / RANK-02): the ANON list read (`getStrategiesByCategory`)
+    // projects this one key as `three_month:metrics_json->three_month` (MEASURED
+    // against TEST: the embed alias returns a real number); the OWNER read
+    // (`getMyStrategies`) keeps its wildcard embed under the D-02 exemption and
+    // still carries the blob. Alias first with a blob fallback keeps the filter
+    // identical on BOTH surfaces.
+    const rangeSpecs: {
+      label: string;
+      range: RangeFilter;
+      scale: number;
+      value: (s: StrategyWithAnalytics) => number | null | undefined;
+    }[] = [
+      { label: "AUM", range: advancedFilters.aum, scale: 1, value: (s) => s.aum },
+      { label: "Max capacity", range: advancedFilters.maxCapacity, scale: 1, value: (s) => s.max_capacity },
+      { label: "Return %", range: advancedFilters.cumulativeReturn, scale: 100, value: (s) => s.analytics.cumulative_return },
+      { label: "CAGR", range: advancedFilters.cagr, scale: 100, value: (s) => gatedMetric(s, "cagr") },
+      { label: "Max DD", range: advancedFilters.maxDrawdown, scale: 100, value: (s) => s.analytics.max_drawdown },
+      { label: "Volatility", range: advancedFilters.volatility, scale: 100, value: (s) => gatedMetric(s, "volatility") },
+      { label: "Sharpe", range: advancedFilters.sharpe, scale: 1, value: (s) => gatedMetric(s, "sharpe") },
+      { label: "6 Month", range: advancedFilters.sixMonth, scale: 100, value: (s) => s.analytics.six_month_return },
+      { label: "Calmar", range: advancedFilters.calmar, scale: 1, value: (s) => gatedMetric(s, "calmar") },
+      {
+        label: "3 Month",
+        range: advancedFilters.threeMonth,
+        scale: 100,
+        value: (s) => {
+          const mj = s.analytics.metrics_json as Record<string, number> | null;
+          return s.analytics.three_month ?? mj?.three_month ?? null;
+        },
+      },
+    ];
+    const activeSpecs = rangeSpecs.filter((spec) => spec.range.from !== "" || spec.range.to !== "");
+    let missingExcluded = 0;
+    const missingLabels = new Set<string>();
+    if (activeSpecs.length > 0) {
       result = result.filter((s) => {
-        const mj = s.analytics.metrics_json as Record<string, number> | null;
-        const val = s.analytics.three_month ?? mj?.three_month ?? null;
-        return matchesRange(val, advancedFilters.threeMonth, 100);
+        let keep = true;
+        let missing = false;
+        for (const spec of activeSpecs) {
+          const v = spec.value(s);
+          if (isMissingFigure(v)) {
+            missing = true;
+            missingLabels.add(spec.label);
+          }
+          if (!rangeMatches(v, spec.range, spec.scale)) keep = false;
+        }
+        if (missing) missingExcluded += 1;
+        return keep;
       });
     }
 
@@ -877,15 +906,21 @@ export function StrategyTable({
         if (aRanked !== bRanked) return aRanked ? -1 : 1;
       }
 
-      const aVal = getSortValue(a, effectiveSortKey);
-      const bVal = getSortValue(b, effectiveSortKey);
-
-      if (aVal < bVal) return effectiveSortDir === "asc" ? -1 : 1;
-      if (aVal > bVal) return effectiveSortDir === "asc" ? 1 : -1;
-      return 0;
+      // D-09: a missing figure (null, or withheld) sorts after every finite value in
+      // BOTH directions and two missing rows keep their prior order. Equally
+      // direction-independent as the partition above, and for the same reason: a
+      // position is not a measurement, and flipping the sort must not march a row
+      // the figure of which we do not have to the other end.
+      return compareWithMissingLast(
+        getSortValue(a, effectiveSortKey),
+        getSortValue(b, effectiveSortKey),
+        effectiveSortDir,
+      );
     });
 
-    return result;
+    // Deterministic label order (the filter order), not the order rows were visited.
+    const notShownLabels = activeSpecs.map((spec) => spec.label).filter((l) => missingLabels.has(l));
+    return { rows: result, missingExcluded, notShownLabels };
   }, [strategies, visibility, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, effectiveViewMode, mountedAtMs, scope, watchedSet]);
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
@@ -991,6 +1026,19 @@ export function StrategyTable({
 
   const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
 
+  // The D-09 excluded-count line, or null at 0. The sentence is `notShownLine`'s.
+  const notShownText = notShownLine(missingExcluded, notShownLabels);
+  const notShownStatus = notShownText ? (
+    <p
+      role="status"
+      aria-live="polite"
+      className="px-4 mt-2 text-caption text-text-muted"
+      data-testid="figures-not-shown"
+    >
+      {notShownText}
+    </p>
+  ) : null;
+
   // Quiet Geist-Mono percentile suffix (e.g. `P82`) appended to the ACTIVE sort
   // column only. Honest absence: no percentiles prop, no metric mapping for the
   // sorted column, or a missing/non-finite entry → renders nothing.
@@ -1071,6 +1119,12 @@ export function StrategyTable({
             }
           : {})}
       >
+        {/* Phase 194 plan 06 (D-09, UI-SPEC "List contract" item 4) — ONE status
+            line above the scroll region saying how many rows an active range
+            filter hid because their figure is missing. Never two: when the filter
+            empties the table the same line renders beneath the empty message
+            instead. Absent at 0. */}
+        {!showEmptyWatchlist && (paged.length > 0 || effectiveViewMode === "grid") && notShownStatus}
         {showEmptyWatchlist ? (
           <EmptyWatchlist />
         ) : effectiveViewMode === "table" ? (
@@ -1250,7 +1304,12 @@ export function StrategyTable({
                     // Compute each cell's value ONCE, as the single source of
                     // what it renders, via the honest-null formatters \u2014 never a fabricated
                     // 0/\u2014/demo number (no-invented-data / STATE-02 / T-50-09).
-                    const volatilityText = formatPercent(s.analytics.volatility);
+                    const record = rowRecord(s);
+                    const gate = gateAnnualized(record);
+                    const cagrShown = gatedValue(s.analytics.cagr, gate);
+                    const sharpeShown = gatedValue(s.analytics.sharpe, gate);
+                    const volatilityShown = gatedValue(s.analytics.volatility, gate);
+                    const volatilityText = formatPercent(volatilityShown);
                     const sixMonthText = formatPercent(s.analytics.six_month_return);
                     const aumText = formatCurrency(s.aum);
                     // Phase 149 Delta 4 — the chip-state status, from the ONE
@@ -1600,21 +1659,21 @@ export function StrategyTable({
                           {formatPercent(s.analytics.cumulative_return)}
                           {pctSuffix(s, "cumulative_return")}
                         </td>
-                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${magnitudeColor(s.analytics.cagr)}`}>
-                          {formatPercent(s.analytics.cagr)}
-                          {pctSuffix(s, "cagr")}
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${magnitudeColor(cagrShown)}`}>
+                          {annualizedCell(formatPercent(cagrShown), gate, record)}
+                          {gate !== "withheld" && pctSuffix(s, "cagr")}
                         </td>
-                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${magnitudeColor(s.analytics.sharpe)}`}>
-                          {formatNumber(s.analytics.sharpe)}
-                          {pctSuffix(s, "sharpe")}
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${magnitudeColor(sharpeShown)}`}>
+                          {annualizedCell(formatNumber(sharpeShown), gate, record)}
+                          {gate !== "withheld" && pctSuffix(s, "sharpe")}
                         </td>
                         <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${drawdownColor(s.analytics.max_drawdown)}`}>
                           {formatPercent(s.analytics.max_drawdown)}
                           {pctSuffix(s, "max_drawdown")}
                         </td>
-                        <td className="px-4 py-3 text-right font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors">
-                          {volatilityText}
-                          {pctSuffix(s, "volatility")}
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums ${volatilityShown == null ? "text-text-muted" : "text-text-secondary"} group-hover:bg-page/50 transition-colors`}>
+                          {annualizedCell(volatilityText, gate, record)}
+                          {gate !== "withheld" && pctSuffix(s, "volatility")}
                         </td>
                         <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${signColor(s.analytics.six_month_return)}`}>
                           {sixMonthText}
@@ -1726,6 +1785,7 @@ export function StrategyTable({
                     <tr>
                       <td colSpan={emptyRowColSpan} className="px-4 py-8 text-center text-text-muted">
                         No strategies match your filters.
+                        {notShownStatus}
                       </td>
                     </tr>
                   )}

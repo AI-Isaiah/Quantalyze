@@ -368,7 +368,7 @@ const ALLOWLIST: readonly AllowEntry[] = [
   // Sortino: the bootstrap's resampled downside deviation.
   { file: "src/lib/factsheet/bootstrap.ts", shape: "S0", denominator: "downDev", reason: "Sortino, downside deviation", count: 1 },
   // Sortino: rollingSortino's windowed downside deviation.
-  { file: "src/lib/factsheet/rolling.ts", shape: "S0", denominator: "dd", reason: "rollingSortino, downside deviation", count: 1 },
+  { file: "src/lib/factsheet/rolling.ts", shape: "S0", denominator: "dd", reason: "rollingSortino and rollingCalendarStats (194-23 D-14 365-day twin of metrics.py _rolling_calendar_stats), downside deviation", count: 2 },
   // Sortino: the sample-basis downside volatility.
   { file: "src/lib/sample-basis-ratios.ts", shape: "S0", denominator: "downsideVol", reason: "Sortino, downside deviation", count: 1 },
   // Sortino: the scenario's downside volatility.

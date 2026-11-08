@@ -27,6 +27,7 @@ import type {
   RiskDecompositionRow,
   TimeSeriesPoint,
 } from "./types";
+import type { FigureRecord, FigureState } from "./figure-gate";
 
 type Json = unknown;
 
@@ -154,6 +155,30 @@ function parseBenchmarkComparison(v: Json): BenchmarkComparison | null {
   };
 }
 
+const LIFT_STATES: ReadonlySet<string> = new Set(["withheld", "short", "full", "null"]);
+
+/**
+ * 194 D-15 (T-194-43): the stored `sharpe_lift_state` is a closed set. Anything outside it
+ * (absent, a typo, a number) is the unknown state, null, never trusted as-is.
+ */
+export function parseLiftState(v: Json): FigureState | null {
+  return typeof v === "string" && LIFT_STATES.has(v) ? (v as FigureState) : null;
+}
+
+/**
+ * 194 D-15 (T-194-43): the producer's `{span_days, observations, crypto}` failing record, read
+ * from the stored JSON. Needs a numeric `span_days` and `observations` and a boolean `crypto`;
+ * anything else is null, because a record is judged on its own count and a guessed one would
+ * print a false reason. Maps to the client's camelCase `FigureRecord`.
+ */
+export function parseWireFigureRecord(v: Json): FigureRecord | null {
+  if (!isObject(v)) return null;
+  const spanDays = asNumber(v.span_days);
+  const observations = asNumber(v.observations);
+  if (spanDays == null || observations == null || typeof v.crypto !== "boolean") return null;
+  return { spanDays, observations, crypto: v.crypto };
+}
+
 function parseOptimizerSuggestionRow(v: Json): OptimizerSuggestionRow | null {
   if (!isObject(v)) return null;
   const strategy_id = asString(v.strategy_id);
@@ -166,6 +191,23 @@ function parseOptimizerSuggestionRow(v: Json): OptimizerSuggestionRow | null {
     // correlation into "reduce average correlation toward 0.00" on the card.
     corr_with_portfolio: asNumber(v.corr_with_portfolio),
     sharpe_lift: asNumber(v.sharpe_lift),
+    // 194 D-11 / D-15: absent on a suggestion stored before the producer recorded them, which
+    // reads as unknown (null), never as a verdict.
+    sharpe_lift_span_days: asNumber(v.sharpe_lift_span_days),
+    // 194 R2-M2: a PRESENT state outside the closed set fails closed to withheld; only an
+    // ABSENT one (pre-194 row) reads as unknown and shows the value.
+    sharpe_lift_state:
+      v.sharpe_lift_state == null ? null : (parseLiftState(v.sharpe_lift_state) ?? "withheld"),
+    // 194 R3 SFH-M1: keep the original out-of-set value so the card reports the real cause.
+    ...(v.sharpe_lift_state != null && parseLiftState(v.sharpe_lift_state) === null
+      ? {
+          sharpe_lift_state_raw:
+            typeof v.sharpe_lift_state === "string"
+              ? v.sharpe_lift_state
+              : JSON.stringify(v.sharpe_lift_state),
+        }
+      : {}),
+    sharpe_lift_failing_record: parseWireFigureRecord(v.sharpe_lift_failing_record),
     dd_improvement: asNumber(v.dd_improvement) ?? 0,
     score: asNumber(v.score) ?? 0,
   };

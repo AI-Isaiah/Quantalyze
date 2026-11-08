@@ -152,6 +152,7 @@ describe("windowView — the slice's figures come from the shared bundle (D-25, 
         strategyName: base.strategyName,
         missingSegments: base.missingSegments,
         benchmarkPrices: base.benchmarkPrices ?? { unavailable: true },
+        figureRecord: null,
       },
     );
     expect(base.comparators.btc.joint, "fixture: the full record has a BTC joint").not.toBeNull();
@@ -344,6 +345,7 @@ describe("useWindowedView — the full-history arm is the base view BY REFERENCE
       markets: cash.markets,
       strategyName: cash.strategyName,
       benchmarkPrices: { unavailable: true },
+      figureRecord: null,
     });
     const payload = { ...cash, seriesByBasis: { mark_to_market: mtmBundle } } as FactsheetPayload;
     mountProbe(payload, "mark_to_market");

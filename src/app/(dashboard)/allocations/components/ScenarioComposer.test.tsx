@@ -221,6 +221,25 @@ let optimizerOnApply: ((weights: Record<string, number>) => void) | null = null;
 let optimizerStrategies:
   | Array<{ id: string; name: string; dailyReturns: unknown }>
   | null = null;
+// 194 D-15 — the composer's "Scenario blend" strip shows the annualised blend
+// figures only for a record that clears the gate, and most fixtures in this file
+// are 12-60 day blends built to test engine PLUMBING (does a leverage edit move
+// the volatility the strip receives). `gateAnnualized` is wrapped as a
+// pass-through spy so those plumbing tests can open the gate with
+// `openFigureGate()`; the gate's own behavior is tested below with the real
+// function, and every test starts from the real one (see the afterEach).
+vi.mock("@/lib/figure-gate", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/figure-gate")>();
+  return { ...actual, gateAnnualized: vi.fn(actual.gateAnnualized) };
+});
+function openFigureGate() {
+  vi.mocked(gateAnnualizedSpy).mockImplementation(() => "full");
+}
+afterEach(async () => {
+  const actual = await vi.importActual<typeof import("@/lib/figure-gate")>("@/lib/figure-gate");
+  vi.mocked(gateAnnualizedSpy).mockImplementation(actual.gateAnnualized);
+});
+
 // Phase 57 — engine-arg recorder. `@/lib/scenario` stays REAL (computeScenario
 // still computes genuine metrics — the member_count oracle depends on it), but
 // `computeScenario` is wrapped so each invocation's `state` arg is captured. The
@@ -467,6 +486,7 @@ import {
 } from "../lib/scenario-state";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { KpiStrip } from "./KpiStrip";
+import { gateAnnualized as gateAnnualizedSpy } from "@/lib/figure-gate";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
@@ -4361,6 +4381,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("R4 — a per-strategy leverage edit reaches the projection (2× changes vol) and surfaces the caveat", () => {
+    openFigureGate();
     const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
@@ -4555,8 +4576,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(
       screen.getByText(/historical realized · not a forecast/i),
     ).toBeInTheDocument();
+    // 194 review WR-03: the caption names the blend's own basis. This fixture is one
+    // crypto per-key leg, so the basis is 365, not the old hardcoded 252.
     expect(
-      screen.getByText(/252-day annualized/i),
+      screen.getByText(/365-day annualized/i),
     ).toBeInTheDocument();
     // The leaf charts mounted (populated body, not the empty banner).
     expect(screen.getByTestId("return-histogram-mock")).toBeInTheDocument();
@@ -5644,6 +5667,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // post-edit capture — never reverted to the default-weight projection).
   // -------------------------------------------------------------------------
   it("LAYOUT-02 collapsing the composition controls preserves in-progress weight + leverage edits and the projection still reflects them", () => {
+    openFigureGate();
     const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
@@ -6013,6 +6037,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   // hide (dim the row, leave projectionState.selected intact) FAILS this.
   // -------------------------------------------------------------------------
   it("DSRC-03 toggling a source off honestly recomputes Sharpe/maxDD/return + curve endpoint, matching an independent two→one recompute", () => {
+    openFigureGate();
     renderPerKey(makePerKeyPayload());
 
     // Baseline (both included) — must equal the independent two-key blend.
@@ -6081,6 +6106,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   // Non-vacuity: the field-less recompute (today's 0-fill) has a different twr.
   // -------------------------------------------------------------------------
   it("188 D-07 a key's tiny-base days are left out of the composer's blend, matching an independent recompute and a hand product (not read as 0%)", () => {
+    openFigureGate();
     const NAMED = ["2026-02-07", "2026-02-08"];
     const keyBWithoutNamed = KEY_B_SERIES.filter((p) => !NAMED.includes(p.date));
     expect(keyBWithoutNamed).toHaveLength(12);
@@ -6243,6 +6269,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   // DSRC-03 — all-excluded honest empty + re-include restores
   // -------------------------------------------------------------------------
   it("DSRC-03 excluding every source → EmptyStateCard + null KPIs (never stale); re-including restores the live projection", () => {
+    openFigureGate();
     renderPerKey(makePerKeyPayload());
 
     const liveBefore = lastKpiScenarioMetrics();
@@ -6998,6 +7025,7 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
   // projection-derived KPI vs the 1× baseline. Fails today: the per-key leverage
   // input does not exist.
   it("(c) RED — setting K1's leverage to 2 moves the projection volatility vs the 1× baseline", () => {
+    openFigureGate();
     render112();
     const beforeVol = lastKpiScenarioMetrics()?.volatility;
     expect(beforeVol).toBeTypeOf("number");
@@ -11170,6 +11198,7 @@ describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
   });
 
   it("a book blend with a per-key (crypto) leg threads periodsPerYear=365 to computeScenario, and the engine Sharpe reflects the √365 basis (non-vacuous vs √252)", () => {
+    openFigureGate();
     // A per-key book payload: buildPerKeyStrategyForBuilderSet tags each per-key
     // leg asset_class 'crypto' (every SUPPORTED_EXCHANGE is a crypto venue), so
     // blendPeriodsPerYear over the selected legs → 365.
@@ -13534,6 +13563,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
   });
 
   it("AUM-01 Test 8 (metrics invariance — AUM-01 is NOT the SCEN-01 fix): editing AUM leaves scenarioMetrics identical", () => {
+    openFigureGate();
     const { payload } = aumBook([300_000, 160_000]);
     renderAum1(payload);
 
@@ -14474,6 +14504,7 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
   // byte-identical and must not re-invoke the engine at all. AUM rescales
   // DOLLARS, never returns — that is what keeps AUM-01 distinct from SCEN-01.
   it("AUM-01 Test 7 (metrics invariance after the dollar wiring): a dollar edit moves weights, a pure AUM change moves nothing", () => {
+    openFigureGate();
     renderUsd(mixedBookPayload());
     add(D_A, "Dollar Strat A");
     setAum("2000000");
@@ -16266,12 +16297,18 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     expect(note.className).not.toMatch(/warning|amber|danger|destructive/i);
     expect(note).not.toHaveAttribute("role");
 
+    // 194 D-08: in book mode the figure is the MODELLED book, and its label
+    // says so, beside the Models-N-of-M note.
+    const aumLabel = () => document.querySelector('label[for="scenario-aum"]');
+    expect(aumLabel()?.textContent).toBe("Modelled equity (USD)");
+
     // Blank mode has no key basis to disclose — the AUM there is whatever the
-    // allocator typed.
+    // allocator typed, and the typed input keeps its own label.
     fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
     expect(
       screen.queryByTestId("scenario-aum-modelled-note"),
     ).not.toBeInTheDocument();
+    expect(aumLabel()?.textContent).toBe("PORTFOLIO AUM (USD)");
   });
 
   // -------------------------------------------------------------------------
@@ -19158,7 +19195,9 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       max_drawdown?: number | null;
     };
     expect(live.twr).toBe(payload.liveBaselineMetrics.ytdTwr);
-    expect(live.sharpe).toBe(payload.liveBaselineMetrics.sharpe);
+    // 194 R3 WR-01: the three-point book is under D-15's minimum, so its ANNUALISED Sharpe is
+    // withheld on the strip (the footer's delta already was). TWR and Max DD are not annualised.
+    expect(live.sharpe).toBeNull();
     expect(live.max_drawdown).toBe(payload.liveBaselineMetrics.maxDd);
   });
 });
@@ -19467,5 +19506,107 @@ describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () =>
     expect(rollHeading?.className).toContain("font-semibold");
     expect(dist!.querySelector("h2")).toBeNull();
     expect(roll!.querySelector("h2")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 194 plan 05 (D-04 as superseded by D-15) — the "Scenario blend" strip's
+// annualised figures follow the blend's overlapping record. The blend of a
+// per-key book is crypto (every supported venue is a crypto venue, so
+// `blendPeriodsPerYear` gives 365), so the bound here is 90 CALENDAR days, not
+// an observation count. These tests run the REAL gate (the afterEach above
+// restores it) and read what the composer hands the strip.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — 194 D-15 blend figure gate", () => {
+  /** A crypto per-key book whose overlap covers exactly `days` days (D-20: one daily return per day). */
+  function blendOfDays(days: number) {
+    const start = Date.UTC(2024, 0, 1);
+    const series = Array.from({ length: days }, (_, i) => ({
+      date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+      value: [0.012, -0.008, 0.02, -0.006, 0.014][i % 5],
+    }));
+    return makePayload({
+      apiKeys: [
+        {
+          id: "key-crypto",
+          exchange: "binance",
+          label: "Desk",
+          is_active: true,
+          sync_status: null,
+          last_sync_at: null,
+          account_balance_usdt: null,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      holdingsSummary: [
+        { ...HOLDING_BTC, value_usd: 100_000, api_key_id: "key-crypto" },
+      ],
+      perKeyReturnsByApiKeyId: { "key-crypto": series },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["key-crypto"],
+    });
+  }
+
+  /** Render the blend and return the metrics the composer handed the strip. */
+  function renderBlend(days: number) {
+    render(
+      <ScenarioComposer
+        payload={blendOfDays(days)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    return vi.mocked(KpiStrip).mock.calls.at(-1)![0].scenarioMetrics!;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  it("89 days of crypto overlap: the annualised figures are withheld and one blend-worded reason says why", () => {
+    const handed = renderBlend(89);
+    expect(handed.cagr).toBeNull();
+    expect(handed.volatility).toBeNull();
+    expect(handed.sharpe).toBeNull();
+    expect(handed.sortino).toBeNull();
+    expect(screen.getByTestId("scenario-figure-gate-note").textContent).toBe(
+      "Annualized figures appear once the blend's overlapping record reaches 90 days. It covers 89 days.",
+    );
+  });
+
+  it("the blend is crypto by its legs: 89 observations would clear a 60-observation bound and is still withheld (89 days is under 90)", () => {
+    // Were the record built on the 252 basis (a non-crypto blend, bound = 60
+    // observations) this record would clear and show its figures.
+    const handed = renderBlend(89);
+    expect(handed.sharpe).toBeNull();
+    expect(screen.getByTestId("scenario-figure-gate-note")).toBeInTheDocument();
+  });
+
+  it("exactly 90 days: the figures show, with the blend short-track note", () => {
+    const handed = renderBlend(90);
+    expect(Number.isFinite(handed.sharpe)).toBe(true);
+    expect(handed.volatility).not.toBeNull();
+    expect(screen.getByTestId("scenario-figure-gate-note").textContent).toBe(
+      "CAGR, volatility, Sharpe, Sortino and Calmar are annualized from 90 days of overlapping record, under one year.",
+    );
+  });
+
+  it("200 days: the figures show with '200 days of overlapping record'", () => {
+    const handed = renderBlend(200);
+    expect(Number.isFinite(handed.sharpe)).toBe(true);
+    expect(screen.getByTestId("scenario-figure-gate-note").textContent).toContain(
+      "200 days of overlapping record",
+    );
+  });
+
+  it("500 days: the figures show and there is no note", () => {
+    const handed = renderBlend(500);
+    expect(Number.isFinite(handed.sharpe)).toBe(true);
+    expect(screen.queryByTestId("scenario-figure-gate-note")).toBeNull();
   });
 });

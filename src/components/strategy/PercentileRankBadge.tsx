@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { SHORT_TRACK_MARKER, shortTrackMarkerTitle } from "@/lib/figure-gate";
 
 const PERCENTILE_METRIC_LABELS: Record<string, string> = {
   cagr: "CAGR",
@@ -15,6 +16,14 @@ interface PercentileRankBadgeProps {
   percentile: number | null | undefined;
   categoryLabel?: string;
   className?: string;
+  /**
+   * 194 D-11 / D-15: the calendar days of record the ranked figure is annualised from, passed
+   * ONLY for an annualised metric (CAGR, Sharpe, Sortino, Volatility) of a record that cleared
+   * D-15's minimum and spans under one year. The rank then carries the `<1y` marker with its
+   * reason in `title` and in sr-only text. Absent or null: the badge renders exactly as before.
+   * Never passed for Max DD or Return (not annualised); the caller decides, this only renders.
+   */
+  shortTrackDays?: number | null;
 }
 
 /**
@@ -30,6 +39,7 @@ export function PercentileRankBadge({
   percentile,
   categoryLabel,
   className,
+  shortTrackDays,
 }: PercentileRankBadgeProps) {
   if (percentile == null || !Number.isFinite(percentile)) return null;
 
@@ -38,6 +48,7 @@ export function PercentileRankBadge({
   const tier = tierFor(percentile);
 
   const peerText = categoryLabel ? ` in ${categoryLabel}` : "";
+  const shortReason = shortTrackDays != null ? shortTrackMarkerTitle(shortTrackDays) : null;
 
   return (
     <span
@@ -60,6 +71,15 @@ export function PercentileRankBadge({
     >
       <span>{metricLabel}</span>
       <span className="font-semibold">{suffix}</span>
+      {shortReason && (
+        <span
+          title={shortReason}
+          className="font-mono text-fixed-10 font-normal tabular-nums text-text-muted"
+        >
+          {SHORT_TRACK_MARKER}
+          <span className="sr-only"> {shortReason}</span>
+        </span>
+      )}
     </span>
   );
 }

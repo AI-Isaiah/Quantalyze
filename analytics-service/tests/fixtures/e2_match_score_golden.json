@@ -27,6 +27,8 @@
           "max_drawdown_pct": -0.17,
           "sharpe": 2.0,
           "sharpe_lift": -229264101.0986631,
+          "sharpe_lift_span_days": 40,
+          "sharpe_lift_state": "withheld",
           "ticket_concentration": 0.008,
           "track_record_days": 400
         },
@@ -62,6 +64,8 @@
           "max_drawdown_pct": -0.16,
           "sharpe": 1.9,
           "sharpe_lift": -229264106.13224056,
+          "sharpe_lift_span_days": 40,
+          "sharpe_lift_state": "withheld",
           "ticket_concentration": 0.0083333333,
           "track_record_days": 400
         },
@@ -97,6 +101,8 @@
           "max_drawdown_pct": -0.15,
           "sharpe": 1.8,
           "sharpe_lift": -229264109.8387344,
+          "sharpe_lift_span_days": 40,
+          "sharpe_lift_state": "withheld",
           "ticket_concentration": 0.0086956522,
           "track_record_days": 400
         },
@@ -132,6 +138,8 @@
           "max_drawdown_pct": -0.14,
           "sharpe": 1.7,
           "sharpe_lift": -229264112.90541586,
+          "sharpe_lift_span_days": 40,
+          "sharpe_lift_state": "withheld",
           "ticket_concentration": 0.0090909091,
           "track_record_days": 400
         },
@@ -167,6 +175,8 @@
           "max_drawdown_pct": -0.13,
           "sharpe": 1.6,
           "sharpe_lift": -229264116.4609539,
+          "sharpe_lift_span_days": 40,
+          "sharpe_lift_state": "withheld",
           "ticket_concentration": 0.0095238095,
           "track_record_days": 400
         },
@@ -202,6 +212,8 @@
           "max_drawdown_pct": -0.12,
           "sharpe": 1.5,
           "sharpe_lift": -229264121.4949526,
+          "sharpe_lift_span_days": 40,
+          "sharpe_lift_state": "withheld",
           "ticket_concentration": 0.01,
           "track_record_days": 400
         },

@@ -28,7 +28,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { scoreAgainstPopulation, PERCENTILE_METRICS } from "./percentile-core";
+import {
+  scoreAgainstPopulation,
+  withholdShortRecordRanks,
+  PERCENTILE_METRICS,
+} from "./percentile-core";
 
 type Row = { id: string; analytics: Record<string, number | null> };
 
@@ -158,5 +162,108 @@ describe("scoreAgainstPopulation — map shape (W-D)", () => {
     const map = scoreAgainstPopulation([subject], population);
 
     expect(map.draft.sortino).toBeUndefined();
+  });
+});
+
+/**
+ * Phase 194 plan 18 (D-11 as superseded by D-15, founder-decided 2026-11-07) -
+ * `withholdShortRecordRanks`: a rank of an annualised figure is withheld exactly when the
+ * strategy's TOTAL record fails D-15's minimum (crypto: under 90 calendar days; non-crypto:
+ * under 60 return observations), and a withheld strategy is also left out of every other
+ * strategy's population for those metrics. Records are written as literals, never built by
+ * the gate under test, and the expected percentiles are computed by hand.
+ */
+describe("withholdShortRecordRanks - D-15 total-record rule", () => {
+  const ALL = {
+    cagr: 1,
+    sharpe: 2,
+    sortino: 3,
+    calmar: 4,
+    volatility: 0.2,
+    max_drawdown: -0.1,
+    cumulative_return: 0.3,
+  };
+  const crypto = (spanDays: number | null, observations: number | null = null) => ({
+    spanDays,
+    observations,
+    crypto: true,
+  });
+  const tradfi = (spanDays: number | null, observations: number | null) => ({
+    spanDays,
+    observations,
+    crypto: false,
+  });
+
+  it("nulls the five annualised metrics for a crypto record under 90 days and keeps max drawdown and cumulative return", () => {
+    const out = withholdShortRecordRanks(ALL, crypto(60));
+    expect(out).toEqual({
+      cagr: null,
+      sharpe: null,
+      sortino: null,
+      calmar: null,
+      volatility: null,
+      max_drawdown: -0.1,
+      cumulative_return: 0.3,
+    });
+  });
+
+  it("does not mutate its input", () => {
+    const input = { ...ALL };
+    withholdShortRecordRanks(input, crypto(60));
+    expect(input).toEqual(ALL);
+  });
+
+  it("crypto: 89 days is withheld and 90 days returns the input unchanged", () => {
+    expect(withholdShortRecordRanks(ALL, crypto(89)).sharpe).toBeNull();
+    expect(withholdShortRecordRanks(ALL, crypto(90))).toEqual(ALL);
+  });
+
+  it("non-crypto: 59 observations is withheld; 60 observations over 84 days is not", () => {
+    expect(withholdShortRecordRanks(ALL, tradfi(84, 59)).cagr).toBeNull();
+    expect(withholdShortRecordRanks(ALL, tradfi(84, 60))).toEqual(ALL);
+  });
+
+  it("non-crypto with no stored count falls back to the 90-day bound (A-194-D15-02)", () => {
+    expect(withholdShortRecordRanks(ALL, tradfi(89, null)).sharpe).toBeNull();
+    expect(withholdShortRecordRanks(ALL, tradfi(90, null))).toEqual(ALL);
+  });
+
+  it("a record of 200 or 400 days, or one that cannot be determined, keeps every metric", () => {
+    expect(withholdShortRecordRanks(ALL, crypto(200))).toEqual(ALL);
+    expect(withholdShortRecordRanks(ALL, crypto(400))).toEqual(ALL);
+    expect(withholdShortRecordRanks(ALL, crypto(null))).toEqual(ALL);
+    expect(withholdShortRecordRanks(ALL, tradfi(null, null))).toEqual(ALL);
+  });
+
+  it("a withheld strategy neither gets an annualised rank nor shifts anyone else's (population exclusion)", () => {
+    // Five strategies with sharpe [1,2,3,4,5]; "p5" (sharpe 5) is on a 60-day crypto record.
+    // Without the helper "p1" (sharpe 1) is 1/5*100 = 20. With p5 left out the population is
+    // [1,2,3,4], so p1 = 1/4*100 = 25 and p4 = 4/4*100 = 100. p5 has NO sharpe rank at all.
+    const mk = (id: string, sharpe: number, rec: ReturnType<typeof crypto>): Row => ({
+      id,
+      analytics: withholdShortRecordRanks(
+        {
+          ...(Object.fromEntries(PERCENTILE_METRICS.map((m) => [m, null])) as Record<string, number | null>),
+          sharpe,
+          max_drawdown: -0.1 * sharpe,
+        },
+        rec,
+      ),
+    });
+    const rows = [
+      mk("p1", 1, crypto(300)),
+      mk("p2", 2, crypto(300)),
+      mk("p3", 3, crypto(300)),
+      mk("p4", 4, crypto(300)),
+      mk("p5", 5, crypto(60)),
+    ];
+    const map = scoreAgainstPopulation(rows, rows);
+    expect(map.p1.sharpe).toBe(25);
+    expect(map.p4.sharpe).toBe(100);
+    expect(map.p5.sharpe).toBeUndefined();
+    // Max drawdown is not annualised: p5 is still ranked, and still counted, on it.
+    // |dd| = [0.1,0.2,0.3,0.4,0.5], lower is better: p5 = 100 - (5/5*100) = 0; p1 = 100 - 20 = 80.
+    expect(map.p5.max_drawdown).toBe(0);
+    expect(map.p1.max_drawdown).toBe(80);
   });
 });

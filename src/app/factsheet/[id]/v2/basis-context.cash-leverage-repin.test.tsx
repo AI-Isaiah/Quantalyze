@@ -61,6 +61,7 @@ const LEVERED_CLIENT = deriveSeriesBundle(
     markets: ["BTC"],
     strategyName: "Test Strategy",
     benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+    figureRecord: null,
   },
 ).strategyMetrics;
 

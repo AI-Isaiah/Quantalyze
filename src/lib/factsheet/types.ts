@@ -8,6 +8,7 @@
  */
 
 import type { GuardReason } from "./headline-basis";
+import type { FigureRecord, RollingVerdict } from "@/lib/figure-gate";
 import type { ReconstructedRange } from "./trade-fetch-provenance";
 
 /** One day of strategy or benchmark returns. `value` is a decimal return (not %). */
@@ -149,6 +150,37 @@ export type ComparatorBlock = {
    */
   summarySince?: ComparatorSummary | null;
   joint: JointMetrics | null;
+  /**
+   * 194 D-15 (2026-11-07): set by the comparator gate (plan 21) on a block whose joint
+   * metrics are withheld or short because the TOTAL record is under D-15's minimum or
+   * the paired span is under a year. `days` is the paired span. Absent when full or when
+   * the record is unknown (the `null` state: figure kept, no note). `unreadable` (withheld
+   * only; `days` is then 0 and unused) means the PAIRED span could not be read, so the reason
+   * names unreadable dates, not the record's length.
+   */
+  jointAnnualization?: { state: "withheld" | "short"; days: number; unreadable?: true };
+  /**
+   * 194 D-16 (2026-11-07, round 2 WR-01): the calendar days the comparator's OWN summary
+   * covers (first to last covered date), set ONLY when that span is under one year. The
+   * benchmark column's annualized cells are measured over this span, so the rail reads it
+   * to carry the same muted under-1y note as the strategy column. Absent when the
+   * comparator covers a year or more, or fewer than two dates.
+   */
+  coveredShortSpanDays?: number;
+  /**
+   * 194 R5 SFH-M2 (D-17): set when the comparator's OWN covered span could not be read (a first or
+   * last covered date is present but is not a date). The benchmark's annualized cells are then
+   * dashed (NaN) and no vol-matched curve is built; the rail reads this to give that column the
+   * same "dates could not be read" reason the strategy column carries. Absent on every readable block.
+   */
+  coveredSpanUnreadable?: true;
+  /**
+   * 194 D-14 (2026-11-07): the comparator's own 365-calendar-day rolling series, set by
+   * plan 21. Absent when the record spans under 365 days or is unknown.
+   */
+  rollingVol1y?: Array<number | null>;
+  rollingSharpe1y?: Array<number | null>;
+  rollingSortino1y?: Array<number | null>;
   /**
    * 169.4 review round 2 (SFH-R2 MEDIUM-2): set when `joint` is null ONLY
    * because the record pairs fewer than `MIN_PAIRED_OBSERVATIONS` intervals with
@@ -313,6 +345,16 @@ export type OwnBookDeltaPayload = {
   blend_n: number;
   /** Observation count of the live book (for the basis note). */
   book_n: number;
+  /**
+   * 194 D-15 (2026-11-07): calendar days spanned by the SHORTER of the blend and book
+   * windows. Set by plan 17; null or absent is the unknown state (delta kept, no note).
+   */
+  span_days?: number | null;
+  /**
+   * 194 D-15 (2026-11-07): the two compared TOTAL records, set by plan 17 and read by
+   * plan 16 through `gateDelta`. Absent is the unknown state.
+   */
+  records?: { blend: FigureRecord; book: FigureRecord };
 };
 
 /**
@@ -494,6 +536,20 @@ export type RollWindowPick = {
   window: number;
   label: string;
   enough: boolean;
+  /**
+   * 194 D-11 / D-15 (2026-11-07): whether this window's series may be drawn, and with
+   * the short note or not. Present only on an annualized-series window (the strategy's
+   * rolling vol, Sharpe and Sortino); `rollingBetaWindow` has none (rolling beta is not
+   * annualized, A-194-D11-04). Absent means the record is unknown and is read as the
+   * `null` state (drawn, no note).
+   */
+  annualization?: RollingVerdict;
+  /**
+   * 194 D-14 (2026-11-07): present only on the 365-calendar-day window
+   * (`rollingWindow1y`), and then `window` is the index of the window's first point
+   * plus one, never a row count.
+   */
+  calendarDays?: number;
 };
 
 /**
@@ -536,6 +592,19 @@ export type BasisSeriesBundle = {
   strategyRollingSharpe: Array<number | null>;
   strategyRollingSortino: Array<number | null>;
   rollingWindow: RollWindowPick;
+  /**
+   * 194 D-14 (2026-11-07): the 365-calendar-day window and its three series, drawn
+   * BESIDE `rollingWindow`, never instead of it. Non-null only when the record spans
+   * at least 365 calendar days. `null` means "the record spans under 365 days": a
+   * builder sets `null` rather than omitting the key, because the basis merge
+   * `{ ...payload, ...bundle }` would otherwise leave a longer cash record's 1y window
+   * on a shorter MTM or smoothed view, and `null` survives the JSON payload cache where
+   * `undefined` is dropped.
+   */
+  rollingWindow1y?: RollWindowPick | null;
+  strategyRollingVol1y?: Array<number | null> | null;
+  strategyRollingSharpe1y?: Array<number | null> | null;
+  strategyRollingSortino1y?: Array<number | null> | null;
   rollingBetaWindow: RollWindowPick;
   strategyWorst10: Array<{ start: number; trough: number; recover: number; depth: number }>;
   comparators: {
@@ -668,6 +737,16 @@ export type FactsheetCommon = {
    * flat warmup band.
    */
   rollingWindow: RollWindowPick;
+  /**
+   * 194 D-14 (2026-11-07): the 365-calendar-day window and its three series, drawn
+   * BESIDE `rollingWindow`, never instead of it. Non-null only when the record spans
+   * at least 365 calendar days; `null` means "the record spans under 365 days" (a
+   * builder sets `null` rather than omitting the key, see {@link BasisSeriesBundle}).
+   */
+  rollingWindow1y?: RollWindowPick | null;
+  strategyRollingVol1y?: Array<number | null> | null;
+  strategyRollingSharpe1y?: Array<number | null> | null;
+  strategyRollingSortino1y?: Array<number | null> | null;
   /** Same shape as `rollingWindow`, but for the Rolling β chart (90d → 30d). */
   rollingBetaWindow: RollWindowPick;
   /** Strategy drawdown from running peak (≤ 0). Drives the Underwater chart. */
@@ -1006,6 +1085,14 @@ export type FactsheetCommon = {
    * as unavailable, never as the bundled fixture.
    */
   benchmarkPrices?: BenchmarkPricesOpt;
+  /**
+   * Phase 194 (D-15, 2026-11-07) - the record the factsheet's annualised figures are
+   * gated on: the full-history span, the STORED `record_observations` (null when the
+   * row lacks it; never a count of this payload's own returns) and the crypto flag.
+   * Every reader in the factsheet (rail, strip, charts) gates on this one record,
+   * never on a range. Absent means unknown and reads as the `null` figure state.
+   */
+  figureRecord?: FigureRecord | null;
 };
 
 /**

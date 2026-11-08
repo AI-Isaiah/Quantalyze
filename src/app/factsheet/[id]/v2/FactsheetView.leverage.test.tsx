@@ -76,6 +76,10 @@ function makeReturnsSeries(n: number, drift = 0.0015): DailyPoint[] {
   return pts;
 }
 
+// Phase 194 (D-15): this fixture exercises leverage / unit behaviour, not the record gate, so its
+// TOTAL record is a cleared one (a short fixture would print the withheld dash instead of the figure).
+const CLEARED_RECORD = { spanDays: 400, observations: 400, crypto: false };
+
 // Short series (~50d) for the tests that DIAL leverage (each dial re-derives the whole
 // bundle per consumer). Starts 2023-05-01 so it overlaps BTC_DAILY (from 2023-04-26)
 // and the comparator joint is real, not degenerate.
@@ -92,8 +96,11 @@ function smallSeries(n: number, drift = 0.0015): DailyPoint[] {
   return pts;
 }
 
-const SMALL_STRAT = smallSeries(50, 0.0018);
-const SMALL_BENCH = smallSeries(50, 0.0009);
+// 194 plan 21 (D-15): 120 days, not 50. A 49-day crypto record is under D-15's 90-day minimum, so
+// its alpha / IR are withheld by the record gate; this file is about leverage, so the record is
+// lengthened to clear it (119 days, short, values kept) and the leverage assertions stay as written.
+const SMALL_STRAT = smallSeries(120, 0.0018);
+const SMALL_BENCH = smallSeries(120, 0.0009);
 
 // A single-key cash fixture whose strategyMetrics AND injected comparator joint are the
 // REAL `deriveSeriesBundle(@365)` values — so at L=1 the strip shows the derived base and
@@ -111,6 +118,7 @@ function buildSmall(): { payload: FactsheetPayload; base: ReturnType<typeof deri
     markets: p.markets,
     strategyName: p.strategyName,
     benchmarkPrices: fixtureBenchmarkPrices([clipped]),
+    figureRecord: null,
   });
   const payload = {
     ...p,
@@ -170,6 +178,7 @@ function fixtureMtmWithBundle(): FactsheetPayload {
   const clipped = p.strategyReturns.map((r, i) => ({ date: p.dates[i], value: r }));
   return {
     ...p,
+    figureRecord: CLEARED_RECORD,
     periodsPerYear: 365,
     mtmGate: { available: true },
     metricsByBasis: { mark_to_market: MTM_SCALARS },
@@ -180,6 +189,7 @@ function fixtureMtmWithBundle(): FactsheetPayload {
         markets: p.markets,
         strategyName: p.strategyName,
         benchmarkPrices: fixtureBenchmarkPrices([clipped]),
+        figureRecord: null,
       }),
     },
   } as unknown as FactsheetPayload;
@@ -195,6 +205,7 @@ function fixtureMtmNoBundle(): FactsheetPayload {
   });
   return {
     ...p,
+    figureRecord: CLEARED_RECORD,
     periodsPerYear: 365,
     mtmGate: { available: true },
     metricsByBasis: { mark_to_market: MTM_SCALARS },
@@ -224,6 +235,7 @@ function fixtureMtmNoLossBook(): FactsheetPayload {
   const clipped = p.strategyReturns.map((r, i) => ({ date: p.dates[i], value: r }));
   return {
     ...p,
+    figureRecord: CLEARED_RECORD,
     periodsPerYear: 365,
     mtmGate: { available: true },
     metricsByBasis: { mark_to_market: MTM_NO_LOSS_SCALARS },
@@ -234,6 +246,7 @@ function fixtureMtmNoLossBook(): FactsheetPayload {
         markets: p.markets,
         strategyName: p.strategyName,
         benchmarkPrices: fixtureBenchmarkPrices([clipped]),
+        figureRecord: null,
       }),
     },
   } as unknown as FactsheetPayload;
@@ -252,6 +265,7 @@ function fixtureMtmBundleNoScalars(): FactsheetPayload {
   const clipped = p.strategyReturns.map((r, i) => ({ date: p.dates[i], value: r }));
   return {
     ...p,
+    figureRecord: CLEARED_RECORD,
     periodsPerYear: 365,
     mtmGate: { available: true },
     // NO metricsByBasis — the persisted MTM scalar cache is absent (mid-backfill).
@@ -262,6 +276,7 @@ function fixtureMtmBundleNoScalars(): FactsheetPayload {
         markets: p.markets,
         strategyName: p.strategyName,
         benchmarkPrices: fixtureBenchmarkPrices([clipped]),
+        figureRecord: null,
       }),
     },
   } as unknown as FactsheetPayload;

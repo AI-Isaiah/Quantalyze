@@ -139,12 +139,12 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
   // Cutoffs for END, derived by hand and cross-checked against Date.UTC:
   //   MTD: last day of the previous month      -> 2026-05-31
   //   YTD: 31 Dec of the previous year          -> 2025-12-31
-  //   3M / 6M / 1Y: END minus 90 / 182 / 365 d  -> 2026-04-01 / 2025-12-30 / 2025-06-30
+  //   3M / 6M / 1Y: END minus 91 / 182 / 365 d  -> 2026-03-31 / 2025-12-30 / 2025-06-30 (194 D-03: 3M was 90 d)
   //   3Y / 5Y: END minus 1095 / 1825 days       -> 2023-07-01 / 2021-07-01
   const CUTOFF = {
     mtd: "2026-05-31",
     ytd: "2025-12-31",
-    p3m: "2026-04-01",
+    p3m: "2026-03-31",
     p6m: "2025-12-30",
     p1y: "2025-06-30",
     p3y: "2023-07-01",
@@ -153,7 +153,7 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
 
   it("the oracle's cutoffs are the calendar offsets D-11 names (guards the test itself)", () => {
     const end = utc(END);
-    expect(ymd(end - 90 * DAY)).toBe(CUTOFF.p3m);
+    expect(ymd(end - 91 * DAY)).toBe(CUTOFF.p3m);
     expect(ymd(end - 182 * DAY)).toBe(CUTOFF.p6m);
     expect(ymd(end - 365 * DAY)).toBe(CUTOFF.p1y);
     expect(ymd(end - 3 * 365 * DAY)).toBe(CUTOFF.p3y);
@@ -162,7 +162,7 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
 
   it("a 0.45-year record (166 days) shows MTD and 3M, and nulls YTD, 6M, 1Y, 3Y and 5Y", () => {
     // Starts 2026-01-16: after 1 Jan (YTD) and after 31 Dec (6M), before 1 Jun
-    // (MTD) and before 2 Apr (3M). Before D-11 the four long windows each
+    // (MTD) and before 1 Apr (3M). Before D-11 the four long windows each
     // printed the whole-record return under their own label.
     const dates = dailyDatesEndingOn(END, 166);
     expect(dates[0]).toBe("2026-01-16");
@@ -198,7 +198,7 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
   it.each([
     { key: "mtd", covered: "2026-06-01", short: "2026-06-02" },
     { key: "ytd", covered: "2026-01-01", short: "2026-01-02" },
-    { key: "p3m", covered: "2026-04-02", short: "2026-04-03" },
+    { key: "p3m", covered: "2026-04-01", short: "2026-04-02" },
     { key: "p1y", covered: "2025-07-01", short: "2025-07-02" },
     { key: "p3y", covered: "2023-07-02", short: "2023-07-03" },
     { key: "p5y", covered: "2021-07-02", short: "2021-07-03" },

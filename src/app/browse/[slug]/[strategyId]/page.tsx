@@ -8,6 +8,17 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getPublicStrategyDetail } from "@/lib/queries";
+import { createClient } from "@/lib/supabase/server";
+import { annualizationPeriods } from "@/lib/closed-sets";
+import {
+  figureRecord,
+  gateAnnualized,
+  gatedValue,
+  shortTrackNote,
+  withheldReason,
+} from "@/lib/figure-gate";
+import { readRecordSpan, type RecordSpanRead } from "@/lib/record-span-read";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { getBrowseCategories } from "../../browse-categories";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
@@ -50,6 +61,53 @@ export default async function PublicStrategyDetailPage({
 
   const { strategy, analytics, manager, disclosureTier } = result;
   const displayName = displayStrategyName(strategy);
+
+  // 194 D-04 as superseded by D-15: the strategy's TOTAL record decides whether the
+  // five annualised figures print. One request-scoped, published-only scalar read, one
+  // record, one verdict. A read that cannot be made fails CLOSED: the figures print as
+  // dashes and no caption claims a record length we could not read.
+  let spanRead: RecordSpanRead = { determined: false };
+  try {
+    spanRead = await readRecordSpan(await createClient(), strategy.id);
+  } catch (err) {
+    // createClient threw (cookies unavailable): the same fail-closed answer as a failed
+    // read, but reported. A failed readRecordSpan reports itself to Sentry; this catch
+    // is the one failure it cannot see.
+    captureToSentry(err, {
+      tags: { stage: "record-span-read", reason: "client_unavailable", strategy_id: strategy.id },
+    });
+    console.error("[browse] record span read failed", { strategyId: strategy.id, error: err });
+  }
+  if (!spanRead.determined) {
+    console.error("[browse] record span read failed", { strategyId: strategy.id });
+  }
+  const record = spanRead.determined
+    ? figureRecord({
+        seriesStart: spanRead.seriesStart,
+        seriesEnd: spanRead.seriesEnd,
+        headlineSince: spanRead.headlineSince,
+        observations: spanRead.observations,
+        periodsPerYear: annualizationPeriods(strategy.asset_class),
+      })
+    : null;
+  const gateState = record ? gateAnnualized(record) : "withheld";
+  const gateNote =
+    record && gateState === "withheld"
+      ? withheldReason("record", record)
+      : record && gateState === "short" && record.spanDays != null
+        ? shortTrackNote("record", record.spanDays)
+        : null;
+  // A read that could not be made is not a record length: say the figures are
+  // unavailable and that a reload retries, instead of leaving bare dashes.
+  const unavailableNote = spanRead.determined
+    ? null
+    : "Annualized figures are temporarily unavailable. Reload to retry.";
+  const annualized = (value: number | null | undefined) => gatedValue(value, gateState);
+  const cagr = annualized(analytics.cagr);
+  const sharpe = annualized(analytics.sharpe);
+  const volatility = annualized(analytics.volatility);
+  const sortino = annualized(analytics.sortino);
+  const calmar = annualized(analytics.calmar);
 
   return (
     <>
@@ -102,16 +160,17 @@ export default async function PublicStrategyDetailPage({
       </div>
 
       {/* Hero metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div className="mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <HeroMetric
           label="CAGR"
-          value={formatPercent(analytics.cagr)}
-          colorClass={metricColor(analytics.cagr, "percent")}
+          value={formatPercent(cagr)}
+          colorClass={metricColor(cagr, "percent")}
         />
         <HeroMetric
           label="Sharpe"
-          value={formatNumber(analytics.sharpe)}
-          colorClass={metricColor(analytics.sharpe, "ratio")}
+          value={formatNumber(sharpe)}
+          colorClass={metricColor(sharpe, "ratio")}
         />
         <HeroMetric
           label="Max Drawdown"
@@ -123,9 +182,15 @@ export default async function PublicStrategyDetailPage({
         />
         <HeroMetric
           label="Volatility"
-          value={formatPercent(analytics.volatility)}
+          value={formatPercent(volatility)}
           colorClass="text-text-secondary"
         />
+      </div>
+      {(gateNote ?? unavailableNote) && (
+        <p className="mt-2 text-xs text-text-muted" data-testid="browse-figure-gate-note">
+          {gateNote ?? unavailableNote}
+        </p>
+      )}
       </div>
 
       {/* Sparkline */}
@@ -152,11 +217,11 @@ export default async function PublicStrategyDetailPage({
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         <MiniMetric
           label="Sortino"
-          value={formatNumber(analytics.sortino)}
+          value={formatNumber(sortino)}
         />
         <MiniMetric
           label="Calmar"
-          value={formatNumber(analytics.calmar)}
+          value={formatNumber(calmar)}
         />
         <MiniMetric
           label="6 Month Return"

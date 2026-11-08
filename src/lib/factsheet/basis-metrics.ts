@@ -1,3 +1,5 @@
+import { FIGURE_DEFS_VERSION } from "@/lib/figure-gate";
+
 /**
  * Phase 90 (D5) — the ONE server↔TS basis-KPI mapping module.
  *
@@ -103,4 +105,45 @@ export function hasBasisHeadline(obj: unknown): boolean {
   if (!BASIS_KPI_MAP.every(({ serverKey }) => serverKey in rec)) return false;
   const cr = rec["cumulative_return"];
   return typeof cr === "number" && Number.isFinite(cr);
+}
+
+/**
+ * Phase 194 (D-01, 2026-11-07) - the four stored figures the by-basis scalar overlay
+ * does not carry, read off the single-key row by the fetch path
+ * (`strategy_analytics.six_month_return` plus scalar aliases of `metrics_json`, never
+ * `metrics_json` whole: the payload reaches anonymous viewers).
+ */
+export type StoredFigureDefs = {
+  figureDefsVersion: number | null;
+  sixMonth: number | null;
+  threeMonth: number | null;
+  var95: number | null;
+  cvar95: number | null;
+};
+
+/**
+ * Stored is canonical at full history (D-01): when the stored row carries
+ * `figure_defs_version >= FIGURE_DEFS_VERSION`, 6 Month, 3 Month, VaR 95% and CVaR 95%
+ * are the stored values, including a stored null (p6m/p3m null, var95/cvar95 NaN, the
+ * existing missing-figure convention of `compute`); a stored null never falls back to
+ * the computed value. Without the marker (a row written before the recompute, whose
+ * VaR/CVaR used the old definition) `base` is returned unchanged: the computed figures
+ * use the same definitions. Separate from {@link overlayBasisScalars}, whose map is
+ * per-basis.
+ */
+export function overlayStoredFigureDefs<T extends Record<string, unknown>>(
+  base: T,
+  stored: StoredFigureDefs | undefined | null,
+): T {
+  if (!stored || stored.figureDefsVersion == null || stored.figureDefsVersion < FIGURE_DEFS_VERSION) {
+    return base;
+  }
+  const num = (v: number | null): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    ...base,
+    p6m: num(stored.sixMonth),
+    p3m: num(stored.threeMonth),
+    var95: num(stored.var95) ?? NaN,
+    cvar95: num(stored.cvar95) ?? NaN,
+  };
 }

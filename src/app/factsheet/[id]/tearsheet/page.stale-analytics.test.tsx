@@ -60,7 +60,11 @@ const seeded = vi.hoisted(() => ({ strategyRow: null as unknown }));
 
 const buildChain = (table: string) => {
   const chain: Record<string, unknown> = {};
-  chain.select = () => chain;
+  let selected = "";
+  chain.select = (cols: string) => {
+    selected = cols;
+    return chain;
+  };
   chain.eq = () => chain;
   chain.order = () => chain;
   chain.limit = () => chain;
@@ -70,7 +74,25 @@ const buildChain = (table: string) => {
         ? { data: seeded.strategyRow, error: null }
         : { data: null, error: null },
     );
-  chain.maybeSingle = () => Promise.resolve({ data: null, error: null });
+  // 194 plan 07: the record-span read (`readRecordSpan`) is the one maybeSingle read
+  // that must answer a row here; a two-year, 500-observation record clears D-15, so a
+  // COMPLETE run keeps every annualised figure. Every other read stays "no row".
+  chain.maybeSingle = () =>
+    Promise.resolve(
+      selected.includes("record_observations")
+        ? {
+            data: {
+              strategy_analytics: {
+                series_start: "2024-01-01",
+                series_end: "2026-01-01",
+                headline_since: null,
+                record_observations: 500,
+              },
+            },
+            error: null,
+          }
+        : { data: null, error: null },
+    );
   // `getPercentiles` awaits the builder directly; an empty cohort (< 5) returns
   // null, so the peer-rank section stays out of this spec.
   chain.then = (onFulfilled: (v: { data: unknown; error: unknown }) => unknown) =>
@@ -135,6 +157,7 @@ function analytics(status: string) {
     sparkline_returns: [1, 1.2, 1.45, 1.91],
     monthly_returns: { "2026": { Jan: 0.081, Feb: -0.014 } },
     metrics_json: {
+      figure_defs_version: 2,
       var_1d_95: -0.0271,
       cvar: -0.0388,
       best_day: 0.0612,

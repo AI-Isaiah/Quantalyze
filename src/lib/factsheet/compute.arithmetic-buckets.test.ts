@@ -48,7 +48,7 @@ function cutoff(k: WindowKey): Date {
   switch (k) {
     case "mtd": return new Date(Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), 0));
     case "ytd": return new Date(Date.UTC(last.getUTCFullYear() - 1, 11, 31));
-    case "p3m": return back(90);
+    case "p3m": return back(91); // 194 D-03: 3M is 91 calendar days (was 90)
     case "p6m": return back(182);
     case "p1y": return back(365);
     case "p3y": return back(3 * 365);

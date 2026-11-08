@@ -1,7 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PortfolioImpactPanel } from "./PortfolioImpactPanel";
+import { PortfolioImpactPanel, formatDelta, gateSimulatorDeltas } from "./PortfolioImpactPanel";
 import type { SimulatorCandidate } from "@/lib/types";
+import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
+import { widenedShortNote, widenedWithheldReason } from "@/lib/figure-gate";
 
 function buildResponse(
   partial: Partial<SimulatorCandidate> = {},
@@ -12,6 +14,8 @@ function buildResponse(
     portfolio_id: "p1",
     status: "ok",
     overlap_days: 200,
+    // 194 M3: the producer's risk clock. Absent means the Sharpe change is withheld.
+    annualization_periods: 252,
     partial_history: false,
     current_metrics_reliable: true,
     deltas: {
@@ -1665,5 +1669,195 @@ describe("[140.3-01 / TS-05] <PortfolioImpactPanel> reads the seam error body th
       ),
     ).toBe(true);
     errorSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 194 D-11 as superseded by D-15 — the Sharpe delta is withheld only when the compared
+// record fails the total-record minimum; a short window qualifies with one muted note.
+// ---------------------------------------------------------------------------
+describe("<PortfolioImpactPanel> D-15 Sharpe delta gate", () => {
+  /** Daily curve points that cover exactly `days` days (D-20: one point per day, both ends counted). */
+  function curve(start: string, days: number) {
+    const t0 = Date.parse(`${start}T00:00:00Z`);
+    return Array.from({ length: days }, (_, i) => ({
+      date: new Date(t0 + i * 86_400_000).toISOString().slice(0, 10),
+      value: 1 + i * 0.001,
+    }));
+  }
+
+  function ok(over: Partial<SimulatorCandidate>): SimulatorResponseOk {
+    return buildResponse({
+      equity_curve_current: curve("2025-01-01", 400),
+      equity_curve_proposed: curve("2025-01-01", 400),
+      ...over,
+    }) as SimulatorResponseOk;
+  }
+
+  async function renderWith(data: SimulatorResponseOk) {
+    mockFetch(
+      async () =>
+        new Response(JSON.stringify(data), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Candidate"
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/Projected impact/i)).toBeInTheDocument());
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const sharpeCard = () => screen.getByText("Sharpe").closest("[title]") as HTMLElement;
+  const sharpeValue = () => sharpeCard().querySelector("p.font-metric") as HTMLElement;
+  const otherChips = () =>
+    ["MaxDD", "Correlation", "Concentration"].map(
+      (label) => (screen.getByText(label).closest("[title]") as HTMLElement).outerHTML,
+    );
+  const note = () => screen.queryByTestId("impact-delta-annualization-note");
+
+  it("crypto book, curves spanning 59 days: Sharpe withheld, untoned dash, reason in title and note, not announced", async () => {
+    const data = ok({
+      annualization_periods: 365,
+      overlap_days: 60,
+      equity_curve_current: curve("2025-01-01", 59),
+      equity_curve_proposed: curve("2025-01-01", 59),
+    });
+    const record = { spanDays: 59, observations: 60, crypto: true };
+    await renderWith(data);
+
+    expect(sharpeValue().textContent).toBe("—");
+    expect(sharpeValue().className).toContain("text-text-muted");
+    expect(sharpeValue().className).not.toMatch(/text-(positive|negative)/);
+    expect(sharpeCard().getAttribute("title")).toBe(widenedWithheldReason("delta", record));
+    expect(note()?.textContent).toBe(widenedWithheldReason("delta", record));
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).not.toMatch(/Sharpe (improved|regressed|unchanged|not computable)/);
+    expect(status).toContain(widenedWithheldReason("delta", record));
+    // The other chips still speak.
+    expect(status).toMatch(/Max drawdown improved/);
+  });
+
+  it("traditional book, 60 observations over 84 days: value kept, short note (D-15: 60 observations clear)", async () => {
+    await renderWith(
+      ok({
+        annualization_periods: 252,
+        overlap_days: 60,
+        equity_curve_current: curve("2025-01-01", 84),
+        equity_curve_proposed: curve("2025-01-01", 84),
+      }),
+    );
+    expect(sharpeValue().textContent).toBe(formatDelta(0.15, "ratio"));
+    expect(note()?.textContent).toBe(widenedShortNote("delta", 84));
+    expect(screen.getByText(/Sharpe improved by 0\.150/)).toBeInTheDocument();
+  });
+
+  it("traditional book, 59 observations: withheld, the record names its own count", async () => {
+    await renderWith(
+      ok({
+        annualization_periods: 252,
+        overlap_days: 59,
+        equity_curve_current: curve("2025-01-01", 84),
+        equity_curve_proposed: curve("2025-01-01", 84),
+      }),
+    );
+    const record = { spanDays: 84, observations: 59, crypto: false };
+    expect(sharpeValue().textContent).toBe("—");
+    expect(note()?.textContent).toBe(widenedWithheldReason("delta", record));
+  });
+
+  it("200-day curves on a cleared record: value kept, note carries the 200-day span", async () => {
+    await renderWith(
+      ok({
+        annualization_periods: 252,
+        overlap_days: 200,
+        equity_curve_current: curve("2025-01-01", 200),
+        equity_curve_proposed: curve("2025-01-01", 200),
+      }),
+    );
+    expect(sharpeValue().textContent).toBe(formatDelta(0.15, "ratio"));
+    expect(note()?.textContent).toBe(widenedShortNote("delta", 200));
+  });
+
+  it("400-day curves: no note, the Sharpe chip and the announcement as an ungated response", async () => {
+    await renderWith(ok({ annualization_periods: 252, overlap_days: 400 }));
+    expect(note()).toBeNull();
+    expect(sharpeValue().textContent).toBe(formatDelta(0.15, "ratio"));
+    expect(screen.getByRole("status").textContent).toBe(
+      "Simulation complete. Sharpe improved by 0.150. Max drawdown improved by 2.00%. Correlation improved by 0.030. Concentration improved by 0.050.",
+    );
+  });
+
+  it("no annualization_periods (older analytics deploy): Sharpe change withheld with a reason, never an ungated chip", async () => {
+    await renderWith(
+      ok({
+        annualization_periods: undefined,
+        overlap_days: 400,
+        equity_curve_current: curve("2025-01-01", 400),
+        equity_curve_proposed: curve("2025-01-01", 400),
+      }),
+    );
+    const unavailable = "Sharpe change is temporarily unavailable. Reload to retry.";
+    expect(sharpeValue().textContent).toBe("—");
+    expect(sharpeValue().className).not.toMatch(/text-(positive|negative)/);
+    expect(note()?.textContent).toBe(unavailable);
+    expect(screen.getByRole("status").textContent).toBe(
+      `Simulation complete. Max drawdown improved by 2.00%. Correlation improved by 0.030. Concentration improved by 0.050. ${unavailable}`,
+    );
+  });
+
+  it("MaxDD, Correlation and Concentration chips and the partial-history banner are identical when Sharpe is withheld", async () => {
+    const base = { overlap_days: 60, partial_history: true } as const;
+    const span59 = {
+      equity_curve_current: curve("2025-01-01", 59),
+      equity_curve_proposed: curve("2025-01-01", 59),
+    };
+    await renderWith(ok({ ...base, ...span59, annualization_periods: 365 }));
+    const withheldOthers = otherChips();
+    const banner = screen.getByText(/Partial history:/).closest("[role=note]")?.outerHTML;
+    expect(banner).toBeDefined();
+    cleanup();
+
+    await renderWith(ok({ ...base, ...span59 }));
+    expect(otherChips()).toEqual(withheldOthers);
+    expect(screen.getByText(/Partial history:/).closest("[role=note]")?.outerHTML).toBe(banner);
+  });
+
+  describe("gateSimulatorDeltas", () => {
+    it("passes the producer's value through when cleared and nulls only sharpe_delta when withheld", () => {
+      const cleared = gateSimulatorDeltas(ok({ annualization_periods: 252, overlap_days: 400 }));
+      expect(cleared.state).toBe("full");
+      expect(cleared.deltas.sharpe_delta).toBe(0.15);
+
+      const withheld = gateSimulatorDeltas(
+        ok({
+          annualization_periods: 365,
+          overlap_days: 60,
+          equity_curve_current: curve("2025-01-01", 59),
+          equity_curve_proposed: curve("2025-01-01", 59),
+        }),
+      );
+      expect(withheld.state).toBe("withheld");
+      expect(withheld.deltas).toEqual({ ...cleared.deltas, sharpe_delta: null });
+      expect(withheld.record).toEqual({ spanDays: 59, observations: 60, crypto: true });
+    });
+
+    it("an absent basis is withheld with no record, and the Sharpe change is null", () => {
+      const { annualization_periods: _drop, ...noBasis } = ok({ overlap_days: 60 });
+      const g = gateSimulatorDeltas(noBasis as SimulatorResponseOk);
+      expect(g.state).toBe("withheld");
+      expect(g.record).toBeNull();
+      expect(g.deltas.sharpe_delta).toBeNull();
+    });
   });
 });

@@ -107,9 +107,8 @@ describe("MetricsColumn states the record length on the calendar clock (D-12)", 
     expect(payload.strategyMetrics.years.toFixed(2)).toBe("0.45");
     const { container } = renderColumn(payload);
     expect(rowValue(section(container, "Compound Performance"), "Years Observed")).toBe("0.45");
-    const w = warningText(container);
-    expect(w).not.toBeNull();
-    expect(w).toContain("Only 166 observations (0.45y)");
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
   });
 
   it("a SPARSE record (166 observations over 1.20 calendar years): both sites state 1.20, never 166 / 365 = 0.45", () => {
@@ -118,15 +117,14 @@ describe("MetricsColumn states the record length on the calendar clock (D-12)", 
     expect(payload.strategyMetrics.years.toFixed(2)).toBe("1.20");
     const { container } = renderColumn(payload);
     expect(rowValue(section(container, "Compound Performance"), "Years Observed")).toBe("1.20");
-    const w = warningText(container);
-    expect(w).not.toBeNull();
-    expect(w).toContain("Only 166 observations (1.20y)");
-    expect(w).not.toContain("0.45");
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
   });
 
   it("the warning's threshold condition and 167.1.2's threshold sentence are unchanged on the sparse record", () => {
     const { container } = renderColumn(payloadOf(sparse166(), 365));
-    expect(warningText(container)).toContain("Conventional reliability threshold is ≥ 365 observations (1 year).");
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
   });
 
   it("a record at or above the threshold count still shows no warning, however long it is on the calendar", () => {
@@ -282,6 +280,7 @@ describe("the record length follows the selected basis at every site (WR-03)", (
       markets: [],
       strategyName: "Record Length Test",
       benchmarkPrices: fixtureBenchmarkPrices([series(Array.from({ length: 180 }, (_, i) => 220 + i))]),
+      figureRecord: null,
     });
     const payload = {
       ...cash,
@@ -329,7 +328,8 @@ describe("the record length follows the selected basis at every site (WR-03)", (
 
     const { container } = renderOn(payload, "mark_to_market");
     expect(rowValue(section(container, "Compound Performance"), "Years Observed")).toBe(mtmLength.years);
-    expect(warningText(container)).toContain(`Only 180 observations (${mtmLength.years}y)`);
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
 
     const thesisText = (section(container, "Strategy Thesis").textContent ?? "").replace(/\s+/g, " ");
     expect(thesisText).toContain(`(${mtmLength.text})`);

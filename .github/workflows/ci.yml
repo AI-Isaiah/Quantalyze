@@ -4942,7 +4942,7 @@ jobs:
           #   test_enqueue_race_loss_40001.sql                3
           #   test_fan_in_failure_cascade.sql                     8
           #   test_fan_in_lock_order_race.sql                     8
-          #   test_get_verified_cohort_rank_gate.sql          6
+          #   test_get_verified_cohort_rank_gate.sql         14
           #   test_ledger_refresh_composite_arm.sql          23
           #   test_ledger_refresh_fanout.sql                 31
           #   test_ledger_refresh_staleness.sql               8
@@ -5241,6 +5241,22 @@ jobs:
           #   compute_jobs first in its UPDATE, from the comment-stripped definitions).
           #   SENTINEL_FLOOR stays 27; ARMS_FLOOR moves 416 -> 418 (+2), read off the file's
           #   own `ALL 13 ARMS EXECUTED` sentinel.
+          # Re-measured 2026-11-07 (Phase 194 FIGURETRUTH, plan 20), no file joined:
+          #   test_get_verified_cohort_rank_gate.sql goes 6 -> 12 (+6) for the D-15 cohort record
+          #   gate: arm 7 (the count query leaves out a crypto 60-day row), arm 8 (crypto 90 days
+          #   stays, 89 leaves), arm 9 (the rank query leaves out short rows), arm 10 (non-crypto
+          #   60 observations stays, 59 leaves), arm 11 (the A-194-D15-02 span fallback) and
+          #   arm 12 (an impossible calendar date cannot fail the RPC). The file set is unchanged,
+          #   so SENTINEL_FLOOR stays 27; ARMS_FLOOR moves 418 -> 424 (+6). Derived from the
+          #   PRE-EDIT 6 plus the six arms actually added, then read off the file's own
+          #   `ALL 12 ARMS EXECUTED` sentinel.
+          # Re-measured 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18), no file
+          #   joined: test_get_verified_cohort_rank_gate.sql goes 12 -> 14 (+2). Arm 13 (the min-N
+          #   floor applies per rank, a Max DD set of 20 ranks while the annualised set of 10 does
+          #   not) and arm 14 (the Max DD decile counts the short-record rows). SENTINEL_FLOOR stays
+          #   27; ARMS_FLOOR moves 424 -> 426 (+2), read off the file's own
+          #   `ALL 14 ARMS EXECUTED` sentinel. The mutation runner's ARMS_FLOOR moves in the
+          #   same plan (scripts/mutation-floors.mjs).
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5254,7 +5270,7 @@ jobs:
           #   and ARMS_FLOOR 386, re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never
           #   by adding the moves.
           SENTINEL_FLOOR=27  # files declaring a sentinel
-          ARMS_FLOOR=418     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 31 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35
+          ARMS_FLOOR=426     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 9 + 8 + 3 + 8 + 8 + 14 + 23 + 31 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

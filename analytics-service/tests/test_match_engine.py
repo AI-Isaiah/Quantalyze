@@ -1698,3 +1698,208 @@ class TestComputeEffectiveWeights:
         monkeypatch.setattr(me, "W_CAPACITY_FIT", 0.0)
         with pytest.raises(ValueError, match=r"non-positive sum.*allocator_id=a9"):
             me.compute_effective_weights({}, "a9")
+
+
+# ---------------------------------------------------------------------------
+# 194 D-11/D-15: the span each lift is measured over, the verdict of the two records
+# it compares, and the reason text that follows it. Expected spans come from the
+# fixture's own dates, never from the code under test.
+# ---------------------------------------------------------------------------
+
+
+def _dated_series(n_days: int, start: str, seed: int) -> pd.Series:
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range(start, periods=n_days, freq="D")
+    return pd.Series(rng.normal(0.001, 0.01, n_days), index=dates, name="ret")
+
+
+def _fit(book: pd.Series, cand: pd.Series) -> dict[str, Any]:
+    from services.match_engine import _compute_portfolio_fit_components
+
+    return _compute_portfolio_fit_components(
+        portfolio_returns_series=book,
+        portfolio_weights={"b1": 1.0},
+        portfolio_strategies_returns={"b1": book},
+        candidate_returns=cand,
+        add_weight=0.10,
+    )
+
+
+def test_fit_components_carry_span_and_state_of_the_aligned_window():
+    # Both records 60 days: the window is 60 days covered, and a 60-day record fails D-15.
+    book60 = _dated_series(60, "2025-01-01", 1)
+    cand60 = _dated_series(60, "2025-01-01", 2)
+    out = _fit(book60, cand60)
+    assert out["sharpe_lift_span_days"] == (book60.index[-1] - book60.index[0]).days + 1 == 60
+    assert out["sharpe_lift_state"] == "withheld"
+
+    # 400-day book, 400-day candidate overlapping the book's last 60 days: records clear,
+    # window 60 < 365 -> short.
+    book = _dated_series(400, "2025-01-01", 3)
+    cand = _dated_series(400, "2025-12-07", 4)
+    overlap = book.index.intersection(cand.index)
+    out = _fit(book, cand)
+    assert out["sharpe_lift_span_days"] == (overlap[-1] - overlap[0]).days + 1
+    assert out["sharpe_lift_state"] == "short"
+
+    # Two 400-day records over 400 days: the window covers 400 days, a full year -> full.
+    out = _fit(_dated_series(400, "2025-01-01", 5), _dated_series(400, "2025-01-01", 6))
+    assert out["sharpe_lift_span_days"] == 400
+    assert out["sharpe_lift_state"] == "full"
+
+
+def test_empty_and_no_candidate_components_carry_none_for_both():
+    from services.match_engine import _empty_pf_components, _no_candidate_returns_components
+
+    for comps in (_empty_pf_components(), _no_candidate_returns_components()):
+        assert comps["sharpe_lift_span_days"] is None
+        assert comps["sharpe_lift_state"] is None
+    # No candidate returns at all goes through the real entry point too.
+    book = _dated_series(100, "2025-01-01", 7)
+    out = _fit(book, pd.Series(dtype=float))
+    assert out["sharpe_lift_span_days"] is None and out["sharpe_lift_state"] is None
+
+
+def _personalized(book: pd.Series, cand: pd.Series) -> dict[str, Any]:
+    return score_candidates(
+        allocator_id="a1",
+        preferences={},
+        portfolio_strategies=[{"strategy_id": "b1"}],
+        portfolio_returns={"b1": book},
+        portfolio_weights={"b1": 1.0},
+        candidate_strategies=[_make_candidate("s1")],
+        candidate_returns={"s1": cand},
+    )
+
+
+def test_score_breakdown_raw_carries_the_component_span_and_state():
+    book = _dated_series(150, "2025-01-01", 8)
+    cand = _dated_series(150, "2025-01-01", 9)
+    comps = _fit(book, cand)
+    raw = _personalized(book, cand)["candidates"][0]["score_breakdown"]["raw"]
+    assert raw["sharpe_lift_span_days"] == comps["sharpe_lift_span_days"] == 150
+    assert raw["sharpe_lift_state"] == comps["sharpe_lift_state"] == "short"
+
+
+def test_gate_state_never_moves_the_score(monkeypatch):
+    """The state is a display rule: forcing it to every other value leaves score and lift fixed."""
+    import services.match_engine as me
+
+    book = _dated_series(60, "2025-01-01", 10)
+    cand = _dated_series(60, "2025-01-01", 11)
+    base = _personalized(book, cand)["candidates"][0]
+    assert base["score_breakdown"]["raw"]["sharpe_lift_state"] == "withheld"
+    for forced in ("full", "short", "null"):
+        monkeypatch.setattr(me, "sharpe_lift_gate", lambda *a, _f=forced, **k: (59, _f, None))
+        other = _personalized(book, cand)["candidates"][0]
+        assert other["score"] == base["score"]
+        assert other["score_breakdown"]["raw"]["sharpe_lift"] == base["score_breakdown"]["raw"]["sharpe_lift"]
+        assert other["score_breakdown"]["raw"]["sharpe_lift_state"] == forced
+
+
+def _reasons(state: Any, span: Any) -> list[str]:
+    from services.match_engine import _generate_reasons
+
+    raw: dict[str, Any] = {"sharpe_lift": 0.3, "corr_with_portfolio": None}
+    if state is not None:
+        raw["sharpe_lift_state"] = state
+        raw["sharpe_lift_span_days"] = span
+    cand = _make_candidate("s1", track_record_days=0)
+    return _generate_reasons(cand, {}, {"raw": raw}, "personalized")
+
+
+def test_lift_reason_withheld_is_dropped():
+    assert not [r for r in _reasons("withheld", 59) if "Lifts portfolio Sharpe" in r]
+
+
+@pytest.mark.parametrize("span", [60, 200])
+def test_lift_reason_short_is_qualified_with_the_overlap(span):
+    assert f"Lifts portfolio Sharpe by +0.30 over {span} days of overlap, under one year" in _reasons(
+        "short", span
+    )
+
+
+@pytest.mark.parametrize("state", ["full", None])
+def test_lift_reason_full_or_legacy_is_todays_text(state):
+    assert "Lifts portfolio Sharpe by +0.30" in _reasons(state, 400)
+
+
+# ---------------------------------------------------------------------------
+# 194 round 2 WR-02: the lift reason is gated on each record's REAL asset class, not on
+# the crypto bound for everyone. D-15: a non-crypto record clears on 60 observations, a
+# crypto (or unknown-class) record on 90 calendar days. The fixture is a weekday series, so
+# 62 observations span 85 days: over D-15's non-crypto minimum and under the crypto bound.
+# Without the class the engine withheld this reason where the optimizer and the TS readers
+# showed it, two verdicts for one record.
+# ---------------------------------------------------------------------------
+
+
+def _weekday_series(n_obs: int, seed: int, drift: float, vol: float) -> pd.Series:
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2025-01-06", periods=n_obs)
+    return pd.Series(rng.normal(drift, vol, n_obs), index=dates, name="ret")
+
+
+def _fit_classes(
+    n_obs: int, cand_class: str | None, book_class: str | None
+) -> dict[str, Any]:
+    from services.match_engine import _compute_portfolio_fit_components
+
+    book = _weekday_series(n_obs, 21, 0.0002, 0.012)
+    cand = _weekday_series(n_obs, 22, 0.002, 0.004)
+    return _compute_portfolio_fit_components(
+        portfolio_returns_series=book,
+        portfolio_weights={"b1": 1.0},
+        portfolio_strategies_returns={"b1": book},
+        candidate_returns=cand,
+        add_weight=0.10,
+        candidate_asset_class=cand_class,
+        book_asset_classes={"b1": book_class},
+    )
+
+
+def test_traditional_records_of_62_observations_over_85_days_keep_the_lift():
+    out = _fit_classes(62, "traditional", "traditional")
+    assert out["sharpe_lift_span_days"] == 86  # 61 weekday gaps = 85 days apart, 86 covered, from the fixture's own dates
+    assert out["sharpe_lift_state"] == "short"  # shown, qualified: under one year
+
+
+def test_traditional_records_of_59_observations_lose_the_lift():
+    assert _fit_classes(59, "traditional", "traditional")["sharpe_lift_state"] == "withheld"
+
+
+@pytest.mark.parametrize(
+    "cand_class,book_class",
+    [("crypto", "traditional"), ("traditional", "crypto"), (None, "traditional"), ("traditional", None)],
+)
+def test_a_crypto_or_unknown_class_keeps_the_stricter_90_day_bound(cand_class, book_class):
+    # 85 days is under 90: a crypto or unknown-class record on either side withholds.
+    assert _fit_classes(62, cand_class, book_class)["sharpe_lift_state"] == "withheld"
+
+
+def test_the_lift_reason_is_shown_end_to_end_for_a_traditional_record():
+    book = _weekday_series(62, 21, 0.0002, 0.012)
+    cand = _weekday_series(62, 22, 0.002, 0.004)
+    cand_row = {**_make_candidate("s1"), "asset_class": "traditional"}
+
+    def run(book_class: str | None) -> dict[str, Any]:
+        return score_candidates(
+            allocator_id="a1",
+            preferences={},
+            portfolio_strategies=[{"strategy_id": "b1", "asset_class": book_class}],
+            portfolio_returns={"b1": book},
+            portfolio_weights={"b1": 1.0},
+            candidate_strategies=[cand_row],
+            candidate_returns={"s1": cand},
+        )["candidates"][0]
+
+    shown = run("traditional")
+    assert shown["score_breakdown"]["raw"]["sharpe_lift"] > 0.1  # the fixture must give a lift to gate
+    assert any("Lifts portfolio Sharpe" in r for r in shown["reasons"])
+    withheld = run(None)  # an unprojected book leg is unknown, so crypto
+    assert not any("Lifts portfolio Sharpe" in r for r in withheld["reasons"])
+    assert withheld["score"] == shown["score"]  # a display rule: the score never moves

@@ -218,6 +218,11 @@ function renderStrip(
   series: DailyReturn[],
   stored: Stored & { max_drawdown: number; sharpe: number; cagr: number },
   flags: Record<string, unknown> = {},
+  // Phase 194 plan 08 (D-15): the strip now withholds its annualised cells when the strategy's TOTAL
+  // record is under the minimum (a 24-day crypto record is). This file pins that the card and the strip
+  // print the same STORED figures, so by default the strip is given a record that clears the gate.
+  // `recordGate: "live"` leaves the payload's own record, for the one case that pins the divergence.
+  recordGate: "cleared" | "live" = "cleared",
 ): { sharpe: string; cagr: string; maxDd: string; colors: { cagr: string; maxDd: string } } {
   // The read path's own applier decides Dated vs Withheld; the strip is built
   // from what it returns, exactly as the page's real read path builds it.
@@ -226,8 +231,12 @@ function renderStrip(
     metricsByBasis: { cash_settlement: applied.headline },
     ...(Object.keys(applied.quality).length > 0 ? { dataQuality: { composite: false, ...applied.quality } } : {}),
   };
-  const payload = buildFactsheetPayload(STRATEGY, series, opts);
-  if (!payload) throw new Error("fixture must build a payload");
+  const built = buildFactsheetPayload(STRATEGY, series, opts);
+  if (!built) throw new Error("fixture must build a payload");
+  const payload =
+    recordGate === "cleared"
+      ? { ...built, figureRecord: { spanDays: 400, observations: 400, crypto: true } }
+      : built;
   const { container, unmount } = render(
     <FactsheetProvider payload={payload} persist={false}>
       <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
@@ -306,6 +315,21 @@ describe("the share card equals the factsheet strip for a stored row (D-06, B9)"
     expect(strip.sharpe).toBe("0.12");
     expect(strip.maxDd).toBe("-3.7%");
     expect(card.sharpe.value).toBe(strip.sharpe);
+    expect(card.maxDd.value).toBe(strip.maxDd);
+  });
+
+  // Phase 194 plan 08 (D-15, B3): the strip withholds a short TOTAL record's annualised cells; the share
+  // card (route.tsx) does not read the record gate yet, so for the same 25-point row the card prints the
+  // stored Sharpe and the strip prints a dash. The card is census row B3, assigned to Phase 194.1 (D-10).
+  // This case pins the divergence so it is a decision and not drift: when 194.1 gates the card it goes
+  // RED, and the author deletes it and drops `recordGate` from `renderStrip`.
+  it("KNOWN DIVERGENCE (B3, Phase 194.1): on a 25-point crypto record the strip withholds Sharpe and CAGR while the card still prints the stored Sharpe", async () => {
+    const card = await renderOgCard(SHORT, STORED_SHORT);
+    const strip = renderStrip(SHORT, STORED_SHORT, {}, "live");
+    expect(strip.sharpe).toBe("—");
+    expect(strip.cagr).toBe("—");
+    expect(card.sharpe.value).toBe("0.12");
+    expect(strip.maxDd).toBe("-3.7%");
     expect(card.maxDd.value).toBe(strip.maxDd);
   });
 

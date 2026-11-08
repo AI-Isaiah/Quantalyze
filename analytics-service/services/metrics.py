@@ -89,6 +89,144 @@ _CALENDAR_DAYS_PER_YEAR = 365.0
 # below which annualizing a short live window is not statistically meaningful.
 MIN_ANNUALIZATION_DAYS = 90
 
+# 194 D-15 (2026-11-07, founder): about three months of record is 60 trading days
+# for a non-crypto (weekday) strategy and 90 calendar days for crypto. This is the
+# observation-count bound of that rule. The producer adds NO withholding of its own:
+# `metrics_json.record_observations` (the count of non-NaN headline returns) is the
+# input the readers gate on. TS twin: `MIN_ANNUALIZATION_OBS` in
+# src/lib/figure-gate.ts (plan 03 pins the pair).
+MIN_ANNUALIZATION_OBS = 60
+
+# 194 D-11/D-15 (2026-11-07): a window under one year of calendar days carries the
+# "short" note; from one year it is "full". The window only qualifies a figure, it
+# never withholds one. TS twin: `ONE_YEAR_DAYS` in src/lib/figure-gate.ts (plan 12
+# pins the pair).
+ONE_YEAR_DAYS = 365
+
+# 194 D-14 (founder, 2026-11-07, "Add a 365-day window"): the rolling window, in
+# CALENDAR days, whose filled windows span a year and so show without the short
+# note. The producer stores it in ``rolling_metrics`` as ``volatility_1y`` /
+# ``sharpe_1y`` / ``sortino_1y`` (``_rolling_calendar_stats``). TS twin:
+# ``ROLL_WINDOW_1Y_DAYS`` in src/lib/factsheet/rolling.ts (plan 23's
+# rolling-calendar test pins the pair).
+ROLLING_1Y_WINDOW_DAYS = ONE_YEAR_DAYS
+
+
+def record_clears(
+    span_days: int | None, observations: int | None, crypto: bool
+) -> bool | None:
+    """Does a TOTAL record clear D-15's minimum? Mirror of TS ``recordClears``.
+
+    Crypto: span >= ``MIN_ANNUALIZATION_DAYS``. Non-crypto: observations >=
+    ``MIN_ANNUALIZATION_OBS``; while the count is absent, span >=
+    ``MIN_ANNUALIZATION_DAYS`` (interim fallback, A-194-D15-02: the failure
+    direction is the dash). None when the deciding input is None.
+    """
+    if not crypto and observations is not None:
+        return observations >= MIN_ANNUALIZATION_OBS
+    if span_days is None:
+        return None
+    return span_days >= MIN_ANNUALIZATION_DAYS
+
+
+def blend_gate_crypto(asset_classes: Iterable[str | None]) -> bool:
+    """D-15 crypto flag of a BLEND's record: True when any class is crypto OR unknown.
+
+    194 D-15: the exact rule of TS ``blendPeriodsPerYear`` (src/lib/closed-sets.ts,
+    RANK-06): an unknown blend leg is a caller projection gap, never a traditional
+    strategy (``strategies.asset_class`` is ``NOT NULL DEFAULT 'traditional'``), so
+    the producer and the TS readers give a book with an unknown-class leg the same
+    D-15 bound. An empty set is False. ``blend_periods_per_year`` is deliberately
+    NOT changed: it sets the stored risk clock, where unknown counts as 252, and
+    moving it would move stored figures outside D-15's scope.
+    """
+    classes = list(asset_classes)
+    return any(c == "crypto" or c is None for c in classes)
+
+
+def annualization_state(
+    clears_a: bool | None,
+    clears_b: bool | None,
+    window_span_days: int | None,
+) -> Literal["withheld", "short", "full", "null"]:
+    """State of a figure that compares two records over one window (D-11 via D-15).
+
+    Withheld when either record fails the minimum; null when either verdict is
+    unknown (and neither failed) or the window is unknown; short when the window
+    is under ``ONE_YEAR_DAYS``; full from one year. Mirror of TS ``gateAnnualized``.
+    """
+    if clears_a is False or clears_b is False:
+        return "withheld"
+    if clears_a is None or clears_b is None or window_span_days is None:
+        return "null"
+    return "short" if window_span_days < ONE_YEAR_DAYS else "full"
+
+
+def _index_span_days(index: pd.Index) -> int | None:
+    """Days ``index`` COVERS, first to last entry both counted (None when empty).
+
+    194 D-20 (founder, 2026-11-08, "Count returns"): each daily return covers one
+    day, so 365 daily returns cover 365 days, not the 364-day first-to-last gap.
+    TS twin: ``coveredDays`` in src/lib/figure-gate.ts (a pytest pins the pair).
+    """
+    if len(index) == 0:
+        return None
+    dt = index if isinstance(index, pd.DatetimeIndex) else pd.to_datetime(index)
+    return int((dt.max() - dt.min()).days) + 1
+
+
+def sharpe_lift_gate(
+    candidate_index: pd.Index,
+    book_index: pd.Index,
+    aligned_index: pd.Index,
+    candidate_crypto: bool,
+    book_crypto: bool,
+) -> tuple[
+    int | None,
+    Literal["withheld", "short", "full", "null"],
+    dict[str, Any] | None,
+]:
+    """D-11 as superseded by D-15, for ONE Sharpe lift: ``(span, state, failing_record)``.
+
+    ``span`` is the calendar days of the ``aligned`` overlap window, the window BOTH
+    legs of the lift are measured over. ``state`` is ``annualization_state`` over the
+    candidate's own record and the book's record (each: its own index's observation
+    count and first-to-last span, the observation count being the index length, i.e.
+    the non-NaN returns) and that window. ``failing_record`` is
+    ``{"span_days", "observations", "crypto"}`` of the record that failed D-15's
+    minimum (the shorter span when both fail); None unless the state is withheld.
+    The producer's score and the stored lift are never touched by this.
+    """
+    window = _index_span_days(aligned_index)
+    cand: dict[str, Any] = {
+        "span_days": _index_span_days(candidate_index),
+        "observations": int(len(candidate_index)),
+        "crypto": bool(candidate_crypto),
+    }
+    book: dict[str, Any] = {
+        "span_days": _index_span_days(book_index),
+        "observations": int(len(book_index)),
+        "crypto": bool(book_crypto),
+    }
+    cand_clears = record_clears(cand["span_days"], cand["observations"], cand["crypto"])
+    book_clears = record_clears(book["span_days"], book["observations"], book["crypto"])
+    state = annualization_state(cand_clears, book_clears, window)
+    failing: dict[str, Any] | None = None
+    if state == "withheld":
+        failed = [r for r, c in ((cand, cand_clears), (book, book_clears)) if c is False]
+        failing = min(failed, key=lambda r: r["span_days"] if r["span_days"] is not None else -1)
+    return window, state, failing
+
+# 194 D-02/D-03 (2026-11-07, TRUST-04): the stored figure definitions version.
+# 2 = VaR/CVaR are HISTORICAL (sorted-returns quantile, the factsheet engine's
+# rule), and 3M/6M are CALENDAR windows (91 / 182 days ending on the headline's
+# last date). A row without this key (or with 1) was computed by the quantstats
+# parametric VaR and the 63 / 126-row windows; readers gate on it. The TS twin
+# lives in src/lib/figure-gate.ts (plan 03 pins the pair).
+FIGURE_DEFS_VERSION = 2
+SIX_MONTH_WINDOW_DAYS = 182
+THREE_MONTH_WINDOW_DAYS = 91
+
 
 # PR #181 take-2 red-team F16: when a fundamental qs.stats shape regression
 # trips multiple scalars at once (e.g., a future qs upgrade returns Series
@@ -671,6 +809,80 @@ def _downside_rms(x: pd.Series) -> float:
     if n == 0:
         return float("nan")
     return math.sqrt(float((x[x < 0.0] ** 2).sum()) / n)
+
+
+def _historical_var_cvar(returns: pd.Series) -> tuple[float | None, float | None]:
+    """Historical 1-day 95% VaR and CVaR (194 D-02), the factsheet engine's rule.
+
+    Sort the non-NaN returns ascending, ``k = floor(0.05 * n)``, VaR =
+    ``sorted[min(k, n - 1)]``, CVaR = ``mean(sorted[0 : max(1, k)])``. ``n == 0``
+    gives ``(None, None)``. The TS twin is ``historicalVarCvar`` in
+    ``src/lib/return-stats.ts``; both are pinned to one JSON fixture
+    (``tests/fixtures/figure_parity_vectors.json``). Replaces the quantstats
+    parametric call that used to set the stored ``var_1d_95`` and ``cvar``.
+    """
+    ordered = sorted(float(x) for x in returns.dropna())
+    n = len(ordered)
+    if n == 0:
+        return None, None
+    k = math.floor(0.05 * n)
+    tail = ordered[: max(1, k)]
+    return ordered[min(k, n - 1)], sum(tail) / len(tail)
+
+
+def _record_covers_window(index: pd.DatetimeIndex, days: int) -> bool:
+    """Does the record cover a ``days``-day calendar window? (194 D-03)
+
+    A faithful port of ``recordCoversWindow`` in ``src/lib/factsheet/compute.ts``:
+    the cutoff is the last date minus ``days``; the window is covered iff every UTC
+    day strictly between the cutoff and the first observation is a day the venue did
+    not trade. A record is on the WEEKDAY calendar only when it spans a Saturday and
+    holds no Saturday/Sunday print; only then are Saturday, Sunday, 1 January and
+    25 December skipped before the strict ``start <= first session`` test. Every
+    other record keeps the strict rule (cutoff + 1 day), so the failure direction is
+    always "not covered" (None). ``index`` is the dates of the non-NaN returns.
+    """
+    if len(index) == 0:
+        return False
+    dates = index.normalize()
+    start = dates[0]
+    last = dates[-1]
+    cutoff = last - pd.Timedelta(days=days)
+    trades_weekends = bool((dates.weekday >= 5).any())
+    # JS getUTCDay(): Sunday 0 .. Saturday 6; pandas weekday(): Monday 0 .. Sunday 6.
+    first_dow = (start.weekday() + 1) % 7
+    span_days = (last - start).days
+    spans_saturday = (6 - first_dow + 7) % 7 <= span_days
+    weekday_venue = spans_saturday and not trades_weekends
+
+    def _non_trading(d: pd.Timestamp) -> bool:
+        if not weekday_venue:
+            return False
+        return bool(d.weekday() >= 5 or (d.month == 1 and d.day == 1) or (d.month == 12 and d.day == 25))
+
+    first_session = cutoff + pd.Timedelta(days=1)
+    for _ in range(7):
+        if not _non_trading(first_session):
+            break
+        first_session += pd.Timedelta(days=1)
+    return bool(start <= first_session)
+
+
+def _calendar_window_return(
+    series: pd.Series, days: int, bucket: Callable[[pd.Series], Any]
+) -> float | None:
+    """Return of the last ``days`` calendar days, or None when the record does not cover it.
+
+    194 D-03: ``bucket`` is applied to the returns on dates strictly after
+    ``last date - days``; no row-count fallback exists. The TS twin is the engine's
+    ``windowReturn(offsetDays(days))``.
+    """
+    valid = series.dropna()
+    if not _record_covers_window(pd.DatetimeIndex(valid.index), days):
+        return None
+    dates = pd.DatetimeIndex(valid.index).normalize()
+    cutoff = dates[-1] - pd.Timedelta(days=days)
+    return _safe_float(bucket(valid[dates > cutoff]))
 
 
 def _cvar_of_tail(series: pd.Series, threshold: float) -> float:
@@ -1695,18 +1907,18 @@ def compute_all_metrics(
         )
     # F3 (red-team MED8): the body assumes the index is ASCENDING by date.
     # mtd/ytd window construction reads `returns.index[-1]` as "most recent",
-    # and `tail(126)`/`tail(63)` (six_month/three_month) assume the LAST rows
-    # are the most recent. A descending or shuffled DatetimeIndex would pass the
+    # and the calendar windows (six_month/three_month) assume the LAST index
+    # is the most recent. A descending or shuffled DatetimeIndex would pass the
     # DatetimeIndex + float-dtype checks above yet silently produce wrong
     # windows (e.g. mtd computed from the OLDEST month, three_month from the
-    # FIRST 63 days). Fail loud (Rule 12) so the caller fixes ordering at the
+    # FIRST 91 days). Fail loud (Rule 12) so the caller fixes ordering at the
     # ingestion boundary rather than shipping a mislabeled factsheet.
     if not returns.index.is_monotonic_increasing:
         raise ValueError(
             "compute_all_metrics requires an ascending (monotonic-increasing) "
             "DatetimeIndex on `returns`; the index is not sorted oldest-to-newest. "
-            "mtd/ytd slices and tail(126)/tail(63) windows assume the last rows "
-            "are the most recent — sort with `returns.sort_index()` at the "
+            "mtd/ytd slices and the 91/182-day windows assume the last index "
+            "is the most recent — sort with `returns.sort_index()` at the "
             "ingestion boundary."
         )
 
@@ -2122,6 +2334,20 @@ def compute_all_metrics(
         "sharpe_90d": _rolling_sharpe(_rolling_basis, 90, periods_per_year=periods_per_year),
         "sharpe_365d": _rolling_sharpe(_rolling_basis, 365, periods_per_year=periods_per_year),
     }
+    # 194 D-14: the 365-CALENDAR-day window, stored beside the row windows above (which
+    # are untouched). Sharpe rides `_rolling_basis` and volatility / Sortino ride
+    # `returns`, exactly as the row windows do (`sharpe_30d` vs the sibling kinds).
+    _sharpe_1y = _rolling_calendar_stats(
+        _rolling_basis, ROLLING_1Y_WINDOW_DAYS, periods_per_year
+    )["sharpe"]
+    _vol_sortino_1y = _rolling_calendar_stats(returns, ROLLING_1Y_WINDOW_DAYS, periods_per_year)
+    rolling["volatility_1y"] = _finalize_rolling_calendar(
+        _vol_sortino_1y["vol"], ROLLING_1Y_WINDOW_DAYS
+    )
+    rolling["sharpe_1y"] = _finalize_rolling_calendar(_sharpe_1y, ROLLING_1Y_WINDOW_DAYS)
+    rolling["sortino_1y"] = _finalize_rolling_calendar(
+        _vol_sortino_1y["sortino"], ROLLING_1Y_WINDOW_DAYS
+    )
 
     # Return quantiles — pass pre-computed monthly_rets to avoid double resample (NEW-C02-11)
     quantiles = _return_quantiles(returns, monthly_rets=monthly_rets)
@@ -2152,8 +2378,11 @@ def compute_all_metrics(
     # Six month return (single-convention: arithmetic Σr on "simple", geometric
     # compound otherwise — byte-identical on the default geometric path).
     # FACTSHEETTRUTH D-01: the window returns are headline stats, so they ride the
-    # suffix and its length (the 126 / 63 day minimums now apply to the suffix).
-    six_month = _safe_float(_bucket_return(headline.tail(126))) if len(headline) >= 126 else None
+    # headline suffix. 194 D-03: 6M and 3M are CALENDAR windows (182 / 91 days ending
+    # on the headline's last date), shown only when the record covers them under the
+    # factsheet engine's `recordCoversWindow` rule (the weekday tolerance included),
+    # otherwise None. The old row-count windows (126 / 63 rows) are gone.
+    six_month = _calendar_window_return(headline, SIX_MONTH_WINDOW_DAYS, _bucket_return)
 
     # Extended metrics
     metrics_json: dict[str, Any] = {}
@@ -2175,64 +2404,45 @@ def compute_all_metrics(
     # try to reproduce the failure manually with the same length.
     returns_len_for_log = len(returns)
     returns_nonnan_len_for_log = int(returns.notna().sum())
-    # fail-soft: optional scalar — single qs failure must not abort compute.
-    # PR #181 take-2 red-team F2: prior call passed `cutoff=0.05`; the
-    # pinned quantstats==0.0.81 signature uses `confidence=0.95` (NOT
-    # `cutoff`). Pre-take2 every analytics run raised TypeError here and
-    # var_1d_95 was missing from every factsheet; the sweep WARNINGs then
-    # made the permanent failure a Railway noise floor that erodes the
-    # signal value of the new fail-loud emissions.
-    # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
-    # Kept on ONE source line so the region gate can see the kwarg.
-    _var_95: float | None = None
-    _var_95_exc: Exception | None = None
+    # fail-soft: optional scalar — a failure must not abort compute.
+    # 194 D-02 (2026-11-07, TRUST-04): the stored var_1d_95 and cvar are HISTORICAL,
+    # from `_historical_var_cvar` (the factsheet engine's rule), replacing the
+    # RANK-05 quantstats parametric call that made the list/tearsheet and the
+    # factsheet print different numbers under one name. VaR and CVaR come from ONE
+    # helper call, so the tail rule and the threshold cannot disagree. A failure
+    # keeps its own fail-loud warning per key (fail-soft for the result, loud for
+    # the operator), in the shape the sweep has always emitted.
+    _hist_var: float | None = None
+    _hist_cvar: float | None = None
+    _hist_exc: Exception | None = None
     try:
-        _var_95 = _safe_float(qs.stats.value_at_risk(returns, confidence=0.95, prepare_returns=False))
-        metrics_json["var_1d_95"] = _var_95
+        _hist_var, _hist_cvar = _historical_var_cvar(returns)
     except Exception as exc:  # noqa: BLE001
-        _var_95_exc = exc
+        _hist_exc = exc
+    try:
+        if _hist_exc is not None:
+            raise _hist_exc
+        metrics_json["var_1d_95"] = _safe_float(_hist_var)
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar var_1d_95 failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("var_1d_95", exc),
         )
-    # RANK-05 — MEASURED DIVERGENCE from the research matrix, recorded here
-    # because the signature lies. `cvar` DOES advertise `prepare_returns=`, but
-    # 0.0.81's `conditional_value_at_risk` does NOT forward it to the VaR
-    # threshold it computes internally:
-    #
-    #     var = value_at_risk(returns, sigma, confidence)   # <- kwarg dropped
-    #     c_var = returns[returns < var].values.mean()
-    #
-    # So `cvar(r, prepare_returns=False)` derives the threshold from the
-    # PRICE-GUESSED series while selecting the tail from the raw one — a mixed
-    # basis that is worse than either. Measured on the 60-day all-winning fixture:
-    # `cvar(r, prepare_returns=False)` returned -0.24153, exactly the guessed-VaR
-    # value, versus the honest -0.28406. The kwarg is therefore NOT a closure for
-    # this site; the two-line wrapper is inlined instead, keeping the underlying
-    # `value_at_risk` primitive (which DOES honour the kwarg) as the threshold
-    # source. quantstats' Series branch falls back to the VaR value when no
-    # observation lies below the threshold; reproduced verbatim, minus the
-    # empty-slice RuntimeWarning its `.values.mean()` emits.
-    # fail-soft: optional scalar.
     try:
-        # Threshold reuses the SINGLE VaR evaluation above — "same threshold
-        # source" is now true by construction, not by two calls agreeing. A VaR
-        # failure is re-raised here so cvar keeps its OWN fail-loud warning
-        # (fail-soft for the result, loud for the operator — same as before).
-        if _var_95_exc is not None:
-            raise _var_95_exc
-        _cvar_threshold = _var_95
-        if _cvar_threshold is None:
-            metrics_json["cvar"] = None
-        else:
-            metrics_json["cvar"] = _safe_float(_cvar_of_tail(returns, _cvar_threshold))
+        if _hist_exc is not None:
+            raise _hist_exc
+        metrics_json["cvar"] = _safe_float(_hist_cvar)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar cvar failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("cvar", exc),
         )
+    metrics_json["figure_defs_version"] = FIGURE_DEFS_VERSION
+    # 194 D-15: the record the stored annualised scalars are computed on, so a
+    # chain-broken row counts from its headline start.
+    metrics_json["record_observations"] = int(headline.dropna().shape[0])
 
     # MTD / YTD / 3M single-convention (arithmetic Σr on "simple", geometric
     # compound otherwise — byte-identical on the default geometric path).
@@ -2242,7 +2452,7 @@ def compute_all_metrics(
     metrics_json["ytd"] = _safe_float(_bucket_return(headline[headline.index >= pd.Timestamp(f"{headline.index[-1].year}-01-01")]))
     metrics_json["best_day"] = _safe_float(returns.max())
     metrics_json["worst_day"] = _safe_float(returns.min())
-    metrics_json["three_month"] = _safe_float(_bucket_return(headline.tail(63))) if len(headline) >= 63 else None
+    metrics_json["three_month"] = _calendar_window_return(headline, THREE_MONTH_WINDOW_DAYS, _bucket_return)
 
     if len(monthly_rets) > 0:
         metrics_json["best_month"] = _safe_float(monthly_rets.max())
@@ -3366,6 +3576,65 @@ def _rolling_volatility(
     if len(returns) < window:
         return []
     return _finalize_rolling(returns.rolling(window).std() * np.sqrt(periods_per_year))
+
+
+def _rolling_calendar_stats(
+    returns: pd.Series, window_days: int, periods_per_year: int
+) -> dict[str, pd.Series]:
+    """Rolling annualized volatility, Sharpe and Sortino over a CALENDAR window (194 D-14).
+
+    The point at return date t aggregates the returns dated after ``t - window_days``
+    days, up to and including t, and exists only when the returns from the series' first
+    date to t cover ``window_days`` days (D-21: first to last date, both counted, so 365
+    daily returns fill a 365-day window, as ``_index_span_days`` counts them). Earlier rows are NaN, so no point is
+    ever stored before the first full window. The result is unrounded and index-aligned
+    with ``returns``; NaN also marks a window with no ratio.
+
+    ONE definition, the producer's (D-01; A-194-D14-02): volatility is the SAMPLE
+    standard deviation (ddof 1) times the root of ``periods_per_year``; Sharpe is the
+    window mean over that standard deviation times the same root, NaN when the standard
+    deviation does not clear ``_residue_floor``; Sortino is the window mean over the
+    root of (sum of squared returns below ``MAR`` / the window's OWN count), times the
+    same root, NaN when no return in the window is below ``MAR``. A residue standard
+    deviation reads exactly 0 for volatility, as the TS twin's ``dispersion`` does.
+    TS twin: ``rollingCalendarStats`` in src/lib/factsheet/rolling.ts; both are proven
+    equal on tests/fixtures/rolling_1y_vectors.json.
+    """
+    roll = returns.rolling(f"{window_days}D")
+    mean = roll.mean()
+    sd = roll.std()
+    count = roll.count()
+    root = np.sqrt(periods_per_year)
+
+    vol_sd = pd.Series(np.where(sd <= _residue_floor(mean), 0.0, sd), index=returns.index)
+    sharpe = pd.Series(
+        np.where(sd > _residue_floor(mean), mean / sd, np.nan), index=returns.index
+    )
+
+    neg_sq = (returns.where(returns < MAR, 0.0)) ** 2
+    downside = (neg_sq.rolling(f"{window_days}D").sum() / count) ** 0.5
+    sortino = pd.Series(np.where(downside > 0, mean / downside, np.nan), index=returns.index)
+
+    out = {"vol": vol_sd * root, "sharpe": sharpe * root, "sortino": sortino * root}
+    if len(returns) > 0:
+        first_full = returns.index[0] + pd.Timedelta(days=window_days - 1)
+        warm = returns.index >= first_full
+        for key in out:
+            out[key] = out[key].where(warm)
+    return out
+
+
+def _finalize_rolling_calendar(series: pd.Series, window_days: int) -> list[SeriesPoint]:
+    """``_finalize_rolling`` over the rows from the first full calendar window on.
+
+    The warmup rows are NaN by construction, so they are cut before finalizing: the
+    ``_finalize_rolling`` drop-ratio WARNING then speaks only of windows that had no
+    ratio, and a record under one year stores ``[]`` without a warning.
+    """
+    if len(series) == 0:
+        return []
+    warm = series.index >= series.index[0] + pd.Timedelta(days=window_days - 1)
+    return _finalize_rolling(series[warm]) if bool(warm.any()) else []
 
 
 def _rolling_greeks(

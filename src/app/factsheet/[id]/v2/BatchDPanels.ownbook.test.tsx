@@ -4,6 +4,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, OwnBookDeltaPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
+import { figureRecord } from "@/lib/figure-gate";
 import { OwnBookDeltaPanel } from "./BatchDPanels";
 
 /**
@@ -83,6 +84,17 @@ function renderPanel(payload: FactsheetPayload) {
   );
 }
 
+/** Two long records on one basis, so the gate clears and the caption is the only thing under test. */
+function recordsAt(periodsPerYear: 252 | 365): NonNullable<OwnBookDeltaPayload["records"]> {
+  const record = figureRecord({
+    seriesStart: "2023-01-01",
+    seriesEnd: "2024-01-31",
+    observations: 400,
+    periodsPerYear,
+  });
+  return { blend: record, book: record };
+}
+
 /** Resolve the value cell <td> for a given row label inside the panel. */
 function valueCellFor(container: HTMLElement, label: string): HTMLElement {
   const cells = Array.from(container.querySelectorAll("td"));
@@ -103,6 +115,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
       max_dd: 0.018, // +1.8pp shallower
       blend_n: 287,
       book_n: 412,
+      records: recordsAt(252),
     };
     const { getByText, container } = renderPanel(csvPayload(delta));
 
@@ -187,5 +200,33 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     const { container, queryByText } = renderPanel(apiPayload);
     expect(container.querySelector("section")).toBeNull();
     expect(queryByText("vs Your Book")).toBeNull();
+  });
+});
+
+// 194 R3 WR-02: the caption names the basis the blend's own record carries.
+describe("OwnBookDeltaPanel basis caption follows the blend's annualisation basis (R3 WR-02)", () => {
+  const delta = (records?: OwnBookDeltaPayload["records"]): OwnBookDeltaPayload => ({
+    sharpe: 0.24,
+    sortino: -0.18,
+    max_dd: 0.018,
+    blend_n: 287,
+    book_n: 412,
+    ...(records ? { records } : {}),
+  });
+  const basisOf = (d: OwnBookDeltaPayload): string =>
+    renderPanel(csvPayload(d)).container.textContent ?? "";
+
+  it("a crypto blend (365) reads sample/365 basis, never sample/252", () => {
+    const text = basisOf(delta(recordsAt(365)));
+    expect(text).toContain("sample/365 basis");
+    expect(text).not.toContain("sample/252 basis");
+  });
+
+  it("a traditional blend (252) reads sample/252 basis", () => {
+    expect(basisOf(delta(recordsAt(252)))).toContain("sample/252 basis");
+  });
+
+  it("an absent record is unknown, which counts as crypto: sample/365 basis", () => {
+    expect(basisOf(delta())).toContain("sample/365 basis");
   });
 });

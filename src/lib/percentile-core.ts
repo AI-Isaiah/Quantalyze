@@ -28,6 +28,8 @@
  *     denominators never see it — an unpublished row cannot shift a public rank.
  */
 
+import { gateAnnualized, type FigureRecord } from "@/lib/figure-gate";
+
 /** Metric keys we compute percentile ranks for */
 export const PERCENTILE_METRICS = [
   "cagr",
@@ -40,6 +42,47 @@ export const PERCENTILE_METRICS = [
 ] as const;
 
 export type PercentileMetric = (typeof PERCENTILE_METRICS)[number];
+
+/**
+ * 194 D-11 / D-15 (2026-11-07): the percentile metrics that rank an ANNUALISED figure.
+ * Max drawdown and cumulative return are not annualised, so they are never withheld on
+ * the strength of a short record.
+ */
+export const ANNUALIZED_PERCENTILE_METRICS = [
+  "cagr",
+  "sharpe",
+  "sortino",
+  "calmar",
+  "volatility",
+] as const satisfies readonly PercentileMetric[];
+
+/**
+ * 194 D-11 as superseded by D-15 (2026-11-07), founder-decided: a rank of an annualised
+ * figure is withheld exactly when that figure is withheld for the strategy, and that is
+ * decided on the strategy's TOTAL record (`gateAnnualized(record) === "withheld"`:
+ * crypto under 90 calendar days, non-crypto under 60 observations, or under 90 days while
+ * the stored count is absent). A short window never withholds; a record that cannot be
+ * determined keeps its ranks (the gate's null state).
+ *
+ * Returns a COPY with the five annualised metrics set to null when the record is withheld,
+ * otherwise the input unchanged. Pure.
+ *
+ * THE POPULATION CONSEQUENCE IS THE POINT. `scoreAgainstPopulation` skips a null metric on
+ * BOTH sides (as a subject it gets no rank, as a population row it adds no value to anyone's
+ * denominator), so applying this helper to every row before scoring is what leaves a
+ * withheld strategy out of the peer set ("A strategy whose figure is withheld is also left
+ * out of the peer set", D-11). Max drawdown and cumulative return are untouched, so the same
+ * strategy still ranks, and is ranked against, on those two.
+ */
+export function withholdShortRecordRanks(
+  analytics: Record<string, number | null>,
+  record: FigureRecord,
+): Record<string, number | null> {
+  if (gateAnnualized(record) !== "withheld") return analytics;
+  const out = { ...analytics };
+  for (const metric of ANNUALIZED_PERCENTILE_METRICS) out[metric] = null;
+  return out;
+}
 
 /**
  * Phase 166 (D-12) — the literal TYPE of `tuple.join(", ")`.

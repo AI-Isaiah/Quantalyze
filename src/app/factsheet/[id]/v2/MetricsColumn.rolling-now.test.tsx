@@ -55,7 +55,9 @@ function renderRolling(payload: FactsheetPayload): (label: string) => string[] {
       <MetricsColumn />
     </FactsheetProvider>,
   );
-  const section = getByText(/Rolling Metrics/).closest("section") as HTMLElement;
+  // Phase 194 (D-14): a record of a year or more also renders a "Rolling Metrics (1y)" table,
+  // so the row-window table this file pins is selected by its own title.
+  const section = getByText(/Rolling Metrics \((6mo|30d)\)/).closest("section") as HTMLElement;
   return (label: string) => {
     const row = [...section.querySelectorAll("tbody tr")].find(
       tr => tr.querySelector("td")?.textContent === label,

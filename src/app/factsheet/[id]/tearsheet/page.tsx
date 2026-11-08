@@ -13,6 +13,19 @@ import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel
 import { PrintButton } from "@/components/ui/PrintButton";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { canViewAum } from "@/lib/factsheet/viewer-aum";
+import { formatUsd } from "@/lib/dollar-validation";
+import { annualizationPeriods } from "@/lib/closed-sets";
+import {
+  FIGURE_DEFS_VERSION,
+  VAR_METHOD_LINE,
+  figureRecord,
+  gateAnnualized,
+  gatedValue,
+  shortTrackNote,
+  withheldReason,
+} from "@/lib/figure-gate";
+import { readRecordSpan } from "@/lib/record-span-read";
 import { withPublishedOnly } from "@/lib/visibility";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
@@ -329,12 +342,21 @@ export default async function TearSheetPage({
   // silently open the leak again. Run AFTER getFactsheetDetail so the
   // 404 path skips this lookup.
   let isAttested = false;
+  // 194 D-06 (T-194-12): AUM is shown ONLY to a signed-in allocator or to the
+  // strategy's own manager. Default false; every failure path leaves it false and
+  // the row is absent from the DOM (no placeholder). The per-viewer page stays
+  // `force-dynamic`, and the cookie-less PDF render is anonymous, so it never
+  // carries the row.
+  let showAum = false;
+  // The server-validated user id from the one `getUser()` below; null for anonymous.
+  let viewerId: string | null = null;
   // Hoisted so the returns-unit read below shares this request's client.
   let supabase: Awaited<ReturnType<typeof createClient>> | null = null;
   try {
     supabase = await createClient();
     const { data: userData, error: userError } = await supabase.auth.getUser();
     if (!userError && userData?.user != null) {
+      viewerId = userData.user.id;
       const { data: attestation, error: attError } = await supabase
         .from("investor_attestations")
         .select("attested_at")
@@ -347,6 +369,15 @@ export default async function TearSheetPage({
   } catch (err) {
     console.error("[tearsheet] attestation lookup failed:", err);
     // Stay redacted — the safer default.
+  }
+
+  // D-06: the AUM gate. A separate try so an attestation-lookup failure never
+  // decides AUM and an AUM-lookup failure never decides attestation. Reuses the
+  // request-scoped client and `getUser()` (JWT validated server-side), never
+  // `getSession()`. Ownership compares the server-read user id to the id on the
+  // server-read strategy row (T-194-14): no client input is involved.
+  if (supabase) {
+    showAum = await canViewAum(supabase, viewerId, result.strategy.user_id, "[tearsheet]");
   }
 
   const { strategy, analytics, manager, disclosureTier } = result;
@@ -380,6 +411,45 @@ export default async function TearSheetPage({
   const percentiles = percentileMap?.[strategy.id] ?? null;
 
   const m = analytics.metrics_json as Record<string, number> | null;
+
+  // 194 D-04 as superseded by D-15: the TOTAL record decides whether the five
+  // annualised figures print. One scalar-alias read (published-only, this request's
+  // client), one record, one verdict. A read that cannot be made fails CLOSED: the
+  // figures print as dashes and no caption is claimed about a record we could not read.
+  const spanRead = supabase ? await readRecordSpan(supabase, strategy.id) : null;
+  const spanReadFailed = !spanRead || !spanRead.determined;
+  if (spanReadFailed) {
+    // A null read means no request client was available; readRecordSpan has already
+    // reported its own failures to Sentry, so this is the one log line either way.
+    console.error("[tearsheet] record span read failed", { strategyId: strategy.id, noClient: !supabase });
+  }
+  const record = spanRead?.determined
+    ? figureRecord({
+        seriesStart: spanRead.seriesStart,
+        seriesEnd: spanRead.seriesEnd,
+        headlineSince: spanRead.headlineSince,
+        observations: spanRead.observations,
+        periodsPerYear: annualizationPeriods(strategy.asset_class),
+      })
+    : null;
+  const gateState = record ? gateAnnualized(record) : "withheld";
+  // The one caption under the hero grid: why the figures are dashes, or that they are
+  // annualized from under a year. A cleared record of a year or more says nothing.
+  const gateNote =
+    record && gateState === "withheld"
+      ? withheldReason("record", record)
+      : record && gateState === "short" && record.spanDays != null
+        ? shortTrackNote("record", record.spanDays)
+        : spanReadFailed
+          ? "Annualized figures are temporarily unavailable. Reload to retry."
+          : null;
+  const annualized = (value: number | null | undefined) =>
+    gatedValue(value, gateState);
+  // D-02: VaR/CVaR print only from a row written under the historical definition.
+  // An older row holds the parametric figure, which must never sit under the
+  // historical label.
+  const historicalVar =
+    typeof m?.figure_defs_version === "number" && m.figure_defs_version >= FIGURE_DEFS_VERSION;
 
   return (
     <div className="tearsheet mx-auto my-0 bg-white text-text-primary print:m-0 print:p-0">
@@ -509,10 +579,10 @@ export default async function TearSheetPage({
       <section className="mb-6 grid grid-cols-4 gap-3">
         <HeroMetric
           label={withUnit("CAGR", returnsUnit)}
-          value={unitUndetermined ? WITHHELD : formatPercent(analytics.cagr)}
+          value={unitUndetermined ? WITHHELD : formatPercent(annualized(analytics.cagr))}
         />
-        <HeroMetric label="Sharpe" value={formatNumber(analytics.sharpe)} />
-        <HeroMetric label="Sortino" value={formatNumber(analytics.sortino)} />
+        <HeroMetric label="Sharpe" value={formatNumber(annualized(analytics.sharpe))} />
+        <HeroMetric label="Sortino" value={formatNumber(annualized(analytics.sortino))} />
         <HeroMetric
           label="Max DD"
           value={unitUndetermined ? WITHHELD : formatPercent(analytics.max_drawdown)}
@@ -521,6 +591,11 @@ export default async function TearSheetPage({
           danger={!unitUndetermined && signTone(analytics.max_drawdown, 2, 100) === "negative"}
         />
       </section>
+      {gateNote && (
+        <p className="mt-2 text-xs text-text-muted" data-testid="tearsheet-figure-gate-note">
+          {gateNote}
+        </p>
+      )}
 
       {/* Equity curve */}
       {!unitUndetermined && analytics.sparkline_returns && analytics.sparkline_returns.length > 0 && (
@@ -554,8 +629,18 @@ export default async function TearSheetPage({
                 <PercentileRankBadge
                   key={metric}
                   metric={metric}
-                  percentile={percentiles[metric]}
+                  // 194 D-18 (review WR-01): the figures beside these ranks are dashes
+                  // when the record is withheld or unreadable, so the annualised ranks
+                  // go with them. Max DD is not annualised and keeps its rank.
+                  percentile={
+                    metric !== "max_drawdown" && gateState === "withheld"
+                      ? null
+                      : percentiles[metric]
+                  }
                   categoryLabel={categorySlug}
+                  shortTrackDays={
+                    metric !== "max_drawdown" && gateState === "short" ? record?.spanDays : null
+                  }
                 />
               ),
             )}
@@ -567,9 +652,9 @@ export default async function TearSheetPage({
       <section className="mb-6 grid grid-cols-4 gap-3">
         <DetailMetric
           label="Volatility"
-          value={unitUndetermined ? WITHHELD : formatPercent(analytics.volatility)}
+          value={unitUndetermined ? WITHHELD : formatPercent(annualized(analytics.volatility))}
         />
-        <DetailMetric label="Calmar" value={formatNumber(analytics.calmar)} />
+        <DetailMetric label="Calmar" value={formatNumber(annualized(analytics.calmar))} />
         <DetailMetric
           label="6 Month"
           value={unitUndetermined ? WITHHELD : formatPercent(analytics.six_month_return)}
@@ -579,10 +664,13 @@ export default async function TearSheetPage({
           value={unitUndetermined ? WITHHELD : formatPercent(analytics.cumulative_return)}
         />
         <DetailMetric
-          label="VaR (95%)"
-          value={unitUndetermined ? WITHHELD : formatPercent(m?.var_1d_95)}
+          label="VaR 95%"
+          value={unitUndetermined || !historicalVar ? WITHHELD : formatPercent(m?.var_1d_95)}
         />
-        <DetailMetric label="CVaR" value={unitUndetermined ? WITHHELD : formatPercent(m?.cvar)} />
+        <DetailMetric
+          label="CVaR 95%"
+          value={unitUndetermined || !historicalVar ? WITHHELD : formatPercent(m?.cvar)}
+        />
         <DetailMetric
           label="Best Day"
           value={unitUndetermined ? WITHHELD : formatPercent(m?.best_day)}
@@ -592,6 +680,9 @@ export default async function TearSheetPage({
           value={unitUndetermined ? WITHHELD : formatPercent(m?.worst_day)}
         />
       </section>
+      <p className="mt-2 text-xs text-text-muted" data-testid="tearsheet-var-method-line">
+        {VAR_METHOD_LINE}
+      </p>
 
       {/* Monthly returns heatmap */}
       {!unitUndetermined && analytics.monthly_returns && (
@@ -648,24 +739,24 @@ export default async function TearSheetPage({
         </section>
       )}
 
-      {/* Fees, minimum, lockup */}
+      {/* Leverage, benchmark; AUM only for an allocator or the own manager (D-06) */}
       <section className="mb-6 rounded-lg border border-border p-4">
         <h2 className="mb-3 text-sm font-semibold text-text-primary">Allocation Terms</h2>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
-          {/* D-21: `strategy.aum` is a declared USD figure. Beside a native unit it
-              would read as an amount in that unit, so a unit strategy shows a dash. */}
-          <TermRow
-            label="Minimum Allocation"
-            value={
-              unitUndetermined || returnsUnit != null
-                ? WITHHELD
-                : strategy.aum
-                  ? `$${Math.round(strategy.aum).toLocaleString()}`
-                  : "Negotiable"
-            }
-          />
+          {/* D-06: `strategy.aum` is the manager's declared USD AUM, so the row says AUM
+              (it was labelled Minimum Allocation, which it never was). Absent from the
+              DOM, with no placeholder, for every viewer who is not an allocator or the
+              strategy's own manager. D-21: beside a native unit a USD amount would read
+              as an amount in that unit, so a unit strategy shows a dash. */}
+          {showAum && (
+            <TermRow
+              label="AUM"
+              value={
+                unitUndetermined || returnsUnit != null ? WITHHELD : formatUsd(strategy.aum ?? null)
+              }
+            />
+          )}
           <TermRow label="Leverage" value={strategy.leverage_range ?? "Not disclosed"} />
-          <TermRow label="Lockup" value="None (read-only API)" />
           <TermRow label="Benchmark" value={strategy.benchmark ?? "BTC"} />
         </dl>
       </section>

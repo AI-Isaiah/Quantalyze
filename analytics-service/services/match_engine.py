@@ -34,6 +34,7 @@ import pandas as pd
 # them from this module too.
 from services.dispersion import pairwise_correlation_or_none
 from services.match_defaults import merge_with_defaults
+from services.metrics import blend_gate_crypto, sharpe_lift_gate
 from services.portfolio_optimizer import (
     _avg_corr,
     _compute_sharpe,
@@ -653,13 +654,17 @@ def _empty_pf_components() -> dict[str, float | int | str | None]:
     Adding a new portfolio_fit sidecar field (e.g. M-0675 data_completeness)
     requires ONE edit here — previously four sites needed lockstep updates.
 
-    Keys: sharpe_lift, corr_reduction, dd_improvement, corr_with_portfolio,
-    data_completeness, and the GAP-01 short-overlap marker fit_unavailable_reason,
+    Keys: sharpe_lift, sharpe_lift_span_days, sharpe_lift_state, corr_reduction,
+    dd_improvement, corr_with_portfolio, data_completeness, and the GAP-01 short-overlap marker fit_unavailable_reason,
     fit_overlap_days, fit_min_overlap_days (set only by the short-overlap and no-candidate-returns
     branches).
     """
     return {
         "sharpe_lift": None,
+        # 194 D-11/D-15: the span the lift is measured over and the verdict of the two
+        # records it compares; None wherever the lift itself is not computed.
+        "sharpe_lift_span_days": None,
+        "sharpe_lift_state": None,
         "corr_reduction": None,
         "dd_improvement": None,
         "corr_with_portfolio": None,
@@ -691,6 +696,8 @@ def _compute_portfolio_fit_components(
     portfolio_strategies_returns: dict[str, pd.Series],
     candidate_returns: pd.Series,
     add_weight: float,
+    candidate_asset_class: str | None = None,
+    book_asset_classes: Optional[dict[str, Optional[str]]] = None,
 ) -> dict[str, float | int | str | None]:
     """Compute sharpe_lift, corr_reduction, dd_improvement, corr_with_portfolio.
 
@@ -787,6 +794,22 @@ def _compute_portfolio_fit_components(
     )
     dd_improvement = drawdown_improvement(current_max_dd, new_max_dd)
 
+    # 194 D-11 (as superseded by D-15): the span of the aligned window the lift is
+    # measured over and the verdict of the two records it compares (the candidate's own
+    # non-NaN returns, the book's own joined index). This engine holds no asset class
+    # round 2 WR-02: each record is gated on its real asset class (D-15: 60 observations
+    # non-crypto, 90 days crypto), the same rule the optimizer and the TS readers apply. A
+    # class the caller did not project is unknown, which counts as crypto, the stricter
+    # bound (TS `blendPeriodsPerYear`, RANK-06). The score is untouched, and its Sharpe
+    # still runs on the fixed default clock.
+    lift_span, lift_state, _lift_failing = sharpe_lift_gate(
+        candidate_returns.dropna().index.unique(),
+        port_df.index,
+        aligned.index,
+        blend_gate_crypto([candidate_asset_class]),
+        blend_gate_crypto((book_asset_classes or {}).get(sid) for sid in port_df.columns),
+    )
+
     corr_with_portfolio = _compute_corr_with_portfolio(current_port, candidate_returns)
 
     # M-0675 fix: surface a `data_completeness` sidecar — the ratio of
@@ -801,6 +824,8 @@ def _compute_portfolio_fit_components(
 
     return {
         "sharpe_lift": _safe_float(sharpe_lift),
+        "sharpe_lift_span_days": lift_span,
+        "sharpe_lift_state": lift_state,
         "corr_reduction": _safe_float(corr_reduction),
         "dd_improvement": _safe_float(dd_improvement),
         "corr_with_portfolio": corr_with_portfolio,
@@ -829,7 +854,18 @@ def _generate_reasons(
 
     sharpe_lift = raw.get("sharpe_lift")
     if mode == "personalized" and sharpe_lift is not None and sharpe_lift > 0.1:
-        candidates.append((0.90, f"Lifts portfolio Sharpe by {sharpe_lift:+.2f}"))
+        # 194 D-11 (as superseded by D-15): withheld drops the reason (a compared record is
+        # under the minimum); short qualifies it; full or no state (pre-194) keeps today's text.
+        lift_state = raw.get("sharpe_lift_state")
+        if lift_state != "withheld":
+            lift_text = f"Lifts portfolio Sharpe by {sharpe_lift:+.2f}"
+            if lift_state == "short":
+                lift_span = raw.get("sharpe_lift_span_days")
+                if lift_span is not None:
+                    lift_text += f" over {lift_span:,} days of overlap, under one year"
+                else:
+                    lift_text += ", under one year"
+            candidates.append((0.90, lift_text))
 
     track = candidate.get("track_record_days") or 0
     if track > 730:
@@ -1070,6 +1106,12 @@ def score_candidates(
     else:
         portfolio_returns_series = pd.Series(dtype=float)
 
+    # round 2 WR-02: the book legs' classes for the D-15 lift gate. A leg with no projected
+    # class (a holding pseudo-strategy, or a caller that sends none) reads as unknown.
+    book_asset_classes: dict[str, Optional[str]] = {
+        ps["strategy_id"]: ps.get("asset_class") for ps in portfolio_strategies
+    }
+
     # Compute sub-scores for each eligible candidate
     raw_components: list[dict[str, Any]] = []
     for cand in eligible:
@@ -1083,6 +1125,8 @@ def score_candidates(
                 portfolio_returns,
                 cand_returns,
                 add_weight,
+                candidate_asset_class=cand.get("asset_class"),
+                book_asset_classes=book_asset_classes,
             )
         elif mode == "personalized" and not portfolio_returns_series.empty:
             # SFH-R5 M1: the fit would have been attempted, but this candidate has no returns
@@ -1117,6 +1161,8 @@ def score_candidates(
         raw_components.append({
             "candidate": cand,
             "sharpe_lift": pf_components.get("sharpe_lift"),
+            "sharpe_lift_span_days": pf_components.get("sharpe_lift_span_days"),
+            "sharpe_lift_state": pf_components.get("sharpe_lift_state"),
             "corr_reduction": pf_components.get("corr_reduction"),
             "dd_improvement": pf_components.get("dd_improvement"),
             "corr_with_portfolio": pf_components.get("corr_with_portfolio"),
@@ -1222,6 +1268,8 @@ def score_candidates(
             "raw": {
                 "corr_with_portfolio": rc["corr_with_portfolio"],
                 "sharpe_lift": rc["sharpe_lift"],
+                "sharpe_lift_span_days": rc.get("sharpe_lift_span_days"),
+                "sharpe_lift_state": rc.get("sharpe_lift_state"),
                 "dd_improvement": rc["dd_improvement"],
                 "track_record_days": cand.get("track_record_days"),
                 "manager_aum": cand.get("manager_aum"),

@@ -7,6 +7,7 @@ import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
 import { decimalExponent, fitBaselineY, pow10 } from "@/lib/chart-ticks";
 import { pct, pctSigned, ratio } from "./format";
+import type { FigureState } from "@/lib/figure-gate";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -356,7 +357,18 @@ export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld
   );
 }
 
-export function BootstrapCIPanel({ wholeRecordWithheld }: { wholeRecordWithheld: boolean }) {
+export function BootstrapCIPanel({
+  wholeRecordWithheld,
+  figureState = "null",
+}: {
+  wholeRecordWithheld: boolean;
+  /**
+   * Phase 194 (D-04 as superseded by D-15): the rail's record-scope verdict for the annualized
+   * figures, decided once in `MetricsColumn` (`gateAnnualized` over the TOTAL record, so a
+   * selected range never withholds). Absent reads as the `null` state: the figures show.
+   */
+  figureState?: FigureState;
+}) {
   // Phase 103 (MTM-04, Finding #6): the bootstrap CIs resample the strategy's own
   // daily series → follow the active basis. The reliability (low-N) gate reads the
   // resample count OFF the bootstrap payload itself (`b.n`, the basis-selected
@@ -372,7 +384,14 @@ export function BootstrapCIPanel({ wholeRecordWithheld }: { wholeRecordWithheld:
   // whole record, which compounds across the break the rail's Withheld note names, so the panel
   // renders the SAME form a withheld window does. The gate is decided once in `MetricsColumn` and
   // passed in: this panel never decides "Withheld" for itself.
-  const b = wholeRecordWithheld ? withheldBootstrapCI(view.bootstrapCI.n) : view.bootstrapCI;
+  // Phase 194 (D-04, D-13): when the TOTAL record fails D-15's gate, Sharpe and Sortino (the two
+  // annualized ratios) read the existing withheld form and their sparklines are not drawn; Max
+  // Drawdown is not annualized, so its row, interval and sparkline stay.
+  const annualizedWithheld = !wholeRecordWithheld && figureState === "withheld";
+  const base = wholeRecordWithheld ? withheldBootstrapCI(view.bootstrapCI.n) : view.bootstrapCI;
+  const b = annualizedWithheld
+    ? { ...base, sharpe: withheldBootstrapCI(base.n).sharpe, sortino: withheldBootstrapCI(base.n).sortino }
+    : base;
   const withheld = wholeRecordWithheld || view.withheld != null;
   const lowN = !withheld && b.n < 252;
   // A resample with no Sharpe (no dispersion) or no Sortino (no losing day) is
@@ -387,7 +406,8 @@ export function BootstrapCIPanel({ wholeRecordWithheld }: { wholeRecordWithheld:
       ["Sortino", sortinoUsed],
     ] as const
   )
-    .filter(([, used]) => used < b.n_resamples)
+    // A withheld ratio has no resamples by design, so it is not "dropped" resamples.
+    .filter(([, used]) => !annualizedWithheld && used < b.n_resamples)
     .map(([label, used]) =>
       // None survived: say so plainly, as degenerateNote does, never "from 0 of
       // 2,000 resamples (the rest have no …)" (review round 3 IN3-01).
@@ -401,8 +421,10 @@ export function BootstrapCIPanel({ wholeRecordWithheld }: { wholeRecordWithheld:
         <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Bootstrap 95% Confidence</h3>
       </header>
       {lowN && (
-        <p className="mb-2 text-micro italic" style={{ color: "var(--color-warning, #B45309)" }}>
-          ⚠ Bootstrap resamples are drawn from {b.n} observations.
+        // Phase 194 (D-13, A-194-D13-01): a short-record warning, so it is muted with no glyph;
+        // the trigger and the words are unchanged.
+        <p className="mb-2 text-micro italic text-text-muted">
+          Bootstrap resamples are drawn from {b.n} observations.
           CI width is wide and may understate true uncertainty below 252 days (1 year).
         </p>
       )}
@@ -424,9 +446,13 @@ export function BootstrapCIPanel({ wholeRecordWithheld }: { wholeRecordWithheld:
       {/* Resample-distribution sparklines — show the SHAPE of the bootstrap
           density, not just the CI bounds. Sharpe = primary (accent), Sortino
           + Max-DD stacked below in muted tones. */}
-      <div className="mt-3 flex flex-col gap-2.5">
-        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => ratio(n)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
-        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => ratio(n)} nValid={sortinoUsed} nTotal={b.n_resamples} />
+      <div className="mt-3 flex flex-col gap-2.5" data-testid="bootstrap-sparklines">
+        {!annualizedWithheld && (
+          <>
+            <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => ratio(n)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
+            <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => ratio(n)} nValid={sortinoUsed} nTotal={b.n_resamples} />
+          </>
+        )}
         <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => pct(n)} />
       </div>
 

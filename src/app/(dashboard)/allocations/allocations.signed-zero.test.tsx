@@ -77,6 +77,13 @@ const BOOK = Array.from({ length: 60 }, (_, i) => ({
   date: isoDay("2026-08-01", i),
   value: 0.004 * Math.sin(i * 0.7) + 0.0015 * Math.cos(i * 0.31) + 0.0004,
 }));
+// 194 review V-b (D-15): the widget withholds its annualised alpha on the book's TOTAL record, as
+// the Overview does, so this fixture's book gets 90 earlier days with no BTC close behind them: the
+// record clears D-15 and exactly the same days pair as before.
+const PRE = Array.from({ length: 90 }, (_, i) => ({
+  date: isoDay("2026-05-03", i),
+  value: 0.003 * Math.cos(i * 0.9) + 0.0002,
+}));
 const CLOSES = Array.from({ length: 61 }, (_, i) => ({
   date: isoDay("2026-07-31", i),
   close: 60_000 * (1 + 0.03 * Math.sin(i * 0.45) + 0.0008 * i),
@@ -85,7 +92,7 @@ const ALPHA_DATA = {
   strategies: [],
   analytics: null,
   equityHistoryState: "ready",
-  equityDailyReturns: BOOK,
+  equityDailyReturns: [...PRE, ...BOOK],
   btcBenchmarkPrices: { prices: CLOSES, through: "2026-09-29", dropped: [] as string[] },
 } as AlphaBetaWidgetData;
 const ALPHA_PROPS = { timeframe: "1YTD" as const, width: 6, height: 3 };

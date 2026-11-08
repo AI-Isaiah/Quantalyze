@@ -299,10 +299,17 @@ describe("METRICS-13 cross-runtime parity (TS independent math oracle)", () => {
     );
   });
 
-  it("six_month_return matches the cumulative over the last 126 trading days", () => {
-    // Regression caught: an off-by-window six-month slice (e.g. first vs last
-    // 126 days) or an arithmetic-sum-vs-compound bug.
-    const derived = cumulativeReturn(rets.slice(-126));
+  it("six_month_return matches the cumulative over the 182 calendar days ending on the last date", () => {
+    // 194 D-03: 6M is a CALENDAR window (returns on dates strictly after last - 182
+    // days), not the last 126 rows. Regression caught: a row-count slice, an
+    // off-by-window slice (first vs last), or an arithmetic-sum-vs-compound bug.
+    const lastMs = Date.parse(input.returns[input.returns.length - 1].date + "T00:00:00Z");
+    const cutoffMs = lastMs - 182 * 86_400_000;
+    const inWindow = input.returns
+      .filter((p) => Date.parse(p.date + "T00:00:00Z") > cutoffMs)
+      .map((p) => p.value);
+    expect(inWindow.length).toBe(130); // counted by hand from the dates: 2025-06-20 .. 2025-12-18, weekdays
+    const derived = cumulativeReturn(inWindow);
     expect(Math.abs(metrics.six_month_return - derived)).toBeLessThan(TOL);
   });
 

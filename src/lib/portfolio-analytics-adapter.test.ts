@@ -388,3 +388,86 @@ describe("adaptPortfolioAnalytics", () => {
     expect(Object.keys(rolling)).toEqual(["sid-a:sid-b"]);
   });
 });
+
+// 194 D-11 / D-15: the producer's lift verdict passes through the adapter, defensively
+// parsed (T-194-43): a closed-set state, a numeric span, a shape-checked failing record.
+describe("adaptPortfolioAnalytics optimizer lift verdict (194 D-15)", () => {
+  const base = {
+    strategy_id: "s-1",
+    strategy_name: "Candidate",
+    corr_with_portfolio: 0.2,
+    sharpe_lift: 0.3,
+    dd_improvement: 0.01,
+    score: 0.5,
+  };
+  const parseRow = (extra: Record<string, unknown>) =>
+    adaptPortfolioAnalytics({ ...complete, optimizer_suggestions: [{ ...base, ...extra }] })
+      ?.optimizer_suggestions?.[0];
+
+  it("carries a short state and its span", () => {
+    const s = parseRow({ sharpe_lift_span_days: 60, sharpe_lift_state: "short" });
+    expect(s?.sharpe_lift_span_days).toBe(60);
+    expect(s?.sharpe_lift_state).toBe("short");
+    expect(s?.sharpe_lift_failing_record).toBeNull();
+  });
+
+  it.each(["withheld", "short", "full", "null"])("accepts the closed-set state %s", (state) => {
+    expect(parseRow({ sharpe_lift_state: state })?.sharpe_lift_state).toBe(state);
+  });
+
+  // R2-M2: a present but unrecognised state must never read as unknown, because unknown shows
+  // the lift (D-17). It fails closed to withheld so the card shows no unearned figure.
+  it.each(["WITHHELD", "partial", "", 1, true, {}])("reads the out-of-set state %j as withheld", (state) => {
+    expect(parseRow({ sharpe_lift_state: state })?.sharpe_lift_state).toBe("withheld");
+  });
+
+  // R3 SFH-M1: the coerced state keeps its stored value so the card can report the real cause.
+  it("keeps the original out-of-set value beside the coerced state, and only then", () => {
+    expect(parseRow({ sharpe_lift_state: "partial" })?.sharpe_lift_state_raw).toBe("partial");
+    expect(parseRow({ sharpe_lift_state: 1 })?.sharpe_lift_state_raw).toBe("1");
+    expect(parseRow({ sharpe_lift_state: "withheld" })).not.toHaveProperty("sharpe_lift_state_raw");
+    expect(parseRow({})).not.toHaveProperty("sharpe_lift_state_raw");
+  });
+
+  it("reads an explicit null state as unknown, like an absent one", () => {
+    expect(parseRow({ sharpe_lift_state: null })?.sharpe_lift_state).toBeNull();
+  });
+
+  it("maps a well-formed failing record to a FigureRecord", () => {
+    const s = parseRow({
+      sharpe_lift_state: "withheld",
+      sharpe_lift_failing_record: { span_days: 50, observations: 51, crypto: true },
+    });
+    expect(s?.sharpe_lift_failing_record).toEqual({ spanDays: 50, observations: 51, crypto: true });
+  });
+
+  it.each([
+    ["a missing crypto flag", { span_days: 50, observations: 51 }],
+    ["a string crypto flag", { span_days: 50, observations: 51, crypto: "true" }],
+    ["a non-numeric span", { span_days: "x", observations: 51, crypto: true }],
+    ["a missing observation count", { span_days: 50, crypto: false }],
+    ["an array", [50, 51, true]],
+    ["a string", "50 days"],
+  ])("reads %s as no record", (_name, rec) => {
+    expect(parseRow({ sharpe_lift_failing_record: rec })?.sharpe_lift_failing_record).toBeNull();
+  });
+
+  it("a row stored before the producer recorded the verdict parses all three to null", () => {
+    const s = parseRow({});
+    expect(s?.sharpe_lift_span_days).toBeNull();
+    expect(s?.sharpe_lift_state).toBeNull();
+    expect(s?.sharpe_lift_failing_record).toBeNull();
+  });
+
+  it("leaves every existing field unchanged", () => {
+    const s = parseRow({ sharpe_lift_state: "short", sharpe_lift_span_days: 60 });
+    expect(s).toMatchObject({
+      strategy_id: "s-1",
+      strategy_name: "Candidate",
+      corr_with_portfolio: 0.2,
+      sharpe_lift: 0.3,
+      dd_improvement: 0.01,
+      score: 0.5,
+    });
+  });
+});

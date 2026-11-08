@@ -37,6 +37,12 @@ import type { DisclosureTier } from "@/lib/types";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { OWN_CAPITAL, isAllocatable } from "@/lib/capital-ownership";
+import {
+  gateAnnualized,
+  gatedValue,
+  type FigureRecord,
+  type FigureState,
+} from "@/lib/figure-gate";
 
 type PositionRow = MyAllocationDashboardPayload["strategies"][number];
 
@@ -80,7 +86,18 @@ export interface StrategyRow {
   allocation: number | null;
   /** Month-to-date return derived from daily_returns. Null when no data. */
   mtd: number | null;
+  /**
+   * 194 D-04 / D-15 (2026-11-07): the stored Sharpe AFTER the total-record gate. `null`
+   * when `sharpeState` is `"withheld"` (the record is under D-15's minimum), otherwise the
+   * stored value, unchanged. Never a substitute number.
+   */
   sharpe: number | null;
+  /** 194 D-15: the gate's verdict on `sharpe`: `"withheld"`, `"short"` (`<1y`), `"full"` or `"null"` (record undeterminable, value shown as stored). */
+  sharpeState: FigureState;
+  /** 194 D-15: the record's calendar span, for the `<1y` marker's title; null when unknown. */
+  sharpeSpanDays: number | null;
+  /** 194 D-15: the record the verdict was judged on, for the withheld cell's title. */
+  sharpeRecord: FigureRecord;
   maxDd: number | null;
   /**
    * Whole days since `added_at`, clamped to >= 0 (defensive vs clock skew).
@@ -139,6 +156,37 @@ export function computeMtd(rawDailyReturns: unknown): number | null {
   }
   const mtd = compound - 1;
   return Number.isFinite(mtd) ? mtd : null;
+}
+
+/**
+ * 194 D-04 / D-15 (2026-11-07): judge a strategy's stored Sharpe on its TOTAL record
+ * through `gateAnnualized`, the one verdict every surface uses. Both halves of the union
+ * call this with the three server-computed record scalars, so a positioned row and a
+ * marked-only row of one strategy cannot disagree. Pure: the record arrives as scalars
+ * (`figure_span_days`, `figure_observations`, `figure_crypto`) and no series, flag or
+ * metric blob is read here. Absent scalars (a legacy hand-built payload) mean an unknown
+ * record: state `"null"`, the stored Sharpe shown, no marker.
+ */
+function gatedSharpe(
+  stored: number | null | undefined,
+  scalars: {
+    figure_span_days?: number | null;
+    figure_observations?: number | null;
+    figure_crypto?: boolean;
+  },
+): Pick<StrategyRow, "sharpe" | "sharpeState" | "sharpeSpanDays" | "sharpeRecord"> {
+  const record: FigureRecord = {
+    spanDays: scalars.figure_span_days ?? null,
+    observations: scalars.figure_observations ?? null,
+    crypto: scalars.figure_crypto ?? false,
+  };
+  const state = gateAnnualized(record);
+  return {
+    sharpe: gatedValue(stored, state),
+    sharpeState: state,
+    sharpeSpanDays: record.spanDays,
+    sharpeRecord: record,
+  };
 }
 
 export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] {
@@ -202,7 +250,7 @@ export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] 
       weight: null, // derived in the post-pass below
       allocation: ps.allocated_amount,
       mtd: computeMtd(s.strategy_analytics?.daily_returns),
-      sharpe: s.strategy_analytics?.sharpe ?? null,
+      ...gatedSharpe(s.strategy_analytics?.sharpe, s),
       maxDd: s.strategy_analytics?.max_drawdown ?? null,
       age,
     });
@@ -247,7 +295,7 @@ export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] 
       // reads the dashboard payload's own embed, which is not this phase's to
       // change.
       mtd: s.mtd,
-      sharpe: s.strategy_analytics?.sharpe ?? null,
+      ...gatedSharpe(s.strategy_analytics?.sharpe, s),
       maxDd: s.strategy_analytics?.max_drawdown ?? null,
       age: null, // no added_at — NOT 0 ("added today" would be invented)
     });

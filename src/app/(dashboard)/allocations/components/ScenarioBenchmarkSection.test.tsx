@@ -4,6 +4,12 @@ import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import { btcClosesFromReturns } from "../lib/btc-closes.test-utils";
 import { computeAlphaBeta } from "@/lib/portfolio-stats";
 import { pairScenarioWithBtc } from "../lib/scenario-benchmark";
+import {
+  figureRecord,
+  coveredDays,
+  widenedShortNote,
+  widenedWithheldReason,
+} from "@/lib/figure-gate";
 
 /**
  * Plan 24-03 Task 1 — TDD RED pins for the extracted benchmark metrics section.
@@ -108,6 +114,20 @@ describe("ScenarioBenchmarkSection", () => {
     // Metrics path is NOT an empty state.
     expect(screen.queryByText(EMPTY_HEADING)).toBeNull();
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  // 194 R4 WR-01: the caption names the basis the values were annualised at, never a constant.
+  it("a crypto blend (periodsPerYear 365) reads '365-day annualized active returns', never 252", () => {
+    const dates = buildDates("2024-01-01", 40);
+    const { container } = render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={series(dates, (i) => (i % 2 === 0 ? 0.012 : -0.006))}
+        btc={btcClosesFromReturns(series(dates, (i) => (i % 3 === 0 ? 0.02 : -0.01)))}
+        periodsPerYear={365}
+      />,
+    );
+    expect(container.textContent).toContain("365-day annualized active returns");
+    expect(container.textContent).not.toContain("252-day");
   });
 
   it("renders the BELOW-FLOOR body (naming N) when overlap is 12 days", () => {
@@ -326,5 +346,140 @@ describe("ScenarioBenchmarkSection", () => {
     render(<ScenarioBenchmarkSection portfolioDaily={portfolioDaily} btc={btc} />);
     expect(screen.getByText(/vs BTC over 40 overlapping days/i)).toBeTruthy();
     expect(screen.getByTestId("benchmark-value-beta").textContent).toBe("0.50");
+  });
+});
+
+/**
+ * 194-17 (D-11 as superseded by D-15): Tracking Error, Information Ratio and Alpha
+ * are withheld only when the blend's TOTAL record fails D-15's minimum. The paired
+ * overlap only qualifies the note.
+ */
+describe("ScenarioBenchmarkSection D-15 gate on annualized active metrics", () => {
+  const NOTE = "scenario-benchmark-annualization-note";
+
+  /** n consecutive calendar days from startDate (a dense, 7-day series). */
+  function denseDates(startDate: string, n: number): string[] {
+    const out: string[] = [];
+    const d = new Date(`${startDate}T00:00:00Z`);
+    for (let i = 0; i < n; i += 1) {
+      out.push(d.toISOString().slice(0, 10));
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    return out;
+  }
+  const alt = (i: number) => (i % 2 === 0 ? 0.012 : -0.006);
+  const btcAlt = (i: number) => (i % 3 === 0 ? 0.02 : -0.01);
+
+  it("crypto blend, 60 returns over 59 days: TE, IR and Alpha print the dash, Beta its value, the note is the overlap withheld reason", () => {
+    const dates = denseDates("2024-01-01", 60);
+    const portfolioDaily = series(dates, alt);
+    const btc = btcClosesFromReturns(series(dates, btcAlt));
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={portfolioDaily}
+        btc={btc}
+        periodsPerYear={365}
+      />,
+    );
+    expect(pairScenarioWithBtc(portfolioDaily, btc).p).toHaveLength(60);
+    expect(screen.getByTestId("benchmark-value-tracking-error").textContent).toBe("—");
+    expect(screen.getByTestId("benchmark-value-information-ratio").textContent).toBe("—");
+    expect(screen.getByTestId("benchmark-value-alpha").textContent).toBe("—");
+    expect(screen.getByTestId("benchmark-value-beta").textContent).not.toBe("—");
+    const record = figureRecord({
+      seriesStart: dates[0],
+      seriesEnd: dates[59],
+      observations: 60,
+      periodsPerYear: 365,
+    });
+    expect(screen.getByTestId(NOTE).textContent).toBe(
+      widenedWithheldReason("overlap", record),
+    );
+  });
+
+  it("non-crypto blend, 60 returns over a short overlap: all four print values and the note is the short overlap note", () => {
+    // 60 weekdays; flat-filled BTC closes so every portfolio date pairs.
+    const dates = buildDates("2024-01-01", 60);
+    const portfolioDaily = series(dates, alt);
+    const btc = btcClosesFromReturns(series(dates, btcAlt), { flatFillGaps: true });
+    const paired = pairScenarioWithBtc(portfolioDaily, btc);
+    expect(paired.p).toHaveLength(60);
+    const span = coveredDays(paired.dates[0], paired.dates[59]);
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={portfolioDaily}
+        btc={btc}
+        periodsPerYear={252}
+      />,
+    );
+    for (const m of ["tracking-error", "information-ratio", "alpha", "beta"]) {
+      expect(screen.getByTestId(`benchmark-value-${m}`).textContent).not.toBe("—");
+    }
+    expect(screen.getByTestId(NOTE).textContent).toBe(
+      widenedShortNote("overlap", span),
+    );
+  });
+
+  it("crypto blend of 400 days paired over its last 100 days: values shown with the 100-day note (the record decides, the overlap only qualifies)", () => {
+    const dates = denseDates("2023-01-01", 400);
+    const portfolioDaily = series(dates, alt);
+    const tail = series(dates, btcAlt).slice(300);
+    const btc = btcClosesFromReturns(tail);
+    const paired = pairScenarioWithBtc(portfolioDaily, btc);
+    expect(paired.p).toHaveLength(100);
+    expect(coveredDays(paired.dates[0], paired.dates[99])).toBe(100);
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={portfolioDaily}
+        btc={btc}
+        periodsPerYear={365}
+      />,
+    );
+    for (const m of ["tracking-error", "information-ratio", "alpha"]) {
+      expect(screen.getByTestId(`benchmark-value-${m}`).textContent).not.toBe("—");
+    }
+    expect(screen.getByTestId(NOTE).textContent).toBe(widenedShortNote("overlap", 100));
+  });
+
+  it("400 paired dates: values shown, no note", () => {
+    const dates = denseDates("2023-01-01", 400);
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={series(dates, alt)}
+        btc={btcClosesFromReturns(series(dates, btcAlt))}
+        periodsPerYear={365}
+      />,
+    );
+    expect(screen.getByTestId("benchmark-value-alpha").textContent).not.toBe("—");
+    expect(screen.queryByTestId(NOTE)).toBeNull();
+  });
+
+  it("below the 30-day floor, no overlap, or no scenario returns: the empty states, no note", () => {
+    const dates = denseDates("2024-01-01", 12);
+    const { unmount } = render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={series(dates, alt)}
+        btc={btcClosesFromReturns(series(dates, btcAlt))}
+        periodsPerYear={365}
+      />,
+    );
+    expect(screen.getByText(EMPTY_HEADING)).toBeTruthy();
+    expect(screen.queryByTestId(NOTE)).toBeNull();
+    unmount();
+    const none = render(
+      <ScenarioBenchmarkSection portfolioDaily={[]} btc={null} periodsPerYear={365} />,
+    );
+    expect(screen.getByText(EMPTY_HEADING)).toBeTruthy();
+    expect(screen.queryByTestId(NOTE)).toBeNull();
+    none.unmount();
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={series(dates, alt)}
+        btc={null}
+        periodsPerYear={365}
+      />,
+    );
+    expect(screen.getByText(EMPTY_HEADING)).toBeTruthy();
+    expect(screen.queryByTestId(NOTE)).toBeNull();
   });
 });

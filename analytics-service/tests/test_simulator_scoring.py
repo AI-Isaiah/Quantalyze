@@ -471,3 +471,49 @@ class TestRedteamRegressions:
         )
         assert r_short["status"] == "insufficient_data"
         assert r_short["current_metrics_reliable"] is False
+
+
+class TestAnnualizationPeriods:
+    """194 D-15: the ok response names the risk clock both Sharpes ran at."""
+
+    def _run(self, asset_classes):
+        port = {"s1": _make_returns(1, n=200), "s2": _make_returns(2, n=200)}
+        return simulate_add_candidate(
+            portfolio_returns=port,
+            candidate_id="c1",
+            candidate_returns=_make_returns(10, n=200),
+            weights={"s1": 0.5, "s2": 0.5},
+            asset_classes=asset_classes,
+        )
+
+    def test_crypto_book_leg_gives_365(self):
+        r = self._run({"s1": "crypto", "s2": "traditional", "c1": "traditional"})
+        assert r["status"] == "ok"
+        assert r["annualization_periods"] == 365
+
+    def test_traditional_book_gives_252(self):
+        r = self._run({"s1": "traditional", "s2": "traditional", "c1": "traditional"})
+        assert r["annualization_periods"] == 252
+
+    def test_candidate_class_never_moves_the_basis(self):
+        """D-08: the book's clock, never the candidate's."""
+        r = self._run({"s1": "traditional", "s2": "traditional", "c1": "crypto"})
+        assert r["annualization_periods"] == 252
+
+    def test_legacy_call_without_classes_is_252(self):
+        assert self._run(None)["annualization_periods"] == 252
+
+    def test_non_ok_branches_do_not_carry_it(self):
+        port = {"s1": _make_returns(1, n=200)}
+        r_short = simulate_add_candidate(
+            portfolio_returns=port, candidate_id="c", candidate_returns=_make_returns(10, n=5),
+            weights={"s1": 1.0},
+        )
+        assert r_short["status"] == "insufficient_data"
+        assert "annualization_periods" not in r_short
+        r_dup = simulate_add_candidate(
+            portfolio_returns=port, candidate_id="s1", candidate_returns=_make_returns(10, n=200),
+            weights={"s1": 1.0},
+        )
+        assert r_dup["status"] == "already_in_portfolio"
+        assert "annualization_periods" not in r_dup
