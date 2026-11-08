@@ -13687,3 +13687,51 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Reading.** The stored engine (`analytics-service/services/metrics.py`) annualises CAGR on 365 days and Sharpe with ddof 1. The factsheet's narrowed-range engine (`compute.ts`) uses 365.25 and ddof 0, and Scenario (`scenario.ts`) uses 365.25 and ddof 1. At full history the stored overlay makes the factsheet's seven headline scalars agree with the stored values (D-01); a narrowed range and a blend are computed by their own engine and are labelled as different engines, not reconciled. The D-14 residual (A-194-D14-02) is the same family: the factsheet's 126- and 30-row rolling windows use the population standard deviation (ddof 0) while the 365-day window uses the producer's sample standard deviation (ddof 1). Aligning the constants is not decided by any D-0x.
 
 **Owner / Trigger:** unowned. Trigger: a reading that shows a narrowed-range or blend figure beside a stored figure for the same period and the gap is traced to the year length or ddof, or the next phase that edits `compute.ts` `years`, `sharpeRatio` or `scenario.ts` `calendarYears`. Closed when one year length and one ddof are chosen for every engine and a parity test pins them, or the founder rules the difference intended.
+
+### [194-HOLDINGS-UNREADABLE-FLAG] — the Holdings `figureRecordScalars` path does not carry the unreadable-record flag (booked 2026-11-08, Phase 194 close, DATA INTEGRITY)
+
+**Reading.** Every other Phase 194 reader passes the unreadable-record flag through `figureRecord`, so a record whose dates cannot be read is withheld with its reason. The Holdings path builds its scalars through `figureRecordScalars` without that flag, so an unreadable record there is read as an ordinary one.
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the Holdings path carries the flag and a test that neuters it goes red.
+
+### [194-MALFORMED-DATES-ABSENT] — the mark-to-market and smoothed date arrays, `shapedRecordScalars` and the SQL cohort twin read a malformed date as absent (booked 2026-11-08, Phase 194 review R6 WR-02 and WR-03, DATA INTEGRITY, user-facing)
+
+**Reading.** R5 WR-03 is closed on the cash date axis only: a malformed interior date on the mark-to-market or smoothed axis still shows annualised figures with no note on a zoom (R6 WR-02). Producers that normalise a malformed date to `null` before `figureRecord`, `shapedRecordScalars` among them, and the SQL cohort twin bypass the D-17 headline-start and series-start rule, so one strategy can be withheld on its factsheet and shown in the discovery list (R6 WR-03).
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when every date axis and the SQL twin treat a malformed date as unreadable, not absent, and a parity test pins the factsheet and list verdicts together.
+
+### [194-SCENARIO-INTERIOR-DATES] — `scenario-factsheet-payload` does not check interior dates (booked 2026-11-08, Phase 194 close)
+
+**Reading.** The Scenario factsheet payload checks the record's first and last dates but not the interior ones, so a malformed interior date passes as a readable record.
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the payload applies the interior-date check the cash axis uses.
+
+### [194-PERCENTILE-SENTRY-DEDUP] — `percentileRecord` Sentry reports are not deduplicated (booked 2026-11-08, Phase 194 close)
+
+**Reading.** Each render that reaches an unreadable record in `percentileRecord` sends its own Sentry report, so one bad record produces a report per render rather than one per record.
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the report is sent once per record (or fingerprinted so Sentry groups it) and a test pins the count.
+
+### [194-WIZARD-HARD04-RAW-GAP] — the wizard's HARD-04 `insufficient_window` caveat still uses the raw gap (booked 2026-11-08, Phase 194 close, user-facing)
+
+**Reading.** The wizard decides the HARD-04 `insufficient_window` caveat on the raw calendar gap between the first and last dates, not on the D-15 rule (60 observations or 90 days crypto) every Phase 194 page now applies, so the wizard and the pages can disagree on whether a record is long enough.
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the wizard reads the same gate as the pages.
+
+### [194-ZOOM-BENCHMARK-COVERAGE] — a zoomed range whose benchmark covers less than the window has no note (booked 2026-11-08, Phase 194 close, user-facing)
+
+**Reading.** On a narrowed factsheet range, a benchmark series that starts after the window start (or ends before its end) is compared over the shorter overlap with no note saying so.
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the zoomed view names the benchmark's covered span whenever it is shorter than the window.
+
+### [194-OG-CARD-DIVERGENCE] — the OG share card prints stored CAGR, Sharpe and volatility with no D-15 gate (booked 2026-11-08, Phase 194 VERIFICATION deferral, census B3)
+
+**Reading.** `src/app/api/og/factsheet/[id]/route.tsx` imports no figure gate, so the share card prints figures the factsheet withholds; `route.stored-parity.test.tsx` pins it as a KNOWN DIVERGENCE (B3, Phase 194.1).
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP), census row B3. Closed when the card applies the gate and the known-divergence case is removed.
+
+### [194-BASELINE-REDUMP-COHORT-RANK] — main CI's `sql-gate-lint` reports stale-baseline drift for `get_verified_cohort_rank` (booked 2026-11-08, Phase 194 close, CI)
+
+**Reading.** Phase 194's migration `20261107140000_get_verified_cohort_rank_span_gate.sql` changed `get_verified_cohort_rank`, and `supabase/schema/baseline.sql` still carries the pre-migration body, so `sql-gate-lint`'s baseline-content check reads DRIFT on main. Repo rules count that drift as green for merging, but it leaves main's head SHA with a red check, which very likely made Railway skip the `quantalyze-analytics` deploy of the Phase 194 merge (the founder redeployed it by hand on 2026-11-08). Every later merge carries the same red until the baseline is re-dumped.
+
+**Owner / Trigger:** Phase 194.1 (D04SWEEP), before its ship, unless a CI-only phase takes it first. Closed when the baseline is re-dumped with `baseline-carried-migrations.txt` regenerated in the same commit (`supabase/schema/BASELINE.md`, `## Regenerating`) and main's `sql-gate-lint` reads no DRIFT row.
