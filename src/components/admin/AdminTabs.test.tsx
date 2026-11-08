@@ -439,3 +439,131 @@ describe("AdminTabs — labels, not stored values (170.1.2-08)", () => {
     expect(screen.getAllByRole("button", { name: "Intro made" })).toHaveLength(2);
   });
 });
+
+/**
+ * Phase 194.1 B12a (194 D-12 / D-15) - the review card judges CAGR and Sharpe on THAT
+ * strategy's total record. Titles are typed by hand, not built from the gate's own
+ * helpers, so a reworded sentence in `figure-gate.ts` fails here instead of agreeing
+ * with itself. Dates come from `endAfter` (start plus `days - 1`, D-20).
+ *
+ * Neuter to redden: render the Sharpe cell as the bare `formatNumber(analytics?.sharpe)`
+ * in `StrategyReviewTab` (dropping `annualizedCell` too: that cell prints `—` for a
+ * withheld state whatever text it is handed, so removing `gatedValue` alone stays green);
+ * the 40-day case then finds `2.10` and no withheld title.
+ */
+describe("AdminTabs - Strategy Review cards withhold by the strategy's total record (194.1 B12a)", () => {
+  const START = "2025-01-01";
+
+  function endAfter(days: number): string {
+    const d = new Date(`${START}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + days - 1);
+    return d.toISOString().slice(0, 10);
+  }
+
+  async function renderCard(
+    assetClass: string | null | undefined,
+    aliases: Record<string, unknown>,
+  ) {
+    const user = userEvent.setup();
+    const { container } = render(
+      <AdminTabs
+        introRequests={[]}
+        pendingStrategies={[
+          {
+            ...STRAT,
+            asset_class: assetClass,
+            strategy_analytics: [
+              {
+                cagr: 0.5,
+                sharpe: 2.1,
+                max_drawdown: -0.1,
+                computation_status: "complete",
+                computed_at: new Date().toISOString(),
+                ...aliases,
+              },
+            ],
+          },
+        ]}
+        pendingAllocators={[]}
+        pendingManagers={[]}
+      />,
+    );
+    await user.click(screen.getByRole("tab", { name: /Strategy Review/ }));
+    return container;
+  }
+
+  /** The value `<p>` that follows the label `<p>` of one metric cell. */
+  function cell(label: string): HTMLElement {
+    const labelEl = screen.getByText(label, { selector: "p" });
+    return labelEl.nextElementSibling as HTMLElement;
+  }
+
+  function aliasesFor(days: number, observations: number | null = days) {
+    return {
+      series_start: START,
+      series_end: endAfter(days),
+      headline_since: null,
+      record_observations: observations,
+    };
+  }
+
+  it("a 40-day crypto record withholds CAGR and Sharpe and still prints Max DD", async () => {
+    await renderCard("crypto", aliasesFor(40));
+    for (const label of ["CAGR", "Sharpe"]) {
+      const c = cell(label);
+      expect(c.textContent).toContain("—");
+      expect(c.textContent).not.toContain("50.0");
+      expect(c.textContent).not.toContain("2.10");
+      expect(
+        c.querySelector(
+          '[title="Withheld until the record reaches 90 days (40 days so far)."]',
+        ),
+      ).not.toBeNull();
+    }
+    expect(cell("Max DD").textContent).toContain("-10.0");
+  });
+
+  it("a 200-day record prints the figures with the <1y marker and its reason", async () => {
+    await renderCard("crypto", aliasesFor(200));
+    for (const [label, figure] of [
+      ["CAGR", "50.0"],
+      ["Sharpe", "2.10"],
+    ] as const) {
+      const c = cell(label);
+      expect(c.textContent).toContain(figure);
+      expect(c.textContent).toContain("<1y");
+      expect(
+        c.querySelector('[title="Annualized from 200 days of record, under one year."]'),
+      ).not.toBeNull();
+    }
+  });
+
+  it("a 400-day record reads exactly as today", async () => {
+    await renderCard("crypto", aliasesFor(400));
+    expect(cell("CAGR").textContent).toBe("+50.0%");
+    expect(cell("Sharpe").textContent).toBe("2.10");
+  });
+
+  it("a row with no aliases at all reads exactly as today (unknown record, never withheld)", async () => {
+    await renderCard("crypto", {});
+    expect(cell("CAGR").textContent).toBe("+50.0%");
+    expect(cell("Sharpe").textContent).toBe("2.10");
+  });
+
+  it("a traditional record with 59 observations is withheld on the 60-trading-day basis", async () => {
+    await renderCard("traditional", aliasesFor(120, 59));
+    const c = cell("Sharpe");
+    expect(c.textContent).toContain("—");
+    expect(
+      c.querySelector(
+        '[title="Withheld until the record reaches 60 trading days (59 so far)."]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it("withholding does not make a computed row read as never computed", async () => {
+    await renderCard("crypto", aliasesFor(40));
+    // computeRecency reads the RAW stored figures: a withheld Sharpe must not blank it.
+    expect(screen.getByText(/^by Quant Bob/).textContent).toMatch(/Computed/);
+  });
+});

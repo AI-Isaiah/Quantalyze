@@ -364,6 +364,15 @@ const BridgeCandidateSchema = z.object({
   corr_delta: z.number().nullable(),
   composite_score: z.number(),
   fit_label: BridgeFitLabelSchema,
+  // 194.1 D-11 / D-15 (2026-11-08): the producer's verdict on the two records the Sharpe delta
+  // compares. A known field that fails to parse throws the WHOLE Bridge response (see the header
+  // above), so these three are typed PERMISSIVELY and no wire value of them (absent, null, a bogus
+  // string, a number, a malformed record) can 500 the call, in either deploy order. The closed-set
+  // read happens on the client, as the optimizer adapter reads `sharpe_lift_state`:
+  // `parseLiftState` for the state and `parseWireFigureRecord` for the failing record.
+  sharpe_delta_span_days: z.unknown().optional(),
+  sharpe_delta_state: z.unknown().optional(),
+  sharpe_delta_failing_record: z.unknown().optional(),
 });
 
 export const BridgeResponseSchema = z.object({

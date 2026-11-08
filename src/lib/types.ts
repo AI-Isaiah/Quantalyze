@@ -1733,6 +1733,16 @@ export interface BridgeCandidate {
   corr_delta: number | null;
   composite_score: number;
   fit_label: BridgeFitLabel;
+  /**
+   * 194.1 D-11 / D-15 (2026-11-08): the producer's verdict on the records `sharpe_delta` compares.
+   * Absent = a response from an analytics deploy older than this change, read as unknown (the
+   * delta shows as before). Typed `unknown` because the schema is permissive (a malformed value
+   * must not fail the Bridge parse); ReplacementCard narrows them with `parseLiftState` and
+   * `parseWireFigureRecord`.
+   */
+  sharpe_delta_span_days?: unknown;
+  sharpe_delta_state?: unknown;
+  sharpe_delta_failing_record?: unknown;
 }
 
 /**

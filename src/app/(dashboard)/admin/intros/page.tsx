@@ -8,6 +8,8 @@ import { scrubPii } from "@/lib/admin/pii-scrub";
 import { formatNumber, formatPercent } from "@/lib/utils";
 import { introSnapshotStatusLabel, introSourceLabel } from "@/lib/display-labels";
 import { PortfolioSnapshotSchema, type PortfolioSnapshotJSON } from "@/lib/intro/snapshot";
+import { gateAnnualized, gatedValue, type FigureRecord } from "@/lib/figure-gate";
+import { annualizedCell } from "@/components/strategy/annualized-cell";
 
 export const metadata: Metadata = {
   title: "Intro requests",
@@ -47,6 +49,30 @@ type StrategyRef = { id: string; name: string };
 
 type SnapshotStrategy = PortfolioSnapshotJSON["top_3_strategies"][number];
 
+// Phase 194.1 B12c (194 D-12 / D-15, 2026-11-08) - a frozen Sharpe is judged on the record
+// frozen beside it. A snapshot frozen before this phase carries none: that is an UNKNOWN
+// record (state "null", the figure as stored), never a verdict and never an invented one.
+const UNKNOWN_RECORD: FigureRecord = { spanDays: null, observations: null, crypto: false };
+
+type SnapshotRecordJSON = NonNullable<PortfolioSnapshotJSON["sharpe_record"]>;
+
+function figureFromSnapshot(r: SnapshotRecordJSON | null | undefined): FigureRecord | null {
+  if (!r) return null;
+  return {
+    spanDays: r.span_days,
+    observations: r.observations,
+    crypto: r.crypto,
+    ...(r.unreadable ? { unreadable: true as const } : {}),
+  };
+}
+
+/** One frozen Sharpe as a cell: withheld prints `—` with its reason, short adds `<1y`. */
+function sharpeCell(sharpe: number | null, snapRecord: SnapshotRecordJSON | null | undefined) {
+  const rec = figureFromSnapshot(snapRecord);
+  const state = rec ? gateAnnualized(rec) : "null";
+  return annualizedCell(formatNumber(gatedValue(sharpe, state)), state, rec ?? UNKNOWN_RECORD);
+}
+
 function SnapshotMiniTable({ title, rows }: { title: string; rows: SnapshotStrategy[] }) {
   if (rows.length === 0) {
     return (
@@ -65,7 +91,7 @@ function SnapshotMiniTable({ title, rows }: { title: string; rows: SnapshotStrat
             <tr key={r.strategy_id}>
               <td className="pr-3 text-text-primary">{r.strategy_name}</td>
               <td className="font-metric tabular-nums text-text-secondary">
-                {formatNumber(r.sharpe)}
+                {sharpeCell(r.sharpe, r.sharpe_record)}
               </td>
             </tr>
           ))}
@@ -225,7 +251,7 @@ export default async function AdminIntrosPage() {
                           {introSnapshotStatusLabel(snapshotStatus)}
                         </div>
                         <div className="text-text-primary font-metric tabular-nums">
-                          Sharpe {formatNumber(sharpe)}
+                          Sharpe {sharpeCell(sharpe, snap?.sharpe_record)}
                         </div>
                         <div className="text-text-secondary font-metric tabular-nums">
                           MDD {formatPercent(mdd, 1, { signed: false })}

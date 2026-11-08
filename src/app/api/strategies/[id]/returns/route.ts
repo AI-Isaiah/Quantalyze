@@ -74,6 +74,7 @@ import {
   type SeriesState,
 } from "@/lib/closed-sets";
 import { readPublicVerificationSignals, shouldCaptureDerivedRowRejection } from "@/lib/queries";
+import { RECORD_SCALAR_ALIASES, recordFromScalars } from "@/lib/figure-record-scalars";
 
 // AGENTS.md: default to the Node.js runtime explicitly. The route touches the
 // supabase server client; Edge runtime would skip the Node-only paths the
@@ -158,6 +159,34 @@ export interface ReturnsResponse {
    * same `isRankableAnalyticsRow` gate, same never-zero rule as `cagr` above.
    */
   sharpe: number | null;
+  /**
+   * 194.1 plan 09 (B8, D-15, 2026-11-08) — the covered span of THIS strategy's total record in
+   * days, the first of the three record scalars the composer's detail row judges `cagr` and
+   * `sharpe` on. Same name and meaning as `figure_span_days` on `getMyAllocationDashboard`'s book
+   * payload. `null` when the run is not rankable (the SAME `isRankableAnalyticsRow` decision that
+   * withholds `cagr` / `sharpe`), and on a stale build.
+   */
+  figure_span_days: number | null;
+  /**
+   * 194.1 plan 09 (B8, D-15) — the stored observation count behind the record (the non-crypto
+   * 60-trading-day bar). `null` when absent or the run is not rankable. Same name and meaning as
+   * the book payload's `figure_observations`.
+   */
+  figure_observations: number | null;
+  /**
+   * 194.1 plan 09 (B8, D-15) — whether the record annualises on a 365-day calendar (crypto). `false`
+   * when the run is not rankable. Same name and meaning as the book payload's `figure_crypto`.
+   */
+  figure_crypto: boolean;
+  /**
+   * 194.1 round 2 (R2 WR-01, D-15/D-17) — `true` only when the run is rankable AND the record's
+   * `series_start` / `series_end` / `headline_since` is present but not a date. The composer reads
+   * it as an `unreadable` record, so `cagr` and `sharpe` (served as stored) are WITHHELD with the
+   * unreadable-dates reason instead of being nulled here, which the panel would misread as "no
+   * computed metrics". `false` on a readable record, a non-rankable run and a stale build (absent
+   * reads as unknown).
+   */
+  figure_unreadable: boolean;
   /**
    * Phase 164.6.6.2 (D-18, D-22, D-23) — the unit this strategy's OWN
    * `daily_returns` are recorded in: `"BTC"` for a BTC-native account, `null` for
@@ -332,7 +361,7 @@ export async function GET(
       const { data, error } = await supabase
         .from("strategy_analytics")
         .select(
-          "daily_returns, returns_series, computation_status, data_quality_flags, cagr, sharpe",
+          `daily_returns, returns_series, computation_status, data_quality_flags, cagr, sharpe, ${RECORD_SCALAR_ALIASES}`,
         )
         .eq("strategy_id", id)
         .maybeSingle();
@@ -379,6 +408,10 @@ export async function GET(
         computation_status?: unknown;
         cagr?: unknown;
         sharpe?: unknown;
+        series_start?: unknown;
+        series_end?: unknown;
+        headline_since?: unknown;
+        record_observations?: unknown;
       } | null;
       const status =
         typeof analyticsRow?.computation_status === "string"
@@ -480,6 +513,27 @@ export async function GET(
       const asset_class =
         (strat as { asset_class?: string | null }).asset_class ?? null;
 
+      // 194.1 plan 09 (B8, D-15) — this strategy's own record, served as the three scalars the
+      // book payload already ships, under the SAME rankable decision as `cagr` / `sharpe` so a dead
+      // run's record never reads as current. The three scalars cannot carry the record's
+      // `unreadable` flag (the same limit the book payload has), and a null span reads as UNKNOWN
+      // at the consumer, which shows the stored figure. So the flag travels as one extra wire field,
+      // `figure_unreadable` (R2 WR-01): the values still reach the consumer and its gate withholds
+      // them, rather than the route nulling them and the panel claiming "no computed metrics". It is
+      // reported once at the producer, never from a render path.
+      const record = recordFromScalars(analyticsRow, asset_class);
+      const figureUnreadable = analyticsRankable && !!record.unreadable;
+      if (figureUnreadable) {
+        captureToSentry(new Error("strategy record unreadable"), {
+          tags: {
+            route: "api/strategies/returns",
+            reason: "figure-record-unreadable",
+            strategy_id: id,
+          },
+          level: "warning",
+        });
+      }
+
       // Phase 126-04 — the PUBLIC trust_tier signal via the correct-by-
       // construction DB primitive (get_published_trust_signals, migration 135):
       // published-gated + column-scoped (trust_tier+status only) + readable by a
@@ -556,6 +610,10 @@ export async function GET(
         series_state,
         cagr,
         sharpe,
+        figure_span_days: analyticsRankable ? record.spanDays : null,
+        figure_observations: analyticsRankable ? record.observations : null,
+        figure_crypto: analyticsRankable ? record.crypto : false,
+        figure_unreadable: figureUnreadable,
         returns_unit,
         daily_returns_usd,
         native_unpriced,

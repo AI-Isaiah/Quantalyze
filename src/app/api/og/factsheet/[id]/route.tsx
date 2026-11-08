@@ -6,6 +6,10 @@ import { withPublishedOnly } from "@/lib/visibility";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 import { shortenOgDescription } from "@/lib/factsheet/og-description";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+// Phase 194.1 plan 06 (census B3; 194 D-04 as superseded by D-15, D-13, 2026-11-08): the card is
+// gated on the strategy's TOTAL record, built from the four alias scalars the embed carries.
+import { gateAnnualized, shortTrackMarkerTitle, withheldReason } from "@/lib/figure-gate";
+import { RECORD_SCALAR_ALIASES, recordFromScalars } from "@/lib/figure-record-scalars";
 // Phase 147 / SCEN-01 — the LEAF import. `resolveDailyReturnSeries` lives in
 // its own module precisely so this route (and the public share page) can share
 // the ONE series-resolution mechanism without dragging in the factsheet
@@ -78,6 +82,21 @@ type AnalyticsEmbed = {
   volatility?: unknown;
   sortino?: unknown;
   calmar?: unknown;
+  // 194.1 B3: the four record scalar aliases (`RECORD_SCALAR_ALIASES`), as PostgREST answers them.
+  series_start?: unknown;
+  series_end?: unknown;
+  headline_since?: unknown;
+  record_observations?: unknown;
+};
+
+/** The `strategies` row this card reads, as the select below answers it. */
+type OgStrategyRow = {
+  id?: string;
+  name?: string | null;
+  codename?: string | null;
+  description?: string | null;
+  asset_class?: string | null;
+  strategy_analytics?: AnalyticsEmbed | AnalyticsEmbed[] | null;
 };
 
 export async function GET(
@@ -85,14 +104,7 @@ export async function GET(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  let data: {
-    id?: string;
-    name?: string | null;
-    codename?: string | null;
-    description?: string | null;
-    asset_class?: string | null;
-    strategy_analytics?: AnalyticsEmbed | AnalyticsEmbed[] | null;
-  } | null = null;
+  let data: OgStrategyRow | null = null;
   // SFH-02: set on any failure path, so the card is sent no-store (see below).
   let failed = false;
   try {
@@ -130,7 +142,15 @@ export async function GET(
           // and withhold a chain-broken row the page withholds. Same published-
           // gated read of the same row; the columns are already public on the
           // factsheet page and never leave the server (this response is a PNG).
-          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, metrics_json_by_basis )",
+          // Phase 194.1 plan 06 (B3, D-15): the four record scalar aliases join the embed (the
+          // factsheet's own `RECORD_SCALAR_ALIASES`; `returns_series` and `metrics_json` are
+          // never projected whole by them), so the card judges the strategy's TOTAL record, not
+          // the resolved series, which is capped. The concatenation types the select `string`:
+          // postgrest-js cannot parse the `->-1` index of the `series_end` alias at the type
+          // level, so a literal would type every row as a `ParserError`; the row is cast below.
+          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, metrics_json_by_basis, " +
+            RECORD_SCALAR_ALIASES +
+            " )",
         )
         .eq("id", id),
     )
@@ -143,7 +163,7 @@ export async function GET(
       failed = true;
       reportOgFailure("read", id, res.error);
     }
-    data = res.data ?? null;
+    data = (res.data ?? null) as unknown as OgStrategyRow | null;
   } catch (err) {
     // OG image still renders with the fallback.
     // (deliberately doesn't throw — broken OG image must not 500 the deploy)
@@ -164,6 +184,9 @@ export async function GET(
   let sharpe = NaN;
   let cagr = NaN;
   let maxDd = NaN;
+  // Phase 194.1 plan 06 (B3, D-15 / D-13): the ONE muted line under the stat row. Declared
+  // beside the NaN sentinels so a throw below leaves it null, and the card still renders.
+  let figureNote: string | null = null;
   // Phase 164.6.6.2 plan 07 (D-12, T-164.6.6.2-22): the unit this card's CAGR is
   // in. It comes from the row's own `data_quality_flags.native_unit`, through the
   // one validator, and from NOTHING the caller sent: the page links the card as
@@ -233,6 +256,22 @@ export async function GET(
       // ABSENT from it (the page's `missing_keys` gate reads presence), not
       // undefined-valued as a picked literal would make it.
       ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, analytics));
+      // Phase 194.1 plan 06 (B3; 194 D-04 as superseded by D-15, D-13, 2026-11-08): the verdict is
+      // the strategy's TOTAL record, from the stored alias scalars and never `rows.length` (the
+      // resolved series is capped), exactly as the factsheet strip reads it. Withheld: Sharpe and
+      // CAGR take the card's own dash (NaN), Max DD is untouched, and the line gives the reason.
+      // Cleared but under one year: every KPI prints and the line is the marker sentence, which
+      // names no figure the card does not show (so it is drawn only while Sharpe or CAGR prints).
+      // A full or unknown record draws no line. This is inside the try: a failure here cannot 500.
+      const record = recordFromScalars(analytics, data?.asset_class);
+      const state = gateAnnualized(record);
+      if (state === "withheld") {
+        sharpe = NaN;
+        cagr = NaN;
+        figureNote = withheldReason("record", record);
+      } else if (state === "short" && record.spanDays != null && (Number.isFinite(sharpe) || Number.isFinite(cagr))) {
+        figureNote = shortTrackMarkerTitle(record.spanDays);
+      }
     }
   } catch (err) {
     failed = true;
@@ -285,6 +324,9 @@ export async function GET(
             tone={maxDdTone === "negative" ? "neg" : undefined}
           />
         </div>
+        {figureNote && (
+          <div style={{ marginTop: 24, fontSize: 20, color: "#64748B" }}>{figureNote}</div>
+        )}
         <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ fontSize: 18, color: "#64748B" }}>quantalyze.xyz</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#1B6B5A", fontSize: 18, letterSpacing: 2 }}>

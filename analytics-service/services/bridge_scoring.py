@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from collections.abc import Mapping
 from typing import Any, Optional
-from services.metrics import _safe_float
+from services.metrics import _safe_float, blend_gate_crypto, sharpe_lift_gate
 from services.portfolio_optimizer import (
     _compute_sharpe,
     _avg_corr,
@@ -47,7 +47,8 @@ def find_replacement_candidates(
 
     Returns top 5 candidates sorted by composite_score, each with:
       strategy_id, sharpe_delta, dd_delta, corr_delta,
-      composite_score, fit_label
+      composite_score, fit_label, plus the D-15 verdict of the Sharpe delta
+      (sharpe_delta_span_days, sharpe_delta_state, sharpe_delta_failing_record)
 
     NOTE: strategy_name is NOT included in the raw output. The router
     (portfolio.py) hydrates it from the strategies table before returning
@@ -112,6 +113,9 @@ def find_replacement_candidates(
     # asset_class never changes it, so identical candidates score equally whatever
     # their label.
     book_ppy = blend_clock(asset_classes, list(port_df.columns))
+    # 194.1 D-11 / D-15: the book's D-15 crypto flag (unknown class counts as crypto),
+    # for the Sharpe-delta verdict below.
+    book_gate_crypto = blend_gate_crypto((asset_classes or {}).get(sid) for sid in port_df.columns)
     results: list[dict[str, Any]] = []
     for cid, c_returns in candidate_returns.items():
         if cid in portfolio_sids:
@@ -192,6 +196,17 @@ def find_replacement_candidates(
         )
         fit_label = _fit_label(composite)
 
+        # 194.1 D-11 / D-15 (the 194-22 shape): the span the delta is measured over and the
+        # verdict of the two records it compares. A display rule only: the stored
+        # `sharpe_delta`, the composite and the ordering are untouched.
+        delta_span, delta_state, delta_failing = sharpe_lift_gate(
+            c_returns.dropna().index,
+            port_df.index,
+            all_returns.index,
+            blend_gate_crypto([(asset_classes or {}).get(cid)]),
+            book_gate_crypto,
+        )
+
         results.append({
             "strategy_id": cid,
             "sharpe_delta": _safe_float(sharpe_delta),
@@ -199,6 +214,9 @@ def find_replacement_candidates(
             "corr_delta": _safe_float(corr_delta),
             "composite_score": _safe_float(composite),
             "fit_label": fit_label,
+            "sharpe_delta_span_days": delta_span,
+            "sharpe_delta_state": delta_state,
+            "sharpe_delta_failing_record": delta_failing,
         })
 
     return sorted(results, key=lambda x: x["composite_score"], reverse=True)[:5]

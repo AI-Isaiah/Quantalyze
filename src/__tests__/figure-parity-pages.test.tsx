@@ -30,6 +30,13 @@
  * observation count, non-crypto, 60 weekday returns inside 90 days) is withheld on every
  * page that shows its annualised figures, through the one interim rule. The case goes RED
  * if any page counts its own returns in place of the missing stored count.
+ *
+ * 194.1 plan 13 (2026-11-08): two readers join. `recordFromScalars` is the shared constructor
+ * behind the 194.1 sites that read the four record scalars (the wizard, the admin queue, the
+ * recommendations and intro pages, the replacement card), and `CandidateDetail` is the rendered
+ * admin match-queue surface (census row B12b). Both are fed the SAME interim and CR-01 fixture
+ * constants the cases below already use, never a second fixture, and must reach the verdict the
+ * factsheet, Holdings, StrategyTable and tearsheet reach on them (194 D-15, D-20).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { cleanup, render } from "@testing-library/react";
@@ -159,6 +166,9 @@ import { formatNumber, formatPercent } from "@/lib/utils";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import TearSheetPage from "@/app/factsheet/[id]/tearsheet/page";
 import { toStrategyRows } from "@/app/(dashboard)/allocations/lib/strategies-row-adapter";
+import { recordFromScalars, type RecordScalarRow } from "@/lib/figure-record-scalars";
+import { CandidateDetail } from "@/components/admin/CandidateDetail";
+import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 import { createClient } from "@/lib/supabase/server";
 import { getFactsheetDetail } from "@/lib/queries";
 import { getUserRolesResult } from "@/lib/auth";
@@ -491,6 +501,78 @@ function holdingsRow(
   return row;
 }
 
+/**
+ * 194.1: the four record scalars a `strategy_analytics` row yields for the aliases in
+ * `RECORD_SCALAR_ALIASES`, derived from the fixture's own series and stored `metrics_json`, so
+ * the constructor and the admin surface judge exactly the record the other readers judge.
+ */
+function recordScalars(analytics: Row, series: { date: string }[]): RecordScalarRow {
+  return {
+    series_start: series[0].date,
+    series_end: series[series.length - 1].date,
+    headline_since: null,
+    record_observations: (analytics.metrics_json as Row).record_observations,
+  };
+}
+
+/** CandidateDetail (admin match queue, B12b) rendered on the fixture's scalars and stored Sharpe. */
+function renderCandidateDetail(assetClass: "crypto" | "traditional", analytics: Row, series: { date: string }[]) {
+  const candidate = {
+    id: "cand-1",
+    strategy_id: STRATEGY_ID,
+    score: 70,
+    score_breakdown: {},
+    reasons: [],
+    rank: 1,
+    exclusion_reason: null,
+    exclusion_provenance: null,
+    strategies: {
+      id: STRATEGY_ID,
+      name: "Parity Fixture",
+      codename: null,
+      disclosure_tier: "exploratory",
+      strategy_types: [],
+      supported_exchanges: [],
+      aum: null,
+      max_capacity: null,
+      user_id: "u-1",
+      asset_class: assetClass,
+    },
+    analytics: {
+      sharpe: analytics.sharpe,
+      sortino: analytics.sortino,
+      max_drawdown: analytics.max_drawdown,
+      cagr: analytics.cagr,
+      volatility: analytics.volatility,
+      six_month_return: analytics.six_month_return,
+      cumulative_return: analytics.cumulative_return,
+      sparkline_returns: null,
+      ...recordScalars(analytics, series),
+    },
+  } as unknown as CandidateRow;
+  return render(
+    <CandidateDetail
+      candidate={candidate}
+      alreadySent={false}
+      isKept={false}
+      isSkipped={false}
+      isReadOnly
+      onSendIntro={() => {}}
+      onKeep={() => {}}
+      onSkip={() => {}}
+    />,
+  );
+}
+
+/** The text of the CandidateDetail metric labelled `label` (a label `<p>` and its next-sibling value `<p>`). */
+function candidateMetric(container: HTMLElement, label: string): string {
+  const hit = Array.from(container.querySelectorAll("p")).find(
+    (p) => p.textContent === label && p.nextElementSibling?.tagName === "P",
+  );
+  if (!hit) throw new Error(`CandidateDetail has no metric labelled ${label}`);
+  return hit.nextElementSibling!.textContent ?? "";
+}
+
 beforeEach(() => {
   cleanup();
   fake.strategyRow = null;
@@ -651,6 +733,21 @@ describe("D-15 interim parity: an unmarked non-crypto row of 60 weekday returns 
     const { container } = await renderTearsheet("traditional", unmarkedAnalytics(), UNMARKED_SERIES, null);
     expect(tearsheetValue(container, "Sharpe")).toBe("—");
   });
+
+  it("194.1 recordFromScalars: the four alias scalars carry no count and the gate withholds", () => {
+    const record = recordFromScalars(recordScalars(unmarkedAnalytics(), UNMARKED_SERIES), "traditional");
+    expect(record.observations).toBeNull();
+    expect(record.crypto).toBe(false);
+    expect(record.spanDays).toBe(spanOfSeries(UNMARKED_SERIES));
+    expect(gateAnnualized(record)).toBe("withheld");
+  });
+
+  it("194.1 CandidateDetail (B12b): the Sharpe prints the dash, as the factsheet verdict says", () => {
+    const { container } = renderCandidateDetail("traditional", unmarkedAnalytics(), UNMARKED_SERIES);
+    const cell = candidateMetric(container, "Sharpe");
+    expect(cell.startsWith("—")).toBe(true);
+    expect(cell).not.toContain(STORED.sharpe.toFixed(2));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -707,6 +804,17 @@ describe("CR-01 parity: a non-crypto record of 62 observations over under 90 day
     cleanup();
     const { container } = await renderTearsheet("traditional", analytics, SHORT_COUNTED_SERIES, SHORT_COUNTED_OBSERVATIONS);
     expect(tearsheetValue(container, "Sharpe")).toBe(formatNumber(STORED.sharpe));
+  });
+
+  it("194.1 recordFromScalars and CandidateDetail (B12b) reach the same verdict: the Sharpe shows", () => {
+    const analytics = shortCountedAnalytics();
+    const record = recordFromScalars(recordScalars(analytics, SHORT_COUNTED_SERIES), "traditional");
+    expect(record.observations).toBe(SHORT_COUNTED_OBSERVATIONS);
+    expect(gateAnnualized(record)).not.toBe("withheld");
+    const { container } = renderCandidateDetail("traditional", analytics, SHORT_COUNTED_SERIES);
+    // The admin surface formats with its own two-decimal formatter, then appends the <1y marker.
+    expect(candidateMetric(container, "Sharpe")).toContain(STORED.sharpe.toFixed(2));
+    expect(candidateMetric(container, "Sharpe").startsWith("—")).toBe(false);
   });
 });
 

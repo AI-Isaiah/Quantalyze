@@ -79,6 +79,7 @@ from services.match_engine import (
 from services.match_eval import (
     compute_hit_rate_metrics,
 )
+from services.metrics import RECORD_SCALAR_ALIASES, figure_record_from_scalars
 from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 from services.rate_limit import limiter, tenant_or_platform_key
 from services.wealth_returns import daily_returns_from_row, records_to_series
@@ -460,9 +461,12 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # CURVE, so the candidate's daily returns come from `daily_returns`
             # when stored and are otherwise derived from the curve, never read
             # as returns.
+            # 194.1 (B5): the four record scalar aliases are scalars (one is a single
+            # `metrics_json` key path, never the column), read so the Sharpe reason follows the
+            # recommendation card's record.
             .select(
                 "strategy_id, returns_series, daily_returns, sharpe, max_drawdown, "
-                "data_quality_flags"
+                f"data_quality_flags, {RECORD_SCALAR_ALIASES}"
             )
             .in_("strategy_id", _chunk)
         ),
@@ -564,6 +568,17 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # 194 D-15 (round 2 WR-02): the candidate's own class, so its Sharpe-lift reason is
             # gated on its real bound. Absent reads as unknown, which counts as crypto.
             "asset_class": strategy.get("asset_class"),
+            # 194.1 (B5): the record the recommendation card gates this same Sharpe on. Crypto is
+            # read as TS `annualizationPeriods` reads ONE strategy (unknown is not crypto here,
+            # unlike the lift gate's blend rule above). A strategy with no analytics row gets an
+            # all-absent record (unknown), which keeps the Sharpe sentence.
+            "sharpe_record": figure_record_from_scalars(
+                analytics.get("series_start"),
+                analytics.get("series_end"),
+                analytics.get("headline_since"),
+                analytics.get("record_observations"),
+                strategy.get("asset_class") == "crypto",
+            ),
         }
 
         daily_returns = daily_returns_from_row(analytics, name=sid, keep_absent=True)

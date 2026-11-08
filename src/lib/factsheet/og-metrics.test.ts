@@ -73,13 +73,26 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(crypto.cagr).toBe(trad.cagr);
   });
 
-  it("CAGR hidden (NaN) for a dense sub-year series (300 trading days < 0.95y)", () => {
-    // 300 consecutive days spans ~299 days ≈ 0.82y < 0.95y → CAGR suppressed,
-    // even though there are plenty of observations for Sharpe.
+  it("a dense 300-day crypto series shows a CAGR (194.1: no card-only year rule): the stored one when carried, else the computed calendar CAGR", () => {
+    // 300 consecutive days spans 299 days. The card used to hide the CAGR of such a
+    // series; whether a record is long enough to show annualized figures at all is
+    // now the route's total-record gate, not this helper's.
     const rows = alternating(300);
+    const stored = computeOgHeadline(rows, "crypto", {
+      sharpe: 1.5,
+      cagr: 0.2,
+      max_drawdown: -0.1,
+      computation_status: "complete",
+    });
+    expect(stored.cagr).toBe(0.2);
+
+    // The computed fallback (stored key absent): 150 pairs of +0.2% then -0.1% compound to
+    // (1.002 * 0.999)^150, over 299 elapsed days on the 365.25-day calendar clock.
     const { sharpe, cagr } = computeOgHeadline(rows, "crypto");
-    expect(Number.isFinite(sharpe)).toBe(true); // Sharpe still shown
-    expect(Number.isNaN(cagr)).toBe(true); // CAGR hidden — sub-calendar-year
+    expect(Number.isFinite(sharpe)).toBe(true);
+    expect(Number.isFinite(cagr)).toBe(true);
+    const expected = Math.pow(Math.pow(1.002 * 0.999, 150), 365.25 / 299) - 1;
+    expect(cagr).toBeCloseTo(expected, 10);
   });
 
   it("a constant series has no Sharpe even with plenty of observations (D-07 floor, D7 '—')", () => {
@@ -90,8 +103,8 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
   });
 
   it("CAGR shown for a sparse-but-year-long weekday series", () => {
-    // 40 rows, one per ~10 days, spanning ~390 days > 0.95y → CAGR qualifies
-    // despite the sparse (non-daily) sampling.
+    // 40 rows, one per ~10 days, spanning ~390 days → the computed CAGR is
+    // finite despite the sparse (non-daily) sampling.
     const rows = Array.from({ length: 40 }, (_, i) => ({
       date: iso(Date.parse("2023-01-02") + i * 10 * DAY),
       value: 0.004,
@@ -109,16 +122,17 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(Number.isNaN(cagr)).toBe(true);
   });
 
-  it("no card-only observation floor (D-06): 29 dispersing rows still show Sharpe and Max DD; CAGR is NaN for the span (E1)", () => {
+  it("no card-only observation floor (D-06): 29 dispersing rows still show Sharpe and Max DD, and the computed CAGR is finite (no card-only span rule)", () => {
     // The card used to hide Sharpe and Max DD below 30 observations while the
     // factsheet printed them, so one strategy read two ways. Any minimum-history
-    // rule now belongs in compute. CAGR keeps its span rule (E1): 29 days is
-    // well under 0.95 calendar years.
+    // rule now belongs in compute, and the total-record minimum is the route's gate
+    // (194 D-15). 29 consecutive days: 15 gains of +0.2% and 14 losses of -0.1%.
     const { sharpe, cagr, maxDd } = computeOgHeadline(alternating(29), "crypto");
     expect(Number.isFinite(sharpe)).toBe(true);
     expect(Number.isFinite(maxDd)).toBe(true);
     expect(maxDd).toBeLessThanOrEqual(0);
-    expect(Number.isNaN(cagr)).toBe(true);
+    const expected = Math.pow(Math.pow(1.002, 15) * Math.pow(0.999, 14), 365.25 / 28) - 1;
+    expect(cagr).toBeCloseTo(expected, 8);
   });
 
   it("a pure call on fewer than two finite values returns no measured-looking Max DD", () => {
@@ -126,6 +140,16 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(Number.isNaN(computeOgHeadline([], "crypto").maxDd)).toBe(true);
     expect(Number.isNaN(computeOgHeadline([{ date: "2023-01-01", value: 0.01 }], "crypto").maxDd)).toBe(true);
     expect(Number.isNaN(computeOgHeadline([{ date: "2023-01-01", value: Number.NaN }], "crypto").maxDd)).toBe(true);
+  });
+
+  it("a computed CAGR that overflows is NaN, never Infinity (a huge gain over a one-day span)", () => {
+    // 1e6 growth in one day annualizes to 1e6^365.25, past the largest double.
+    const rows = [
+      { date: "2023-01-01", value: 0.01 },
+      { date: "2023-01-02", value: 1e6 },
+    ];
+    const { cagr } = computeOgHeadline(rows, "crypto");
+    expect(Number.isNaN(cagr)).toBe(true);
   });
 
   it("single / duplicate / unsorted dates never produce Infinity", () => {
@@ -167,11 +191,11 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
  * factsheet headline and every list say. Before this, the card recomputed them
  * from the raw series and could disagree with the stored values the lists rank
  * on. Since 164.6.6.3.3 (D-06) the card shows the stored Sharpe and max drawdown
- * with no card-only floor, and keeps only CAGR's two named exceptions (E1 a span
- * under 0.95 calendar years, E2 a chain-broken or short-window headline); a
- * stored null hides, and a key the caller never projected (undefined) falls back
- * to the computation. A non-rankable row (a failed or
- * computing run still carries the previous run's scalars) is never read.
+ * with no card-only floor, and since 194.1 plan 06 it shows the stored CAGR at any
+ * span too; its one named CAGR difference is E2 (a chain-broken or short-window
+ * headline). A stored null hides, and a key the caller never projected (undefined)
+ * falls back to the computation. A non-rankable row (a failed or computing run
+ * still carries the previous run's scalars) is never read.
  */
 describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)", () => {
   const STORED = { sharpe: 1.5, cagr: 0.2, max_drawdown: -0.1 } as const;
@@ -194,18 +218,14 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
     },
   );
 
-  it("a 200-day series keeps the card's CAGR policy: CAGR hidden, the stored Sharpe shown", () => {
+  it("a 200-day series shows the STORED CAGR with the stored Sharpe and Max DD (194.1: no card-only year rule)", () => {
     const got = computeOgHeadline(alternating(200), "crypto", { ...STORED, computation_status: "complete" });
-    expect(Number.isNaN(got.cagr)).toBe(true);
-    expect(got.sharpe).toBe(1.5);
-    expect(got.maxDd).toBe(-0.1);
+    expect(got).toEqual({ sharpe: 1.5, cagr: 0.2, maxDd: -0.1 });
   });
 
-  it("a 20-observation series shows the stored Sharpe AND max drawdown (no card-only floor, D-06); CAGR is NaN for the span (E1)", () => {
+  it("a 20-observation series shows the stored Sharpe, max drawdown AND CAGR (no card-only floor, D-06; no span rule)", () => {
     const got = computeOgHeadline(alternating(20), "crypto", { ...STORED, computation_status: "complete" });
-    expect(got.sharpe).toBe(1.5);
-    expect(got.maxDd).toBe(-0.1);
-    expect(Number.isNaN(got.cagr)).toBe(true);
+    expect(got).toEqual({ sharpe: 1.5, cagr: 0.2, maxDd: -0.1 });
   });
 
   it("B10: a stored CAGR shows on a 400-day row whose computed cumulative growth is not positive; a computed fallback stays NaN", () => {
@@ -257,8 +277,8 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
 
   /**
    * Review round 1 CR-01 / SFH-01: the stored CAGR on a chain-broken row is
-   * annualized over the suffix after the break only, while the card's 0.95-year
-   * gate measures the whole 400-day series. A 45-day +6% suffix stores about
+   * annualized over the suffix after the break only, while the card's own series
+   * spans the whole 400-day record. A 45-day +6% suffix stores about
    * +60%; the card must not show it as if it covered the full record.
    */
   describe("a stored CAGR whose span the card cannot see is hidden (CR-01)", () => {

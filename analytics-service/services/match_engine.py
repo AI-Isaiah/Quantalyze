@@ -34,7 +34,7 @@ import pandas as pd
 # them from this module too.
 from services.dispersion import pairwise_correlation_or_none
 from services.match_defaults import merge_with_defaults
-from services.metrics import blend_gate_crypto, sharpe_lift_gate
+from services.metrics import blend_gate_crypto, record_clears, sharpe_lift_gate
 from services.portfolio_optimizer import (
     _avg_corr,
     _compute_sharpe,
@@ -890,7 +890,20 @@ def _generate_reasons(
         candidates.append((0.85, "High-conviction screening pick"))
 
     sharpe = candidate.get("sharpe")
-    if sharpe is not None and sharpe > 2.0:
+    # 194.1 (B5, 194 D-15 / D-17): the card dashes a Sharpe whose TOTAL record is withheld, so the
+    # reason that prints it is left out. An unknown record (None) or a candidate with no
+    # `sharpe_record` is not reinterpreted as withheld; a short (cleared) record keeps today's text.
+    sharpe_record = candidate.get("sharpe_record")
+    sharpe_withheld = isinstance(sharpe_record, dict) and (
+        bool(sharpe_record.get("unreadable"))
+        or record_clears(
+            sharpe_record.get("span_days"),
+            sharpe_record.get("observations"),
+            bool(sharpe_record.get("crypto")),
+        )
+        is False
+    )
+    if sharpe is not None and sharpe > 2.0 and not sharpe_withheld:
         candidates.append((0.55, f"Strong risk-adjusted return (Sharpe {sharpe:.1f})"))
 
     max_dd = candidate.get("max_drawdown_pct")

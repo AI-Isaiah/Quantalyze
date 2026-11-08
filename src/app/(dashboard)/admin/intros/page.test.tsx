@@ -144,3 +144,157 @@ describe("/admin/intros labels and names", () => {
     expect(container.textContent).not.toContain("zzz");
   });
 });
+
+/**
+ * Phase 194.1 B12c (194 D-12 / D-15) - a frozen Sharpe is judged on the record frozen beside
+ * it. Titles are typed by hand so a reworded sentence in `figure-gate.ts` fails here instead of
+ * agreeing with itself; dates are not needed because the snapshot freezes `span_days` itself.
+ *
+ * Neuter to redden: render the mini-table Sharpe as the bare `formatNumber(r.sharpe)` in
+ * `page.tsx`, without `annualizedCell` (the 40-day row then prints its number).
+ */
+describe("/admin/intros withholds a frozen Sharpe by the record frozen beside it (194.1 B12c)", () => {
+  const crypto = (span_days: number) => ({ span_days, observations: null, crypto: true });
+
+  function snapshot(over: Record<string, unknown>) {
+    return {
+      sharpe: 1.23,
+      max_drawdown: -0.1,
+      concentration: 0.5,
+      top_3_strategies: [],
+      bottom_3_strategies: [],
+      alerts_last_7d: 0,
+      ...over,
+    };
+  }
+
+  /** The `<td>` of the mini-table row naming `name`. */
+  function sharpeTd(container: HTMLElement, name: string): HTMLElement {
+    const nameTd = Array.from(container.querySelectorAll("td")).find((td) => td.textContent === name);
+    if (!nameTd) throw new Error(`no mini-table row for ${name}`);
+    return nameTd.nextElementSibling as HTMLElement;
+  }
+
+  const row = (id: string, name: string, sharpe: number, sharpe_record?: unknown) => ({
+    strategy_id: id,
+    strategy_name: name,
+    sharpe,
+    ...(sharpe_record === undefined ? {} : { sharpe_record }),
+  });
+
+  it("a 40-day crypto row prints a dash with the withheld title and not its number", async () => {
+    state.rows = [
+      request({
+        portfolio_snapshot: snapshot({ top_3_strategies: [row("s1", "Short Fund", 7.77, crypto(40))] }),
+      }),
+    ];
+    const { container } = render(await AdminIntrosPage());
+    const td = sharpeTd(container, "Short Fund");
+
+    expect(td.textContent).not.toContain("7.77");
+    expect(td.textContent).toContain("—");
+    expect(td.querySelector("[title]")?.getAttribute("title")).toBe(
+      "Withheld until the record reaches 90 days (40 days so far).",
+    );
+    expect(td.querySelector(".sr-only")?.textContent).toBe(
+      "Withheld until the record reaches 90 days (40 days so far).",
+    );
+  });
+
+  it("a 200-day record prints the Sharpe plus the <1y marker", async () => {
+    state.rows = [
+      request({
+        portfolio_snapshot: snapshot({ top_3_strategies: [row("s1", "Mid Fund", 2.5, crypto(200))] }),
+      }),
+    ];
+    const { container } = render(await AdminIntrosPage());
+    const td = sharpeTd(container, "Mid Fund");
+
+    expect(td.textContent).toContain("2.50");
+    expect(td.textContent).toContain("<1y");
+    expect(td.querySelector("[title]")?.getAttribute("title")).toBe(
+      "Annualized from 200 days of record, under one year.",
+    );
+  });
+
+  it("a record of a year or more prints the Sharpe with no marker and no title", async () => {
+    state.rows = [
+      request({
+        portfolio_snapshot: snapshot({ top_3_strategies: [row("s1", "Long Fund", 2.5, crypto(400))] }),
+      }),
+    ];
+    const { container } = render(await AdminIntrosPage());
+    const td = sharpeTd(container, "Long Fund");
+
+    expect(td.textContent).toBe("2.50");
+    expect(td.querySelector("[title]")).toBeNull();
+  });
+
+  it("a legacy row without the record prints the stored Sharpe with no title", async () => {
+    state.rows = [
+      request({ portfolio_snapshot: snapshot({ bottom_3_strategies: [row("s1", "Old Fund", 0.4)] }) }),
+    ];
+    const { container } = render(await AdminIntrosPage());
+    const td = sharpeTd(container, "Old Fund");
+
+    expect(td.textContent).toBe("0.40");
+    expect(td.querySelector("[title]")).toBeNull();
+  });
+
+  it("the book Sharpe follows its own record: withheld, then qualified, then as stored", async () => {
+    state.rows = [request({ portfolio_snapshot: snapshot({ sharpe: 9.99, sharpe_record: crypto(40) }) })];
+    let { container, unmount } = render(await AdminIntrosPage());
+    let line = Array.from(container.querySelectorAll("div")).find((d) => d.textContent?.startsWith("Sharpe"));
+    expect(line?.textContent).not.toContain("9.99");
+    expect(line?.querySelector("[title]")?.getAttribute("title")).toBe(
+      "Withheld until the record reaches 90 days (40 days so far).",
+    );
+    unmount();
+
+    state.rows = [request({ portfolio_snapshot: snapshot({ sharpe: 1.23, sharpe_record: crypto(200) }) })];
+    ({ container, unmount } = render(await AdminIntrosPage()));
+    line = Array.from(container.querySelectorAll("div")).find((d) => d.textContent?.startsWith("Sharpe"));
+    expect(line?.textContent).toContain("1.23");
+    expect(line?.textContent).toContain("<1y");
+    unmount();
+
+    state.rows = [request({ portfolio_snapshot: snapshot({ sharpe: 1.23 }) })];
+    ({ container } = render(await AdminIntrosPage()));
+    line = Array.from(container.querySelectorAll("div")).find((d) => d.textContent?.startsWith("Sharpe"));
+    expect(line?.textContent).toBe("Sharpe 1.23");
+    expect(line?.querySelector("[title]")).toBeNull();
+  });
+
+  it("an unreadable record withholds with the dates-could-not-be-read title", async () => {
+    state.rows = [
+      request({
+        portfolio_snapshot: snapshot({
+          top_3_strategies: [
+            row("s1", "Odd Fund", 3.3, { span_days: null, observations: null, crypto: true, unreadable: true }),
+          ],
+        }),
+      }),
+    ];
+    const { container } = render(await AdminIntrosPage());
+    const td = sharpeTd(container, "Odd Fund");
+    expect(td.textContent).not.toContain("3.30");
+    expect(td.querySelector("[title]")?.getAttribute("title")).toBe(
+      "Withheld: the record's dates could not be read.",
+    );
+  });
+
+  it("never re-ranks: a withheld row keeps its place in the list", async () => {
+    state.rows = [
+      request({
+        portfolio_snapshot: snapshot({
+          top_3_strategies: [row("s1", "First", 5, crypto(40)), row("s2", "Second", 4, crypto(400))],
+        }),
+      }),
+    ];
+    const { container } = render(await AdminIntrosPage());
+    const names = Array.from(container.querySelectorAll("td"))
+      .map((td) => td.textContent)
+      .filter((t) => t === "First" || t === "Second");
+    expect(names).toEqual(["First", "Second"]);
+  });
+});

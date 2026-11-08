@@ -176,6 +176,20 @@ export function computeMetricsForDraft(
   liveInputs: ScenarioCompareInputs,
   opts: ComputeMetricsForDraftOptions = {},
 ): ComputedMetrics {
+  return computeDraftColumn(draft, liveInputs, opts).metrics;
+}
+
+/**
+ * 194.1 plan 03 (194 D-15) — the same compute as `computeMetricsForDraft`, plus the
+ * blend annualization basis the engine ran it at. The compare table judges each
+ * column on its own blend record, and that record's crypto flag is this basis, so it
+ * is returned here rather than re-derived from asset classes downstream.
+ */
+export function computeDraftColumn(
+  draft: ScenarioDraft,
+  liveInputs: ScenarioCompareInputs,
+  opts: ComputeMetricsForDraftOptions = {},
+): { metrics: ComputedMetrics; periodsPerYear: number } {
   // v1.6 MEMBER-02 — the SAVED draft's PERSISTED membership drives per-key
   // selection, NOT the live gate (F5 closure). A blank-authored draft
   // (memberKeyIds=[]) computes the series-space added-only path even when the
@@ -370,7 +384,10 @@ export function computeMetricsForDraft(
   // Degenerate sets (empty active set, n < 10, NaN-poisoned) return null-metric
   // ComputedMetrics — flow it straight through, NO `?? 0`. The caller renders
   // an honest em-dash via formatPercent/formatNumber.
-  return computeScenario(adapterOutput.strategies, engineState, dateMapCache, basis);
+  return {
+    metrics: computeScenario(adapterOutput.strategies, engineState, dateMapCache, basis),
+    periodsPerYear: basis,
+  };
 }
 
 /**

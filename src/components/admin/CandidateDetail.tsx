@@ -1,8 +1,12 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { displayStrategyName } from "@/lib/strategy-display";
+import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
+import { recordFromScalars } from "@/lib/figure-record-scalars";
+import { annualizedCell } from "@/components/strategy/annualized-cell";
 import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 
 export function CandidateDetail({
@@ -27,6 +31,12 @@ export function CandidateDetail({
 }) {
   const strategy = candidate.strategies;
   const analytics = candidate.analytics;
+  // 194.1 B12b (194 D-12 / D-15): the admin match queue follows the total-record rule. Sharpe,
+  // CAGR and Volatility are judged on THIS strategy's record; Max DD, 6M return and Total
+  // return are never gated. A missing `analytics` is a record of unknown span (state "null"),
+  // which prints as today.
+  const record = recordFromScalars(analytics, strategy?.asset_class);
+  const figureState = gateAnnualized(record);
   const breakdown = candidate.score_breakdown;
   const raw = breakdown.raw ?? {};
 
@@ -69,9 +79,30 @@ export function CandidateDetail({
 
       {/* Metrics grid */}
       <div className="mt-6 grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-3 border-t border-border pt-4">
-        <Metric label="Sharpe" value={fmtNum(analytics?.sharpe)} />
-        <Metric label="CAGR" value={fmtPct(analytics?.cagr)} />
-        <Metric label="Volatility" value={fmtPct(analytics?.volatility)} />
+        <Metric
+          label="Sharpe"
+          value={annualizedCell(
+            fmtNum(gatedValue(analytics?.sharpe, figureState)),
+            figureState,
+            record,
+          )}
+        />
+        <Metric
+          label="CAGR"
+          value={annualizedCell(
+            fmtPct(gatedValue(analytics?.cagr, figureState)),
+            figureState,
+            record,
+          )}
+        />
+        <Metric
+          label="Volatility"
+          value={annualizedCell(
+            fmtPct(gatedValue(analytics?.volatility, figureState)),
+            figureState,
+            record,
+          )}
+        />
         <Metric label="Max DD" value={fmtPct(analytics?.max_drawdown)} />
         <Metric label="6M return" value={fmtPct(analytics?.six_month_return)} />
         <Metric label="Total return" value={fmtPct(analytics?.cumulative_return)} />
@@ -194,7 +225,7 @@ export function CandidateDetail({
 
 // ─── Subcomponents ──────────────────────────────────────────────────────
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <p className="text-micro uppercase tracking-wider text-text-muted">{label}</p>

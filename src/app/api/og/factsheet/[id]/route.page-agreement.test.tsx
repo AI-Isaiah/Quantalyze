@@ -79,7 +79,7 @@ afterEach(() => {
 });
 Object.defineProperty(window, "localStorage", { value: localStorageMock, configurable: true });
 
-/** 400 dated daily returns from 2024-01-01: spans more than the card's 0.95-year CAGR rule. */
+/** 400 dated daily returns from 2024-01-01: a record long enough to need no short-track note, so only the verdict can hide a figure. */
 function dated(values: number[]): DailyPoint[] {
   const start = Date.UTC(2024, 0, 1);
   return values.map((value, i) => ({

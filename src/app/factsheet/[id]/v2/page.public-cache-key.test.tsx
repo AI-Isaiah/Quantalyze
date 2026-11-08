@@ -78,6 +78,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
+import { OG_CARD_VERSION } from "@/lib/factsheet/og-metrics";
 
 const STRATEGY_ID = "51a10001-0000-4000-8000-0000000000d2";
 
@@ -412,6 +413,7 @@ describe("166.3.1 D-05 - STATUS-MOVES-KEY: a status change under a held computed
 });
 
 describe("164.6.6.2-07 - the share card link carries the strategy's unit as a cache key", () => {
+  // 194.1 plan 06: the figure-rules version is always in the URL, ahead of the unit.
   /** The metadata probe: the published strategy row with its analytics embed. */
   function mockMetadataClient(analytics: unknown) {
     const chain = {
@@ -443,23 +445,23 @@ describe("164.6.6.2-07 - the share card link carries the strategy's unit as a ca
     return images[0].url;
   }
 
-  it("a BTC strategy's card URL ends ?u=BTC (object embed and array embed)", async () => {
+  it("a BTC strategy's card URL is the version, then &u=BTC (object embed and array embed)", async () => {
     expect(await ogUrl({ data_quality_flags: { native_unit: "BTC" } })).toBe(
-      `/api/og/factsheet/${STRATEGY_ID}?u=BTC`,
+      `/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}&u=BTC`,
     );
     expect(await ogUrl([{ data_quality_flags: { native_unit: "BTC" } }])).toBe(
-      `/api/og/factsheet/${STRATEGY_ID}?u=BTC`,
+      `/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}&u=BTC`,
     );
   });
 
-  it("a USD strategy's card URL is exactly what it was before this phase", async () => {
-    expect(await ogUrl({ data_quality_flags: {} })).toBe(`/api/og/factsheet/${STRATEGY_ID}`);
-    expect(await ogUrl(null)).toBe(`/api/og/factsheet/${STRATEGY_ID}`);
+  it("a USD strategy's card URL carries the version and nothing else", async () => {
+    expect(await ogUrl({ data_quality_flags: {} })).toBe(`/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}`);
+    expect(await ogUrl(null)).toBe(`/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}`);
   });
 
   it("a malformed unit never reaches the URL", async () => {
     expect(await ogUrl({ data_quality_flags: { native_unit: "b!tc&x=1" } })).toBe(
-      `/api/og/factsheet/${STRATEGY_ID}`,
+      `/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}`,
     );
   });
 });

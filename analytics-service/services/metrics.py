@@ -1,10 +1,12 @@
 import logging
+import re
 import quantstats as qs
 import pandas as pd
 import numpy as np
 import math
 from collections.abc import Callable, ItemsView, Iterable, KeysView, ValuesView
 from dataclasses import dataclass, field
+from datetime import date as _Date
 from typing import Any, Literal, TypedDict
 
 from scipy.stats import linregress, norm
@@ -127,6 +129,101 @@ def record_clears(
     if span_days is None:
         return None
     return span_days >= MIN_ANNUALIZATION_DAYS
+
+
+# 194.1 B12c (2026-11-08): the four record scalar aliases of a `strategy_analytics` read, the
+# exact string of TS `RECORD_SCALAR_ALIASES` (src/lib/figure-record-scalars.ts). The intro
+# snapshot handler selects them beside `sharpe`; one shared fixture
+# (tests/fixtures/intro_snapshot_record_parity.json) pins this string equal to the TS one.
+RECORD_SCALAR_ALIASES: str = (
+    "series_start:returns_series->0->>date, series_end:returns_series->-1->>date, "
+    "headline_since:data_quality_flags->>headline_since, "
+    "record_observations:metrics_json->record_observations"
+)
+
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _as_date_text(value: object) -> str | None:
+    """A non-empty string or None: twin of ``asString`` in TS ``recordFromScalars``."""
+    return value if isinstance(value, str) and value else None
+
+
+def _read_day(value: str) -> _Date | None:
+    """The day of an exact ``yyyy-mm-dd`` string, else None (a datetime is NOT a day)."""
+    if not _ISO_DAY.fullmatch(value):
+        return None
+    try:
+        return _Date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def figure_record_from_scalars(
+    series_start: object,
+    series_end: object,
+    headline_since: object,
+    observations: object,
+    crypto: bool,
+) -> dict[str, Any]:
+    """The record a frozen figure is judged on: Python twin of the intro snapshot's TS record.
+
+    TS twins: ``figureRecord`` / ``figureSpan`` (src/lib/figure-gate.ts), the coercion of
+    ``recordFromScalars`` and ``toSnapshotRecord`` (src/lib/intro/snapshot.ts). Returns the
+    FROZEN snake_case shape ``{"span_days", "observations", "crypto"}`` plus ``"unreadable":
+    True`` only when a date is present but is not an exact ``yyyy-mm-dd`` day.
+
+    The span is covered days (194 D-20: first to last return date, both counted) from the
+    LATER of ``series_start`` and a readable ``headline_since`` (a chain-broken row's headline
+    covers only the suffix), to ``series_end``; None when either end is absent or unreadable.
+    ``observations`` is the stored count when it is a finite number (never a bool or a string),
+    else None. ``crypto`` passes through. No threshold lives here: the verdict is
+    ``record_clears`` / the TS ``gateAnnualized`` over this record.
+
+    Known divergence, deliberately outside the shared fixture: ``Date.parse`` rolls a
+    calendar-overflow day such as ``2026-02-30`` forward while ``date.fromisoformat`` rejects
+    it, so Python freezes that row unreadable (withheld, the documented failure direction).
+    Producers only write real ``yyyy-mm-dd`` days.
+    """
+    start_text = _as_date_text(series_start)
+    end_text = _as_date_text(series_end)
+    headline_text = _as_date_text(headline_since)
+
+    unreadable = any(
+        t is not None and _read_day(t) is None
+        for t in (start_text, end_text, headline_text)
+    )
+
+    span_days: int | None = None
+    if start_text is not None and end_text is not None:
+        first = start_text
+        if (
+            headline_text is not None
+            and _read_day(headline_text) is not None
+            and headline_text > start_text
+        ):
+            first = headline_text
+        first_day = _read_day(first)
+        last_day = _read_day(end_text)
+        if first_day is not None and last_day is not None:
+            span_days = max(0, (last_day - first_day).days + 1)
+
+    count: int | float | None = None
+    if (
+        isinstance(observations, (int, float))
+        and not isinstance(observations, bool)
+        and math.isfinite(observations)
+    ):
+        count = observations
+
+    record: dict[str, Any] = {
+        "span_days": span_days,
+        "observations": count,
+        "crypto": crypto,
+    }
+    if unreadable:
+        record["unreadable"] = True
+    return record
 
 
 def blend_gate_crypto(asset_classes: Iterable[str | None]) -> bool:

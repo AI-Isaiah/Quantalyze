@@ -4,6 +4,14 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
+import { annualizedCell } from "@/components/strategy/annualized-cell";
+import {
+  figureRecord,
+  gateAnnualized,
+  gatedValue,
+  type FigureRecord,
+  type FigureState,
+} from "@/lib/figure-gate";
 import {
   evaluateSampleFloor,
   sampleFloorBody,
@@ -53,6 +61,63 @@ export interface ScenarioColumn {
    * peer column would be the exact mislabel this milestone forbids.
    */
   leveraged?: boolean;
+  /**
+   * 194.1 plan 03 (194 D-15): the blend annualization basis (365 or 252) the engine
+   * annualised this column at, carried from `computeDraftColumn`. It is the crypto
+   * flag of the column's record, so the table never re-derives it from asset classes.
+   * Absent means unknown: the column's annualised cells print as today, with no
+   * reason and no marker.
+   */
+  periodsPerYear?: number;
+}
+
+/** A column with its record verdict; `metrics` already carries the gated annualised figures. */
+interface GatedColumn extends ScenarioColumn {
+  record: FigureRecord;
+  state: FigureState;
+}
+
+/** The four annualised rows; Cumulative Return and Max Drawdown are never gated. */
+const ANNUALIZED_ROW_KEYS: ReadonlySet<keyof ComputedMetrics> = new Set([
+  "cagr",
+  "sharpe",
+  "sortino",
+  "volatility",
+]);
+
+/** The record of a column whose record cannot be judged: state `null`, figures shown as today. */
+const UNKNOWN_RECORD: FigureRecord = { spanDays: null, observations: null, crypto: false };
+
+/**
+ * 194.1 plan 03 (194 D-04 as superseded by D-15): judge one column on its OWN blend
+ * record (the engine's effective window, its observation count, the basis it was
+ * annualised at) and replace the four annualised figures with their gated values.
+ * An empty, undecodable or basis-less column is the unknown state.
+ */
+function gateColumn(c: ScenarioColumn): GatedColumn {
+  if (c.undecodable || c.periodsPerYear == null || c.metrics.n <= 0) {
+    return { ...c, record: UNKNOWN_RECORD, state: "null" };
+  }
+  const record = figureRecord({
+    seriesStart: c.metrics.effective_start,
+    seriesEnd: c.metrics.effective_end,
+    headlineSince: null,
+    observations: c.metrics.n,
+    periodsPerYear: c.periodsPerYear,
+  });
+  const state = gateAnnualized(record);
+  return {
+    ...c,
+    record,
+    state,
+    metrics: {
+      ...c.metrics,
+      cagr: gatedValue(c.metrics.cagr, state),
+      sharpe: gatedValue(c.metrics.sharpe, state),
+      sortino: gatedValue(c.metrics.sortino, state),
+      volatility: gatedValue(c.metrics.volatility, state),
+    },
+  };
 }
 
 interface MetricRow {
@@ -163,7 +228,9 @@ export function ScenarioCompareTable({
   liveBook: ScenarioColumn | null;
 }) {
   // The live book participates as a column (its own window + winner candidacy).
-  const allColumns: ScenarioColumn[] = liveBook ? [...columns, liveBook] : columns;
+  const allColumns: GatedColumn[] = (liveBook ? [...columns, liveBook] : columns).map(
+    gateColumn,
+  );
 
   // Under-selection: fewer than 2 columns to compare → UI-SPEC hint
   // (mirrors CompareTable's "Select strategies to compare." empty state).
@@ -248,7 +315,9 @@ export function ScenarioCompareTable({
                             isWinner ? "text-accent font-semibold" : "text-text-secondary",
                           )}
                         >
-                          {formatValue(val, metric.format)}
+                          {ANNUALIZED_ROW_KEYS.has(metric.key)
+                            ? annualizedCell(formatValue(val, metric.format), c.state, c.record)
+                            : formatValue(val, metric.format)}
                           {/* Winner mark: a discrete DM Sans accent glyph (own
                               span, own spacing) — NOT a " ✓" string glued to the
                               mono numeric run. Drops the banned third weight. */}

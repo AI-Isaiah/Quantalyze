@@ -170,3 +170,136 @@ describe("CandidateDetail no-returns line (GAP-01, SFH-R5 M1)", () => {
     expect(items.map((li) => li.textContent)).toEqual(REASONS);
   });
 });
+
+/**
+ * Phase 194.1 B12b (194 D-12 / D-15) - the candidate detail judges Sharpe, CAGR and
+ * Volatility on THAT strategy's total record. Titles are typed by hand so a reworded
+ * sentence in `figure-gate.ts` fails here instead of agreeing with itself. Dates come from
+ * `endAfter` (start plus `days - 1`, D-20).
+ *
+ * Neuter to redden: render Volatility as the bare `fmtPct(analytics?.volatility)` in
+ * `CandidateDetail.tsx`, without `annualizedCell` (that cell prints `—` for a withheld state
+ * whatever text it is handed, so removing `gatedValue` alone stays green).
+ */
+describe("CandidateDetail withholds annualised figures by the strategy's total record (194.1 B12b)", () => {
+  const START = "2025-01-01";
+
+  function endAfter(days: number): string {
+    const d = new Date(`${START}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + days - 1);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function renderWith(
+    assetClass: string | null,
+    aliases: Record<string, unknown> | null,
+  ) {
+    const base = candidateWithRaw({});
+    const candidate: CandidateRow = {
+      ...base,
+      strategies: base.strategies && { ...base.strategies, asset_class: assetClass },
+      analytics:
+        aliases === null
+          ? null
+          : {
+              sharpe: 2.1,
+              sortino: 3.1,
+              max_drawdown: -0.1,
+              cagr: 0.5,
+              volatility: 0.25,
+              six_month_return: 0.2,
+              cumulative_return: 0.9,
+              sparkline_returns: null,
+              ...aliases,
+            },
+    };
+    return render(
+      <CandidateDetail
+        candidate={candidate}
+        alreadySent={false}
+        isKept={false}
+        isSkipped={false}
+        onSendIntro={vi.fn()}
+        onKeep={vi.fn()}
+        onSkip={vi.fn()}
+      />,
+    );
+  }
+
+  function aliasesFor(days: number, observations: number | null = days) {
+    return {
+      series_start: START,
+      series_end: endAfter(days),
+      headline_since: null,
+      record_observations: observations,
+    };
+  }
+
+  /** The value `<p>` that follows the label `<p>` of one metric. */
+  function cell(label: string): HTMLElement {
+    return screen.getByText(label, { selector: "p" }).nextElementSibling as HTMLElement;
+  }
+
+  it("a 40-day crypto record withholds Sharpe, CAGR and Volatility; the other three print", () => {
+    renderWith("crypto", aliasesFor(40));
+    for (const label of ["Sharpe", "CAGR", "Volatility"]) {
+      const c = cell(label);
+      expect(c.textContent).toContain("—");
+      expect(c.textContent).not.toMatch(/2\.10|50\.0|25\.0/);
+      expect(
+        c.querySelector(
+          '[title="Withheld until the record reaches 90 days (40 days so far)."]',
+        ),
+      ).not.toBeNull();
+    }
+    expect(cell("Max DD").textContent).toBe("-10.0%");
+    expect(cell("6M return").textContent).toBe("20.0%");
+    expect(cell("Total return").textContent).toBe("90.0%");
+  });
+
+  it("a 200-day record prints the three figures with the <1y marker and its reason", () => {
+    renderWith("crypto", aliasesFor(200));
+    for (const [label, figure] of [
+      ["Sharpe", "2.10"],
+      ["CAGR", "50.0%"],
+      ["Volatility", "25.0%"],
+    ] as const) {
+      const c = cell(label);
+      expect(c.textContent).toContain(figure);
+      expect(c.textContent).toContain("<1y");
+      expect(
+        c.querySelector('[title="Annualized from 200 days of record, under one year."]'),
+      ).not.toBeNull();
+    }
+  });
+
+  it("a 400-day record reads exactly as today", () => {
+    renderWith("crypto", aliasesFor(400));
+    expect(cell("Sharpe").textContent).toBe("2.10");
+    expect(cell("CAGR").textContent).toBe("50.0%");
+    expect(cell("Volatility").textContent).toBe("25.0%");
+  });
+
+  it("a candidate with no analytics reads as today (dashes, no withheld title)", () => {
+    const { container } = renderWith("crypto", null);
+    expect(cell("Sharpe").textContent).toBe("—");
+    expect(container.querySelector('[title^="Withheld"]')).toBeNull();
+  });
+
+  it("analytics with no aliases reads as today (unknown record, never withheld)", () => {
+    renderWith("crypto", {});
+    expect(cell("Sharpe").textContent).toBe("2.10");
+    expect(cell("Volatility").textContent).toBe("25.0%");
+  });
+
+  it("a traditional record with 59 observations is withheld on the 60-trading-day basis", () => {
+    renderWith("traditional", aliasesFor(120, 59));
+    for (const label of ["Sharpe", "CAGR", "Volatility"]) {
+      expect(
+        cell(label).querySelector(
+          '[title="Withheld until the record reaches 60 trading days (59 so far)."]',
+        ),
+      ).not.toBeNull();
+    }
+  });
+});

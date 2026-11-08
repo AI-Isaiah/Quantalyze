@@ -1655,3 +1655,42 @@ describe("[153.2-05] the envelope names its venue and its surface", () => {
     ).toBeInTheDocument();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 194.1 plan 08 (B6, 194 D-15) - the DRAFT summary carries the sync preview's verdict.
+// SubmitStep reuses `snapshot.metrics`, which already prints the withheld dashes; the one
+// panel note travels on the snapshot so this screen says why, in the same words.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[194.1 B6] SubmitStep - the draft summary shows the preview's figure note", () => {
+  const NOTE =
+    "Annualized figures appear once the record reaches 90 days. This record covers 40 days.";
+
+  function renderWith(snapshot: SyncPreviewSnapshot) {
+    render(
+      <SubmitStep
+        strategyId="strat-1"
+        wizardSessionId="session-1"
+        snapshot={snapshot}
+        metadata={METADATA}
+        onSubmitted={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders the snapshot's note under the DRAFT preview", () => {
+    renderWith({ ...SNAPSHOT, figureNote: NOTE });
+    const notes = screen.getAllByTestId("factsheet-preview-figure-note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(NOTE);
+  });
+
+  it("renders no note when the snapshot carries none", () => {
+    renderWith(SNAPSHOT);
+    expect(screen.queryByTestId("factsheet-preview-figure-note")).toBeNull();
+  });
+});

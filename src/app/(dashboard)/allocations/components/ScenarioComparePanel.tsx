@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import type { ComputedMetrics, DailyPoint, StrategyForBuilder } from "@/lib/scenario";
 import {
-  computeMetricsForDraft,
+  computeDraftColumn,
   buildLiveBookDraft,
   type ScenarioCompareInputs,
 } from "../lib/scenario-compare";
@@ -323,9 +323,14 @@ export function ScenarioComparePanel({
               )
             : draft;
         try {
+          const { metrics, periodsPerYear } = computeDraftColumn(
+            normalized,
+            liveInputs,
+          );
           return {
             name: row.name,
-            metrics: computeMetricsForDraft(normalized, liveInputs),
+            metrics,
+            periodsPerYear,
             leveraged: draftHasEffectiveLeverage(normalized),
           };
         } catch (err) {
@@ -347,7 +352,7 @@ export function ScenarioComparePanel({
   const liveBook: ScenarioColumn | null = useMemo(() => {
     if (!includeLiveBook) return null;
     try {
-      const metrics = computeMetricsForDraft(
+      const { metrics, periodsPerYear } = computeDraftColumn(
         // 151 review WR-07 — the live-book leg is the composer's book-mode
         // projection, so it is stamped with what that engine blends: the
         // CONTRIBUTING keys under the SPLIT gate, never the role-blind eligible
@@ -359,7 +364,7 @@ export function ScenarioComparePanel({
         liveInputs,
         { liveBook: true },
       );
-      return { name: "Live book", metrics };
+      return { name: "Live book", metrics, periodsPerYear };
     } catch (err) {
       warnAudit("scenario_compare_compute_failed", {
         id: "__live_book__",

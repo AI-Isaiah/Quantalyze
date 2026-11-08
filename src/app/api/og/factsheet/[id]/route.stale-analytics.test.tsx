@@ -78,10 +78,10 @@ import { GET } from "./route";
 const STRATEGY_ID = "51a10001-0000-4000-8000-00000000000b";
 
 /**
- * A REAL series: 40 drifting-up observations spread over ~390 CALENDAR days.
- * Both of `computeOgHeadline`'s gates are cleared deliberately — ≥30 finite
- * observations (Sharpe / Max DD) AND a ≥0.95-year span (CAGR) — so all three
- * headline figures are finite. The `complete` control proves exactly that.
+ * A REAL series: 40 drifting-up observations spread over ~390 CALENDAR days, a
+ * record long enough to clear 194 D-15's minimum and to need no short-track note,
+ * so all three headline figures are finite. The `complete` control proves exactly
+ * that.
  */
 const REAL_SERIES = Array.from({ length: 40 }, (_, i) => {
   const d = new Date(Date.UTC(2025, 0, 1) + i * 10 * 24 * 60 * 60 * 1000);

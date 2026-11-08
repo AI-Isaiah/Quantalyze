@@ -3,7 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 vi.mock("server-only", () => ({}));
 
-import { getAllocatorMatchPayload } from "./match";
+import { getAllocatorMatchPayload, STRATEGY_ANALYTICS_MATCH_COLUMNS } from "./match";
+import { RECORD_SCALAR_ALIASES } from "@/lib/figure-record-scalars";
 
 /**
  * Why these tests exist (Phase 170 VERIFICATION gap 6).
@@ -108,5 +109,58 @@ describe("getAllocatorMatchPayload: real failures stay loud", () => {
         ALLOCATOR_ID,
       ),
     ).rejects.toThrow(/castRow.*profile/);
+  });
+});
+
+/**
+ * Phase 194.1 B12b (194 D-12 / D-15) - the candidate detail judges its annualised figures on
+ * the strategy's total record, so the loader must read the four record scalar aliases beside
+ * the match columns and `asset_class` on the candidate join. The aliases are appended at the
+ * read, never to `STRATEGY_ANALYTICS_MATCH_COLUMNS`, whose schema-sync backstop checks every
+ * name in it is a real column.
+ *
+ * Neuter to redden: drop `, ${RECORD_SCALAR_ALIASES}` from the bulk `strategy_analytics`
+ * select in `match.ts`.
+ */
+describe("getAllocatorMatchPayload: the reads the record verdict needs (194.1 B12b)", () => {
+  it("appends the record aliases to the bulk analytics read and reads asset_class on the join", async () => {
+    const selects: Record<string, string[]> = {};
+    const base = fakeAdmin({
+      ...baseTables({
+        match_batches: { data: BATCH_ROW, error: null },
+        match_candidates: {
+          data: [
+            {
+              id: "c1",
+              strategy_id: "00000000-0000-4000-8000-0000000000c1",
+              exclusion_reason: null,
+            },
+          ],
+          error: null,
+        },
+        strategy_analytics: { data: [], error: null },
+      }),
+    });
+    const spied = {
+      from(table: string) {
+        const builder = (base as unknown as { from: (t: string) => Record<string, unknown> }).from(table);
+        const select = builder.select as (...a: unknown[]) => unknown;
+        builder.select = (...args: unknown[]) => {
+          (selects[table] ??= []).push(String(args[0]));
+          return select(...args);
+        };
+        return builder;
+      },
+    } as unknown as SupabaseClient;
+
+    await getAllocatorMatchPayload(spied, ALLOCATOR_ID);
+
+    expect(selects.strategy_analytics).toEqual([
+      `${STRATEGY_ANALYTICS_MATCH_COLUMNS}, ${RECORD_SCALAR_ALIASES}`,
+    ]);
+    expect(selects.match_candidates).toHaveLength(1);
+    expect(selects.match_candidates[0]).toMatch(/\basset_class\b/);
+    // The constant itself stays a plain column list the schema-sync test can check.
+    expect(STRATEGY_ANALYTICS_MATCH_COLUMNS).not.toMatch(/[:>]/);
   });
 });

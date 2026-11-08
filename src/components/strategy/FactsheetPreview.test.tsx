@@ -202,4 +202,38 @@ describe("FactsheetPreview", () => {
       ).not.toBeInTheDocument();
     });
   });
+
+  // Phase 194.1 plan 08 (B6): the panel's ONE muted figure note. The caller owns the verdict;
+  // the component only places the line, and every other caller (no prop) is unchanged.
+  describe("figureNote (194.1 B6)", () => {
+    it("renders exactly one note element carrying the given text", () => {
+      render(
+        <FactsheetPreview
+          strategyName="X"
+          metrics={METRICS}
+          figureNote="Annualized figures appear once the record reaches 90 days. This record covers 40 days."
+        />,
+      );
+      const notes = screen.getAllByTestId("factsheet-preview-figure-note");
+      expect(notes).toHaveLength(1);
+      expect(notes[0].textContent).toBe(
+        "Annualized figures appear once the record reaches 90 days. This record covers 40 days.",
+      );
+    });
+
+    it("renders no note element without the prop, or with a null or empty one", () => {
+      const { rerender } = render(
+        <FactsheetPreview strategyName="X" metrics={METRICS} />,
+      );
+      expect(screen.queryByTestId("factsheet-preview-figure-note")).toBeNull();
+      rerender(
+        <FactsheetPreview strategyName="X" metrics={METRICS} figureNote={null} />,
+      );
+      expect(screen.queryByTestId("factsheet-preview-figure-note")).toBeNull();
+      rerender(
+        <FactsheetPreview strategyName="X" metrics={METRICS} figureNote="" />,
+      );
+      expect(screen.queryByTestId("factsheet-preview-figure-note")).toBeNull();
+    });
+  });
 });

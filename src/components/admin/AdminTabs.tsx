@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -16,6 +16,9 @@ import {
   formatRelativeTime,
 } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
+import { recordFromScalars } from "@/lib/figure-record-scalars";
+import { annualizedCell } from "@/components/strategy/annualized-cell";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
 import { analyticsStatusLabel, strategySourceLabel } from "@/lib/display-labels";
 import { ComputeJobsTable } from "./ComputeJobsTable";
@@ -57,6 +60,9 @@ export interface PendingStrategyRow {
   strategy_types: string[];
   created_at: string;
   user_id: string;
+  // 194.1 B12a: optional so a row from before the widened read still types; absent means the
+  // asset class is unknown and the record is judged on the non-crypto basis, never a guess.
+  asset_class?: string | null;
   profiles: { display_name: string | null; email: string | null } | null;
   strategy_analytics: Array<{
     cagr: number | null;
@@ -64,6 +70,12 @@ export interface PendingStrategyRow {
     max_drawdown: number | null;
     computation_status: string;
     computed_at: string;
+    // The four record scalar aliases (RECORD_SCALAR_ALIASES). Optional `unknown`:
+    // `recordFromScalars` coerces each, and an absent one is a record of unknown span.
+    series_start?: unknown;
+    series_end?: unknown;
+    headline_since?: unknown;
+    record_observations?: unknown;
   }> | null;
 }
 
@@ -472,6 +484,12 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
         {strategies.map((s) => {
           const profile = s.profiles;
           const analytics = extractAnalytics(s.strategy_analytics);
+          // 194.1 B12a (194 D-12 / D-15): the admin queue follows the total-record rule. CAGR
+          // and Sharpe are judged on THIS strategy's record; Max DD is never gated, and
+          // `computeRecency` below keeps reading the raw stored figures so a withheld figure
+          // does not make a computed row read as never computed.
+          const record = recordFromScalars(analytics, s.asset_class);
+          const figureState = gateAnnualized(record);
           const source = s.source;
           // Phase 18 / round-2 (Red Team conf 4) — fresh-onboarding sources
           // (wizard, csv, allocator-connected, exchange) all get the accent
@@ -513,8 +531,22 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
                   />
 
                   <div className="mt-3 grid grid-cols-3 gap-3 border-t border-border pt-3">
-                    <MetricCell label="CAGR" value={formatPercent(analytics?.cagr, 1)} />
-                    <MetricCell label="Sharpe" value={formatNumber(analytics?.sharpe)} />
+                    <MetricCell
+                      label="CAGR"
+                      value={annualizedCell(
+                        formatPercent(gatedValue(analytics?.cagr, figureState), 1),
+                        figureState,
+                        record,
+                      )}
+                    />
+                    <MetricCell
+                      label="Sharpe"
+                      value={annualizedCell(
+                        formatNumber(gatedValue(analytics?.sharpe, figureState)),
+                        figureState,
+                        record,
+                      )}
+                    />
                     <MetricCell label="Max DD" value={formatPercent(analytics?.max_drawdown, 1)} />
                   </div>
 
@@ -589,7 +621,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
   );
 }
 
-function MetricCell({ label, value }: { label: string; value: string }) {
+function MetricCell({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <p className="text-micro uppercase tracking-wider text-text-muted">{label}</p>

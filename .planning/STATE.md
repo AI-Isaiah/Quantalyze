@@ -4,18 +4,18 @@ milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
 current_phase: 194
 current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
-status: planning
-stopped_at: Phases 192, 193, 202, 203 and 195 complete; 194 planned, 194.1 booked behind it
-last_updated: "2026-11-07T14:57:12.710Z"
+status: executing
+stopped_at: Completed 194-13-PLAN.md
+last_updated: "2026-11-07T17:42:15.555Z"
 last_activity: 2026-11-07
-last_activity_desc: Phases 203 B3TRUNC and 195 TRIM complete (verified)
-state_head: 3ba04e9a012df72c71add7c95e89dc6ba5300c32
+last_activity_desc: Phase 194 execution started
+state_head: eb836950d7dc6b7f8c952721ec9863b5de247b65
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 5
-  total_plans: 38
-  completed_plans: 38
-  percent: 42
+  total_plans: 62
+  completed_plans: 42
+  percent: 38
 ---
 
 ## ⭐ STATE lineage
@@ -32,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-06)
 
-**Current focus:** Phase 192 — PUBLICTRUTH — the public site and the demo tell a visitor one true story (executing). 202 RESIDCHURN is complete.
+**Current focus:** Phase 194 — FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 192 (PUBLICTRUTH), 193 (QUIETVIEW), 202 (RESIDCHURN), 203 (B3TRUNC) and 195 (TRIM) are complete; 194 (FIGURETRUTH) is planned, with 194.1 booked and blocked behind it
-Plan: 203 B3TRUNC verified passed (5/5; RESID-02 complete) and 195 TRIM verified passed (12/12, UAT complete; UC-6 rests on unit tests only); 194 FIGURETRUTH planned, not yet executing
-Status: Phases 192, 193, 202, 203 and 195 complete. 194 planned; 194.1 booked and blocked behind 194. 196-201 not started.
-Last activity: 2026-11-07 — Phases 203 and 195 complete
-Progress: [████░░░░░░] 42% (5 of 12 phases)
+Phase: 194 (FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something) — EXECUTING
+Plan: 24 of 24 (code merged as #1219; plan 09 PROD recompute done 2026-11-08, 194-RECOMPUTE.md lacking=0)
+Status: Verification human_needed (signed-in browser UAT only)
+Last activity: 2026-11-08 — Phase 194 deployed (959ef982) and PROD recompute done (plan 09); browser UAT next
+Progress: [████░░░░░░] 38% (5 of 12 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -390,6 +390,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 202 P05 | 25 min | 2 tasks | 1 files |
 | Phase 202 P07 | 25min | 3 tasks | 2 files |
 | Phase 202 P08 | 15 min | 3 tasks | 1 files |
+| Phase 194 P01 | 1 session | 2 tasks | 4 files |
+| Phase 194 P02 | 1 session | 3 tasks | 13 files |
+| Phase 194 P03 | 1 session | 3 tasks | 9 files |
+| Phase 194 P13 | 1 session | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -674,6 +678,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2.1.1.1.1 inserted after Phase 167.2.1.1.1: MARKSOURCE: one stated mark rule on every path; the two allocator equity curves agree while positions are open; last-bar uPnL spike gone (founder 2026-10-22, "Or several phases")
 - Phase 167.2.1.1.2 inserted after Phase 167.2.1.1: ACCTREBUILD: a Bybit-backed account's past allocation history is rebuilt whole-account or refused; OKX-holding accounts get a 90-day rebuild (founder 2026-10-22, split from UPNLVENUES D-04, "Add an OKX 90-day path", "Split Phases if Necessary")
 - Phase 167.2.1.1.2.1 inserted after Phase 167.2.1.1.2: TRADEPAGES: the allocator history rebuild reads every trade page on OKX and Bybit (founder 2026-10-23, from ACCTREBUILD SC-3; data-integrity) (URGENT)
+- Phase 194.1 inserted after Phase 194: D04SWEEP: the widened short-track rule on every page outside 194 (founder D-10/D-11, 2026-11-07)
 - Phase 203 added (2026-11-07, /gsd-phase add, founder D-17 "book the investigation as a phase"): B3TRUNC, from RESIDCHURN plan 07 (why book b3 carries window_truncated)
 
 ### Decisions
@@ -1049,6 +1054,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 202]: 202-07: final_attribution.py (hash 8a62ca3b1215) run unchanged gives b 36, d 1178 of the 1214; the alternative reading with undefined one-day stretches not counted gives b 1142, d 72. Both reported; the founder then chose the alternative (D-15), so the attribution of record is a 0, b 1142, c 0, d 72 and the pinned reading is lineage.
 - [Phase 202]: 202-07: D-12 routed by the plan's rule to reopened=yes reason=component_disagrees (b6 truncation line, plan 03 rule unamended per D-14); returned to the founder as a checkpoint. D-14: b6's curve counts k18 alone, named at function level only.
 - [Phase 202]: D-14 closed to D-17 (founder 2026-11-07): D-14 closed as intended behaviour, no flag (b6 and b5 omit unknown-account revoked Bybit keys by `departed_history_inclusion`); D-15 an undefined one-day stretch is not a fail (b 1142, d 72 of record); D-16 bucket (c) is not widened, the MT5 clock lead is booked as TODOS 202-MT5-CLOCK-LEAD-01; D-17 b3 is not re-opened, its `window_truncated` investigation is Phase 203 B3TRUNC
+- [Phase 194]: D-05 (founder, Show don't flag) overrides the plausibility wording of SC-4 and TRUST-05; recorded in ROADMAP and REQUIREMENTS
+- [Phase 194]: Engine-constant alignment (365 vs 365.25, ddof 0 vs 1) booked as 194-ENGINE-CONSTANTS, not decided by any D-0x
+- [Phase 194]: 194-03: D-15 verdict in figure-gate.ts (total record withholds, window only qualifies); missing-last list contract in list-figures.ts; Scenario VaR/CVaR on historicalVarCvar
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1753,9 +1761,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-11-06T20:36:19.383Z
-**Stopped At:** Phases 203 B3TRUNC and 195 TRIM complete; 194 planned, 194.1 booked behind it
-**Resume File:** .planning/phases/192-publictruth-the-public-site-and-the-demo-tell-a-visitor-one/192-VERIFICATION.md
+**Last Date:** 2026-11-07T17:42:15.306Z
+**Stopped At:** Completed 194-13-PLAN.md
+**Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md

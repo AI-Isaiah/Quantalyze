@@ -116,6 +116,12 @@ const STATE = vi.hoisted(() => ({
         // fixture models a row whose columns are unset → null on the body.
         cagr?: unknown;
         sharpe?: unknown;
+        // 194.1 plan 09 (B8): the four aliased record scalars. The mock projects an
+        // `alias:expr` select entry onto the fixture key named by the alias.
+        series_start?: unknown;
+        series_end?: unknown;
+        headline_since?: unknown;
+        record_observations?: unknown;
       }
     | null,
   // Phase 147 / P5 — the strategies.created_at the route's SEPARATE lazy age
@@ -303,6 +309,14 @@ vi.mock("@/lib/supabase/server", () => ({
               .filter(Boolean);
             const projected: Record<string, unknown> = {};
             for (const col of cols) {
+              // PostgREST names an `alias:expr` column by its alias.
+              const key = col.includes(":") ? col.slice(0, col.indexOf(":")) : col;
+              if (key !== col) {
+                if (key in STATE.analyticsRow) {
+                  projected[key] = (STATE.analyticsRow as Record<string, unknown>)[key];
+                }
+                continue;
+              }
               if (col in STATE.analyticsRow) {
                 projected[col] = (
                   STATE.analyticsRow as Record<string, unknown>
@@ -1173,12 +1187,16 @@ describe("GET /api/strategies/[id]/returns", () => {
     // data_quality_flags / computation_status passthrough would show up here).
     // 164.6.6.2 plan 09 added `returns_unit` and `daily_returns_usd` (null for a
     // USD strategy) to the list; SFH-1 added the boolean `native_unpriced`.
-    // Nothing else.
+    // 194.1 plan 09 added the three record scalars `figure_*`; R2 WR-01 added `figure_unreadable`. Nothing else.
     expect(Object.keys(body).sort()).toEqual([
       "asset_class",
       "cagr",
       "daily_returns",
       "daily_returns_usd",
+      "figure_crypto",
+      "figure_observations",
+      "figure_span_days",
+      "figure_unreadable",
       "is_composite",
       "native_unpriced",
       "returns_unit",
@@ -1487,5 +1505,192 @@ describe("GET /api/strategies/[id]/returns — 164.6.6.2 native-unit legs", () =
     expect(JSON.stringify(body)).not.toContain("data_quality_flags");
     expect(JSON.stringify(body)).not.toContain("degraded_members");
     expect(JSON.stringify(body)).not.toContain("native_unit");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 194.1 plan 09 (B8, D-15) — the three record scalars of a lazily-added leg.
+//
+// WHY: the composer's detail row judges a drawer-added strategy's CAGR and Sharpe on THAT
+// strategy's own total record, and the book-only payload has no record for it. The route serves
+// the same three names the book payload carries, under the same rankable decision that withholds
+// `cagr` / `sharpe`. Expected values are hand-counted: 2026-01-01 to 2026-02-09 is 31 + 9 = 40
+// covered days; 2026-01-01 to 2026-01-30 is 30 covered days.
+// ---------------------------------------------------------------------------
+describe("GET /api/strategies/[id]/returns — 194.1 record scalars (B8)", () => {
+  async function call() {
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  const SERIES = [{ date: "2026-01-02", value: 0.021 }];
+
+  it("a rankable crypto row covering 40 days serves span 40, the stored count and crypto true, with cagr and sharpe unchanged", async () => {
+    STATE.publishedAssetClass = "crypto";
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      cagr: 0.5,
+      sharpe: 2.1,
+      series_start: "2026-01-01",
+      series_end: "2026-02-09",
+      record_observations: 38,
+    };
+    const body = await call();
+    expect(body.figure_span_days).toBe(40);
+    expect(body.figure_observations).toBe(38);
+    expect(body.figure_crypto).toBe(true);
+    expect(body.cagr).toBe(0.5);
+    expect(body.sharpe).toBe(2.1);
+    expect(STATE.observedFilters.analyticsSelect).toContain("series_start:returns_series->0->>date");
+  });
+
+  it("a rankable row with no stored count serves a null count; a traditional class reads crypto false", async () => {
+    STATE.publishedAssetClass = "traditional";
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      series_start: "2026-01-01",
+      series_end: "2026-02-09",
+    };
+    const body = await call();
+    expect(body.figure_span_days).toBe(40);
+    expect(body.figure_observations).toBeNull();
+    expect(body.figure_crypto).toBe(false);
+  });
+
+  it("a NON-rankable (failed) row serves nulls and crypto false, however long its leftover record", async () => {
+    STATE.publishedAssetClass = "crypto";
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "failed",
+      cagr: 0.5,
+      sharpe: 2.1,
+      series_start: "2024-01-01",
+      series_end: "2026-02-09",
+      record_observations: 800,
+    };
+    const body = await call();
+    expect(body.cagr).toBeNull();
+    expect(body.sharpe).toBeNull();
+    expect(body.figure_span_days).toBeNull();
+    expect(body.figure_observations).toBeNull();
+    expect(body.figure_crypto).toBe(false);
+  });
+
+  it("never forwards the series, the flags blob or the metrics blob", async () => {
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      returns_series: { "2026-01-01": 1, "2026-01-02": 1.02 },
+      computation_status: "complete",
+      data_quality_flags: { headline_since: "2026-01-05", degraded_members: ["okx:BTC"] },
+      series_start: "2026-01-01",
+      series_end: "2026-02-09",
+    };
+    const body = await call();
+    expect(Object.keys(body)).not.toContain("returns_series");
+    expect(Object.keys(body)).not.toContain("data_quality_flags");
+    expect(Object.keys(body)).not.toContain("metrics_json");
+    expect(JSON.stringify(body)).not.toContain("degraded_members");
+    expect(JSON.stringify(body)).not.toContain("headline_since");
+  });
+
+  // R2 WR-01: a null span reads as UNKNOWN at the consumer (the stored figure shows), and a null
+  // pair reads as "no computed metrics". So an unreadable record on a rankable run serves the
+  // stored values AND `figure_unreadable: true`, and the consumer's gate withholds them.
+  it("an unreadable series_end on a rankable run serves cagr and sharpe with figure_unreadable true", async () => {
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      cagr: 0.5,
+      sharpe: 2.1,
+      series_start: "2024-01-01",
+      series_end: "not-a-date",
+      record_observations: 800,
+    };
+    const body = await call();
+    expect(body.cagr).toBe(0.5);
+    expect(body.sharpe).toBe(2.1);
+    expect(body.figure_unreadable).toBe(true);
+    expect(body.figure_span_days).toBeNull();
+  });
+
+  it("an unreadable headline_since over an otherwise long valid series serves cagr and sharpe with figure_unreadable true", async () => {
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      cagr: 0.5,
+      sharpe: 2.1,
+      series_start: "2024-01-01",
+      series_end: "2026-02-09",
+      headline_since: "garbage",
+      record_observations: 800,
+    };
+    const body = await call();
+    expect(body.cagr).toBe(0.5);
+    expect(body.sharpe).toBe(2.1);
+    expect(body.figure_unreadable).toBe(true);
+  });
+
+  it("a readable record, and a non-rankable run with an unreadable one, serve figure_unreadable false", async () => {
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      cagr: 0.5,
+      sharpe: 2.1,
+      series_start: "2026-01-01",
+      series_end: "2026-02-09",
+    };
+    expect((await call()).figure_unreadable).toBe(false);
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "failed",
+      cagr: 0.5,
+      sharpe: 2.1,
+      series_start: "2026-01-01",
+      series_end: "not-a-date",
+    };
+    const dead = await call();
+    expect(dead.figure_unreadable).toBe(false);
+    expect(dead.cagr).toBeNull();
+    expect(dead.sharpe).toBeNull();
+  });
+
+  it("reports an unreadable record once at the producer, and a readable or non-rankable one never", async () => {
+    captureSpy.mockClear();
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      series_start: "2026-01-01",
+      series_end: "not-a-date",
+    };
+    const body = await call();
+    expect(body.figure_span_days).toBeNull();
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [, opts] = captureSpy.mock.calls[0]!;
+    expect(opts.tags).toMatchObject({
+      route: "api/strategies/returns",
+      reason: "figure-record-unreadable",
+      strategy_id: PUBLISHED_ID,
+    });
+
+    captureSpy.mockClear();
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "failed",
+      series_start: "2026-01-01",
+      series_end: "not-a-date",
+    };
+    await call();
+    STATE.analyticsRow = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      series_start: "2026-01-01",
+      series_end: "2026-02-09",
+    };
+    await call();
+    expect(captureSpy).not.toHaveBeenCalled();
   });
 });

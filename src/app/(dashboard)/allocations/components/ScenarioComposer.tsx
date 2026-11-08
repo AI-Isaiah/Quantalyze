@@ -217,6 +217,7 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
+import { constituentCell, constituentFigure, parseConstituentRecord, UNKNOWN_CONSTITUENT_FIGURE, type ConstituentFigure, type SettledMetrics } from "../lib/constituent-figure";
 import { CoverageTimeline } from "./CoverageTimeline";
 import { DefaultChangeNote } from "./DefaultChangeNote";
 import { ProvenanceNote } from "./ProvenanceNote";
@@ -733,7 +734,7 @@ function narrowSeriesState(raw: unknown): SeriesState {
  * agree with it instead of contradicting it about the same HTTP response.
  */
 type AddedMetricsEntry =
-  | { cagr: number | null; sharpe: number | null }
+  | SettledMetrics
   | "unavailable";
 
 /** The render-facing projection of the above (see `AddedMetricsEntry`). */
@@ -1688,7 +1689,7 @@ export function ScenarioComposer({
       assetClass: string | null,
       provenance: { trust_tier: string | null; is_composite: boolean },
       seriesState: SeriesState,
-      metrics: { cagr: number | null; sharpe: number | null },
+      metrics: SettledMetrics,
       native: { unit: string | null; usdSeries: DailyPoint[]; unpriced: boolean },
       tinyBaseDays: string[],
     ) => {
@@ -1802,6 +1803,7 @@ export function ScenarioComposer({
               typeof d.sharpe === "number" && Number.isFinite(d.sharpe)
                 ? d.sharpe
                 : null,
+            record: parseConstituentRecord(d),
           };
           // 164.6.6.2 plan 11 (D-18, T-164.6.6.2-34) — the unit goes through the
           // ONE validator at this client boundary: a stale or malformed value
@@ -3067,12 +3069,12 @@ export function ScenarioComposer({
   const addedMetricsByRef = useMemo<
     Record<
       string,
-      { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+      { cagr: number | null; sharpe: number | null; state: AddedMetricsState } & ConstituentFigure
     >
   >(() => {
     const out: Record<
       string,
-      { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+      { cagr: number | null; sharpe: number | null; state: AddedMetricsState } & ConstituentFigure
     > = {};
     for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
       // HONEST-05 — `state` rides alongside the pair because the panel needs to
@@ -3082,10 +3084,11 @@ export function ScenarioComposer({
         cagr: meta.cagr,
         sharpe: meta.sharpe,
         state: meta.metricsState,
+        ...constituentFigure(strategyById.get(id)?.strategy, addedMetricsById[id]),
       };
     }
     return out;
-  }, [addedStrategyMetadataLookup]);
+  }, [addedStrategyMetadataLookup, strategyById, addedMetricsById]);
 
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
@@ -7169,7 +7172,7 @@ interface CompositionListProps {
    */
   addedMetricsByRef: Record<
     string,
-    { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+    { cagr: number | null; sharpe: number | null; state: AddedMetricsState } & ConstituentFigure
   >;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
@@ -8195,6 +8198,7 @@ function CompositionList({
             cagr: null,
             sharpe: null,
             state: "pending" as AddedMetricsState,
+            ...UNKNOWN_CONSTITUENT_FIGURE,
           };
           const metricsAbsent = metrics.cagr == null && metrics.sharpe == null;
           // 164.6.6.2 plan 11 (D-12, UI-SPEC E1/E2/E5) — the unit this row's own
@@ -8511,12 +8515,12 @@ function CompositionList({
                             // for positive); an em-dash is muted, because a
                             // missing value must not compete with a present one.
                             className={`font-mono text-xs tabular-nums ${
-                              metrics.cagr == null
+                              gatedValue(metrics.cagr, metrics.figureState) == null
                                 ? "text-text-muted"
                                 : "text-text-primary"
                             }`}
                           >
-                            {formatPercent(metrics.cagr, 1)}
+                            {constituentCell(metrics.cagr, metrics, (v) => formatPercent(v, 1))}
                           </span>
                         </div>
                         <div className="flex items-center gap-2">
@@ -8524,12 +8528,12 @@ function CompositionList({
                           <span
                             data-testid={`scenario-detail-sharpe-${a.id}`}
                             className={`font-mono text-xs tabular-nums ${
-                              metrics.sharpe == null
+                              gatedValue(metrics.sharpe, metrics.figureState) == null
                                 ? "text-text-muted"
                                 : "text-text-primary"
                             }`}
                           >
-                            {formatNumber(metrics.sharpe, 2)}
+                            {constituentCell(metrics.sharpe, metrics, (v) => formatNumber(v, 2))}
                           </span>
                         </div>
                       </>

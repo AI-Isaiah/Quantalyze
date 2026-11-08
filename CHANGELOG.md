@@ -1,17 +1,78 @@
 # Changelog
 
-## [0.133.27.1] - 2026-11-08 — BASELINE: automated re-dump after the PROD apply of 959ef982
+## [0.133.28.1] - 2026-11-08 — BASELINE: automated re-dump after the PROD apply of 959ef982
 
 ### Changed
 - `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `42479251239`, after the PROD apply of merge `959ef982`: sha256 `aa24e1a4…` → `00ff175d…`.
 - Shape, old → new: tables 66 → 66, policies 153 → 153, function statements 134 → 134, distinct function names 132 → 132, data statements 0 → 0.
 - Migrations the dump newly carries, from the marker diff: `20261107140000_get_verified_cohort_rank_span_gate.sql`.
-- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-08` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.27.0 → 0.133.27.1.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-08` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.28.0 → 0.133.28.1 (re-picked when landed, since 0.133.27.1 and 0.133.28.0 shipped first).
 - The gates on the composed tree, verbatim: `baseline-currency: carried=317 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
 
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `42479251239` succeeded, and this entry was composed by the `redump-pr` job. Run `42479251239` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.133.28.0] - 2026-11-08 — Phase 194.1 D04SWEEP
+
+Phase 194's total-record rule (D-15) now reaches every page outside Phase 194. A CAGR, Sharpe, Sortino, volatility, Sharpe delta or reason sentence shows only when the strategy's total record reaches 90 days (crypto) or 60 observations (otherwise). Above that it shows, with the one muted note while the record is under a year (D-13). 30 source and test commits across 13 plans in 4 waves and three review rounds. No migration, no new dependency.
+
+### Added
+- **Client-safe record scalars.** `figure-record-scalars` (`RECORD_SCALAR_ALIASES`, `recordFromScalars`) turns the four stored record scalars into a gate verdict outside server code. A test pins it equal to the reviewed `RECORD_SPAN_SELECT`, so no whole `returns_series`, `metrics_json` or `data_quality_flags` column is projected. The Python twin is `figure_record_from_scalars` and `record_clears` in `services/metrics.py`.
+- **An every-page census.** `figure-gate-census.test.ts` walks every source file and fails on a file that renders an annualised figure without importing a gate. Exclusions take a reason from a closed set and are checked for staleness, and a planted self-test proves the census goes RED.
+- **Record fields on three wires, all optional so either deploy order is safe:**
+  - The Bridge response gains `sharpe_delta_state` and the two record fields.
+  - `GET /api/strategies/[id]/returns` gains `figure_span_days`, `figure_observations`, `figure_crypto` and `figure_unreadable`.
+  - The intro snapshot freezes a `sharpe_record` beside each Sharpe, written by both the TS route and the Python worker and pinned by one shared fixture.
+
+### Changed
+- **Gated on the total record (D-15):**
+  - The shared scenario page's KPI strip.
+  - Each saved-scenario compare column. A withheld column never wins and never counts as a comparison, and the blend basis is the engine's own.
+  - The `/compare` holding card's Sharpe and volatility. The 30-day floor stays on cumulative return and max drawdown.
+  - The Bridge replacement card's Sharpe delta. A malformed state fails closed to withheld and is reported once. The ranking is unchanged.
+  - Each recommendation card. An asset-class read error or a missing row withholds and never defaults to a class.
+  - The wizard's preview tiles and submit summary, including composites and non-crypto drafts.
+  - A Scenario constituent's CAGR and Sharpe on its own record. This covers book legs and drawer-added legs.
+  - The admin review card, the admin match candidate and the admin intros page.
+- **The match engine's "Sharpe X" reason sentence** is gated on the candidate's stored record and asset class, and omitted when withheld. Score and rank are untouched.
+- **The factsheet share card (OG)** follows D-15. Its own sub-year CAGR rule (E1) is dropped, it shows the one muted note under a year, and its URL carries `OG_CARD_VERSION` so cached cards are not reused.
+
+### Fixed
+- **Review round 1 (WR-01):** the returns route no longer serves an unreadable record's figures as if they were current.
+- **Review round 2 (R2 WR-01):** a drawer-added leg with an unreadable record shows its CAGR and Sharpe as withheld, with the reason "the record's dates could not be read". It no longer shows the false "No computed metrics" sentence. The route now sends the stored values plus `figure_unreadable`, and the client gate withholds them.
+
+### Tests
+- Every gated site carries neuter-RED proofs.
+- The census has a planted-file self-test.
+- TS and Python parity runs on one intro-snapshot fixture.
+- The match-reason gate has cases for non-crypto, unknown, unreadable and legacy records.
+- The wealth-returns census reads a select column list composed as an f-string as one select, and lists `RECORD_SCALAR_ALIASES` as the one module-level alias constant in `services/metrics.py`.
+
+### Notes
+- **Skipped on purpose:** `/strategy/[id]`, `/strategy/[id]/v2`, `/browse/[slug]/[strategyId]`, `/discovery/[slug]/[strategyId]` and the StrategyV2Shell panels. Phase 196 D-03 redirects those routes to `/factsheet/[id]` and drops the panels (founder pick 2026-11-08, "Drop now, book a phase"). The census excludes those six files with that reason. Whichever of 194.1 and 196 merges second deletes the stale entries.
+- **Known limits:**
+  - Match batches and intro snapshots frozen before this release keep their stored text.
+  - The Bridge chip and the match reason need the analytics service deploy of this release.
+  - The holdings book payload cannot carry the unreadable flag, so a malformed book-leg record shows as stored.
+
+## [0.133.27.1] - 2026-11-08 — records: Phase 194 plan 09 PROD recompute and residuals
+
+### Changed
+- **The Phase 194 records are on main.** This brings the phase directory (plans, summaries, reviews, VERIFICATION, the SC-1 reading and `194-RECOMPUTE.md`), the ROADMAP plan list with plan 09 ticked, STATE's Current Position set by hand, REQUIREMENTS and the Phase 194.1 CONTEXT.
+- **Plan 194-09 ran on PROD.** The deploy of `959ef982` was confirmed by Railway and by `/health`. After that, every complete analytics row (27) was recomputed through `enqueue_compute_job`, and every job finished `done`. Before the recompute, 27 rows lacked the Phase 194 facts. After it, 0 lack `figure_defs_version` 2, `record_observations` or the three 1y rolling keys. S1's 6 Month, 3 Month, VaR 95% and CVaR 95% now equal the factsheet engine's definitions. API-keyed rows were enqueued without waiting for their daily sync tick, which enqueues the same job kind.
+
+### Notes
+- VERIFICATION stays `human_needed` for the signed-in browser UAT only. The recompute and the CI item are passed. The phase is not marked complete.
+- TODOS books eight Phase 194 residuals, all owned by Phase 194.1:
+  - Holdings `figureRecordScalars` does not carry the unreadable flag.
+  - Malformed dates on the mark-to-market and smoothed axes, in `shapedRecordScalars` and in the SQL twin read as absent (R6 WR-02/03).
+  - `scenario-factsheet-payload` does not check interior dates.
+  - `percentileRecord` Sentry reports are not deduplicated.
+  - The wizard's HARD-04 caveat still uses the raw gap.
+  - A zoomed range whose benchmark covers less than the window has no note.
+  - The OG share card is not gated.
+  - The `get_verified_cohort_rank` stale-baseline drift needs a baseline re-dump. It leaves a red `sql-gate-lint` check on main and likely made Railway skip the first deploy of the Phase 194 merge.
 
 ## [0.133.27.0] - 2026-11-08 — Phase 194 FIGURETRUTH
 

@@ -74,6 +74,14 @@ export type HoldingCompareAnalytics = {
    * metrics below the minimum still carries it.
    */
   priced_days: number;
+  /**
+   * 194.1 plan 04 (census B11, D-15): the first and last date of the points
+   * `priced_days` counts, so the card can judge Sharpe and annualised volatility on
+   * the holding's price record. Optional: absent on a payload built before this field,
+   * and then the card treats the record as unknown and shows the figures as before.
+   */
+  first_priced_day?: string | null;
+  last_priced_day?: string | null;
 };
 
 /**
@@ -427,7 +435,10 @@ export function isOptionSymbol(symbol: string): boolean {
   return name.endsWith("-C") || name.endsWith("-P");
 }
 
-type PriceMetrics = Omit<HoldingCompareAnalytics, "priced_days">;
+type PriceMetrics = Omit<
+  HoldingCompareAnalytics,
+  "priced_days" | "first_priced_day" | "last_priced_day"
+>;
 
 const NULL_METRICS: PriceMetrics = {
   cumulative_return: null,
@@ -757,6 +768,14 @@ export async function fetchHoldingCompareItem(params: {
   return {
     ...base,
     historyState: "ready",
-    analytics: { ...metrics, priced_days: marks.priced_days },
+    analytics: {
+      ...metrics,
+      priced_days: marks.priced_days,
+      // 194.1 B11: the same point set whose length is `priced_days` (spot: the priced
+      // days; derivative: the usable, directed days), ascending by `asof`.
+      first_priced_day: marks.points.length > 0 ? marks.points[0].asof : null,
+      last_priced_day:
+        marks.points.length > 0 ? marks.points[marks.points.length - 1].asof : null,
+    },
   };
 }
