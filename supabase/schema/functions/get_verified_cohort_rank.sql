@@ -6,6 +6,11 @@
 -- ==========================================================================
 -- STEP 1: get_verified_cohort_rank SECURITY DEFINER RPC (full re-base)
 -- ==========================================================================
+-- VAC-04: PROD's live body before this migration equals the committed baseline snapshot
+-- (the same hash sql-gate-lint reports for supabase/schema/baseline.sql), so this replace
+-- overwrites no out-of-band patch.
+--   get_verified_cohort_rank/3
+-- prod-body-ack: 1fd8f0cd9e3e72ba5580453361eb202a8f2b371e409933e46f246f28dd23d55f
 CREATE OR REPLACE FUNCTION public.get_verified_cohort_rank(
   p_sharpe   DOUBLE PRECISION,
   p_sortino  DOUBLE PRECISION,
