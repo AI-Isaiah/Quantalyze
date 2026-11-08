@@ -1138,6 +1138,29 @@ export function keyAttentionChipLabel(k: KeyAttentionInput): string | null {
     : untrustedKeyChipLabel(k.sync_status);
 }
 
+// --- Cash symbols (Phase 198, ROUTE-08) ------------------------------------
+// Mirrors the Python `STABLECOINS` literal in analytics-service/services/
+// closed_sets.py, the writer's "treat as cash" set. The split-suffix symbols
+// (USDE, PYUSD, USDB) are deliberately excluded: the writer recognises them
+// only to parse perp symbols. closed-sets.cash-symbols.test.ts pins this set
+// against the Python literal member for member; change both together.
+export const CASH_SYMBOLS: ReadonlySet<string> = new Set([
+  "USDT",
+  "USDC",
+  "DAI",
+  "BUSD",
+  "TUSD",
+  "FDUSD",
+  "USD",
+]);
+
+/** A spot row whose upper-cased symbol is in `CASH_SYMBOLS`. A derivative row
+ *  is never cash, and an account-balance row (MT5, sFOX) is cash only when its
+ *  symbol is in the set. */
+export function isCashHolding(h: { holding_type: string; symbol: string }): boolean {
+  return h.holding_type === "spot" && CASH_SYMBOLS.has(h.symbol.toUpperCase());
+}
+
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
 // new user receives is the SQL trigger handle_new_user

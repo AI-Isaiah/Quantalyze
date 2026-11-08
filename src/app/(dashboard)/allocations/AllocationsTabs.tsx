@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -25,12 +26,13 @@ import { computeTabStripScroll } from "@/lib/tab-strip-scroll";
 // Plan 170-08 imports the scroll math from the lib module. Re-exported here
 // so the existing test import from this file keeps working unchanged.
 export { computeTabStripScroll } from "@/lib/tab-strip-scroll";
-// Phase 116 / ADDALLOC-02 — the real-data onboarding overlay. Hosted at the
-// tab level so the context-aware header "+ Allocation" button can open it on
-// Holdings / Overview (where ScenarioComposer, its other host, is not mounted).
-// Imported statically: it renders null while closed, so WizardClient (its heavy
-// body) only mounts on open — no Overview-first bundle cost from the import.
-import { ContributionWizardOverlay } from "./components/ContributionWizardOverlay";
+// Phase 198 D-03 — the allocator's own add-allocation flow, hosted here so the
+// one header "+ Allocation" button opens it on every tab. Imported statically:
+// it renders null while closed and fetches nothing until it opens.
+import { AddAllocationFlow } from "./components/AddAllocationFlow";
+import type { DeepLinkInvalidReason } from "./components/AddAllocationFlow";
+import { heldStrategyIdsFrom } from "./lib/add-allocation";
+import { bookEquityUsd } from "./lib/book-figures";
 // Phase 11 / 11-05 — onboarding nudge surfaces (S1 + S2). Both render
 // above the existing tab nav when apiKeysCount === 0. Light client
 // components — kept as direct imports rather than next/dynamic so they
@@ -64,13 +66,14 @@ function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
 // AFTER the payload reference is stable (and add a test that pins the
 // short-circuit), otherwise it ships as misleading optimization signal.
 
-// Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
-// next/dynamic with ssr: false. Together they pull in HoldingsTable +
-// HoldingDetail + OutcomeForm + BridgeOutcomeBanner + OutcomesWidget +
-// MandateForm + RiskAttribution surfaces, plus their charts and primitives
-// — easily ~1500 LOC of code the Overview tab never needs. Deferring them
-// from the initial bundle and HTML keeps the first paint of the dashboard
-// aligned with the Overview path that >90% of allocators land on.
+// Phase A6 — the Holdings tab panel lazy-loads via next/dynamic with
+// ssr: false. It pulls in HoldingsTable + HoldingDetail + OutcomeForm +
+// BridgeOutcomeBanner surfaces, plus their charts and primitives — code the
+// Overview tab never needs. Deferring it from the initial bundle and HTML keeps
+// the first paint of the dashboard aligned with the Overview path that >90% of
+// allocators land on. (Phase 198 D-02: the Outcomes / Mandate / Risk panels are
+// no longer tabs; their panel files stay for plans 198-06 and 198-11 to mount
+// inside Overview and Holdings.)
 //
 // AllocationsTabs is itself a "use client" component, so the deferred
 // chunks hydrate in lock-step with the user's first interaction with
@@ -103,23 +106,6 @@ const HoldingsTabPanel = dynamic(
   () =>
     import("./HoldingsTabPanel").then((m) => ({ default: m.HoldingsTabPanel })),
   { ssr: false, loading: () => <TabBodyFallback label="Holdings" /> },
-);
-
-const OutcomesTabPanel = dynamic(
-  () =>
-    import("./OutcomesTabPanel").then((m) => ({ default: m.OutcomesTabPanel })),
-  { ssr: false, loading: () => <TabBodyFallback label="Outcomes" /> },
-);
-
-const MandateTabPanel = dynamic(
-  () =>
-    import("./MandateTabPanel").then((m) => ({ default: m.MandateTabPanel })),
-  { ssr: false, loading: () => <TabBodyFallback label="Mandate" /> },
-);
-
-const RiskTabPanel = dynamic(
-  () => import("./RiskTabPanel").then((m) => ({ default: m.RiskTabPanel })),
-  { ssr: false, loading: () => <TabBodyFallback label="Risk" /> },
 );
 
 // Phase 10 / 10-06b — full Scenario tab body. L4: dynamic() lives at MODULE
@@ -166,7 +152,7 @@ const ScenarioComposer = dynamic(
 // — the persisted localStorage key NAME is "allocations.ui_v2" for
 // back-compat with shipped opt-outs, but in current main its SCOPE is the
 // Scenario tab only (ScenarioComposer vs ScenarioStub in the scenario
-// tabpanel below). The Overview / Holdings / Outcomes / Mandate / Risk
+// tabpanel below). The Overview / Holdings
 // panels are not gated by this flag. Treat any documentation that calls
 // it a "broader UI rollback" as stale.
 //
@@ -213,15 +199,12 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
 /**
  * Phase 09.1 Plan 02 / D-05 / D-06 — Tabs shell for /allocations.
  *
- * Visible tablist (see VISIBLE_TAB_KEYS):
+ * Visible tablist (see VISIBLE_TAB_KEYS), three tabs since Phase 198 D-02:
  *   - Overview (default) — wraps AllocationDashboardV2.
  *   - Holdings — full-width HoldingsTable.
- *   - Outcomes — full-width OutcomesWidget.
- *   - Mandate  — link to /profile?tab=mandate + MandateSnapshot.
- *   - Risk     — curated grid of risk widgets.
  *   - Scenario — ScenarioComposer (V2 default) / ScenarioStub (rollback).
  *     SURF-01 (Phase 21): now a visible tab button; still independently
- *     reachable via ?tab=scenario or the "+ Allocation" header chip.
+ *     reachable via ?tab=scenario.
  *
  * URL state (D-04 / D-05):
  *   /allocations                  → Overview
@@ -229,9 +212,12 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  *   /allocations?tab=performance  → Overview (legacy Phase 07 alias; param
  *                                   deleted on mount for clean bookmarks)
  *   /allocations?tab=holdings     → Holdings
- *   /allocations?tab=outcomes     → Outcomes
- *   /allocations?tab=mandate      → Mandate
- *   /allocations?tab=risk         → Risk
+ *   /allocations?tab=outcomes     → Holdings, scrolled to #outcomes (legacy alias,
+ *                                   rewritten to ?tab=holdings on mount)
+ *   /allocations?tab=mandate      → Overview, scrolled to #mandate (legacy alias,
+ *                                   `tab` param deleted on mount)
+ *   /allocations?tab=risk         → Overview, scrolled to #risk (legacy alias,
+ *                                   `tab` param deleted on mount)
  *   /allocations?tab=scenario     → Scenario (now a visible tab — SURF-01, Phase 21)
  *   /allocations?tab=<unknown>    → Overview (D-04 silent fallback)
  *
@@ -259,13 +245,7 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  * <Suspense fallback={<div />}>.
  */
 
-type TabKey =
-  | "overview"
-  | "holdings"
-  | "outcomes"
-  | "mandate"
-  | "risk"
-  | "scenario";
+type TabKey = "overview" | "holdings" | "scenario";
 
 // Visible tab strip. SURF-01 (Phase 21): Scenario is now a visible tab in
 // the strip — it remains independently reachable via ?tab=scenario and the
@@ -276,11 +256,39 @@ type TabKey =
 const VISIBLE_TAB_KEYS: readonly TabKey[] = [
   "overview",
   "holdings",
-  "outcomes",
-  "mandate",
-  "risk",
   "scenario",
 ] as const;
+
+// Phase 198 D-02 — the Outcomes, Mandate and Risk tabs are retired; their
+// content now lives inside Holdings (Outcomes) and Overview (Risk, Mandate),
+// each under a fixed section id. A retired `?tab=` value keeps working: it
+// lands on the content's new home, the `tab` param is rewritten, and the page
+// scrolls once to the section. A CLOSED map — the anchor is one of three fixed
+// ids and is never read from the URL (T-198-07).
+const LEGACY_TAB_ALIASES = {
+  outcomes: { tab: "holdings", anchor: "outcomes" },
+  risk: { tab: "overview", anchor: "risk" },
+  mandate: { tab: "overview", anchor: "mandate" },
+} as const;
+type LegacyTabKey = keyof typeof LEGACY_TAB_ALIASES;
+
+function isLegacyTabKey(raw: string | null): raw is LegacyTabKey {
+  return raw !== null && Object.hasOwn(LEGACY_TAB_ALIASES, raw);
+}
+
+// Frame budget for the anchor retry: the Holdings panel is a lazily mounted
+// next/dynamic chunk, so its section may not exist on the first frame.
+const ANCHOR_SCROLL_MAX_FRAMES = 120;
+
+// One reduced-motion check for both the NAV-02 strip scroll and the alias
+// anchor scroll. Guarded so it no-ops where matchMedia is absent (jsdom).
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
 
 // audit-2026-05-07 M-1045 (silent-failure-hunter c8) — D-04 says unknown
 // values silently fall back to Overview. We keep the user-facing fallback
@@ -290,35 +298,35 @@ const VISIBLE_TAB_KEYS: readonly TabKey[] = [
 // keys are NOT logged — only genuinely unknown non-empty raw values.
 //
 // audit-2026-05-07 Phase-4 red-team (MED conf 8) — entries are typed as
-// `TabKey | "performance"` and derived from `VISIBLE_TAB_KEYS` + the
-// routable-but-not-visible "scenario" + the legacy "performance" alias so
+// `TabKey | LegacyTabKey | "performance"` and derived from `VISIBLE_TAB_KEYS`
+// + the retired-tab aliases + the legacy "performance" alias so
 // a future TabKey rename can't leave a stale string here that silently
 // suppresses `invalid_tab_fallback`. `VISIBLE_TAB_KEYS` is the single
 // TabKey-typed source of truth; the spread here keeps the two constants
 // in lockstep at compile time. The Set is exposed as `ReadonlySet<string>`
 // so `.has(raw)` still accepts an arbitrary search-param string at the
 // call site without per-call casts.
-const KNOWN_TAB_RAW_ENTRIES: readonly (TabKey | "performance")[] = [
-  ...VISIBLE_TAB_KEYS,
-  "scenario",
-  "performance", // Phase 07 legacy alias — cleaned up by the URL effect.
-] as const;
+const KNOWN_TAB_RAW_ENTRIES: readonly (TabKey | LegacyTabKey | "performance")[] =
+  [
+    ...VISIBLE_TAB_KEYS,
+    ...(Object.keys(LEGACY_TAB_ALIASES) as LegacyTabKey[]),
+    "performance", // Phase 07 legacy alias — cleaned up by the URL effect.
+  ] as const;
 const KNOWN_TAB_RAW: ReadonlySet<string> = new Set<string>(
   KNOWN_TAB_RAW_ENTRIES,
 );
 
 function parseTab(raw: string | null): TabKey {
-  // Overview is default. Anything else (null, empty, unknown values, the
+  // Overview is default. A retired tab key (Phase 198 D-02) maps to the tab its
+  // content now lives in. Anything else (null, empty, unknown values, the
   // legacy "performance" alias) collapses to "overview" — silent fallback
-  // preserves D-04.
+  // preserves D-04, with a breadcrumb only for a genuinely unknown value.
   switch (raw) {
     case "holdings":
-    case "outcomes":
-    case "mandate":
-    case "risk":
     case "scenario":
       return raw;
     default:
+      if (isLegacyTabKey(raw)) return LEGACY_TAB_ALIASES[raw].tab;
       if (raw && raw.length > 0 && !KNOWN_TAB_RAW.has(raw)) {
         warnAudit("invalid_tab_fallback", { raw });
       }
@@ -329,9 +337,6 @@ function parseTab(raw: string | null): TabKey {
 const TAB_LABELS: Record<TabKey, string> = {
   overview: "Overview",
   holdings: "Holdings",
-  outcomes: "Outcomes",
-  mandate: "Mandate",
-  risk: "Risk",
   scenario: "Scenario",
 };
 
@@ -412,8 +417,8 @@ export function AllocationsTabs(
   const isUiV2 = uiV2State !== "explicit-false";
 
   // audit-2026-05-07 H-1188 (red-team c8) — the persisted flag's SCOPE is
-  // Scenario only in current main; the Overview / Holdings / Outcomes /
-  // Mandate / Risk panels remain V2 regardless. Log a breadcrumb when the
+  // Scenario only in current main; the Overview / Holdings
+  // panels remain V2 regardless. Log a breadcrumb when the
   // explicit-false rollback path is hit so support can correlate "I set the
   // flag but my dashboard didn't roll back" tickets. Fires on the
   // post-hydration value, and again only if a cross-tab flip arrives.
@@ -430,24 +435,83 @@ export function AllocationsTabs(
   // (the new default — redundant) OR ?tab=performance (legacy Phase 07
   // alias — bookmark compat), strip it so the canonical URL is
   // /allocations. Runs after render to avoid touching render-phase state.
+  //
+  // Phase 198 D-02 — a retired tab key (outcomes / risk / mandate) is rewritten
+  // the same way: `tab=holdings` for outcomes, the param deleted for risk and
+  // mandate, every other param kept, built exactly as changeTab builds its URL.
+  // The alias also arms `pendingAlias`, which the anchor-scroll effect below
+  // consumes. This effect runs on every searchParams change, so a soft
+  // navigation to a legacy link while already on /allocations (the sidebar's
+  // Risk item) re-arms it, not just the first mount.
   // Phase 167.1.2 plan 07 (SC-5c): the native History API, not the router.
   // An App Router navigation to a changed query on this force-dynamic page
   // refetches the RSC payload (the old comment's "shallow replace does not
   // refetch" was wrong for the App Router); history.replaceState does not,
   // and Next syncs useSearchParams to it.
+  //
+  // Phase 198 D-07 — every URL write in this file builds from the LIVE
+  // `window.location.search`, never the render's `searchParams` snapshot. Two
+  // effects now rewrite the URL in the same commit (this one and the `add` strip
+  // below); a snapshot-built write would put back whatever param the other
+  // effect had just removed (`?tab=risk&add=<id>` would regain `tab`).
+  const [pendingAlias, setPendingAlias] = useState<LegacyTabKey | null>(null);
   useEffect(() => {
     const current = searchParams.get("tab");
     if (current === "overview" || current === "performance") {
-      const params = new URLSearchParams(searchParams.toString());
+      const params = new URLSearchParams(window.location.search);
       params.delete("tab");
       const qs = params.toString();
       window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
+    } else if (isLegacyTabKey(current)) {
+      const params = new URLSearchParams(window.location.search);
+      if (current === "outcomes") params.set("tab", "holdings");
+      else params.delete("tab");
+      const qs = params.toString();
+      window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- arms a one-shot scroll from an external URL change; the value cannot be derived in render because this very effect removes the legacy param from the URL
+      setPendingAlias(current);
     }
   }, [searchParams, pathname]);
 
+  // Phase 198 D-02 — one scroll to the alias's section once it exists. The
+  // Holdings panel is lazily mounted (RESEARCH P6), so poll with a bounded
+  // requestAnimationFrame loop (ANCHOR_SCROLL_MAX_FRAMES) and give up silently
+  // when no anchor appears. Cancelled on unmount and on any tab change: a
+  // pending alias whose tab is no longer active is dropped, so returning to
+  // that tab later does not scroll unprompted.
+  useEffect(() => {
+    if (!pendingAlias) return;
+    const alias = LEGACY_TAB_ALIASES[pendingAlias];
+    if (activeTab !== alias.tab) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- drops a stale one-shot when the user leaves the alias's tab
+      setPendingAlias(null);
+      return;
+    }
+    let frame = 0;
+    let handle = 0;
+    const tick = () => {
+      const target = document.getElementById(alias.anchor);
+      if (target) {
+        target.scrollIntoView({
+          behavior: prefersReducedMotion() ? "auto" : "smooth",
+          block: "start",
+        });
+        setPendingAlias(null);
+        return;
+      }
+      frame += 1;
+      if (frame >= ANCHOR_SCROLL_MAX_FRAMES) {
+        setPendingAlias(null);
+        return;
+      }
+      handle = window.requestAnimationFrame(tick);
+    };
+    handle = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(handle);
+  }, [pendingAlias, activeTab]);
+
   // Live-refresh polling — only while on Overview + document visible
-  // (Phase 06 D-11 inherited pattern). Never polls on Holdings / Outcomes /
-  // Mandate / Risk / Scenario.
+  // (Phase 06 D-11 inherited pattern). Never polls on Holdings / Scenario.
   //
   // audit-2026-05-07 M-1046 (red-team c8) — wrap router.refresh in a
   // try/catch + breadcrumb. router.refresh has no AbortController; if it
@@ -479,143 +543,119 @@ export function AllocationsTabs(
     window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
   };
 
-  // Phase 116 / ADDALLOC — context-aware header "+ Allocation" button.
+  // Phase 198 D-03 — the header "+ Allocation" button opens the allocator's own
+  // add-allocation flow on EVERY tab, the Scenario tab and its rollback surface
+  // included. It never opens the manager's strategy wizard (an allocator is not a
+  // manager), and on Scenario the composer's own "Browse strategies" stays the
+  // way to add a strategy to a model.
   //
-  // `addButtonRef` is the trigger the overlays return focus to on close (the
-  // overlay pulls focus IN on open but never restores the trigger — that is the
-  // host's job, because the trigger lives here in AllocationsTabs, not in the
-  // overlay). `contributeOpen` hosts the Holdings/Overview onboarding wizard at
-  // the tab level so it is reachable on tabs where ScenarioComposer is NOT
-  // mounted. This is deliberately ADDITIVE: the composer keeps its OWN internal
-  // contributeOpen (the Browse → "Add your own" handoff) byte-untouched; a
-  // closed overlay renders null, so the UI-SPEC single-modal contract holds.
+  // `addButtonRef` is the trigger the flow returns focus to on every close path:
+  // the flow pulls focus IN on open but never restores the trigger, because the
+  // trigger lives here, not in the flow. `addFlow.deepLink` carries the raw
+  // `?add=` value (Phase 196's entry point, D-07) and is null for a header click.
   const addButtonRef = useRef<HTMLButtonElement>(null);
-  const [contributeOpen, setContributeOpen] = useState(false);
+  const [addFlow, setAddFlow] = useState<{
+    open: boolean;
+    deepLink: { raw: string } | null;
+  }>({ open: false, deepLink: null });
 
-  // Phase 116 / ADDALLOC-01 — the "+ Strategy" (scenario tab) dispatch signals
-  // the composer's StrategyBrowseDrawer to open. The composer registers an
-  // imperative open fn here (onRegisterOpenBrowse); we store it and call it on
-  // click. Because ScenarioComposer is dynamic-imported (scenario-tab-only), a
-  // click can land BEFORE registration during the chunk-load window —
-  // pendingBrowseOpenRef records that so handleRegisterOpenBrowse drains it
-  // (ADDALLOC-03: no silent no-op during the loading window).
-  // headerBrowseTriggeredRef marks a header-initiated open so a subsequent
-  // Browse close returns focus to the header button (while an in-composer Browse
-  // close does not steal focus).
-  const composerBrowseOpenRef = useRef<(() => void) | null>(null);
-  const pendingBrowseOpenRef = useRef(false);
-  const headerBrowseTriggeredRef = useRef(false);
-
-  const handleRegisterOpenBrowse = useCallback((open: () => void) => {
-    composerBrowseOpenRef.current = open;
-    if (pendingBrowseOpenRef.current) {
-      pendingBrowseOpenRef.current = false;
-      open();
-    }
+  // Same microtask-clear live-region idiom as the Export chip (see
+  // `liveAnnouncement` below): set "" first so an identical message re-announces,
+  // then the real message, with no sentinel character in the DOM text.
+  const [liveAnnouncement, setLiveAnnouncement] = useState<string>("");
+  const announce = useCallback((message: string) => {
+    setLiveAnnouncement("");
+    queueMicrotask(() => setLiveAnnouncement(message));
   }, []);
-
-  const handleBrowseClosed = useCallback(() => {
-    if (headerBrowseTriggeredRef.current) {
-      headerBrowseTriggeredRef.current = false;
-      addButtonRef.current?.focus();
-    }
-  }, []);
-
-  // Phase 116 review WR-01 — the composer's Browse → "Add your own" handoff
-  // (onAddOwn) closes Browse WITHOUT firing onBrowseClosed — a modal-to-modal
-  // transition, not a close. So a header-initiated Browse the user hands off to
-  // the contribute wizard would leave headerBrowseTriggeredRef armed
-  // indefinitely; a LATER, independently in-composer-initiated Browse close then
-  // fires onBrowseClosed, sees the stale flag, and yanks focus to the header
-  // "+ Strategy" button — violating "an in-composer close does not steal focus."
-  // The host cannot observe the composer-internal handoff on its own, so the
-  // composer signals it here (onBrowseHandoff); we disarm the flag so only a
-  // genuine header-initiated close returns focus.
-  const handleBrowseHandoff = useCallback(() => {
-    headerBrowseTriggeredRef.current = false;
-  }, []);
-
-  // Guard against a stale pending Browse-open (or focus-return flag) re-firing
-  // on a later scenario remount: clear them whenever we leave the scenario tab.
-  //
-  // Phase 116 review WR-02 — ALSO null the composer's registered open-Browse
-  // setter. ScenarioComposer unmounts when activeTab !== "scenario", so its
-  // registered `() => setBrowseOpen(true)` closure points at a dead instance.
-  // Leaving it non-null lets a "+ Strategy" click in the remount's
-  // pre-registration window take the truthy-ref branch, call the dead setter
-  // (a no-op on the unmounted component), and NOT set pendingBrowseOpenRef — so
-  // the click is swallowed with no drawer opening: exactly the silent no-op
-  // ADDALLOC-03 forbids. Nulling it (symmetric with the two refs above) makes
-  // such a click fall through to the pending-drain path instead.
-  useEffect(() => {
-    if (activeTab !== "scenario") {
-      pendingBrowseOpenRef.current = false;
-      headerBrowseTriggeredRef.current = false;
-      composerBrowseOpenRef.current = null;
-    }
-  }, [activeTab]);
 
   // Memoized so their identities stay stable across the Overview tab's 30s
-  // router.refresh() poll (which re-renders AllocationsTabs). A new handler
-  // identity would re-run ContributionWizardOverlay's open-effect ([isOpen,
-  // onClose]) and yank `panelRef.current?.focus()` away from the user's input
-  // mid-typing every 30s. `setContributeOpen` (state setter) and `addButtonRef`
-  // (a ref) are stable, so neither belongs in deps; `router` does.
-  const handleContributeClose = useCallback(() => {
-    setContributeOpen(false);
-    // Return focus to the header trigger (UI-SPEC §Close → focus return).
+  // router.refresh() poll (which re-renders AllocationsTabs). A new `onClose`
+  // identity would re-run the flow's open effect and yank focus away from the
+  // amount the allocator is typing every 30s. The state setters, `announce` and
+  // `addButtonRef` are stable, so only `router` belongs in deps.
+  const handleFlowClose = useCallback(() => {
+    setAddFlow((prev) => ({ ...prev, open: false }));
+    // Return focus to the header trigger (UI-SPEC close -> focus return).
     addButtonRef.current?.focus();
   }, []);
-  const handleContributeSuccess = useCallback(() => {
-    setContributeOpen(false);
-    addButtonRef.current?.focus();
-    // A freshly connected key / uploaded CSV should reflect in the SSR payload
-    // without waiting for the 30s Overview poll. This is a user-initiated
-    // refresh (not the guarded background interval above), so call directly.
-    router.refresh();
-  }, [router]);
+  // The flow calls onRecorded and then onClose, so focus returns once, in close.
+  const handleFlowRecorded = useCallback(
+    (announcement: string) => {
+      announce(announcement);
+      // A recorded allocation should reflect in the SSR payload without waiting
+      // for the 30s Overview poll. User-initiated, so call it directly, with the
+      // poll's try/catch + breadcrumb: router.refresh has no AbortController.
+      try {
+        router.refresh();
+      } catch (err) {
+        warnAudit("router_refresh_failed", {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [announce, router],
+  );
 
-  // Per-tab dispatch (ADDALLOC-01/02/03). Binary on activeTab: the Scenario tab
-  // opens the composer's strategy picker (Browse); every OTHER tab
-  // (overview / holdings / outcomes / mandate / risk) opens the onboarding
-  // wizard inline. The binary generalizes the UI-SPEC 3-row table to the
-  // remaining tabs on purpose so the button is never a silent no-op on ANY tab.
-  const isScenarioTab = activeTab === "scenario";
-  const handleHeaderAdd = () => {
-    if (isScenarioTab) {
-      // ADDALLOC-01 — "+ Strategy" opens the composer's StrategyBrowseDrawer.
-      if (!isUiV2) {
-        // Rollback surface: the ScenarioStub (not the composer) is mounted, so
-        // there is no Browse drawer to signal. Rather than a silent no-op
-        // (changeTab to the tab we are already on), open the onboarding wizard
-        // so "+ Strategy" still performs a real add-a-strategy action
-        // (ADDALLOC-03: never a silent no-op, even on this degraded path). The
-        // ScenarioStub predates ADDALLOC and is otherwise out of its scope.
-        setContributeOpen(true);
-        return;
-      }
-      headerBrowseTriggeredRef.current = true;
-      if (composerBrowseOpenRef.current) {
-        composerBrowseOpenRef.current();
-      } else {
-        // Click landed during the composer's dynamic-import load window; drain
-        // it when registration arrives (handleRegisterOpenBrowse).
-        pendingBrowseOpenRef.current = true;
-      }
-      return;
-    }
-    // ADDALLOC-02 — real-data onboarding wizard, inline, no navigation.
-    setContributeOpen(true);
-  };
+  // Phase 198 D-07 — `/allocations?add=<strategyId>`, the entry point Phase 196's
+  // factsheet links to. Read in an EFFECT on mount and on every searchParams
+  // change, never in a useState initializer (RESEARCH P4): the server render and
+  // the first client render both have the flow closed, so hydration agrees, and a
+  // soft navigation to a new id while mounted opens it again. The raw value is
+  // only handed to the flow, which validates it as a uuid and resolves it against
+  // the allocator-gated browse list (the URL is never trusted, and no write
+  // happens without a press). Research C8: the param is consumed into state and
+  // stripped from the URL as the flow opens, so a reload or a copied address bar
+  // never reopens it. An empty value opens the flow with no deep link.
+  useEffect(() => {
+    const raw = searchParams.get("add");
+    if (raw === null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot external URL param into state; it cannot be derived in render because this very effect removes the param from the URL
+    setAddFlow({ open: true, deepLink: raw === "" ? null : { raw } });
+    const params = new URLSearchParams(window.location.search);
+    params.delete("add");
+    const qs = params.toString();
+    window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
+  }, [searchParams, pathname]);
+
+  // A flow-reported invalid `?add=` id (malformed, not in the list, or absent
+  // from a truncated list) leaves a breadcrumb, the invalid_tab_fallback
+  // precedent: the user sees a stated reason inside the flow, support sees why.
+  const handleInvalidDeepLink = useCallback((reason: DeepLinkInvalidReason) => {
+    warnAudit("invalid_add_param", { reason });
+  }, []);
+
+  // One-line dispatch: no per-tab branching, so the button is never a silent
+  // no-op on any surface (ADDALLOC-03 stays true).
+  const handleHeaderAdd = () => setAddFlow({ open: true, deepLink: null });
+
+  const heldStrategyIds = useMemo(
+    () =>
+      heldStrategyIdsFrom(
+        props.strategies ?? [],
+        props.outcomes ?? [],
+        props.heldOutcomeStrategyIds ?? [],
+      ),
+    [props.strategies, props.outcomes, props.heldOutcomeStrategyIds],
+  );
+  // Undefined when the strategies read failed: `[]` there is not a claim that
+  // nothing is marked, so the flow must not disable every own row on it.
+  const ownCapitalStrategyIds = useMemo(
+    () =>
+      props.strategiesReadFailed || !props.ownCapitalStrategies
+        ? undefined
+        : new Set(props.ownCapitalStrategies.map((s) => s.id)),
+    [props.strategiesReadFailed, props.ownCapitalStrategies],
+  );
+  const bookEquity = useMemo(
+    () => bookEquityUsd(props.holdingsSummary ?? []),
+    [props.holdingsSummary],
+  );
 
   // WAI-ARIA authoring-practices tab pattern: Arrow keys move focus between
   // tabs, Home/End jump to first/last. Tab/Shift-Tab leaves the tablist.
   const tabRefs = useRef<Record<TabKey, HTMLButtonElement | null>>({
     overview: null,
     holdings: null,
-    outcomes: null,
-    mandate: null,
-    risk: null,
     scenario: null,
   });
   const handleTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>, key: TabKey) => {
@@ -623,8 +663,8 @@ export function AllocationsTabs(
     // now part of that set (a visible tab), so arrow-nav reaches it for
     // free — no separate keyboard-nav array. It also stays reachable via
     // "+ Allocation" / direct ?tab=scenario URL.
-    // Phase 195 D-05: the Outcomes tab is always present (the Tweaks knob
-    // that could hide it is gone), so no tab is skipped here.
+    // Phase 195 D-05: no tab is skipped here (the Tweaks knob that could hide
+    // one is gone). Phase 198 D-02: the walk is over three tabs.
     const idx = VISIBLE_TAB_KEYS.indexOf(key);
     if (idx < 0) return;
     let next: TabKey | null = null;
@@ -669,10 +709,6 @@ export function AllocationsTabs(
       typeof strip.scrollTo !== "function"
     )
       return;
-    const prefersReducedMotion =
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const elRect = el.getBoundingClientRect();
     const stripRect = strip.getBoundingClientRect();
     const target = computeTabStripScroll({
@@ -682,27 +718,25 @@ export function AllocationsTabs(
       elWidth: elRect.width,
       viewLeft: strip.scrollLeft,
       viewWidth: strip.clientWidth,
-      prefersReducedMotion,
+      prefersReducedMotion: prefersReducedMotion(),
     });
     if (target) strip.scrollTo(target);
   }, [activeTab]);
 
-  // PR3 (dashboard parity) — count badges on Holdings + Outcomes tabs
-  // matching the truth screenshot ("Holdings 8", "Outcomes 4"). Counts
-  // come straight from the payload arrays already on `props`; no new
-  // queries needed.
+  // PR3 (dashboard parity) — count badge on the Holdings tab ("Holdings 8").
+  // The count comes straight from the payload array already on `props`; no new
+  // queries needed. Phase 198 D-02: the Outcomes tab and its count badge left
+  // with the tab; the Outcomes widget's own KPI strip still counts outcomes.
   // F4b — the Holdings tab's primary surface is now one row per onboarded
   // strategy, so the badge counts strategies (raw exchange positions render
   // in the secondary "Exchange Positions" section, not as the headline count).
   const holdingsCount = props.strategies?.length ?? 0;
-  const outcomesCount = props.outcomes?.length ?? 0;
   const tabCount: Partial<Record<TabKey, number>> = {
     holdings: holdingsCount,
-    outcomes: outcomesCount,
   };
 
 // audit-2026-05-07 M-1044 (silent-failure-hunter c8) — Export chip
-  // navigates to Holdings as a stub; users from Risk/Outcomes/Mandate see
+  // navigates to Holdings as a stub; users from Overview/Scenario see
   // their tab change silently. Surface a polite aria-live announcement
   // explaining the redirect. Visually-hidden via DESIGN-bundle .sr-only
   // utility so the design contract is unchanged.
@@ -720,7 +754,10 @@ export function AllocationsTabs(
   // re-announces without any sentinel characters, and textContent stays
   // equal to the human-readable string for clipboard safety. Also drops
   // the unbounded `exportAnnouncementSeqRef` counter the suffix needed.
-  const [exportAnnouncement, setExportAnnouncement] = useState<string>("");
+  //
+  // Phase 198 D-03 — the state is `liveAnnouncement`, declared with the header
+  // flow above (its `announce` helper is the same idiom); the add-allocation
+  // success line shares the Export chip's region.
 
   // PR1 QA — inline header row matching designer-bundle/project/src/app.jsx
   // (lines 460-510): "My Allocation" + entity name on the left, tab list +
@@ -786,7 +823,7 @@ export function AllocationsTabs(
             fit rather than wrapping (GC-01, 2026-09-30). */}
         <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:flex-nowrap">
           {/* NAV-02 (Phase 45) / GC-01 (2026-09-30) — CSS-first horizontally-
-              scrollable tab strip at EVERY width, so all six surfaces stay
+              scrollable tab strip at EVERY width, so all three surfaces stay
               reachable on a phone (no tab dropped) and the strip never wraps.
               JOURNEY-03 is preserved: this is the SAME element with the SAME
               role="tablist" and the SAME direct role="tab" children — no role is
@@ -876,8 +913,7 @@ export function AllocationsTabs(
               if (activeTab !== "holdings") {
                 const message =
                   "Export lives in the Holdings tab — taking you there.";
-                setExportAnnouncement("");
-                queueMicrotask(() => setExportAnnouncement(message));
+                announce(message);
               }
               changeTab("holdings");
             }}
@@ -891,32 +927,29 @@ export function AllocationsTabs(
             </svg>
             <span>Export</span>
           </button>
-          {/* Phase 116 / ADDALLOC-01/02/03 — primary context-aware header
-              button. Its label, action, and aria-label are derived from
-              activeTab: on Scenario it reads "+ Strategy" and opens the
-              composer's strategy picker; on every other tab it reads
-              "+ Allocation" and opens the real-data onboarding wizard inline
-              (no navigation). The action is deterministic per tab — never a
-              silent no-op, never a dropdown. */}
+          {/* Phase 198 D-03 — the one primary header button. The label and
+              the accessible name are the same on every tab (Scenario and its
+              rollback surface included) and it opens the allocator's own
+              add-allocation flow inline: no navigation, never the manager's
+              strategy wizard, never a silent no-op, never a dropdown. */}
           <button
             ref={addButtonRef}
             type="button"
             onClick={handleHeaderAdd}
             className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label={
-              isScenarioTab
-                ? "Add strategy — open the strategy picker"
-                : "Add allocation — connect an exchange or upload a CSV"
+              "Add allocation — pick a strategy and enter an amount"
             }
           >
-            {isScenarioTab ? "+ Strategy" : "+ Allocation"}
+            + Allocation
           </button>
         </div>
       </div>
 
-      {/* audit-2026-05-07 M-1044 — polite live region for the Export chip
-          stub-navigation announcement. Visually hidden (sr-only) so the
-          DESIGN.md visual contract is unchanged. */}
+      {/* audit-2026-05-07 M-1044 — the page's one polite live region: the Export
+          chip's stub-navigation announcement and (Phase 198) the add-allocation
+          success line. Visually hidden (sr-only) so the DESIGN.md visual
+          contract is unchanged. */}
       <div
         role="status"
         aria-live="polite"
@@ -924,7 +957,7 @@ export function AllocationsTabs(
         className="sr-only"
         data-testid="allocations-tabs-live-region"
       >
-        {exportAnnouncement}
+        {liveAnnouncement}
       </div>
 
       {/* Tabpanel pattern below has two cooperating conditions, by design:
@@ -953,31 +986,6 @@ export function AllocationsTabs(
       </div>
       <div
         role="tabpanel"
-        id="panel-outcomes"
-        data-allocator-panel="outcomes"
-        aria-labelledby="tab-outcomes"
-        hidden={activeTab !== "outcomes"}
-      >
-        {activeTab === "outcomes" && <OutcomesTabPanel {...props} />}
-      </div>
-      <div
-        role="tabpanel"
-        id="panel-mandate"
-        aria-labelledby="tab-mandate"
-        hidden={activeTab !== "mandate"}
-      >
-        {activeTab === "mandate" && <MandateTabPanel {...props} />}
-      </div>
-      <div
-        role="tabpanel"
-        id="panel-risk"
-        aria-labelledby="tab-risk"
-        hidden={activeTab !== "risk"}
-      >
-        {activeTab === "risk" && <RiskTabPanel {...props} />}
-      </div>
-      <div
-        role="tabpanel"
         id="panel-scenario"
         aria-labelledby="tab-scenario"
         hidden={activeTab !== "scenario"}
@@ -987,14 +995,7 @@ export function AllocationsTabs(
             // Phase 23 / PERSIST-03+04 — the composer + the saved-scenarios
             // list + the in-tab compare panel, wired together on the V2
             // scenario path. The ScenarioStub rollback path below is untouched.
-            // Phase 116 / ADDALLOC-01 — thread the header "+ Strategy" Browse
-            // seam down to the composer.
-            <ScenarioTabContent
-              {...props}
-              onRegisterOpenBrowse={handleRegisterOpenBrowse}
-              onBrowseClosed={handleBrowseClosed}
-              onBrowseHandoff={handleBrowseHandoff}
-            />
+            <ScenarioTabContent {...props} />
           ) : (
             <ScenarioStub
               flaggedHoldings={props.flaggedHoldings}
@@ -1002,14 +1003,23 @@ export function AllocationsTabs(
             />
           ))}
       </div>
-      {/* Phase 116 / ADDALLOC-02 — tab-agnostic host for the "+ Allocation"
-          onboarding wizard. Rendered unconditionally (null while closed) so the
-          header button can open it on Holdings / Overview where ScenarioComposer
-          is not mounted. Focus returns to the header trigger on close/success. */}
-      <ContributionWizardOverlay
-        isOpen={contributeOpen}
-        onClose={handleContributeClose}
-        onSuccess={handleContributeSuccess}
+      {/* Phase 198 D-03 — tab-agnostic host for the add-allocation flow.
+          Rendered unconditionally (null while closed) so the header button can
+          open it on every tab. Focus returns to the header trigger on every
+          close path. */}
+      <AddAllocationFlow
+        // A new id while the flow is open re-points it: the flow resolves its
+        // deep link once per mount, so a changed id needs a fresh mount.
+        key={addFlow.deepLink?.raw ?? ""}
+        open={addFlow.open}
+        deepLink={addFlow.deepLink}
+        onInvalidDeepLink={handleInvalidDeepLink}
+        heldStrategyIds={heldStrategyIds}
+        ownCapitalStrategyIds={ownCapitalStrategyIds}
+        bookEquityUsd={bookEquity}
+        allKeysStale={props.allKeysStale}
+        onRecorded={handleFlowRecorded}
+        onClose={handleFlowClose}
       />
     </div>
   );
@@ -1027,19 +1037,7 @@ export function AllocationsTabs(
 // A dedicated sub-component (not inline in the conditional branch) keeps these
 // hooks unconditional — the V2/ScenarioStub gate lives one level up, so this
 // component's hooks never run on the rollback path.
-function ScenarioTabContent({
-  // Phase 116 / ADDALLOC-01 — Browse seam threaded from AllocationsTabs down to
-  // ScenarioComposer. Destructured out so `props` stays a clean payload for the
-  // `payload=` prop below (and the compare-panel narrow).
-  onRegisterOpenBrowse,
-  onBrowseClosed,
-  onBrowseHandoff,
-  ...props
-}: MyAllocationDashboardPayload & {
-  onRegisterOpenBrowse?: (open: () => void) => void;
-  onBrowseClosed?: () => void;
-  onBrowseHandoff?: () => void;
-}) {
+function ScenarioTabContent(props: MyAllocationDashboardPayload) {
   const [savedRows, setSavedRows] = useState<SavedScenarioListRow[]>([]);
   // A hard list-load failure (non-2xx or thrown fetch). Distinct from "no saved
   // scenarios" — an unloaded list must NOT masquerade as an empty list (a
@@ -1155,9 +1153,6 @@ function ScenarioTabContent({
         allocatorMandate={props.mandate}
         onRegisterOpen={handleRegisterOpen}
         onScenarioSaved={handleMutated}
-        onRegisterOpenBrowse={onRegisterOpenBrowse}
-        onBrowseClosed={onBrowseClosed}
-        onBrowseHandoff={onBrowseHandoff}
       />
 
       <SavedScenariosList

@@ -4,6 +4,12 @@ import Link from "next/link";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 /**
+ * Phase 198 plan 06 (D-02) — the Overview's Mandate section. The Mandate tab is
+ * retired; this panel is mounted by `<section id="mandate">`, the last section
+ * of the Overview. The snapshot and the edit link render as ONE data panel
+ * (square corners, a 1px hairline, no shadow, an interior hairline above the
+ * link), not two cards.
+ *
  * Phase 09.1 D-06 — Mandate tab body (Plan 10).
  *
  * Decision (CONTEXT §D-06): keep the link-out to /profile?tab=mandate (the
@@ -38,7 +44,7 @@ function MandateSnapshotCard({
     return (
       <div
         data-testid="mandate-snapshot"
-        className="rounded-lg border border-border bg-surface p-4"
+        className="p-4"
       >
         <div className="text-xs uppercase tracking-wider text-text-muted">
           Mandate snapshot
@@ -83,7 +89,7 @@ function MandateSnapshotCard({
   return (
     <div
       data-testid="mandate-snapshot"
-      className="rounded-lg border border-border bg-surface p-4"
+      className="p-4"
     >
       <div className="text-xs uppercase tracking-wider text-text-muted">
         Mandate snapshot
@@ -151,9 +157,9 @@ export function MandateTabPanel(props: MyAllocationDashboardPayload) {
   const mandate: MandateSnapshot | null = props.mandate ?? null;
 
   return (
-    <div data-tab-panel="mandate" className="grid gap-4">
+    <div data-tab-panel="mandate" className="border border-border bg-surface">
       <MandateSnapshotCard mandate={mandate ?? null} />
-      <div className="rounded-lg border border-border bg-surface p-4 text-sm">
+      <div className="border-t border-border p-4 text-sm">
         <p className="mb-2 text-text-secondary">
           Edit your mandate in the profile surface. Changes take effect
           immediately across the Bridge engine.
@@ -162,7 +168,7 @@ export function MandateTabPanel(props: MyAllocationDashboardPayload) {
           href="/profile?tab=mandate"
           className="text-accent hover:underline"
         >
-          Open Mandate form →
+          Edit mandate
         </Link>
       </div>
     </div>

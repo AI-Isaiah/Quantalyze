@@ -2,17 +2,22 @@
 
 import type { ExposureSnapshot, HoldingClass } from "@/lib/portfolio-exposure";
 import { Card } from "@/components/ui/Card";
-import { formatCurrency } from "@/lib/utils";
+import { formatUsd } from "@/lib/dollar-validation";
 import { CHART_ACCENT } from "@/components/charts/chart-tokens";
-import { ResponsiveTable } from "@/components/ResponsiveTable";
-import { holdingSideLabel, venueLabel } from "@/lib/display-labels";
 
 /**
  * PI-01 — Exposure by asset class (99-UI-SPEC § Widget 1).
  *
- * A segmented horizontal composition bar + KPI strip (GROSS/NET/LONG/SHORT) +
- * per-slice drilldown table (one row per key's position, D-08) — NOT a donut (the class dimension has exactly two
- * values, D-P1, and a single-class book would render a misleading full circle).
+ * A segmented horizontal composition bar + KPI strip (GROSS/NET/LONG/SHORT/CASH)
+ * — NOT a donut (the class dimension has exactly two values, D-P1, and a
+ * single-class book would render a misleading full circle).
+ *
+ * Phase 198 (ROUTE-08, LEAN-06): cash rows are not exposure, so Gross, Net, Long,
+ * Short and the bar exclude them (the snapshot already does) and the fifth cell,
+ * Cash, prints the cash total, `—` when no cash row was read. The per-slice
+ * drilldown table is gone: it re-listed every position the Positions tables
+ * list. Every money value prints with `formatUsd` (whole dollars), so one figure
+ * never reads in two formats on this card.
  * Pure CSS: no chart library, no data fetching. Consumes a plain `ExposureSnapshot`
  * prop; the data-contract types are imported TYPE-ONLY so the server Supabase
  * client that `@/lib/portfolio-exposure` pulls in never crosses into the client
@@ -33,11 +38,6 @@ const CLASS_LABEL: Record<HoldingClass, string> = {
   spot: "Spot",
   derivative: "Derivatives",
 };
-// Compact class label for the dense drilldown table (99-UI-SPEC § Widget 1 · 4).
-const CLASS_LABEL_SHORT: Record<HoldingClass, string> = {
-  spot: "Spot",
-  derivative: "Deriv",
-};
 const CLASS_COLOR: Record<HoldingClass, string> = {
   spot: CHART_ACCENT,
   derivative: DERIVATIVE_COLOR,
@@ -57,18 +57,7 @@ function readDayStamp(snapshot: ExposureSnapshot): string | null {
   return `as of ${snapshot.oldestAsof} to ${snapshot.asof}`;
 }
 
-export function ExposureByClass({
-  snapshot,
-  keyLabels,
-}: {
-  snapshot: ExposureSnapshot | null;
-  /**
-   * api_key_id → display name from the one key-label rule (`apiKeyLabelById`).
-   * A slice whose key is not in the map reads an em-dash, never the raw id
-   * (T-169-26).
-   */
-  keyLabels?: ReadonlyMap<string, string>;
-}) {
+export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | null }) {
   // Honest-empty (snapshot === null → the latest per-key read holds no position).
   // The AttributionBar empty-card idiom. No date window is claimed: the per-key
   // reader keeps a quiet key's last read, so "older snapshots are hidden" would
@@ -108,13 +97,14 @@ export function ExposureByClass({
         )}
       </div>
 
-      {/* KPI strip — GROSS / NET / LONG / SHORT. No color on direction. */}
-      <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+      {/* KPI strip — GROSS / NET / LONG / SHORT / CASH. No color on direction.
+          Five cells wrap onto a second row in a narrow container (no sideways scroll). */}
+      <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-5">
         <KpiCell testid="kpi-gross" label="Gross exposure" value={gross} />
         <div>
           <p className="text-micro uppercase tracking-wider text-text-muted">Net exposure</p>
           <p data-testid="kpi-net" className="text-h3 font-semibold font-metric text-text-primary">
-            {formatCurrency(net)}
+            {formatUsd(net)}
           </p>
           <p data-testid="net-caption" className="text-caption text-text-muted">
             {netCaption}
@@ -122,6 +112,7 @@ export function ExposureByClass({
         </div>
         <KpiCell testid="kpi-long" label="Long" value={long} />
         <KpiCell testid="kpi-short" label="Short" value={short} />
+        <KpiCell testid="kpi-cash" label="Cash" value={snapshot.cashUsd} />
       </div>
 
       {/* Composition bar — one segment per PRESENT class, share of gross. */}
@@ -145,7 +136,7 @@ export function ExposureByClass({
         {CLASS_ORDER.map((cls) => {
           const isPresent = classGross[cls] > 0;
           const valueStr = isPresent
-            ? `${formatCurrency(classGross[cls])} (${sharePct(cls).toFixed(1)}%)`
+            ? `${formatUsd(classGross[cls])} (${sharePct(cls).toFixed(1)}%)`
             : "—";
           return (
             <div
@@ -163,75 +154,25 @@ export function ExposureByClass({
           );
         })}
       </div>
-
-      {/* Drilldown table — per (key, venue, symbol, type, side) slice, valueUsd desc.
-          Table idiom copied from CompositionDonut. Class identity is carried by
-          label + swatch, never color alone (WCAG 1.4.1). Side/Net never colored
-          by direction. Scrolls only past 12 rows.
-
-          Phase 170.2 (SC-1, UI-SPEC H-3): the scroller is a named, focusable
-          ResponsiveTable region, so a wide drilldown scrolls inside itself like
-          every other table on the Holdings tab. The wrapper keeps the testid and
-          carries `min-w-0` so a grid item can shrink below its table. The 12-row
-          vertical cap rides on the region (it is the element that scrolls). */}
-      <div data-testid="drilldown" className="mt-4 min-w-0">
-        <ResponsiveTable
-          label="Exposure by venue and symbol"
-          className={snapshot.slices.length > 12 ? "max-h-64 overflow-y-auto" : undefined}
-        >
-          <table className="w-full text-small">
-            <thead>
-              <tr className="border-b border-border text-left text-caption text-text-muted uppercase tracking-wider">
-                <th className="py-2 pr-4">Venue</th>
-                <th className="py-2 pr-4">Key</th>
-                <th className="py-2 pr-4">Symbol</th>
-                <th className="py-2 pr-4">Type</th>
-                <th className="py-2 pr-4">Side</th>
-                <th className="py-2 pr-4 text-right font-metric">Gross exposure</th>
-                <th className="py-2 text-right font-metric">Net exposure</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...snapshot.slices]
-                .sort((a, b) => b.valueUsd - a.valueUsd)
-                .map((s) => (
-                  <tr
-                    key={`${s.apiKeyId}|${s.holdingType}|${s.venue}|${s.symbol}|${s.side}`}
-                    className="border-b border-border/50 transition-colors hover:bg-page/50"
-                  >
-                    <td className="py-2 pr-4">{venueLabel(s.venue)}</td>
-                    <td className="py-2 pr-4">
-                      {(s.apiKeyId !== null && keyLabels?.get(s.apiKeyId)) || "—"}
-                    </td>
-                    <td className="py-2 pr-4">{s.symbol}</td>
-                    <td className="py-2 pr-4">
-                      <span className="flex items-center gap-1.5">
-                        <span
-                          className="inline-block h-2.5 w-2.5 rounded-sm"
-                          style={{ backgroundColor: CLASS_COLOR[s.holdingType] }}
-                        />
-                        {CLASS_LABEL_SHORT[s.holdingType]}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 text-caption text-text-secondary">{holdingSideLabel(s.side)}</td>
-                    <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.valueUsd)}</td>
-                    <td className="py-2 text-right font-metric">{formatCurrency(s.signedValueUsd)}</td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        </ResponsiveTable>
-      </div>
     </Card>
   );
 }
 
-function KpiCell({ testid, label, value }: { testid: string; label: string; value: number }) {
+function KpiCell({
+  testid,
+  label,
+  value,
+}: {
+  testid: string;
+  label: string;
+  /** `formatUsd` prints `—` for null, so an unread value is never a zero. */
+  value: number | null;
+}) {
   return (
     <div>
       <p className="text-micro uppercase tracking-wider text-text-muted">{label}</p>
       <p data-testid={testid} className="text-h3 font-semibold font-metric text-text-primary">
-        {formatCurrency(value)}
+        {formatUsd(value)}
       </p>
     </div>
   );

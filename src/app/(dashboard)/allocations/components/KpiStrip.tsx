@@ -174,7 +174,7 @@ function pairCoverage(
  * neutral. A drawdown is non-positive by construction, so a positive value there is an
  * upstream sign bug and must not read as good news. The cell does not print it either:
  * `isImpossibleDrawdown` sends it to the dash (R2-SFH-2). */
-function valueColorClass(raw: number | null, scale: number, drawdown = false): string {
+export function valueColorClass(raw: number | null, scale: number, drawdown = false): string {
   const tone = drawdown ? drawdownTone(raw, 2, scale) : signTone(raw, 2, scale);
   if (tone === "positive") return "text-positive";
   if (tone === "negative") return "text-negative";
@@ -192,7 +192,7 @@ function valueColorClass(raw: number | null, scale: number, drawdown = false): s
  * The test is on the value ROUNDED to the 2 dp the cell prints at (D-03), so float noise
  * that prints "0.00%" is a zero, not a violation.
  */
-function isImpossibleDrawdown(raw: number | null): boolean {
+export function isImpossibleDrawdown(raw: number | null): boolean {
   return signTone(raw, 2, 100) === "positive";
 }
 

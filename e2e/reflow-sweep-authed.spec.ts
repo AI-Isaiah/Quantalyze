@@ -92,10 +92,14 @@ const AUTHED_ROUTES: {
   { path: "/allocations", anchor: 'h1:has-text("My allocation")', label: "allocations (default)" },
   { path: "/allocations?tab=overview", anchor: 'h1:has-text("My allocation")', label: "allocations Overview" },
   { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My allocation")', label: "allocations Holdings" },
-  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My allocation")', label: "allocations Outcomes" },
-  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My allocation")', label: "allocations Mandate" },
-  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My allocation")', label: "allocations Risk" },
+  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My allocation")', label: "allocations Outcomes (legacy alias: lands on Holdings #outcomes)" },
+  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My allocation")', label: "allocations Mandate (legacy alias: lands on Overview #mandate)" },
+  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My allocation")', label: "allocations Risk (legacy alias: lands on Overview #risk)" },
   { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My allocation")', label: "allocations Scenario composer" },
+  // Phase 198 D-07 — `?add=` opens the "+ Allocation" flow at step 1 (no deep link
+  // for an empty value). The slide-over is the surface swept here: its long-text
+  // and moved-section backstops (E7) at 320px.
+  { path: "/allocations?add=", anchor: 'h1:has-text("My allocation")', label: "allocations + Allocation flow (step 1)" },
   // Manager-gated standalone onboarding wizard (Phase 109 ROLE-04) — reached
   // here via the seeded role='both' user. The default ?source=api flow renders
   // ConnectKeyStep's "Connect your exchange" <h2 id=…>.
@@ -353,8 +357,9 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
 // a FRESHLY-SEEDED role='both' user (seedTestAllocator({ role: "both" }), NO
 // extra seed) reliably renders with a stable VISIBLE anchor — the same
 // reachability the 320px AUTHED_ROUTES sweep above already proves. Added rows:
-//   - the remaining /allocations tabs (overview/holdings/outcomes/mandate) — the
-//     "My allocation" <h1> sits above the tab-panel switch on every ?tab= value;
+//   - the remaining /allocations surfaces (overview/holdings, the retired
+//     outcomes/mandate/risk aliases, and the ?add= flow) — the "My allocation"
+//     <h1> sits above the tab-panel switch on every ?tab= value;
 //   - the manager-gated onboarding wizard (API + CSV entries) — its step
 //     <h2 id=…> anchors, mirroring the 320px sweep. The standalone
 //     /strategies/new/wizard route is manager-gated (Phase 109 ROLE-04,
@@ -372,10 +377,14 @@ const ULTRAWIDE_ROUTES: { path: string; anchor: string; label: string }[] = [
   { path: "/allocations", anchor: 'h1:has-text("My allocation")', label: "allocations (default)" },
   { path: "/allocations?tab=overview", anchor: 'h1:has-text("My allocation")', label: "allocations Overview" },
   { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My allocation")', label: "allocations Holdings" },
-  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My allocation")', label: "allocations Outcomes" },
-  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My allocation")', label: "allocations Mandate" },
-  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My allocation")', label: "allocations Risk" },
+  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My allocation")', label: "allocations Outcomes (legacy alias: lands on Holdings #outcomes)" },
+  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My allocation")', label: "allocations Mandate (legacy alias: lands on Overview #mandate)" },
+  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My allocation")', label: "allocations Risk (legacy alias: lands on Overview #risk)" },
   { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My allocation")', label: "allocations Scenario composer" },
+  // Phase 198 D-07 — `?add=` opens the "+ Allocation" flow at step 1 (no deep link
+  // for an empty value). The slide-over is the surface swept here: its long-text
+  // and moved-section backstops (E7) at 320px.
+  { path: "/allocations?add=", anchor: 'h1:has-text("My allocation")', label: "allocations + Allocation flow (step 1)" },
   { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (manager-gated route, role=both)" },
   { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (manager-gated route, role=both)" },
   { path: "/security", anchor: "main h1", label: "security (authed)" },

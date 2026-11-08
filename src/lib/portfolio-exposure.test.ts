@@ -490,6 +490,55 @@ describe("getNetExposureSeries", () => {
   });
 });
 
+describe("ROUTE-08: cash is not exposure in the net series, and stays in the allocation weights", () => {
+  it("a day with BTC spot 10000 and USDT 5000 is net 10000 / gross 10000, cash excluded", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-01", symbol: "BTC", side: "flat", value_usd: 10000 }),
+      row({ asof: "2026-07-01", symbol: "USDT", side: "flat", value_usd: 5000 }),
+    ];
+    const series = await getNetExposureSeries(USER_ID);
+    expect(series.points).toEqual([
+      { asof: "2026-07-01", netUsd: 10000, grossUsd: 10000 },
+    ]);
+  });
+
+  it("a day read with only USDT 5000 stays a zero point and is not a gap", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-01", symbol: "BTC", side: "flat", value_usd: 10000 }),
+      row({ asof: "2026-07-02", symbol: "USDT", side: "flat", value_usd: 5000 }),
+      row({ asof: "2026-07-03", symbol: "BTC", side: "flat", value_usd: 10000 }),
+    ];
+    const series = await getNetExposureSeries(USER_ID);
+    expect(series.points.map((p) => [p.asof, p.netUsd, p.grossUsd])).toEqual([
+      ["2026-07-01", 10000, 10000],
+      ["2026-07-02", 0, 0],
+      ["2026-07-03", 10000, 10000],
+    ]);
+    expect(series.gaps).toEqual([]);
+  });
+
+  it("a USDT derivative-typed row is not cash (the rule is spot-only) and still counts", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-01", symbol: "USDT", holding_type: "derivative", side: "long", value_usd: 700 }),
+    ];
+    const series = await getNetExposureSeries(USER_ID);
+    expect(series.points).toEqual([{ asof: "2026-07-01", netUsd: 700, grossUsd: 700 }]);
+  });
+
+  it("getAllocationSeries still counts the USDT value in its venue weight (where capital sits)", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-01", venue: "A", symbol: "BTC", value_usd: 300 }),
+      row({ asof: "2026-07-01", venue: "B", symbol: "USDT", value_usd: 100 }),
+    ];
+    const series = await getAllocationSeries(USER_ID);
+    const byVenue = Object.fromEntries(
+      series.points[0].venues.map((v) => [v.venue, v.weight]),
+    );
+    expect(byVenue.A).toBeCloseTo(0.75, 9);
+    expect(byVenue.B).toBeCloseTo(0.25, 9);
+  });
+});
+
 describe("getAllocationSeries", () => {
   it("honest-empty: zero rows → { points: [], gaps: [] }", async () => {
     holdingsResolver.rows = [];

@@ -65,6 +65,11 @@ import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/lib/drawd
 // above; the adapter's own `@/lib/queries` import is type-only, so no cycle.
 import { computeMtd } from "@/app/(dashboard)/allocations/lib/strategies-row-adapter";
 import type { FlaggedHolding } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
+import {
+  keyDataGaps as computeKeyDataGaps,
+  previousUtcDay,
+  type KeyDataGap,
+} from "@/app/(dashboard)/allocations/lib/key-data-gaps";
 import type {
   Strategy,
   StrategyAnalytics,
@@ -3493,6 +3498,12 @@ export interface MyAllocationDashboardPayload {
   };
   /** Phase 5 D-15: full outcome history for the allocator, sorted created_at DESC, capped at 200 most-recent (Voice-D5). */
   outcomes: OutcomeRow[];
+  /**
+   * Phase 198 (SFH-5): the distinct strategy ids behind every `allocated`
+   * outcome, read uncapped. `outcomes` above stops at 200 rows, so the Add
+   * allocation flow's held set comes from here.
+   */
+  heldOutcomeStrategyIds?: string[];
   // ─────────────────────────────────────────────────────────────────────
   // Phase 07 / 07-03 extensions (VOICES-ACCEPTED f7 + f9)
   // ─────────────────────────────────────────────────────────────────────
@@ -3712,6 +3723,22 @@ export interface MyAllocationDashboardPayload {
    * producer always sets it.
    */
   failingKeyExits?: FailingKeyExit[];
+  /**
+   * Phase 198 plan 03 (D-01, ROUTE-07). The Overview missing-data message's
+   * producer: for each key the server can attribute a fault to, its cause, the
+   * first missing day and the missing day range, so the message can say which
+   * key and which days. Derived on the server from data already read (the
+   * per-key daily series, the compose's `failingKeyExits`, the key list's
+   * account identity and sync status); see `deriveKeyDataGapsField`.
+   *
+   * Owner-only (T-186-18 precedent): every id is one of the owner's own key ids,
+   * and `venue_account_id` and any other account identifier never enter the
+   * payload. A range the producer cannot derive is `null`, never a guess, and
+   * the reference day is a server day (the curve's last day, or yesterday UTC),
+   * never a client clock. Optional so legacy fixtures compile, as `asof` is;
+   * the dashboard read always sets it.
+   */
+  keyDataGaps?: KeyDataGap[];
   /**
    * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 and the UI-SPEC planner check. The
    * first day recorded (marked-to-market) equity begins for the keys the DRAWN
@@ -5204,6 +5231,84 @@ export function notSyncingIdentityPendingKeyIds(
 }
 
 /**
+ * Phase 198 plan 03 (D-01). The sibling of `notSyncingIdentityPendingKeyIds`:
+ * the identity-pending keys that are NOT failing to sync, the ones an
+ * `account_identity_pending` reason is about. Same `identityStillPending` and
+ * `failingToSync` predicates, so the two lists partition the pending set that
+ * `equityHistoryReadiness` holds on.
+ */
+export function identityPendingKeyIds(apiKeys: readonly EquityHistoryKey[]): string[] {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  return apiKeys
+    .filter((key) => identityStillPending(key, byId) && !failingToSync(key))
+    .map((key) => key.id);
+}
+
+/** The latest `YYYY-MM-DD` in a series, or null when it is empty. Order-independent. */
+function latestSeriesDay(points: readonly { date: string }[] | undefined): string | null {
+  let latest: string | null = null;
+  for (const point of points ?? []) {
+    if (latest === null || point.date > latest) latest = point.date;
+  }
+  return latest;
+}
+
+/**
+ * Phase 198 plan 03 (D-01, ROUTE-07). The `keyDataGaps` payload field: which
+ * of the owner's keys is missing which days, derived from data the dashboard
+ * read already holds (no new query). Pure, so `getMyAllocationDashboard` computes
+ * it once and spreads it into both payload literals.
+ *
+ * The account identity stays inside this function: `venue_account_id` is read
+ * to group two keys on one account and is not copied to the result, which holds
+ * only the owner's own key ids (T-186-18 precedent). `todayIso` is the SERVER's
+ * UTC day; the reference day is never a client clock.
+ *
+ * While the history rebuilds, `failingKeyExits` is empty by construction, so the
+ * rebuilding entries come from the per-key series and the key list; on a ready
+ * book the exit entries come from `failingKeyExits` and the curve's last day.
+ */
+export function deriveKeyDataGapsField(
+  apiKeys: readonly EquityHistoryKey[],
+  phase07: Pick<
+    MyAllocationDashboardPayload,
+    | "equityHistoryState"
+    | "equityHistoryRebuildReason"
+    | "equityHistoryNotSyncingKeyIds"
+    | "failingKeyExits"
+    | "equityDailyPoints"
+  >,
+  perKeyReturnsByApiKeyId: Readonly<Record<string, readonly { date: string }[]>>,
+  todayIso: string,
+): KeyDataGap[] {
+  const lastSeriesDayByKey: Record<string, string> = {};
+  for (const key of apiKeys) {
+    const last = latestSeriesDay(perKeyReturnsByApiKeyId[key.id]);
+    if (last !== null) lastSeriesDayByKey[key.id] = last;
+  }
+  return computeKeyDataGaps({
+    ownKeyIds: apiKeys.map((key) => key.id),
+    reason: phase07.equityHistoryRebuildReason,
+    notSyncingKeyIds: phase07.equityHistoryNotSyncingKeyIds ?? [],
+    identityPendingKeyIds: identityPendingKeyIds(apiKeys),
+    keyAccounts: apiKeys.map((key) => ({
+      id: key.id,
+      accountId: knownVenueAccountId(key.venue_account_id) ? key.venue_account_id : null,
+      shareKind: key.account_share_kind,
+      failing: failingToSync(key),
+    })),
+    failingKeyExits: phase07.failingKeyExits ?? [], // gitleaks:allow (identifier, not a secret)
+    lastSeriesDayByKey,
+    curveLastDay:
+      phase07.equityHistoryState === "ready"
+        ? latestSeriesDay(phase07.equityDailyPoints)
+        : null,
+    yesterdayUtc: previousUtcDay(todayIso),
+  });
+}
+
+/**
  * Phase 167.1.2 plan 11. Ready iff the version-2 series is present and every
  * eligible key on okx/bybit/binance/deribit has a venue account id, is a
  * composite member, or is a duplicate whose holder in the key list carries the
@@ -5804,6 +5909,13 @@ export const getMyAllocationDashboard = cache(
       // reviewer can't accidentally drop it). .limit(200) caps the result
       // set at the 200 most-recent outcomes per allocator (Voice-D5).
       outcomesFullRes,
+      // Phase 198 (SFH-5) — every strategy an `allocated` outcome recorded, with
+      // NO row cap and NO embed. `outcomesFullRes` is capped at 200 and drops a
+      // row whose strategy embed is null, so the "already in your book" set built
+      // from it could offer a held strategy again, and the commit route has no
+      // per-strategy uniqueness. Same admin client and the same explicit
+      // `.eq("allocator_id", userId)` ownership gate as the read above.
+      heldOutcomesRes,
       // Phase 36 / 36-03 (UNIFY-01/02) — per-key csv_daily_returns rows for the
       // Overview-stats repoint (D1). Uses the USER supabase client + owner RLS
       // (`allocator_id = auth.uid()`); the admin client would bypass RLS, so we
@@ -5875,6 +5987,11 @@ export const getMyAllocationDashboard = cache(
         .eq("allocator_id", userId)
         .order("created_at", { ascending: false })
         .limit(200),
+      admin
+        .from("bridge_outcomes")
+        .select("strategy_id")
+        .eq("allocator_id", userId)
+        .eq("kind", "allocated"),
       // Phase 36 / 36-03 (D1, UNIFY-01/02) — per-key dailies for the Overview
       // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`): every
       // key keeps its full 730-day window, and the window is what bounds the
@@ -6136,6 +6253,14 @@ export const getMyAllocationDashboard = cache(
       };
     };
 
+    const heldOutcomeStrategyIds = [
+      ...new Set(
+        ((heldOutcomesRes.data ?? []) as { strategy_id: string | null }[])
+          .map((r) => r.strategy_id)
+          .filter((id): id is string => typeof id === "string"),
+      ),
+    ];
+
     const outcomes: OutcomeRow[] = ((outcomesFullRes.data ?? []) as RawRow[]).map(
       (row) => {
         const replRaw = row.replacement_strategy;
@@ -6162,6 +6287,7 @@ export const getMyAllocationDashboard = cache(
     assertOk(phase09MatchBatchRes, "match_batches");
     assertOk(phase09MatchDecisionsRes, "match_decisions");
     assertOk(outcomesFullRes, "bridge_outcomes");
+    assertOk(heldOutcomesRes, "bridge_outcomes");
     assertOk(phase36PerKeyDailiesRes, "csv_daily_returns");
 
     // Phase 11 / D-02 — derive apiKeysCount from the already-fetched,
@@ -6548,6 +6674,16 @@ export const getMyAllocationDashboard = cache(
         )
       : emptyLiveBaselineMetrics(phase07.holdingsSummary);
 
+    // Phase 198 plan 03 (D-01): which key is missing which days, for the
+    // Overview message. Computed once here and spread into BOTH literals below;
+    // the day is the server's UTC day, never a client clock.
+    const keyDataGaps = deriveKeyDataGapsField(
+      apiKeys,
+      phase07,
+      perKeyReturnsByApiKeyId,
+      new Date().toISOString().slice(0, 10),
+    );
+
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
     // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
     // can rely on it. Trust the `userId` argument: callers (the Server
@@ -6577,6 +6713,7 @@ export const getMyAllocationDashboard = cache(
         apiKeys,
         alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
         outcomes,
+        heldOutcomeStrategyIds,
         flaggedHoldings,
         matchDecisionsByHoldingRef,
         mandate,
@@ -6599,6 +6736,7 @@ export const getMyAllocationDashboard = cache(
         apiKeysCount,
         mandateIsSet,
         ...phase07,
+        keyDataGaps,
         btcBenchmarkPrices,
         marksStart,
         marksTrailingSince,
@@ -7114,6 +7252,7 @@ export const getMyAllocationDashboard = cache(
       // G-1 fix: `outcomes` is hoisted to Step 1 above so the !portfolio
       // branch returns the same payload shape (Phase 5 D-15).
       outcomes,
+      heldOutcomeStrategyIds,
       flaggedHoldings,
       matchDecisionsByHoldingRef,
       mandate,
@@ -7138,6 +7277,7 @@ export const getMyAllocationDashboard = cache(
       apiKeysCount,
       mandateIsSet,
       ...phase07,
+      keyDataGaps,
       btcBenchmarkPrices,
       marksStart,
       marksTrailingSince,

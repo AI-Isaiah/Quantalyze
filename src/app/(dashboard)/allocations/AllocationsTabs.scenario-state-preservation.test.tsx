@@ -64,15 +64,6 @@ vi.mock("./AllocationDashboardV2", () => ({
 vi.mock("./HoldingsTabPanel", () => ({
   HoldingsTabPanel: () => <div data-testid="holdings-body">HOLDINGS_BODY</div>,
 }));
-vi.mock("./OutcomesTabPanel", () => ({
-  OutcomesTabPanel: () => <div data-testid="outcomes-body">OUTCOMES_BODY</div>,
-}));
-vi.mock("./MandateTabPanel", () => ({
-  MandateTabPanel: () => <div data-testid="mandate-body">MANDATE_BODY</div>,
-}));
-vi.mock("./RiskTabPanel", () => ({
-  RiskTabPanel: () => <div data-testid="risk-body">RISK_BODY</div>,
-}));
 vi.mock("./ScenarioStub", () => ({
   ScenarioStub: () => <div data-testid="scenario-stub-body">SCENARIO_STUB_BODY</div>,
 }));

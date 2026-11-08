@@ -110,17 +110,21 @@ function isoDay(i: number): string {
 }
 
 describe("HoldingsTabPanel — Exposure section (99-04 wiring)", () => {
-  it("places the Exposure section BETWEEN Strategies and Exchange Positions", () => {
+  it("places the Exposure section AFTER Positions and BEFORE Outcomes", () => {
+    // WHY (198 D-02): Strategies, Positions, Exposure, Outcomes. Positions moved
+    // up from last; the retired Outcomes tab lands right after Exposure.
     const { container } = renderPanel(EMPTY_EXPOSURE);
     const text = container.textContent ?? "";
     const iStrategies = text.indexOf("STRATEGIES_SECTION");
-    const iExposure = text.indexOf("Exposure");
-    const iExchange = text.indexOf("Exchange Positions");
+    const positions = container.querySelector("section#positions")!;
+    const exposureSection = container.querySelector('section[aria-label="Exposure"]')!;
+    const outcomes = container.querySelector("section#outcomes")!;
     expect(iStrategies).toBeGreaterThanOrEqual(0);
-    expect(iExposure).toBeGreaterThanOrEqual(0);
-    expect(iExchange).toBeGreaterThanOrEqual(0);
-    expect(iStrategies).toBeLessThan(iExposure);
-    expect(iExposure).toBeLessThan(iExchange);
+    expect(positions).not.toBeNull();
+    expect(outcomes).not.toBeNull();
+    expect(positions.compareDocumentPosition(exposureSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(exposureSection.compareDocumentPosition(outcomes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(text.indexOf("STRATEGIES_SECTION")).toBeLessThan(text.indexOf("Positions"));
 
     // The section is a real landmark with the aria-label the UI-SPEC pins.
     const section = container.querySelector('section[aria-label="Exposure"]');
@@ -137,17 +141,28 @@ describe("HoldingsTabPanel — Exposure section (99-04 wiring)", () => {
     expect(section.querySelectorAll("svg").length).toBe(0);
   });
 
-  it("builds the Exposure card from holdingsSummary: gross KPI and one drilldown row per position (D-01)", () => {
+  /** The ExposureByClass card: the element holding the "Exposure by asset class" title. */
+  function exposureCard(section: Element): Element {
+    const title = Array.from(section.querySelectorAll("h4")).find(
+      (h) => h.textContent === "Exposure by asset class",
+    )!;
+    return title.parentElement!.parentElement!;
+  }
+
+  it("builds the Exposure card from holdingsSummary: gross and net in whole dollars, no position rows (D-01, LEAN-06)", () => {
     const { container } = renderPanel(EMPTY_EXPOSURE, DERIBIT_BOOK);
     const section = container.querySelector('section[aria-label="Exposure"]')!;
-    expect(section.querySelector('[data-testid="kpi-gross"]')!.textContent).toBe("$185.1K");
-    expect(section.querySelector('[data-testid="kpi-net"]')!.textContent).toBe("$85.1K");
-    expect(section.querySelectorAll('[data-testid="drilldown"] tbody tr')).toHaveLength(3);
+    expect(section.querySelector('[data-testid="kpi-gross"]')!.textContent).toBe("$185,100");
+    expect(section.querySelector('[data-testid="kpi-net"]')!.textContent).toBe("$85,100");
+    // LEAN-06: the card re-lists no position, so it holds no table and no row.
+    const card = exposureCard(section);
+    expect(card.querySelector("table")).toBeNull();
+    expect(card.querySelector("tr")).toBeNull();
     expect(section.textContent).toContain("as of 2026-10-03");
     expect(section.textContent).not.toContain("No current positions.");
   });
 
-  it("names each drilldown row's key by the one key-label rule, from the panel's apiKeys (D-08)", () => {
+  it("sums two keys' spot rows into one gross, with the card still listing no position (D-08, LEAN-06)", () => {
     const { container } = renderPanel(
       EMPTY_EXPOSURE,
       [
@@ -156,13 +171,19 @@ describe("HoldingsTabPanel — Exposure section (99-04 wiring)", () => {
       ],
       [{ id: "key-a", exchange: "binance", label: "Main" }],
     );
-    const rows = container.querySelectorAll(
-      'section[aria-label="Exposure"] [data-testid="drilldown"] tbody tr',
-    );
-    expect(rows).toHaveLength(2);
-    expect(rows[0].textContent).toContain("Binance — Main");
-    expect(rows[1].textContent).not.toContain("key-b");
-    expect(container.querySelector('[data-testid="kpi-gross"]')!.textContent).toBe("$65K");
+    expect(container.querySelector('[data-testid="kpi-gross"]')!.textContent).toBe("$65,000");
+    const card = exposureCard(container.querySelector('section[aria-label="Exposure"]')!);
+    expect(card.querySelector("table")).toBeNull();
+    expect(card.textContent).not.toContain("Binance");
+  });
+
+  it("ROUTE-08: a spot USDT row is the Cash cell, not Spot gross", () => {
+    const { container } = renderPanel(EMPTY_EXPOSURE, [
+      holding({ symbol: "BTC", venue: "binance", holding_type: "spot", side: "flat", value_usd: 40000, api_key_id: "key-a" }),
+      holding({ symbol: "USDT", venue: "binance", holding_type: "spot", side: "flat", value_usd: 10000, api_key_id: "key-a" }),
+    ]);
+    expect(container.querySelector('[data-testid="kpi-gross"]')!.textContent).toBe("$40,000");
+    expect(container.querySelector('[data-testid="kpi-cash"]')!.textContent).toBe("$10,000");
   });
 
   it("shows the card's empty copy when holdingsSummary is empty, whatever the series hold", () => {

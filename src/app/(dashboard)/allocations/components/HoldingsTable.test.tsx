@@ -839,3 +839,45 @@ describe("HoldingsTable — price-gap Value cell (167.2.1.1.1.1 / D-07, P1)", ()
     expect(cell.textContent).toBe("—No price");
   });
 });
+
+/**
+ * Phase 198 plan 13 (ROUTE-08) — cash is not Spot. A stablecoin balance is a
+ * cash row, and calling it Spot misleads an allocator about what the row is.
+ * The Type cell classifies through the one shared rule `isCashHolding`; a
+ * split-suffix token (USDE) and a derivative row are not cash.
+ */
+describe("HoldingsTable — the Type cell says Cash for a cash balance (198-13 / ROUTE-08)", () => {
+  const TYPE = 1;
+
+  function typeText(overrides: Partial<HoldingRow>): string | null {
+    const { container } = render(
+      <HoldingsTable
+        holdings={[makeHolding(overrides)]}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const cells = container.querySelector("tbody")!.querySelectorAll("tr")[0].querySelectorAll("td");
+    return cells[TYPE].textContent;
+  }
+
+  it("a spot USDT row reads Cash", () => {
+    expect(typeText({ symbol: "USDT" })).toBe("Cash");
+  });
+
+  it("a spot usdc row reads Cash (case-insensitive)", () => {
+    expect(typeText({ symbol: "usdc" })).toBe("Cash");
+  });
+
+  it("a spot BTC row still reads Spot", () => {
+    expect(typeText({ symbol: "BTC" })).toBe("Spot");
+  });
+
+  it("a spot USDE row reads Spot (a split-suffix token is not cash)", () => {
+    expect(typeText({ symbol: "USDE" })).toBe("Spot");
+  });
+
+  it("a derivative row still reads Derivative, even on a stablecoin symbol", () => {
+    expect(typeText({ symbol: "USDT", holding_type: "derivative" })).toBe("Derivative");
+  });
+});

@@ -701,6 +701,12 @@ export interface AllowEntry {
 export type Allowlist = Readonly<Record<string, Readonly<Partial<Record<CountRule, AllowEntry>>>>>;
 
 export const ALLOWLIST: Allowlist = {
+  "src/app/(dashboard)/allocations/components/AddAllocationFlow.tsx": {
+    R5: {
+      count: 1,
+      reason: "The amount and date inputs' shared `aria-[invalid=true]:border-negative` is a form-validity border (it fires on aria-invalid, never on a value's sign), the same idiom AllocateDialog pins; it is not a figure's tone.",
+    },
+  },
   "src/app/(dashboard)/allocations/components/AlertBanner.tsx": {
     R5: {
       count: 2,

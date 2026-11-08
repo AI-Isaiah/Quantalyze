@@ -236,6 +236,9 @@ import {
   equityHistoryReadiness,
   derivedPayloadRejection,
   DERIVED_ROW_READ_FAILED,
+  notSyncingIdentityPendingKeyIds,
+  identityPendingKeyIds,
+  deriveKeyDataGapsField,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
 import { EMPTY_ANALYTICS } from "./utils";
@@ -3220,6 +3223,172 @@ describe("failingKeyExits: the compose's exited-key list reaches the Overview (1
       expect(call(row(extra)).failingKeyExits).toEqual([]);
       expect(errorSpy).not.toHaveBeenCalled();
       expect(recorders.sentryCalls).toHaveLength(0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 198 plan 03 (D-01, ROUTE-07). The Overview message names the key and the
+// missing days, so the payload carries `keyDataGaps`, computed on the server from
+// data it already reads. The account identity (`venue_account_id`) is read here to
+// group two keys on one account and must never reach the payload: a dead key
+// affects only itself, and only the owner's own key ids ship.
+// ---------------------------------------------------------------------------
+describe("keyDataGaps: the server derives which key is missing which days (198 D-01)", () => {
+  const key = (
+    id: string,
+    over: Partial<{
+      venue_account_id: string | null;
+      sync_status: string | null;
+      exchange: string;
+    }> = {},
+  ) => ({
+    id,
+    is_active: true,
+    exchange: over.exchange ?? "okx",
+    label: id,
+    sync_status: "sync_status" in over ? over.sync_status! : "complete",
+    last_sync_at: "2026-10-09T00:00:00Z",
+    disconnected_at: null,
+    venue_account_id: "venue_account_id" in over ? over.venue_account_id! : `va-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+  });
+  const series = (...days: string[]) => days.map((date) => ({ date, value: 0.01 }));
+  const derivedRow = (extra: Record<string, unknown>, trustworthy = true) => ({
+    payload: {
+      version: 2,
+      is_trustworthy: trustworthy,
+      curve: [{ date: "2026-10-09", equity_usd: 100 }],
+      returns: [{ date: "2026-10-09", r: 0.01 }],
+      flags: [] as string[],
+      ...extra,
+    } as Record<string, unknown>,
+    computed_at: "2026-10-10T05:30:00Z",
+  });
+
+  describe("identityPendingKeyIds", () => {
+    it("partitions the pending set with notSyncingIdentityPendingKeyIds: failing keys are one list, the rest the other", () => {
+      const keys = [
+        key("K1", { venue_account_id: null, sync_status: "error" }),
+        key("K2", { venue_account_id: null, sync_status: "complete" }),
+        key("K3"),
+      ];
+      const notSyncing = notSyncingIdentityPendingKeyIds(keys);
+      const pendingOnly = identityPendingKeyIds(keys);
+      expect(notSyncing).toEqual(["K1"]);
+      expect(pendingOnly).toEqual(["K2"]);
+      // Together they are exactly the keys the readiness check holds on.
+      expect([...notSyncing, ...pendingOnly].sort()).toEqual(["K1", "K2"]);
+    });
+  });
+
+  describe("the rebuilding arm", () => {
+    it("names the not-syncing key with the tail from its last per-key day to yesterday UTC, and not a healthy key", () => {
+      const keys = [
+        key("K1", { venue_account_id: null, sync_status: "error" }),
+        key("K2"),
+      ];
+      const phase07 = derivePhase07Fields(keys, [], null);
+      expect(phase07.equityHistoryRebuildReason).toBe("key_not_syncing");
+      const out = deriveKeyDataGapsField(
+        keys,
+        phase07,
+        { K1: series("2026-09-30", "2026-10-02"), K2: series("2026-10-10") },
+        "2026-10-12",
+      );
+      expect(out).toEqual([
+        {
+          apiKeyIds: ["K1"],
+          cause: "not_syncing",
+          firstMissingDay: "2026-10-03",
+          ranges: [{ from: "2026-10-03", to: "2026-10-11" }],
+        },
+      ]);
+    });
+
+    it("reads the last day as the maximum, whatever the series order", () => {
+      const keys = [key("K1", { venue_account_id: null, sync_status: "error" })];
+      const phase07 = derivePhase07Fields(keys, [], null);
+      const out = deriveKeyDataGapsField(
+        keys,
+        phase07,
+        { K1: series("2026-10-02", "2026-09-30") },
+        "2026-10-12",
+      );
+      expect(out[0].firstMissingDay).toBe("2026-10-03");
+    });
+
+    it("names two failing keys on one account as one shared-account entry, with no account id in the field", () => {
+      const keys = [
+        key("K1", { venue_account_id: "va-shared", sync_status: "error" }),
+        key("K2", { venue_account_id: "va-shared", sync_status: "sign_in_failed" }),
+        key("K3"),
+      ];
+      const phase07 = derivePhase07Fields(
+        keys,
+        [],
+        derivedRow({ degrade_reasons: ["shared_account_no_working_key"] }, false),
+      );
+      expect(phase07.equityHistoryRebuildReason).toBe("shared_account_no_working_key");
+      const out = deriveKeyDataGapsField(
+        keys,
+        phase07,
+        { K1: series("2026-10-01"), K2: series("2026-10-04") },
+        "2026-10-12",
+      );
+      expect(out).toEqual([
+        {
+          apiKeyIds: ["K1", "K2"],
+          cause: "shared_account_failing",
+          firstMissingDay: "2026-10-05",
+          ranges: [{ from: "2026-10-05", to: "2026-10-11" }],
+        },
+      ]);
+      expect(JSON.stringify(out)).not.toContain("va-");
+    });
+
+    it("a shared account with one working key names nobody", () => {
+      const keys = [
+        key("K1", { venue_account_id: "va-shared", sync_status: "error" }),
+        key("K2", { venue_account_id: "va-shared" }),
+      ];
+      const phase07 = derivePhase07Fields(
+        keys,
+        [],
+        derivedRow({ degrade_reasons: ["shared_account_no_working_key"] }, false),
+      );
+      expect(deriveKeyDataGapsField(keys, phase07, {}, "2026-10-12")).toEqual([]);
+    });
+  });
+
+  describe("the ready arm", () => {
+    it("runs a failing exit from the day after its last counted day to the curve's last day", () => {
+      const keys = [key("K1"), key("K2")];
+      const phase07 = derivePhase07Fields(
+        keys,
+        [],
+        derivedRow({
+          flags: ["failing_key_exited"],
+          failing_key_exits: [{ api_key_id: "K1", reason: "sync_failing", day: "2026-06-03" }],
+        }),
+      );
+      expect(phase07.equityHistoryState).toBe("ready");
+      const out = deriveKeyDataGapsField(keys, phase07, {}, "2026-10-30");
+      expect(out).toEqual([
+        {
+          apiKeyIds: ["K1"],
+          cause: "sync_failing",
+          firstMissingDay: "2026-06-04",
+          ranges: [{ from: "2026-06-04", to: "2026-10-09" }],
+        },
+      ]);
+    });
+
+    it("names nothing when the book is ready and no key exited", () => {
+      const keys = [key("K1")];
+      const phase07 = derivePhase07Fields(keys, [], derivedRow({}));
+      expect(deriveKeyDataGapsField(keys, phase07, {}, "2026-10-12")).toEqual([]);
     });
   });
 });

@@ -44,7 +44,7 @@ import {
 import { newCorrelationId } from "@/lib/correlation-id-client";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
-const ALLOCATION_ROUTE = "/api/portfolio-strategies/allocation";
+export const ALLOCATION_ROUTE = "/api/portfolio-strategies/allocation";
 
 // ─────────────────────────────────────────────────────────────────────── copy
 // 150-UI-SPEC Copywriting Contract — byte-binding. Module constants rather
@@ -52,8 +52,8 @@ const ALLOCATION_ROUTE = "/api/portfolio-strategies/allocation";
 // drift and so apostrophes stay literal.
 
 const FIELD_LABEL = "Allocation (USD)";
-const ERROR_NON_POSITIVE = "Enter an amount above $0.";
-const ERROR_ABOVE_CAP = "That's above the $1B sanity cap — check the amount.";
+export const ERROR_NON_POSITIVE = "Enter an amount above $0.";
+export const ERROR_ABOVE_CAP = "That's above the $1B sanity cap — check the amount.";
 
 /**
  * ⚠️ D-12-B SUPERSESSION — do NOT "fix" this back to the fallback sentence at
@@ -84,7 +84,7 @@ function removeConfirmCopy(strategyName: string): string {
 
 // ──────────────────────────────────────────────────────────────── validation
 
-type ParsedAmount = { ok: true; value: number } | { ok: false; error: string };
+export type ParsedAmount = { ok: true; value: number } | { ok: false; error: string };
 
 /**
  * Client mirror of the route's `parseAmount` (route.ts:115-128) — the SERVER
@@ -99,7 +99,7 @@ type ParsedAmount = { ok: true; value: number } | { ok: false; error: string };
  * NOT `isValidDollar`, which carries the AUM convention ($1e12, accepts 0) and
  * would make the copy wrong by 1000× while admitting a zero ticket.
  */
-function parseAmount(raw: string): ParsedAmount {
+export function parseAmount(raw: string): ParsedAmount {
   const trimmed = raw.trim();
   if (trimmed === "") return { ok: false, error: ERROR_NON_POSITIVE };
   const n = Number(trimmed);
@@ -166,7 +166,7 @@ const ROUTE: DashboardDialogRoute = "portfolio-strategies/allocation";
  * than the vague terminal. Delete them once no pre-161-10 instance can serve
  * this route, and not before.
  */
-function envelopeForResponse(
+export function envelopeForResponse(
   res: Response,
   correlationId: string,
   body: unknown,
