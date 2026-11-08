@@ -6,11 +6,14 @@
  * rebuilding panel on Risk.
  *
  * This file renders the REAL tab bodies through `AllocationsTabs` (Overview,
- * Holdings, Risk, Scenario) from ONE payload whose holdings are empty, whose
+ * Holdings, Scenario) from ONE payload whose holdings are empty, whose
  * portfolios are empty and whose history is rebuilding. The two arms differ
  * only in `hasConnectedKeys` and in that flag's source key row (live vs
  * disconnected, the "disconnected my only key" case). Flipping them must flip
- * every tab between a connect-a-key prompt and none. `apiKeysCount` is 1 in
+ * every tab between a connect-a-key prompt and none. Phase 198 D-02: Risk is
+ * no longer a tab (it is an Overview section), so its row left this matrix; its
+ * empty-book behaviour is pinned on the Overview by plan 198-06.
+ * `apiKeysCount` is 1 in
  * both arms so the above-tabs OnboardingBanner stays hidden and the matrix
  * measures tab bodies only.
  */
@@ -81,9 +84,6 @@ vi.mock("@/components/portfolio/PortfolioOptimizer", () => ({
 }));
 vi.mock("./components/StrategyBrowseDrawer", () => ({
   StrategyBrowseDrawer: () => null,
-}));
-vi.mock("./components/ContributionWizardOverlay", () => ({
-  ContributionWizardOverlay: () => null,
 }));
 vi.mock("./components/BridgeDrawer", () => ({ BridgeDrawer: () => null }));
 vi.mock("./components/ScenarioCommitDrawer", () => ({
@@ -197,7 +197,7 @@ const TABS = [
     tab: "overview",
     rendered: () => {
       expect(
-        screen.queryByTestId("overview-equity-rebuilding") ??
+        screen.queryByTestId("overview-missing-data") ??
           screen.queryByText("No positions to analyze yet."),
       ).not.toBeNull();
     },
@@ -208,12 +208,6 @@ const TABS = [
       expect(
         screen.getByRole("heading", { name: /Diversification Optimizer|Simulate Impact/i }),
       ).toBeTruthy();
-    },
-  },
-  {
-    tab: "risk",
-    rendered: () => {
-      expect(document.querySelector("[data-tab-panel='risk']")).not.toBeNull();
     },
   },
   {

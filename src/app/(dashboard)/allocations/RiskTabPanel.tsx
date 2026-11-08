@@ -3,20 +3,26 @@
 import { Suspense } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { WIDGET_COMPONENTS, type WidgetId } from "./widgets";
-import { EquityHistoryRebuilding } from "./components/EquityHistoryRebuilding";
-import { EmptyState } from "./EmptyState";
-import { historyGate, resolveNotSyncingKeys } from "./lib/history-gate";
 import { bookRiskInput } from "./widgets/lib/book-risk-input";
 
 /**
- * Phase 09.1 D-06 — Risk tab body (Plan 10).
+ * Phase 198 plan 06 (D-02) — the Overview Risk section's widget grid.
  *
+ * Phase 09.1 D-06 made this the Risk tab body; the tab is retired (198 D-02)
+ * and its six widgets now render in `<section id="risk">` of the Overview.
  * Curated 6-widget grid via WIDGET_COMPONENTS (no new widgets — picker
  * rendering only). Order matches the planning §D-06 list.
  *
+ * The gate lives in the Overview, not here (RESEARCH P5): the Overview's ONE
+ * `historyGate` call decides the whole page, and this grid is mounted only by
+ * its "ready" branch, so the page and the Risk section can never disagree. The
+ * panel no longer gates itself; rendered on its own it draws the grid for
+ * whatever payload it is handed, so a caller must not mount it over a history
+ * the gate holds back.
+ *
  * Each tile carries `data-widget-id` so a future IntersectionObserver
  * (Plan 05 in the AllocationDashboardV2 root) can fire `widget_viewed`
- * analytics for Risk-tab widgets too.
+ * analytics for these widgets too.
  */
 
 // H-0157 / M-1096: typed against WidgetId, so the panel can only list ids that
@@ -32,32 +38,6 @@ const RISK_WIDGETS: readonly WidgetId[] = [
 ] as const;
 
 export function RiskTabPanel(props: MyAllocationDashboardPayload) {
-  // Phase 169.4-01 (SC2, T-169-25): the Risk tab shares the Overview's
-  // rebuilding state. Fail-closed like the Overview: only an explicit "ready"
-  // shows a figure; a missing or unknown state reads as rebuilding, and NO risk
-  // widget renders over a history 167.1.2 withholds.
-  // Phase 170.4 plan 04 (D-04, D-07, D-09): Risk and Overview now share ONE
-  // gate (`historyGate`), so they cannot disagree. An allocator with NO
-  // eligible key and an empty book sees the connect-a-key card on both tabs;
-  // one with an eligible key sees the rebuilding panel on both.
-  const gate = historyGate(props);
-  if (gate === "no_eligible_key") {
-    return (
-      <div data-tab-panel="risk">
-        <EmptyState hasSyncing={false} hasConnectedKeys={false} />
-      </div>
-    );
-  }
-  if (gate === "rebuilding") {
-    return (
-      <div data-tab-panel="risk">
-        <EquityHistoryRebuilding
-          reason={props.equityHistoryRebuildReason ?? null}
-          notSyncingKeys={resolveNotSyncingKeys(props)}
-        />
-      </div>
-    );
-  }
   // Every widget reads the book the Overview charts, through the one adapter.
   const data = bookRiskInput(props);
   return (

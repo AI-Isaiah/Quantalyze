@@ -92,6 +92,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { oneKeyPerAccountDay } from "@/lib/holdings-account-day";
+import { isCashHolding } from "@/lib/closed-sets";
 import {
   HOLDINGS_ROW_CAP,
   KEY_IDENTITY_COLUMNS,
@@ -136,8 +137,16 @@ export interface ExposureSnapshot {
    */
   oldestAsof: string | null;
   slices: ExposureSlice[];
+  /** Excludes cash rows (ROUTE-08): `isCashHolding` rows are never slices. */
   totalGrossUsd: number;
+  /** Excludes cash rows (ROUTE-08). */
   totalNetUsd: number;
+  /**
+   * The summed value of the cash rows read (ROUTE-08), null when no cash row was
+   * read, so a missing cash read is never printed as a zero. Excluded from
+   * `slices` and from both totals.
+   */
+  cashUsd: number | null;
 }
 
 export interface AsofGap {
@@ -350,6 +359,10 @@ function distinctSortedAsofs(rows: HoldingRow[]): string[] {
 /**
  * PI-02 — signed net (+ gross) exposure per existing `asof` day, with interior
  * calendar holes MARKED as gaps. Never zero-fills a missing day.
+ *
+ * ROUTE-08: cash rows (`isCashHolding`) add nothing to net or gross, so this
+ * series agrees with the Exposure strip. A day read with only cash rows is
+ * still a point, at zero, so no read day vanishes.
  */
 export async function getNetExposureSeries(
   userId: string,
@@ -360,8 +373,12 @@ export async function getNetExposureSeries(
   const byAsof = new Map<string, { netUsd: number; grossUsd: number }>();
   for (const r of rows) {
     const acc = byAsof.get(r.asof) ?? { netUsd: 0, grossUsd: 0 };
-    acc.netUsd += signed(r.side, r.value_usd);
-    acc.grossUsd += r.value_usd;
+    // ROUTE-08: cash is not exposure. The row still creates its day's entry
+    // above, so a day read with only cash stays in the series as a zero point.
+    if (!isCashHolding(r)) {
+      acc.netUsd += signed(r.side, r.value_usd);
+      acc.grossUsd += r.value_usd;
+    }
     byAsof.set(r.asof, acc);
   }
 
@@ -389,6 +406,10 @@ export async function getNetExposureSeries(
  * neither series silently drops the day. (Weights genuinely cannot exist for a
  * zero-gross day; a gap — not a fabricated 0-weight point — is the honest
  * representation on the allocation axis.)
+ *
+ * Cash stays in the venue weights (198 decision, ROUTE-08): this chart shows
+ * where capital sits, not exposure, so a stablecoin balance is still capital on
+ * its venue. `getNetExposureSeries` is the one that excludes cash.
  */
 export async function getAllocationSeries(
   userId: string,

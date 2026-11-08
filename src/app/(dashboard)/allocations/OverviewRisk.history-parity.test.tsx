@@ -1,23 +1,32 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
-import { RiskTabPanel } from "./RiskTabPanel";
 import type {
   EquityHistoryRebuildReason,
   MyAllocationDashboardPayload,
 } from "@/lib/queries";
 
 // ---------------------------------------------------------------------------
-// Phase 170.4 plan 04 (D-04, D-07, D-09) — Overview and Risk answer every
-// history and key state the same way.
+// Phase 198 plan 06 (D-02, LEAN-06, ROUTE-07) — the Overview's Risk section.
 //
-// Why this matters: on 2026-10-03 PROD, an allocator with a connected key and
-// an empty book saw the rebuilding panel on Risk and "No positions to analyze
-// yet" on Overview, because Overview's empty-holdings early return ran before
-// its rebuilding branch. Switching tabs changed what the page said about the
-// allocator's history. Both tabs now choose through `historyGate`, and this
-// file renders BOTH from one payload object and compares what they say.
+// Why this file still exists: after D-02 the Risk tab is gone and Risk is a
+// section of the Overview, so there is no second tab to compare against. What
+// stays is the reason the gate is SINGLE. On 2026-10-03 PROD, an allocator with
+// a connected key and an empty book saw the rebuilding panel on Risk and "No
+// positions to analyze yet" on Overview, so switching tabs changed what the
+// page said about the allocator's history (Phase 170.4 plan 04, D-04, D-07,
+// D-09). Now ONE `historyGate` call in the Overview decides the whole page:
+// the connect-a-key card, the rebuilding panel and the Risk section's widgets
+// or its one line. These cases render the Overview over every history and key
+// state and pin what it says, so the Risk section can never show a figure over
+// a history the gate holds back, and the rebuilding reason is stated once.
+//
+// Phase 198 plan 09 (D-01): the "rebuilding panel" of this file is now the
+// missing-data section (`overview-missing-data`). D-01 names the key and the
+// days, so the generic panel and its four class headings are retired; what the
+// section says about a reason is pinned per reason in
+// `AllocationDashboardV2.rebuilding.test.tsx` and `MissingDataMessage.test.tsx`.
 // ---------------------------------------------------------------------------
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
@@ -40,11 +49,22 @@ vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
     <div data-testid="mock-factsheet-body">{topSlot}</div>
   ),
 }));
-vi.mock("@/lib/factsheet/allocator-portfolio-payload", () => ({
-  buildAllocatorPortfolioFactsheetPayload: () => ({ stub: true }),
+// `refuse` makes the builder decline the book's returns, which is the Overview's
+// warm-up branch (too little history for the factsheet panels).
+const builder = vi.hoisted(() => ({ refuse: false }));
+// Partial: the Risk widgets read the module's other exports (the annualization basis).
+vi.mock("@/lib/factsheet/allocator-portfolio-payload", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/lib/factsheet/allocator-portfolio-payload")
+  >()),
+  buildAllocatorPortfolioFactsheetPayload: () =>
+    builder.refuse ? null : { stub: true },
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  builder.refuse = false;
+});
 
 const BASE = {
   portfolio: null,
@@ -72,58 +92,76 @@ function payload(over: Partial<Record<string, unknown>> = {}) {
   return { ...BASE, ...over } as unknown as MyAllocationDashboardPayload;
 }
 
-/** What one tab says about the history and about keys: the rebuilding panel's text, or the connect-a-key card. */
-function readTab(): { kind: "panel" | "connect" | "other"; text: string } {
-  const panel = screen.queryByTestId("overview-equity-rebuilding");
-  if (panel) return { kind: "panel", text: panel.textContent ?? "" };
-  if (screen.queryByRole("link", { name: /Connect Exchange/ })) {
-    return {
-      kind: "connect",
-      text: screen.getByText(/Connect a read-only exchange API key/).textContent ?? "",
-    };
-  }
-  return { kind: "other", text: "" };
+
+// Typed by hand, never read from the component.
+const RISK_LINE = "Risk figures need the equity history. See the note above.";
+// The six widgets in the order the Risk section lists them (planning D-06).
+const RISK_WIDGET_IDS = [
+  "var-expected-shortfall",
+  "tail-risk",
+  "risk-decomposition",
+  "alpha-beta-decomposition",
+  "regime-detector",
+  "correlation-matrix",
+];
+
+/**
+ * The Risk section's panel chunk and its widgets load lazily. An ABSENCE
+ * assertion over a not-yet-mounted chunk would pass whatever the gate says, so
+ * every absence check settles the dynamic imports first.
+ */
+async function settle() {
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
 }
 
-function overviewOf(p: MyAllocationDashboardPayload) {
-  render(<AllocationDashboardV2 {...p} />);
-  const out = readTab();
-  cleanup();
-  return out;
+function riskSection(): HTMLElement | null {
+  return document.querySelector<HTMLElement>("section#risk");
 }
 
-function riskOf(p: MyAllocationDashboardPayload) {
-  render(<RiskTabPanel {...p} />);
-  const out = readTab();
-  cleanup();
-  return out;
+function widgetIds(root: ParentNode): string[] {
+  return [...root.querySelectorAll("[data-widget-id]")].map(
+    (el) => el.getAttribute("data-widget-id") ?? "",
+  );
 }
 
-describe("Overview / Risk history parity — the 2026-10-03 case (D-04, D-07, D-09)", () => {
-  it("eligible key, empty book, history rebuilding: Overview renders the same panel text as Risk, never its empty card", () => {
-    const p = payload({
-      hasConnectedKeys: true,
-      holdingsSummary: [],
-      hasSyncing: false,
-      equityHistoryState: "rebuilding",
-      equityHistoryRebuildReason: "awaiting_derivation",
-    });
+/** `a` appears before `b` in the document. */
+function before(a: Element, b: Element): boolean {
+  return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
 
-    render(<AllocationDashboardV2 {...p} />);
-    const overviewPanel = screen.getByTestId("overview-equity-rebuilding");
-    const overviewText = overviewPanel.textContent;
+/** The Overview said: connect card, ONE missing-data section with a Risk line, or neither (a ready page). */
+async function readOverview(p: MyAllocationDashboardPayload) {
+  const { container } = render(<AllocationDashboardV2 {...p} />);
+  await settle();
+  return container;
+}
+
+describe("Overview Risk section — the 2026-10-03 case (D-04, D-07, D-09)", () => {
+  it("eligible key, empty book, history rebuilding: one missing-data section, never the empty card, and a Risk line with no widget", async () => {
+    await readOverview(
+      payload({
+        hasConnectedKeys: true,
+        holdingsSummary: [],
+        hasSyncing: false,
+        equityHistoryState: "rebuilding",
+        equityHistoryRebuildReason: "awaiting_derivation",
+      }),
+    );
+
     // The empty-holdings card must not shadow the rebuilding state.
     expect(screen.queryByText("No positions to analyze yet.")).toBeNull();
     expect(screen.queryByText(/You're connected/)).toBeNull();
-    cleanup();
-
-    render(<RiskTabPanel {...p} />);
-    const riskText = screen.getByTestId("overview-equity-rebuilding").textContent;
-
-    expect(overviewText).toContain(
-      "Your history is recomputed from each account's returns and cash flows once a day.",
+    const panels = screen.getAllByTestId("overview-missing-data");
+    expect(panels).toHaveLength(1);
+    expect(panels[0].textContent).toContain(
+      "Book return and risk are recomputed once a day from each account's returns and cash flows. They appear after the next recompute.",
     );
-    expect(overviewText).toBe(riskText);
+    const risk = riskSection();
+    expect(risk).not.toBeNull();
+    expect(risk!.textContent).toContain(RISK_LINE);
+    expect(widgetIds(document)).toEqual([]);
   });
 });
 
@@ -133,7 +171,8 @@ describe("Overview / Risk history parity — the 2026-10-03 case (D-04, D-07, D-
 // {no, yes}, with the history rebuilding. The expected answer is hand-derived
 // from the decisions, NOT from `historyGate`, so a wrong gate cannot grade
 // itself: the connect-a-key card shows only for an EMPTY, NOT-syncing book with
-// NO eligible key (D-09); every other cell is the rebuilding panel (D-04).
+// NO eligible key (D-09), and then NO section renders at all; every other cell
+// is the missing-data section once (D-04, D-01) over a Risk section holding one line.
 // ---------------------------------------------------------------------------
 
 const REASONS = [
@@ -188,70 +227,73 @@ const CELLS: Cell[] = REASONS.flatMap((reason) =>
 const cellLabel = (c: Cell) =>
   `reason=${c.reason ?? "null"} keys=${c.keys} book=${c.empty ? "empty" : "spot"} syncing=${c.syncing}`;
 
-describe("Overview / Risk history parity matrix (D-04, D-07, D-09)", () => {
+describe("Overview history matrix (D-04, D-07, D-09)", () => {
   it.each(CELLS.map((c) => [cellLabel(c), c] as const))(
-    "%s: both tabs say the same thing",
-    (_label, c) => {
-      const p = payload({
-        hasConnectedKeys: c.keys,
-        holdingsSummary: c.empty ? [] : [SPOT_ROW],
-        hasSyncing: c.syncing,
-        equityHistoryState: "rebuilding",
-        equityHistoryRebuildReason: c.reason,
-      });
-      const overview = overviewOf(p);
-      const risk = riskOf(p);
+    "%s: one answer",
+    async (_label, c) => {
+      const container = await readOverview(
+        payload({
+          hasConnectedKeys: c.keys,
+          holdingsSummary: c.empty ? [] : [SPOT_ROW],
+          hasSyncing: c.syncing,
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: c.reason,
+        }),
+      );
 
       const expectConnect = !c.keys && c.empty && !c.syncing;
-      expect(overview.kind).toBe(expectConnect ? "connect" : "panel");
-      expect(risk).toEqual(overview);
-
-      if (c.keys) {
-        // D-07: an allocator with an eligible key never sees a connect prompt.
-        render(<AllocationDashboardV2 {...p} />);
-        expect(screen.queryByRole("link", { name: /Connect Exchange/ })).toBeNull();
-        expect(screen.queryByText(/Connect a read-only exchange API key/)).toBeNull();
-        cleanup();
-        render(<RiskTabPanel {...p} />);
-        expect(screen.queryByRole("link", { name: /Connect Exchange/ })).toBeNull();
-        expect(screen.queryByText(/Connect a read-only exchange API key/)).toBeNull();
-        cleanup();
-      }
       if (expectConnect) {
-        render(<RiskTabPanel {...p} />);
         expect(
           screen.getByRole("link", { name: /Connect Exchange/ }),
         ).toHaveAttribute("href", "/profile?tab=exchanges");
-        cleanup();
+        expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+        // The connect card replaces every section, Risk included, but not the
+        // Mandate: it is not tied to a key (review WR-04).
+        expect(container.querySelector("#risk")).toBeNull();
+        expect(container.querySelector("#mandate")).not.toBeNull();
+        return;
+      }
+
+      // The missing-data section renders exactly once, never inside the Risk
+      // section, whose only text is its one line.
+      expect(screen.getAllByTestId("overview-missing-data")).toHaveLength(1);
+      const risk = riskSection();
+      expect(risk, "the Risk section exists").not.toBeNull();
+      expect(
+        risk!.querySelector('[data-testid="overview-missing-data"]'),
+      ).toBeNull();
+      expect(risk!.textContent).toBe(`Risk${RISK_LINE}`);
+      expect(widgetIds(risk!)).toEqual([]);
+      // The reason is stated by the section above, not repeated by the Risk line.
+      expect(risk!.textContent).not.toContain("recomputed once a day");
+      // The Risk section comes after the section, so "See the note above." is true.
+      expect(
+        before(screen.getByTestId("overview-missing-data"), risk!),
+      ).toBe(true);
+
+      if (c.keys) {
+        // D-07: an allocator with an eligible key never sees a connect prompt.
+        expect(screen.queryByRole("link", { name: /Connect Exchange/ })).toBeNull();
+        expect(screen.queryByText(/Connect a read-only exchange API key/)).toBeNull();
       }
     },
   );
 
-  it("the connect card keeps Risk's data-tab-panel wrapper (D-09)", () => {
-    const { container } = render(
-      <RiskTabPanel
-        {...payload({
-          hasConnectedKeys: false,
-          holdingsSummary: [],
-          equityHistoryState: "rebuilding",
-        })}
-      />,
+  it("no eligible key and an empty book gets the connect card when the history reads ready too (D-09)", async () => {
+    const container = await readOverview(
+      payload({
+        hasConnectedKeys: false,
+        holdingsSummary: [],
+        equityHistoryState: "ready",
+      }),
     );
-    expect(container.querySelector('[data-tab-panel="risk"]')).not.toBeNull();
     expect(screen.getByRole("link", { name: /Connect Exchange/ })).toBeInTheDocument();
+    expect(container.querySelector("#risk")).toBeNull();
+    expect(container.querySelector("#mandate")).not.toBeNull();
+    expect(widgetIds(document)).toEqual([]);
   });
 
-  it("no eligible key and an empty book still gets the connect card on Risk when the history reads ready (D-09)", () => {
-    const p = payload({
-      hasConnectedKeys: false,
-      holdingsSummary: [],
-      equityHistoryState: "ready",
-    });
-    expect(riskOf(p).kind).toBe("connect");
-    expect(overviewOf(p).kind).toBe("connect");
-  });
-
-  describe("key_not_syncing names the same key on both tabs", () => {
+  describe("key_not_syncing names the key", () => {
     const key = (id: string, exchange: string, label: string) => ({
       id,
       exchange,
@@ -285,122 +327,183 @@ describe("Overview / Risk history parity matrix (D-04, D-07, D-09)", () => {
         ["k-gone"],
         "One of your keys is not syncing",
       ],
-    ])("%s", (_label, apiKeys, ids, sentence) => {
+    ])("%s", async (_label, apiKeys, ids, sentence) => {
       for (const empty of [true, false]) {
-        const p = payload({
-          hasConnectedKeys: true,
-          apiKeys,
-          holdingsSummary: empty ? [] : [SPOT_ROW],
-          equityHistoryState: "rebuilding",
-          equityHistoryRebuildReason: "key_not_syncing",
-          equityHistoryNotSyncingKeyIds: ids,
-        });
-        const overview = overviewOf(p);
-        expect(overview.kind).toBe("panel");
-        expect(overview.text).toContain(sentence);
-        expect(riskOf(p)).toEqual(overview);
+        await readOverview(
+          payload({
+            hasConnectedKeys: true,
+            apiKeys,
+            holdingsSummary: empty ? [] : [SPOT_ROW],
+            equityHistoryState: "rebuilding",
+            equityHistoryRebuildReason: "key_not_syncing",
+            equityHistoryNotSyncingKeyIds: ids,
+          }),
+        );
+        const panel = screen.getByTestId("overview-missing-data");
+        expect(panel.textContent).toContain(sentence);
+        // The Risk line names no key: the note above does.
+        expect(riskSection()!.textContent).toBe(`Risk${RISK_LINE}`);
+        cleanup();
       }
     });
   });
 
-  // 170.6.2 D-04 / D-05: both tabs render the same heading for the same
-  // reason, and it is the heading of that reason's class. The expected heading
-  // is typed by hand per reason; it is never read from the component's map.
-  describe("the panel heading is the same on both tabs for every reason (D-05)", () => {
-    const HEADINGS = [
-      ["duplicate_account", "Your equity history is waiting on a key"],
-      ["key_not_syncing", "Your equity history is waiting on a key"],
-      ["shared_account_no_working_key", "Your equity history is waiting on a key"],
-      ["history_read_failed", "We could not load your equity history"],
-      ["account_identity_pending", "Your equity history is being rebuilt"],
-      ["awaiting_derivation", "Your equity history is being rebuilt"],
-      ["derivation_rejected", "We are holding back your equity history"],
-      ["shared_account_history_truncated", "We are holding back your equity history"],
-    ] as const satisfies ReadonlyArray<
-      readonly [EquityHistoryRebuildReason, string]
-    >;
+  // 198-09 (D-01): the four class headings of the retired panel (170.6.2 D-04 /
+  // D-05) never render on the Overview now, for any reason, on an empty or a
+  // populated book. Typed by hand, never read from the old component's map.
+  describe("no reason prints a retired class heading (D-01)", () => {
+    const RETIRED = [
+      "Your equity history is waiting on a key",
+      "We could not load your equity history",
+      "Your equity history is being rebuilt",
+      "We are holding back your equity history",
+    ] as const;
+    const NAMED_REASONS = REASONS.filter(
+      (r): r is EquityHistoryRebuildReason => r !== null,
+    );
 
-    // Compile-time exhaustiveness: a ninth reason fails tsc until a heading is typed for it.
-    const ALL_HEADINGS_LISTED: [
-      Exclude<EquityHistoryRebuildReason, (typeof HEADINGS)[number][0]>,
-    ] extends [never]
-      ? true
-      : never = true;
-    void ALL_HEADINGS_LISTED;
-
-    function h2Of(p: MyAllocationDashboardPayload, tab: "overview" | "risk") {
-      render(tab === "overview" ? <AllocationDashboardV2 {...p} /> : <RiskTabPanel {...p} />);
-      const h2 = screen
-        .getByTestId("overview-equity-rebuilding")
-        .querySelector("h2");
-      const text = h2?.textContent ?? null;
-      cleanup();
-      return text;
-    }
-
-    it.each(HEADINGS)("%s: Overview and Risk both read '%s'", (reason, heading) => {
+    it.each(NAMED_REASONS)("%s: the section carries no h2 and no retired heading", async (reason) => {
       for (const empty of [true, false]) {
-        const p = payload({
-          hasConnectedKeys: true,
-          holdingsSummary: empty ? [] : [SPOT_ROW],
-          equityHistoryState: "rebuilding",
-          equityHistoryRebuildReason: reason,
-        });
-        const overview = h2Of(p, "overview");
-        const risk = h2Of(p, "risk");
-        expect(overview, `Overview, ${empty ? "empty" : "non-empty"} book`).toBe(heading);
-        expect(risk, `Risk, ${empty ? "empty" : "non-empty"} book`).toBe(heading);
-        expect(risk).toBe(overview);
+        await readOverview(
+          payload({
+            hasConnectedKeys: true,
+            holdingsSummary: empty ? [] : [SPOT_ROW],
+            equityHistoryState: "rebuilding",
+            equityHistoryRebuildReason: reason,
+          }),
+        );
+        const section = screen.getByTestId("overview-missing-data");
+        const where = `${empty ? "empty" : "non-empty"} book`;
+        expect(section.querySelector("h2"), where).toBeNull();
+        for (const heading of RETIRED) {
+          expect(screen.queryByText(heading), where).toBeNull();
+        }
+        cleanup();
       }
     });
   });
+});
 
-  it("ready history: Risk still renders its six widgets for a non-empty book, Overview its curve", () => {
-    const p = payload({
-      hasConnectedKeys: true,
-      holdingsSummary: [SPOT_ROW],
-      equityHistoryState: "ready",
-    });
-    const { container } = render(<RiskTabPanel {...p} />);
-    expect(container.querySelectorAll("[data-widget-id]")).toHaveLength(6);
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
-    cleanup();
-    render(<AllocationDashboardV2 {...p} />);
+describe("Overview Risk section — ready (ROUTE-07, D-02, D-04)", () => {
+  it("ready history, non-empty book: the curve renders and the Risk section holds the six widgets in order, after the factsheet body", async () => {
+    await readOverview(
+      payload({
+        hasConnectedKeys: true,
+        holdingsSummary: [SPOT_ROW],
+        equityHistoryState: "ready",
+      }),
+    );
+    const risk = screen.getByRole("region", { name: "Risk" });
+    expect(risk).toBe(riskSection());
+    await waitFor(() => expect(widgetIds(risk)).toEqual(RISK_WIDGET_IDS));
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    expect(risk.textContent).not.toContain(RISK_LINE);
+    expect(before(screen.getByTestId("mock-factsheet-body"), risk)).toBe(true);
   });
 
-  // Phase 167.1.2.1.2 D-04 (2026-10-20): a ready history of an all-closed book.
-  // Risk already rendered its widgets for it; the Overview said "No positions
-  // to analyze yet." over the same payload. Both tabs now show figures.
-  it("ready history, eligible key, all-closed book: Risk renders its six widgets and Overview its curve (D-04)", () => {
-    const p = payload({
-      hasConnectedKeys: true,
-      holdingsSummary: [],
-      hasSyncing: false,
-      equityHistoryState: "ready",
-    });
-    const { container } = render(<RiskTabPanel {...p} />);
-    expect(container.querySelectorAll("[data-widget-id]")).toHaveLength(6);
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
-    cleanup();
-    render(<AllocationDashboardV2 {...p} />);
+  // Phase 167.1.2.1.2 D-04 (2026-10-20): a ready history of an all-closed book
+  // shows figures. The Overview used to say "No positions to analyze yet." over
+  // the same payload; the Risk widgets already rendered for it.
+  it("ready history, eligible key, all-closed book: six widgets and the curve (D-04)", async () => {
+    await readOverview(
+      payload({
+        hasConnectedKeys: true,
+        holdingsSummary: [],
+        hasSyncing: false,
+        equityHistoryState: "ready",
+      }),
+    );
+    const risk = screen.getByRole("region", { name: "Risk" });
+    await waitFor(() => expect(widgetIds(risk)).toEqual(RISK_WIDGET_IDS));
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
     expect(screen.queryByText("No positions to analyze yet.")).toBeNull();
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+  });
+
+  it("ready but too little history for the factsheet panels: the Risk section follows the warm-up note", async () => {
+    builder.refuse = true;
+    await readOverview(
+      payload({
+        hasConnectedKeys: true,
+        holdingsSummary: [SPOT_ROW],
+        equityHistoryState: "ready",
+      }),
+    );
+    const risk = screen.getByRole("region", { name: "Risk" });
+    await waitFor(() => expect(widgetIds(risk)).toEqual(RISK_WIDGET_IDS));
+    expect(
+      before(screen.getByTestId("overview-factsheet-warmup"), risk),
+    ).toBe(true);
   });
 
   it.each([
     ["a missing state", undefined],
     ["null", null],
     ["an unrecognised state", "weird"],
-  ])("fail-closed on both tabs: %s reads as rebuilding", (_label, state) => {
-    const p = payload({
-      hasConnectedKeys: true,
-      holdingsSummary: [SPOT_ROW],
-      equityHistoryState: state,
-    });
-    expect(overviewOf(p).kind).toBe("panel");
-    expect(riskOf(p).kind).toBe("panel");
+  ])("fail-closed: %s reads as rebuilding, so no risk widget", async (_label, state) => {
+    await readOverview(
+      payload({
+        hasConnectedKeys: true,
+        holdingsSummary: [SPOT_ROW],
+        equityHistoryState: state,
+      }),
+    );
+    // Moved here from RiskTabPanel.book-series.test.tsx: the Risk tab's own
+    // fail-closed case. The gate is the Overview's now.
+    expect(screen.getAllByTestId("overview-missing-data")).toHaveLength(1);
+    expect(riskSection()!.textContent).toContain(RISK_LINE);
+    expect(widgetIds(document)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 198 plan 06 (D-02): the retired Mandate tab is the Overview's LAST
+// section. The order is the contract (UI-SPEC "Overview, top to bottom"), so a
+// refactor that slides it above Risk, or leaves it behind the connect card,
+// fails here.
+// ---------------------------------------------------------------------------
+describe("Overview Mandate section (D-02)", () => {
+  it.each([
+    ["ready", "ready"],
+    ["rebuilding", "rebuilding"],
+  ])("%s history: #mandate is the last section, after #risk, labelled by an h2 'Mandate'", async (_label, state) => {
+    const container = await readOverview(
+      payload({
+        hasConnectedKeys: true,
+        holdingsSummary: [SPOT_ROW],
+        equityHistoryState: state,
+      }),
+    );
+    const risk = riskSection()!;
+    const mandate = container.querySelector<HTMLElement>("section#mandate");
+    expect(mandate, "the Mandate section exists").not.toBeNull();
+    expect(screen.getByRole("region", { name: "Mandate" })).toBe(mandate);
+    expect(mandate!.querySelector("h2")?.textContent).toBe("Mandate");
+    expect(before(risk, mandate!)).toBe(true);
+    // Last: nothing follows it inside the Overview shell.
+    const shell = container.querySelector("[data-ui-v2-shell]")!;
+    expect(shell.lastElementChild).toBe(mandate);
+    // The snapshot and the Edit mandate link render inside it.
+    expect(mandate!.querySelector('[data-testid="mandate-snapshot"]')).not.toBeNull();
+    expect(
+      within(mandate!).getByRole("link", { name: "Edit mandate" }),
+    ).toHaveAttribute("href", "/profile?tab=mandate");
+  });
+
+  it("the connect-a-key card does not replace the Mandate section (review WR-04)", async () => {
+    const container = await readOverview(
+      payload({
+        hasConnectedKeys: false,
+        holdingsSummary: [],
+        equityHistoryState: "rebuilding",
+      }),
+    );
+    expect(screen.getByRole("link", { name: /Connect Exchange/ })).toBeInTheDocument();
+    expect(container.querySelector("#mandate")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Edit mandate" })).toHaveAttribute(
+      "href",
+      "/profile?tab=mandate",
+    );
   });
 });

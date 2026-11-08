@@ -217,6 +217,7 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
+import { liveBookFigures } from "../lib/book-figures";
 import { constituentCell, constituentFigure, parseConstituentRecord, UNKNOWN_CONSTITUENT_FIGURE, type ConstituentFigure, type SettledMetrics } from "../lib/constituent-figure";
 import { CoverageTimeline } from "./CoverageTimeline";
 import { DefaultChangeNote } from "./DefaultChangeNote";
@@ -4479,6 +4480,19 @@ export function ScenarioComposer({
     [payload.liveBaselineMetrics],
   );
 
+  // Phase 198 plan 01 (D-06, research C6): the live strip's Sharpe is the shared module's
+  // gated value, judged on the live baseline's own record (194 D-15), the same value the
+  // Overview's at-a-glance panel prints. `liveMetricsForKpi` stays the ungated adapter
+  // output the rest of the composer reads.
+  const liveFigures = useMemo(
+    () => liveBookFigures(payload.liveBaselineMetrics),
+    [payload.liveBaselineMetrics],
+  );
+  const liveMetricsForStrip: ComputedMetrics = useMemo(
+    () => ({ ...liveMetricsForKpi, sharpe: liveFigures.sharpe }),
+    [liveMetricsForKpi, liveFigures],
+  );
+
   // 194 D-15 / D-11 (review CR-01, R3 WR-01): Sharpe is annualised, so its delta is judged
   // on the TOTAL records of both legs, exactly as the own-book delta is. The footer chip
   // reads `sharpeDeltaState`; the "Scenario blend" strip derives its pill and its "Current
@@ -4503,9 +4517,9 @@ export function ScenarioComposer({
   const gatedLiveMetrics = useMemo<ComputedMetrics>(
     () => ({
       ...liveMetricsForKpi,
-      sharpe: gatedValue(liveMetricsForKpi.sharpe, liveSharpeState),
+      sharpe: gatedValue(liveFigures.sharpe, liveSharpeState),
     }),
-    [liveMetricsForKpi, liveSharpeState],
+    [liveMetricsForKpi, liveFigures, liveSharpeState],
   );
 
   // -------------------------------------------------------------------------
@@ -6017,7 +6031,7 @@ export function ScenarioComposer({
           variant="panel"
           scenarioMetrics={gatedBlendMetrics}
           liveMetrics={gatedLiveMetrics}
-          metrics={liveMetricsForKpi}
+          metrics={liveMetricsForStrip}
           analytics={{}}
           snapshotCount={snapshotCount}
           allKeysStale={allKeysStale}

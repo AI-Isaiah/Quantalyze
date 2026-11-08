@@ -3,21 +3,28 @@
 /**
  * Phase 09.1 D-06 + D-11 + D-18 / F4b — Holdings tab body.
  *
- * Two sections:
+ * Sections, top to bottom (Phase 198 D-02):
  *   1. **Strategies** — one row per onboarded portfolio strategy
  *      (`props.strategies` → `toStrategyRows` → `HoldingsTable strategyRows`).
  *      This is the primary surface: Strategy / Manager / Weight / Allocation /
  *      MTD / Sharpe / Max DD / Age, each row linking to the strategy factsheet.
  *      Strategy↔analytics data is real (server-projected); there is NO
  *      holding→strategy join, so raw exchange positions live in section 2.
- *   2. **Exchange Positions** — the allocator's raw synced positions, always
- *      shown with position-appropriate columns (no empty strategy columns):
- *        - a flagged-holding "Record outcome" surface
- *          (`ScenarioFlaggedHoldingsList`) when any holdings are flagged for a
- *          bridge/replacement — preserves the per-holding outcome CTA;
+ *   2. **Positions** (`#positions`, formerly the last section, moved up and
+ *      renamed) — the allocator's raw synced positions, always shown with
+ *      position-appropriate columns (no empty strategy columns):
+ *        - a flagged position carries a `Flagged` chip and a `Record outcome…`
+ *          action in its own row (198-12), so each position is listed once; a
+ *          flag with no rendered row (not in the read, or hidden) renders
+ *          through `ScenarioFlaggedHoldingsList`, so it is never dropped;
  *        - spot balances via the legacy `HoldingsTable` (holding columns +
  *          revoked-key handling);
  *        - open derivative positions via `OpenPositionsTable`.
+ *   3. **Exposure**.
+ *   4. **Outcomes** (`#outcomes`) — the retired Outcomes tab's content, the
+ *      unchanged `OutcomesWidget` with its own empty state.
+ *   5. **Watchlist & Optimizer**.
+ *   6. **Notes**.
  *
  * Spot vs derivative are partitioned because their `value_usd` semantics
  * differ (spot = marked equity value; derivative = notional exposure, with
@@ -40,7 +47,9 @@ import {
   OpenPositionsTable,
   type OpenPositionRow,
 } from "./components/OpenPositionsTable";
-import { ScenarioFlaggedHoldingsList } from "./ScenarioFlaggedHoldingsList";
+import { BannerSubRowContent, ScenarioFlaggedHoldingsList } from "./ScenarioFlaggedHoldingsList";
+import { mapFlagsToRows, type FlaggedRows } from "./lib/flagged-position-map";
+import { OutcomesTabPanel } from "./OutcomesTabPanel";
 // Phase 99 / 99-04 — DIRECT imports of the three exposure widgets. NOT routed
 // through the B7b-locked widgets/index.ts WIDGET_COMPONENTS barrel (these are
 // section-mounted, not part of the configurable dashboard grid).
@@ -61,7 +70,24 @@ import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 import { isLiveKey } from "@/lib/departed-history";
 import { apiKeyLabelById } from "@/lib/api-key-label";
 import { holdingIsPriceGap } from "@/lib/holding-equity";
+import { keyNeedsAttention } from "@/lib/closed-sets";
+import { Button } from "@/components/ui/Button";
+import { LiveRegion } from "@/components/ui/LiveRegion";
+import {
+  DUST_RULE_CAPTION,
+  dustAnnouncement,
+  dustControlLabel,
+  isDust,
+} from "./lib/dust";
 import { priceGapHoldingsNote } from "./lib/live-holdings-summary";
+import {
+  bookEquityUsd,
+  holdingsReadDay,
+  unreportedDerivativeCaption,
+  unreportedDerivativeCount,
+} from "./lib/book-figures";
+import { formatUsd } from "@/lib/dollar-validation";
+import { formatCloseDay } from "@/lib/factsheet/returns-unit";
 
 /** Honest-empty optimizer state when the prop is absent (test harnesses). */
 /** A venue's display name. The exchange ids that need more than a capital. */
@@ -298,7 +324,7 @@ export function HoldingsTabPanel(
   },
 ) {
   const holdingsSummary = useMemo(() => props.holdingsSummary ?? [], [props.holdingsSummary]);
-  const flaggedHoldings = props.flaggedHoldings ?? [];
+  const flaggedHoldings = useMemo(() => props.flaggedHoldings ?? [], [props.flaggedHoldings]);
   const matchDecisionsByHoldingRef = props.matchDecisionsByHoldingRef ?? {};
   const apiKeys = useMemo(() => props.apiKeys ?? [], [props.apiKeys]);
   const strategies = useMemo(() => props.strategies ?? [], [props.strategies]);
@@ -326,7 +352,7 @@ export function HoldingsTabPanel(
   //    (it has no position yet), and the position half is why no allocated
   //    money vanishes from the surface when nobody has answered the capital
   //    question for it. No holding involvement (raw positions render in
-  //    section 5 below).
+  //    the Positions section).
   const strategyRows = useMemo(
     () =>
       toStrategyRows({
@@ -410,7 +436,7 @@ export function HoldingsTabPanel(
     return m;
   }, [apiKeys]);
 
-  // ── spot rows for the legacy holding-column table (Exchange Positions).
+  // ── spot rows for the legacy holding-column table (Positions).
   //    source_key_sync_status drives the revoked-key chip.
   const spotHoldingRows = useMemo<HoldingRow[]>(
     () =>
@@ -517,9 +543,139 @@ export function HoldingsTabPanel(
     [partialPositionReads, apiKeys, holdingsSummary],
   );
 
+  // 198 C5, SC-2: the Positions header prints the glance's Book equity, read day
+  // and unreported-derivative caption through the same helpers. Computed over
+  // EVERY row, so dust, filters and toggles cannot move them.
+  const bookEquity = useMemo(() => bookEquityUsd(holdingsSummary), [holdingsSummary]);
+  const readDay = useMemo(() => holdingsReadDay(holdingsSummary), [holdingsSummary]);
+  const unreportedCaption = useMemo(
+    () => unreportedDerivativeCaption(unreportedDerivativeCount(holdingsSummary)),
+    [holdingsSummary],
+  );
+
+  // 198 D-04 (LEAN-06): one dust set over spot and derivative rows. The tables
+  // receive EVERY row plus these ids to leave unrendered, never a filtered array,
+  // because the derivatives footer sums over `rows` in one pass. A spot row is
+  // priced unless it is a price gap; a derivative row needs a finite positive
+  // mark. A row on a key that needs attention, or one missing from the key list,
+  // is never dust. Spot rows test their value, derivative rows the notional they
+  // print.
+  const dustIds = useMemo(() => {
+    const trusted = (r: {
+      source_key_sync_status: string;
+      source_key_disconnected_at: string | null;
+      source_key_missing?: boolean;
+    }) =>
+      !keyNeedsAttention({
+        sync_status: r.source_key_sync_status,
+        disconnected_at: r.source_key_disconnected_at,
+      }) && r.source_key_missing !== true;
+    const ids = new Set<string>();
+    for (const r of spotHoldingRows) {
+      if (
+        isDust(
+          {
+            valueUsd: r.value_usd,
+            priced: !holdingIsPriceGap(r),
+            trustedKey: trusted(r),
+          },
+          bookEquity,
+        )
+      ) {
+        ids.add(r.id);
+      }
+    }
+    for (const r of openPositionRows) {
+      const mark = r.mark_price;
+      if (
+        isDust(
+          {
+            valueUsd: r.notional_usd,
+            priced: typeof mark === "number" && Number.isFinite(mark) && mark > 0,
+            trustedKey: trusted(r),
+          },
+          bookEquity,
+        )
+      ) {
+        ids.add(r.id);
+      }
+    }
+    return ids;
+  }, [spotHoldingRows, openPositionRows, bookEquity]);
+  const [showSmall, setShowSmall] = useState(false);
+  const [dustAnnounced, setDustAnnounced] = useState<string | null>(null);
+  const toggleSmall = useCallback(() => {
+    const next = !showSmall;
+    setShowSmall(next);
+    setDustAnnounced(dustAnnouncement(dustIds.size, next));
+  }, [showSmall, dustIds.size]);
+
   const allocatorPreferences = props.mandate
     ? { max_weight: props.mandate.max_weight }
     : null;
+
+  // Phase 198 plan 12 (C9, OQ-7 assumed, D-02): a flagged position is marked in
+  // its own row and opens the shipped outcome form inline, so each position is
+  // listed once. A flag is per scope ref and rows are per key, so one flag marks
+  // every key's row of its ref. `renderedIds` is what the tables actually draw:
+  // dust while it is hidden and, while the untrusted-key filter is on, spot rows
+  // on a key that needs attention are not. A flag whose rows are all absent comes
+  // back in `unmatched` and renders through the list, so it is never dropped
+  // (D-04 stays literal: dust is not exempted, the flag is carried instead).
+  const { flagByRowId, unmatchedFlags } = useMemo(() => {
+    const spotShown = showRevoked
+      ? spotHoldingRows
+      : spotHoldingRows.filter(
+          (r) =>
+            !keyNeedsAttention({
+              sync_status: r.source_key_sync_status,
+              disconnected_at: r.source_key_disconnected_at,
+            }),
+        );
+    const renderedIds = [...spotShown, ...openPositionRows]
+      .map((r) => r.id)
+      .filter((id) => showSmall || !dustIds.has(id));
+    const mapped = mapFlagsToRows(flaggedHoldings, renderedIds);
+    return { flagByRowId: mapped.flagByRowId, unmatchedFlags: mapped.unmatched };
+  }, [flaggedHoldings, spotHoldingRows, openPositionRows, dustIds, showSmall, showRevoked]);
+
+  // One outcome form is open at a time across both tables. The decision and
+  // error maps are owned here, as the list owns them, so a decision made from one
+  // key's row is reused by the other key's row and survives a collapse.
+  const [openOutcomeRowId, setOpenOutcomeRowId] = useState<string | null>(null);
+  const [localDecisionsByRef, setLocalDecisionsByRef] = useState<
+    Record<string, { id: string } | null>
+  >({});
+  const [errorByRef, setErrorByRef] = useState<Record<string, string | null>>({});
+  const onToggleOutcome = useCallback((rowId: string) => {
+    setOpenOutcomeRowId((prev) => (prev === rowId ? null : rowId));
+  }, []);
+  const flaggedRows: FlaggedRows = {
+    flaggedRowIds: new Set(flagByRowId.keys()),
+    openRowId: openOutcomeRowId,
+    onToggle: onToggleOutcome,
+    renderOutcome: (rowId) => {
+      const flag = flagByRowId.get(rowId);
+      if (!flag) return null;
+      // T-198-21: the form is handed the FLAG, never the row id, and builds the
+      // key-free holding ref from it, so the write never carries `#api_key_id`.
+      return (
+        <BannerSubRowContent
+          key={rowId}
+          h={flag}
+          matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
+          // Existing outcomes are not pre-loaded here (matches ScenarioStub);
+          // the banner's server-side eligibility check gates double-recording.
+          existingOutcomesByHoldingRef={{}}
+          maxWeight={allocatorPreferences?.max_weight ?? null}
+          localDecisionsByRef={localDecisionsByRef}
+          setLocalDecisionsByRef={setLocalDecisionsByRef}
+          errorByRef={errorByRef}
+          setErrorByRef={setErrorByRef}
+        />
+      );
+    },
+  };
 
   // Phase 170.2 (SC-1, UI-SPEC H-1, H-2): a bare `grid` has an implicit `auto`
   // track, which sizes to the widest table's MIN-CONTENT, so every ResponsiveTable
@@ -554,9 +710,122 @@ export function HoldingsTabPanel(
         />
       )}
 
-      {/* Section 2 — Exposure (PI-01/02/03). Sits directly after Strategies per
-          the 99-UI-SPEC placement (the 100-04 Watchlist/Notes sections now follow
-          it, before Exchange Positions). The current card reads the panel's own
+      {/* Section 2 — Positions (D-02, moved up from last and renamed from
+          the old last-section heading): the allocator's raw synced positions,
+          always shown, the only place a position is listed. */}
+      <section
+        id="positions"
+        aria-labelledby="holdings-positions-heading"
+        className="grid grid-cols-1 gap-4"
+      >
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <h3
+            id="holdings-positions-heading"
+            className="text-sm font-semibold uppercase tracking-wider text-text-primary"
+          >
+            Positions
+          </h3>
+          <span
+            data-testid="positions-book-equity"
+            className="text-micro font-mono text-text-muted"
+          >
+            Book equity {formatUsd(bookEquity)}
+            {readDay !== null ? ` · read ${formatCloseDay(readDay)}` : ""}
+          </span>
+        </div>
+        {unreportedCaption !== null ? (
+          <p
+            data-testid="positions-unreported-caption"
+            className="text-caption text-text-muted"
+          >
+            {unreportedCaption}
+          </p>
+        ) : null}
+        {unmatchedFlags.length > 0 ? (
+          <ScenarioFlaggedHoldingsList
+            flaggedHoldings={unmatchedFlags}
+            matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
+            // Matches the Scenario-tab wiring (ScenarioStub): existing outcomes
+            // are not pre-loaded here; the banner's server-side eligibility
+            // check gates double-recording.
+            existingOutcomesByHoldingRef={{}}
+            allocatorPreferences={allocatorPreferences}
+          />
+        ) : null}
+        <div id="positions-spot">
+          <HoldingsTable
+            holdings={spotHoldingRows}
+            // Phase 170.4 D-02: the Open Positions table's own row count, so a
+            // derivatives-only book reads "No spot holdings" and not "empty".
+            // The FULL count: counts include dust (198 D-04).
+            openPositionCount={openPositionRows.length}
+            hiddenRowIds={showSmall ? undefined : dustIds}
+            flagged={flaggedRows}
+            showRevoked={showRevoked}
+            onShowRevokedChange={setShowRevoked}
+          />
+        </div>
+        {spotReadDayNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="holdings-read-day-note"
+            className="text-xs text-text-muted [overflow-wrap:anywhere]"
+          >
+            {note}
+          </p>
+        ))}
+        {priceGapCount > 0 ? (
+          <p
+            data-testid="holdings-price-gap-note"
+            className="text-xs text-text-muted [overflow-wrap:anywhere]"
+          >
+            {priceGapHoldingsNote(priceGapCount)}
+          </p>
+        ) : null}
+        <div id="positions-derivatives">
+          <OpenPositionsTable
+            rows={openPositionRows}
+            hiddenRowIds={showSmall ? undefined : dustIds}
+            flagged={flaggedRows}
+          />
+        </div>
+        {partialReadNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="open-positions-partial-read-note"
+            className="text-xs text-text-muted"
+          >
+            {note}
+          </p>
+        ))}
+        {readDayNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="open-positions-read-day-note"
+            className="text-xs text-text-muted"
+          >
+            {note}
+          </p>
+        ))}
+        {dustIds.size > 0 ? (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-expanded={showSmall}
+              aria-controls="positions-spot positions-derivatives"
+              onClick={toggleSmall}
+            >
+              {dustControlLabel(dustIds.size, showSmall)}
+            </Button>
+            <p className="text-caption text-text-muted">{DUST_RULE_CAPTION}</p>
+            <LiveRegion message={dustAnnounced} />
+          </div>
+        ) : null}
+      </section>
+
+      {/* Section 3 — Exposure (PI-01/02/03). Follows Positions (D-02); the
+          Outcomes section follows it, then Watchlist & Optimizer and Notes. The current card reads the panel's own
           holdings (Phase 170.4, D-01); the two over-time charts are fed by the
           distinct `exposure` prop (D-03) and render honest-empty when empty. */}
       <section aria-label="Exposure" className="grid grid-cols-1 gap-4">
@@ -564,7 +833,7 @@ export function HoldingsTabPanel(
           Exposure
         </h3>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <ExposureByClass snapshot={exposureSnapshot} keyLabels={keyLabels} />
+          <ExposureByClass snapshot={exposureSnapshot} />
           <NetExposureChart {...props.exposure.netSeries} />
           <div className="lg:col-span-2">
             <AllocationOverTime {...props.exposure.allocationSeries} />
@@ -572,7 +841,24 @@ export function HoldingsTabPanel(
         </div>
       </section>
 
-      {/* Section 3 — Watchlist & Optimizer (PI-05). Mounts directly BELOW the
+      {/* Section 4 — Outcomes (D-02), moved from its retired tab. The content is
+          the unchanged OutcomesWidget with its own empty state; a legacy
+          `?tab=outcomes` link scrolls here (`#outcomes`, 198-04's alias). */}
+      <section
+        id="outcomes"
+        aria-labelledby="holdings-outcomes-heading"
+        className="grid grid-cols-1 gap-4"
+      >
+        <h3
+          id="holdings-outcomes-heading"
+          className="text-sm font-semibold uppercase tracking-wider text-text-primary"
+        >
+          Outcomes
+        </h3>
+        <OutcomesTabPanel {...props} />
+      </section>
+
+      {/* Section 5 — Watchlist & Optimizer (PI-05). Mounts directly BELOW the
           exposure trio per the 100-UI-SPEC composition. Additive: fed by the
           distinct `favorites` / `optimizer` props; each panel renders honest-empty
           when its data is empty (zero fabricated rows). The two panels reflow on
@@ -599,7 +885,7 @@ export function HoldingsTabPanel(
         </div>
       </section>
 
-      {/* Section 4 — Notes (PI-04), full-width. DashboardNoteCard owns its own
+      {/* Section 6 — Notes (PI-04), full-width. DashboardNoteCard owns its own
           "Notes" heading + autosave; the <section> is an aria landmark only (no
           duplicate section heading). */}
       <section aria-label="Notes">
@@ -607,68 +893,6 @@ export function HoldingsTabPanel(
           initialContent={note.initialContent}
           initialLastSavedAt={note.initialLastSavedAt}
         />
-      </section>
-
-      {/* Section 5 — raw exchange positions (always shown). */}
-      <section className="grid grid-cols-1 gap-4">
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
-          Exchange Positions
-        </h3>
-        {flaggedHoldings.length > 0 ? (
-          <ScenarioFlaggedHoldingsList
-            flaggedHoldings={flaggedHoldings}
-            matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
-            // Matches the Scenario-tab wiring (ScenarioStub): existing outcomes
-            // are not pre-loaded here; the banner's server-side eligibility
-            // check gates double-recording.
-            existingOutcomesByHoldingRef={{}}
-            allocatorPreferences={allocatorPreferences}
-          />
-        ) : null}
-        <HoldingsTable
-          holdings={spotHoldingRows}
-          // Phase 170.4 D-02: the Open Positions table's own row count, so a
-          // derivatives-only book reads "No spot holdings" and not "empty".
-          openPositionCount={openPositionRows.length}
-          showRevoked={showRevoked}
-          onShowRevokedChange={setShowRevoked}
-        />
-        {spotReadDayNotes.map((note) => (
-          <p
-            key={note}
-            data-testid="holdings-read-day-note"
-            className="text-xs text-text-muted [overflow-wrap:anywhere]"
-          >
-            {note}
-          </p>
-        ))}
-        {priceGapCount > 0 ? (
-          <p
-            data-testid="holdings-price-gap-note"
-            className="text-xs text-text-muted [overflow-wrap:anywhere]"
-          >
-            {priceGapHoldingsNote(priceGapCount)}
-          </p>
-        ) : null}
-        <OpenPositionsTable rows={openPositionRows} />
-        {partialReadNotes.map((note) => (
-          <p
-            key={note}
-            data-testid="open-positions-partial-read-note"
-            className="text-xs text-text-muted"
-          >
-            {note}
-          </p>
-        ))}
-        {readDayNotes.map((note) => (
-          <p
-            key={note}
-            data-testid="open-positions-read-day-note"
-            className="text-xs text-text-muted"
-          >
-            {note}
-          </p>
-        ))}
       </section>
     </div>
   );

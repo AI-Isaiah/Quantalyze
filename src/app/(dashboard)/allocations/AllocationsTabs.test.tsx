@@ -8,25 +8,24 @@ import type { ReadonlyURLSearchParams } from "next/navigation";
  * each panel body is mocked to a marker div so this file doesn't depend
  * on widget grids, holdings tables, or any downstream implementation.
  *
- * Tablist contract (PR3 dashboard parity): 5 visible tab buttons —
- * Overview / Holdings / Outcomes / Mandate / Risk. Scenario stays
- * routable via ?tab=scenario (and the "+ Allocation" chip) but has no
- * button in the tablist.
+ * Tablist contract (Phase 198 D-02): exactly three tab buttons —
+ * Overview / Holdings / Scenario, in that order. The Outcomes, Mandate and
+ * Risk tabs are retired; their `?tab=` values are legacy aliases that land on
+ * the content's new home (see the "legacy tab aliases" describe below).
  *
  * Cases:
  *   1. No tab param → Overview active.
  *   2. ?tab=holdings → Holdings active.
- *   3. ?tab=outcomes → Outcomes active.
- *   4. ?tab=mandate  → Mandate active.
- *   5. ?tab=risk     → Risk active.
- *   6. ?tab=scenario → Scenario panel visible, NO Scenario tab button.
+ *   3. ?tab=outcomes → Holdings active (legacy alias), URL rewritten.
+ *   4. ?tab=mandate  → Overview active (legacy alias), tab param removed.
+ *   5. ?tab=risk     → Overview active (legacy alias), tab param removed.
+ *   6. ?tab=scenario → Scenario panel visible, Scenario tab present + selected.
  *   7. ?tab=performance (legacy Phase 07 alias) → Overview + the native
  *      history.replaceState strips the param (Phase 167.1.2 plan 07; was the
  *      router's replace, which re-ran the server render).
  *   8. ?tab=xyz (unknown) → Overview silent fallback (D-04). No URL cleanup
  *      because unknown is not in {overview, performance}.
- *   9. ArrowRight wraps focus across the 5 visible tabs in D-05 order
- *      (Scenario is excluded from arrow nav per PR3).
+ *   9. ArrowRight wraps focus across the 3 visible tabs in D-05 order.
  */
 
 // --- next/navigation mocks --------------------------------------------------
@@ -75,32 +74,26 @@ import { useSearchParams, useRouter } from "next/navigation";
 // 05/08/10 fill these bodies later — the tab-shell contract should be
 // independent of body content.
 
+// Phase 198 D-02 — the Overview stub carries the `#risk` and `#mandate` section
+// ids and the Holdings stub carries `#outcomes`: the real sections land there in
+// plans 198-06 and 198-11, and the legacy-alias scroll targets them by id.
 vi.mock("./AllocationDashboardV2", () => ({
   AllocationDashboardV2: () => (
-    <div data-testid="overview-v2">OVERVIEW_V2_BODY</div>
+    <div data-testid="overview-v2">
+      OVERVIEW_V2_BODY
+      <section id="risk" />
+      <section id="mandate" />
+    </div>
   ),
 }));
 
 vi.mock("./HoldingsTabPanel", () => ({
   HoldingsTabPanel: () => (
-    <div data-testid="holdings-body">HOLDINGS_BODY</div>
+    <div data-testid="holdings-body">
+      HOLDINGS_BODY
+      <section id="outcomes" />
+    </div>
   ),
-}));
-
-vi.mock("./OutcomesTabPanel", () => ({
-  OutcomesTabPanel: () => (
-    <div data-testid="outcomes-body">OUTCOMES_BODY</div>
-  ),
-}));
-
-vi.mock("./MandateTabPanel", () => ({
-  MandateTabPanel: () => (
-    <div data-testid="mandate-body">MANDATE_BODY</div>
-  ),
-}));
-
-vi.mock("./RiskTabPanel", () => ({
-  RiskTabPanel: () => <div data-testid="risk-body">RISK_BODY</div>,
 }));
 
 vi.mock("./ScenarioStub", () => ({
@@ -120,6 +113,14 @@ vi.mock("./components/ScenarioComposer", () => ({
   ScenarioComposer: () => (
     <div data-testid="scenario-body">SCENARIO_COMPOSER_BODY</div>
   ),
+}));
+
+// Phase 198 D-03 / D-07 — the add-allocation flow is not under test here (its
+// own suite is AllocationsTabs.add-param.test.tsx and AddAllocationFlow.test.tsx).
+// A deep link in these URL-rewrite cases would otherwise open the real flow and
+// start its list read.
+vi.mock("./components/AddAllocationFlow", () => ({
+  AddAllocationFlow: () => null,
 }));
 
 // --- Import after mocks -----------------------------------------------------
@@ -185,18 +186,22 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   mandateIsSet: false,
 };
 
+// Phase 198 D-07 — the component builds every URL write from the LIVE
+// `window.location.search` (two effects rewrite the URL in one commit, and a
+// write built from the render's searchParams snapshot would resurrect a param the
+// other had removed). So the mocked searchParams and the real jsdom location must
+// say the same thing. Captured before any spy so it stays the real implementation.
+const realReplaceState = window.history.replaceState.bind(window.history);
 function setSearchParams(query: string): void {
   vi.mocked(useSearchParams).mockReturnValue(
     new URLSearchParams(query) as unknown as ReadonlyURLSearchParams,
   );
+  realReplaceState(null, "", query ? `/allocations?${query}` : "/allocations");
 }
 
 const ACTIVE_BODIES = [
   "overview-v2",
   "holdings-body",
-  "outcomes-body",
-  "mandate-body",
-  "risk-body",
   "scenario-body",
 ] as const;
 
@@ -233,8 +238,8 @@ function resetRouterMocks(): void {
   } as unknown as ReturnType<typeof useRouter>);
 }
 
-// Phase A6 — Holdings / Outcomes / Mandate / Risk tab bodies are now
-// loaded via next/dynamic({ ssr: false }), so they only appear after the
+// Phase A6 — the Holdings tab body is loaded via next/dynamic({ ssr: false }),
+// so it only appears after the
 // lazy chunk resolves. findByTestId polls until the body appears or the
 // jest timeout elapses, which is the right abstraction for lazy modules.
 async function expectOnlyVisibleBodyAsync(
@@ -450,30 +455,32 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     ).toBe("true");
   });
 
-  it("?tab=outcomes → Outcomes tab active", async () => {
+  // Phase 198 D-02 — retired tab is an alias now. The tab each lands on and the
+  // URL after mount are pinned in depth by the "legacy tab aliases" describe.
+  it("?tab=outcomes → Holdings tab active (legacy alias)", async () => {
     setSearchParams("tab=outcomes");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    await expectOnlyVisibleBodyAsync("outcomes-body");
+    await expectOnlyVisibleBodyAsync("holdings-body");
     expect(
-      screen.getByRole("tab", { name: "Outcomes" }).getAttribute("aria-selected"),
+      screen.getByRole("tab", { name: "Holdings" }).getAttribute("aria-selected"),
     ).toBe("true");
   });
 
-  it("?tab=mandate → Mandate tab active", async () => {
+  it("?tab=mandate → Overview tab active (legacy alias)", () => {
     setSearchParams("tab=mandate");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    await expectOnlyVisibleBodyAsync("mandate-body");
+    expectOnlyVisibleBody("overview-v2");
     expect(
-      screen.getByRole("tab", { name: "Mandate" }).getAttribute("aria-selected"),
+      screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected"),
     ).toBe("true");
   });
 
-  it("?tab=risk → Risk tab active", async () => {
+  it("?tab=risk → Overview tab active (legacy alias)", () => {
     setSearchParams("tab=risk");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    await expectOnlyVisibleBodyAsync("risk-body");
+    expectOnlyVisibleBody("overview-v2");
     expect(
-      screen.getByRole("tab", { name: "Risk" }).getAttribute("aria-selected"),
+      screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected"),
     ).toBe("true");
   });
 
@@ -581,21 +588,22 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     );
     const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
     expectOnlyVisibleBody("overview-v2");
-    fireEvent.click(screen.getByRole("tab", { name: "Mandate" }));
-    expect(window.location.search).toBe("?tab=mandate");
+    fireEvent.click(screen.getByRole("tab", { name: "Holdings" }));
+    expect(window.location.search).toBe("?tab=holdings");
     rerender(<AllocationsTabs {...STUB_PROPS} />);
-    await expectOnlyVisibleBodyAsync("mandate-body");
+    await expectOnlyVisibleBodyAsync("holdings-body");
     expect(mockReplace).not.toHaveBeenCalled();
     realReplace(null, "", originalUrl);
   });
 
-  it("ArrowRight wraps focus across the visible tabs in VISIBLE_TAB_KEYS order (includes Scenario, SURF-01)", () => {
+  it("ArrowRight wraps focus across the three visible tabs in VISIBLE_TAB_KEYS order (includes Scenario, SURF-01)", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
     // SURF-01 (Phase 21) — Scenario is now in VISIBLE_TAB_KEYS, so the
     // keyboard walk includes it as the last visible tab. Overview is the
     // factsheet view (no separate Analytics tab). Wrap from Scenario → Overview.
-    const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk", "Scenario"];
+    // Phase 198 D-02: three tabs, so the walk is Overview → Holdings → Scenario.
+    const order = ["Overview", "Holdings", "Scenario"];
     for (let i = 0; i < order.length; i++) {
       mockHistoryReplace.mockClear();
       const current = screen.getByRole("tab", { name: order[i] });
@@ -615,12 +623,15 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
 
 // --- audit-2026-05-07 cluster P regression tests ----------------------------
 
-describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / M-1042)", () => {
+describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / M-1042; Phase 198 D-02)", () => {
   beforeEach(() => {
     resetRouterMocks();
   });
 
-  it("renders count badges on Holdings (8) and Outcomes (4) tabs when arrays are populated", () => {
+  // Phase 198 D-02: the Outcomes tab and its badge left with the tab. The
+  // Holdings badge still counts strategies, and a populated outcomes array must
+  // not put a badge or a tab back in the strip.
+  it("renders the count badge on the Holdings tab (8) and no Outcomes tab even when outcomes are populated", () => {
     setSearchParams("");
     // F4b: the Holdings badge counts onboarded strategies, not raw positions.
     const strategies = Array.from({ length: 8 }).map((_, i) => ({ strategy_id: `s-${i}` }));
@@ -636,8 +647,8 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / 
     const holdingsTab = screen.getByRole("tab", { name: /Holdings/ });
     expect(within(holdingsTab).getByText("8")).toBeInTheDocument();
 
-    const outcomesTab = screen.getByRole("tab", { name: /Outcomes/ });
-    expect(within(outcomesTab).getByText("4")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /Outcomes/ })).toBeNull();
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
   });
 
   it("hides the badge when count is 0 — no '0' chip", () => {
@@ -645,8 +656,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / 
     render(<AllocationsTabs {...STUB_PROPS} />);
     const holdingsTab = screen.getByRole("tab", { name: /Holdings/ });
     expect(within(holdingsTab).queryByText("0")).toBeNull();
-    const outcomesTab = screen.getByRole("tab", { name: /Outcomes/ });
-    expect(within(outcomesTab).queryByText("0")).toBeNull();
+    expect(screen.queryByRole("tab", { name: /Outcomes/ })).toBeNull();
   });
 
   it("renders '1' badge correctly (pins the >0 gate, not >=2)", () => {
@@ -681,8 +691,10 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M
     resetRouterMocks();
   });
 
-  it("Export chip from Risk tab navigates to Holdings (M-1041 regression)", async () => {
-    setSearchParams("tab=risk");
+  // Phase 198 D-02: Risk is an alias of Overview now (and rewrites the URL on
+  // mount), so these Export arms start from the Overview, a non-Holdings tab.
+  it("Export chip from the Overview tab navigates to Holdings (M-1041 regression)", async () => {
+    setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const exportChip = screen.getByRole("button", { name: "Export" });
     fireEvent.click(exportChip);
@@ -693,7 +705,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P Export chip (M-1041 / M
   });
 
   it("Export chip announces redirect via aria-live region (M-1044 silent-failure fix)", async () => {
-    setSearchParams("tab=risk");
+    setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const liveRegion = screen.getByTestId("allocations-tabs-live-region");
     expect(liveRegion.textContent).toBe("");
@@ -1040,9 +1052,10 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 parseTab boundary cases (
     resetRouterMocks();
   });
 
-  // Pin the KNOWN_TAB_RAW contract — none of these canonical keys should
-  // emit invalid_tab_fallback. Locks the constant set as part of the
-  // tested contract instead of leaving it as documentation.
+  // Pin the KNOWN_TAB_RAW contract — none of these canonical keys (nor the
+  // Phase 198 D-02 retired-tab aliases outcomes / mandate / risk) should emit
+  // invalid_tab_fallback. Locks the constant set as part of the tested
+  // contract instead of leaving it as documentation.
   for (const raw of [
     "overview",
     "holdings",
@@ -1052,7 +1065,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 parseTab boundary cases (
     "scenario",
     "performance",
   ] as const) {
-    it(`?tab=${raw} (canonical) does NOT emit invalid_tab_fallback breadcrumb`, () => {
+    it(`?tab=${raw} (canonical or legacy alias) does NOT emit invalid_tab_fallback breadcrumb`, () => {
       const warnSpy = vi
         .spyOn(console, "warn")
         .mockImplementation(() => undefined);
@@ -1125,11 +1138,10 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     resetRouterMocks();
   });
 
-  it("Export chip from Risk: history.replaceState called exactly ONCE, the router's replace never", () => {
-    setSearchParams("tab=risk");
+  it("Export chip from Overview: history.replaceState called exactly ONCE, the router's replace never", () => {
+    setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    // Pre-render setup may call replace zero times (no cleanup needed for
-    // tab=risk since risk is canonical and stays). Clear to isolate the
+    // Pre-render setup may call replace zero times. Clear to isolate the
     // click's effect.
     mockHistoryReplace.mockClear();
 
@@ -1146,7 +1158,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("Export chip clicked twice from Risk → re-announces (microtask-clear pinned)", async () => {
+  it("Export chip clicked twice from Overview → re-announces (microtask-clear pinned)", async () => {
     // audit-2026-05-07 Phase-4 red-team (MED conf 8) — replaced the
     // unbounded ZWS-suffix counter with a microtask-clear pattern. Each
     // click sets the live region to "" first (forcing React to commit an
@@ -1156,7 +1168,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     // longer needed and (importantly) does not leak into clipboard reads.
     // This test pins both halves: textContent reverts to "" right after
     // click, then reverts to the message after the microtask flush.
-    setSearchParams("tab=risk");
+    setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const liveRegion = screen.getByTestId("allocations-tabs-live-region");
     const exportChip = screen.getByRole("button", { name: "Export" });
@@ -1176,7 +1188,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     // Second click from the same tab — the empty-render gap fires again,
     // so aria-live=polite re-announces even though the final text is
     // identical to the first announcement.
-    setSearchParams("tab=risk");
+    setSearchParams("");
     fireEvent.click(exportChip);
     expect(liveRegion.textContent).toBe("");
     await act(async () => { await Promise.resolve(); });
@@ -1192,7 +1204,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
   // A user copying the announcement into a support ticket or trade-note
   // form should NOT paste invisible characters.
   it("Export live region textContent equals the human-readable string (no ZWS leak)", async () => {
-    setSearchParams("tab=risk");
+    setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const liveRegion = screen.getByTestId("allocations-tabs-live-region");
     const exportChip = screen.getByRole("button", { name: "Export" });
@@ -1209,7 +1221,7 @@ describe("AllocationsTabs — audit-2026-05-07 Phase-2 Export chip hardening (ME
     // Click again — even after multiple announcements, the textContent
     // stays equal to the single human-readable string. Pre-fix the suffix
     // would have grown to two ZWS characters here.
-    setSearchParams("tab=risk");
+    setSearchParams("");
     fireEvent.click(exportChip);
     await act(async () => { await Promise.resolve(); });
     const text2 = liveRegion.textContent ?? "";
@@ -1301,20 +1313,21 @@ describe("AllocationsTabs — a stored Tweaks value changes nothing (Phase 195 D
     clearTweakAttrs();
   });
 
-  it("renders the Outcomes tab and stays on ?tab=outcomes when a stale value says showOutcomes=false", async () => {
+  // Phase 198 D-02 — Outcomes is a legacy alias of Holdings now. The intent is
+  // unchanged: a stale showOutcomes=false must not redirect an Outcomes link
+  // away from its content, so the link lands on Holdings and the only URL
+  // write is the alias rewrite to ?tab=holdings (never a strip to Overview).
+  it("an ?tab=outcomes link still lands on Holdings when a stale value says showOutcomes=false", async () => {
     window.localStorage.setItem("allocations.tweaks", STALE_TWEAKS_VALUE);
     setSearchParams("tab=outcomes");
     await act(async () => {
       render(<AllocationsTabs {...STUB_PROPS} />);
     });
-    expect(screen.getByRole("tab", { name: "Outcomes" })).toBeTruthy();
-    // No redirect off Outcomes: nothing stripped the tab param.
+    expect(
+      screen.getByRole("tab", { name: "Holdings" }).getAttribute("aria-selected"),
+    ).toBe("true");
     expect(mockReplace).not.toHaveBeenCalled();
-    for (const url of historyUrls()) {
-      if (url.includes("/allocations") && !url.includes("tab=")) {
-        throw new Error(`Unexpected redirect off Outcomes: ${url}`);
-      }
-    }
+    expect(historyUrls()).toEqual(["/allocations?tab=holdings"]);
   });
 
   it("sets none of the Tweaks DOM attributes from a stale stored value", async () => {
@@ -1329,7 +1342,7 @@ describe("AllocationsTabs — a stored Tweaks value changes nothing (Phase 195 D
     }
   });
 
-  it("keyboard arrow-nav reaches Outcomes (the tab is always present)", async () => {
+  it("keyboard arrow-nav still walks every tab (a stale value hides none)", async () => {
     window.localStorage.setItem("allocations.tweaks", STALE_TWEAKS_VALUE);
     setSearchParams("");
     await act(async () => {
@@ -1341,6 +1354,318 @@ describe("AllocationsTabs — a stored Tweaks value changes nothing (Phase 195 D
     fireEvent.keyDown(holdings, { key: "ArrowRight" });
     const urls = historyUrls();
     const lastUrl = urls[urls.length - 1] ?? "";
-    expect(lastUrl).toMatch(/tab=outcomes/);
+    expect(lastUrl).toMatch(/tab=scenario/);
+  });
+});
+
+// Phase 198 D-02 — My allocation has three tabs, and the three retired tabs
+// (Outcomes, Mandate, Risk) are legacy aliases: a link to one lands on the tab
+// holding that content, the URL is rewritten with no history entry, and the page
+// scrolls once to the section. A user who bookmarked ?tab=risk, or the sidebar's
+// Risk item, must never land on an empty or wrong surface.
+describe("AllocationsTabs — Phase 198 D-02 three tabs and legacy tab aliases", () => {
+  // A hand-driven requestAnimationFrame so the bounded retry loop is observable
+  // frame by frame, and a stubbed scrollIntoView (jsdom has none).
+  let rafQueue: Map<number, FrameRequestCallback>;
+  let rafSeq: number;
+  let rafRequests: number;
+  let scrollIntoView: ReturnType<typeof vi.fn>;
+  let cancelSpy: MockInstance<Window["cancelAnimationFrame"]>;
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  const originalMatchMedia = window.matchMedia;
+
+  function flushFrames(n: number): void {
+    for (let i = 0; i < n; i++) {
+      const pending = Array.from(rafQueue.values());
+      rafQueue.clear();
+      if (pending.length === 0) return;
+      act(() => {
+        for (const cb of pending) cb(0);
+      });
+    }
+  }
+
+  function setReducedMotion(reduce: boolean): void {
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: reduce && query.includes("prefers-reduced-motion"),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  beforeEach(() => {
+    resetRouterMocks();
+    rafQueue = new Map();
+    rafSeq = 0;
+    rafRequests = 0;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      rafRequests += 1;
+      rafSeq += 1;
+      rafQueue.set(rafSeq, cb);
+      return rafSeq;
+    });
+    cancelSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((id) => {
+        rafQueue.delete(id);
+      });
+    scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView =
+      scrollIntoView as unknown as typeof Element.prototype.scrollIntoView;
+    setReducedMotion(false);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+    window.matchMedia = originalMatchMedia;
+  });
+
+  function tabNames(): string[] {
+    return screen.getAllByRole("tab").map((t) => t.textContent ?? "");
+  }
+
+  it("the tablist has exactly three tabs: Overview, Holdings, Scenario, in that order", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expect(tabNames()).toEqual(["Overview", "Holdings", "Scenario"]);
+    for (const retired of ["Outcomes", "Mandate", "Risk"]) {
+      expect(screen.queryByRole("tab", { name: retired })).toBeNull();
+    }
+  });
+
+  it("End focuses Scenario and Home focuses Overview (keyboard walks three tabs)", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Overview" }), {
+      key: "End",
+    });
+    expect(document.activeElement).toBe(
+      screen.getByRole("tab", { name: "Scenario" }),
+    );
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Scenario" }), {
+      key: "Home",
+    });
+    expect(document.activeElement).toBe(
+      screen.getByRole("tab", { name: "Overview" }),
+    );
+  });
+
+  // WHY: the alias must land on the tab that HOLDS the content, and the URL must
+  // be rewritten once with no router navigation (no RSC refetch, no history entry).
+  it("?tab=outcomes lands on Holdings and rewrites the URL once to ?tab=holdings", async () => {
+    setSearchParams("tab=outcomes");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    await expectOnlyVisibleBodyAsync("holdings-body");
+    expect(
+      screen.getByRole("tab", { name: "Holdings" }).getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(mockHistoryReplace).toHaveBeenCalledTimes(1);
+    expect(historyUrls()).toEqual(["/allocations?tab=holdings"]);
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  for (const legacy of ["risk", "mandate"] as const) {
+    it(`?tab=${legacy} lands on Overview and removes the tab param (/allocations)`, () => {
+      setSearchParams(`tab=${legacy}`);
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      expectOnlyVisibleBody("overview-v2");
+      expect(
+        screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected"),
+      ).toBe("true");
+      expect(mockHistoryReplace).toHaveBeenCalledTimes(1);
+      expect(historyUrls()).toEqual(["/allocations"]);
+    });
+  }
+
+  // WHY: a deep link carrying another param (add= opens the add-allocation flow)
+  // must keep it through the alias rewrite, or the alias silently drops user
+  // intent. The alias write is the FIRST write; the add strip that follows it, and
+  // the final URL once both have run, are pinned in AllocationsTabs.add-param.test.tsx
+  // against a real URL (this file's replaceState spy is a no-op).
+  it("?tab=risk&add=abc: the alias rewrite keeps add (/allocations?add=abc)", () => {
+    setSearchParams("tab=risk&add=abc");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expect(historyUrls()[0]).toBe("/allocations?add=abc");
+  });
+
+  it("?tab=outcomes&add=abc: the alias rewrite goes to ?tab=holdings with add kept", () => {
+    setSearchParams("tab=outcomes&add=abc");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expect(historyUrls()[0]).toBe("/allocations?tab=holdings&add=abc");
+  });
+
+  describe("anchor scroll", () => {
+    it("?tab=risk scrolls once to #risk with behavior smooth", () => {
+      setSearchParams("tab=risk");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      flushFrames(5);
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "start",
+      });
+      expect((scrollIntoView.mock.contexts[0] as HTMLElement).id).toBe("risk");
+    });
+
+    it("?tab=mandate scrolls once to #mandate", () => {
+      setSearchParams("tab=mandate");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      flushFrames(5);
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect((scrollIntoView.mock.contexts[0] as HTMLElement).id).toBe("mandate");
+    });
+
+    // WHY: a vestibular-sensitive user who asked for reduced motion must get an
+    // instant jump, never an animated scroll.
+    it("honours prefers-reduced-motion: the scroll is instant (behavior auto)", () => {
+      setReducedMotion(true);
+      setSearchParams("tab=risk");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      flushFrames(5);
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        behavior: "auto",
+        block: "start",
+      });
+    });
+
+    it("?tab=outcomes scrolls once to #outcomes inside the Holdings panel", async () => {
+      setSearchParams("tab=outcomes");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      await screen.findByTestId("holdings-body");
+      flushFrames(5);
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect((scrollIntoView.mock.contexts[0] as HTMLElement).id).toBe(
+        "outcomes",
+      );
+    });
+
+    // WHY (RESEARCH P6): the Holdings panel mounts lazily, so the anchor does not
+    // exist on the first frames. The retry must keep waiting for it, not give up
+    // early or scroll to nothing. Modelled by hiding the anchor's id for a few
+    // frames (the lazy chunk's late mount), then restoring it.
+    it("keeps retrying while the anchor is absent, then scrolls once when it appears", () => {
+      setSearchParams("tab=risk");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      const anchor = document.getElementById("risk") as HTMLElement;
+      anchor.id = "risk-not-mounted-yet";
+      flushFrames(3);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(rafQueue.size).toBe(1);
+      anchor.id = "risk";
+      flushFrames(3);
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.contexts[0]).toBe(anchor);
+    });
+
+    // WHY: a missing anchor (the section is not built, or the panel failed to
+    // load) must end silently inside the frame budget, never loop forever and
+    // never throw.
+    it("gives up silently after 120 frames when no anchor appears", () => {
+      setSearchParams("tab=risk");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      // No anchor ever exists in this render.
+      const anchor = document.getElementById("risk") as HTMLElement;
+      anchor.id = "risk-never-mounted";
+      expect(() => flushFrames(500)).not.toThrow();
+      expect(rafRequests).toBe(120);
+      expect(rafQueue.size).toBe(0);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      // The budget is spent: an anchor that shows up later does not scroll.
+      anchor.id = "risk";
+      flushFrames(5);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it("cancels the pending frame on unmount", () => {
+      setSearchParams("tab=risk");
+      const { unmount } = render(<AllocationsTabs {...STUB_PROPS} />);
+      expect(rafQueue.size).toBe(1);
+      unmount();
+      expect(cancelSpy).toHaveBeenCalled();
+      expect(rafQueue.size).toBe(0);
+      flushFrames(5);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    // WHY: a user who clicks to another tab before the scroll fires must not be
+    // yanked to a section on a tab they already left.
+    it("a tab change before the scroll cancels it", () => {
+      setSearchParams("tab=risk");
+      const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
+      setSearchParams("tab=scenario");
+      rerender(<AllocationsTabs {...STUB_PROPS} />);
+      flushFrames(5);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      // And it does not fire later when the user returns to Overview.
+      setSearchParams("");
+      rerender(<AllocationsTabs {...STUB_PROPS} />);
+      flushFrames(5);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it("a plain ?tab=holdings or no tab never scrolls", () => {
+      setSearchParams("tab=holdings");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      flushFrames(5);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+  });
+
+  // WHY: the Sidebar's Risk item links /allocations?tab=risk. Clicked while the
+  // user is already on /allocations, that is a soft navigation (searchParams
+  // change), not a first mount, and it must still land on the Risk section.
+  it("a soft navigation from ?tab=holdings to ?tab=risk lands on Overview, rewrites the URL and scrolls", async () => {
+    setSearchParams("tab=holdings");
+    const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("holdings-body");
+    mockHistoryReplace.mockClear();
+    flushFrames(5);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    setSearchParams("tab=risk");
+    rerender(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("overview-v2");
+    expect(historyUrls()).toEqual(["/allocations"]);
+    flushFrames(5);
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect((scrollIntoView.mock.contexts[0] as HTMLElement).id).toBe("risk");
+  });
+
+  describe("invalid_tab_fallback breadcrumb", () => {
+    function breadcrumbs(spy: MockInstance<Console["warn"]>) {
+      return spy.mock.calls.filter(
+        (c) =>
+          typeof c[0] === "string" && c[0].includes("invalid_tab_fallback"),
+      );
+    }
+
+    it("?tab=nonsense falls back to Overview and logs the breadcrumb", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      setSearchParams("tab=nonsense");
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      expectOnlyVisibleBody("overview-v2");
+      const found = breadcrumbs(warnSpy);
+      // parseTab runs on every render, so the breadcrumb may repeat; what is
+      // pinned is that it fires and names the raw value.
+      expect(found.length).toBeGreaterThan(0);
+      expect(found[0][1]).toEqual({ raw: "nonsense" });
+    });
+
+    for (const legacy of ["outcomes", "risk", "mandate"] as const) {
+      it(`?tab=${legacy} (a retired tab) does NOT log the breadcrumb`, () => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        setSearchParams(`tab=${legacy}`);
+        render(<AllocationsTabs {...STUB_PROPS} />);
+        expect(breadcrumbs(warnSpy)).toHaveLength(0);
+      });
+    }
   });
 });

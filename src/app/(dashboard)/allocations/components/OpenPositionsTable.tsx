@@ -18,7 +18,9 @@
  * — Open Positions is read-only context, not an allocation-decision tile.
  */
 
-import { type CSSProperties } from "react";
+import { Fragment, type CSSProperties } from "react";
+import type { FlaggedRows } from "../lib/flagged-position-map";
+import { dustHiddenLine } from "../lib/dust";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { venueLabel } from "@/lib/display-labels";
 // Phase 167 CREDTRUST / D-16 — the SEVENTH former `=== "revoked"` equality,
@@ -93,6 +95,18 @@ export interface OpenPositionRow {
 
 interface OpenPositionsTableProps {
   rows: OpenPositionRow[];
+  /**
+   * Phase 198 D-04. Ids of rows to leave out of the body because they are dust.
+   * The footer total and notes still iterate EVERY row in `rows`, so hiding dust
+   * never moves a figure. Absent is the empty set.
+   */
+  hiddenRowIds?: ReadonlySet<string>;
+  /**
+   * Phase 198 plan 12. Marks flagged rows: a `Flagged` chip, a `Record outcome…`
+   * action, and one inline sub-row under the open row. Absent leaves every row
+   * as before.
+   */
+  flagged?: FlaggedRows;
 }
 
 function formatQuantity(n: number): string {
@@ -126,7 +140,7 @@ function pnlColor(pnl: number | null): string | undefined {
   return undefined;
 }
 
-export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
+export function OpenPositionsTable({ rows, hiddenRowIds, flagged }: OpenPositionsTableProps) {
   // Phase 167.1 AUMTRUST / D-16 — the footer total and its untrusted part.
   // They MUST come from this ONE pass: a total and a disclosed subset summed by
   // two loops with two filters can drift, and then the footer states a part
@@ -183,6 +197,9 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
   }
   const pnlUnavailable = rows.length - reported;
   const footerTotal = reported === 0 ? null : totalUnrealized;
+  // Phase 198 D-04: the body skips dust ids; the pass above does not.
+  const shownRows = hiddenRowIds ? rows.filter((r) => !hiddenRowIds.has(r.id)) : rows;
+  const dustHiddenCount = rows.length - shownRows.length;
 
   return (
     <section className="mt-6 rounded-sm border border-border bg-surface">
@@ -218,7 +235,17 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {shownRows.length === 0 ? (
+              // Phase 198 D-04: every row is dust. The line stands in for the
+              // rows INSIDE the table, so the footer total and its notes, which
+              // count every row, stay on screen and never move with the toggle.
+              <tr>
+                <td colSpan={7} className="px-4 py-6 text-sm text-text-muted">
+                  {dustHiddenLine(dustHiddenCount)}
+                </td>
+              </tr>
+            ) : null}
+            {shownRows.map((r) => {
               // D-16 site 7. The chip is per-status copy, not one shared
               // sentence — `revoked` names a cause a sign-in failure does not
               // have, and vice versa.
@@ -231,13 +258,14 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                 ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
                 : "px-4 py-2 font-metric tabular-nums text-right text-text-primary";
               return (
+                <Fragment key={r.id}>
                 <tr
-                  key={r.id}
+                  data-position-row={r.id}
                   className="border-b border-border transition-colors last:border-b-0 hover:bg-page/50"
                   style={{ minHeight: 44 }}
                 >
                   <td className="px-4 py-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-text-primary">
                         {venueLabel(r.venue)} · {r.symbol}
                       </span>
@@ -259,6 +287,22 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                         >
                           {UNKNOWN_KEY_STATUS_ROW_LABEL}
                         </span>
+                      ) : null}
+                      {flagged?.flaggedRowIds.has(r.id) ? (
+                        <>
+                          <span className="rounded bg-surface-muted px-1.5 py-0.5 text-fixed-10 tracking-wider text-text-muted">
+                            Flagged
+                          </span>
+                          <button
+                            type="button"
+                            aria-expanded={flagged.openRowId === r.id}
+                            aria-controls={`flagged-outcome-${r.id}`}
+                            onClick={() => flagged.onToggle(r.id)}
+                            className="min-h-[44px] rounded px-2 text-xs text-accent underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+                          >
+                            Record outcome…
+                          </button>
+                        </>
                       ) : null}
                     </div>
                     {r.key_label ? (
@@ -296,6 +340,14 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                     {formatUsdSigned(r.unrealized_pnl_usd)}
                   </td>
                 </tr>
+                {flagged?.openRowId === r.id ? (
+                  <tr id={`flagged-outcome-${r.id}`} data-testid="flagged-outcome-row">
+                    <td colSpan={7} className="p-0">
+                      {flagged.renderOutcome(r.id)}
+                    </td>
+                  </tr>
+                ) : null}
+                </Fragment>
               );
             })}
           </tbody>

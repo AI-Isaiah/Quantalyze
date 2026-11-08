@@ -1065,6 +1065,56 @@ describe("getMyAllocationDashboard — outcomes top-level fan-out (Phase 5 D-15)
   });
 });
 
+describe("getMyAllocationDashboard — heldOutcomeStrategyIds (Phase 198 SFH-5)", () => {
+  // `outcomes` is capped at 200 rows and a row with a null strategy join carries no
+  // id, so the Add allocation flow's held set cannot come from it alone: the commit
+  // route has no per-strategy uniqueness, and an offered-again held strategy is a
+  // duplicate money record.
+  const asRow = (o: Record<string, unknown>) =>
+    o as unknown as (typeof state.bridgeOutcomes)[number];
+
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  it("is the distinct strategy ids of this allocator's allocated outcomes, including a row whose join is null", async () => {
+    state.bridgeOutcomes = [
+      asRow({ ...P5_OUTCOME_O1, id: "o-a", strategy_id: "s-a" }),
+      asRow({ ...P5_OUTCOME_O1, id: "o-a2", strategy_id: "s-a" }),
+      asRow({ ...P5_OUTCOME_O1, id: "o-b", strategy_id: "s-b", replacement_strategy: null }),
+      asRow({ ...P5_OUTCOME_O1, id: "o-rej", strategy_id: "s-rej", kind: "rejected" }),
+      asRow({ ...P5_OUTCOME_O1, id: "o-other", strategy_id: "s-other", allocator_id: "user-2" }),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect([...(result.heldOutcomeStrategyIds ?? [])].sort()).toEqual(["s-a", "s-b"]);
+  });
+
+  it("is read through the same ownership gate as the outcomes read, with no row cap", async () => {
+    state.bridgeOutcomes = [asRow({ ...P5_OUTCOME_O1 })];
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+    const held = chainAudit.entries.filter(
+      (c) =>
+        c.table === "bridge_outcomes" &&
+        c.eqs.some((e) => e.column === "kind" && e.value === "allocated"),
+    );
+    expect(held).toHaveLength(1);
+    expect(held[0].limitN).toBeNull();
+    expect(
+      held[0].eqs.some((e) => e.column === "allocator_id" && e.value === "user-1"),
+    ).toBe(true);
+  });
+
+  it("is an empty list for an allocator with no allocated outcomes", async () => {
+    state.bridgeOutcomes = [];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.heldOutcomeStrategyIds).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Phase 07 / 07-03 — getMyAllocationDashboard Phase 07 payload extensions
 //
@@ -1166,6 +1216,33 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result.equityHistoryState).toBe("ready");
     expect(result.equityDailyPoints).toHaveLength(2);
     expect(result.snapshotCount).toBe(2);
+  });
+
+  // Phase 198 plan 03 (D-01): the missing-data message names the key and the
+  // days, so BOTH payload literals must carry the server-derived `keyDataGaps`.
+  // Pinning each branch on its own is the point: the no-portfolio literal is a
+  // separate object, and a field added to only one of them is a fresh
+  // allocator whose message silently loses its key.
+  it("TC 198-03a: the main branch carries keyDataGaps as an array", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [P7_IDENTIFIED_KEY];
+    state.allocatorEquityDerived = [p7DerivedV2Row(2)];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.portfolio).not.toBeNull();
+    expect(result).toHaveProperty("keyDataGaps");
+    expect(Array.isArray(result.keyDataGaps)).toBe(true);
+  });
+
+  it("TC 198-03b: the no-portfolio branch carries keyDataGaps as an array", async () => {
+    state.portfolios = [];
+    state.apiKeys = [P7_IDENTIFIED_KEY];
+    state.allocatorEquityDerived = [p7DerivedV2Row(2)];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.portfolio).toBeNull();
+    expect(result).toHaveProperty("keyDataGaps");
+    expect(Array.isArray(result.keyDataGaps)).toBe(true);
   });
 
   it("TC p7-03: snapshotCount equals the derived curve's day count when < 30", async () => {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import dynamic from "next/dynamic";
 import type {
   FailingKeyExit,
   MyAllocationDashboardPayload,
@@ -10,7 +11,13 @@ import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import EquityChartWidget from "./widgets/performance/EquityChart";
-import { EquityHistoryRebuilding } from "./components/EquityHistoryRebuilding";
+import {
+  MissingDataMessage,
+  missingDataLines,
+  namedExitKeyIds,
+} from "./components/MissingDataMessage";
+import { GlancePanel } from "./components/GlancePanel";
+import { MandateTabPanel } from "./MandateTabPanel";
 import { historyGate, resolveNotSyncingKeys } from "./lib/history-gate";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
 import { formatCloseDay } from "@/lib/factsheet/returns-unit";
@@ -18,6 +25,24 @@ import {
   FactsheetProvider,
 } from "@/app/factsheet/[id]/v2/factsheet-context";
 import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
+
+// Phase 198 plan 06 (D-02): the Risk tab's widget grid, now the Overview's
+// Risk section. It keeps the runtime it had as a tab: client-only through
+// next/dynamic with server rendering off, so moving it into this tree adds no
+// server render of the six widgets. dynamic() lives at MODULE scope so a re-render
+// never re-creates the component. The section and its heading are in the
+// server-rendered tree, so the `#risk` anchor exists before the chunk loads.
+const RiskTabPanel = dynamic(
+  () => import("./RiskTabPanel").then((m) => ({ default: m.RiskTabPanel })),
+  {
+    ssr: false,
+    loading: () => (
+      <p role="status" className="text-xs text-text-muted">
+        Loading risk figures…
+      </p>
+    ),
+  },
+);
 
 /**
  * Overview = factsheet shell. Full-width blended equity curve mounted at
@@ -35,10 +60,25 @@ import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
  * the surface) and the demo AllocatorSection is suppressed (this IS the
  * allocator's view; demo portfolios are out of place here).
  *
- * Phase 167.1.2 / D-02 ("Hide it until correct"): all of the above is the
- * "ready" branch only. While `equityHistoryState !== "ready"` the Overview
- * renders `EquityHistoryRebuilding` in place of the curve AND the factsheet,
- * and builds no factsheet payload at all.
+ * Phase 198 plan 09 (D-01, UI-SPEC "Overview, top to bottom"): the layout is the
+ * glance panel, then the missing-data message (only when something is missing),
+ * then the key notes (departed history, unpriced accounts, failing-key exits),
+ * the InsightStrip, the curve and factsheet (ready branch only; the not-ready
+ * branch renders nothing there, because the reason lives in the message), the
+ * Risk section and the Mandate section.
+ *
+ * Phase 198 plan 06 (D-02): after the factsheet body (or the warm-up note) come
+ * two more sections. `#risk` holds the six Risk widgets
+ * when the one `historyGate` call reads "ready" and ONE line otherwise. `#mandate`
+ * comes last: the retired Mandate tab's snapshot and its Edit mandate link. Both
+ * sit under the connect-a-key early return, so with no eligible key the connect
+ * card replaces every section.
+ *
+ * Phase 167.1.2 / D-02 ("Hide it until correct"): the curve and the factsheet
+ * are the "ready" branch only. While `equityHistoryState !== "ready"` the Overview
+ * renders neither the curve nor the factsheet, and builds no factsheet payload
+ * at all. Phase 198 plan 09 (D-01): the generic panel that stood in their place
+ * is retired; the missing-data message under the glance says what is missing.
  */
 export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const {
@@ -114,6 +154,29 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // form rather than naming a different key.
   const notSyncingKeys = resolveNotSyncingKeys(props);
 
+  // Phase 198 plan 09 (D-01, ROUTE-07): the per-key missing-data lines, read
+  // from the SSR payload's owner-only `keyDataGaps`. A legacy payload without
+  // the field reads as no gaps, so the reason's shipped sentence still prints.
+  const keyDataGaps = props.keyDataGaps;
+  const apiKeys = props.apiKeys;
+  const missingLines = useMemo(
+    () =>
+      missingDataLines({
+        gaps: keyDataGaps ?? [],
+        apiKeys: apiKeys ?? [],
+        rebuilding: isRebuilding,
+        reason: equityHistoryRebuildReason,
+        notSyncingKeys,
+      }),
+    [keyDataGaps, apiKeys, isRebuilding, equityHistoryRebuildReason, notSyncingKeys],
+  );
+  // One fact, one sentence: an exit the message names for its range is not named
+  // again by the exit note. An exit it does not name keeps its shipped sentence.
+  const unnamedExits = useMemo(() => {
+    const named = namedExitKeyIds(keyDataGaps ?? [], apiKeys ?? []);
+    return failingKeyExits.filter((e) => !named.has(e.apiKeyId));
+  }, [keyDataGaps, apiKeys, failingKeyExits]);
+
   const factsheetPayload = useMemo(
     () =>
       // D-02: no factsheet payload (so no KPI) is built while rebuilding.
@@ -166,6 +229,22 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             key" CTA. Phase 170.4 (D-04, D-09): `historyGate` reads that same
             flag. */}
         <EmptyState hasSyncing={false} hasConnectedKeys={false} />
+        {/* Phase 198 review WR-04: the Mandate snapshot is not tied to a key, so
+            it renders here too. Without it a set mandate shows nowhere and a
+            legacy `?tab=mandate` link lands with no `#mandate` to scroll to. */}
+        <section
+          id="mandate"
+          aria-labelledby="overview-mandate-heading"
+          className="mt-8"
+        >
+          <h2
+            id="overview-mandate-heading"
+            className="mb-3 text-sm font-semibold uppercase tracking-wider text-text-primary"
+          >
+            Mandate
+          </h2>
+          <MandateTabPanel {...props} />
+        </section>
       </div>
     );
   }
@@ -199,6 +278,20 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {allKeysStale && !hasSyncing && (
         <StalenessBanner lastSyncAt={lastSyncAt} />
       )}
+      {/* Phase 198 plan 01 (D-06, ROUTE-07): the book at a glance. Figures come
+          from the shared book-figures module Scenario's live strip also reads,
+          and do not depend on the history state (research C7). `noteBelow` points
+          assistive tech at the missing-data message, so it is bound to the
+          message rendering and never to the gate alone. */}
+      <GlancePanel
+        liveBaselineMetrics={props.liveBaselineMetrics}
+        holdingsSummary={props.holdingsSummary ?? []}
+        allKeysStale={allKeysStale}
+        noteBelow={missingLines.length > 0}
+      />
+      {/* Phase 198 plan 09 (D-01): what is missing, per key, directly under the
+          glance. Renders nothing when nothing is missing. */}
+      <MissingDataMessage lines={missingLines} />
       {/* Review C4 SFH-C4-04: the derive leaves such an account out under a
           benign flag and still marks the curve trustworthy, so without this
           line a ready book reads as the whole book. Ready only: nothing is
@@ -217,8 +310,8 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {/* Phase 186 plan 08 (SC-4): the readers say which key. A key whose
           exchange read failed or came back incomplete leaves the total at its
           last complete day, and the note names it. Ready only. */}
-      {!isRebuilding && failingKeyExits.length > 0 && (
-        <FailingKeyExitNote exits={failingKeyExits} />
+      {!isRebuilding && unnamedExits.length > 0 && (
+        <FailingKeyExitNote exits={unnamedExits} />
       )}
       <InsightStrip
         analytics={analytics}
@@ -228,14 +321,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       />
 
       {isRebuilding ? (
-        // D-02: replaces BOTH the curve slot and the factsheet, and is checked
-        // BEFORE the warm-up fallback, so a book whose history is withheld
-        // never sees the "appear once" copy. D-15: every such book, a
-        // brand-new one included, gets the panel and its named reason.
-        <EquityHistoryRebuilding
-          reason={equityHistoryRebuildReason}
-          notSyncingKeys={notSyncingKeys}
-        />
+        // D-02: neither the curve slot nor the factsheet renders, and this is
+        // checked BEFORE the warm-up fallback, so a book whose history is
+        // withheld never sees the "appear once" copy. D-15: every such book, a
+        // brand-new one included, is told why by the message above. Phase 198
+        // plan 09: nothing renders here, the reason lives in that message.
+        null
       ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>
           <FactsheetBody
@@ -252,6 +343,47 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           <FactsheetWarmupNote curveDays={equityDailyPoints.length} />
         </>
       )}
+      {/* Phase 198 plan 06 (D-02, RESEARCH P5): the retired Risk tab's content.
+          The ONE gate above decides it: only an explicit "ready" mounts the six
+          widgets, so a missing or unknown state reads as rebuilding and prints
+          the line. The line does not repeat the reason the missing-data message
+          above states; a rebuilding book always has at least one such line. */}
+      <section
+        id="risk"
+        aria-labelledby="overview-risk-heading"
+        className="mt-8"
+      >
+        <h2
+          id="overview-risk-heading"
+          className="text-sm font-semibold uppercase tracking-wider text-text-primary"
+        >
+          Risk
+        </h2>
+        {gate === "ready" ? (
+          <div className="mt-3">
+            <RiskTabPanel {...props} />
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-text-secondary">
+            Risk figures need the equity history. See the note above.
+          </p>
+        )}
+      </section>
+      {/* Phase 198 plan 06 (D-02): the retired Mandate tab, last on the page.
+          Small and dependency-free, so it is a static import. */}
+      <section
+        id="mandate"
+        aria-labelledby="overview-mandate-heading"
+        className="mt-8"
+      >
+        <h2
+          id="overview-mandate-heading"
+          className="mb-3 text-sm font-semibold uppercase tracking-wider text-text-primary"
+        >
+          Mandate
+        </h2>
+        <MandateTabPanel {...props} />
+      </section>
     </div>
   );
 }

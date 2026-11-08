@@ -284,7 +284,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(tokens.filter((t) => /^(m|p|max-w)[a-z]?-/.test(t))).toEqual([]);
   });
 
-  it("sits in the Exchange Positions section after the spot table and before Open Positions", () => {
+  it("sits in the Positions section after the spot table and before Open Positions", () => {
     // WHY (D-05): the line dates the table directly above it; placed after
     // Open Positions it would read as dating the derivative rows.
     renderPanel(
@@ -298,7 +298,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     const spotTable = within(section).getByTestId("holdings-table-stub");
     const openTable = within(section).getByTestId("open-positions-table-stub");
     expect(section.getAttribute("aria-label")).toBeNull();
-    expect(section.querySelector("h3")?.textContent).toBe("Exchange Positions");
+    expect(section.querySelector("h3")?.textContent).toBe("Positions");
     expect(spotTable.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(note.compareDocumentPosition(openTable) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });

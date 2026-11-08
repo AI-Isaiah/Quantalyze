@@ -83,22 +83,6 @@ vi.mock("./HoldingsTabPanel", () => ({
   ),
 }));
 
-vi.mock("./OutcomesTabPanel", () => ({
-  OutcomesTabPanel: () => (
-    <div data-testid="outcomes-body">OUTCOMES_BODY</div>
-  ),
-}));
-
-vi.mock("./MandateTabPanel", () => ({
-  MandateTabPanel: () => (
-    <div data-testid="mandate-body">MANDATE_BODY</div>
-  ),
-}));
-
-vi.mock("./RiskTabPanel", () => ({
-  RiskTabPanel: () => <div data-testid="risk-body">RISK_BODY</div>,
-}));
-
 vi.mock("./ScenarioStub", () => ({
   ScenarioStub: () => (
     <div data-testid="scenario-stub-body">SCENARIO_STUB_BODY</div>
@@ -499,39 +483,40 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
   });
 
   // -------------------------------------------------------------------------
-  // T_AT8 — Other tabs (Holdings/Outcomes/Mandate/Risk) unchanged
+  // T_AT8 — Other tabs (Holdings/Overview, and the Phase 198 D-02 legacy
+  //         aliases that land on them) unchanged
   // -------------------------------------------------------------------------
-  it("T_AT8 Other tabs (holdings/outcomes/mandate/risk) unchanged by the v2 scenario branch", async () => {
+  it("T_AT8 Other tabs (holdings, and the outcomes/mandate/risk aliases) unchanged by the v2 scenario branch", async () => {
     setSearchParams("tab=holdings");
     const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
     await screen.findByTestId("holdings-body");
     expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
 
+    // Retired tabs are aliases now: outcomes lands on Holdings, mandate and
+    // risk on Overview. None of them may mount the composer.
     setSearchParams("tab=outcomes");
     rerender(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("outcomes-body");
+    await screen.findByTestId("holdings-body");
     expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
 
     setSearchParams("tab=mandate");
     rerender(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("mandate-body");
+    await screen.findByTestId("overview-v2");
     expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
 
     setSearchParams("tab=risk");
     rerender(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("risk-body");
+    await screen.findByTestId("overview-v2");
     expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
   });
 
   // -------------------------------------------------------------------------
-  // T_AT9 — Sentinel (Phase 116 rewrite): the header chip's accessible name
-  //         states the REAL per-tab action. The retired routes-to-scenario
-  //         mislabel is gone; on the default (overview) tab the button
-  //         connects an exchange / uploads a CSV, and its accessible name no
-  //         longer mentions the Scenario tab.
-  //         (No click here — this file's harness does not mock
-  //         ContributionWizardOverlay, so a click would mount the real
-  //         WizardClient. The dispatch/overlay wiring is covered by
+  // T_AT9 — Sentinel (Phase 198 D-03): the header chip's accessible name states
+  //         the REAL action on every tab, and it no longer mentions the Scenario
+  //         tab. The retired routes-to-scenario mislabel is gone; the button
+  //         opens the allocator's own add-allocation flow (a pick and an
+  //         amount), not an exchange connect or a CSV upload.
+  //         (No click here — the dispatch and flow wiring are covered by
   //         AllocationsTabs.addalloc.test.tsx. The literal retired phrase is
   //         intentionally NOT spelled out so the whole-repo mislabel grep gate
   //         stays at 0 hits — the substring assertion below is the sentinel.)
@@ -541,7 +526,7 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
     render(<AllocationsTabs {...STUB_PROPS} />);
     // The corrected accessible name is present on the default (overview) tab.
     const btn = screen.getByRole("button", {
-      name: /Add allocation — connect an exchange or upload a CSV/i,
+      name: /Add allocation — pick a strategy and enter an amount/i,
     });
     expect(btn).toBeInTheDocument();
     // The stale mislabel routed the button to the Scenario tab — its accessible
@@ -698,14 +683,15 @@ describe("AllocationsTabs — Scenario visible tab (SURF-01)", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("keyboard arrow-nav reaches the Scenario tab (ArrowRight from Risk)", () => {
-    // Risk is the tab immediately before Scenario in VISIBLE_TAB_KEYS, so a
-    // single ArrowRight from Risk must land on Scenario. If "scenario" were
-    // missing from the keyboard-nav set this routes nowhere (no tab=scenario).
-    setSearchParams("tab=risk");
+  it("keyboard arrow-nav reaches the Scenario tab (ArrowRight from Holdings)", () => {
+    // Holdings is the tab immediately before Scenario in VISIBLE_TAB_KEYS
+    // (Phase 198 D-02: three tabs), so a single ArrowRight from Holdings must
+    // land on Scenario. If "scenario" were missing from the keyboard-nav set
+    // this routes nowhere (no tab=scenario).
+    setSearchParams("tab=holdings");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    const riskTab = screen.getByRole("tab", { name: "Risk" });
-    fireEvent.keyDown(riskTab, { key: "ArrowRight" });
+    const holdingsTab = screen.getByRole("tab", { name: "Holdings" });
+    fireEvent.keyDown(holdingsTab, { key: "ArrowRight" });
     expect(historyReplace).toHaveBeenCalled();
     const url = firstHistoryUrl();
     expect(url).toContain("tab=scenario");

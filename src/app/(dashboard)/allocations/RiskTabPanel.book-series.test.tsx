@@ -24,7 +24,7 @@ vi.mock("recharts", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 169.4-01 (SC2) — the Risk tab reads the same book the Overview reads.
+// Phase 169.4-01 (SC2) — the Risk widget grid reads the same book the Overview reads.
 //
 // Why this matters: the Overview charts the book's own daily returns
 // (`equityDailyReturns`) and, while the history is being rebuilt, shows the
@@ -33,7 +33,8 @@ vi.mock("recharts", async () => {
 // legacy portfolio-strategies set. On a key-connected book that set is empty,
 // and the tab said "Insufficient return data" beside an Overview showing the
 // book. While rebuilding, it computed figures over a history the Overview had
-// withheld as untrustworthy (T-169-25).
+// withheld as untrustworthy (T-169-25); that gate is the Overview's now, and its
+// cases live in OverviewRisk.history-parity.test.tsx.
 // ---------------------------------------------------------------------------
 
 afterEach(cleanup);
@@ -83,66 +84,10 @@ describe("RiskTabPanel — the book series (SC2)", () => {
     ).toBeNull();
   });
 
-  it("rebuilding: the Overview's rebuilding panel renders with its reason, and NO risk widget", () => {
-    render(
-      <RiskTabPanel
-        {...payload({
-          equityHistoryState: "rebuilding",
-          equityHistoryRebuildReason: "awaiting_derivation",
-          equityDailyReturns: [],
-        })}
-      />,
-    );
-
-    expect(
-      screen.getByRole("heading", {
-        level: 2,
-        name: "Your equity history is being rebuilt",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Your history is recomputed from each account's returns and cash flows once a day.",
-        { exact: false },
-      ),
-    ).toBeInTheDocument();
-    expect(document.querySelectorAll("[data-widget-id]")).toHaveLength(0);
-    expect(
-      screen.queryByText("Insufficient return data for VaR calculation"),
-    ).toBeNull();
-  });
-
-  // 170.6.2 D-04 / D-05: the Risk tab shows the class heading, not "being
-  // rebuilt" for a reason that is not a wait. Typed by hand, never read from
-  // the component's map.
-  it.each([
-    ["history_read_failed", "We could not load your equity history"],
-    ["key_not_syncing", "Your equity history is waiting on a key"],
-  ])("%s: the Overview's panel renders the h2 '%s', and NO risk widget", (reason, heading) => {
-    render(
-      <RiskTabPanel
-        {...payload({
-          equityHistoryState: "rebuilding",
-          equityHistoryRebuildReason: reason,
-          equityDailyReturns: [],
-        })}
-      />,
-    );
-
-    expect(
-      screen.getByRole("heading", { level: 2, name: heading }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: "Your equity history is being rebuilt" }),
-    ).toBeNull();
-    expect(document.querySelectorAll("[data-widget-id]")).toHaveLength(0);
-  });
-
-  it("fail-closed: a missing state reads as rebuilding, as on the Overview", () => {
-    render(<RiskTabPanel {...payload({ equityHistoryState: undefined })} />);
-    expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();
-    expect(document.querySelectorAll("[data-widget-id]")).toHaveLength(0);
-  });
+  // The rebuilding, class-heading and fail-closed cases that stood here moved to
+  // OverviewRisk.history-parity.test.tsx (Phase 198 plan 06, D-02). The panel no
+  // longer gates itself: the Overview's one `historyGate` call decides whether
+  // it mounts, so a gate case is an Overview case.
 });
 
 describe("RiskTabPanel — decomposition and correlation over the Scenario's per-key set (SC2)", () => {

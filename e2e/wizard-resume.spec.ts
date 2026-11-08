@@ -5,9 +5,15 @@
  * ⚠️ `/strategies/new/wizard` ALREADY resumed before this phase (the SSR page
  * has read the draft since Phase 46). The defect lived on the OTHER entry
  * point: `ContributionWizardOverlay` passed `initialDraft={null}`, so opening
- * the wizard from "+ Allocation" / the My Strategies empty state always
+ * the wizard from the nav / the My Strategies empty state always
  * started fresh. This spec therefore drives the OVERLAY, never that route —
  * asserting the route would report green against the untouched bug.
+ *
+ * Phase 198 D-03 / FD-3: the My allocation header "+ Allocation" no longer opens
+ * this wizard; it opens the allocator's own add-allocation flow
+ * (e2e/allocations-add.spec.ts). The manager wizard overlay stays reachable from
+ * the sidebar's "Add a Strategy" action (DashboardChrome hosts it), which is the
+ * entry this spec now drives.
  *
  * ── Oracles ─────────────────────────────────────────────────────────────────
  * 1. A route SPY (not a stub) on `/api/strategies/wizard-draft`: the overlay
@@ -111,10 +117,13 @@ test.describe("Phase 154 — wizard continuity (WIZCONT-01)", () => {
     await loginViaForm(page, allocator.email, allocator.password);
     await page.goto("/allocations");
 
-    // The "+ Allocation" header button (ADDALLOC-02) — the tab-agnostic
-    // onboarding-wizard mount, one of the four real overlay renderers.
+    // The sidebar's "Add a Strategy" action (Phase 110 CONTRIB-01): the
+    // chrome-level overlay mount, one of the real overlay renderers. Scoped to the
+    // desktop sidebar's landmark (the bottom nav is "Primary mobile") so it cannot
+    // match another button of the same name.
     await page
-      .getByRole("button", { name: /Add allocation/i })
+      .getByRole("navigation", { name: "Primary", exact: true })
+      .getByRole("button", { name: "Add a Strategy" })
       .click({ timeout: 15_000 });
 
     const dialog = page.getByRole("dialog", { name: "Add a strategy" });

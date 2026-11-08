@@ -591,7 +591,21 @@ describe("ScenarioComposer Sharpe delta - the strip and the footer share one ver
 
   it("a 400-day book beside a 400-day blend: both surfaces keep the Sharpe delta", () => {
     renderBlend(denseSeries(400), {
-      extra: { equityHistoryState: "ready", equityDailyReturns: bookOf(400) },
+      extra: {
+        equityHistoryState: "ready",
+        equityDailyReturns: bookOf(400),
+        // 198 plan 01: was pinned against the two-day default baseline (the ungated C6
+        // Sharpe). The live baseline now has its own 400-day record, like the book.
+        liveBaselineMetrics: {
+          aum: 100_000,
+          ytdTwr: 0.05,
+          sharpe: 1.2,
+          maxDd: -0.08,
+          avgRho: 0.4,
+          equity: bookOf(400).map((p) => ({ date: p.date, value: 1 })),
+          drawdown: [],
+        },
+      },
     });
     expect(stripProps().liveMetrics.sharpe).toBe(1.2);
     expect(footerDeltas().map((d) => d.label)).toContain("Sharpe");

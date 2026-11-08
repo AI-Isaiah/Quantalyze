@@ -4,12 +4,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Phase 170.4 plan 02 (D-01, D-08). The cross-surface invariant.
+ * Phase 170.4 plan 02 (D-01, D-08), reshaped by Phase 198 plan 07 (LEAN-06,
+ * ROUTE-08). The cross-surface invariant.
  *
  * Plan 01 made Exposure, Holdings and Open Positions read ONE array. That alone
  * would also let all three agree on a WRONG answer, so this file pins the
  * answer per case with figures typed by hand from the fixture, and pins the
  * agreement from the rendered DOM.
+ *
+ * After LEAN-06 the Exposure card no longer lists positions, so it agrees with
+ * the two tables on TOTALS, not on row tokens: its Gross plus its Cash cell
+ * equals the Holdings table total plus the Open Positions notional. Cash rows
+ * (ROUTE-08) are in the Holdings table and in the Cash cell, never in Gross.
  *
  * The path is the real one: `fetchLatestHoldingsPerKey` over a hand-rolled
  * client that honours the owner filter, then `derivePhase07Fields`, then
@@ -18,9 +24,9 @@ import { join } from "node:path";
  * the shared optimizer chart.
  *
  * Every expected figure is a literal the author derived from the fixture, never
- * a number the code under test computed. The fixture amounts are multiples of
- * 100, so the compact currency strings the Exposure card renders ("$185.1K")
- * parse back to the exact integer.
+ * a number the code under test computed. The Exposure card prints whole dollars
+ * (`formatUsd`); the two tables print compact strings, which parse back to the
+ * exact integer because the fixture amounts are multiples of 100.
  */
 
 // The Optimizer mounts the shared PortfolioOptimizer via next/dynamic; no
@@ -44,7 +50,7 @@ import {
   keyStateMapsOf,
   summarizeLiveHoldings,
 } from "./lib/live-holdings-summary";
-import { formatCurrency } from "@/lib/utils";
+import { formatUsd } from "@/lib/dollar-validation";
 
 // ---------------------------------------------------------------------------
 // The fake database. Copied in shape from latest-holdings-per-key.test.ts
@@ -410,18 +416,6 @@ function exposureSection(): HTMLElement {
   return document.querySelector('section[aria-label="Exposure"]') as HTMLElement;
 }
 
-function exposureTokens(): string[] {
-  return bodyRows(exposureSection())
-    .map((tr) => {
-      const c = Array.from(tr.querySelectorAll("td")).map((td) => td.textContent ?? "");
-      // Venue | Key | Symbol | Type | Side | Gross | Net
-      // Venue prints its display name since 170.1.2 WR-02; compare by code, as
-      // venueAndSymbol does for the other two surfaces.
-      return `${c[1]}|${c[0].toLowerCase()}|${c[2]}|${c[3] === "Spot" ? "spot" : "derivative"}`;
-    })
-    .sort();
-}
-
 function exposureKpi(testid: string): string {
   return within(exposureSection()).getByTestId(testid).textContent ?? "";
 }
@@ -434,19 +428,25 @@ function exposureGross(): { text: string; value: number } | null {
     : { text: el.textContent ?? "", value: parseMoney(el.textContent ?? "") };
 }
 
+/** The Cash cell's value, null when it prints an em dash (no cash row was read). */
+function exposureCash(): number | null {
+  const el = within(exposureSection()).queryByTestId("kpi-cash");
+  if (el === null) return null;
+  const text = el.textContent ?? "";
+  return text === "—" ? null : parseMoney(text);
+}
+
 /** Everything the three surfaces say, read once. */
 function readSurfaces() {
   return {
     holdings: holdingsTokens(),
     positions: openPositionTokens(),
-    exposure: exposureTokens(),
     holdingsTotal: holdingsTotal(),
     positionsTotal: openPositionsNotional(),
     gross: exposureGross(),
+    cash: exposureCash(),
   };
 }
-
-const union = (a: string[], b: string[]) => [...a, ...b].sort();
 
 // ---------------------------------------------------------------------------
 // Fixtures. Every figure is typed by hand.
@@ -503,17 +503,15 @@ describe("Exposure, Holdings and Open Positions give one answer (D-01)", () => {
       "Deribit — Main|deribit|BTC-PERP|derivative",
       "Deribit — Main|deribit|ETH-PERP|derivative",
     ];
-    expect(s.exposure).toEqual(THREE);
     expect(s.positions).toEqual(THREE);
     expect(s.holdings).toEqual([]);
-    expect(s.exposure).toEqual(union(s.holdings, s.positions));
 
     // 100000 + 50000 + 35100.
     expect(s.holdingsTotal).toBe(0);
     expect(s.positionsTotal).toBe(185100);
     expect(s.gross?.value).toBe(185100);
-    expect(s.gross?.text).toBe(formatCurrency(185100));
-    expect(s.gross?.value).toBe(s.holdingsTotal + s.positionsTotal);
+    expect(s.gross?.text).toBe(formatUsd(185100));
+    expect((s.gross?.value ?? 0) + (s.cash ?? 0)).toBe(s.holdingsTotal + s.positionsTotal);
     // Net: +100000 - 50000 + 35100.
     expect(parseMoney(exposureKpi("kpi-net"))).toBe(85100);
   });
@@ -527,7 +525,6 @@ describe("Exposure, Holdings and Open Positions give one answer (D-01)", () => {
     renderPanel(book);
     const s = readSurfaces();
 
-    expect(s.exposure).toEqual([]);
     expect(s.holdings).toEqual([]);
     expect(s.positions).toEqual([]);
     expect(s.gross).toBeNull();
@@ -538,6 +535,40 @@ describe("Exposure, Holdings and Open Positions give one answer (D-01)", () => {
     expect(section("Open Positions").textContent).toContain(
       "No open derivative positions.",
     );
+  });
+});
+
+describe("ROUTE-08: a spot USDT row is Cash on the Exposure card and still in the Holdings table", () => {
+  it("BTC spot 40000 + USDT spot 10000 + a 20000 short swap: gross 60000, cash 10000, and gross + cash equals both tables' totals", async () => {
+    const book = await readBook({
+      keys: [key("key-a", "binance", "Main")],
+      holdings: [
+        spot("key-a", "binance", DAY_3, T_3, "BTC", 40000),
+        spot("key-a", "binance", DAY_3, T_3, "USDT", 10000),
+        deriv("key-a", "binance", DAY_3, T_3, "BTC-PERP", "short", 20000),
+      ],
+    });
+    renderPanel(book);
+    const s = readSurfaces();
+
+    // The Holdings table lists both spot rows: 40000 + 10000.
+    expect(s.holdingsTotal).toBe(50000);
+    expect(s.positionsTotal).toBe(20000);
+    // The card: USDT is not exposure, so gross is 40000 + 20000.
+    expect(s.gross?.value).toBe(60000);
+    expect(s.cash).toBe(10000);
+    expect((s.gross?.value ?? 0) + (s.cash ?? 0)).toBe(s.holdingsTotal + s.positionsTotal);
+    // Net: 40000 - 20000. Long: 40000. Short: 20000.
+    expect(parseMoney(exposureKpi("kpi-net"))).toBe(20000);
+    expect(parseMoney(exposureKpi("kpi-long"))).toBe(40000);
+    expect(parseMoney(exposureKpi("kpi-short"))).toBe(20000);
+  });
+
+  it("a book with no cash row prints the Cash cell as an em dash", async () => {
+    const book = await readBook({ keys: [DERIBIT_KEY], holdings: deribitBook() });
+    renderPanel(book);
+    expect(readSurfaces().cash).toBeNull();
+    expect(exposureKpi("kpi-cash")).toBe("—");
   });
 });
 
@@ -610,12 +641,6 @@ describe("every supersession rule removes a row from all three surfaces together
       "OKX — Alpha|okx|ETH|spot",
     ]);
     expect(s.positions).toEqual(["OKX — Alpha|okx|BTC-USDT-SWAP|derivative"]);
-    expect(s.exposure).toEqual([
-      "Binance — Beta|binance|BTC|spot",
-      "OKX — Alpha|okx|BTC-USDT-SWAP|derivative",
-      "OKX — Alpha|okx|ETH|spot",
-    ]);
-    expect(s.exposure).toEqual(union(s.holdings, s.positions));
 
     // 7000 + 40000.
     expect(s.holdingsTotal).toBe(47000);
@@ -623,7 +648,7 @@ describe("every supersession rule removes a row from all three surfaces together
     expect(s.positionsTotal).toBe(30000);
     // 7000 + 40000 + 30000.
     expect(s.gross?.value).toBe(77000);
-    expect(s.gross?.value).toBe(s.holdingsTotal + s.positionsTotal);
+    expect((s.gross?.value ?? 0) + (s.cash ?? 0)).toBe(s.holdingsTotal + s.positionsTotal);
     // Net: 7000 + 40000 - 30000. Long: 7000 + 40000. Short: 30000.
     expect(parseMoney(exposureKpi("kpi-net"))).toBe(17000);
     expect(parseMoney(exposureKpi("kpi-long"))).toBe(47000);
@@ -682,7 +707,6 @@ describe("one key is one strategy: two live keys on one symbol are two rows ever
 
     expect(s.holdings).toEqual(BOTH_BTC);
     expect(s.positions).toEqual([]);
-    expect(s.exposure).toEqual(BOTH_BTC);
     // 40000 + 25000.
     expect(s.holdingsTotal).toBe(65000);
     expect(s.gross?.value).toBe(65000);
@@ -701,7 +725,6 @@ describe("one key is one strategy: two live keys on one symbol are two rows ever
     const s = readSurfaces();
 
     expect(s.holdings).toEqual(BOTH_BTC);
-    expect(s.exposure).toEqual(BOTH_BTC);
     expect(s.holdingsTotal).toBe(65000);
     expect(s.gross?.value).toBe(65000);
   });
@@ -726,7 +749,6 @@ describe("one key is one strategy: two live keys on one symbol are two rows ever
       "Binance — Two|binance|BTC|spot",
     ];
     expect(s.holdings).toEqual(WINNERS);
-    expect(s.exposure).toEqual(WINNERS);
     // 30000 + 25000. Counting the account twice would read 95000.
     expect(s.holdingsTotal).toBe(55000);
     expect(s.gross?.value).toBe(55000);
@@ -892,18 +914,13 @@ describe("a same-day clean empty newest poll removes the key from all three surf
 
     expect(s.holdings).toEqual(["Binance — Beta|binance|BTC|spot"]);
     expect(s.positions).toEqual(["Binance — Beta|binance|BTC-PERP|derivative"]);
-    expect(s.exposure).toEqual([
-      "Binance — Beta|binance|BTC-PERP|derivative",
-      "Binance — Beta|binance|BTC|spot",
-    ]);
-    expect(s.exposure).toEqual(union(s.holdings, s.positions));
     // Spot 40000 only.
     expect(s.holdingsTotal).toBe(40000);
     // The one remaining swap's notional.
     expect(s.positionsTotal).toBe(20000);
     // 40000 + 20000.
     expect(s.gross?.value).toBe(60000);
-    expect(s.gross?.value).toBe(s.holdingsTotal + s.positionsTotal);
+    expect((s.gross?.value ?? 0) + (s.cash ?? 0)).toBe(s.holdingsTotal + s.positionsTotal);
 
     const everything = document.body.textContent ?? "";
     for (const gone of ["ETH", "BTC-USDT-SWAP"]) {
