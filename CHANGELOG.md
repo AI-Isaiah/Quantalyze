@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.133.29.0] - 2026-11-08 — Phase 197 SCREEN: discovery reads plainly and a shortlist can be compared
+
+### Added
+- **Every discovery column says what period it covers.** Each metric header carries a second line naming the period and whether the stored figure is annualised ("full record, ann.", "last 6 months, not annualized"), with the definition in a tooltip. One label map, `src/components/strategy/discovery-columns.ts`, feeds the table header and the grid footer, and the sortable header's accessible name carries the full period (CLAR-01, D-05).
+- **A sortable Track column shows months of record.** It is computed from the Phase 194 figure-gate record (`trackMonths` and `recordStartDay` in `src/lib/figure-gate.ts`): 365-day divisor, `<1` under 30 covered days, counting from `headline_since` on a chain-broken row. An unknown span sorts last in both directions.
+- **A stale strategy is flagged and stops ranking as current.** `listSeriesVerdict` (`src/lib/freshness.ts`) judges the newest stored return day, `series_end`, never `computed_at`: stale above 7 days for crypto and above 10 for everything else. Stale and age-unknown rows sort after current ones in every sort, take no `#n` rank and no percentile, and show an amber chip with the reason (`StaleSeriesChip`). The discovery page passes the server clock as `nowMs`, so server and client judge the same instant (CLAR-02, D-03).
+- **A shortlist can be compared from discovery.** On `/discovery/[slug]` only, rows and grid cards get a checkbox. From two selected, a sticky bar shows chips, Clear and "Compare (n)", capped at 4 with the reason announced. Focus moves as the UI contract specifies (`SelectCheckbox`, ROUTE-05 discovery side).
+- **`/compare` can add and remove strategies.** An "Add strategy" combobox searches the published catalogue through the existing `/api/strategies/browse` route: 250 ms debounce, from 2 characters, up to 8 options, keyboard support, and loading, no-match and retry states. Each compared strategy gets a Remove link, and no search is mounted at four items. `compareHref` builds every compare URL with a fixed path and encoded ids (ROUTE-05 compare side, D-04).
+- **An admin sees which discovery listings share an exchange account.** `getSharedAccountPartners` (`src/lib/discovery/shared-account-partners.ts`, server-only) checks `isAdminUser` before it creates the service-role client. It reads published strategies only, selects no credential column, returns partner names only, and returns null on any error after reporting to Sentry. The page passes the line only when the map is non-null, and the anonymous `/browse` page never reads it (CLAR-05, D-01, D-02).
+
+### Changed
+- **Volatility prints unsigned on discovery.** The tearsheet and `CompareTable` still sign it; booked as `[197-VOL-SIGN-TEARSHEET-COMPARE]` for Phase 201.
+- **`/compare` no longer says adding a strategy is not available.** Its empty, one-item and full states follow the phase UI contract.
+- **DESIGN.md** gains one dated Numbers Contract sentence about the period qualifier.
+
+### Fixed
+Found by the phase review (gsd-code-reviewer and silent-failure-hunter, three rounds) and fixed before ship:
+- **Track no longer states a length the figure gate refuses to read.** A record whose `headline_since` is present but malformed shows an em dash, has no record-length title and sorts last (WR-01).
+- **A future-dated or calendar-impossible `series_end` reads as unknown, not current.** More than 2 UTC days ahead, or a day that does not round-trip (2026-02-31), now gets the "Data date unknown" chip and no rank. Before this fix, a corrupt write could put a dead strategy back at #1.
+- **The admin partner read pages past PostgREST's 1000-row cap.** It uses `.order("id").range()` until a short page, so a large catalogue is no longer silently truncated (WR-02).
+- **The `/compare` search tells the truth about a truncated catalogue.** A 200 response without a `strategies` array now shows the error and "Try again" state, not "no match". When the route reports `has_more`, the empty line says the search covered only the first N strategies and points to Discovery, instead of a false "No published strategy matches" (WR-03, WR-04).
+
+### Tests
+- New: `StrategyTable.headers.test.tsx`, `StrategyTable.stale-series.test.tsx`, the selection test, `CompareAddStrategy.test.tsx`, `compare-href.test.ts`, `shared-account-partners.test.ts`, the `SharedAccountNote` tests, and new cases in `figure-gate.test.ts`, `freshness.test.ts`, `StrategyGrid.test.tsx` and the discovery page test.
+- Phase-149 parity pin 2c asserts that the anonymous browse page carries neither the partner prop nor the reader.
+- The default-mounts byte-pin fixture, the cross-surface guards, `figure-parity-pages` (volatility compared by value), the pinned-cell census and `e2e/layout-narrow.spec.ts` move to the new header and four-cell pinned-stack contract. Every changed hunk was classified before the pin moved.
+- Each data-integrity or user-facing gate was shown to fail: the fix was neutered from a byte backup, the test went RED, and the restore was `cmp`-identical.
+
+### Notes
+- **TODOS books four Phase 197 entries:** `[197-VOL-SIGN-TEARSHEET-COMPARE]`, `[197-SYNCBADGE-SERIES-LADDER]`, `[197-PERCENTILE-COHORT-STALE]` and `[197-COMPARE-NAME-PSEUDONYMITY]`.
+- **Verification is human_needed.** All 4 success criteria pass automatically. Browser-only items remain open in the phase UAT: the 375px and 1280px visual check, keyboard walks on `/discovery` and `/compare`, and the admin line on a real shared-account pair.
+- **No migration and no new API route.**
+- **Known limits, below MEDIUM, recorded in the phase review:** the partner read's page size equals the 1000-row cap. The `/browse` mount uses its own clock, so a UTC-midnight hydration mismatch is possible at an exact threshold (T-197-18, remedy once Phase 196 lands). The browse drawer still has no truncation notice.
+
 ## [0.133.28.3] - 2026-11-08 — fix: the Python intro snapshot never freezes a what-if book
 
 ### Fixed
