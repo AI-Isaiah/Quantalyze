@@ -6,16 +6,16 @@ current_phase: 194
 current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 status: executing
 stopped_at: Completed 194-13-PLAN.md
-last_updated: "2026-11-07T17:42:15.555Z"
-last_activity: 2026-11-07
+last_updated: "2026-11-08T19:05:40.162Z"
+last_activity: 2026-11-08
 last_activity_desc: Phase 194 execution started
-state_head: eb836950d7dc6b7f8c952721ec9863b5de247b65
+state_head: e9277565edbd14430a02efcd648f4cd3487bb75a
 progress:
-  total_phases: 13
+  total_phases: 14
   completed_phases: 5
   total_plans: 62
-  completed_plans: 42
-  percent: 38
+  completed_plans: 62
+  percent: 33
 ---
 
 ## ⭐ STATE lineage
@@ -180,7 +180,7 @@ Phase: 194 (FIGURETRUTH — a figure means one thing everywhere and shows only w
 Plan: 24 of 24 (code merged as #1219; plan 09 PROD recompute done 2026-11-08, 194-RECOMPUTE.md lacking=0)
 Status: Verification human_needed (signed-in browser UAT only)
 Last activity: 2026-11-08 — Phase 194 deployed (959ef982) and PROD recompute done (plan 09); browser UAT next
-Progress: [████░░░░░░] 38% (5 of 12 phases)
+Progress: [███░░░░░░░] 33% (5 of 12 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -680,6 +680,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2.1.1.2.1 inserted after Phase 167.2.1.1.2: TRADEPAGES: the allocator history rebuild reads every trade page on OKX and Bybit (founder 2026-10-23, from ACCTREBUILD SC-3; data-integrity) (URGENT)
 - Phase 194.1 inserted after Phase 194: D04SWEEP: the widened short-track rule on every page outside 194 (founder D-10/D-11, 2026-11-07)
 - Phase 203 added (2026-11-07, /gsd-phase add, founder D-17 "book the investigation as a phase"): B3TRUNC, from RESIDCHURN plan 07 (why book b3 carries window_truncated)
+- Phase 194.2 inserted after Phase 194: FIGURERESIDUALS: the six figure-gate residuals 194.1's scope did not cover (founder 2026-11-08)
 
 ### Decisions
 
