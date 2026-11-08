@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.133.29.1] - 2026-11-09 — records: Phase 198 MYBOOK execution, review and verification
+
+### Notes
+- **Phase 198 records land on `main`:** the 13 plan SUMMARYs, `198-REVIEW.md` (three review and fix rounds), `198-SECURITY.md` (24 registered threats, all closed) and `198-VERIFICATION.md` (`human_needed`: 10/10 truths verified; a desktop and mobile visual pass is outstanding). The phase is NOT closed, because its verification has not passed.
+- ROADMAP ticks all 13 plan rows. The 198-08 row no longer names the next phase with the word "Phase", so hygiene rule 6e stays green. STATE's Last activity records the ship of #1226.
+- **TODOS books three entries:** `198-FD3-SIDEBAR-ADD-A-STRATEGY` (the founder's FD-3 follow-up), `198-SHARED-ACCOUNT-FALLBACK-UNNAMED` (the user-facing residual that survived three review rounds) and `198-ADD-DEEPLINK-UNMARKED-OWN` (a carry note owned by Phase 196).
+
 ## [0.133.29.0] - 2026-11-09 — feat: MYBOOK, My allocation answers "how is my book doing" in three tabs
 
 ### Added
