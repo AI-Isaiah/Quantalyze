@@ -92,7 +92,10 @@ describe("Overview of a ready, all-closed book (D-04 / SC-4)", () => {
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
     expect(screen.getByTestId("mock-factsheet-body")).toBeInTheDocument();
     expect(screen.queryByText("No positions to analyze yet.")).toBeNull();
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    // 198-09 (D-01): nothing is missing on a ready book with no gaps, so the
+    // missing-data section does not render and the glance points at no note.
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+    expect(document.body.textContent).not.toContain("Not shown: see the note below.");
   });
 
   it("eligible key + ready + empty book, factsheet builder refuses: the curve plus the warm-up note, never the empty card (E1 empty)", () => {
@@ -102,7 +105,10 @@ describe("Overview of a ready, all-closed book (D-04 / SC-4)", () => {
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
     expect(screen.getByTestId("overview-factsheet-warmup")).toBeInTheDocument();
     expect(screen.queryByText("No positions to analyze yet.")).toBeNull();
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    // 198-09 (D-01): nothing is missing on a ready book with no gaps, so the
+    // missing-data section does not render and the glance points at no note.
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+    expect(document.body.textContent).not.toContain("Not shown: see the note below.");
   });
 });
 
@@ -118,7 +124,10 @@ describe("neighbouring states keep their answer (guards, not proof of D-04)", ()
       screen.getByRole("link", { name: /Connect Exchange/ }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    // 198-09 (D-01): nothing is missing on a ready book with no gaps, so the
+    // missing-data section does not render and the glance points at no note.
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+    expect(document.body.textContent).not.toContain("Not shown: see the note below.");
   });
 
   // Fail-closed (T-167.1.2.1.2-04): only an explicit "ready" may draw the curve.
@@ -136,7 +145,9 @@ describe("neighbouring states keep their answer (guards, not proof of D-04)", ()
         <AllocationDashboardV2 {...payload({ equityHistoryState: state })} />,
       );
 
-      expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();
+      // 198-09 (D-01): the shipped sentence is the one line, so a book whose
+      // history is withheld always says so.
+      expect(screen.getByTestId("overview-missing-data")).toBeInTheDocument();
       expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
       expect(screen.queryByText("No positions to analyze yet.")).toBeNull();
     },

@@ -1320,11 +1320,8 @@ test.describe("/allocations holdings — SC1-HOLDINGS", () => {
 
       const holdings = page.getByRole("region", { name: /^Holdings:/ });
       const open = page.getByRole("region", { name: /^Open positions:/ });
-      // UI-SPEC H-3: the Exposure drill-down is a named ResponsiveTable region too.
-      const exposure = page.getByRole("region", { name: /^Exposure by venue and symbol:/ });
-      await expect(exposure.first(), `${vp.id}: Exposure by venue and symbol region missing`).toBeVisible({
-        timeout: 15_000,
-      });
+      // Phase 198 (198-07) removed the Exposure by venue and symbol drill-down
+      // table, so Holdings and Open positions are the wide tables left.
       await expect(holdings.first(), `${vp.id}: Holdings region missing`).toBeVisible({
         timeout: 15_000,
       });
@@ -1338,7 +1335,6 @@ test.describe("/allocations holdings — SC1-HOLDINGS", () => {
       for (const [label, region] of [
         ["Holdings", holdings],
         ["Open positions", open],
-        ["Exposure by venue and symbol", exposure],
       ] as const) {
         // The table's INTRINSIC width (min-content), not its laid-out width: a
         // `w-full` table is stretched to whatever track it gets, so the laid-out
@@ -1373,7 +1369,6 @@ test.describe("/allocations holdings — SC1-HOLDINGS", () => {
       const regions: [string, import("@playwright/test").Locator][] = [
         ["Holdings", holdings.first()],
         ["Open positions", open.first()],
-        ["Exposure by venue and symbol", exposure.first()],
       ];
       // The Strategies region exists only for an allocator with onboarded
       // strategies; when it is present its right edge must be inside too.
@@ -1382,15 +1377,15 @@ test.describe("/allocations holdings — SC1-HOLDINGS", () => {
         regions.push(["Strategies", strategies.first()]);
       }
       // Every region on the tab has a unique accessible name (axe landmark-unique,
-      // and the screen-reader landmark rotor): Strategies, Holdings, Open
-      // positions and Exposure by venue and symbol must not read alike.
+      // and the screen-reader landmark rotor): Strategies, Holdings and Open
+      // positions must not read alike.
       const names = await page
         .locator('[data-tab-panel="holdings"] [role="region"]')
         .evaluateAll((els) => els.map((el) => el.getAttribute("aria-label") ?? ""));
       expect(
         names.length,
-        `${vp.id}: expected at least the Holdings, Open positions and Exposure regions, got ${JSON.stringify(names)}`,
-      ).toBeGreaterThanOrEqual(3);
+        `${vp.id}: expected at least the Holdings and Open positions regions, got ${JSON.stringify(names)}`,
+      ).toBeGreaterThanOrEqual(2);
       expect(
         new Set(names).size,
         `${vp.id}: region accessible names are not unique: ${JSON.stringify(names)}`,
@@ -2641,6 +2636,9 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
         test.setTimeout(120_000);
         await openSurface(page, "overview", vp);
         const svg = page.locator(`${EQUITY_ROOT} ${EQUITY_SVG}`).first();
+        // Phase 198 put the glance panel above the chart, so on a phone the
+        // chart starts below the fold; bring it into view before measuring.
+        await svg.scrollIntoViewIfNeeded();
         const geo = await svg.evaluate((el) => {
           const wrap = el.closest("div.relative.w-full");
           if (!wrap) return { error: 'no ancestor matches div.relative.w-full' };

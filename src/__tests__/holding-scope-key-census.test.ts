@@ -301,6 +301,14 @@ export const CLASSIFICATION: Classification = {
       reason: "Flagged holdings come from the match batch, which is built per scope ref (match.py pseudo-strategies); the ref looks up that flag's decision and outcome. No dollar figure is keyed here.",
     },
   },
+  [`${ALLOC}/lib/flagged-position-map.ts`]: {
+    M2: {
+      count: 1,
+      verdict: "key-free-by-design",
+      symbols: ["mapFlagsToRows"],
+      reason: "A flag is per scope ref (the match batch). mapFlagsToRows builds each flag's ref once and fans it out to every key's row id (split at the last `#`); it merges nothing and keys no dollar figure.",
+    },
+  },
   [`${ALLOC}/components/BridgeDrawer.tsx`]: {
     M2: {
       count: 5,

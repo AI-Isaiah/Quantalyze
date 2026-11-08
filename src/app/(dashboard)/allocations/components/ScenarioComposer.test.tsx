@@ -477,7 +477,7 @@ vi.mock("@/lib/diversification", async (importOriginal) => {
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
-import { EquityHistoryRebuilding } from "./EquityHistoryRebuilding";
+import { MissingDataMessage, missingDataLines } from "./MissingDataMessage";
 // Real (un-mocked) — used to build a valid current-schema draft so the
 // onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
 import {
@@ -703,6 +703,20 @@ function addStrategy(s: AddStrategyInput): void {
   act(() => {
     browseOnAdd!(s);
   });
+}
+
+// Phase 198 plan 01 (C6): the live strip's Sharpe is judged on the live baseline's own
+// record (194 D-15), and `makePayload`'s two-day baseline is withheld. A test that pins
+// "the live Sharpe reaches the strip" needs a record that clears the gate (400 days).
+function longLiveBaseline(): MyAllocationDashboardPayload["liveBaselineMetrics"] {
+  const start = Date.parse("2025-01-01T00:00:00Z");
+  return {
+    ...makePayload().liveBaselineMetrics,
+    equity: Array.from({ length: 400 }, (_, i) => ({
+      date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+      value: 1 + i * 0.001,
+    })),
+  };
 }
 
 // Build a baseline payload — every test extends/overrides specific fields.
@@ -3563,7 +3577,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // T_C_M4_live_ssr_lifted (M4) — live baseline read from payload
   // -------------------------------------------------------------------------
   it("T_C_M4_live_ssr_lifted KpiStrip's liveMetrics carries fields from payload.liveBaselineMetrics; adapter called once per render", () => {
-    const payload = makePayload();
+    // 198 plan 01: was pinned against the two-day default baseline (the ungated C6 Sharpe).
+    const payload = makePayload({ liveBaselineMetrics: longLiveBaseline() });
     render(
       <ScenarioComposer
         payload={payload}
@@ -3592,6 +3607,59 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // that call-count pin is retired — the holdings builder is deleted, so a
     // second holdings-path call is now structurally impossible, not merely
     // asserted-against.
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 198 plan 01 (D-06, research C6): the live strip's Sharpe is judged on
+  // the live baseline's own record through the shared book-figures module, as
+  // the Overview's at-a-glance panel judges it. Before, `metrics` carried the
+  // raw baseline Sharpe, so a short record printed an annualised figure the
+  // 194 D-15 gate withholds everywhere else.
+  // -------------------------------------------------------------------------
+  describe("198 plan 01: the live strip reads the shared, gated live Sharpe (C6)", () => {
+    function liveEquity(days: number) {
+      const start = Date.parse("2026-01-01T00:00:00Z");
+      return Array.from({ length: days }, (_, i) => ({
+        date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+        value: 1 + i * 0.001,
+      }));
+    }
+    function liveStripMetrics(days: number) {
+      const base = makePayload();
+      const payload = makePayload({
+        liveBaselineMetrics: {
+          ...base.liveBaselineMetrics,
+          sharpe: 1.2,
+          equity: liveEquity(days),
+        },
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      const props = vi.mocked(KpiStrip).mock.calls[0][0];
+      return {
+        metrics: props.metrics as unknown as { sharpe: number | null; twr: number | null },
+        liveMetrics: props.liveMetrics as unknown as { sharpe: number | null },
+      };
+    }
+
+    it("a 60-day live record: the strip's Sharpe is withheld (null), not the raw 1.2", () => {
+      const { metrics, liveMetrics } = liveStripMetrics(60);
+      expect(metrics.sharpe).toBeNull();
+      // The "Current book" tooltip never shows a Sharpe the primary cell withholds.
+      expect(liveMetrics.sharpe).toBeNull();
+    });
+
+    it("a 400-day live record: the strip's Sharpe is the stored 1.2, and the other fields are untouched", () => {
+      const { metrics, liveMetrics } = liveStripMetrics(400);
+      expect(metrics.sharpe).toBe(1.2);
+      expect(liveMetrics.sharpe).toBe(1.2);
+      expect(metrics.twr).toBe(0.05);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -18691,6 +18759,8 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     const payload = makePayload({
       equityDailyPoints: THREE_POINT_CURVE,
       equityHistoryState: "rebuilding",
+      // 198 plan 01: was pinned against the two-day default baseline (the ungated C6 Sharpe).
+      liveBaselineMetrics: longLiveBaseline(),
     });
     render(
       <ScenarioComposer
@@ -18747,6 +18817,8 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       equityDailyReturns: [],
       derivedCurveComputedAt: null,
       snapshotCount: null,
+      // 198 plan 01: was pinned against the two-day default baseline (the ungated C6 Sharpe).
+      liveBaselineMetrics: longLiveBaseline(),
       ...overrides,
     });
 
@@ -18925,19 +18997,14 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     held_back:
       "We are holding back your book's own history, so the comparison with your current book is not shown.",
   } as const;
-  // Review C3 round 3 WR-01: the Overview heading per class, written out
-  // literally for the same reason as the class table above. 170.6.2 D-04: each
-  // class has its own heading; only `rebuilding` promises a rebuild.
-  const OVERVIEW_HEADING_BY_CLASS = {
-    rebuilding: "Your equity history is being rebuilt",
-    read_failed: "We could not load your equity history",
-    needs_action: "Your equity history is waiting on a key",
-    held_back: "We are holding back your equity history",
-  } as const;
+  // Phase 198 plan 10 (D-01): the Overview's old class headings are retired
+  // with the generic panel, so there is no heading table here. Parity with the
+  // Overview message is by class, through the Exchanges link and the reload
+  // sentence.
   const EXCHANGES_HREF = "/profile?tab=exchanges";
 
   it.each(REASON_CLASSES)(
-    "rebuilding reason %s: the Scenario gives the %s line, the same class the Overview panel gives (SFH-C3-01)",
+    "rebuilding reason %s: the Scenario gives the %s line, the same class the Overview message gives (SFH-C3-01)",
     (reason, reasonClass) => {
       // The producer's shape for a non-ready book: no curve, no returns.
       const payload = makePayload({
@@ -18953,11 +19020,19 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
             allocatorId={ALLOCATOR_A}
             allocatorMandate={null}
           />
-          <EquityHistoryRebuilding reason={payload.equityHistoryRebuildReason} />
+          <MissingDataMessage
+            lines={missingDataLines({
+              gaps: [],
+              apiKeys: [],
+              rebuilding: true,
+              reason: payload.equityHistoryRebuildReason,
+              notSyncingKeys: null,
+            })}
+          />
         </>,
       );
       const scenario = screen.getByTestId("scenario-ownbook-rebuilding");
-      const overview = screen.getByTestId("overview-equity-rebuilding");
+      const overview = screen.getByTestId("overview-missing-data");
       expect(scenario.textContent).toBe(SCENARIO_LINE_BY_CLASS[reasonClass]);
       // Neither surface promises "appear once" (D-15).
       expect(scenario.textContent).not.toMatch(/appear once/);
@@ -18979,22 +19054,16 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
 
       // Review C3 round 2 WR-02: the Scenario says "being rebuilt" exactly
       // when the Overview's own reason line names the daily run that retries
-      // it. The panel's body is the same for every reason, and no heading
-      // names a daily run, so the match comes from the reason line alone.
+      // it. The message names no run for a held-back reason, so the match
+      // comes from the reason line alone.
       const rebuilding = reasonClass === "rebuilding";
       expect(/being rebuilt/.test(scenario.textContent ?? "")).toBe(rebuilding);
       expect(/\bdaily\b|once a day/i.test(overview.textContent ?? "")).toBe(rebuilding);
 
-      // Review C3 round 3 WR-01: the Overview heading follows the same class.
-      // For a held_back reason the heading and the Scenario both say the
-      // history is held back, and neither says "being rebuilt"; 170.6.2 D-04:
-      // only the `rebuilding` class says "being rebuilt".
-      const heading = within(overview).getByRole("heading", { level: 2 });
-      expect(heading.textContent).toBe(OVERVIEW_HEADING_BY_CLASS[reasonClass]);
+      // A held-back reason says so on the Scenario, and only a `rebuilding`
+      // class says "being rebuilt" (170.6.2 D-04).
       const heldBack = reasonClass === "held_back";
-      expect(/holding back/.test(heading.textContent ?? "")).toBe(heldBack);
       expect(/holding back/.test(scenario.textContent ?? "")).toBe(heldBack);
-      expect(/being rebuilt/.test(heading.textContent ?? "")).toBe(reasonClass === "rebuilding");
     },
   );
 
@@ -19032,27 +19101,39 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     },
   );
 
-  // Review C3 round 2 IN-01: the Overview panel fails closed through the same
-  // guard. An unknown reason or a prototype key used to reach
-  // `REASON_LINE[reason]` unguarded: an unknown string drew an empty line, and
-  // "constructor" handed React a function. It must render exactly what a book
-  // with no reason renders (the generic heading and body, no reason line).
+  // Review C3 round 2 IN-01: the Overview message fails closed through the same
+  // guard. An unknown reason or a prototype key used to reach the per-reason
+  // table unguarded: an unknown string drew an empty line, and "constructor"
+  // handed React a function. It must render exactly what a book with no reason
+  // renders (the one shipped fallback line).
   it.each([
     ["a reason this build does not know", "some_later_reason"],
     ["a prototype key", "constructor"],
   ] as const)(
-    "the Overview panel with reason %s renders the no-reason panel (IN-01, fail-closed)",
+    "the Overview message with reason %s renders what a null reason renders (IN-01, fail-closed)",
     (_label, reason) => {
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const message = (r: EquityHistoryRebuildReason | null) => (
+        <MissingDataMessage
+          lines={missingDataLines({
+            gaps: [],
+            apiKeys: [],
+            rebuilding: true,
+            reason: r,
+            notSyncingKeys: null,
+          })}
+        />
+      );
       try {
-        const { unmount } = render(<EquityHistoryRebuilding reason={null} />);
-        const generic = screen.getByTestId("overview-equity-rebuilding");
+        const { unmount } = render(message(null));
+        const generic = screen.getByTestId("overview-missing-data");
         const genericText = generic.textContent;
         const genericLines = generic.querySelectorAll("p").length;
+        expect(genericText).toContain("hidden for now");
         unmount();
 
-        render(<EquityHistoryRebuilding reason={reason as never} />);
-        const panel = screen.getByTestId("overview-equity-rebuilding");
+        render(message(reason as never));
+        const panel = screen.getByTestId("overview-missing-data");
         expect(panel.textContent).toBe(genericText);
         expect(panel.querySelectorAll("p").length).toBe(genericLines);
         expect(errorSpy).not.toHaveBeenCalled();

@@ -8,7 +8,8 @@
  * The underlying `liquidity_preference` enum value is unchanged; only the
  * SNAPSHOT row label + displayed value changed. A refactor that swaps a tier
  * label (e.g. "$10M+" ↔ "<$1M") would silently show allocators a wrong tier.
- * These pin the rename + the empty-state + the link-out target.
+ * These pin the rename + the empty-state + the link-out target (the link reads
+ * "Edit mandate" since Phase 198 plan 06).
  *
  * The panel reads `mandate` defensively off the payload via
  * `(props as Record<string, unknown>).mandate ?? .allocatorPreferences ?? null`
@@ -83,10 +84,48 @@ describe("MandateTabPanel — Minimum AUM rename + snapshot (M-1050)", () => {
     }
   });
 
-  it("always renders the 'Open Mandate form →' link to /profile?tab=mandate", () => {
+  it("always renders the 'Edit mandate' link to /profile?tab=mandate", () => {
     renderPanel(null);
-    const link = screen.getByRole("link", { name: /Open Mandate form/i });
+    const link = screen.getByRole("link", { name: "Edit mandate" });
     expect(link).toBeInTheDocument();
+    // The Profile page's own Mandate tab, not a retired allocations tab.
     expect(link.getAttribute("href")).toBe("/profile?tab=mandate");
+    // Phase 198 plan 06 (D-02): the old label is gone everywhere.
+    expect(screen.queryByRole("link", { name: /Open Mandate form/i })).toBeNull();
   });
+
+  // Phase 198 plan 06 (D-02, UI-SPEC "One data panel, never cards"): the snapshot
+  // and the edit link are ONE hairline panel, so the page reads as a data panel
+  // and not as two floating cards. Pinned by class token, since jsdom draws no
+  // CSS: one outer box (border, no rounding, no shadow) around both, and an
+  // interior hairline above the link row instead of a second outer box.
+  it.each([null, { liquidity_preference: "high" }])(
+    "the snapshot and the link sit in one square hairline panel (%j)",
+    (mandate) => {
+      renderPanel(mandate);
+      const snapshot = screen.getByTestId("mandate-snapshot");
+      const link = screen.getByRole("link", { name: "Edit mandate" });
+      const panel = snapshot.closest<HTMLElement>('[data-tab-panel="mandate"]');
+      expect(panel).not.toBeNull();
+      expect(panel!.contains(link)).toBe(true);
+
+      const tokens = (el: Element) => [...el.classList];
+      const panelTokens = tokens(panel!);
+      expect(panelTokens).toEqual(expect.arrayContaining(["border", "border-border", "bg-surface"]));
+      expect(panelTokens.some((t) => t.startsWith("rounded"))).toBe(false);
+      expect(panelTokens.some((t) => t.startsWith("shadow"))).toBe(false);
+
+      // Neither block draws its own outer box.
+      const row = link.closest<HTMLElement>("div")!;
+      for (const block of [snapshot, row]) {
+        const t = tokens(block);
+        expect(t, "no second outer border").not.toContain("border");
+        expect(t.some((x) => x.startsWith("rounded"))).toBe(false);
+        expect(t.some((x) => x.startsWith("shadow"))).toBe(false);
+      }
+      // The interior hairline sits above the link row.
+      expect(tokens(row)).toEqual(expect.arrayContaining(["border-t", "border-border"]));
+      expect(panel!.querySelectorAll("div.border, a.border")).toHaveLength(0);
+    },
+  );
 });

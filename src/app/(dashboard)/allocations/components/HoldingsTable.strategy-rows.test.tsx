@@ -444,7 +444,7 @@ describe("HoldingsTable — D-12-A union row states", () => {
     ) as HTMLElement;
   }
 
-  it("marked + NOT allocated: `— not allocated`, weight `—`, the tag, and Allocate…", () => {
+  it("marked + no amount: `— no amount entered`, weight `—`, the tag, and Allocate…", () => {
     const { container } = renderRows({
       strategies: [makeMarked({ id: "fresh", name: "Fresh Book" })],
     });
@@ -452,8 +452,12 @@ describe("HoldingsTable — D-12-A union row states", () => {
     expect(cells[0]).toContain("Fresh Book");
     expect(cells[0]).toContain("Own capital");
     expect(cells[2]).toBe("—");
-    // UI-SPEC copy, byte-exact: em-dash in the metric voice, then the caption.
-    expect(cells[3]).toBe("— not allocated");
+    // ROUTE-08 copy, byte-exact: em-dash in the metric voice, then the caption.
+    // The old two-word label called an own allocation unallocated; with no
+    // amount the truthful statement is that no amount was entered.
+    expect(cells[3]).toBe("— no amount entered");
+    // Negative pin (ROUTE-08): the old label appears in no cell of the row.
+    expect(cells.join("|")).not.toContain(["not", "allocated"].join(" "));
     const row = rowOf(container, "fresh");
     expect(
       within(row).getByRole("button", { name: "Allocate…" }),
@@ -702,7 +706,10 @@ describe("HoldingsTabPanel — Allocate… with props.portfolio === null", () =>
     renderPanel();
     const row = document.querySelector('[data-strategy-row="swan"]');
     expect(row).not.toBeNull();
-    expect(within(row as HTMLElement).getByText("not allocated")).toBeInTheDocument();
+    // ROUTE-08: an own-capital row with no amount says no amount was entered,
+    // never that it is not allocated.
+    expect(within(row as HTMLElement).getByText("no amount entered")).toBeInTheDocument();
+    expect(row?.textContent).not.toContain(["not", "allocated"].join(" "));
   });
 
   it("[D-12-A] a POSITION still reaches the surface — allocated money never vanishes", () => {

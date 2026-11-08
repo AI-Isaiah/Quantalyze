@@ -138,7 +138,10 @@ describe("AllocationDashboardV2: the ready-branch warm-up note follows the real 
       render(<AllocationDashboardV2 {...baseProps} {...shape} />);
       // The curve is on screen in both outcomes.
       expect(screen.getByTestId("mock-equity-chart")).toBeInTheDocument();
-      expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+      // 198-09 (D-01): a ready curve with nothing missing renders no missing-data
+      // section and no glance pointer to a note that is not there.
+      expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+      expect(document.body.textContent).not.toContain("Not shown: see the note below.");
       if (builderIsNull) {
         expect(screen.getByTestId("overview-factsheet-warmup")).toBeInTheDocument();
         expect(screen.queryByTestId("mock-factsheet-body")).toBeNull();

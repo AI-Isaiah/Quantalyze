@@ -33,6 +33,7 @@
  */
 
 import { Fragment, useMemo, useState, type CSSProperties } from "react";
+import type { FlaggedRows } from "../lib/flagged-position-map";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
@@ -61,6 +62,7 @@ import {
 // equality SHAPE is the defect, and a second literal pasted beside the first
 // reproduces it for the next status.
 import {
+  isCashHolding,
   keyNeedsAttention,
   keyAttentionChipLabel,
   UNTRUSTED_KEY_SET_NOUN,
@@ -70,6 +72,7 @@ import { holdingIsPriceGap } from "@/lib/holding-equity";
 import { OWN_CAPITAL } from "@/lib/capital-ownership";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { Button } from "@/components/ui/Button";
+import { dustHiddenLine } from "../lib/dust";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import type { StrategyRow } from "../lib/strategies-row-adapter";
 import {
@@ -219,6 +222,18 @@ interface HoldingsTableCommonProps {
    * table cannot disagree. Absent or 0 keeps "No holdings to display.".
    */
   openPositionCount?: number;
+  /**
+   * Phase 198 D-04 (legacy mode only). Ids of rows to leave unrendered because
+   * they are dust. The table still receives EVERY row, so nothing it computes
+   * from `holdings` moves when dust is hidden. Absent is the empty set.
+   */
+  hiddenRowIds?: ReadonlySet<string>;
+  /**
+   * Phase 198 plan 12 (legacy mode only). Marks flagged rows: a `Flagged` chip,
+   * a `Record outcome…` action, and one inline sub-row under the open row.
+   * Absent leaves every row as before.
+   */
+  flagged?: FlaggedRows;
   showRevoked?: boolean;
   onShowRevokedChange?: (next: boolean) => void;
   notesByHoldingScopeRef?: Record<
@@ -285,6 +300,8 @@ export function HoldingsTable(props: HoldingsTableProps) {
     <LegacyHoldingsTable
       holdings={props.holdings ?? []}
       openPositionCount={props.openPositionCount ?? 0}
+      hiddenRowIds={props.hiddenRowIds}
+      flagged={props.flagged}
       showRevoked={props.showRevoked ?? true}
       onShowRevokedChange={props.onShowRevokedChange ?? (() => {})}
       notesByHoldingScopeRef={props.notesByHoldingScopeRef ?? {}}
@@ -546,7 +563,7 @@ function StrategyRowsTable({
                     <>
                       <span className="font-metric">—</span>{" "}
                       <span className="text-caption text-text-muted">
-                        not allocated
+                        no amount entered
                       </span>
                     </>
                   ) : (
@@ -640,6 +657,8 @@ function StrategySortableHeader({
 interface LegacyProps {
   holdings: HoldingRow[];
   openPositionCount: number;
+  hiddenRowIds?: ReadonlySet<string>;
+  flagged?: FlaggedRows;
   showRevoked: boolean;
   onShowRevokedChange: (next: boolean) => void;
   notesByHoldingScopeRef: Record<
@@ -651,6 +670,8 @@ interface LegacyProps {
 function LegacyHoldingsTable({
   holdings,
   openPositionCount,
+  hiddenRowIds,
+  flagged,
   showRevoked,
   onShowRevokedChange,
   notesByHoldingScopeRef,
@@ -677,6 +698,13 @@ function LegacyHoldingsTable({
         }),
       ).length;
 
+  // Phase 198 D-04: dust ids are skipped at render only. Dust rows sit on
+  // trusted keys, so this never overlaps the untrusted-key filter above.
+  const renderedHoldings = hiddenRowIds
+    ? visibleHoldings.filter((h) => !hiddenRowIds.has(h.id))
+    : visibleHoldings;
+  const dustHiddenCount = visibleHoldings.length - renderedHoldings.length;
+
   const [expandedNoteRowId, setExpandedNoteRowId] = useState<string | null>(
     null,
   );
@@ -697,7 +725,13 @@ function LegacyHoldingsTable({
         </label>
       </div>
 
-      {visibleHoldings.length === 0 ? (
+      {renderedHoldings.length === 0 && dustHiddenCount > 0 ? (
+        // Phase 198 D-04: every row that would show is dust, so say so instead
+        // of reading as an empty book.
+        <p className="px-4 py-6 text-sm text-text-muted">
+          {dustHiddenLine(dustHiddenCount)}
+        </p>
+      ) : visibleHoldings.length === 0 ? (
         // Phase 170.4 D-02: tested on `holdings`, not `visibleHoldings`. A spot
         // row hidden by the untrusted-key filter is still a spot holding, so
         // the no-spot-holdings line would be false of it; that case keeps the
@@ -733,7 +767,7 @@ function LegacyHoldingsTable({
             </tr>
           </thead>
           <tbody>
-            {visibleHoldings.map((h) => {
+            {renderedHoldings.map((h) => {
               // D-16 site 3 — the per-row flag. The CHIP is per-status copy,
               // not one shared sentence: `revoked` means the venue asserted
               // the rejection, `sign_in_failed` means we could not sign in and
@@ -765,11 +799,12 @@ function LegacyHoldingsTable({
               return (
                 <Fragment key={h.id}>
                   <tr
+                    data-position-row={h.id}
                     className="border-b border-border transition-colors last:border-b-0 hover:bg-page/50"
                     style={{ minHeight: 44 }}
                   >
                     <td className="px-4 py-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium text-text-primary">
                           {venueLabel(h.venue)} · {h.symbol}
                         </span>
@@ -794,6 +829,22 @@ function LegacyHoldingsTable({
                             {UNKNOWN_KEY_STATUS_ROW_LABEL}
                           </span>
                         ) : null}
+                        {flagged?.flaggedRowIds.has(h.id) ? (
+                          <>
+                            <span className="rounded bg-surface-muted px-1.5 py-0.5 text-fixed-10 tracking-wider text-text-muted">
+                              Flagged
+                            </span>
+                            <button
+                              type="button"
+                              aria-expanded={flagged.openRowId === h.id}
+                              aria-controls={`flagged-outcome-${h.id}`}
+                              onClick={() => flagged.onToggle(h.id)}
+                              className="min-h-[44px] rounded px-2 text-xs text-accent underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+                            >
+                              Record outcome…
+                            </button>
+                          </>
+                        ) : null}
                       </div>
                       {h.key_label ? (
                         <div
@@ -805,7 +856,11 @@ function LegacyHoldingsTable({
                       ) : null}
                     </td>
                     <td className="px-4 py-2 text-xs text-text-secondary">
-                      {h.holding_type === "spot" ? "Spot" : "Derivative"}
+                      {isCashHolding(h)
+                        ? "Cash"
+                        : h.holding_type === "spot"
+                          ? "Spot"
+                          : "Derivative"}
                     </td>
                     <td className={numericCell}>
                       {nativeUnit !== null
@@ -859,6 +914,13 @@ function LegacyHoldingsTable({
                       />
                     </td>
                   </tr>
+                  {flagged?.openRowId === h.id ? (
+                    <tr id={`flagged-outcome-${h.id}`} data-testid="flagged-outcome-row">
+                      <td colSpan={TOTAL_COLUMNS} className="p-0">
+                        {flagged.renderOutcome(h.id)}
+                      </td>
+                    </tr>
+                  ) : null}
                   {isExpanded ? (
                     <HoldingNoteRow
                       rowId={h.id}

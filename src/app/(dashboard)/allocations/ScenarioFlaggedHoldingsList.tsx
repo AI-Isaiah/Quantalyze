@@ -10,6 +10,10 @@
  * mount. On 4xx the error surfaces inline; the form does NOT mount.
  *
  * Prop shape designed forward-looking per D-09 so Phase 10 extends rather than grafts.
+ *
+ * Phase 198 plan 12: `BannerSubRowContent` is exported so the Holdings position
+ * rows open this same outcome state machine inline; the Holdings mount of this
+ * list now receives only flags with no rendered position row.
  */
 
 import { Fragment, useState } from "react";
@@ -57,7 +61,7 @@ const COL_SPAN = 5;
 
 type BannerMode = "banner" | "allocated" | "rejected" | "dismissed";
 
-function BannerSubRowContent({
+export function BannerSubRowContent({
   h,
   matchDecisionsByHoldingRef,
   existingOutcomesByHoldingRef,

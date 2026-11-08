@@ -176,6 +176,73 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
     expect(screen.queryByTestId(TID)).toBeNull();
   });
 
+  // Phase 198 plan 09 (D-01, one fact one sentence). The missing-data message
+  // names a key for its range, so the exit note must not name it again; an exit
+  // the message does not name keeps its sentence. Without the filter the same
+  // key would be named twice, in two phrasings, one line apart.
+  describe("a key the missing-data message names is not named again by the exit note", () => {
+    const keyRow = (id: string, label: string) => ({
+      id,
+      exchange: "okx",
+      label,
+      is_active: true,
+      sync_status: "error",
+      last_sync_at: null,
+      sync_error: null,
+      disconnected_at: null,
+    });
+    const gapFor = (id: string) => ({
+      apiKeyIds: [id],
+      cause: "sync_failing" as const,
+      firstMissingDay: "2026-06-04",
+      ranges: [{ from: "2026-06-04", to: "2026-06-10" }],
+    });
+    const GAP_LINE =
+      "OKX — Main: no data for Jun 4, 2026 – Jun 10, 2026. Reconnect the key on the Exchanges page or wait for the next sync.";
+
+    function renderGaps(exits: Exit[], gaps: ReturnType<typeof gapFor>[] | undefined) {
+      return render(
+        <AllocationDashboardV2
+          {...baseProps}
+          apiKeys={[keyRow("id-Main", "Main"), keyRow("id-Zed", "Zed")] as never}
+          equityHistoryState="ready"
+          failingKeyExits={exits}
+          keyDataGaps={gaps}
+        />,
+      );
+    }
+
+    it("K1 named by a gap: the message names K1 and the exit note does not render", () => {
+      renderGaps([E("Main")], [gapFor("id-Main")]);
+      expect(screen.getByTestId("overview-missing-data").textContent).toContain(GAP_LINE);
+      expect(screen.queryByTestId(TID)).toBeNull();
+    });
+
+    it("a second exit with no gap entry: the exit note renders and names that key only", () => {
+      renderGaps([E("Main"), E("Zed")], [gapFor("id-Main")]);
+      expect(screen.getByTestId("overview-missing-data").textContent).toContain(GAP_LINE);
+      const note = screen.getByTestId(TID);
+      expect(note.textContent).toBe(
+        "The total counts Zed through Jun 3, 2026: its exchange key is failing to sync, so its capital is no longer counted after that day.",
+      );
+      expect(note.textContent).not.toContain("Main");
+    });
+
+    it("a gap whose key the owner's list does not label names nothing, so the exit note keeps that key", () => {
+      renderGaps([E("Ghost")], [gapFor("id-Ghost")]);
+      expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+      expect(screen.getByTestId(TID).textContent).toContain("Ghost");
+    });
+
+    it("no gaps at all (a legacy payload): the exit note renders exactly as it did", () => {
+      renderGaps([E("Main")], undefined);
+      expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+      expect(screen.getByTestId(TID).textContent).toBe(
+        "The total counts Main through Jun 3, 2026: its exchange key is failing to sync, so its capital is no longer counted after that day.",
+      );
+    });
+  });
+
   it("renders nothing when the list is empty or absent", () => {
     renderWith([]);
     expect(screen.queryByTestId(TID)).toBeNull();

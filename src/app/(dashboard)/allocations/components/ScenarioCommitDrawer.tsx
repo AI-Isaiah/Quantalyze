@@ -178,7 +178,7 @@ type SubmitState =
       failureReason: "partial" | "generic" | "stale_portfolio";
     };
 
-function generateIdempotencyKey(): string {
+export function generateIdempotencyKey(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }

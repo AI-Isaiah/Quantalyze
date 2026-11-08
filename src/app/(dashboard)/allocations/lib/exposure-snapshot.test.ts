@@ -102,4 +102,54 @@ describe("exposureSnapshotFromHoldings", () => {
     expect(snap!.slices.map((s) => s.apiKeyId).sort()).toEqual(["key-a", "key-b"]);
     expect(snap!.totalGrossUsd).toBe(65000);
   });
+  describe("ROUTE-08: cash rows are not exposure", () => {
+    const spot = (over: Partial<Row> & Pick<Row, "symbol" | "value_usd">) =>
+      row({ holding_type: "spot", venue: "binance", api_key_id: "key-a", side: "flat", ...over });
+
+    it("[BTC spot 40000, USDT spot 10000, BTC-PERP short 20000]: no USDT slice, gross 60000, net 20000, cash 10000", () => {
+      const snap = exposureSnapshotFromHoldings([
+        spot({ symbol: "BTC", value_usd: 40000 }),
+        spot({ symbol: "USDT", value_usd: 10000 }),
+        row({ symbol: "BTC-PERP", side: "short", value_usd: 20000 }),
+      ]);
+      expect(snap!.slices.map((s) => s.symbol).sort()).toEqual(["BTC", "BTC-PERP"]);
+      expect(snap!.totalGrossUsd).toBe(60000);
+      expect(snap!.totalNetUsd).toBe(20000);
+      expect(snap!.cashUsd).toBe(10000);
+    });
+
+    it("two cash rows of 0 and 0 give cashUsd 0, not null", () => {
+      const snap = exposureSnapshotFromHoldings([
+        spot({ symbol: "USDT", value_usd: 0 }),
+        spot({ symbol: "USDC", value_usd: 0 }),
+      ]);
+      expect(snap!.cashUsd).toBe(0);
+    });
+
+    it("no cash row gives cashUsd null (no fabricated zero)", () => {
+      const snap = exposureSnapshotFromHoldings([spot({ symbol: "BTC", value_usd: 40000 })]);
+      expect(snap!.cashUsd).toBeNull();
+    });
+
+    it("a book of only cash rows is a snapshot, not null: no slices, gross and net 0, the read day kept", () => {
+      const snap = exposureSnapshotFromHoldings([
+        spot({ symbol: "USDT", value_usd: 7000, asof: "2026-10-02" }),
+        spot({ symbol: "USDC", value_usd: 3000, asof: "2026-10-02" }),
+      ]);
+      expect(snap).not.toBeNull();
+      expect(snap!.slices).toEqual([]);
+      expect(snap!.totalGrossUsd).toBe(0);
+      expect(snap!.totalNetUsd).toBe(0);
+      expect(snap!.cashUsd).toBe(10000);
+      expect(snap!.asof).toBe("2026-10-02");
+    });
+
+    it("a stablecoin-named DERIVATIVE row is not cash (the rule is spot-only)", () => {
+      const snap = exposureSnapshotFromHoldings([
+        row({ symbol: "USDT", holding_type: "derivative", value_usd: 500 }),
+      ]);
+      expect(snap!.slices).toHaveLength(1);
+      expect(snap!.cashUsd).toBeNull();
+    });
+  });
 });

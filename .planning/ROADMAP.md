@@ -378,7 +378,7 @@ Plans:
 **Goal:** An allocator opening My allocation sees the book's return, risk and holdings at a glance (or exactly what is missing), "+ Allocation" opens the allocator's own flow, Holdings labels positions correctly, and the page has at most three tabs with each position listed once and dust hidden.
 **Requirements**: ROUTE-06, ROUTE-07, ROUTE-08, LEAN-06
 **Depends on:** Phase 194 (the book's values agree across Scenario and Holdings), Phase 195 (the Tweaks panel is already gone)
-**Plans:** 0 plans
+**Plans:** 13/13 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -394,7 +394,33 @@ Plans:
 UI changes are checked against `DESIGN.md` (Numbers Contract, data density principle, 9-State Matrix).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 198-01-PLAN.md — tracer: the Overview "Book at a glance" panel and the shared book-figures module (D-06), starting with npm ci
+- [x] 198-02-PLAN.md — pure rules: which spot symbols are cash, and which rows are dust (D-04)
+- [x] 198-03-PLAN.md — per-key missing-data gaps in the SSR payload (D-01)
+- [x] 198-04-PLAN.md — three tabs, legacy tab aliases and the D-02 fold table
+- [x] 198-05-PLAN.md — the allocator "+ Allocation" flow with the D-05 two-route write
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 198-06-PLAN.md — Risk and Mandate sections on the Overview
+- [x] 198-07-PLAN.md — cash out of exposure; the exposure drilldown removed
+- [x] 198-08-PLAN.md — header "+ Allocation" on every tab and the `/allocations?add=<strategyId>` entry that 196 links to (D-07)
+- [x] 198-13-PLAN.md — Holdings labels: no "not allocated", cash rows typed Cash
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 198-09-PLAN.md — the missing-data message naming key, days and action
+- [x] 198-11-PLAN.md — Holdings order, Positions header matching the glance, the dust control
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 198-10-PLAN.md — retire the old equity-history panel and its copy
+- [x] 198-12-PLAN.md — flagged positions listed once, then the phase-wide gates
+
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- D-08: this plan executes only after Phase 194.1 has merged into main and the phase branch is rebased on it. C1-C9 win over 198-UI-SPEC.md.
+- Dust uses strict comparisons: a position worth exactly $50, or exactly 0.1% of Book equity, is not dust.
+- D-08: this plan executes only after Phase 194.1 has merged into main and the phase branch is rebased on it. C1-C9 win over 198-UI-SPEC.md, and each override is named below.
+
+Execution starts only after Phase 194.1 merges, rebased on main (D-08).
 
 ### Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health
 
@@ -531,7 +557,7 @@ Plans:
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
 | 197. SCREEN | 0/0 | Not started | - |
-| 198. MYBOOK | 0/0 | Not started | - |
+| 198. MYBOOK | 13/13 | In Progress | - |
 | 199. MANAGERHOME | 0/0 | Not started | - |
 | 200. MANAGERKEYS | 0/0 | Not started | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |

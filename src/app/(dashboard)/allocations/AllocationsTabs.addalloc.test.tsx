@@ -1,21 +1,33 @@
 /**
- * Phase 116 / ADDALLOC-01/02/03 — context-aware "+ Allocation" header button.
+ * Phase 198 D-03 — the header "+ Allocation" opens the allocator's own flow on
+ * EVERY tab (AllocationsTabs.tsx).
  *
- * Pins the per-tab dispatch of the single header button (AllocationsTabs.tsx):
- *   - Holdings / Overview → label "+ Allocation", opens ContributionWizardOverlay
- *     inline (no navigation), aria-label states the real connect/CSV action.
- *   - Scenario → label "+ Strategy", opens the composer's StrategyBrowseDrawer
- *     (Task 2 seam), aria-label states the picker action; the wizard overlay
- *     does NOT open here.
- *   - Closing a header-triggered overlay returns focus to the header button.
- *   - onSuccess closes the overlay, returns focus, and refreshes the SSR payload.
+ * WHY this file exists: Phase 116 gave the header button three jobs (open the
+ * manager's wizard on Overview and Holdings, open the composer's picker on
+ * Scenario, open the wizard again on the rollback path). D-03 replaced all of
+ * them with one: an allocator picks a strategy and enters an amount in
+ * AddAllocationFlow, and never lands in the manager's strategy wizard from
+ * their own header. This pins that wiring:
+ *   - the label and accessible name are the same on every tab, Scenario and the
+ *     rollback (isUiV2 === false) surface included;
+ *   - the click mounts the flow (open, no deep link) and never WizardClient,
+ *     which this file mocks to a sentinel so ANY path into it is caught;
+ *   - the flow gets the held set (Holdings plus allocated outcomes), Book
+ *     equity and the stale flag from the payload;
+ *   - close and success return focus to the header button, and success is
+ *     announced through the page's polite live region and refreshes the
+ *     payload exactly once;
+ *   - the flow's callbacks keep one identity across a parent re-render (the 30s
+ *     Overview poll), or the flow's open effect would steal focus from a typing
+ *     allocator;
+ *   - the composer on Scenario gets no host Browse seam, so its own
+ *     "Browse strategies" stays the way to add a strategy to a model.
  *
- * Both overlays are mocked to lightweight marker stubs so this asserts the
- * WIRING (which overlay opens + focus return + no navigation) without pulling
- * WizardClient / the real composer into jsdom. Harness idiom copied from
+ * The flow, the composer and the WizardClient are mocked: this asserts the
+ * WIRING without pulling the real surfaces into jsdom. Harness idiom copied from
  * AllocationsTabs.scenario-composer.test.tsx.
  *
- * Local runs: touched allocations tests flake under parallelism — run with
+ * Local runs: touched allocations tests flake under parallelism, so run with
  * `--no-file-parallelism`.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -67,30 +79,23 @@ beforeEach(() => {
   vi.stubGlobal("localStorage", localStorageMock);
 });
 
-// --- Shared capture state for the ScenarioComposer stub (Task 2 host wiring) -
-// vi.hoisted so the hoisted vi.mock factory can reference it safely.
-const composerHarness = vi.hoisted(() => ({
-  // Whether the composer stub auto-registers its Browse-open handler on render.
-  // Task 2's pending-drain test flips this false to simulate the dynamic-import
-  // loading window (registration arrives late).
-  registerImmediately: true,
-  // The host's onRegisterOpenBrowse prop (composer calls it to hand the host an
-  // imperative open-Browse function). Captured so tests can register late.
-  captureRegister: null as null | ((open: () => void) => void),
-  // The host's onBrowseClosed prop (fired when the drawer closes so the host can
-  // restore focus). Captured so tests can drive a close.
-  captureBrowseClosed: null as null | (() => void),
-  // The host's onBrowseHandoff prop (fired on the composer's Browse → "Add your
-  // own" modal-to-modal handoff, which does NOT fire onBrowseClosed). Captured so
-  // the WR-01 focus-theft test can drive the handoff.
-  captureBrowseHandoff: null as null | (() => void),
-  // Spy standing in for the composer's imperative "open Browse" function.
-  browseOpenSpy: vi.fn(),
-  // Every onClose / onSuccess identity the tab-level ContributionWizardOverlay
-  // receives, in render order. The memoization test reads the last two to prove
-  // the handler references are referentially STABLE across a parent re-render.
-  contributeOnClose: [] as Array<() => void>,
-  contributeOnSuccess: [] as Array<((strategyId: string) => void) | undefined>,
+// --- Shared capture state for the stubs ------------------------------------
+// vi.hoisted so the hoisted vi.mock factories can reference it safely.
+const harness = vi.hoisted(() => ({
+  // The last props the flow stub received.
+  flowProps: null as null | {
+    open: boolean;
+    deepLink: { raw: string } | null;
+    heldStrategyIds: ReadonlySet<string>;
+    bookEquityUsd: number | null;
+    allKeysStale: boolean;
+  },
+  // Every onClose / onRecorded identity the flow receives, in render order. The
+  // memoization test reads the last two to prove the references are stable.
+  onClose: [] as Array<() => void>,
+  onRecorded: [] as Array<(announcement: string) => void>,
+  // The seam props the composer was rendered with (D-03 removed the seam).
+  composerSeamProps: [] as string[],
 }));
 
 // --- Panel / body stubs (shared with AllocationsTabs.test.tsx idiom) --------
@@ -105,84 +110,71 @@ vi.mock("./HoldingsTabPanel", () => ({
   HoldingsTabPanel: () => <div data-testid="holdings-body">HOLDINGS_BODY</div>,
 }));
 
-vi.mock("./OutcomesTabPanel", () => ({
-  OutcomesTabPanel: () => <div data-testid="outcomes-body">OUTCOMES_BODY</div>,
-}));
-
-vi.mock("./MandateTabPanel", () => ({
-  MandateTabPanel: () => <div data-testid="mandate-body">MANDATE_BODY</div>,
-}));
-
-vi.mock("./RiskTabPanel", () => ({
-  RiskTabPanel: () => <div data-testid="risk-body">RISK_BODY</div>,
-}));
-
 vi.mock("./ScenarioStub", () => ({
   ScenarioStub: () => (
     <div data-testid="scenario-stub-body">SCENARIO_STUB_BODY</div>
   ),
 }));
 
-// The tab-level onboarding overlay host. Marker stub: renders only when open,
-// with buttons that invoke the received onClose / onSuccess so the wiring
-// (focus return, refresh) is assertable without mounting WizardClient.
-vi.mock("./components/ContributionWizardOverlay", () => ({
-  ContributionWizardOverlay: (props: {
-    isOpen: boolean;
+// The manager's strategy wizard. A sentinel: if any header path mounts it, this
+// text appears and the test that expects its absence goes red.
+vi.mock("@/app/(dashboard)/strategies/new/wizard/WizardClient", () => ({
+  WizardClient: () => <div data-testid="wizard-client-sentinel">WIZARD</div>,
+}));
+
+// The allocator flow. A marker stub: a dialog named "Add allocation" only while
+// open, with buttons that drive the received callbacks, and the received props
+// captured for assertion.
+vi.mock("./components/AddAllocationFlow", () => ({
+  AddAllocationFlow: (props: {
+    open: boolean;
     onClose: () => void;
-    onSuccess?: (strategyId: string) => void;
+    onRecorded: (announcement: string) => void;
+    deepLink: { raw: string } | null;
+    heldStrategyIds: ReadonlySet<string>;
+    bookEquityUsd: number | null;
+    allKeysStale: boolean;
   }) => {
-    // Record the handler identities on EVERY render (open or not) so the
-    // memoization test can compare them across a forced parent re-render.
-    composerHarness.contributeOnClose.push(props.onClose);
-    composerHarness.contributeOnSuccess.push(props.onSuccess);
-    return props.isOpen ? (
-      <div data-testid="contribution-overlay-stub">
+    harness.flowProps = props;
+    // Recorded on EVERY render (open or not) so the memoization test can
+    // compare identities across a forced parent re-render.
+    harness.onClose.push(props.onClose);
+    harness.onRecorded.push(props.onRecorded);
+    if (!props.open) return null;
+    return (
+      <div role="dialog" aria-label="Add allocation">
         <button
           type="button"
-          data-testid="overlay-invoke-close"
+          data-testid="flow-invoke-close"
           onClick={() => props.onClose()}
         >
           close
         </button>
         <button
           type="button"
-          data-testid="overlay-invoke-success"
-          onClick={() => props.onSuccess?.("test-id")}
+          data-testid="flow-invoke-recorded"
+          onClick={() => {
+            // The real flow calls onRecorded, then onClose.
+            props.onRecorded("Allocation recorded: Test Strategy");
+            props.onClose();
+          }}
         >
-          success
+          recorded
         </button>
       </div>
-    ) : null;
+    );
   },
 }));
 
-// Minimal ScenarioComposer stub. Captures the Task-2 Browse seam props so the
-// host-side "+ Strategy" tests can drive registration + close. Registration is
-// done during render (ref-only host side effects, no setState) mirroring the
-// onRegisterOpen capture idiom of the sibling test.
 vi.mock("./components/ScenarioComposer", () => ({
-  ScenarioComposer: (props: {
-    onRegisterOpen?: (open: (row: unknown) => void) => void;
-    onScenarioSaved?: () => void;
-    onRegisterOpenBrowse?: (open: () => void) => void;
-    onBrowseClosed?: () => void;
-    onBrowseHandoff?: () => void;
-  }) => {
-    composerHarness.captureRegister = props.onRegisterOpenBrowse ?? null;
-    composerHarness.captureBrowseClosed = props.onBrowseClosed ?? null;
-    composerHarness.captureBrowseHandoff = props.onBrowseHandoff ?? null;
-    if (composerHarness.registerImmediately && props.onRegisterOpenBrowse) {
-      props.onRegisterOpenBrowse(composerHarness.browseOpenSpy);
-    }
+  ScenarioComposer: (props: Record<string, unknown>) => {
+    harness.composerSeamProps = [
+      "onRegisterOpenBrowse",
+      "onBrowseClosed",
+      "onBrowseHandoff",
+    ].filter((k) => props[k] !== undefined);
     return (
-      <div
-        data-testid="scenario-composer-body"
-        data-has-register-browse={props.onRegisterOpenBrowse ? "true" : "false"}
-        data-has-browse-closed={props.onBrowseClosed ? "true" : "false"}
-      >
-        SCENARIO_COMPOSER_BODY
-      </div>
+      <div data-testid="scenario-composer-body">SCENARIO_COMPOSER_BODY</div>
     );
   },
 }));
@@ -297,27 +289,22 @@ function setSearchParams(query: string): void {
   );
 }
 
-const ADD_ALLOCATION_NAME =
-  /Add allocation — connect an exchange or upload a CSV/i;
-const ADD_STRATEGY_NAME = /Add strategy — open the strategy picker/i;
+const ADD_NAME = /Add allocation — pick a strategy and enter an amount/i;
 
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
 
-describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 116)", () => {
+describe("AllocationsTabs — header '+ Allocation' opens the allocator flow on every tab (Phase 198 D-03)", () => {
   beforeEach(() => {
     lsStore.clear();
     mockReplace.mockReset();
     mockRefresh.mockReset();
     mockPush.mockReset();
-    composerHarness.registerImmediately = true;
-    composerHarness.captureRegister = null;
-    composerHarness.captureBrowseClosed = null;
-    composerHarness.captureBrowseHandoff = null;
-    composerHarness.browseOpenSpy.mockReset();
-    composerHarness.contributeOnClose.length = 0;
-    composerHarness.contributeOnSuccess.length = 0;
+    harness.flowProps = null;
+    harness.onClose.length = 0;
+    harness.onRecorded.length = 0;
+    harness.composerSeamProps = [];
     vi.mocked(useRouter).mockReturnValue({
       replace: mockReplace,
       refresh: mockRefresh,
@@ -328,277 +315,214 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
     } as unknown as ReturnType<typeof useRouter>);
   });
 
-  // -------------------------------------------------------------------------
-  // Task 1 — Holdings / Overview branch (ContributionWizardOverlay)
-  // -------------------------------------------------------------------------
+  // Each surface the button lives on, as [name, query, body to wait for, flag].
+  const SURFACES: ReadonlyArray<{
+    name: string;
+    query: string;
+    body: string;
+    rollback: boolean;
+  }> = [
+    { name: "Overview", query: "", body: "overview-v2", rollback: false },
+    {
+      name: "Holdings",
+      query: "tab=holdings",
+      body: "holdings-body",
+      rollback: false,
+    },
+    {
+      name: "Scenario",
+      query: "tab=scenario",
+      body: "scenario-composer-body",
+      rollback: false,
+    },
+    {
+      name: "Scenario rollback (isUiV2 false)",
+      query: "tab=scenario",
+      body: "scenario-stub-body",
+      rollback: true,
+    },
+  ];
 
-  it("T_ADDALLOC_1 overview (default tab): label '+ Allocation', opens the wizard overlay inline, no navigation", () => {
+  for (const surface of SURFACES) {
+    it(`T_ADDALLOC_1 ${surface.name}: label '+ Allocation', allocator accessible name, click opens the flow, never the manager wizard, no navigation`, async () => {
+      // WHY (D-03): an allocator must never be dropped into the manager's
+      // strategy wizard from their own header, on any tab or on the rollback
+      // path. The WizardClient sentinel is the proof of absence.
+      if (surface.rollback) lsStore.set("allocations.ui_v2", "false");
+      setSearchParams(surface.query);
+      render(<AllocationsTabs {...STUB_PROPS} />);
+      await screen.findByTestId(surface.body);
+
+      const btn = screen.getByRole("button", { name: ADD_NAME });
+      expect(btn).toHaveTextContent("+ Allocation");
+      // The retired per-tab labels are gone, so Scenario reads the same.
+      expect(screen.queryByRole("button", { name: /Add strategy/i })).toBeNull();
+      expect(screen.queryByRole("dialog", { name: "Add allocation" })).toBeNull();
+
+      fireEvent.click(btn);
+
+      expect(
+        screen.getByRole("dialog", { name: "Add allocation" }),
+      ).toBeInTheDocument();
+      expect(harness.flowProps?.open).toBe(true);
+      expect(harness.flowProps?.deepLink).toBeNull();
+      expect(screen.queryByTestId("wizard-client-sentinel")).toBeNull();
+      expect(mockPush).not.toHaveBeenCalled();
+      expect(mockReplace).not.toHaveBeenCalled();
+    });
+  }
+
+  it("T_ADDALLOC_2 the accessible name never mentions the Scenario tab", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const btn = screen.getByRole("button", { name: ADD_NAME });
+    expect(btn.getAttribute("aria-label")).not.toContain("Scenario tab");
+  });
+
+  it("T_ADDALLOC_3 the flow gets the held set (Holdings plus allocated outcomes), Book equity and the stale flag from the payload", () => {
+    // WHY: the commit route has no per-strategy uniqueness, so the held set is
+    // what stops a strategy already in the book being added a second time. A
+    // rejected outcome is a decision NOT to allocate and holds nothing.
+    setSearchParams("");
+    render(
+      <AllocationsTabs
+        {...STUB_PROPS}
+        allKeysStale
+        strategies={
+          [
+            { strategy_id: "s-held" },
+          ] as unknown as MyAllocationDashboardPayload["strategies"]
+        }
+        outcomes={
+          [
+            { kind: "allocated", replacement_strategy: { id: "s-outcome" } },
+            { kind: "rejected", replacement_strategy: { id: "s-rejected" } },
+          ] as unknown as MyAllocationDashboardPayload["outcomes"]
+        }
+        // The capped `outcomes` list can lose a held strategy (past 200 rows, or a
+        // null join); the uncapped id read is what still holds it.
+        heldOutcomeStrategyIds={["s-beyond-the-cap"]}
+      />,
+    );
+
+    const flow = harness.flowProps!;
+    expect(Array.from(flow.heldStrategyIds).sort()).toEqual([
+      "s-beyond-the-cap",
+      "s-held",
+      "s-outcome",
+    ]);
+    // 1 BTC at 60k, the one reported contribution.
+    expect(flow.bookEquityUsd).toBe(60_000);
+    expect(flow.allKeysStale).toBe(true);
+  });
+
+  it("T_ADDALLOC_4 focus return: closing the header-opened flow returns focus to the header button", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
 
-    const btn = screen.getByRole("button", { name: ADD_ALLOCATION_NAME });
-    expect(btn).toHaveTextContent("+ Allocation");
-    expect(screen.queryByTestId("contribution-overlay-stub")).toBeNull();
-
+    const btn = screen.getByRole("button", { name: ADD_NAME });
     fireEvent.click(btn);
+    fireEvent.click(screen.getByTestId("flow-invoke-close"));
 
-    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
-    // No navigation to the scenario tab (the retired bug).
-    for (const call of mockReplace.mock.calls) {
-      expect(String(call[0])).not.toContain("tab=scenario");
-    }
-  });
-
-  it("T_ADDALLOC_2 ?tab=holdings: label '+ Allocation', click opens the wizard overlay", async () => {
-    setSearchParams("tab=holdings");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("holdings-body");
-
-    const btn = screen.getByRole("button", { name: ADD_ALLOCATION_NAME });
-    expect(btn).toHaveTextContent("+ Allocation");
-    fireEvent.click(btn);
-    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
-  });
-
-  it("T_ADDALLOC_3 ?tab=scenario: label '+ Strategy' + picker aria; the wizard overlay does NOT open", async () => {
-    setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("scenario-composer-body");
-
-    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
-    expect(btn).toHaveTextContent("+ Strategy");
-    // The Holdings/Overview aria-label must NOT be present on the scenario tab.
-    expect(
-      screen.queryByRole("button", { name: ADD_ALLOCATION_NAME }),
-    ).toBeNull();
-
-    fireEvent.click(btn);
-    // Scenario dispatches to Browse (Task 2), never the wizard overlay.
-    expect(screen.queryByTestId("contribution-overlay-stub")).toBeNull();
-  });
-
-  it("T_ADDALLOC_4 focus return: closing the header-opened overlay returns focus to the header button", () => {
-    setSearchParams("");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-
-    const btn = screen.getByRole("button", { name: ADD_ALLOCATION_NAME });
-    fireEvent.click(btn);
-    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId("overlay-invoke-close"));
-
-    expect(screen.queryByTestId("contribution-overlay-stub")).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Add allocation" })).toBeNull();
     expect(document.activeElement).toBe(btn);
+    // A plain close records nothing, so it neither refreshes nor announces.
+    expect(mockRefresh).not.toHaveBeenCalled();
   });
 
-  it("T_ADDALLOC_5 onSuccess: closes the overlay, returns focus, refreshes exactly once", () => {
+  it("T_ADDALLOC_5 recorded: the success line is announced in the live region, the payload refreshes exactly once, focus returns once the flow closes", async () => {
+    // WHY: the flow's own success line says where the allocation landed, and the
+    // host owns the page's one polite live region and the refresh that makes the
+    // new row appear without waiting for the 30s poll.
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
 
-    const btn = screen.getByRole("button", { name: ADD_ALLOCATION_NAME });
+    const btn = screen.getByRole("button", { name: ADD_NAME });
     fireEvent.click(btn);
-    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("flow-invoke-recorded"));
+    // The microtask-clear idiom commits "" first, then the message.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
-    fireEvent.click(screen.getByTestId("overlay-invoke-success"));
-
-    expect(screen.queryByTestId("contribution-overlay-stub")).toBeNull();
-    expect(document.activeElement).toBe(btn);
+    expect(screen.getByTestId("allocations-tabs-live-region").textContent).toBe(
+      "Allocation recorded: Test Strategy",
+    );
     expect(mockRefresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "Add allocation" })).toBeNull();
+    expect(document.activeElement).toBe(btn);
   });
 
-  it("T_ADDALLOC_6 memoization: onClose/onSuccess identities are referentially STABLE across a parent re-render (no 30s-poll focus theft)", () => {
+  it("T_ADDALLOC_5b a throwing router.refresh is caught and breadcrumbed, and the announcement still lands", async () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    mockRefresh.mockImplementation(() => {
+      throw new Error("simulated route-handler 5xx");
+    });
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    fireEvent.click(screen.getByRole("button", { name: ADD_NAME }));
+    expect(() =>
+      fireEvent.click(screen.getByTestId("flow-invoke-recorded")),
+    ).not.toThrow();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(
+      warnSpy.mock.calls.some(
+        (c) => typeof c[0] === "string" && c[0].includes("router_refresh_failed"),
+      ),
+    ).toBe(true);
+    expect(screen.getByTestId("allocations-tabs-live-region").textContent).toBe(
+      "Allocation recorded: Test Strategy",
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("T_ADDALLOC_6 memoization: onClose/onRecorded identities are referentially STABLE across a parent re-render (no 30s-poll focus theft)", () => {
     // WHY (Rule 9): the Overview tab runs a 30s router.refresh() poll that
-    // re-renders AllocationsTabs. ContributionWizardOverlay's open-effect has
-    // deps [isOpen, onClose] and calls panelRef.focus() — so a NEW onClose
-    // identity on each poll re-runs that effect and yanks focus from the user's
-    // API-key input mid-typing. useCallback pins the identities; this test fails
-    // (identities differ) if either wrapper is unwrapped.
+    // re-renders AllocationsTabs. The flow's open effect has onClose in its deps
+    // and pulls focus into the panel, so a NEW onClose identity on each poll
+    // would yank focus from the amount the allocator is typing. useCallback pins
+    // the identities; this fails (identities differ) if either is unwrapped.
     setSearchParams("");
     const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
 
-    // Open the overlay so it (re)renders and captures the current handlers.
-    const btn = screen.getByRole("button", { name: ADD_ALLOCATION_NAME });
-    fireEvent.click(btn);
-    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
-
-    const closeBefore = composerHarness.contributeOnClose.at(-1);
-    const successBefore = composerHarness.contributeOnSuccess.at(-1);
+    fireEvent.click(screen.getByRole("button", { name: ADD_NAME }));
+    const closeBefore = harness.onClose.at(-1);
+    const recordedBefore = harness.onRecorded.at(-1);
     expect(closeBefore).toBeTypeOf("function");
-    expect(successBefore).toBeTypeOf("function");
+    expect(recordedBefore).toBeTypeOf("function");
 
-    // Force a parent re-render — the same mechanism the 30s Overview poll drives.
+    // Force a parent re-render, the same mechanism the 30s poll drives.
     rerender(<AllocationsTabs {...STUB_PROPS} />);
 
-    const closeAfter = composerHarness.contributeOnClose.at(-1);
-    const successAfter = composerHarness.contributeOnSuccess.at(-1);
     // A fresh render happened (a new identity was recorded to compare).
-    expect(composerHarness.contributeOnClose.length).toBeGreaterThan(1);
-    // Referentially stable across the re-render → the overlay's open-effect does
-    // not re-run, so focus is not stolen.
-    expect(closeAfter).toBe(closeBefore);
-    expect(successAfter).toBe(successBefore);
+    expect(harness.onClose.length).toBeGreaterThan(1);
+    expect(harness.onClose.at(-1)).toBe(closeBefore);
+    expect(harness.onRecorded.at(-1)).toBe(recordedBefore);
   });
 
-  // -------------------------------------------------------------------------
-  // Task 2 — Scenario "+ Strategy" → composer Browse signal (host side)
-  // -------------------------------------------------------------------------
-
-  it("T_ADDALLOC_S1 scenario: clicking '+ Strategy' invokes the registered Browse-open once, no navigation", async () => {
+  it("T_ADDALLOC_7 Scenario: the composer receives NO host Browse seam props (its own 'Browse strategies' is the way to add to a model)", async () => {
     setSearchParams("tab=scenario");
     render(<AllocationsTabs {...STUB_PROPS} />);
     await screen.findByTestId("scenario-composer-body");
-
-    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
-    fireEvent.click(btn);
-
-    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
-    for (const call of mockReplace.mock.calls) {
-      expect(String(call[0])).not.toContain("tab=scenario");
-    }
+    expect(harness.composerSeamProps).toEqual([]);
   });
 
-  it("T_ADDALLOC_S2 scenario: composer receives the onRegisterOpenBrowse + onBrowseClosed seam props", async () => {
-    setSearchParams("tab=scenario");
+  it("T_ADDALLOC_8 the Export chip still announces its redirect through the same live region", async () => {
+    setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    const body = await screen.findByTestId("scenario-composer-body");
-    expect(body.getAttribute("data-has-register-browse")).toBe("true");
-    expect(body.getAttribute("data-has-browse-closed")).toBe("true");
-  });
-
-  it("T_ADDALLOC_S3 pending drain: a click during the loading window opens Browse once registration arrives", async () => {
-    // Simulate the dynamic-import loading window: the composer mounts but does
-    // not register its Browse-open handler yet.
-    composerHarness.registerImmediately = false;
-    setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("scenario-composer-body");
-
-    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
-    fireEvent.click(btn);
-    // Nothing registered yet → no open call, but the click is NOT lost.
-    expect(composerHarness.browseOpenSpy).not.toHaveBeenCalled();
-
-    // Registration arrives (composer chunk resolved) → the pending click drains.
-    act(() => {
-      composerHarness.captureRegister?.(composerHarness.browseOpenSpy);
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    await act(async () => {
+      await Promise.resolve();
     });
-    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it("T_ADDALLOC_S6 scenario round-trip: a '+ Strategy' click before re-registration on remount drains via pending, not the stale unmounted setter (WR-02)", async () => {
-    // First visit: the composer registers its imperative Browse-open setter, so
-    // composerBrowseOpenRef points at THIS composer instance's setter.
-    setSearchParams("tab=scenario");
-    const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("scenario-composer-body");
-    expect(composerHarness.captureRegister).not.toBeNull();
-
-    // Leave the scenario tab → the composer unmounts. Simulate the remount's
-    // dynamic-import loading window on the return trip: the next mount will NOT
-    // re-register immediately.
-    composerHarness.registerImmediately = false;
-    setSearchParams("tab=holdings");
-    rerender(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("holdings-body");
-
-    // Return to scenario. The composer remounts but has not yet re-registered
-    // its Browse-open setter (pre-registration window). Clear the shared spy's
-    // call history so the next assertion reads only clicks from THIS window.
-    composerHarness.browseOpenSpy.mockReset();
-    setSearchParams("tab=scenario");
-    rerender(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("scenario-composer-body");
-
-    // Click "+ Strategy" in the pre-registration window. Without the WR-02 fix,
-    // composerBrowseOpenRef still holds the UNMOUNTED instance's setter, so the
-    // click takes the truthy-ref branch, calls the dead spy, and never sets the
-    // pending flag — the click is swallowed. With the fix the ref was nulled on
-    // leave, so the click falls through to the pending-drain path.
-    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
-    fireEvent.click(btn);
-    expect(composerHarness.browseOpenSpy).not.toHaveBeenCalled();
-
-    // Registration arrives (composer chunk finishes) → the pending click drains.
-    act(() => {
-      composerHarness.captureRegister?.(composerHarness.browseOpenSpy);
-    });
-    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it("T_ADDALLOC_S4 focus return: a header-initiated Browse close returns focus; a non-header close does not steal it", async () => {
-    setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("scenario-composer-body");
-
-    // Header-initiated open, then a close → focus returns to the header button.
-    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
-    fireEvent.click(btn);
-    act(() => {
-      composerHarness.captureBrowseClosed?.();
-    });
-    expect(document.activeElement).toBe(btn);
-
-    // A subsequent in-composer close (no prior header click) must NOT steal focus.
-    (document.activeElement as HTMLElement | null)?.blur();
-    act(() => {
-      composerHarness.captureBrowseClosed?.();
-    });
-    expect(document.activeElement).not.toBe(btn);
-  });
-
-  it("T_ADDALLOC_S7 scenario rollback (isUiV2===false): the ScenarioStub is mounted (composer NOT), and '+ Strategy' opens the wizard overlay instead of a silent no-op (ADDALLOC-03)", async () => {
-    // Seed the explicit opt-out so useCrossTabStorage's deferred mount-load
-    // decodes raw "false" → "explicit-false" → isUiV2 === false. The key name +
-    // "false" sentinel mirror UI_V2_STORAGE_KEY / uiV2FlagCodec in
-    // AllocationsTabs.tsx (parse: raw === "false" ? "explicit-false" : "default").
-    lsStore.set("allocations.ui_v2", "false");
-    setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-
-    // The rollback surface (ScenarioStub) mounts after the post-mount hydration
-    // flip; the V2 composer must NOT be present on this path.
-    await screen.findByTestId("scenario-stub-body");
-    expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
-
-    // The header button is still the scenario-tab "+ Strategy" (label + aria are
-    // driven by activeTab, independent of the V2/rollback gate).
-    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
-    expect(btn).toHaveTextContent("+ Strategy");
-
-    // On the rollback path there is no composer Browse to signal, so the
-    // registered Browse-open spy must NOT fire — and, per ADDALLOC-03, the click
-    // is NEVER a silent no-op: it opens the onboarding wizard overlay instead.
-    fireEvent.click(btn);
-    expect(composerHarness.browseOpenSpy).not.toHaveBeenCalled();
-    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
-  });
-
-  it("T_ADDALLOC_S5 no focus theft after a handoff: header-open → onAddOwn handoff → a later in-composer close does not steal focus (WR-01)", async () => {
-    setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    await screen.findByTestId("scenario-composer-body");
-
-    // Header-initiated Browse open — this arms the header focus-return flag.
-    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
-    fireEvent.click(btn);
-    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
-
-    // The user hands off Browse → "Add your own": the composer closes Browse and
-    // opens the contribute wizard WITHOUT firing onBrowseClosed (a modal-to-modal
-    // transition), but signals the handoff so the host disarms its flag.
-    expect(composerHarness.captureBrowseHandoff).not.toBeNull();
-    act(() => {
-      composerHarness.captureBrowseHandoff?.();
-    });
-
-    // Later, an independently in-composer-initiated Browse open + close fires
-    // onBrowseClosed. Move focus off the header button first so a steal would be
-    // observable. Without the WR-01 fix, the stale-armed flag yanks focus back to
-    // the "+ Strategy" button; with the fix, the handoff disarmed it.
-    (document.activeElement as HTMLElement | null)?.blur();
-    act(() => {
-      composerHarness.captureBrowseClosed?.();
-    });
-    expect(document.activeElement).not.toBe(btn);
+    const region = screen.getByTestId("allocations-tabs-live-region");
+    expect(region.textContent).toContain("Export");
+    expect(region.textContent).toContain("Holdings");
+    expect(region.getAttribute("aria-live")).toBe("polite");
   });
 });

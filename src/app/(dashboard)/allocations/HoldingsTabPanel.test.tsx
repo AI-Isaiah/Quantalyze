@@ -8,7 +8,7 @@ import { render } from "@testing-library/react";
  * Contract under test: HoldingsTabPanel joins `props.apiKeys`
  * (api_key.id → sync_status) onto `props.holdingsSummary` (api_key_id) so each
  * spot position carries the correct `source_key_sync_status`. F4b moved spot
- * positions to the secondary "Exchange Positions" section, rendered via the
+ * positions to the secondary "Positions" section, rendered via the
  * legacy `HoldingsTable` mode (the `holdings` prop), so the resolved status now
  * lives on `HoldingRow.source_key_sync_status` rather than the design-mode
  * `revokedStatusByHoldingId` map. The join must:
@@ -209,25 +209,34 @@ function renderP100(props: Record<string, unknown>) {
 }
 
 describe("HoldingsTabPanel — Watchlist/Optimizer + Notes (100-04 wiring)", () => {
-  it("mounts Exposure → Watchlist & Optimizer → Notes → Exchange Positions in order", () => {
+  it("mounts Positions → Exposure → Outcomes → Watchlist & Optimizer → Notes in order", () => {
+    // WHY (198 D-02): "what do I hold?" is the Holdings question, so Positions
+    // sits second, right under Strategies, and nothing was deleted: the retired
+    // Outcomes tab's content has its own section after Exposure.
     const { container } = renderP100({
       ...P100_BASE,
       favorites: [],
       optimizer: EMPTY_OPTIMIZER,
       note: { initialContent: "", initialLastSavedAt: null },
     });
-    const text = container.textContent ?? "";
-    const iExposure = text.indexOf("Exposure");
-    const iWatchOpt = text.indexOf("Watchlist & Optimizer");
-    const iNotes = text.indexOf("Notes");
-    const iExchange = text.indexOf("Exchange Positions");
-    expect(iExposure).toBeGreaterThanOrEqual(0);
-    expect(iWatchOpt).toBeGreaterThanOrEqual(0);
-    expect(iNotes).toBeGreaterThanOrEqual(0);
-    expect(iExchange).toBeGreaterThanOrEqual(0);
-    expect(iExposure).toBeLessThan(iWatchOpt);
-    expect(iWatchOpt).toBeLessThan(iNotes);
-    expect(iNotes).toBeLessThan(iExchange);
+    const panel = container.querySelector('[data-tab-panel="holdings"]')!;
+    const sectionHeadings = Array.from(panel.children)
+      .filter((el) => el.tagName === "SECTION")
+      .map((s) => s.querySelector("h3")?.textContent)
+      .filter((t): t is string => typeof t === "string");
+    expect(sectionHeadings).toEqual([
+      "Positions",
+      "Exposure",
+      "Outcomes",
+      "Watchlist & Optimizer",
+      "Notes", // DashboardNoteCard owns its own h3
+    ]);
+    // Notes is the last landmark; no element is still called "Exchange Positions".
+    const sections = Array.from(panel.children).filter((el) => el.tagName === "SECTION");
+    expect(sections[sections.length - 1].getAttribute("aria-label")).toBe("Notes");
+    expect(container.textContent ?? "").not.toContain("Exchange Positions");
+    // Strategies (the first child) comes before Positions.
+    expect(panel.children[0].tagName).not.toBe("SECTION");
 
     // Both new sections are real aria landmarks. (Matched via getAttribute — a
     // literal `&` in a CSS attribute selector trips jsdom's selector parser.)
@@ -346,14 +355,34 @@ describe("HoldingsTabPanel — grid tracks have a zero minimum (SC-1 H-1, H-2)",
     },
   );
 
-  it("the Exchange Positions section grid declares grid-cols-1", () => {
+  it.each(["Positions", "Outcomes"])("the %s section grid declares grid-cols-1", (heading) => {
     const { container } = renderEmpty();
     const section = Array.from(container.querySelectorAll("section")).find(
-      (s) => s.querySelector("h3")?.textContent === "Exchange Positions",
+      (s) => s.querySelector("h3")?.textContent === heading,
     );
-    expect(section, "Exchange Positions section missing").toBeDefined();
+    expect(section, `${heading} section missing`).toBeDefined();
     expect(classesOf(section!)).toContain("grid");
     expect(classesOf(section!)).toContain("grid-cols-1");
+  });
+
+  it("the Positions and Outcomes sections are landmarks labelled by their own headings", () => {
+    // WHY (198 D-02): the legacy ?tab=outcomes alias scrolls to #outcomes, and
+    // a screen reader reaches each section by its name.
+    const { container } = renderEmpty();
+    for (const [id, heading, headingId] of [
+      ["positions", "Positions", "holdings-positions-heading"],
+      ["outcomes", "Outcomes", "holdings-outcomes-heading"],
+    ]) {
+      const section = container.querySelector(`section#${id}`);
+      expect(section, `#${id} missing`).not.toBeNull();
+      expect(section!.getAttribute("aria-labelledby")).toBe(headingId);
+      const h = container.querySelector(`#${headingId}`);
+      expect(h?.textContent).toBe(heading);
+    }
+    // The retired Outcomes tab's content is inside the section, with its own empty state.
+    expect(
+      container.querySelector('section#outcomes [data-tab-panel="outcomes"]'),
+    ).not.toBeNull();
   });
 
   it("the Notes section is untouched (no grid)", () => {

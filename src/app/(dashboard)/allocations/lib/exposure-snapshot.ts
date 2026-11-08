@@ -17,10 +17,15 @@
  * the sum over keys. Net is SIGNED (D-P2): a short is negated, long and flat
  * pass through. An empty book is `null`, never a zero-filled snapshot (D-P7).
  *
+ * ROUTE-08: cash rows (`isCashHolding`) are not exposure. They build no slice
+ * and add to neither total; their summed value is `cashUsd`, null when no cash
+ * row was read. A book of only cash is a snapshot with no slices.
+ *
  * Pure and client-safe: the data-contract types come in TYPE-ONLY, there is no
  * Supabase client and no table name here (T-170.4-03).
  */
 
+import { isCashHolding } from "@/lib/closed-sets";
 import type { ExposureSlice, ExposureSnapshot } from "@/lib/portfolio-exposure";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
@@ -45,11 +50,16 @@ export function exposureSnapshotFromHoldings(
   const byGrain = new Map<string, ExposureSlice>();
   let newest: string | null = null;
   let oldest: string | null = null;
+  let cashUsd: number | null = null;
   for (const r of rows) {
     const side: ExposureSlice["side"] = r.side ?? "flat";
     const key = `${r.api_key_id}|${r.holding_type}|${r.venue}|${r.symbol}|${side}`;
     const existing = byGrain.get(key);
-    if (existing) {
+    if (isCashHolding(r)) {
+      // ROUTE-08: a cash balance is not exposure. It adds no slice and no total;
+      // it only feeds the Cash figure. The read-day stamp below still sees it.
+      cashUsd = (cashUsd ?? 0) + r.value_usd;
+    } else if (existing) {
       existing.valueUsd += r.value_usd;
       existing.signedValueUsd += signed(side, r.value_usd);
     } else {
@@ -76,5 +86,6 @@ export function exposureSnapshotFromHoldings(
     slices,
     totalGrossUsd: slices.reduce((a, s) => a + s.valueUsd, 0),
     totalNetUsd: slices.reduce((a, s) => a + s.signedValueUsd, 0),
+    cashUsd,
   };
 }

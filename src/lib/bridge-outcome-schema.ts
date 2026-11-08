@@ -74,6 +74,15 @@ export function mostMatureDelta(o: BridgeOutcome): number | null {
   return null;
 }
 
+/**
+ * The two date-window messages, declared once. `ALLOCATED_FIELDS` reads them for
+ * its refine and the allocator's add-allocation flow reads them for its
+ * client-side window check, so a field error has one source (198 plan 05, C4).
+ */
+export const OUTCOME_DATE_FUTURE_MESSAGE = "Date cannot be in the future";
+export const OUTCOME_DATE_TOO_OLD_MESSAGE =
+  "Date cannot be more than 365 days ago";
+
 export const ALLOCATED_FIELDS = z
   .object({
     percent_allocated: z.number().min(0.1).max(50),
@@ -89,13 +98,13 @@ export const ALLOCATED_FIELDS = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["allocated_at"],
-        message: "Date cannot be in the future",
+        message: OUTCOME_DATE_FUTURE_MESSAGE,
       });
     } else if (val.allocated_at < earliest) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["allocated_at"],
-        message: "Date cannot be more than 365 days ago",
+        message: OUTCOME_DATE_TOO_OLD_MESSAGE,
       });
     }
   });

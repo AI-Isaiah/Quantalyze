@@ -22,10 +22,19 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // the panels (review C3 WR-01: its count is measured against the real builder
 // in `AllocationDashboardV2.warmup.test.tsx`).
 //
-// The factsheet body mock renders a "Sharpe" label and the payload builder
+// The factsheet body mock renders a "Factsheet Sharpe" label and the payload builder
 // returns a non-null stub, so a regression that let the factsheet mount would
-// show a Sharpe label here. The "ready" case is the positive control: the same
-// mocks DO render the curve and the Sharpe label when the state allows it.
+// show that label here. The "ready" case is the positive control: the same
+// mocks DO render the curve and the label when the state allows it.
+// Phase 198 plan 01 (C7): the at-a-glance panel prints its own `Sharpe` cell
+// whatever the history state, so the mock's label is distinct from it.
+//
+// Phase 198 plan 09 (D-01, ROUTE-07): the generic "equity history" panel and its
+// four class headings are retired from the Overview. D-01 names the key and the
+// days, so a rebuilding book now gets `overview-missing-data`, a section under
+// the glance panel with one line per affected key (or one book-level line). The
+// assertions below that used to read the panel read that section instead, and a
+// negative arm pins that no reason prints the old headings.
 // ---------------------------------------------------------------------------
 
 const buildPayloadSpy = vi.fn((..._args: unknown[]) => ({ stub: true }));
@@ -48,7 +57,7 @@ vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
   FactsheetBody: ({ topSlot }: { topSlot?: React.ReactNode }) => (
     <div data-testid="mock-factsheet-body">
       {topSlot}
-      <span>Sharpe</span>
+      <span>Factsheet Sharpe</span>
     </div>
   ),
 }));
@@ -80,17 +89,18 @@ const REASON_LINES = [
     "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
   ],
   [
+    // 198-09 (D-01): the Overview says whose history: the book's.
     "awaiting_derivation",
-    "Your history is recomputed from each account's returns and cash flows once a day.",
+    "Book return and risk are recomputed once a day from each account's returns and cash flows. They appear after the next recompute.",
   ],
   [
     "derivation_rejected",
-    "The latest rebuild of your history did not pass its checks, so it is not shown.",
+    "The latest rebuild of your book's history did not pass its checks, so book return and risk are not shown.",
   ],
   [
     // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
     "history_read_failed",
-    "We could not load your history just now. Reload the page to try again.",
+    "We could not load your book's history just now. Reload the page to try again.",
   ],
   [
     // Review C2 round 3 R3-WR-03: the cause and the unlock, never "did not
@@ -107,20 +117,19 @@ const REASON_LINES = [
   readonly [NonNullable<MyAllocationDashboardPayload["equityHistoryRebuildReason"]>, string]
 >;
 
-// 170.6.2 D-04: the heading each reason renders, typed by hand (never read from
-// the component's map, which could not fail when the component changes).
-const HEADING_BY_REASON = [
-  ["duplicate_account", "Your equity history is waiting on a key"],
-  ["key_not_syncing", "Your equity history is waiting on a key"],
-  ["shared_account_no_working_key", "Your equity history is waiting on a key"],
-  ["history_read_failed", "We could not load your equity history"],
-  ["account_identity_pending", "Your equity history is being rebuilt"],
-  ["awaiting_derivation", "Your equity history is being rebuilt"],
-  ["derivation_rejected", "We are holding back your equity history"],
-  ["shared_account_history_truncated", "We are holding back your equity history"],
-] as const satisfies ReadonlyArray<
-  readonly [NonNullable<MyAllocationDashboardPayload["equityHistoryRebuildReason"]>, string]
->;
+// 198-09 (D-01): the four class headings of the retired panel (170.6.2 D-04),
+// typed by hand. No reason may print any of them on the Overview now.
+const RETIRED_HEADINGS = [
+  "Your equity history is waiting on a key",
+  "We could not load your equity history",
+  "Your equity history is being rebuilt",
+  "We are holding back your equity history",
+] as const;
+
+const REASONS = REASON_LINES.map(([reason]) => reason);
+
+const HIDDEN_FOR_NOW =
+  "The equity chart and the ratios built from it are hidden for now.";
 
 const baseProps = {
   portfolio: {
@@ -180,35 +189,25 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     buildPayloadSpy.mockClear();
   });
 
-  it("rebuilding: the rebuilding panel renders; no curve, no factsheet, no warm-up copy, no Sharpe; InsightStrip stays", () => {
+  it("rebuilding: the missing-data section renders under the glance; no curve, no factsheet, no warm-up copy, no Sharpe; InsightStrip stays", () => {
     render(
       <AllocationDashboardV2 {...baseProps} equityHistoryState="rebuilding" />,
     );
 
-    const panel = screen.getByTestId("overview-equity-rebuilding");
-    // Review round 1 (WR-04 / IN-03): a labelled region with an h2. The page
-    // h1 is the only heading above the panel, so an h3 fails axe
-    // `heading-order`; and a static panel is not a live region.
-    expect(
-      screen.getByRole("heading", {
-        level: 2,
-        name: "Your equity history is being rebuilt",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Your equity history is being rebuilt" }),
-    ).toBe(panel);
-    expect(panel).not.toHaveAttribute("role");
-    expect(panel).not.toHaveAttribute("aria-live");
-    expect(panel.textContent).toContain(
-      "Holdings and AUM on this page do not use that history.",
-    );
+    // D-01: a labelled region (a static section is not a live region). With no
+    // reason known the shipped sentence is the one line, so the Risk section's
+    // "See the note above." points at a note that exists.
+    const section = screen.getByTestId("overview-missing-data");
+    expect(screen.getByRole("region", { name: "What is missing" })).toBe(section);
+    expect(section).not.toHaveAttribute("role");
+    expect(section).not.toHaveAttribute("aria-live");
+    expect(section.textContent).toContain(HIDDEN_FOR_NOW);
 
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
     expect(screen.queryByTestId("mock-equity-chart")).toBeNull();
     expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
     expect(screen.queryByTestId("mock-factsheet-body")).toBeNull();
-    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText("Factsheet Sharpe")).toBeNull();
     // No KPI is even computed from a curve while rebuilding.
     expect(buildPayloadSpy).not.toHaveBeenCalled();
 
@@ -219,9 +218,9 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     // `baseProps` deliberately carries no `equityHistoryState` field.
     expect("equityHistoryState" in baseProps).toBe(false);
     render(<AllocationDashboardV2 {...baseProps} />);
-    expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-missing-data")).toBeInTheDocument();
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
-    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText("Factsheet Sharpe")).toBeNull();
   });
 
   // Review round 1 (WR-03 / SFH-05): the panel renders for every allocator
@@ -231,7 +230,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
   // "added up snapshots from several keys" (false for a single-key book) and
   // called holdings and AUM "current" directly under a banner saying
   // "Analytics may be stale".
-  it("the panel copy holds for a stale, single-key book and a first connect: no 'current', no 'earlier chart', no 'several keys'", () => {
+  it("the message copy holds for a stale, single-key book and a first connect: no 'current', no 'earlier chart', no 'several keys'", () => {
     render(
       <AllocationDashboardV2
         {...baseProps}
@@ -242,12 +241,13 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
     // The stale banner IS on screen, so the contradiction would be visible.
     expect(screen.getByTestId("dashboard-staleness-banner")).toBeInTheDocument();
-    const text = screen.getByTestId("overview-equity-rebuilding").textContent ?? "";
+    const text = screen.getByTestId("overview-missing-data").textContent ?? "";
     expect(text).not.toMatch(/\bcurrent\b/i);
     expect(text).not.toMatch(/earlier chart/i);
     expect(text).not.toMatch(/several keys/i);
-    // The duplicate-account cause is stated as conditional on more than one key.
-    expect(text).toContain("when more than one key reads it");
+    // 198-09: the retired body sentence's duplicate-account cause is gone, and
+    // with it the claim that holds only when more than one key reads an account.
+    expect(text).not.toContain("when more than one key reads it");
 
     cleanup();
     // First connect: no holdings yet, a sync in flight. The panel still renders
@@ -261,7 +261,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       />,
     );
     expect(
-      screen.getByTestId("overview-equity-rebuilding").textContent,
+      screen.getByTestId("overview-missing-data").textContent,
     ).not.toMatch(/earlier chart/i);
   });
 
@@ -283,7 +283,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       // absence below is the removed banner and not an empty tree.
       expect(
         screen.getByTestId(
-          state === "ready" ? "overview-equity-curve" : "overview-equity-rebuilding",
+          state === "ready" ? "overview-equity-curve" : "overview-missing-data",
         ),
       ).toBeTruthy();
       expect(
@@ -309,10 +309,10 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         equityHistoryState={value as never}
       />,
     );
-    expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-missing-data")).toBeInTheDocument();
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
     expect(screen.queryByTestId("mock-factsheet-body")).toBeNull();
-    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText("Factsheet Sharpe")).toBeNull();
     expect(buildPayloadSpy).not.toHaveBeenCalled();
   });
 
@@ -338,9 +338,9 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         hasSyncing
       />,
     );
-    const panel = screen.getByTestId("overview-equity-rebuilding");
+    const panel = screen.getByTestId("overview-missing-data");
     expect(panel.textContent).toContain(
-      "Your history is recomputed from each account's returns and cash flows once a day.",
+      "Book return and risk are recomputed once a day from each account's returns and cash flows. They appear after the next recompute.",
     );
     expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
     expect(screen.queryByText(/appear once/)).toBeNull();
@@ -348,7 +348,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
     expect(screen.queryByTestId("mock-equity-chart")).toBeNull();
     expect(screen.queryByTestId("mock-factsheet-body")).toBeNull();
-    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText("Factsheet Sharpe")).toBeNull();
     expect(buildPayloadSpy).not.toHaveBeenCalled();
   });
 
@@ -372,7 +372,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       ),
     ),
   )(
-    "rebuilding reason %s with %s: the panel renders that reason's line and the warm-up note does not (D-15)",
+    "rebuilding reason %s with %s: the message renders that reason's line and the warm-up note does not (D-15)",
     (reason, _shape, snapshotCount, equityCurveSource, line) => {
       render(
         <AllocationDashboardV2
@@ -383,14 +383,14 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
           equityCurveSource={equityCurveSource}
         />,
       );
-      const panelText = screen.getByTestId("overview-equity-rebuilding").textContent;
+      const panelText = screen.getByTestId("overview-missing-data").textContent;
       expect(panelText).toContain(line);
       // 170.6.2 D-03: no reason line or panel body promises a heal with "yet".
       expect(panelText).not.toMatch(/\byet\b/);
       expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
       expect(screen.queryByText(/appear once/)).toBeNull();
       expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
-      expect(screen.queryByText("Sharpe")).toBeNull();
+      expect(screen.queryByText("Factsheet Sharpe")).toBeNull();
       expect(buildPayloadSpy).not.toHaveBeenCalled();
     },
   );
@@ -418,8 +418,8 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
     expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
     expect(screen.getByTestId("mock-factsheet-body")).toBeInTheDocument();
-    expect(screen.getByText("Sharpe")).toBeInTheDocument();
-    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    expect(screen.getByText("Factsheet Sharpe")).toBeInTheDocument();
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
     // D-06: the builder receives the persisted returns, not a curve-derived series.
     expect(buildPayloadSpy).toHaveBeenCalledWith(
       baseProps.equityDailyPoints,
@@ -435,7 +435,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         equityHistoryRebuildReason={reason}
       />,
     );
-    const panel = screen.getByTestId("overview-equity-rebuilding");
+    const panel = screen.getByTestId("overview-missing-data");
     expect(panel.textContent).toContain(line);
     // 170.6.2 D-03: no reason line or panel body promises a heal with "yet".
     expect(panel.textContent).not.toMatch(/\byet\b/);
@@ -509,7 +509,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         equityHistoryNotSyncingKeyIds={ids}
       />,
     );
-    const panel = screen.getByTestId("overview-equity-rebuilding");
+    const panel = screen.getByTestId("overview-missing-data");
     expect(panel.textContent).toContain(line);
     // 170.6.2 D-03: every key arm and the panel body carry no "yet".
     expect(panel.textContent).not.toMatch(/\byet\b/);
@@ -523,11 +523,13 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
   });
 
-  // 170.6.2 D-04: every class has its own heading. The table is written out
-  // literally above, so a change to the component's map fails here.
-  it.each(HEADING_BY_REASON)(
-    "rebuilding reason %s: the h2 reads '%s' and labels the region",
-    (reason, heading) => {
+  // 198-09 (D-01): the four class headings are retired. No reason prints any of
+  // them, and none prints "We are holding back your equity history", which
+  // named nothing. The list is typed by hand above, so renaming a heading in
+  // the old component cannot hide a regression here.
+  it.each(REASONS)(
+    "rebuilding reason %s prints none of the four retired class headings",
+    (reason) => {
       render(
         <AllocationDashboardV2
           {...baseProps}
@@ -535,11 +537,76 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
           equityHistoryRebuildReason={reason}
         />,
       );
-      const panel = screen.getByTestId("overview-equity-rebuilding");
-      expect(
-        screen.getByRole("heading", { level: 2, name: heading }),
-      ).toBeInTheDocument();
-      expect(screen.getByRole("region", { name: heading })).toBe(panel);
+      for (const heading of RETIRED_HEADINGS) {
+        expect(screen.queryByText(heading)).toBeNull();
+        expect(screen.queryByRole("heading", { name: heading })).toBeNull();
+      }
+        expect(document.body.textContent).not.toContain(
+        "We are holding back your equity history",
+      );
+      // The one section carrying the reason is the missing-data one.
+      expect(screen.getAllByTestId("overview-missing-data")).toHaveLength(1);
     },
   );
+
+  // D-01, the point of the phase: a payload with a keyDataGaps entry names the
+  // key, the days and the action. The key is labelled through the one key-label
+  // rule, and the glance's sr-only pointer says where to read it.
+  it("a keyDataGaps entry for K1 prints K1's named line with its range, directly after the glance and before InsightStrip", () => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        apiKeys={[notSyncing("k1-0001", "binance", "Main")] as never}
+        equityHistoryState="rebuilding"
+        equityHistoryRebuildReason="key_not_syncing"
+        equityHistoryNotSyncingKeyIds={["k1-0001"]}
+        keyDataGaps={[
+          {
+            apiKeyIds: ["k1-0001"],
+            cause: "not_syncing",
+            firstMissingDay: "2026-10-03",
+            ranges: [{ from: "2026-10-03", to: "2026-10-11" }],
+          },
+        ]}
+      />,
+    );
+    const section = screen.getByTestId("overview-missing-data");
+    expect(section.textContent).toBe(
+      "What is missing" +
+        "Binance — Main: no data for Oct 3, 2026 – Oct 11, 2026. Reconnect the key on the Exchanges page or wait for the next sync.",
+    );
+    // One fact, one sentence: the gap line replaces the unnamed fallback.
+    expect(section.textContent).not.toContain("One of your keys");
+
+    const glance = screen.getByRole("region", { name: "Book at a glance" });
+    const insight = screen.getByTestId("mock-insight-strip");
+    const after = (a: Node, b: Node) =>
+      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(after(glance, section)).toBe(true);
+    expect(after(section, insight)).toBe(true);
+    expect(glance.nextElementSibling).toBe(section);
+
+    // The glance's pointer is bound to the message existing.
+    expect(glance.textContent).toContain("Not shown: see the note below.");
+    // The Risk section's pointer points at a note that exists.
+    expect(screen.getByText(/See the note above\./)).toBeInTheDocument();
+  });
+
+  it("a rebuilding book always has a note: every reason prints at least one line, so the glance pointer and the Risk pointer are true", () => {
+    for (const reason of [...REASONS, null]) {
+      render(
+        <AllocationDashboardV2
+          {...baseProps}
+          equityHistoryState="rebuilding"
+          equityHistoryRebuildReason={reason}
+        />,
+      );
+      const section = screen.getByTestId("overview-missing-data");
+      expect(section.querySelectorAll("p").length).toBeGreaterThanOrEqual(2);
+      expect(
+        screen.getByRole("region", { name: "Book at a glance" }).textContent,
+      ).toContain("Not shown: see the note below.");
+      cleanup();
+    }
+  });
 });

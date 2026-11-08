@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.29.0] - 2026-11-08 — Phase 197 SCREEN: discovery reads plainly and a shortlist can be compared
+## [0.133.30.0] - 2026-11-09 — Phase 197 SCREEN: discovery reads plainly and a shortlist can be compared
 
 ### Added
 - **Every discovery column says what period it covers.** Each metric header carries a second line naming the period and whether the stored figure is annualised ("full record, ann.", "last 6 months, not annualized"), with the definition in a tooltip. One label map, `src/components/strategy/discovery-columns.ts`, feeds the table header and the grid footer, and the sortable header's accessible name carries the full period (CLAR-01, D-05).
@@ -34,6 +34,48 @@ Found by the phase review (gsd-code-reviewer and silent-failure-hunter, three ro
 - **Verification is human_needed.** All 4 success criteria pass automatically. Browser-only items remain open in the phase UAT: the 375px and 1280px visual check, keyboard walks on `/discovery` and `/compare`, and the admin line on a real shared-account pair.
 - **No migration and no new API route.**
 - **Known limits, below MEDIUM, recorded in the phase review:** the partner read's page size equals the 1000-row cap. The `/browse` mount uses its own clock, so a UTC-midnight hydration mismatch is possible at an exact threshold (T-197-18, remedy once Phase 196 lands). The browse drawer still has no truncation notice.
+
+## [0.133.29.1] - 2026-11-09 — records: Phase 198 MYBOOK execution, review and verification
+
+### Notes
+- **Phase 198 records land on `main`:** the 13 plan SUMMARYs, `198-REVIEW.md` (three review and fix rounds), `198-SECURITY.md` (24 registered threats, all closed) and `198-VERIFICATION.md` (`human_needed`: 10/10 truths verified; a desktop and mobile visual pass is outstanding). The phase is NOT closed, because its verification has not passed.
+- ROADMAP ticks all 13 plan rows. The 198-08 row no longer names the next phase with the word "Phase", so hygiene rule 6e stays green. STATE's Last activity records the ship of #1226.
+- **TODOS books three entries:** `198-FD3-SIDEBAR-ADD-A-STRATEGY` (the founder's FD-3 follow-up), `198-SHARED-ACCOUNT-FALLBACK-UNNAMED` (the user-facing residual that survived three review rounds) and `198-ADD-DEEPLINK-UNMARKED-OWN` (a carry note owned by Phase 196).
+
+## [0.133.29.0] - 2026-11-09 — feat: MYBOOK, My allocation answers "how is my book doing" in three tabs
+
+### Added
+- **Three tabs: Overview, Holdings, Scenario** (Phase 198, D-01). The Outcomes, Risk and Mandate tabs are gone as tabs. `?tab=outcomes` lands on Holdings, and `?tab=risk` and `?tab=mandate` land on Overview with the `tab` param removed and a one-time scroll to the section (instant under reduced motion).
+- **A glance panel at the top of the Overview.** Book equity, return, Sharpe and Max DD come from one module, `lib/book-figures.ts`. The Scenario live strip and Holdings read the same module, so the three surfaces cannot disagree. Sharpe stays gated by `gateAnnualized`.
+- **The Overview now carries Risk and Mandate as sections.** Risk mounts only when the equity history reads ready. Mandate renders even when no key is eligible, so `?tab=mandate` always has a `#mandate` to land on.
+- **Missing data is named per key.** `MissingDataMessage` replaces the old rebuilding panel. Each line names the key and the missing range, labels come only from the owner's own key list, and a cause's fallback sentence prints unless every key it names already has its own line. The server derives the gaps (`keyDataGaps` in `queries.ts`, owner-filtered, server UTC day, no new query).
+- **Add an allocation from any tab.** The header `+ Allocation` opens a slide-over (`AddAllocationFlow`): pick a strategy, enter amount and date, submit. The flow routes an own strategy to `/api/portfolio-strategies/allocation` and any other strategy to `/api/allocator/scenario/commit` with an Idempotency-Key. Both routes are unchanged. Strategies already in the book and own strategies not marked own capital cannot be picked.
+- **`/allocations?add=<strategyId>` opens the flow pre-filled** (D-07, the entry Phase 196 links to). The id must be a UUID and must resolve against the allocator's browse list. It is stripped from the URL on open, so a reload never reopens the flow. A bad id logs `invalid_add_param`.
+- **Cash is its own exposure cell.** `CASH_SYMBOLS` and `isCashHolding` in `closed-sets.ts` mirror the analytics service's `STABLECOINS`, pinned member for member by a parity test. Cash leaves Gross, Net, Long, Short, the bar and the net exposure series. The Cash cell prints an em dash when no cash row was read.
+- **Dust is hidden behind a control** (D-04: under $50 or under 0.1% of Book equity, strict). Unpriced and untrusted rows are never dust, and totals still count every row.
+
+### Changed
+- **Holdings follows the D-02 order with an Outcomes section,** and positions are listed once. A match flag now attaches to its own row (`flagged-position-map.ts`). The flagged list keeps only flags with no rendered row.
+- **The Positions header captions derivatives that report no value,** and the spot Type cell prints `Cash` for stablecoins. An own-capital strategy row with no amount reads `— no amount entered` instead of "not allocated".
+- **The exposure card prints every value with `formatUsd`.** The key-label drilldown table is removed.
+- **The header no longer mounts the manager's strategy wizard** on any tab or on the rollback Scenario surface. `e2e/wizard-resume.spec.ts` reaches the wizard through the sidebar's `Add a Strategy`.
+
+### Fixed (review rounds 1 to 3, recorded in the phase's REVIEW)
+- **A save failure no longer always reads "failed part-way".** 400 and 422 (rolled back) say nothing was saved. 401 and 403 say signed out. 409, 5xx and network failures offer Retry on the same key. A 422 for a reused key with a different body says the save could not be confirmed.
+- **Retry re-sends the exact first request under the same Idempotency-Key.** The 30-second refresh can no longer change the body and turn a landed write into a duplicate on redo.
+- **The held set is read from every allocated outcome,** not from the 200 most recent, so a strategy already held is never offered again. The read fails loud through `assertOk`.
+- **Book equity shows a dash, not $0, when no holding reports a value.** The add flow refuses a third-party write when every key is stale, instead of storing a share computed from stale equity.
+- **An own-strategy 409 refreshes the page,** as `AllocateDialog` does. An archived strategy marked own capital is not called unmarked.
+- **The beyond-200 `?add=` notice no longer points at a search** that cannot reach the strategy.
+- **The seeded e2e finds the search box by its real role** (`searchbox`).
+
+### Tests
+- New suites for the glance, book figures, cash parity, dust, key data gaps, the missing-data message, tab aliases, the `?add` param, the add flow, exposure agreement (`gross + cash` equals Holdings plus open-position notional) and flagged rows. Each data-integrity and user-facing test was seen RED with its code neutered and restored byte-identical.
+- `e2e/allocations-add.spec.ts` is new and runs in the seeded CI job. The seeded spec-count pin moves 26 to 27 with it, and both sweep files gain an `/allocations?add=` row.
+
+### Notes
+- No migration, no API route change, no package added.
+- Recorded rather than fixed: a `shared_account_failing` key can still go unnamed beside a named one, which needs a change where the gaps are built (TODOS). A `?add=` link to an own strategy not marked own capital reaches the amount step and gets the route's 409. Phase 196 carries that, since nothing builds an `?add=` link yet.
 
 ## [0.133.28.3] - 2026-11-08 — fix: the Python intro snapshot never freezes a what-if book
 
