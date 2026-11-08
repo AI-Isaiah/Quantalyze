@@ -241,6 +241,7 @@ describe("TimeSeriesChart marks-start note, (d): only while the cash-settlement 
         markets: [],
         strategyName: "Synthetic",
         benchmarkPrices: { unavailable: true },
+        figureRecord: null,
       },
     );
     return { ...base, seriesByBasis: { mark_to_market: bundle } } as unknown as FactsheetPayload;
@@ -374,7 +375,7 @@ describe("TimeSeriesChart marks-trailing note (SFH-2 N1): says so when the marks
   it("is hidden while a mark-to-market bundle is drawn, and only the cumulative config carries it", () => {
     const bundle = deriveSeriesBundle(
       DATES.map((date, i) => ({ date, value: RETURNS[i] * 1.1 })),
-      { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Synthetic", benchmarkPrices: { unavailable: true } },
+      { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Synthetic", benchmarkPrices: { unavailable: true }, figureRecord: null },
     );
     const p = payloadWith({ marksTrailingSince: TRAILING_DAY, seriesByBasis: { mark_to_market: bundle } });
     expect(renderChart(p, cumulativeCfg, "mark_to_market").container.querySelector(TRAILING)).toBeNull();

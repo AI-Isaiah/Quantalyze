@@ -281,6 +281,11 @@ function rederiveArgs(view: FactsheetPayload): Parameters<typeof deriveSeriesBun
     // the field (hand-built) has no coverage information: BTC is the unavailable
     // form, never the bundled fixture.
     benchmarkPrices: view.benchmarkPrices ?? { unavailable: true },
+    // 194 D-15: the leverage arm and `windowView` re-derive on the view's own TOTAL
+    // record, so a levered or zoomed view gates exactly as the payload does (the total
+    // record withholds, never the selected window). Never a record built from a slice
+    // or from levered returns. A view without one is the unknown state.
+    figureRecord: view.figureRecord ?? null,
   };
 }
 

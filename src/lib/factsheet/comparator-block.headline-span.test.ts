@@ -20,9 +20,8 @@ const DAY = 86_400_000;
 const addDays = (d: string, n: number) =>
   new Date(Date.parse(`${d}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
 
-// 170.6 plan 11 (D-07): the suffix from `START` must span at least the 90-day annualization
-// floor (COMPARATOR_ANNUALIZATION_FLOOR_DAYS), or its Sharpe, CAGR and the rest are NaN by
-// design and the field-by-field oracle below would stop comparing them. 200 - 100 = 99 days.
+// 200 - 100 = 99 days from `START`: long enough that the suffix summary's Sharpe, CAGR and the
+// rest are well defined (194 D-16 removed the 90-day overlap gate that once made them NaN).
 const N = 200;
 const PPY = 365;
 const dates = Array.from({ length: N }, (_, i) => addDays("2025-01-01", i));

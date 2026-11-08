@@ -7,10 +7,22 @@ import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { recordCoversWindow } from "@/lib/factsheet/compute";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
-import { COMPARATOR_ANNUALIZATION_FLOOR_DAYS, comparatorAnnualizationWithheld } from "@/lib/factsheet/comparator-block";
 import { joinGuardPhrases } from "@/lib/factsheet/headline-basis";
 import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
+import {
+  VAR_METHOD_LINE,
+  gateAnnualized,
+  gatedValue,
+  shortTrackNote,
+  coveredDays,
+  widenedShortNote,
+  widenedWithheldReason,
+  withheldReason,
+  type FigureRecord,
+  type FigureState,
+  type RollingVerdict,
+} from "@/lib/figure-gate";
 import { pct, pctSigned, ppDelta, ratio, signed } from "./format";
 import { usePayload, useActiveComparator, useXRange } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, type Basis, type RangeScope } from "./basis-context";
@@ -310,15 +322,6 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
       ? null
       : comparatorPartialThrough(jointCmp.through, view.dates[view.dates.length - 1], COMPARATOR_CALENDARS[cmpKey]);
   const bnDated = bn != null && benchThrough != null ? `${bn} to ${isoToMonthDay(benchThrough)}` : bn;
-  // Phase 167.1.2 plan 07 (SC-5b) — observations per year for the Main Metrics
-  // warning, read from the payload this rail already renders. Absent (a stale
-  // cache) or not a positive finite number → undefined, and the warning hides.
-  const obsPerYear =
-    typeof payload.periodsPerYear === "number" &&
-    Number.isFinite(payload.periodsPerYear) &&
-    payload.periodsPerYear > 0
-      ? payload.periodsPerYear
-      : undefined;
   // Phase 169 D-12 / D-25 (SC5): the record length is stated one way, from the
   // calendar years compute() reports, at Years Observed and in the warning below.
   // Dividing the observation count by the basis read a sparse record short.
@@ -340,6 +343,37 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   const returnsSpan = selected ? null : headlineCoverageNote(payload.dataQuality, railBasis, "returns", { benchShown });
   const maxDdSpan = selected ? null : headlineCoverageNote(payload.dataQuality, railBasis, "maxdd", { benchShown });
 
+  // Phase 194 (D-04 as superseded by D-15, TRUST-05): ONE gate for the rail. The TOTAL
+  // record (`payload.figureRecord`, the same object at full history and inside a range)
+  // decides whether CAGR, Ann. Volatility, Sharpe, Sortino and Calmar show; the window
+  // shown only qualifies them with one muted note under a year. A selected range is never
+  // withheld for being short. In the Scenario composer the record is the blend's, so the
+  // note speaks of the blend (its engine is used only for blends, D-01).
+  const figureRec = payload.figureRecord ?? null;
+  const gateWindowSpan = selected ? coveredDays(scope.start, scope.end) : undefined;
+  const gateState = figureRec ? gateAnnualized(figureRec, gateWindowSpan) : "null";
+  const gateNote =
+    figureRec && gateState === "withheld"
+      ? withheldReason(scenarioMode ? "blend" : "record", figureRec)
+      : figureRec && gateState === "short"
+        ? shortTrackNote(scenarioMode ? "blend" : selected ? "range" : "record", gateWindowSpan ?? figureRec.spanDays ?? 0)
+        : null;
+  const gv = (value: number | null | undefined) => gatedValue(value, gateState);
+  // 194 D-16 (review round 2 WR-01): the benchmark's annualized cells are measured over the
+  // comparator's OWN covered span, which can be under a year while the strategy's record is not
+  // (a comparator whose data starts late). Its cells then carry the same muted note, naming the
+  // benchmark. Shown only while the cells show: D-19 withholds them with the strategy's total
+  // record, and a selected range's note already speaks of the window.
+  // 194 R5 SFH-M2 (D-17): a covered span that could not be read dashes those cells with no
+  // length to name; the reason is the gate's unreadable sentence, on a range as well as the
+  // whole record (the cells are dashed in both).
+  const benchNote =
+    bn != null && gateState !== "withheld" && hb != null && jointCmp.coveredSpanUnreadable
+      ? `${bn}: ${withheldReason("record", { ...(figureRec ?? UNKNOWN_RECORD), unreadable: true })}`
+      : bn != null && !selected && gateState !== "withheld" && hb != null && jointCmp.coveredShortSpanDays != null
+        ? `${bn}: ${shortTrackNote("record", jointCmp.coveredShortSpanDays)}`
+        : null;
+
   return (
     <aside className="flex flex-col gap-12">
       <StrategyThesisPanel />
@@ -354,17 +388,16 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           </Kpm>
         </Panel>
         <Panel title="Main Metrics" benchHeader={bnDated}>
-          {/* Phase 167.1.2 plan 07 (SC-5b): one year is the payload's own
-              annualisation basis (365 crypto / the book's blend basis), not a
-              fixed trading-day count. A payload with no basis shows no warning:
-              assuming one is the defect this replaced. The basis sets only the
-              threshold; the stated length is calendar years (Phase 169 D-12,
-              D-51). */}
-          {obsPerYear != null && m.n < obsPerYear && (
-            <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-              ⚠ Only {m.n} observations ({recordLength.years}y) — Sharpe / Sortino / Calmar below
-              have wide statistical confidence intervals. Conventional reliability threshold is
-              ≥ {obsPerYear} observations (1 year).
+          {/* Phase 194 (D-15): the amber observation-count sentence of 167.1.2 plan 07
+              is gone; `figure-gate-note` below is the one note, from the shared gate. */}
+          {gateNote && (
+            <p className="mb-2 text-fixed-10 italic text-text-muted" data-testid="figure-gate-note">
+              {gateNote}
+            </p>
+          )}
+          {benchNote && (
+            <p className="mb-2 text-fixed-10 italic text-text-muted" data-testid="bench-figure-gate-note">
+              {benchNote}
             </p>
           )}
           {spanNote && (
@@ -373,21 +406,16 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               {spanNote.text}
             </p>
           )}
-          {/* Phase 170.6 SFH-1 (founder override of O-5): the comparator's annualized figures
-              read "—" under the overlap floor (D-07). Say so beside the dashes, so a short
-              overlap is not mistaken for missing data. Muted italic, as the span notes above. */}
-          {bn != null && comparatorAnnualizationWithheld(hb) && (
-            <p className="mb-2 text-fixed-10 italic text-text-muted" data-testid="comparator-annualization-reason">
-              {bn} annualized figures need {COMPARATOR_ANNUALIZATION_FLOOR_DAYS} days of overlap.
-            </p>
-          )}
+          {/* 194 D-16 (review WR-01): the benchmark column follows D-15 like the strategy
+              column. The 170.6 "need 90 days of overlap" line is gone; the one muted note
+              above stands for both columns. D-19: the benchmark cells are withheld only with the strategy's TOTAL record (the same `gv`); no overlap or window length withholds them. */}
           <Kpm>
             <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pctSigned(m.cum_ret, 2)} bench={pctSigned(hb?.cum_ret, 2)} />
-            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pctSigned(m.cagr, 2)} bench={pctSigned(hb?.cagr, 2)} />
-            <Row label="Ann. Volatility" value={pct(m.ann_vol, 2)} bench={pct(hb?.ann_vol, 2)} />
-            <Row label="Sharpe" value={ratio(m.sharpe)} bench={ratio(hb?.sharpe)} accent />
-            <Row label="Sortino" value={ratio(m.sortino)} bench={ratio(hb?.sortino)} />
-            <Row label="Calmar" value={ratio(m.calmar)} bench={ratio(hb?.calmar)} />
+            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pctSigned(gv(m.cagr), 2)} bench={pctSigned(gv(hb?.cagr), 2)} />
+            <Row label="Ann. Volatility" value={pct(gv(m.ann_vol), 2)} bench={pct(gv(hb?.ann_vol), 2)} />
+            <Row label="Sharpe" value={ratio(gv(m.sharpe))} bench={ratio(gv(hb?.sharpe))} accent />
+            <Row label="Sortino" value={ratio(gv(m.sortino))} bench={ratio(gv(hb?.sortino))} />
+            <Row label="Calmar" value={ratio(gv(m.calmar))} bench={ratio(gv(hb?.calmar))} />
             <Row label="Skew" value={wr(signed(m.skew))} bench="" />
             <Row label="Kurtosis" value={wr(ratio(m.kurt))} bench="" />
           </Kpm>
@@ -423,8 +451,9 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           </Kpm>
         </Panel>
         <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
-        <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} />
-        {!selected && <CumulativeReturnsPanel />}
+        <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} record={figureRec} />
+        {/* D-04: the panel mounts at full history only, so `gateState` here is the RECORD-scope verdict. */}
+        {!selected && <CumulativeReturnsPanel figureState={gateState} />}
       </EditorialSection>
 
       <EditorialSection label="II" name="Risk">
@@ -440,8 +469,10 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
             <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
           </Kpm>
+          <p className="mt-2 text-fixed-10 italic text-text-muted" data-testid="var-method-line">{VAR_METHOD_LINE}</p>
         </Panel>
-        <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} />
+        {/* D-04 / D-15: the panel follows the windowed view, so it gets the same record-scope verdict as the headline rows. */}
+        <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} figureState={gateState} />
         <Panel title="Best / Worst Period">
           <table className="w-full text-fixed-11">
             <thead>
@@ -523,6 +554,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             joint={wholeRecordWithheld ? null : jointCmp.joint}
             withheldReason={jointCmp.flatLeg && !wholeRecordWithheld ? flatLegReason(selected ? "range" : "record") : undefined}
             reasonTestId="joint-flat-leg-reason"
+            annualizationNote={wholeRecordWithheld ? undefined : jointAnnualizationNote(jointCmp.jointAnnualization, figureRec)}
           />
         </EditorialSection>
       ) : jointCmp.jointWithheld && bn != null ? (
@@ -576,15 +608,36 @@ function EditorialSection({
   );
 }
 
+/**
+ * Phase 194 (D-11 as superseded by D-15): the one muted line under section IV's joint figures.
+ * Withheld only when the TOTAL record fails the gate (the wording names the record's own
+ * bound and count, never the overlap); short when the overlap is under a year. Absent marker,
+ * or a withheld verdict with no record to name, prints no line.
+ */
+const UNKNOWN_RECORD: FigureRecord = { spanDays: null, observations: null, crypto: false };
+
+function jointAnnualizationNote(
+  marker: ComparatorBlock["jointAnnualization"],
+  record: FigureRecord | null,
+): string | undefined {
+  if (!marker) return undefined;
+  if (marker.unreadable) return widenedWithheldReason("overlap", { ...(record ?? UNKNOWN_RECORD), unreadable: true });
+  if (marker.state === "withheld") return record ? widenedWithheldReason("overlap", record) : undefined;
+  return widenedShortNote("overlap", marker.days);
+}
+
 function BenchmarkMetricsBody({
   joint,
   withheldReason,
   reasonTestId = "joint-floor-reason",
+  annualizationNote,
 }: {
   joint: JointMetrics | null;
   withheldReason?: string;
   /** `joint-floor-reason` for the native-unit and paired-floor arms; the flat-leg arm passes its own. */
   reasonTestId?: "joint-floor-reason" | "joint-flat-leg-reason";
+  /** Phase 194: the overlap annualization line, rendered after the reason line when present. */
+  annualizationNote?: string;
 }) {
   // A null joint (withheld below the paired floor) reads "—" in every row.
   // The dash-never-accent rule (UI-SPEC §6) lives in `Row` itself, so the alpha
@@ -611,6 +664,11 @@ function BenchmarkMetricsBody({
       {withheldReason && (
         <p className="mt-2 text-fixed-11 text-text-muted" data-testid={reasonTestId}>
           {withheldReason}
+        </p>
+      )}
+      {annualizationNote && (
+        <p className="mt-2 text-fixed-11 text-text-muted" data-testid="joint-annualization-note">
+          {annualizationNote}
         </p>
       )}
     </Panel>
@@ -892,7 +950,16 @@ function count(v: number | null | undefined): string {
  * current value (the latest window, "—" when it has none), min, max, average. Lets a reader judge
  * how stable each rolling stat has been over the strategy's life.
  */
-function RollingMetricsPanel({ scope, wholeRecordWithheld }: { scope: RangeScope; wholeRecordWithheld: boolean }) {
+function RollingMetricsPanel({
+  scope,
+  wholeRecordWithheld,
+  record,
+}: {
+  scope: RangeScope;
+  wholeRecordWithheld: boolean;
+  /** The rail's TOTAL record (`payload.figureRecord`, read once in `MetricsColumn`). */
+  record: FigureRecord | null;
+}) {
   // Phase 103 (MTM-04 follow-through, Finding B): read the rolling arrays from the
   // basis view — the paired rolling CHARTS already render `view.strategyRolling*`
   // (MTM under the toggle), and the bundle carries the MTM arrays, so the summary
@@ -911,32 +978,96 @@ function RollingMetricsPanel({ scope, wholeRecordWithheld }: { scope: RangeScope
   // is the trailing 6-month window, the span whose 6 Month return the Returns panel already
   // dashes on a Withheld row (a trailing window can straddle the undated break), so it reads
   // "—" too, with no accent (`RollingRow` accents only a figure).
-  const stats = (arr: Array<number | null>) => {
+  // Phase 194 (D-11 as superseded by D-15): the payload's own verdict for the table's window
+  // (`view.rollingWindow.annualization`, set once by `deriveSeriesBundle`) withholds the same
+  // four cells, and ONE muted note says why, or says the window is under a year. Absent, the
+  // record is unknown: figures as the payload carries them, no note.
+  const verdict = view.rollingWindow?.annualization;
+  const stats = (arr: Array<number | null>, dash: boolean) => {
     const r = rollingStats(within(arr));
-    return wholeRecordWithheld ? { ...r, current: null, avg: null, min: null, max: null } : r;
+    return dash ? { ...r, current: null, avg: null, min: null, max: null } : r;
   };
-  const v = stats(view.strategyRollingVol);
-  const sh = stats(view.strategyRollingSharpe);
-  const so = stats(view.strategyRollingSortino);
+  const dashRows = wholeRecordWithheld || verdict?.state === "withheld";
+  const note = rollingVerdictNote(verdict, record);
+  // Phase 194 (D-14, ADDITIVE): from 365 days the payload also carries a 365-calendar-day window
+  // (`null` under that, so a shorter basis view never shows the cash view's window). It is a
+  // SECOND table after the row-window one, never a replacement or a retitle of it. Its own
+  // verdict is read the same way, so a record failing the gate dashes it too. A window of a
+  // year or more shows plain: it has no note.
+  const view1y = view.rollingWindow1y ?? null;
+  const vol1y = view.strategyRollingVol1y ?? null;
+  const sharpe1y = view.strategyRollingSharpe1y ?? null;
+  const sortino1y = view.strategyRollingSortino1y ?? null;
+  const dash1y = wholeRecordWithheld || view1y?.annualization?.state === "withheld";
   return (
-    <Panel title={`Rolling Metrics (${view.rollingWindow?.label ?? "6mo"})`}>
-      <table className="w-full text-fixed-12">
-        <thead>
-          <tr className="border-b border-border/60">
-            <th className="py-1 pr-2 text-left font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Metric</th>
-            <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Now</th>
-            <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Avg</th>
-            <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Min</th>
-            <th className="py-1 pl-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Max</th>
-          </tr>
-        </thead>
-        <tbody>
-          <RollingRow label="Volatility" fmt="pct" stats={v} />
-          <RollingRow label="Sharpe" fmt="num" stats={sh} accent />
-          <RollingRow label="Sortino" fmt="num" stats={so} />
-        </tbody>
-      </table>
-    </Panel>
+    <>
+      <Panel title={`Rolling Metrics (${view.rollingWindow?.label ?? "6mo"})`}>
+        {note && (
+          <p className="mb-2 text-fixed-10 italic text-text-muted" data-testid="rolling-annualization-note">
+            {note}
+          </p>
+        )}
+        <RollingTable
+          v={stats(view.strategyRollingVol, dashRows)}
+          sh={stats(view.strategyRollingSharpe, dashRows)}
+          so={stats(view.strategyRollingSortino, dashRows)}
+        />
+      </Panel>
+      {view1y != null && vol1y != null && sharpe1y != null && sortino1y != null && (
+        <div data-testid="rolling-metrics-1y">
+          <Panel title="Rolling Metrics (1y)">
+            <RollingTable v={stats(vol1y, dash1y)} sh={stats(sharpe1y, dash1y)} so={stats(sortino1y, dash1y)} />
+          </Panel>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Phase 194 (D-11, D-15): the one muted line under the row-window table. The `gate` and `record`
+ * causes are different sentences from `figure-gate.ts`; a short window names its day count. The
+ * `record` sentence reads only a day count, so a blend with no record still gets it from the
+ * verdict's own `days`.
+ */
+function rollingVerdictNote(verdict: RollingVerdict | undefined, record: FigureRecord | null): string | null {
+  if (!verdict) return null;
+  if (verdict.state === "withheld") {
+    if (verdict.cause === "record") {
+      return widenedWithheldReason("rolling-record", record ?? { spanDays: verdict.days, observations: null, crypto: false });
+    }
+    return record ? widenedWithheldReason("rolling", record) : null;
+  }
+  if (verdict.state === "short" && verdict.days != null) return widenedShortNote("rolling", verdict.days);
+  return null;
+}
+
+function RollingTable({
+  v,
+  sh,
+  so,
+}: {
+  v: ReturnType<typeof rollingStats>;
+  sh: ReturnType<typeof rollingStats>;
+  so: ReturnType<typeof rollingStats>;
+}) {
+  return (
+    <table className="w-full text-fixed-12">
+      <thead>
+        <tr className="border-b border-border/60">
+          <th className="py-1 pr-2 text-left font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Metric</th>
+          <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Now</th>
+          <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Avg</th>
+          <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Min</th>
+          <th className="py-1 pl-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Max</th>
+        </tr>
+      </thead>
+      <tbody>
+        <RollingRow label="Volatility" fmt="pct" stats={v} />
+        <RollingRow label="Sharpe" fmt="num" stats={sh} accent />
+        <RollingRow label="Sortino" fmt="num" stats={so} />
+      </tbody>
+    </table>
   );
 }
 
@@ -970,7 +1101,7 @@ function RollingRow({
  * 1Y / 3Y / 5Y / inception. Distinct from the "Returns" panel (which is the
  * trailing-window snapshot); this one walks every period for skim-readers.
  */
-function CumulativeReturnsPanel() {
+function CumulativeReturnsPanel({ figureState }: { figureState: FigureState }) {
   // Phase 103 (MTM-04, root-cause flip): the WHOLE panel follows the active basis.
   // Every row is a calendar window from compute() on the active basis, read from
   // the VIEW's strategyMetrics (the bundle's compute() on the MTM series under
@@ -1005,7 +1136,8 @@ function CumulativeReturnsPanel() {
         {m.p3y != null && <Row label="3 Year" value={pctSigned(m.p3y, 2)} bench="" />}
         {m.p5y != null && <Row label="5 Year" value={pctSigned(m.p5y, 2)} bench="" />}
         <Row label="Since Inception" value={pctSigned(m.cum_ret, 2)} bench="" accent />
-        <Row label="CAGR" value={pctSigned(m.cagr, 2)} bench="" />
+        {/* Phase 194 (D-04 as superseded by D-15): the one rail CAGR plan 04 did not route. */}
+        <Row label="CAGR" value={pctSigned(gatedValue(m.cagr, figureState), 2)} bench="" />
       </Kpm>
     </Panel>
   );
@@ -1057,6 +1189,7 @@ function ExtendedMetricsPanel({ wholeRecordWithheld }: { wholeRecordWithheld: bo
         <Row label="Ulcer Index" value={wr(pct(m.ulcer_index, 2))} bench="" />
         <Row label="Avg Win / Avg Loss" value={wr(ratioStr(m.avg_win, m.avg_loss))} bench="" />
       </Kpm>
+      <p className="mt-2 text-fixed-10 italic text-text-muted" data-testid="var-method-line">{VAR_METHOD_LINE}</p>
     </Panel>
   );
 }

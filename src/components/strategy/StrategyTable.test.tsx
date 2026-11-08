@@ -1538,3 +1538,315 @@ describe("StrategyTable - Verified check follows the public trust signal (Phase 
     expect(container.querySelector(CHECK)).toBeNull();
   });
 });
+
+// --- Phase 194 plan 06 (D-15): the CAGR cell is gated by the row's TOTAL record ---
+
+/** One named column's cell on the single rendered data row. */
+function metricCell(label: string): HTMLElement {
+  const headers = Array.from(document.querySelectorAll("thead th"));
+  const idx = headers.findIndex((th) => th.textContent?.replace(/\s+/g, "").startsWith(label));
+  if (idx < 0) throw new Error(`no header named ${label}`);
+  const row = document.querySelector("tbody tr") as HTMLElement;
+  return row.querySelectorAll("td")[idx] as HTMLElement;
+}
+
+/** A published row whose record is given by the three D-15 scalars and its asset class. */
+function recordRow(opts: {
+  assetClass: "crypto" | "traditional";
+  start: string;
+  end: string;
+  observations?: number | null;
+  analytics?: Partial<StrategyAnalytics>;
+}): StrategyWithAnalytics {
+  const s = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar", asset_class: opts.assetClass });
+  s.analytics = makeAnalytics({
+    strategy_id: STRATEGY_ID_A,
+    series_start: opts.start,
+    series_end: opts.end,
+    record_observations: opts.observations ?? null,
+    ...opts.analytics,
+  });
+  return s;
+}
+
+describe("StrategyTable - the CAGR cell follows D-15's total record (phase 194 plan 06)", () => {
+  it("a crypto row spanning 89 days is withheld: a toneless dash whose reason is in title and sr-only text", () => {
+    render(
+      <StrategyTable
+        strategies={[recordRow({ assetClass: "crypto", start: "2026-01-01", end: "2026-03-30" })]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    const cell = metricCell("CAGR");
+    expect(cell.textContent).toContain("—");
+    expect(cell.textContent).not.toContain("18.00%");
+    expect(cell.className).toContain("text-text-muted");
+    expect(cell.className).not.toContain("text-text-primary");
+    const reason = "Withheld until the record reaches 90 days (89 days so far).";
+    expect(cell.querySelector(`[title="${reason}"]`)).not.toBeNull();
+    expect(cell.querySelector(".sr-only")?.textContent).toBe(reason);
+  });
+
+  it("a crypto row with 89 calendar days is withheld whatever its stored count: the crypto bound is days, so the asset class must reach the gate", () => {
+    // 89 observations pass a non-crypto row's 60-observation bound; only the
+    // strategy's asset_class makes this row crypto and so withholds it.
+    render(
+      <StrategyTable
+        strategies={[
+          recordRow({ assetClass: "crypto", start: "2026-01-01", end: "2026-03-30", observations: 89 }),
+        ]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(metricCell("CAGR").textContent).toContain("89 days so far");
+    expect(metricCell("CAGR").textContent).not.toContain("18.00%");
+  });
+
+  it("a crypto row spanning 90 days shows its stored CAGR with the <1y marker and its reason", () => {
+    render(
+      <StrategyTable
+        strategies={[recordRow({ assetClass: "crypto", start: "2026-01-01", end: "2026-03-31" })]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    const cell = metricCell("CAGR");
+    expect(cell.textContent).toContain("18.00%");
+    const marker = cell.querySelector('[title^="Annualized from"]') as HTMLElement;
+    expect(marker.textContent).toContain("<1y");
+    expect(marker.getAttribute("title")).toBe("Annualized from 90 days of record, under one year.");
+    expect(marker.querySelector(".sr-only")?.textContent).toContain("Annualized from 90 days of record");
+  });
+
+  it("a non-crypto row with 59 observations is withheld, with 60 (spanning 84 days) it shows <1y", () => {
+    const { unmount } = render(
+      <StrategyTable
+        strategies={[
+          recordRow({ assetClass: "traditional", start: "2026-01-01", end: "2026-03-26", observations: 59 }),
+        ]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(metricCell("CAGR").textContent).toContain("—");
+    expect(metricCell("CAGR").textContent).toContain("Withheld until the record reaches 60 trading days (59 so far).");
+    unmount();
+    render(
+      <StrategyTable
+        strategies={[
+          recordRow({ assetClass: "traditional", start: "2026-01-01", end: "2026-03-26", observations: 60 }),
+        ]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(metricCell("CAGR").textContent).toContain("18.00%");
+    expect(metricCell("CAGR").textContent).toContain("<1y");
+  });
+
+  it("a non-crypto row with no stored count and 89 days is withheld (the interim fallback)", () => {
+    render(
+      <StrategyTable
+        strategies={[recordRow({ assetClass: "traditional", start: "2026-01-01", end: "2026-03-30" })]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(metricCell("CAGR").textContent).toContain("—");
+    expect(metricCell("CAGR").textContent).toContain("89 days so far");
+  });
+
+  it("Return %, Max DD and 6 Month on a withheld row keep their stored values", () => {
+    render(
+      <StrategyTable
+        strategies={[recordRow({ assetClass: "crypto", start: "2026-01-01", end: "2026-03-30" })]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(metricCell("Return").textContent).toContain("42.00%");
+    expect(metricCell("MaxDD").textContent).toContain("12.00%");
+    expect(metricCell("6Month").textContent).toContain("21.00%");
+  });
+
+  it("a record of a year or more carries no marker, and a row with no record scalars shows its stored value", () => {
+    const { unmount } = render(
+      <StrategyTable
+        strategies={[recordRow({ assetClass: "crypto", start: "2025-01-01", end: "2026-03-31" })]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(metricCell("CAGR").textContent).toBe("+18.00%");
+    unmount();
+    render(
+      <StrategyTable
+        strategies={[makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" })]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(metricCell("CAGR").textContent).toBe("+18.00%");
+  });
+});
+
+// --- Phase 194 plan 06 (D-09): missing sorts last, never matches a filter, the list says how many ---
+
+/** A published row with an explicit Sharpe. `withheld` puts it on a 30-day crypto record (D-15). */
+function sharpeRow(
+  id: string,
+  name: string,
+  sharpe: number | null,
+  withheld = false,
+): StrategyWithAnalytics {
+  const s = makeStrategy({ id, name, asset_class: "crypto" });
+  s.analytics = makeAnalytics({
+    strategy_id: id,
+    sharpe,
+    ...(withheld
+      ? { series_start: "2026-03-02", series_end: "2026-03-31", record_observations: 30 }
+      : { series_start: "2024-01-01", series_end: "2026-03-31", record_observations: 800 }),
+  });
+  return s;
+}
+
+const SHARPE_ROWS = () => [
+  sharpeRow("22222222-0000-4000-8000-00000000000a", "Rowa", 1.2),
+  sharpeRow("22222222-0000-4000-8000-00000000000b", "Rowb", null),
+  sharpeRow("22222222-0000-4000-8000-00000000000c", "Rowc", -0.4),
+  sharpeRow("22222222-0000-4000-8000-00000000000d", "Rowd", 2.5, true),
+];
+
+function rowOrder(): string[] {
+  return Array.from(document.querySelectorAll("tbody tr td a[href^='/factsheet/']")).map(
+    (a) => a.textContent?.trim() ?? "",
+  );
+}
+
+async function applyRange(label: string, from: string, to: string) {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: /All Filters/i }));
+  // The label text also names a table header, so take the one whose row holds the two inputs.
+  const row = screen
+    .getAllByText(label)
+    .map((el) => el.parentElement)
+    .find((p) => p !== null && within(p).queryAllByRole("spinbutton").length === 2)!;
+  const [fromInput, toInput] = within(row).getAllByRole("spinbutton");
+  if (from !== "") fireEvent.change(fromInput!, { target: { value: from } });
+  if (to !== "") fireEvent.change(toInput!, { target: { value: to } });
+  await user.click(screen.getByRole("button", { name: /Apply filters/i }));
+}
+
+/** Click a column header until it is sorted in `dir` (a new column starts descending, a repeat click flips). */
+async function sortColumn(name: RegExp, dir: "ascending" | "descending") {
+  const user = userEvent.setup();
+  const button = screen.getByRole("button", { name });
+  for (let i = 0; i < 3; i += 1) {
+    if (button.closest("th")?.getAttribute("aria-sort") === dir) return;
+    await user.click(button);
+  }
+  throw new Error(`could not sort ${name} ${dir}`);
+}
+
+describe("StrategyTable - D-09 missing figures sort last and never match a filter (phase 194 plan 06)", () => {
+  it("sorts null and withheld Sharpe after every finite value in BOTH directions, keeping their prior order", async () => {
+    render(<StrategyTable strategies={SHARPE_ROWS()} categorySlug="crypto-sma" />);
+    await sortColumn(/^Sharpe/, "descending");
+    expect(rowOrder()).toEqual(["Rowa", "Rowc", "Rowb", "Rowd"]);
+    await sortColumn(/^Sharpe/, "ascending");
+    // A zero substitution would file the two missing rows between -0.4 and 1.2.
+    expect(rowOrder()).toEqual(["Rowc", "Rowa", "Rowb", "Rowd"]);
+  });
+
+  it("a Sharpe filter containing 0 still excludes the null row and the withheld row, and the line names them", async () => {
+    render(<StrategyTable strategies={SHARPE_ROWS()} categorySlug="crypto-sma" />);
+    await applyRange("Sharpe", "-1", "1");
+    expect(rowOrder()).toEqual(["Rowc"]);
+    // Rowa is out of range by VALUE (1.2 > 1) and is not counted: only the two missing rows are.
+    expect(screen.getByTestId("figures-not-shown").textContent).toBe(
+      "Not shown: 2 strategies with no figure for Sharpe.",
+    );
+    expect(screen.getByTestId("figures-not-shown")).toHaveAttribute("role", "status");
+    expect(screen.getByTestId("figures-not-shown")).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("reads '1 strategy' at one, and the line is absent at zero", async () => {
+    const rows = [
+      sharpeRow("22222222-0000-4000-8000-00000000000a", "Rowa", 1.2),
+      sharpeRow("22222222-0000-4000-8000-00000000000b", "Rowb", null),
+    ];
+    const { unmount } = render(<StrategyTable strategies={rows} categorySlug="crypto-sma" />);
+    expect(screen.queryByTestId("figures-not-shown")).toBeNull();
+    await applyRange("Sharpe", "0", "2");
+    expect(screen.getByTestId("figures-not-shown").textContent).toBe(
+      "Not shown: 1 strategy with no figure for Sharpe.",
+    );
+    unmount();
+    render(
+      <StrategyTable
+        strategies={[sharpeRow("22222222-0000-4000-8000-00000000000a", "Rowa", 1.2)]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    await applyRange("Sharpe", "5", "9");
+    expect(screen.queryByTestId("figures-not-shown")).toBeNull();
+  });
+
+  it("a filter that empties the table shows the empty message with the line beneath it", async () => {
+    render(<StrategyTable strategies={SHARPE_ROWS()} categorySlug="crypto-sma" />);
+    await applyRange("Sharpe", "5", "9");
+    const empty = screen.getByText(/No strategies match your filters\./).closest("td")!;
+    expect(empty.textContent).toContain("Not shown: 2 strategies with no figure for Sharpe.");
+    expect(document.querySelectorAll('[data-testid="figures-not-shown"]')).toHaveLength(1);
+  });
+
+  it("a missing AUM never matches an AUM range and sorts last, not as zero", async () => {
+    const withAum = (id: string, name: string, aum: number | null) => {
+      const s = makeStrategy({ id, name, aum });
+      s.analytics = makeAnalytics({ strategy_id: id });
+      return s;
+    };
+    const rows = [
+      withAum("22222222-0000-4000-8000-00000000000a", "Rowa", 5_000_000),
+      withAum("22222222-0000-4000-8000-00000000000b", "Rowb", null),
+      withAum("22222222-0000-4000-8000-00000000000c", "Rowc", 1_000_000),
+    ];
+    const { unmount } = render(<StrategyTable strategies={rows} categorySlug="crypto-sma" />);
+    await sortColumn(/^AUM/, "descending");
+    expect(rowOrder()).toEqual(["Rowa", "Rowc", "Rowb"]);
+    await sortColumn(/^AUM/, "ascending");
+    expect(rowOrder()).toEqual(["Rowc", "Rowa", "Rowb"]);
+    unmount();
+    render(<StrategyTable strategies={rows} categorySlug="crypto-sma" />);
+    await applyRange("AUM ($)", "0", "10000000");
+    expect(rowOrder()).toEqual(["Rowa", "Rowc"]);
+    expect(screen.getByTestId("figures-not-shown").textContent).toBe(
+      "Not shown: 1 strategy with no figure for AUM.",
+    );
+  });
+
+  it("grid mode obeys the same missing-last rule", async () => {
+    const user = userEvent.setup();
+    render(<StrategyTable strategies={SHARPE_ROWS()} categorySlug="crypto-sma" />);
+    await user.click(screen.getByRole("button", { name: /Grid view/i }));
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "sharpe" } });
+    fireEvent.change(screen.getByLabelText("Sort direction"), { target: { value: "asc" } });
+    const names = () =>
+      Array.from(document.querySelectorAll("a"))
+        .map((a) => a.textContent ?? "")
+        .filter((t) => /Row[abcd]/.test(t));
+    const asc = names();
+    expect(asc[0]).toContain("Rowc");
+    expect(asc[1]).toContain("Rowa");
+    fireEvent.change(screen.getByLabelText("Sort direction"), { target: { value: "desc" } });
+    const desc = names();
+    expect(desc[0]).toContain("Rowa");
+    expect(desc[1]).toContain("Rowc");
+  });
+
+  it("the withheld Sharpe and Volatility cells print a toneless dash while the same row's Return %, Max DD and 6 Month keep their values", () => {
+    render(<StrategyTable strategies={[SHARPE_ROWS()[3]]} categorySlug="crypto-sma" />);
+    for (const label of ["Sharpe", "Volatility"]) {
+      const cell = metricCell(label);
+      expect(cell.textContent).toContain("—");
+      expect(cell.textContent).toContain("Withheld until the record reaches 90 days (30 days so far).");
+      expect(cell.className).toContain("text-text-muted");
+    }
+    expect(metricCell("Return").textContent).toContain("42.00%");
+    expect(metricCell("MaxDD").textContent).toContain("12.00%");
+    expect(metricCell("6Month").textContent).toContain("21.00%");
+  });
+});

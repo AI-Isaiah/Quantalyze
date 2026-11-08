@@ -210,7 +210,15 @@ describe("a basis series shorter than the picked window (recorded behaviour, D-3
   it("an active payload with 140 days of which 20 are non-zero: the rolling Sharpe is all null and rollingWindow is unchanged", () => {
     const p = build(dailyRows(140, (i) => i % 7 !== 6), { dayBasis: "active" } as Partial<BuildFactsheetOpts>);
     expect(p.strategyReturns.filter((r) => r !== 0).length).toBe(20);
-    expect(p.rollingWindow).toEqual({ window: 126, label: "6mo", enough: true });
+    // window / label / enough are unchanged (D-14 is additive); the key added by 194 D-11 /
+    // D-15 is the verdict: a 139-day crypto record clears 90 days, and a 126-row window
+    // covers 126 days, under a year, so it is drawn with the short note.
+    expect(p.rollingWindow).toEqual({
+      window: 126,
+      label: "6mo",
+      enough: true,
+      annualization: { state: "short", days: 126, cause: null },
+    });
     expect(p.strategyRollingSharpe.length).toBe(140);
     expect(p.strategyRollingSharpe.every((v) => v === null)).toBe(true);
   });

@@ -72,6 +72,11 @@ import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { Button } from "@/components/ui/Button";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import type { StrategyRow } from "../lib/strategies-row-adapter";
+import {
+  SHORT_TRACK_MARKER,
+  shortTrackMarkerTitle,
+  withheldCellTitle,
+} from "@/lib/figure-gate";
 import { BridgeOutcomeBanner } from "./BridgeOutcomeBanner";
 import { HoldingDetail } from "./HoldingDetail";
 
@@ -326,6 +331,46 @@ function compareStrategyRows(
   return 0;
 }
 
+/**
+ * 194 D-04 / D-15 (2026-11-07): the Sharpe cell of a strategy row. `row.sharpe` is already
+ * gated by `toStrategyRows`, so this only renders the verdict, with copy from
+ * `figure-gate.ts` alone. Withheld (the strategy's TOTAL record is under the minimum): a
+ * toneless `—` whose reason is in `title` and in sr-only text. Short (record cleared,
+ * under one year): the figure plus the `<1y` marker, same slot and classes as
+ * StrategyTable's. Otherwise the figure as stored, exactly as before. Written in the
+ * shape of StrategyTable's `annualizedCell`, not imported from it.
+ */
+function strategySharpeCell(row: StrategyRow) {
+  if (row.sharpeState === "withheld") {
+    const reason = withheldCellTitle(row.sharpeRecord);
+    return (
+      <span title={reason}>
+        —<span className="sr-only">{reason}</span>
+      </span>
+    );
+  }
+  if (row.sharpe == null) return "—";
+  const text = formatNumber(row.sharpe);
+  // `short` implies a known span (a null span gives state `null`); the guard keeps the
+  // type honest without inventing a day count.
+  if (row.sharpeState === "short" && row.sharpeSpanDays != null) {
+    const reason = shortTrackMarkerTitle(row.sharpeSpanDays);
+    return (
+      <>
+        {text}
+        <span
+          title={reason}
+          className="ml-1 inline-block min-w-[3ch] text-right align-baseline text-micro font-mono tabular-nums text-text-muted"
+        >
+          {SHORT_TRACK_MARKER}
+          <span className="sr-only"> {reason}</span>
+        </span>
+      </>
+    );
+  }
+  return text;
+}
+
 function StrategyRowsTable({
   rows,
   hasAnyStrategies,
@@ -512,7 +557,7 @@ function StrategyRowsTable({
                   {row.mtd == null ? "—" : formatPercent(row.mtd)}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
-                  {row.sharpe == null ? "—" : formatNumber(row.sharpe)}
+                  {strategySharpeCell(row)}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
                   {row.maxDd == null ? "—" : formatPercent(row.maxDd)}

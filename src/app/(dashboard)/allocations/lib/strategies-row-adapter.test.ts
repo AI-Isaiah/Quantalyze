@@ -36,6 +36,9 @@ function makeStrategy(over: {
       trust_tier: over.strategy?.trust_tier ?? null,
       is_composite: over.strategy?.is_composite ?? false,
       series_state: over.strategy?.series_state ?? "empty",
+      figure_span_days: over.strategy?.figure_span_days ?? null,
+      figure_observations: over.strategy?.figure_observations ?? null,
+      figure_crypto: over.strategy?.figure_crypto ?? false,
       strategy_analytics:
         over.strategy?.strategy_analytics !== undefined
           ? over.strategy.strategy_analytics
@@ -287,6 +290,8 @@ function makeMarked(over: {
    * coverage in `queries.own-capital-strategies.test.ts`.
    */
   mtd?: number | null;
+  /** 194 D-15: the server-computed record scalars (default: unknown record). */
+  figure?: { span?: number | null; observations?: number | null; crypto?: boolean };
   analytics?: {
     sharpe?: number | null;
     max_drawdown?: number | null;
@@ -302,6 +307,9 @@ function makeMarked(over: {
       ? "own_capital"
       : over.capital_ownership) as OwnCapitalStrategy["capital_ownership"],
     mtd: over.mtd ?? null,
+    figure_span_days: over.figure?.span ?? null,
+    figure_observations: over.figure?.observations ?? null,
+    figure_crypto: over.figure?.crypto ?? false,
     strategy_analytics:
       over.analytics === undefined || over.analytics === null
         ? null
@@ -675,3 +683,126 @@ describe("toStrategyRows — OWN-05 SC 1c owner-name carve-out", () => {
 // `{ strategies: marked, positions }` explicitly and `positions` is required.
 // A test that survives the deletion of its subject would be asserting about a
 // code path nobody can reach.
+
+// ═══════════════════════════════════════════════ Phase 194 plan 11 (D-04, D-15)
+
+/**
+ * WHY THIS MATTERS: a Sharpe from a few weeks of returns annualises noise into a
+ * confident-looking number, and the allocator reads it next to their own money. D-15
+ * (founder, 2026-11-07) withholds it only when the strategy's TOTAL record is under the
+ * minimum (crypto 90 calendar days; non-crypto 60 return observations) and marks it `<1y`
+ * until a year of record exists. Both halves of the union must agree, because one
+ * strategy can be marked, positioned, or both, and its Sharpe must not change with which.
+ */
+describe("toStrategyRows: Sharpe gated on the total record (194 D-04 / D-15)", () => {
+  type Scalars = { span?: number | null; observations?: number | null; crypto?: boolean };
+
+  /** The same record fed through half 1 (positioned) and half 2 (marked only). */
+  function bothHalves(figure: Scalars, sharpe = 1.8) {
+    const analytics = { sharpe, max_drawdown: null };
+    const [positioned] = toStrategyRows({
+      strategies: [],
+      positions: [
+        makeStrategy({
+          strategy: {
+            figure_span_days: figure.span ?? null,
+            figure_observations: figure.observations ?? null,
+            figure_crypto: figure.crypto ?? false,
+            strategy_analytics: {
+              daily_returns: null,
+              cagr: null,
+              sharpe,
+              volatility: null,
+              max_drawdown: null,
+            },
+          },
+        }),
+      ],
+      now: NOW,
+    });
+    const [marked] = toStrategyRows({
+      strategies: [makeMarked({ figure, analytics })],
+      positions: [],
+      now: NOW,
+    });
+    return { positioned, marked };
+  }
+
+  const cases: Array<{
+    label: string;
+    figure: Scalars;
+    sharpe: number | null;
+    state: string;
+  }> = [
+    { label: "crypto 60 days: withheld", figure: { span: 60, crypto: true }, sharpe: null, state: "withheld" },
+    { label: "crypto 89 days: withheld", figure: { span: 89, crypto: true }, sharpe: null, state: "withheld" },
+    {
+      // A count of 89 would clear a NON-crypto row's 60, so only the crypto flag decides this.
+      label: "crypto 89 days with 89 observations: withheld (the crypto bound is days, not observations)",
+      figure: { span: 89, observations: 89, crypto: true },
+      sharpe: null,
+      state: "withheld",
+    },
+    { label: "crypto 90 days: kept, <1y", figure: { span: 90, crypto: true }, sharpe: 1.8, state: "short" },
+    { label: "crypto 200 days: kept, <1y", figure: { span: 200, crypto: true }, sharpe: 1.8, state: "short" },
+    { label: "crypto 400 days: kept, full", figure: { span: 400, crypto: true }, sharpe: 1.8, state: "full" },
+    { label: "no dated series: kept, no marker", figure: { span: null, crypto: true }, sharpe: 1.8, state: "null" },
+    {
+      label: "non-crypto 59 observations: withheld",
+      figure: { span: 120, observations: 59 },
+      sharpe: null,
+      state: "withheld",
+    },
+    {
+      label: "non-crypto 60 observations over 84 days: kept (the bound is observations, not days)",
+      figure: { span: 84, observations: 60 },
+      sharpe: 1.8,
+      state: "short",
+    },
+    {
+      label: "non-crypto, count absent, 89 days: withheld (interim fallback)",
+      figure: { span: 89, observations: null },
+      sharpe: null,
+      state: "withheld",
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.label}, identically on both halves`, () => {
+      const { positioned, marked } = bothHalves(c.figure);
+      for (const row of [positioned, marked]) {
+        expect(row.sharpe).toBe(c.sharpe);
+        expect(row.sharpeState).toBe(c.state);
+        expect(row.sharpeSpanDays).toBe(c.figure.span ?? null);
+        expect(row.sharpeRecord).toEqual({
+          spanDays: c.figure.span ?? null,
+          observations: c.figure.observations ?? null,
+          crypto: c.figure.crypto ?? false,
+        });
+      }
+    });
+  }
+
+  it("a legacy payload row with no record scalars keeps its stored Sharpe and carries no marker", () => {
+    const [row] = toStrategyRows({
+      strategies: [],
+      positions: [
+        makeStrategy({
+          strategy: {
+            figure_span_days: undefined,
+            strategy_analytics: {
+              daily_returns: null,
+              cagr: null,
+              sharpe: 2.2,
+              volatility: null,
+              max_drawdown: null,
+            },
+          },
+        }),
+      ],
+      now: NOW,
+    });
+    expect(row.sharpe).toBe(2.2);
+    expect(row.sharpeState).toBe("null");
+  });
+});

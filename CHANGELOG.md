@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.133.27.0] - 2026-11-08 — Phase 194 FIGURETRUTH
+
+A figure means one thing everywhere and shows only when it is earned. 156 non-merge commits (about 100 source and test commits plus the planning and review records) across 22 plans in 9 waves and five review rounds. One SQL migration (`20261107140000_get_verified_cohort_rank_span_gate`), one new shared module (`figure-gate`), no new dependency.
+
+### Added
+- **The shared figure gate (D-15).** `figure-gate` gives every annualised figure one verdict and one set of sentences. A record's total length must reach 90 days (crypto) or 60 observations (otherwise) before an annualised figure shows. Zoomed windows always show, with a muted note while the total record is under a year. The same verdict feeds the factsheet rail, the tearsheet, list rows, the browse page, `CompareTable`, the Holdings Sharpe cell, the Scenario composer, the optimizer card and the simulator.
+- **A 365-calendar-day rolling window (D-14).** Stored and twinned in the producer, carried on the factsheet bundle and the comparator beside its row series, and offered as a 1y option on the rail and factsheet rolling charts and the Scenario blend rolling panel.
+- **One historical VaR/CVaR definition**, producer to TS engine, on a shared fixture; Scenario VaR and CVaR go through the one helper (D-02). The tearsheet and rail state the VaR method.
+- **Calendar 3M/6M windows** in the producer and 91 days in the engine; the stored observation count now reaches every factsheet build. The factsheet reads the stored 3M, 6M, VaR and CVaR behind the figure-definitions marker.
+- **Lift spans.** Every optimizer suggestion carries one lift span and a D-15 verdict; `match_engine` emits the lift span and gates its lift reason; the narrative recommendation sentence follows the verdict.
+- **List behaviour (D-09).** A missing figure sorts last, never matches a range filter, and the list says how many rows it hid.
+- **Labels (D-08).** Exposure and equity labels name their quantity. The Section IV overlap note and the muted low-N Bootstrap note are added.
+
+### Changed
+- **Benchmark column (D-16, D-19).** Annualised cells show on any zoom and follow the strategy's total-record verdict; the column carries the muted under-1y note when the comparator's own span is under a year. Peer and own-book delta captions name the blend's own annualisation basis (crypto 365, otherwise 252); the Scenario vs BTC caption names the real basis.
+- **Stored KPIs always carry their return series (D-17).** `seed-demo-data` stores the series beside its KPIs and a test pins it. Demo strategies are seeded with 366 daily returns so the span reaches a full year.
+- **Short records and peer ranks (D-18).** A short record leaves only the annualised peer ranks (Sharpe, Sortino) and stays in the Max DD cohort. SQL `get_verified_cohort_rank` (migration `20261107140000`, rollback under `supabase/migrations/down/`) and the TS callers agree; discovery, My Strategies and tearsheet rank badges carry the short-track marker.
+- **A record's length counts covered days (D-20).** 365 daily returns is a full year, on TS, Python and SQL: the cohort rank, the Sharpe lift gate and the span helpers all count the days the returns cover rather than the raw gap.
+- **The 1y rolling window fills at 365 covered days (D-21).**
+- **Present-but-malformed dates withhold.** A present but unparsable date (`headlineSince`, an own-book date) makes the record unreadable and withholds the figure with a named reason; only an absent date reads as unknown. Record dates are parsed without raising on an impossible calendar date. A malformed own-book date withholds the annualised deltas, not the whole vs Your Book panel.
+- **Optimizer and match engine gate by asset class.** Each Sharpe-lift reason is judged on its real asset class; the match router passes each strategy's `asset_class` to the candidate and the book leg; a candidate of unknown class gets the crypto gate like the book.
+- Factsheet payload cache key bumped to v21.
+
+### Fixed
+- **Scenario composer.** The blend strip and footer share one Sharpe-delta verdict; an unreadable own-book series withholds it. The footer delta gates on the blend and book total records; TE, IR and alpha gate on the blend's record. A short or unknown blend is still ranked so its Max DD rank is kept; the book's beta is kept when the annualised alpha is withheld.
+- **Tearsheet.** Annualised peer ranks are withheld when the record is withheld or unreadable. The allocations alpha/beta widget and the discovery grid CAGR gate on a total-record verdict.
+- **Unrecognised stored lift state** is withheld (adapter fails closed) and reported to Sentry with the stored value and its real cause; an absent state stays unknown. A withheld lift with an unreadable failing record shows a generic reason. The simulator withholds its Sharpe change when the analytics service sends no annualisation basis.
+- Browse span-read failures are reported to Sentry and logged by id, with the withheld figures captioned.
+- An unreadable covered span builds no vol-matched curve and names its reason.
+
+### Security
+- **AUM is shown only to an allocator or the strategy's own manager (D-22)** on the factsheet, JSON-LD, discovery detail and share page. A viewer who may not see it gets a payload copy without it, and the share-link recipient gets no AUM in the page data, so it is stripped from the client payload and not merely hidden.
+- **Server-only Sentry reports.** An unreadable record, percentile or Holdings record is reported at the producer; only the server builder reports, so the client never reports a duplicate.
+
+### Tests
+- Cross-page parity gate: one stored fixture through every reader (D-01, TRUST-04), with the OG card's B3 divergence pinned.
+- Cohort record gate arms 7-12 in `get_verified_cohort_rank` gate tests, each shown biting; `ARMS_FLOOR` raised from one full mutation run; census files moved for the new arms; a pin ties the cohort's record bounds to `figure-gate`.
+- Python and TS tests re-derived on the new VaR/CVaR and 3M/6M definitions; one-year cross-language pin; UI branches for the could-not-be-read states.
+
+### Notes
+- Known limits, recorded and not fixed here: (1) the PROD recompute (plan 09) runs after deploy, so PROD rows keep the old definitions until then; (2) the Holdings path does not carry the unreadable flag; (3) the wizard's HARD-04 short-track caveat still uses the raw gap, routed to Phase 194.1; (4) the OG share card is deferred to Phase 194.1.
+- The migration applies to TEST then PROD automatically on merge; there is no human stop after merge.
+- Planning-only commits (about 55: context, research, plans, summaries, verification, review rounds, wave ticks, founder decisions D-10..D-22, security audit 49/49) stay on `feat/194-figuretruth` and are not part of this change.
+
 ## [0.133.26.2] - 2026-11-07 — records: close 203 B3TRUNC and 195 TRIM
 
 Records only. One records commit plus this release commit; no source change.

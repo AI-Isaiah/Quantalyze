@@ -418,7 +418,7 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
         supabase.table("strategies")
         .select(
             "id, name, codename, strategy_types, subtypes, supported_exchanges, "
-            "status, aum, max_capacity, user_id, start_date, is_example"
+            "status, aum, max_capacity, user_id, start_date, is_example, asset_class"
         )
         .eq("status", "published")
     )
@@ -561,6 +561,9 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # Propagated so _score_one_allocator can post-filter the demo
             # allocator's universe to is_example=true rows only.
             "is_example": bool(strategy.get("is_example")),
+            # 194 D-15 (round 2 WR-02): the candidate's own class, so its Sharpe-lift reason is
+            # gated on its real bound. Absent reads as unknown, which counts as crypto.
+            "asset_class": strategy.get("asset_class"),
         }
 
         daily_returns = daily_returns_from_row(analytics, name=sid, keep_absent=True)
@@ -1217,7 +1220,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         ps_rows = chunked_in_query(
             lambda _ps_chunk: (
                 supabase.table("portfolio_strategies")
-                .select("strategy_id, current_weight, portfolio_id, allocated_amount")
+                .select("strategy_id, current_weight, portfolio_id, allocated_amount, strategies(asset_class)")
                 .in_("portfolio_id", _ps_chunk)
                 .order("portfolio_id", desc=False)
                 .order("strategy_id", desc=False)
@@ -1280,7 +1283,11 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
             for row in ps_rows:
                 sid = row["strategy_id"]
                 if sid not in portfolio_weights:
-                    portfolio_strategies.append({"strategy_id": sid})
+                    # 194 D-15 (round 2 WR-02): the book leg's class rides along for the lift gate.
+                    portfolio_strategies.append({
+                        "strategy_id": sid,
+                        "asset_class": (row.get("strategies") or {}).get("asset_class"),
+                    })
                     # NULL current_weight defaults to 1.0 as a cold-start placeholder.
                     # match_engine.score_candidates re-normalizes the weights dict to
                     # sum=1.0 before scoring, so a single NULL row won't break the

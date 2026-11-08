@@ -584,7 +584,14 @@ describe("RED-TEAM-H1: ingestSource derivation — the shared deriveIngestSource
 // compute / rolling / bootstrap / comparator can't silently regress.
 // ---------------------------------------------------------------------------
 describe("#597: asset-class annualization end-to-end", () => {
-  const rets = makeReturns(80);
+  // 194 R4 WR-02: `makeReturns(80)` dated its last rows 2024-01-32 .. 2024-01-80, which are not
+  // dates. A span of NaN used to read as "unknown record" and keep the joint; a malformed date now
+  // withholds, so this scaling test needs real dates, and 120 of them so a crypto record (90-day
+  // minimum, D-15) clears and the joint stays comparable between the two bases.
+  const rets = Array.from({ length: 120 }, (_, i) => ({
+    date: new Date(Date.UTC(2024, 0, 1 + i)).toISOString().slice(0, 10),
+    value: Math.sin(i / 5) * 0.003 + 0.0001,
+  }));
 
   it("absent assetClass == explicit 'traditional' == 252 (byte-identical)", () => {
     const absent = buildFactsheetPayload(makeStrategy(), rets)!;

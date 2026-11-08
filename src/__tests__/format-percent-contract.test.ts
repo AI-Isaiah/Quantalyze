@@ -153,6 +153,10 @@ function makeStrategyFormatRow(
     allocation: 100_000,
     mtd: null,
     sharpe: 1.84,
+    // 194 D-15: an unknown record shows the stored Sharpe as-is.
+    sharpeState: "null",
+    sharpeSpanDays: null,
+    sharpeRecord: { spanDays: null, observations: null, crypto: false },
     maxDd: -0.091,
     age: 90,
     ...overrides,

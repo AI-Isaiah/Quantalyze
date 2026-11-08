@@ -313,7 +313,9 @@ async function resolveFactsheetInputs(
        returns_denominator_config, source,
        api_keys!strategies_api_key_id_fkey ( exchange ),
        strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status,
-         cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar, trades_fetched_at, series_provenance )`,
+         cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar, trades_fetched_at, series_provenance,
+         six_month_return, figure_defs_version:metrics_json->figure_defs_version, three_month:metrics_json->three_month,
+         var_1d_95:metrics_json->var_1d_95, cvar:metrics_json->cvar, record_observations:metrics_json->record_observations )`,
     )
     .eq("id", id);
   const { data: strategy, error } = await visibility(
@@ -741,7 +743,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v20", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v21", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -926,6 +928,33 @@ async function buildFromResolved(
     benchmarkPrices: await readFactsheetBenchmark(supabase, dailyReturns, buildOpts, id),
   };
 
+  // Phase 194 (D-15, review CR-01): the stored observation count is a fact about the
+  // RECORD, so it rides every build (native, composite and, below, the USD view), not
+  // only a build that admitted the stored cash headline. Without it the total record's
+  // count is null and a non-crypto record is judged on a calendar bound, not on D-15's
+  // 60 observations, so the factsheet disagrees with every other reader.
+  const a = analytics as Record<string, unknown> | null | undefined;
+  const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const recordObservations = numOrNull(a?.record_observations);
+  buildOpts = { ...buildOpts, recordObservations };
+
+  // Phase 194 (D-01): the stored figures ride beside the stored cash headline,
+  // on both arms, and only when that headline was admitted (no stored headline means
+  // no stored figure overlaid). The aliases are scalars of `metrics_json`, never the
+  // whole object: this payload reaches anonymous viewers (T-194-20).
+  if (buildOpts.metricsByBasis?.cash_settlement) {
+    buildOpts = {
+      ...buildOpts,
+      storedFigureDefs: {
+        figureDefsVersion: numOrNull(a?.figure_defs_version),
+        sixMonth: numOrNull(a?.six_month_return),
+        threeMonth: numOrNull(a?.three_month),
+        var95: numOrNull(a?.var_1d_95),
+        cvar95: numOrNull(a?.cvar),
+      },
+    };
+  }
+
   // FINDING-5 (b06-silentfailure): Never fall back to "now" for a missing
   // computed_at — that would make FreshnessChip show a green "fresh" badge
   // for a strategy with no real analytics data. Use the epoch sentinel so
@@ -1006,7 +1035,7 @@ async function buildFromResolved(
     benchmark: strategy.benchmark ?? null,
     assetClass: strategy.asset_class ?? null,
   };
-  const built = buildFactsheetPayload(strategyArg, dailyReturns, buildOpts);
+  const built = buildFactsheetPayload(strategyArg, dailyReturns, { ...buildOpts, reportUnreadable: true });
   // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 / D-12 / L2: the day recorded equity
   // begins, read from the PUBLISHED analytics flag and parsed once by the one
   // reader. By spread, only when present, so a strategy with no marks (and a
@@ -1037,6 +1066,7 @@ async function buildFromResolved(
     analytics,
     dqf,
     strategyArg,
+    recordObservations,
   });
   return { ...nativePayload, ...usd };
 }
@@ -1071,8 +1101,10 @@ async function buildUsdView(args: {
   analytics: ResolvedFactsheetInputs["analytics"];
   dqf: ResolvedFactsheetInputs["dqf"];
   strategyArg: Parameters<typeof buildFactsheetPayload>[0];
+  /** CR-01: the stored count describes the record, not its unit, so the USD build gates on it too. */
+  recordObservations: number | null;
 }): Promise<UsdViewOutcome> {
-  const { supabase, id, unit, analytics, dqf, strategyArg } = args;
+  const { supabase, id, unit, analytics, dqf, strategyArg, recordObservations } = args;
   const read = await readBenchmarkPrices(supabase, "BTC");
   if (!read.ok) {
     const err = read.error as { code?: unknown; message?: unknown } | null;
@@ -1120,10 +1152,11 @@ async function buildUsdView(args: {
   const usdOpts: BuildFactsheetOpts = {
     dataQuality: singleKeyDataQuality(dqf),
     returnsUnit: "USD",
+    recordObservations,
     ...(facts.missingSegments.length > 0 ? { missingSegments: facts.missingSegments } : {}),
   };
   usdOpts.benchmarkPrices = await readFactsheetBenchmark(supabase, usdSeries, usdOpts, id);
-  const built = buildFactsheetPayload(strategyArg, usdSeries, usdOpts);
+  const built = buildFactsheetPayload(strategyArg, usdSeries, { ...usdOpts, reportUnreadable: true });
   const payload: FactsheetPayload = { ...built, convertedFrom: unit };
   return {
     usdView: {

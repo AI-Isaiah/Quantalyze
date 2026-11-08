@@ -300,6 +300,7 @@ describe("the Dated note in the rail's Main Metrics (UI-SPEC 1.3 S2)", () => {
       markets: [],
       strategyName: "Headline Coverage Test",
       benchmarkPrices: fixtureBenchmarkPrices([dense(400).slice(200)]),
+      figureRecord: null,
     });
     const payload = {
       ...cash,
@@ -892,6 +893,7 @@ function withheldWithMtm(): FactsheetPayload {
     markets: [],
     strategyName: "Headline Coverage Test",
     benchmarkPrices: fixtureBenchmarkPrices([slice]),
+    figureRecord: null,
   });
   return {
     ...cash,
@@ -949,9 +951,13 @@ describe("D-15 extended again: Dash all of them", () => {
   type Cell = { text: string; cls: string; style: string } | { error: string };
 
   function panelSection(container: HTMLElement, title: string): HTMLElement | string {
-    const hits = [...container.querySelectorAll<HTMLElement>("section")].filter((s) =>
-      (s.querySelector(":scope > header h3")?.textContent ?? "").trim().startsWith(title),
-    );
+    // Phase 194 (D-14): a record of a year or more also renders "Rolling Metrics (1y)", a second
+    // table. These cases pin the row-window table, so the added one is not a match for the
+    // bare "Rolling Metrics" title; plan 15's own test file covers the 1y table.
+    const hits = [...container.querySelectorAll<HTMLElement>("section")].filter((s) => {
+      const heading = (s.querySelector(":scope > header h3")?.textContent ?? "").trim();
+      return heading.startsWith(title) && heading !== "Rolling Metrics (1y)";
+    });
     return hits.length === 1 ? hits[0] : `${hits.length} panels titled "${title}"`;
   }
 

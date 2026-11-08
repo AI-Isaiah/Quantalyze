@@ -21,6 +21,18 @@ vi.mock("@/lib/queries", () => ({
   getPublicStrategyDetail: (id: string) => getPublicStrategyDetail(id),
   getPopulatedCategorySlugs: async () => ["crypto-sma", "cfd"],
 }));
+// 194 plan 10: the page now reads the total record. A two-year, 500-observation record
+// clears the gate, so this badge test is unaffected by it.
+vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({}) }));
+vi.mock("@/lib/record-span-read", () => ({
+  readRecordSpan: async () => ({
+    determined: true,
+    seriesStart: "2023-01-01",
+    seriesEnd: "2025-01-01",
+    headlineSince: null,
+    observations: 500,
+  }),
+}));
 
 import PublicStrategyDetailPage from "./page";
 

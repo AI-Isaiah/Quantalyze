@@ -1,8 +1,9 @@
 /** @vitest-environment jsdom */
 /**
- * Phase 170.6 plan 11 (D-07): the rail prints "—" for the comparator's annualized set
- * (Sharpe, Sortino, Calmar, CAGR, Ann. Volatility) when its overlap is under 90 elapsed
- * calendar days, and still prints its cumulative return and max drawdown.
+ * Phase 170.6 plan 11 (D-07), superseded by Phase 194 D-16 (founder 2026-11-07, review WR-01,
+ * "D-15 wins"): the comparator's annualized set (Sharpe, Sortino, Calmar, CAGR, Ann. Volatility)
+ * is no longer withheld for a short OVERLAP or a short zoomed window. It is withheld only with the
+ * strategy's TOTAL record (D-15), and it always prints its cumulative return and max drawdown.
  *
  * Every expected string is typed by hand. The SPX closes below make five daily moves of
  * +1.0%, -0.5%, +1.2%, +0.3%, +0.8%; their compound is 1.01 * 0.995 * 1.012 * 1.003 * 1.008
@@ -35,6 +36,7 @@ vi.mock("@/lib/factsheet/benchmarks", async importOriginal => ({
 }));
 
 import { FactsheetProvider } from "./factsheet-context";
+import { windowView } from "./basis-context";
 import { MetricsColumn } from "./MetricsColumn";
 import { FactsheetBody } from "./FactsheetView";
 
@@ -85,15 +87,22 @@ function rail(): HTMLElement {
   ).container;
 }
 
-describe("D-07 on the rendered rail: a 5-day SPX overlap", () => {
+describe("D-19 on the rendered rail: a 5-day record withholds the benchmark column with the strategy's", () => {
   it("precondition: SPX is the selected comparator and its prices reach the strategy's last day", () => {
     expect(payload().comparators.spx.through).toBe("2024-08-02");
   });
 
+  // The 5-day TOTAL record is under D-15's minimum, so the strategy column AND the benchmark
+  // column read "—" for the five annualized cells (founder D-19, 2026-11-07).
   it.each(["Sharpe", "Sortino", "Calmar", "CAGR", "Ann. Volatility"])(
-    "Main Metrics: the SPX %s cell reads —",
+    "Main Metrics: the strategy and the SPX %s cells both read —",
     label => {
-      expect(bench(rail(), "Main Metrics", label)).toBe("—");
+      const container = rail();
+      const tr = [...panel(container, "Main Metrics").querySelectorAll("tr")].find(r =>
+        r.querySelector("td")?.textContent?.startsWith(label),
+      )!;
+      expect(tr.querySelectorAll("td")[1]?.textContent).toBe("—");
+      expect(bench(container, "Main Metrics", label)).toBe("—");
     },
   );
 
@@ -176,17 +185,15 @@ describe("D-08: the paired-floor sentence dates a comparator that ends early", (
 });
 
 /**
- * Phase 170.6 SFH-1 (founder override of O-5, 2026-10-14): a comparator whose annualized
- * figures are withheld for a short overlap says so, one plain line under the Main Metrics
- * panel, so "too short to annualize" no longer reads the same as "no data". The sentence is
- * typed by hand, and the constant it names is 90.
+ * Phase 194 D-16 (review WR-01): the "need 90 days of overlap" line of 170.6 SFH-1 is gone, since
+ * a short overlap no longer withholds. The one muted `figure-gate-note` speaks for both columns.
  */
-describe("SFH-1: the withheld comparator figures carry a reason", () => {
+describe("D-16: the comparator columns carry no overlap-length reason", () => {
   const REASON_ID = "comparator-annualization-reason";
 
-  it("a 5-day SPX overlap shows 'SPX annualized figures need 90 days of overlap.'", () => {
+  it("a 5-day record prints no overlap reason line (the strategy's own note speaks)", () => {
     rail();
-    expect(screen.getByTestId(REASON_ID).textContent).toBe("SPX annualized figures need 90 days of overlap.");
+    expect(screen.queryByTestId(REASON_ID)).toBeNull();
   });
 
   /** A 7-day strategy and a 7-day BTC series over the same `from`..`to`, BTC selected. */
@@ -201,7 +208,7 @@ describe("SFH-1: the withheld comparator figures carry a reason", () => {
     const p = buildFactsheetPayload(
       STRATEGY,
       dates.map((date, i) => ({ date, value: ((i % 5) - 2) / 500 })),
-      { benchmarkPrices: { prices, through: prices[prices.length - 1].date, dropped: [] } },
+      { recordObservations: dates.length, benchmarkPrices: { prices, through: prices[prices.length - 1].date, dropped: [] } },
     );
     if (!p) throw new Error("fixture must build");
     return { ...p, activeComparator: "btc" };
@@ -215,10 +222,10 @@ describe("SFH-1: the withheld comparator figures carry a reason", () => {
     ).container;
   }
 
-  it("89 elapsed days (2024-01-01 .. 2024-03-30): the reason shows and the Sharpe cell is a dash", () => {
+  it("89 elapsed days (2024-01-01 .. 2024-03-30, 90 returns, over D-15's 60): the Sharpe prints and there is no reason line", () => {
     const container = railFor(btcPayload("2024-01-01", "2024-03-30"));
-    expect(screen.getByTestId(REASON_ID).textContent).toBe("BTC annualized figures need 90 days of overlap.");
-    expect(bench(container, "Main Metrics", "Sharpe")).toBe("—");
+    expect(screen.queryByTestId(REASON_ID)).toBeNull();
+    expect(bench(container, "Main Metrics", "Sharpe")).not.toBe("—");
   });
 
   it("90 elapsed days (2024-01-01 .. 2024-03-31): the figures print and there is no reason line", () => {
@@ -234,5 +241,34 @@ describe("SFH-1: the withheld comparator figures carry a reason", () => {
       </FactsheetProvider>,
     );
     expect(screen.queryByTestId(REASON_ID)).toBeNull();
+  });
+});
+
+/**
+ * D-16 on a zoom: a record that clears D-15 and is zoomed to 30 days keeps the benchmark's five
+ * annualized figures (the strategy's strip shows them with the muted note), where 170.6 D-07
+ * turned them to NaN under 90 days of slice.
+ */
+describe("D-16: a zoom under 90 days keeps the benchmark's annualized figures", () => {
+  const DAY = 86_400_000;
+  const dates = Array.from({ length: 200 }, (_, i) => new Date(Date.parse("2024-01-01T00:00:00Z") + i * DAY).toISOString().slice(0, 10));
+
+  it("windowView of the last 30 days has a finite BTC Sharpe, Sortino, Calmar, CAGR and volatility", () => {
+    const prices = ["2023-12-31", ...dates].map((date, i) => ({
+      date,
+      close: 100 + i + ((i % 3) - 1) * 2,
+    }));
+    const p = buildFactsheetPayload(
+      STRATEGY,
+      dates.map((date, i) => ({ date, value: ((i % 5) - 2) / 500 })),
+      { recordObservations: dates.length, benchmarkPrices: { prices, through: prices[prices.length - 1].date, dropped: [] } },
+    );
+    if (!p) throw new Error("fixture must build");
+    const w = windowView({ ...p, activeComparator: "btc" }, 170, 199);
+    const summary = w.comparators.btc.summary;
+    expect(summary).toBeTruthy();
+    for (const k of ["sharpe", "sortino", "calmar", "cagr", "ann_vol"] as const) {
+      expect(Number.isFinite(summary![k]), k).toBe(true);
+    }
   });
 });

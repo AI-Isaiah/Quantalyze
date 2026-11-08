@@ -2402,6 +2402,10 @@ function psProvenance(overrides: {
   analyticsRow?: boolean;
   /** Drives the missing-row age bound in deriveEmptySeriesState. */
   strategy_created_at?: string | null;
+  /** 194 D-15: the `record_observations` embed alias (absent by default). */
+  record_observations?: unknown;
+  /** 194 D-15: the strategy's asset class (default `crypto`, as before). */
+  asset_class?: string | null;
 }): unknown {
   const {
     strategy_id = "sc",
@@ -2412,6 +2416,8 @@ function psProvenance(overrides: {
     computation_status = "complete",
     analyticsRow = true,
     strategy_created_at = null,
+    record_observations,
+    asset_class = "crypto",
   } = overrides;
   return {
     portfolio_id: "real-1",
@@ -2427,7 +2433,7 @@ function psProvenance(overrides: {
       strategy_types: [],
       markets: [],
       start_date: null,
-      asset_class: "crypto",
+      asset_class,
       created_at: strategy_created_at,
       organization: null,
       strategy_verifications: verifications,
@@ -2441,6 +2447,7 @@ function psProvenance(overrides: {
             data_quality_flags,
             returns_series,
             computation_status,
+            ...(record_observations === undefined ? {} : { record_observations }),
           }
         : null,
     },
@@ -2520,6 +2527,73 @@ describe("getMyAllocationDashboard — CONSTIT-02 provenance threading", () => {
     // the venue-detail degraded_members must not appear anywhere in the payload
     expect(JSON.stringify(row)).not.toContain("degraded_members");
     expect(JSON.stringify(row)).not.toContain("okx:BTC");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 194 plan 11 (D-04 as superseded by D-15) — the dashboard producer is the
+// POSITIONED half of the Holdings table, and must emit the same three record scalars
+// as `getOwnCapitalStrategies` (cases in `queries.own-capital-span.test.ts`), so one
+// strategy gets one Sharpe verdict whether it is marked, positioned, or both. The
+// record is measured on the server because the series is not shipped for this purpose;
+// every expected value is a calendar distance, not a read-back of the producer.
+describe("getMyAllocationDashboard — total-record scalars (194 plan 11, D-15)", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  const SERIES = [
+    { date: "2026-01-01", value: 0.001 },
+    { date: "2026-03-02", value: 0.002 },
+  ];
+
+  async function strategyOf(overrides: Parameters<typeof psProvenance>[0]) {
+    state.portfolioStrategies = [
+      psProvenance({ daily_returns: SERIES, ...overrides }) as (typeof state.portfolioStrategies)[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    return result.strategies.find((s) => s.strategy_id === "sc")!.strategy as unknown as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it("2026-01-01 to 2026-03-02 covers 61 days; a stored count of 59 reaches figure_observations; crypto is true", async () => {
+    const strat = await strategyOf({ record_observations: 59 });
+    expect(strat.figure_span_days).toBe(61);
+    expect(strat.figure_observations).toBe(59);
+    expect(strat.figure_crypto).toBe(true);
+  });
+
+  it("headline_since 2026-02-01 shortens the span to 30 days; an absent count is null; traditional is not crypto", async () => {
+    const strat = await strategyOf({
+      data_quality_flags: { headline_since: "2026-02-01" },
+      asset_class: "traditional",
+    });
+    expect(strat.figure_span_days).toBe(30);
+    expect(strat.figure_observations).toBeNull();
+    expect(strat.figure_crypto).toBe(false);
+  });
+
+  it("no dated series: the span is null", async () => {
+    const strat = await strategyOf({ daily_returns: [], returns_series: null });
+    expect(strat.figure_span_days).toBeNull();
+  });
+
+  it("T-194-24: the alias is read and dropped; no series, flags or metrics key is added", async () => {
+    const strat = await strategyOf({
+      record_observations: 120,
+      data_quality_flags: { headline_since: "2026-02-01" },
+    });
+    const analytics = strat.strategy_analytics as Record<string, unknown>;
+    expect("record_observations" in analytics).toBe(false);
+    expect("metrics_json" in analytics).toBe(false);
+    expect("data_quality_flags" in analytics).toBe(false);
+    expect("returns_series" in analytics).toBe(false);
+    expect("record_observations" in strat).toBe(false);
+    expect(JSON.stringify(strat)).not.toContain("headline_since");
   });
 });
 

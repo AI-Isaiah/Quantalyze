@@ -9,6 +9,8 @@ import {
 } from "@/lib/queries";
 import { readHeadlineBasis } from "@/lib/factsheet/headline-basis";
 import { usesLastSuccessSnapshot } from "@/lib/stored-analytics-result";
+import { annualizationPeriods } from "@/lib/closed-sets";
+import { figureRecord, type FigureRecord } from "@/lib/figure-gate";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { CompareTable } from "@/components/strategy/CompareTable";
@@ -28,8 +30,11 @@ export const metadata: Metadata = { title: "Compare strategies" };
  * phase 190 alias INPUTS (`COMPARE_ANALYTICS_COLUMNS`) that pick the row's flags
  * generation. They are consumed in the page and never placed on an item.
  * `src/lib/types.ts` carries the two shared ones; the other two are compare-only.
+ * `record_observations` (194 D-15) is the stored count of return observations, appended
+ * at this page's own select call site; it too is consumed here and never placed on an item.
  */
 type CompareProjectedRow = Partial<StrategyAnalytics> & {
+  record_observations?: number | null;
   headline_since?: string | null;
   last_success_twr_chain_broken?: string | null;
   last_success_headline_since?: string | null;
@@ -88,7 +93,12 @@ export default async function ComparePage({
       ? withPublishedOnly(
           supabase
             .from("strategies")
-            .select(`*, strategy_analytics (${COMPARE_ANALYTICS_COLUMNS})`)
+            // 194 D-15: the stored observation count is appended HERE, not in
+            // COMPARE_ANALYTICS_COLUMNS, so queries.ts and its exact-set pin stay as
+            // they are. One scalar alias; `metrics_json` itself is never projected.
+            .select(
+              `*, strategy_analytics (${COMPARE_ANALYTICS_COLUMNS}, record_observations:metrics_json->record_observations)`,
+            )
             .in("id", strategyIds),
         )
       : Promise.resolve({ data: [], error: null }),
@@ -123,6 +133,10 @@ export default async function ComparePage({
   // curve method. It is kept here, outside the item, because `headline_since` is
   // an alias INPUT that never reaches a client component.
   const effectiveHeadlineSince = new Map<string, unknown>();
+  // 194 D-15: each strategy column's TOTAL record (three scalars), built here from the
+  // row's first and last return date, the effective `headline_since` and the stored
+  // observation count. It is NOT counted from `returns_series`, which the producer caps.
+  const figureRecords = new Map<string, FigureRecord>();
 
   const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
     const strat = s as Strategy & { strategy_analytics: unknown };
@@ -142,6 +156,18 @@ export default async function ComparePage({
       strat.id,
       fromSnapshot ? row?.last_success_headline_since : row?.headline_since,
     );
+    const series = Array.isArray(row?.returns_series) ? row.returns_series : null;
+    const headlineSince = effectiveHeadlineSince.get(strat.id);
+    figureRecords.set(
+      strat.id,
+      figureRecord({
+        seriesStart: series?.[0]?.date ?? null,
+        seriesEnd: series?.[series.length - 1]?.date ?? null,
+        headlineSince: typeof headlineSince === "string" ? headlineSince : null,
+        observations: row?.record_observations,
+        periodsPerYear: annualizationPeriods(strat.asset_class),
+      }),
+    );
     const generation: Partial<StrategyAnalytics> = fromSnapshot
       ? {
           twr_chain_broken: row?.last_success_twr_chain_broken ?? null,
@@ -153,6 +179,7 @@ export default async function ComparePage({
     // placed on any item a client component can receive.
     const fetched: CompareProjectedRow = { ...(row ?? {}) };
     delete fetched.headline_since;
+    delete fetched.record_observations;
     delete fetched.last_success_computed_at;
     delete fetched.last_success_cumulative_method;
     delete fetched.last_success_twr_chain_broken;
@@ -255,6 +282,14 @@ export default async function ComparePage({
     };
   });
 
+  // 194 D-15: the table's strategy columns carry their record; the overlay and the matrix
+  // keep the items above, so their key sets do not change.
+  const tableItems = items.map((it) =>
+    it.kind === "strategy"
+      ? { ...it, figureRecord: figureRecords.get(it.strategy.id) as FigureRecord }
+      : it,
+  );
+
   return (
     <>
       <PageHeader
@@ -273,7 +308,7 @@ export default async function ComparePage({
           owned solely by DashboardChrome's `isWide` arm. */}
       <div>
         <div className="space-y-8">
-          <CompareTable items={items} />
+          <CompareTable items={tableItems} />
           <CompareEquityOverlay items={overlayItems} />
           <CompareCorrelationMatrix items={strategyOnlyItems} />
         </div>

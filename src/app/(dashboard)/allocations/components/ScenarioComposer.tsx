@@ -80,6 +80,21 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
+import {
+  type FigureState,
+  coveredDays,
+  figureRecord,
+  gateAnnualized,
+  gateDelta,
+  gateRollingWindow,
+  gatedValue,
+  shortTrackNote,
+  shorterSpan,
+  widenedShortNote,
+  widenedWithheldReason,
+  withheldReason,
+} from "@/lib/figure-gate";
+import { ROLL_WINDOW_1Y_DAYS } from "@/lib/factsheet/rolling";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 import { blendPeriodsPerYear, type SeriesState } from "@/lib/closed-sets";
 import {
@@ -261,6 +276,15 @@ const WINDOW_LABEL: Record<number, string> = {
   126: "6M",
   252: "12M",
 };
+
+/**
+ * 194 D-14 (founder, 2026-11-07): the toggle's one added option, a 365-CALENDAR-day
+ * window (plan 23's `rollingCalendarStats`), never a 365-row window. Its id is a string
+ * that cannot be read as a 63/126/252 row count, so `rollingWindow` is a row count OR
+ * this id. Kept out of `WINDOW_LABEL`, whose three labels and the 63/126/252 windows
+ * stay as they are.
+ */
+const ROLLING_1Y_ID = "365D";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1433,7 +1457,8 @@ export function ScenarioComposer({
   // GRAPH-03 — rolling-metrics window. 3M/6M/12M map to 63/126/252 trading-day
   // windows (client-side, 252-annualization basis — NOT the per-strategy panel's
   // 90/180/365 backend keys). Default 6M=126 per UI-SPEC §Component Inventory.
-  const [rollingWindow, setRollingWindow] = useState(126);
+  // 194 D-14: a row count (63/126/252) or the 365-calendar-day option's id.
+  const [rollingWindow, setRollingWindow] = useState<number | typeof ROLLING_1Y_ID>(126);
 
   // ---------------------------------------------------------------------------
   // Phase 57 (WINDOW-01/04/05, POLISH-01) — the coverage window [winStart,winEnd].
@@ -4014,8 +4039,8 @@ export function ScenarioComposer({
   // universe. Fetched from POST /api/scenario/peer-rank, feeding the ENGINE's
   // sample/252-basis sharpe/sortino/max_drawdown (scenario.ts:454-456 — NOT the
   // population headline), and threaded into the synth factsheet payload via the
-  // ScenarioFactsheetChart `scenarioPeer` prop. Null when the blend is below the
-  // 252-obs sample floor, when a ranking metric is non-finite, or when the route
+  // ScenarioFactsheetChart `scenarioPeer` prop. Null when a ranking metric is
+  // non-finite (a record under D-15's minimum still ranks Max DD), or when the route
   // returns { peer: null } (cohort below the RPC's min-N) → the peer panel is
   // silently absent. No cohort distribution ever reaches the client — only the
   // 3-percentile + count rank (T-42-13).
@@ -4023,9 +4048,9 @@ export function ScenarioComposer({
 
   // Fetch effect keyed on the engine metrics triple + n, so the SAME blend
   // produces the SAME request (reload-stable) and a changed blend re-fetches.
-  // The `buildScenarioPeerRankRequest` gate owns the n>=252 + finite suppression
-  // (PEER-03); below the floor it returns null → no fetch, scenarioPeer reset to
-  // null.
+  // The `buildScenarioPeerRankRequest` gate owns the finite suppression only. A blend
+  // under D-15's minimum is still ranked (D-18: Max DD keeps its rank); the peer panel
+  // blanks Sharpe and Sortino from the blend's own record (194 review WR-02).
   //
   // DEBOUNCE (WR-01) — every distinct weight/leverage edit changes the rounded
   // metric triple and would otherwise fire one POST per edit, capped only by the
@@ -4037,8 +4062,8 @@ export function ScenarioComposer({
   // NO-STALE (intact) — the cleanup aborts both the pending timer AND the
   // in-flight request via an AbortController, so a superseded response can neither
   // resolve into `setScenarioPeer` nor complete server-side (also frees the
-  // limiter token a `cancelled` boolean alone would still burn). The n>=252 gate
-  // is unchanged: a sub-floor / non-finite blend returns a null body → no timer,
+  // limiter token a `cancelled` boolean alone would still burn). A blend under
+  // D-15's minimum / non-finite returns a null body → no timer,
   // no fetch, scenarioPeer reset to null synchronously.
   // BLEND-01 PEER-RANK FENCE (raw-value contract — DO NOT RESCALE). The peer
   // percentile ranks the engine's RAW annualized Sharpe/Sortino/maxDD verbatim.
@@ -4051,6 +4076,25 @@ export function ScenarioComposer({
   const peerSortino = scenarioMetrics.sortino;
   const peerMaxDD = scenarioMetrics.max_drawdown;
   const peerN = scenarioMetrics.n;
+  // 194 D-15 — the blend's record, built ONCE and read by both the annualised
+  // KPI gate (the "Scenario blend" strip) and the peer-rank fetch below. Per
+  // D-15 the blend's total record is its overlapping record, and `blendBasis`
+  // already applies the any-crypto-leg rule, so the crypto flag is never
+  // recomputed from asset classes here.
+  const blendEffectiveStart = scenarioMetrics.effective_start;
+  const blendEffectiveEnd = scenarioMetrics.effective_end;
+  const blendRecord = useMemo(
+    () =>
+      figureRecord({
+        seriesStart: blendEffectiveStart,
+        seriesEnd: blendEffectiveEnd,
+        headlineSince: null,
+        observations: peerN,
+        periodsPerYear: blendBasis,
+      }),
+    [blendEffectiveStart, blendEffectiveEnd, peerN, blendBasis],
+  );
+  const blendGateState = gateAnnualized(blendRecord);
   useEffect(() => {
     const body = buildScenarioPeerRankRequest({
       sharpe: peerSharpe,
@@ -4059,7 +4103,7 @@ export function ScenarioComposer({
       n: peerN,
     });
     if (!body) {
-      // Below the sample floor / non-finite metrics — suppress (no fetch).
+      // Non-finite ranking metrics — suppress (no fetch).
       setScenarioPeer(null);
       return;
     }
@@ -4104,6 +4148,32 @@ export function ScenarioComposer({
     };
   }, [peerSharpe, peerSortino, peerMaxDD, peerN]);
 
+  // 194 D-04 as superseded by D-15 — the metrics the "Scenario blend" strip
+  // renders. The annualised figures read `gatedValue` over the blend record, so
+  // a record under D-15's minimum shows `—` and the caption says why. Every
+  // other consumer of `scenarioMetrics` (peer rank, commit, compare) keeps the
+  // raw engine values: the gate is a display rule.
+  const gatedBlendMetrics = useMemo<ComputedMetrics>(
+    () => ({
+      ...scenarioMetrics,
+      cagr: gatedValue(scenarioMetrics.cagr, blendGateState),
+      volatility: gatedValue(scenarioMetrics.volatility, blendGateState),
+      sharpe: gatedValue(scenarioMetrics.sharpe, blendGateState),
+      sortino: gatedValue(scenarioMetrics.sortino, blendGateState),
+    }),
+    [scenarioMetrics, blendGateState],
+  );
+  // ONE muted caption: the withheld reason, or the short-track note. Absent for
+  // a full record, an unknown record, and an empty blend (nothing to explain).
+  const blendGateNote =
+    scenarioMetrics.n <= 0
+      ? null
+      : blendGateState === "withheld"
+        ? withheldReason("blend", blendRecord)
+        : blendGateState === "short" && blendRecord.spanDays != null
+          ? shortTrackNote("blend", blendRecord.spanDays)
+          : null;
+
   // GRAPH-02 / GRAPH-03 — derive every blend-graph series from the SAME
   // unrounded `portfolio_daily_returns` the benchmark / stress / MC sections
   // read (never the rounded/downsampled `equity_curve`). `deriveBlendPanels` is
@@ -4137,9 +4207,41 @@ export function ScenarioComposer({
   const blendPanels = useMemo(
     // BLEND-01 — the rolling-window blend panels ride the SAME derived blend
     // basis as the headline KPIs (√365 if any selected leg is crypto, else 252).
-    () => deriveBlendPanels(portfolioDaily, rollingWindow, blendBasis),
+    () =>
+      deriveBlendPanels(
+        portfolioDaily,
+        rollingWindow === ROLLING_1Y_ID
+          ? { calendarDays: ROLL_WINDOW_1Y_DAYS }
+          : rollingWindow,
+        blendBasis,
+      ),
     [portfolioDaily, rollingWindow, blendBasis],
   );
+  // 194 D-11 / D-14 / D-15 — the rolling panel's verdict, once per render, on the blend's
+  // TOTAL record (`blendRecord`, record check first): withheld when the record fails the gate
+  // (cause `gate`) or holds no full window (cause `record`); short (window under one year)
+  // draws with one muted note; the calendar window, once filled, draws plain. `enough` is
+  // the row window's full-window count, or the dates spanning the calendar window.
+  const rollingVerdict = useMemo(() => {
+    const dates = portfolioDaily.map((p) => p.date);
+    if (rollingWindow === ROLLING_1Y_ID) {
+      const spans =
+        dates.length >= 2 &&
+        coveredDays(dates[0], dates[dates.length - 1]) >= ROLL_WINDOW_1Y_DAYS;
+      return gateRollingWindow(
+        blendRecord,
+        dates,
+        { calendarDays: ROLL_WINDOW_1Y_DAYS },
+        spans,
+      );
+    }
+    return gateRollingWindow(
+      blendRecord,
+      dates,
+      { rows: rollingWindow },
+      blendPanels.usableN >= rollingWindow,
+    );
+  }, [portfolioDaily, rollingWindow, blendRecord, blendPanels.usableN]);
 
   // PEER-04 (Phase 42) — per-constituent mandate chips for the blend. Built ONLY
   // from genuinely-available `StrategyForBuilder` fields (`strategy_types`,
@@ -4173,14 +4275,36 @@ export function ScenarioComposer({
   // delta = blend − book; null when a leg is null. `null` (→ undefined) when
   // there is no live book series (blank mode or a no-book allocator) so the panel
   // is silently absent. Keyed on the engine output + the own-book series + basis.
+  // The producer only emits finite returns (extractTrustworthyDerivedSeries).
+  // 194 R3 SFH-M2: a series that is present but holds a non-finite return is an
+  // UNREADABLE record, not an absent one. It fails the Sharpe delta closed to
+  // withheld (`sharpeDeltaState`) and is reported once per transition below.
+  // 194 R5 WR-01: this is for a non-finite RETURN only, which corrupts the drawdown as well as
+  // the ratios, so the whole comparison is omitted. A malformed own-book DATE is not handled
+  // here: `figureRecord` marks the book record `unreadable` (R4 WR-02), which withholds the
+  // annualised Sharpe and Sortino through `gateDelta`/`gateAnnualized` and keeps the Max DD
+  // delta, which needs no date.
+  const ownBookUnreadable = useMemo(
+    () => !baselineEquityDailyReturns.every((point) => Number.isFinite(point.value)),
+    [baselineEquityDailyReturns],
+  );
+  useEffect(() => {
+    if (!ownBookUnreadable) return;
+    captureToSentry(
+      new Error("ScenarioComposer: non-finite own-book return; the Sharpe delta is withheld"),
+      {
+        tags: { component: "ScenarioComposer", reason: "own-book-return-unreadable" },
+        level: "error",
+      },
+    );
+  }, [ownBookUnreadable]);
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
-    // The producer only emits finite returns (extractTrustworthyDerivedSeries).
     // Review C2 SFH-11 (b): if that contract ever breaks, the book leg is
     // absent and the break is logged. Filtering the bad value out silently
     // would compute the Sharpe and Sortino on fewer observations with nothing
     // said. No book → absent.
     const bookReturns = baselineEquityDailyReturns.map((point) => point.value);
-    if (!bookReturns.every((r) => Number.isFinite(r))) {
+    if (ownBookUnreadable) {
       console.error(
         "[ScenarioComposer] non-finite own-book return in equityDailyReturns; the own-book comparison is omitted",
       );
@@ -4205,15 +4329,34 @@ export function ScenarioComposer({
     const blendMaxDD = scenarioMetrics.max_drawdown;
     const sub = (a: number | null, b: number | null): number | null =>
       a != null && b != null ? a - b : null;
+    // 194 D-15: the delta is gated on the two TOTAL records, and its note is qualified by
+    // the SHORTER of the two spans (never the longer, which would understate the shortfall).
+    // The book's record is built at `blendBasis`, the basis the book leg is annualized at
+    // above, so both records read the same crypto flag.
+    const bookFirst = baselineEquityDailyReturns[0].date;
+    const bookLast = baselineEquityDailyReturns[baselineEquityDailyReturns.length - 1].date;
     return {
       sharpe: sub(blendSharpe, book.sharpe),
       sortino: sub(blendSortino, book.sortino),
       max_dd: sub(blendMaxDD, book.max_drawdown),
       blend_n: scenarioMetrics.n,
       book_n: bookReturns.length,
+      span_days: shorterSpan(blendRecord.spanDays, coveredDays(bookFirst, bookLast)),
+      records: {
+        blend: blendRecord,
+        book: figureRecord({
+          seriesStart: bookFirst,
+          seriesEnd: bookLast,
+          headlineSince: null,
+          observations: bookReturns.length,
+          periodsPerYear: blendBasis,
+        }),
+      },
     };
   }, [
     baselineEquityDailyReturns,
+    ownBookUnreadable,
+    blendRecord,
     scenarioMetrics.n,
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
@@ -4331,6 +4474,35 @@ export function ScenarioComposer({
   const liveMetricsForKpi: ComputedMetrics = useMemo(
     () => liveBaselineToComputedMetrics(payload.liveBaselineMetrics),
     [payload.liveBaselineMetrics],
+  );
+
+  // 194 D-15 / D-11 (review CR-01, R3 WR-01): Sharpe is annualised, so its delta is judged
+  // on the TOTAL records of both legs, exactly as the own-book delta is. The footer chip
+  // reads `sharpeDeltaState`; the "Scenario blend" strip derives its pill and its "Current
+  // book" tooltip from the same two operands, the gated blend Sharpe and `gatedLiveMetrics`
+  // (the book's Sharpe, withheld when the book's own record is). So a short book beside a
+  // long blend shows no annualised Sharpe delta or book figure in either place. An unknown
+  // record keeps the figure (D-17: unknown is not reinterpreted as withheld). An unreadable
+  // own-book series (SFH-M2) fails closed to withheld. With no book series there is only the
+  // blend to judge, and the live Sharpe stays (blank mode, rebuilding and fewer than 2
+  // returns, D-03).
+  const deltaRecords = scenarioOwnBookDelta?.records;
+  const sharpeDeltaState: FigureState = ownBookUnreadable
+    ? "withheld"
+    : deltaRecords !== undefined
+      ? gateDelta(deltaRecords.blend, deltaRecords.book, scenarioOwnBookDelta?.span_days ?? null)
+      : blendGateState;
+  const liveSharpeState: FigureState = ownBookUnreadable
+    ? "withheld"
+    : deltaRecords !== undefined
+      ? gateAnnualized(deltaRecords.book)
+      : "null";
+  const gatedLiveMetrics = useMemo<ComputedMetrics>(
+    () => ({
+      ...liveMetricsForKpi,
+      sharpe: gatedValue(liveMetricsForKpi.sharpe, liveSharpeState),
+    }),
+    [liveMetricsForKpi, liveSharpeState],
   );
 
   // -------------------------------------------------------------------------
@@ -4734,6 +4906,7 @@ export function ScenarioComposer({
     }> = [];
     const live = liveMetricsForKpi;
     const sc = scenarioMetrics;
+    // The Sharpe chip reads the one `sharpeDeltaState` above (the strip reads it too).
     function pushDelta(
       label: string,
       direction: "up-good" | "down-good",
@@ -4765,7 +4938,7 @@ export function ScenarioComposer({
       0.01,
       { dp: 2 },
       live.sharpe,
-      sc.sharpe,
+      gatedValue(sc.sharpe, sharpeDeltaState),
     );
     pushDelta(
       "Max DD",
@@ -4784,7 +4957,7 @@ export function ScenarioComposer({
       sc.twr,
     );
     return items;
-  }, [liveMetricsForKpi, scenarioMetrics]);
+  }, [liveMetricsForKpi, scenarioMetrics, sharpeDeltaState]);
 
   // -------------------------------------------------------------------------
   // Build commit diffs and route to the ScenarioCommitDrawer (Plan 07).
@@ -5301,7 +5474,11 @@ export function ScenarioComposer({
           htmlFor="scenario-aum"
           className="font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted"
         >
-          PORTFOLIO AUM (USD)
+          {/* 194 D-08: book mode shows a MEASURED figure, the modelled book (the
+              keys carrying a return series, see the Models-N-of-M note below),
+              so it names that quantity. Blank mode is a typed input and keeps
+              its label. */}
+          {entryMode === "book" ? "Modelled equity (USD)" : "PORTFOLIO AUM (USD)"}
         </label>
         <input
           id="scenario-aum"
@@ -5835,13 +6012,21 @@ export function ScenarioComposer({
         <KpiStrip
           mode="scenario"
           variant="panel"
-          scenarioMetrics={scenarioMetrics}
-          liveMetrics={liveMetricsForKpi}
+          scenarioMetrics={gatedBlendMetrics}
+          liveMetrics={gatedLiveMetrics}
           metrics={liveMetricsForKpi}
           analytics={{}}
           snapshotCount={snapshotCount}
           allKeysStale={allKeysStale}
         />
+        {blendGateNote !== null && (
+          <p
+            data-testid="scenario-figure-gate-note"
+            className="px-4 pb-3 text-xs text-text-muted"
+          >
+            {blendGateNote}
+          </p>
+        )}
       </div>
       </div>
 
@@ -6337,21 +6522,40 @@ export function ScenarioComposer({
           <SegmentedControl
             ariaLabel="Rolling window"
             activeId={String(rollingWindow)}
-            onChange={(id) => setRollingWindow(Number(id))}
-            options={Object.keys(WINDOW_LABEL).map((w) => ({
-              id: w,
-              label: WINDOW_LABEL[Number(w)],
-              disabled: blendPanels.usableN < Number(w),
-            }))}
+            onChange={(id) =>
+              setRollingWindow(id === ROLLING_1Y_ID ? ROLLING_1Y_ID : Number(id))
+            }
+            options={[
+              ...Object.keys(WINDOW_LABEL).map((w) => ({
+                id: w,
+                label: WINDOW_LABEL[Number(w)],
+                disabled: blendPanels.usableN < Number(w),
+              })),
+              // 194 D-14: the one added option, after the three row windows. Never
+              // disabled: a record too short for it says so in the body, as the row
+              // windows' withheld reason does for the one already selected.
+              { id: ROLLING_1Y_ID, label: "365D", disabled: false },
+            ]}
           />
         </div>
-        {blendPanels.usableN < rollingWindow ? (
+        {rollingVerdict.state === "withheld" ? (
           <PartialDataBanner
             heading="Awaiting more data"
-            body={`This portfolio needs at least ${rollingWindow} overlapping daily returns for the ${WINDOW_LABEL[rollingWindow] ?? `${rollingWindow}-day`} rolling window.`}
+            body={widenedWithheldReason(
+              rollingVerdict.cause === "record" ? "rolling-record" : "rolling",
+              blendRecord,
+            )}
           />
         ) : (
           <div className="space-y-6">
+            {rollingVerdict.state === "short" && rollingVerdict.days != null ? (
+              <p
+                data-testid="blend-rolling-annualization-note"
+                className="text-xs text-text-muted"
+              >
+                {widenedShortNote("rolling", rollingVerdict.days)}
+              </p>
+            ) : null}
             <div>
               <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
                 Rolling Sharpe
@@ -6364,7 +6568,9 @@ export function ScenarioComposer({
                 // ("365d") would lie about the selected window. Override the visible
                 // legend/tooltip label with the true window count (matches the
                 // "{rollingWindow}-day rolling window" disclosure below).
-                seriesLabels={{ sharpe_365d: `${rollingWindow}d` }}
+                seriesLabels={{
+                  sharpe_365d: `${rollingWindow === ROLLING_1Y_ID ? ROLL_WINDOW_1Y_DAYS : rollingWindow}d`,
+                }}
               />
             </div>
             <div>
@@ -6380,7 +6586,8 @@ export function ScenarioComposer({
               <RollingSortinoChart data={blendPanels.rollingSortino} />
             </div>
             <p className="text-xs text-text-muted">
-              {rollingWindow}-day rolling window · 252-day annualized ·{" "}
+              {rollingWindow === ROLLING_1Y_ID ? ROLL_WINDOW_1Y_DAYS : rollingWindow}
+              -day rolling window · {blendBasis}-day annualized ·{" "}
               {scenarioMetrics.n} overlapping days · not a forecast.
             </p>
           </div>

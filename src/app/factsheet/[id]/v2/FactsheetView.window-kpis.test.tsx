@@ -12,6 +12,7 @@ import { buildFactsheetPayload, deriveSeriesBundle } from "@/lib/factsheet/build
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/build-payload";
 import { compute } from "@/lib/factsheet/compute";
 import { MIN_PAIRED_OBSERVATIONS, pairedFloorReason } from "@/lib/factsheet/joint";
+import { shortTrackNote, coveredDays, widenedShortNote, widenedWithheldReason, withheldReason } from "@/lib/figure-gate";
 import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider, useXRange } from "./factsheet-context";
@@ -205,12 +206,18 @@ describe("KPI strip follows the zoom window (SC10, D-27)", () => {
     expect(screen.getByTestId("range-eyebrow-strip").textContent).toBe(full);
   });
 
-  it("the short-track caveat states the WINDOW's observation count while zoomed", async () => {
+  // Phase 194 (D-04 as superseded by D-15, D-13): the amber "Only N observations" caveat is retired.
+  // A 400-day crypto record clears D-15's minimum and is over a year, so the full-history strip
+  // carries no note; a zoom shows the figures and ONE muted note naming the range's span.
+  it("a zoom under a year keeps the figures and carries the range's short-track note; the amber observation count is gone", async () => {
     const payload = build400();
     const { container } = mount(payload);
-    expect(container.textContent).not.toMatch(/Only \d+ observations? — annualized/);
+    expect(screen.queryByTestId("strip-figure-gate-note")).toBeNull();
     await click("zoom");
-    expect(container.textContent).toContain("Only 200 observations — annualized");
+    const note = screen.getByTestId("strip-figure-gate-note");
+    expect(note.textContent).toContain(shortTrackNote("range", coveredDays(payload.dates[100], payload.dates[299])));
+    expect(container.textContent).not.toMatch(/Only \d+ observations? — annualized/);
+    expect(stripCells().Sharpe).not.toBe("—");
   });
 });
 
@@ -338,6 +345,7 @@ describe("the window holds across basis and leverage and never fabricates a figu
       strategyName: payload.strategyName,
       missingSegments: payload.missingSegments,
       benchmarkPrices: payload.benchmarkPrices ?? { unavailable: true },
+      figureRecord: null,
     }).comparators.btc;
     expect(expected.through).toBe(payload.dates[250]);
     expect(expected.summary).not.toBeNull();
@@ -447,13 +455,84 @@ describe("the window holds across basis and leverage and never fabricates a figu
     expect(container.textContent).not.toMatch(ANY_SPAN_NOTE);
   });
 
-  it("the short-track caveat states a 60-observation window's count; an 800-observation record with no zoom shows none", async () => {
+  it("a 60-row window of an 800-day record shows its figures with the range's note; with no zoom the strip shows no note", async () => {
     const long = build400(800);
     const { container, unmount } = mount(long, [100, 159]);
-    expect(container.textContent).not.toMatch(/Only \d+ observations? — annualized/);
+    expect(screen.queryByTestId("strip-figure-gate-note")).toBeNull();
     await click("zoom");
-    expect(container.textContent).toContain("Only 60 observations — annualized");
+    expect(screen.getByTestId("strip-figure-gate-note").textContent).toContain(
+      shortTrackNote("range", coveredDays(long.dates[100], long.dates[159])),
+    );
+    expect(container.textContent).not.toMatch(/Only \d+ observations? — annualized/);
+    expect(stripCells().Sharpe).not.toBe("—");
     unmount();
+  });
+
+  // Phase 194 plan 08 (D-15 as the founder typed it: "Only if in total, there is less than three
+  // months ... do we not show the KPIs. Otherwise, if a client zooms in, then he wants the KPIs on
+  // shorter timeframes"). The TOTAL record decides; the window only qualifies.
+  it("D-15: a 30-day selected range inside a cleared 400-day record prints its figures, with the 'range' short-track note and no withheld sentence", async () => {
+    const payload = build400();
+    mount(payload, [100, 130]);
+    await click("zoom");
+    const slice = compute(
+      payload.strategyReturns.slice(100, 131),
+      payload.dates.slice(100, 131),
+      0,
+      payload.periodsPerYear!,
+    );
+    const cells = stripCells();
+    expect(cells.Sharpe).toBe(num(slice.sharpe));
+    expect(cells.CAGR).toBe(pctSigned(slice.cagr, 1));
+    expect(cells["Ann. Vol"]).toBe(pct(slice.ann_vol, 1));
+    expect(coveredDays(payload.dates[100], payload.dates[130])).toBe(31); // 31 daily returns cover 31 days (D-20)
+    const note = screen.getByTestId("strip-figure-gate-note").textContent ?? "";
+    expect(note).toContain(shortTrackNote("range", 31));
+    expect(note).not.toContain("Annualized figures appear once");
+  });
+
+  it("D-15: a 45-day crypto blend in the Scenario mount withholds the five annualised cells and states the blend's wording once", () => {
+    const payload = buildScenarioFactsheetPayload({
+      portfolioDaily: Array.from({ length: 45 }, (_, i) => ({ date: addDays("2025-03-01", i), value: stratValue(i) })),
+      benchmark: null,
+      periodsPerYear: 365,
+    });
+    expect(payload.figureRecord?.crypto).toBe(true);
+    mountScenario(payload, [10, 30]);
+    const cells = stripCells();
+    for (const label of ["CAGR", "Sharpe", "Sortino", "Calmar", "Ann. Vol"]) expect(cells[label], label).toBe("—");
+    expect(cells["Cum. Return"]).not.toBe("—");
+    const notes = screen.getAllByTestId("strip-figure-gate-note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toContain(withheldReason("blend", payload.figureRecord!));
+    expect(notes[0].textContent).toContain("blend's overlapping record");
+  });
+
+  it("D-11 / D-15: on a 60-day crypto record alpha and IR print a dash and the one strip note carries the overlap withheld reason", () => {
+    const payload = build400(60);
+    expect(payload.comparators.btc.jointAnnualization?.state).toBe("withheld");
+    mount(payload);
+    const cells = stripCells();
+    expect(cells["α vs BTC"]).toBe("—");
+    expect(cells["IR vs BTC"]).toBe("—");
+    expect(cells.Sharpe).toBe("—");
+    const notes = screen.getAllByTestId("strip-figure-gate-note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toContain(widenedWithheldReason("overlap", payload.figureRecord!));
+  });
+
+  it("D-11 / D-15: a 60-day BTC overlap on a cleared 400-day record prints alpha and IR, and the note carries the overlap's short-track sentence", () => {
+    const payload = build400(400, 59);
+    const marker = payload.comparators.btc.jointAnnualization;
+    expect(marker?.state).toBe("short");
+    expect(marker!.days).toBeGreaterThanOrEqual(59);
+    expect(marker!.days).toBeLessThanOrEqual(60);
+    mount(payload);
+    const cells = stripCells();
+    expect(cells["α vs BTC"]).not.toBe("—");
+    expect(cells["IR vs BTC"]).not.toBe("—");
+    const note = screen.getByTestId("strip-figure-gate-note").textContent ?? "";
+    expect(note).toContain(widenedShortNote("overlap", marker!.days));
   });
 
   it("the strip and the rail at one window run deriveSeriesBundle ONCE, and a second render at that window runs it zero more times", async () => {

@@ -13,7 +13,7 @@ import { btcClosesFromReturns } from "./btc-closes.test-utils";
  * honesty/correctness — a number that lies to an allocator. Each invariant is
  * encoded as an assertion that fails LOUD under the corresponding bug:
  *
- *   - golden VaR/CVaR  — the historical floor-quantile oracle (-0.060 / -0.070).
+ *   - golden VaR/CVaR  — the historical floor-quantile oracle (-0.060 / -0.080).
  *                        A parametric (Normal) or linear-interpolation impl FAILS.
  *   - not parametric   — explicit negative control vs the Normal tail value.
  *   - near-market-neutral — cov≈0 book ⇒ |impact| ≈ 0, NOT the full shock
@@ -83,8 +83,10 @@ describe("computeScenarioStress — golden VaR/CVaR oracle (STRESS-02)", () => {
   //   n = 20, confidence = 0.95
   //   idx       = floor((1 - 0.95) * 20) = floor(1.0) = 1
   //   VaR(95%)  = sorted[1] = -0.060          (the floor / type-1 quantile)
-  //   tail      = { r <= -0.060 } = [-0.080, -0.060]
-  //   CVaR(95%) = mean([-0.080, -0.060]) = -0.070
+  //   194 D-02: CVaR is the mean of the max(1, k) smallest returns, k = floor(0.05 * 20) = 1,
+  //   which EXCLUDES the VaR element itself (the factsheet and the producer use the same rule).
+  //   tail      = sorted[0:1] = [-0.080]
+  //   CVaR(95%) = -0.080
   const SORTED = [
     -0.08, -0.06, -0.045, -0.03, -0.025, -0.02, -0.015, -0.01, -0.005, 0.0,
     0.005, 0.01, 0.012, 0.015, 0.018, 0.02, 0.025, 0.03, 0.04, 0.06,
@@ -101,9 +103,9 @@ describe("computeScenarioStress — golden VaR/CVaR oracle (STRESS-02)", () => {
     expect(r.var).toBeCloseTo(-0.06, 10);
   });
 
-  it("golden CVaR — CVaR(95%) = mean of the tail = -0.070, and CVaR <= VaR", () => {
+  it("golden CVaR — CVaR(95%) = mean of the 1 worst return = -0.080 (VaR element excluded), and CVaR <= VaR", () => {
     const r = computeScenarioStress(port, closes(btc));
-    expect(r.cvar).toBeCloseTo(-0.07, 10);
+    expect(r.cvar).toBeCloseTo(-0.08, 10);
     expect(r.cvar!).toBeLessThanOrEqual(r.var!);
   });
 

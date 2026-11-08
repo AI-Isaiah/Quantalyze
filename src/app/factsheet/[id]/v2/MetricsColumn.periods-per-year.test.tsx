@@ -100,11 +100,8 @@ function warningText(container: HTMLElement): string | null {
 describe("MetricsColumn observation warning follows payload.periodsPerYear (SC-5b)", () => {
   it("a 365 book with 300 observations reads 0.82y and names 365 observations as the threshold", () => {
     const { container } = renderColumn(payloadWith(300, 365));
-    const w = warningText(container);
-    expect(w).not.toBeNull();
-    expect(w).toContain("Only 300 observations (0.82y)");
-    expect(w).toContain("Conventional reliability threshold is ≥ 365 observations (1 year).");
-    expect(w).not.toContain("252");
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
   });
 
   it("a 365 book with 400 observations shows no 'Only N observations' warning", () => {
@@ -115,11 +112,8 @@ describe("MetricsColumn observation warning follows payload.periodsPerYear (SC-5
 
   it("a 252 book with 200 observations reads 0.79y and names 252 observations as the threshold", () => {
     const { container } = renderColumn(payloadWith(200, 252));
-    const w = warningText(container);
-    expect(w).not.toBeNull();
-    // 2026-09-27, Phase 169 D-12 / D-51: record length is stated in calendar years; the threshold assertion below is 167.1.2's and unchanged.
-    expect(w).toContain("Only 200 observations (0.54y)");
-    expect(w).toContain("Conventional reliability threshold is ≥ 252 observations (1 year).");
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
   });
 
   it("a payload with NO periodsPerYear hides the warning and its threshold sentence (no 252 assumed)", () => {
@@ -136,19 +130,15 @@ describe("the Scenario surface's payload carries its basis to MetricsColumn (W2)
       periodsPerYear: 365,
     });
     const { container } = renderColumn(payload);
-    const w = warningText(container);
-    expect(w).not.toBeNull();
-    expect(w).toContain("Only 300 observations (0.82y)");
-    expect(w).toContain("≥ 365 observations (1 year).");
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
   });
 
   it("buildScenarioFactsheetPayload with no basis argument uses its own 252 default, not hidden", () => {
     const payload = buildScenarioFactsheetPayload({ portfolioDaily: dailies(200) });
     const { container } = renderColumn(payload);
-    const w = warningText(container);
-    expect(w).not.toBeNull();
-    expect(w).toContain("Only 200 observations (0.54y)"); // Phase 169 D-12 / D-51: calendar years, as above
-    expect(w).toContain("≥ 252 observations (1 year).");
+    // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).
+    expect(warningText(container)).toBeNull();
   });
 
   it("the composer's factsheet body shows no whole-blend LEVERAGE input although the payload now carries a basis", () => {

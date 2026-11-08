@@ -189,3 +189,29 @@ export function beta(y: number[], x: number[]): number | null {
   varX /= n;
   return varX > 0 ? cov / varX : null;
 }
+
+/**
+ * Historical 1-day VaR and CVaR at the `tail` quantile (194 D-02, TRUST-04): the
+ * ONE definition every surface now shows. Sort the finite returns ascending,
+ * `k = floor(tail * n)`, VaR = `sorted[min(k, n - 1)]`, CVaR = the mean of
+ * `sorted[0 : max(1, k)]`; no finite return gives `{ var: null, cvar: null }`.
+ *
+ * Python twin: `_historical_var_cvar` in `analytics-service/services/metrics.py`
+ * (the stored `var_1d_95` / `cvar`). Both are pinned to one JSON fixture,
+ * `analytics-service/tests/fixtures/figure_parity_vectors.json`, read by
+ * `src/lib/figure-parity.test.ts` and `tests/test_figure_parity.py`.
+ */
+export function historicalVarCvar(
+  returns: readonly number[],
+  tail = 0.05,
+): { var: number | null; cvar: number | null } {
+  const sorted = returns.filter((r) => Number.isFinite(r)).sort((a, b) => a - b);
+  const n = sorted.length;
+  if (n === 0) return { var: null, cvar: null };
+  const k = Math.floor(tail * n);
+  const worst = sorted.slice(0, Math.max(1, k));
+  return {
+    var: sorted[Math.min(k, n - 1)],
+    cvar: worst.reduce((acc, x) => acc + x, 0) / worst.length,
+  };
+}

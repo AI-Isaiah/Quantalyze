@@ -86,6 +86,8 @@ def simulate_add_candidate(
           - proposed: {sharpe, max_drawdown, avg_correlation, concentration}
           - overlap_days: int — trading days of overlap between candidate
             and portfolio
+          - annualization_periods: int — (ok only) the blend_ppy both Sharpes
+            were annualised at, 365 or 252 (194 D-15)
           - partial_history: bool — True when overlap_days <
             PARTIAL_HISTORY_THRESHOLD
           - equity_curve_current: [{date, value}] portfolio-level cumulative
@@ -240,6 +242,11 @@ def simulate_add_candidate(
         # shape. True here because overlap_days >= MIN_DATA_POINTS guarantees
         # Sharpe / MaxDD are computed over a meaningful window.
         "current_metrics_reliable": True,
+        # 194 D-15 (2026-11-07): the risk clock BOTH sides above were annualised at
+        # (365 if a book leg is crypto, else 252). The client needs the basis to apply
+        # the total-record gate to `sharpe_delta` (crypto: 90 calendar days; otherwise
+        # 60 observations). It is the value already computed, nothing is recomputed here.
+        "annualization_periods": blend_ppy,
         "deltas": {
             "sharpe_delta": _safe_float(sharpe_delta),
             "dd_delta": _safe_float(dd_delta),

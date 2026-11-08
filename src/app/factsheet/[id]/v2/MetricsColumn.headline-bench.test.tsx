@@ -192,10 +192,11 @@ function headlineBenchCells(container: HTMLElement) {
 }
 
 /**
- * Phase 170.6 plan 11 (D-07): a comparator span under 90 elapsed calendar days has no
- * annualized figures, so CAGR, Ann. Volatility, Sharpe, Sortino and Calmar read the
- * em-dash. `annualized` is false for the 12-day suffix below; the whole 400-day record
- * annualizes. Cumulative return and max drawdown never depend on it.
+ * Phase 194 D-16 / D-19 (founder 2026-11-07, superseding 170.6 plan 11 D-07): no comparator span is
+ * withheld for its length, only with the strategy's TOTAL record. A crypto Dated row's record is
+ * its 12-day suffix, under D-15's 90 days, so `annualized` is false for it: the five annualized
+ * cells (CAGR, Ann. Volatility, Sharpe, Sortino, Calmar) read the em-dash in the benchmark column
+ * as in the strategy column. The whole 400-day record clears and prints the oracle's figures.
  */
 function expectedHeadline(s: ReturnType<typeof oracle>, annualized = true) {
   return {
@@ -221,8 +222,7 @@ describe("a Dated row: each headline benchmark cell is the comparator over the s
     const since = expectedHeadline(oracle(p, SINCE), false);
     expect(since.cum).not.toBe(whole.cum);
     expect(since.maxdd).not.toBe(whole.maxdd);
-    // D-07 (170.6 plan 11): the suffix's volatility is a real, different number that is withheld
-    // below the 90-day floor, so it is the raw oracle values that must differ, not the printed cells.
+    // The suffix's volatility is a real, different number from the whole record's.
     expect(pctU(oracle(p, SINCE).ann_vol)).not.toBe(pctU(oracle(p).ann_vol));
     // The rail prints the 12-day suffix as the strategy's own span; the oracle agrees it is 12 days.
     expect(p.dates.filter((d) => d >= SINCE)).toHaveLength(12);
@@ -231,8 +231,8 @@ describe("a Dated row: each headline benchmark cell is the comparator over the s
   it("Main Metrics, Returns and Max Drawdown bench cells equal the independent suffix oracle", () => {
     const p = build(DATED);
     const { container } = mount(p);
-    // D-07: the 12-day suffix is under the 90-day floor. The oracle's annualized numbers are finite
-    // (the dash below is the floor, not missing data); the five annualized cells read the em-dash.
+    // D-19: the oracle's annualized numbers are finite (the dash is the strategy's withheld
+    // 12-day total record, not missing data); the five annualized cells read the em-dash.
     for (const k of ["cagr", "ann_vol", "sharpe", "sortino", "calmar"] as const) {
       expect(Number.isFinite(oracle(p, SINCE)[k]), k).toBe(true);
     }
@@ -393,10 +393,29 @@ describe("a clean row and a selected range read what they read before this plan 
     const dated = mount(build(DATED), range);
     await selectRange();
     expect(dated.container.textContent).toContain("hidden while a range is selected");
-    expect(rangeCells(dated.container)).toEqual(want);
+    // The Dated record is the 12-day suffix (withheld, D-19), so only the five annualized cells
+    // differ, and they read the em-dash; every other cell equals the clean row's.
+    expect(rangeCells(dated.container)).toEqual({
+      ...want,
+      cagr: dash,
+      vol: dash,
+      sharpe: dash,
+      sortino: dash,
+      calmar: dash,
+    });
     // Guard against a vacuous pass: the range cells are real figures, not dashes.
+    expect(want.sharpe).not.toBe(dash);
     expect(want.cum).not.toBe(dash);
     expect(want.maxdd).not.toBe(dash);
+  });
+
+  it("D-16 / D-19: a clean 400-day record zoomed to 30 days still shows the benchmark's five annualized cells", async () => {
+    const { container } = mount(build(), [370, 399]);
+    await selectRange();
+    expect(container.textContent).toContain("hidden while a range is selected");
+    for (const label of ["CAGR", "Ann. Volatility", "Sharpe", "Sortino", "Calmar"]) {
+      expect(bench(container, MAIN, label), label).not.toBe(dash);
+    }
   });
 
   it("the Dated payload's whole-record bench figures (summary) are untouched by the span summary", () => {

@@ -461,7 +461,10 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
       .replace("data_quality_flags->>cumulative_method", "")
       .replace("data_quality_flags->last_success_snapshot->flags->>cumulative_method", "")
       .replace("data_quality_flags->last_success_snapshot->>computed_at", "")
-      .replace("data_quality_flags->last_success_snapshot->flags->>native_unit", "");
+      .replace("data_quality_flags->last_success_snapshot->flags->>native_unit", "")
+      // AMENDED 2026-11-07, Phase 194 plan 06 (D-15): ONE more flags scalar, the
+      // date a chain-broken headline starts. A date string, never the blob.
+      .replace("data_quality_flags->>headline_since", "");
     expect(withoutAllowed).not.toContain("data_quality_flags");
     // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
     // projected column (which would ship the entire blob to an anon reader).
@@ -531,6 +534,38 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
     ]) {
       expect(cols.split(alias).length - 1, alias).toBe(1);
     }
+  });
+
+  it("carries the D-15 record as exactly three scalar aliases, two dates and one count, never an array or a blob (phase 194 plan 06, T-194-10)", async () => {
+    const { embed } = await captureSelect();
+    // WHY: the list judges each row's TOTAL record (figure-gate.ts). That needs the
+    // first and last date and the observation count, and nothing else out of the
+    // private blobs. `->0` is the control the `series_end` docblock measured against
+    // TEST: it resolves to the FIRST element, not a silent null.
+    for (const alias of [
+      "series_start:returns_series->0->>date",
+      "headline_since:data_quality_flags->>headline_since",
+      "record_observations:metrics_json->record_observations",
+    ]) {
+      expect(embed.split(alias).length - 1, alias).toBe(1);
+    }
+    // Every blob reference in the embed is one of the allowed alias forms: a regex over
+    // the full column list, so a fourth key out of a blob fails here and not in review.
+    const blobRefs = embed.match(/(?:returns_series|data_quality_flags|metrics_json)[^,]*/g) ?? [];
+    expect(blobRefs.sort()).toEqual(
+      [
+        "data_quality_flags->>cumulative_method",
+        "data_quality_flags->>headline_since",
+        "data_quality_flags->>native_unit",
+        "data_quality_flags->last_success_snapshot->>computed_at",
+        "data_quality_flags->last_success_snapshot->flags->>cumulative_method",
+        "data_quality_flags->last_success_snapshot->flags->>native_unit",
+        "metrics_json->record_observations",
+        "metrics_json->three_month",
+        "returns_series->-1->>date",
+        "returns_series->0->>date",
+      ].sort(),
+    );
   });
 });
 
@@ -678,6 +713,65 @@ describe("shapeRowAnalytics — trades_fetched_at survives a run that produced n
 
   it("no analytics row at all reads null", () => {
     expect(shapeRowAnalytics(null, "s-1").trades_fetched_at).toBeNull();
+  });
+});
+
+describe("shapeRowAnalytics — the D-15 record scalars (phase 194 plan 06)", () => {
+  const row = (over: Partial<StrategyAnalytics>): StrategyAnalytics => ({
+    ...EMPTY_ANALYTICS,
+    id: "an-1",
+    strategy_id: "s-1",
+    computed_at: "2026-10-09T10:00:00+00:00",
+    computation_status: "complete",
+    ...over,
+  });
+
+  it("keeps the three aliases the anonymous ranked read projected", () => {
+    const shaped = shapeRowAnalytics(
+      row({ series_start: "2026-01-02", headline_since: "2026-02-01", record_observations: 71 }),
+      "s-1",
+    );
+    expect([shaped.series_start, shaped.headline_since, shaped.record_observations]).toEqual([
+      "2026-01-02",
+      "2026-02-01",
+      71,
+    ]);
+  });
+
+  it("derives them on the owner path from the wildcard embed (earliest date, flags key, metrics key)", () => {
+    const shaped = shapeRowAnalytics(
+      row({
+        // Deliberately not date-ascending: the start is the earliest date, not slot 0.
+        returns_series: [
+          { date: "2026-03-05", value: 0.01 },
+          { date: "2026-01-09", value: 0.02 },
+        ],
+        data_quality_flags: { headline_since: "2026-02-01" },
+        metrics_json: { record_observations: 59 },
+      }),
+      "s-1",
+    );
+    expect([shaped.series_start, shaped.headline_since, shaped.record_observations]).toEqual([
+      "2026-01-09",
+      "2026-02-01",
+      59,
+    ]);
+  });
+
+  it("answers null, never a guess, for a malformed date or a non-finite count", () => {
+    const shaped = shapeRowAnalytics(
+      row({
+        series_start: "not a date",
+        headline_since: "soon",
+        metrics_json: { record_observations: "many" },
+      }),
+      "s-1",
+    );
+    expect([shaped.series_start, shaped.headline_since, shaped.record_observations]).toEqual([
+      null,
+      null,
+      null,
+    ]);
   });
 });
 

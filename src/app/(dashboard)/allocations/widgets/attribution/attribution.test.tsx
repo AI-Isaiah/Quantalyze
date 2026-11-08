@@ -130,13 +130,20 @@ describe("AlphaBetaDecomposition", () => {
     date: isoDay(i),
     close: 60_000 * (1 + 0.03 * Math.sin(i * 0.45)),
   }));
+// 194 review V-b (D-15): the widget withholds its annualised alpha on the book's TOTAL record, as
+// the Overview does, so this fixture's book gets 90 earlier days with no BTC close behind them: the
+// record clears D-15 and exactly the same days pair as before.
+  const pre = Array.from({ length: 90 }, (_, i) => ({
+    date: isoDay(i - 90),
+    value: 0.003 * Math.cos(i * 0.9) + 0.0002,
+  }));
   const bookData = (
     bookReturns: Array<{ date: string; value: number }>,
     closes: Array<{ date: string; close: number }>,
   ) => ({
     ...mockData,
     equityHistoryState: "ready",
-    equityDailyReturns: bookReturns,
+    equityDailyReturns: [...pre, ...bookReturns],
     btcBenchmarkPrices: { prices: closes, through: closes[closes.length - 1].date, dropped: [] },
   });
 

@@ -1,5 +1,15 @@
 import type { ComputeResult } from "./types";
-import { dispersion, sharpe as sharpeRatio } from "@/lib/return-stats";
+import { dispersion, historicalVarCvar, sharpe as sharpeRatio } from "@/lib/return-stats";
+
+/**
+ * 194 D-03 (TRUST-04): the 3 Month and 6 Month windows are calendar windows of 91
+ * and 182 days ending on the last date. 3M was 90 here and 63 ROWS in the producer;
+ * the producer now writes the same windows (`THREE_MONTH_WINDOW_DAYS` /
+ * `SIX_MONTH_WINDOW_DAYS` in `analytics-service/services/metrics.py`). Pinned to
+ * the Python constants by `src/lib/figure-parity.test.ts`, which reads that file as text.
+ */
+export const THREE_MONTH_WINDOW_DAYS = 91;
+export const SIX_MONTH_WINDOW_DAYS = 182;
 
 /**
  * Phase 169 D-11 (SC6) + 164.6.6.3.3 plan 08: ONE coverage rule for every return
@@ -233,9 +243,12 @@ export function compute(
   // None already say (founder decision D7; review round 3 HI3-01).
   const profitFactor = lossSum !== 0 ? winSum / Math.abs(lossSum) : NaN;
   const sortedRets = [...rets].sort((a, b) => a - b);
-  const var95 = sortedRets[Math.max(0, Math.floor(0.05 * n))];
-  const cvar95Slice = sortedRets.slice(0, Math.max(1, Math.floor(0.05 * n)));
-  const cvar95 = cvar95Slice.reduce((acc, x) => acc + x, 0) / cvar95Slice.length;
+  // 194 D-02: the ONE historical definition, shared with the producer's stored
+  // `var_1d_95` / `cvar` (pinned on a shared fixture by `figure-parity.test.ts`).
+  // `rets` is non-empty here (the n === 0 guard above), so both are numbers.
+  const hist = historicalVarCvar(rets);
+  const var95 = hist.var ?? NaN;
+  const cvar95 = hist.cvar ?? NaN;
 
   // Recovery factor — return earned per unit of max drawdown. Allocator threshold: ≥ 2.
   // null when no drawdown observed — "0 recovery" would imply a measured zero ratio.
@@ -349,8 +362,8 @@ export function compute(
     kurt,
     mtd: windowReturn(mtdCutoff),
     ytd: windowReturn(ytdCutoff),
-    p3m: windowReturn(offsetDays(90)),
-    p6m: windowReturn(offsetDays(182)),
+    p3m: windowReturn(offsetDays(THREE_MONTH_WINDOW_DAYS)),
+    p6m: windowReturn(offsetDays(SIX_MONTH_WINDOW_DAYS)),
     p1y: windowReturn(offsetDays(365)),
     p3y: windowReturn(offsetDays(3 * 365)),
     p5y: windowReturn(offsetDays(5 * 365)),

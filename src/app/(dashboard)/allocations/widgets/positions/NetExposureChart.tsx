@@ -124,8 +124,8 @@ export function NetExposureChart({
         </span>
       </div>
       <div className="mt-2 flex items-center gap-4">
-        <LegendChip label="Net" filled={false} />
-        <LegendChip label="Gross" filled={true} />
+        <LegendChip label="Net exposure" filled={false} />
+        <LegendChip label="Gross exposure" filled={true} />
       </div>
       <div
         className="mt-2"
@@ -147,7 +147,7 @@ export function NetExposureChart({
             <Area
               type="monotone"
               dataKey="grossUsd"
-              name="Gross"
+              name="Gross exposure"
               fill={CHART_ACCENT}
               fillOpacity={0.2}
               stroke="none"
@@ -156,7 +156,7 @@ export function NetExposureChart({
             <Line
               type="monotone"
               dataKey="netUsd"
-              name="Net"
+              name="Net exposure"
               stroke={CHART_ACCENT}
               strokeWidth={1.5}
               // dot={false} for the ≥2-point case; recharts (Dots.shouldRenderDots)

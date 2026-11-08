@@ -3389,7 +3389,20 @@ export const FILES_FLOOR = 80;
 // `lane-invocations: 803 ... plus 80 baseline / 80 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 2.1s over 803 arm run(s)`,
 // `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_compute_job_metadata_merge.sql: sections 12 / judged 12 / annotated 12 / waived 0 / biting 12`.
 // FILES_FLOOR stays 80 and WAIVED_CEILING stays 0 - no waiver was added. Arms 9 and 10 prove sequential key preservation, not concurrency; the live two-connection probe (plan 191-09) is that proof.
-export const ARMS_FLOOR = 803;
+// RAISED 803 -> 809 2026-11-07 (Phase 194 FIGURETRUTH plan 20): +6 arms, arms 7 to 12 of test_get_verified_cohort_rank_gate.sql (the D-15 cohort record gate: the count query, the crypto
+// 90/89-day boundary, the rank query's decile, the non-crypto 60/59-observation boundary, the A-194-D15-02 span fallback, and an impossible calendar date in any of the three record dates).
+// The file's five earlier arms (0, 1, 2a, 3, 4a) were retargeted at 20261107140000, the definition the gate now reads, and still bite, so the file goes 5 -> 11 biting.
+// MEASURED by ONE full `node scripts/mutation-runner/run.mjs` on a clean tree, exit 0: `scope: FULL 80/80 annotated files`, `coverage: files 80/107`, `arms: 809/809/0`, `biting: 809`,
+// `lane-invocations: 809 ... plus 80 baseline / 80 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 1.6s over 809 arm run(s)`,
+// `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_get_verified_cohort_rank_gate.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11`.
+// FILES_FLOOR stays 80 (no file joined) and WAIVED_CEILING stays 0 - no waiver was added. Two earlier full runs the same day each failed on a file that is not this plan's
+// (a restore leg of test_for_quants_leads_contact_dedupe.sql, then arm 7 of test_capital_ownership_column.sql); each of those files is green alone, so they read as lane flakiness, and the third full run is the one recorded here.
+// RAISED 809 -> 811 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18, WR-02): +2 arms, arms 13 and 14 of test_get_verified_cohort_rank_gate.sql (the min-N floor applies per rank, and
+// the Max DD decile counts the short-record rows: a record under the D-15 minimum leaves the Sharpe and Sortino peer sets only). Arm 9 was narrowed to Sharpe and Sortino, and arms 1, 7 and 9
+// were re-pointed at the rec_ok flag the cohort queries now carry, and still bite. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`: `scope: FULL 80/80 annotated files`,
+// `arms: 811/811/0`, `biting: 811`, `lane-invocations: 811` (the two independent tallies AGREE). Per-file line: `test_get_verified_cohort_rank_gate.sql: sections 13 / judged 13 / annotated 13 / waived 0 / biting 13`.
+// FILES_FLOOR stays 80 (no file joined) and WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 811;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

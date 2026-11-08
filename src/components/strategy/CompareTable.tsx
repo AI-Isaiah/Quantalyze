@@ -3,6 +3,16 @@
 import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import { getMetricLabel, LABEL_COLORS } from "@/lib/metric-labels";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
+import {
+  ANNUALIZED_KEYS,
+  SHORT_TRACK_MARKER,
+  gateAnnualized,
+  gatedValue,
+  shortTrackMarkerTitle,
+  withheldCellTitle,
+  type FigureRecord,
+  type FigureState,
+} from "@/lib/figure-gate";
 import type { HoldingCompareItem } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
 import { HoldingFactsheet } from "./HoldingFactsheet";
 
@@ -10,6 +20,12 @@ interface StrategyItem {
   kind: "strategy";
   strategy: Strategy;
   analytics: StrategyAnalytics;
+  /**
+   * 194 D-15: the strategy's TOTAL record (span, stored observation count, crypto), built
+   * SERVER-SIDE by compare/page.tsx. The table never sees `headline_since`, the count
+   * alias or a series, only these three scalars.
+   */
+  figureRecord: FigureRecord;
 }
 
 // Phase 09 / finding g4: discriminated union so CompareTable can render
@@ -41,6 +57,16 @@ function getValue(analytics: StrategyAnalytics, key: string): number | null {
   return typeof val === "number" ? val : null;
 }
 
+// 194 D-04 as superseded by D-15: CAGR, Sharpe, Sortino, Calmar and Volatility go through
+// the total-record gate. A withheld value is null here, so it prints `—`, carries no
+// qualitative chip and can never be the column's best.
+const ANNUALIZED = new Set<string>(ANNUALIZED_KEYS);
+
+function cellValue(item: StrategyItem, key: string, state: FigureState): number | null {
+  const val = getValue(item.analytics, key);
+  return ANNUALIZED.has(key) ? gatedValue(val, state) : val;
+}
+
 function formatValue(value: number | null, format: MetricRow["format"]): string {
   if (value == null) return "—";
   if (format === "percent") return formatPercent(value);
@@ -48,11 +74,16 @@ function formatValue(value: number | null, format: MetricRow["format"]): string 
   return formatNumber(value);
 }
 
-function findWinner(items: StrategyItem[], key: string, higherIsBetter: boolean): number | null {
+function findWinner(
+  items: StrategyItem[],
+  states: FigureState[],
+  key: string,
+  higherIsBetter: boolean,
+): number | null {
   let bestIdx: number | null = null;
   let bestVal: number | null = null;
   items.forEach((item, i) => {
-    const val = getValue(item.analytics, key);
+    const val = cellValue(item, key, states[i]);
     if (val == null) return;
     if (bestVal == null || (higherIsBetter ? val > bestVal : val < bestVal)) {
       bestVal = val;
@@ -71,6 +102,8 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
   // strategy items (tabular comparison columns).
   const holdingItems = items.filter((item): item is HoldingCompareItem => item.kind === "holding");
   const strategyItems = items.filter((item): item is StrategyItem => item.kind === "strategy");
+  // One verdict per strategy column, from its total record (D-15).
+  const states = strategyItems.map((item) => gateAnnualized(item.figureRecord));
 
   return (
     <div className="space-y-6">
@@ -110,12 +143,17 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
             </thead>
             <tbody>
               {METRICS.map((metric) => {
-                const winnerIdx = findWinner(strategyItems, metric.key, metric.higherIsBetter);
+                const winnerIdx = findWinner(strategyItems, states, metric.key, metric.higherIsBetter);
+                const gated = ANNUALIZED.has(metric.key);
                 return (
                   <tr key={metric.key} className="border-b border-border/50 hover:bg-page/50">
                     <td className="px-4 @3xl:px-8 py-2.5 text-xs text-text-muted">{metric.label}</td>
                     {strategyItems.map((item, i) => {
-                      const val = getValue(item.analytics, metric.key);
+                      const val = cellValue(item, metric.key, states[i]);
+                      const record = item.figureRecord;
+                      const withheld = gated && states[i] === "withheld";
+                      const shortSpan =
+                        gated && states[i] === "short" && record.spanDays != null ? record.spanDays : null;
                       const isWinner = winnerIdx === i && strategyItems.length > 1;
                       const qual = metric.qualKey ? getMetricLabel(metric.qualKey, val) : null;
                       return (
@@ -133,11 +171,24 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
                             {/* TYPE-04: tabular-nums on every numeric value so the
                                 comparison columns stay digit-aligned under the
                                 fluid type spine and across the @container reflow. */}
-                            <span className={cn(
-                              "text-xs font-metric tabular-nums",
-                              isWinner ? "text-accent font-semibold" : "text-text-secondary",
-                            )}>
+                            <span
+                              title={withheld ? withheldCellTitle(record) : undefined}
+                              className={cn(
+                                "text-xs font-metric tabular-nums",
+                                isWinner ? "text-accent font-semibold" : "text-text-secondary",
+                              )}
+                            >
                               {formatValue(val, metric.format)}
+                              {withheld && <span className="sr-only">{withheldCellTitle(record)}</span>}
+                              {shortSpan != null && (
+                                <span
+                                  title={shortTrackMarkerTitle(shortSpan)}
+                                  className="ml-1 inline-block min-w-[3ch] text-right align-baseline text-micro font-mono tabular-nums text-text-muted"
+                                >
+                                  {SHORT_TRACK_MARKER}
+                                  <span className="sr-only"> {shortTrackMarkerTitle(shortSpan)}</span>
+                                </span>
+                              )}
                               {/* Winner mark: a discrete DM Sans accent glyph
                                   (own span, own spacing) — NOT a " ✓" string
                                   concatenated into the mono numeric run. Drops

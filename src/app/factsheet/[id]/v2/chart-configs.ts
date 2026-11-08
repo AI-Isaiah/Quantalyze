@@ -23,7 +23,9 @@ export type ChartValueFormat = "growth" | "percent" | "ratio";
  * (NEW-C20-11)
  */
 export type ComparatorSeriesKey = {
-  [K in keyof ComparatorBlock]: ComparatorBlock[K] extends (Array<number | null> | number[] | null) ? K : never;
+  // 194 plan 24 (D-14): `-?` and `Exclude<..., undefined>` let the OPTIONAL numeric-array keys
+  // (`rollingVol1y`, ...) qualify; a string or object field still fails to compile.
+  [K in keyof ComparatorBlock]-?: Exclude<ComparatorBlock[K], undefined> extends (Array<number | null> | number[] | null) ? K : never;
 }[keyof ComparatorBlock];
 
 export type ChartConfig = {
@@ -48,6 +50,10 @@ export type ChartConfig = {
     | "strategyRollingVol"
     | "strategyRollingSharpe"
     | "strategyRollingSortino"
+    // 194 plan 24 (D-14, additive): the 365-day window's series, optional on the payload.
+    | "strategyRollingVol1y"
+    | "strategyRollingSharpe1y"
+    | "strategyRollingSortino1y"
     | "strategyDrawdowns"
     | null;
   /** Which comparator-block field provides the comparator series.
@@ -318,25 +324,29 @@ export function resolveSeries(
   const out: ResolvedSeries[] = [];
   if (cfg.stratField) {
     const isDrawdown = cfg.stratField === "strategyDrawdowns";
-    const raw = payload[cfg.stratField] as ReadonlyArray<number | null>;
-    out.push({
-      name: isDrawdown ? "Drawdown" : payload.strategyName,
-      values: rebase(raw),
-      color: isDrawdown ? "var(--color-negative)" : "var(--color-accent)",
-      width: cfg.stratWidth ?? (cfg.fill ? 1.0 : 1.6),
-      opacity: 1.0,
-      fill: cfg.fill,
-      // D-84: the mask comes from the same helper that made the exclusion, so
-      // there is no second rule. On the calendar basis it excludes no day and
-      // the mask is all false (the line draws exactly as before).
-      ...(cfg.bridgeBasisExcludedDays
-        ? {
-            bridgeAt: metricsBasisSeries(payload.strategyReturns, payload.dates, {
-              dayBasis: payload.dayBasis,
-            }).positions.map((pos) => pos === null),
-          }
-        : {}),
-    });
+    // 194 plan 24: the 1y series are optional (null under 365 days); an absent one is no
+    // strategy line, as an absent comparator array is no comparator line below.
+    const raw = payload[cfg.stratField] as ReadonlyArray<number | null> | null | undefined;
+    if (raw) {
+      out.push({
+        name: isDrawdown ? "Drawdown" : payload.strategyName,
+        values: rebase(raw),
+        color: isDrawdown ? "var(--color-negative)" : "var(--color-accent)",
+        width: cfg.stratWidth ?? (cfg.fill ? 1.0 : 1.6),
+        opacity: 1.0,
+        fill: cfg.fill,
+        // D-84: the mask comes from the same helper that made the exclusion, so
+        // there is no second rule. On the calendar basis it excludes no day and
+        // the mask is all false (the line draws exactly as before).
+        ...(cfg.bridgeBasisExcludedDays
+          ? {
+              bridgeAt: metricsBasisSeries(payload.strategyReturns, payload.dates, {
+                dayBasis: payload.dayBasis,
+              }).positions.map((pos) => pos === null),
+            }
+          : {}),
+      });
+    }
   }
   if (cfg.comparatorField) {
     const cmpRaw = comparator[cfg.comparatorField];

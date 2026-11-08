@@ -13,6 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { deriveBlendPanels } from "@/lib/scenario-blend-adapter";
+import { rollingCalendarStats } from "@/lib/factsheet/rolling";
 import type { BlendPanelSeries } from "@/lib/scenario-blend-adapter";
 
 /** Distinct, ordered date string for index i (content is opaque to the adapter). */
@@ -305,5 +306,38 @@ describe("deriveBlendPanels — crypto √365 basis scaling (BLEND-01 guard)", (
       expect(s252).not.toBe(0);
       expect(s365).toBeCloseTo(s252 * RATIO, 10);
     }
+  });
+});
+
+describe("deriveBlendPanels — D-14 calendar window (194-17)", () => {
+  // A non-trivial return series so the sample-std Sharpe is defined and varied.
+  function wavy(n: number): { date: string; value: number }[] {
+    return Array.from({ length: n }, (_, i) => ({
+      date: dateAt(i),
+      value: 0.004 * Math.sin(i / 3) + (i % 5 === 0 ? -0.006 : 0.002),
+    }));
+  }
+
+  it("the calendar spec's three series equal rollingCalendarStats on the same dates, returns and basis, point for point", () => {
+    const daily = wavy(400);
+    const rets = daily.map((p) => p.value);
+    const dates = daily.map((p) => p.date);
+    const stats = rollingCalendarStats(rets, dates, 365, 365);
+    const panels = deriveBlendPanels(daily, { calendarDays: 365 }, 365);
+    const expectSeries = (vals: Array<number | null>) =>
+      vals.flatMap((v, i) => (v === null ? [] : [{ date: dates[i], value: v }]));
+    expect(panels.rollingSharpe.sharpe_365d.length).toBeGreaterThan(0);
+    expect(panels.rollingSharpe.sharpe_365d).toEqual(expectSeries(stats.sharpe));
+    expect(panels.rollingVol).toEqual(expectSeries(stats.vol));
+    expect(panels.rollingSortino).toEqual(expectSeries(stats.sortino));
+    expect(panels.usableN).toBe(400);
+  });
+
+  it("is empty for a series spanning under 365 days, with usableN as today", () => {
+    const panels = deriveBlendPanels(wavy(300), { calendarDays: 365 }, 365);
+    expect(panels.rollingSharpe.sharpe_365d).toEqual([]);
+    expect(panels.rollingVol).toEqual([]);
+    expect(panels.rollingSortino).toEqual([]);
+    expect(panels.usableN).toBe(300);
   });
 });

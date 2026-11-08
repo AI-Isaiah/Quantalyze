@@ -104,6 +104,7 @@ function makePayload(o: PayloadOverrides = {}): FactsheetPayload {
           strategyName: "Test Strategy",
           missingSegments,
           benchmarkPrices: fixtureBenchmarkPrices([mtmRets.map((r, i) => ({ date: DATES[i], value: r }))]),
+          figureRecord: null,
         },
       ),
     };
@@ -169,6 +170,7 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
         markets: ["BTC"],
         strategyName: "Test Strategy",
         benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+        figureRecord: null,
       },
     );
     act(() => result.current.lev.setLeverage(2));
@@ -195,6 +197,7 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
         markets: ["BTC"],
         strategyName: "Test Strategy",
         benchmarkPrices: fixtureBenchmarkPrices([STRAT.map((r, i) => ({ date: DATES[i], value: r }))]),
+        figureRecord: null,
       },
     );
     const baseJoint = baseBundle.comparators.btc.joint;
@@ -347,6 +350,7 @@ describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage
             markets: ["BTC"],
             strategyName: "Test Strategy",
             benchmarkPrices: fixtureBenchmarkPrices([smRets.map((r, i) => ({ date: DATES[i], value: r }))]),
+            figureRecord: null,
           },
         ),
       };
@@ -378,6 +382,7 @@ describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage
             markets: ["BTC"],
             strategyName: "Test Strategy",
             benchmarkPrices: fixtureBenchmarkPrices([makeReturns(9).map((r, i) => ({ date: DATES[i], value: r }))]),
+            figureRecord: null,
           },
         ),
       },

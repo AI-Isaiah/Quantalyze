@@ -14,7 +14,7 @@
 
 import type { DailyPoint } from "./portfolio-math-utils";
 import { mean, compound } from "./portfolio-math-utils";
-import { beta as sharedBeta, dispersion, dispersionIsReal } from "@/lib/return-stats";
+import { beta as sharedBeta, dispersion, dispersionIsReal, historicalVarCvar } from "@/lib/return-stats";
 
 // ── Non-finite drop diagnostic ──────────────────────────────────────
 // computeReturnDistribution, findMinMax, and detectRegimeChanges all
@@ -105,35 +105,36 @@ export function computeAnnualReturns(daily: DailyPoint[]): DailyPoint[] {
 
 // ── 4. computeVaR ───────────────────────────────────────────────────
 /**
- * Value at Risk: the return at the (1-confidence) quantile.
- * Sort ascending, pick index floor((1-confidence) * n).
+ * Historical 1-day Value at Risk (194 D-02, TRUST-04): the ONE definition shared with the
+ * stored `var_1d_95` and the factsheet. Delegates to `historicalVarCvar`: sort the finite
+ * returns ascending, `k = floor((1 - confidence) * n)`, VaR = `sorted[min(k, n - 1)]`.
+ * An empty input returns 0 (this function's existing contract); a non-empty input with no
+ * finite return returns NaN, never a substitute number.
  */
 export function computeVaR(returns: number[], confidence: number): number {
   if (returns.length === 0) return 0;
-  const sorted = [...returns].sort((a, b) => a - b);
-  // F2 M-0541: clamp BOTH bounds. confidence=0 gives idx = floor(1 * n) = n →
-  // sorted[n] is `undefined`, which then poisons computeExpectedShortfall
-  // (`filter(r => r <= undefined)` → []) and propagates NaN to any consumer.
-  // The lower clamp already existed; the upper bound was missing.
-  const idx = Math.min(
-    sorted.length - 1,
-    Math.max(0, Math.floor((1 - confidence) * sorted.length)),
-  );
-  return sorted[idx];
+  return historicalVarCvar(returns, tailOf(confidence)).var ?? NaN;
+}
+
+// F2 M-0541: clamp the tail to [0, 1]. confidence=0 gives tail 1, so k = n and the helper's
+// own `min(k, n - 1)` keeps sorted[n] (undefined) out of VaR; confidence > 1 gives a
+// negative tail, whose negative k would index off the front, so it clamps to 0 (k = 0, the minimum).
+function tailOf(confidence: number): number {
+  return Math.min(1, Math.max(0, 1 - confidence));
 }
 
 // ── 5. computeExpectedShortfall ─────────────────────────────────────
 /**
- * Expected Shortfall (CVaR): mean of all returns at or below the VaR.
+ * Expected Shortfall (CVaR, 194 D-02): the mean of the `max(1, k)` smallest finite returns,
+ * which EXCLUDES the VaR element itself (k = floor((1 - confidence) * n)). Same helper, so
+ * Scenario, the factsheet and the producer agree. Empty input returns 0 as before.
  */
 export function computeExpectedShortfall(
   returns: number[],
   confidence: number,
 ): number {
-  const var_ = computeVaR(returns, confidence);
-  const tail = returns.filter((r) => r <= var_);
-  if (tail.length === 0) return var_;
-  return mean(tail);
+  if (returns.length === 0) return 0;
+  return historicalVarCvar(returns, tailOf(confidence)).cvar ?? NaN;
 }
 
 // ── 6. computeReturnDistribution ────────────────────────────────────

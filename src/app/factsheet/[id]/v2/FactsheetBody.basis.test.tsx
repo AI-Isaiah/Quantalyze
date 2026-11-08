@@ -303,6 +303,7 @@ const MTM_BUNDLE = deriveSeriesBundle(
     markets: [],
     strategyName: "Scenario",
     benchmarkPrices: fixtureBenchmarkPrices([MTM_SERIES]),
+    figureRecord: null,
   },
 );
 // (g) single-key options, MTM available AND leverageable (periodsPerYear present) WITH
@@ -794,17 +795,20 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     expect(kpiValue(container, "IR vs BTC")).toBe("6.66");
   });
 
-  it("F8: the KpiStrip low-N caveat reflects the MTM observation count, not cash", () => {
+  // Phase 194 (D-04 as superseded by D-15, D-13): the strip's per-basis observation-count caveat is
+  // retired. The gate reads the strategy's TOTAL record (`payload.figureRecord`), which is one
+  // object whichever basis is shown, so the strip's one muted note does not move with the toggle.
+  it("F8 (retired by D-15): the strip's low-N caveat is gone and its one note is the TOTAL record's, the same under cash and MTM", () => {
     const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
     const caveat =
       "annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant";
-    // Cash: the 300-day series clears 252 → the KpiStrip caveat is ABSENT.
+    const note = () => container.querySelector('[data-testid="strip-figure-gate-note"]')?.textContent ?? null;
     expect(container.textContent).not.toContain(caveat);
+    const cash = note();
+    expect(cash, "a 300-day record is under a year: the strip carries its short-track note").not.toBeNull();
     fireEvent.click(getByText("Mark-to-market"));
-    // MTM: the bundle's ~200-day series is < 252 → the caveat fires, reading the MTM
-    // observation count from the view. Neuter (revert to `m.n` = the cash 300) → no
-    // caveat under MTM → RED.
-    expect(container.textContent).toContain(caveat);
+    expect(container.textContent).not.toContain(caveat);
+    expect(note()).toBe(cash);
   });
 
   it("STEP-3 PARITY (F3): the rail §I displays the PERSISTED seven, NOT the divergent bundle TS recompute (overlay wins — neuter → RED)", () => {
@@ -904,6 +908,7 @@ const SMOOTHED_BUNDLE = deriveSeriesBundle(
     markets: [],
     strategyName: "Scenario",
     benchmarkPrices: fixtureBenchmarkPrices([SMOOTHED_SERIES]),
+    figureRecord: null,
   },
 );
 const SMOOTHED_SEGMENT_LABEL = "Smoothed mark-to-market";

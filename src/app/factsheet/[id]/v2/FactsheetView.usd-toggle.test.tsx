@@ -144,7 +144,7 @@ function usdFamily(): FactsheetPayload {
 }
 
 function renderView(payload: FactsheetPayload) {
-  return render(<FactsheetView payload={payload} />);
+  return render(<FactsheetView payload={payload} showAum />);
 }
 
 function kpiLabel(container: HTMLElement, text: string): HTMLElement | undefined {
@@ -420,14 +420,23 @@ const BASIS_REASON = "Shown in BTC only. Switch Units to BTC to see this basis."
 
 // Short records: dialing leverage re-derives the whole bundle per consumer, so the
 // fixtures that dial are kept small (the Phase 107 leverage suites do the same).
-const SHORT_NATIVE: FactsheetPayload = buildScenarioFactsheetPayload({
-  portfolioDaily: makeReturnsSeries(60),
-  benchmark: null,
-});
-const SHORT_USD: FactsheetPayload = buildScenarioFactsheetPayload({
-  portfolioDaily: makeReturnsSeries(58, 2),
-  benchmark: null,
-});
+// Phase 194 (D-15): this fixture exercises leverage / unit behaviour, not the record gate, so its
+// TOTAL record is a cleared one (a short fixture would print the withheld dash instead of the figure).
+const CLEARED_RECORD = { spanDays: 400, observations: 400, crypto: false };
+const SHORT_NATIVE: FactsheetPayload = {
+  ...buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(60),
+    benchmark: null,
+  }),
+  figureRecord: CLEARED_RECORD,
+};
+const SHORT_USD: FactsheetPayload = {
+  ...buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(58, 2),
+    benchmark: null,
+  }),
+  figureRecord: CLEARED_RECORD,
+};
 function shortWithUsd(over: Partial<FactsheetPayload> = {}): FactsheetPayload {
   return {
     ...SHORT_NATIVE,

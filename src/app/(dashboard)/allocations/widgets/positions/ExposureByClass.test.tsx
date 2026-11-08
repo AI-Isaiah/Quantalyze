@@ -40,6 +40,15 @@ describe("<ExposureByClass> — KPI strip (D-P2 signed math)", () => {
     expect(screen.getByTestId("kpi-net").textContent).toBe("$200K");
     expect(screen.getByTestId("kpi-long").textContent).toBe("$300K");
     expect(screen.getByTestId("kpi-short").textContent).toBe("$100K");
+  });
+
+  it("D-08: the Gross and Net KPIs name their quantity, and Long and Short keep their labels", () => {
+    render(<ExposureByClass snapshot={HEDGED} />);
+    const labelOf = (testid: string) => screen.getByTestId(testid).previousElementSibling?.textContent;
+    expect(labelOf("kpi-gross")).toBe("Gross exposure");
+    expect(labelOf("kpi-net")).toBe("Net exposure");
+    expect(labelOf("kpi-long")).toBe("Long");
+    expect(labelOf("kpi-short")).toBe("Short");
     expect(screen.getByTestId("net-caption").textContent).toBe("net long");
   });
 
@@ -180,7 +189,7 @@ describe("<ExposureByClass> — drilldown table", () => {
     render(<ExposureByClass snapshot={HEDGED} />);
     const table = screen.getByRole("table");
     const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toEqual(["Venue", "Key", "Symbol", "Type", "Side", "Gross", "Net"]);
+    expect(headers).toEqual(["Venue", "Key", "Symbol", "Type", "Side", "Gross exposure", "Net exposure"]);
 
     const rows = table.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(2);

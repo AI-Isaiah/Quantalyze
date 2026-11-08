@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
@@ -10,6 +10,15 @@ import { LiveRegion } from "@/components/ui/LiveRegion";
 import { cn, formatNumber, formatPercent } from "@/lib/utils";
 import { RouteResponseError } from "@/lib/route-response-error";
 import { signTone } from "@/lib/factsheet/display-sign";
+import {
+  SHORT_TRACK_MARKER,
+  gatedValue,
+  shortTrackMarkerTitle,
+  widenedWithheldReason,
+  type FigureState,
+} from "@/lib/figure-gate";
+import { captureToSentry } from "@/lib/sentry-capture";
+import { parseLiftState, parseWireFigureRecord } from "@/lib/portfolio-analytics-adapter";
 
 /**
  * The one sentence shown when the failure did NOT come from a route response —
@@ -20,11 +29,28 @@ import { signTone } from "@/lib/factsheet/display-sign";
 const OPTIMIZER_UNAVAILABLE_COPY =
   "We could not complete the optimizer run. Retry in a moment.";
 
+/**
+ * 194 R2-M1: the reason line for a withheld lift whose failing record could not be read, so a
+ * bare dash never stands without a reason. Same voice as `widenedWithheldReason`.
+ */
+const WITHHELD_GENERIC_REASON = "Withheld: the record is too short to annualize.";
+
 export type OptimizerSuggestion = {
   strategy_id: string;
   strategy_name: string;
   corr_with_portfolio: number | null;
   sharpe_lift: number | null;
+  /**
+   * 194 D-11 / D-15: the producer's lift verdict, as stored. All three are optional: a
+   * suggestion stored before the producer recorded them has none, and reads as unknown (the
+   * cell as before, no marker). `sharpe_lift_state` is closed-set checked and the record is
+   * shape checked when read (`parseLiftState`, `parseWireFigureRecord`); nothing is re-derived.
+   */
+  sharpe_lift_span_days?: number | null;
+  sharpe_lift_state?: FigureState | null;
+  /** 194 R3 SFH-M1: the stored out-of-set state the adapter coerced to "withheld" (see types.ts). */
+  sharpe_lift_state_raw?: string;
+  sharpe_lift_failing_record?: { span_days: number | null; observations: number | null; crypto: boolean } | null;
   dd_improvement: number | null;
   score: number | null;
 };
@@ -87,11 +113,14 @@ function MetricCell({
   value,
   unit,
   tooltip,
+  marker,
 }: {
   label: string;
   value: number | null;
   unit: MetricUnit;
   tooltip?: string;
+  /** 194 D-15: the `<1y` marker, rendered after the value. */
+  marker?: { title: string };
 }) {
   return (
     <div className="text-right">
@@ -108,6 +137,15 @@ function MetricCell({
         )}
       >
         {formatMetric(value, unit)}
+        {marker && (
+          <span
+            title={marker.title}
+            className="ml-1 inline-block min-w-[3ch] text-right align-baseline text-micro font-mono tabular-nums text-text-muted"
+          >
+            {SHORT_TRACK_MARKER}
+            <span className="sr-only"> {marker.title}</span>
+          </span>
+        )}
       </p>
     </div>
   );
@@ -118,6 +156,50 @@ function SuggestionRow({
 }: {
   suggestion: OptimizerSuggestion;
 }) {
+  // 194 D-11 / D-15: the producer's verdict on the two records the lift compares. Read, never
+  // re-derived. An ABSENT state (null or undefined) is the pre-194 shape and shows the value (D-17).
+  // A PRESENT state outside the closed set is not unknown: it is withheld and reported (194 R2-M2).
+  // The adapter coerces an out-of-set state to "withheld" and keeps the stored value in
+  // `sharpe_lift_state_raw` (R3 SFH-M1), so a coerced state still reports its real cause.
+  const rawLiftState = suggestion.sharpe_lift_state_raw ?? suggestion.sharpe_lift_state;
+  const parsedLiftState = parseLiftState(suggestion.sharpe_lift_state);
+  const stateUnrecognised =
+    suggestion.sharpe_lift_state_raw != null ||
+    (suggestion.sharpe_lift_state != null && parsedLiftState === null);
+  const liftState: FigureState = stateUnrecognised ? "withheld" : (parsedLiftState ?? "null");
+  const failingRecord = parseWireFigureRecord(suggestion.sharpe_lift_failing_record);
+  const recordUnreadable = liftState === "withheld" && failingRecord === null;
+  // 194 R2-M1 / R2-M2: report the malformed stored value once per value, not once per render.
+  useEffect(() => {
+    if (!stateUnrecognised && !recordUnreadable) return;
+    captureToSentry(
+      new Error(
+        stateUnrecognised
+          ? "the optimizer suggestion carried an unrecognised sharpe_lift_state"
+          : "the optimizer suggestion's withheld lift carried an unreadable failing record",
+      ),
+      {
+        level: "warning",
+        tags: {
+          component: "PortfolioOptimizer",
+          stage: stateUnrecognised ? "lift-state-unrecognised" : "lift-record-unreadable",
+        },
+        extra: { state: String(rawLiftState) },
+      },
+    );
+  }, [stateUnrecognised, recordUnreadable, rawLiftState]);
+  const liftSpan =
+    typeof suggestion.sharpe_lift_span_days === "number" &&
+    Number.isFinite(suggestion.sharpe_lift_span_days)
+      ? suggestion.sharpe_lift_span_days
+      : null;
+  const withheldReason =
+    liftState === "withheld"
+      ? failingRecord !== null
+        ? widenedWithheldReason("delta", failingRecord)
+        : WITHHELD_GENERIC_REASON
+      : null;
+  const shortTitle = liftState === "short" && liftSpan !== null ? shortTrackMarkerTitle(liftSpan) : null;
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 flex-1">
@@ -133,9 +215,13 @@ function SuggestionRow({
       <div className="flex items-center gap-4 sm:gap-6">
         <MetricCell
           label="Sharpe lift"
-          value={suggestion.sharpe_lift}
+          value={gatedValue(suggestion.sharpe_lift, liftState)}
           unit="signedDecimal"
-          tooltip="Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest."
+          tooltip={
+            "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest." +
+            (withheldReason ? ` ${withheldReason}` : shortTitle ? ` ${shortTitle}` : "")
+          }
+          marker={shortTitle ? { title: shortTitle } : undefined}
         />
         <MetricCell
           label="Corr w/ portfolio"

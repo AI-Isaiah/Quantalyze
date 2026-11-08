@@ -154,6 +154,16 @@ _SCOPED_RE = re.compile(
 #   * Phase 186 (DERIVEGAPS fix round 3, R3-04) added arm P11 (a refusal on a job a user's Sync
 #     now took over), one such UPDATE                  -> 18 -> 19
 #
+#   * Phase 194 (FIGURETRUTH, plan 20) added arms 7 to 12 to
+#     supabase/tests/test_get_verified_cohort_rank_gate.sql. Five scoped UPDATEs: four anti-vacuity
+#     steps that change ONLY the record of the arm's own seeded row (`WHERE strategy_id = v_id` or
+#     `v_id2`, in arms 7, 8, 10 and 11) and one in the pg_temp retire helper that fails the rows an
+#     arm seeded (`WHERE strategy_id = ANY (p_ids)`)  -> 1 -> 6
+#
+#   * Phase 194 (FIGURETRUTH, review round 1 fix, D-18) added arms 13 and 14. One scoped UPDATE:
+#     arm 14's anti-vacuity step that lengthens ONLY the ten short rows' record
+#     (`WHERE strategy_id = ANY (v_short)`, the ids that arm itself seeded)  -> 6 -> 7
+#
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
 # never appears in it and an explicit `: 0` here would fail the comparison. The
@@ -161,7 +171,7 @@ _SCOPED_RE = re.compile(
 # a key this map does not have and the assertion still fires.
 # ---------------------------------------------------------------------------
 _EXPECTED_MATCH_COUNTS: dict[str, int] = {
-    "test_get_verified_cohort_rank_gate.sql": 1,
+    "test_get_verified_cohort_rank_gate.sql": 7,
     "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
     "test_okx_archive_rebuild.sql": 1,

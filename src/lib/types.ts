@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
 import type { CapitalOwnership } from "./capital-ownership";
+import type { FigureRecord, FigureState } from "./figure-gate";
 import {
   SIGNUP_ROLES,
   exchangeEnum,
@@ -360,6 +361,27 @@ export interface StrategyAnalytics {
    */
   series_end?: string | null;
   /**
+   * Phase 194 plan 06 (D-15) — NOT a column. The date of the FIRST point of
+   * `returns_series`, projected as `series_start:returns_series->0->>date` by the
+   * ranked-list embed and derived by `shapeRowAnalytics` on the owner path. With
+   * `series_end` it gives a row's record span for `figureRecord` (figure-gate.ts).
+   * OPTIONAL: absent or null means unknown, and an unknown span never clears the gate.
+   */
+  series_start?: string | null;
+  /**
+   * Phase 194 plan 06 (D-15) — NOT a column. The scalar
+   * `data_quality_flags->>headline_since` (a chain-broken row's headline covers only
+   * the suffix from this date). OPTIONAL like `series_start`.
+   */
+  headline_since?: string | null;
+  /**
+   * Phase 194 plan 06 (D-15) — NOT a column. The scalar
+   * `metrics_json->record_observations`, the count of headline return observations
+   * the producer stored (metrics.py). OPTIONAL: absent on a row computed before the
+   * field existed, which the non-crypto gate reads as "count unknown".
+   */
+  record_observations?: number | null;
+  /**
    * Phase 164.6.6.2.2 (WR-05) — NOT a `strategy_analytics` column. The scalar
    * `data_quality_flags->>cumulative_method`, projected as a JSONB alias
    * (`cumulative_method:data_quality_flags->>cumulative_method`) by the
@@ -539,6 +561,10 @@ export interface AnalyticsDataQualityFlags {
    *  flag: it is a steady fact, so a consumer must never read its presence as
    *  "degraded". Read through `parseReturnsUnit`, never trusted raw. */
   native_unit?: string;
+  /** Phase 194 plan 06 (D-15): the first date the headline figures cover (a chain-broken
+   *  row's headline covers only the suffix). A steady fact like `native_unit`, never a
+   *  degradation flag. Read through `shapedRecordScalars`, never trusted raw. */
+  headline_since?: string;
 }
 
 export interface VolumeMetrics {
@@ -1623,6 +1649,28 @@ export interface OptimizerSuggestionRow {
   corr_with_portfolio: number | null;
   /** null = the portfolio has no Sharpe, so a lift over it does not exist (166.1 D7). */
   sharpe_lift: number | null;
+  /**
+   * 194 D-11 / D-15 (2026-11-07): calendar days of the aligned window the lift was measured
+   * over. null = stored before the producer recorded it, read as unknown.
+   */
+  sharpe_lift_span_days: number | null;
+  /**
+   * 194 D-11 / D-15: the producer's verdict on the two records the lift compares (withheld,
+   * short, full, or null = undeterminable). The client reads it and never re-derives it.
+   * null = stored before the producer recorded it, read as unknown (shown as before).
+   */
+  sharpe_lift_state: FigureState | null;
+  /**
+   * 194 R3 SFH-M1: the stored value of a PRESENT `sharpe_lift_state` outside the closed set,
+   * kept so the real cause reaches Sentry. Set only when the adapter coerced the state to
+   * "withheld"; absent on every well-formed row (a genuine producer "withheld" has none).
+   */
+  sharpe_lift_state_raw?: string;
+  /**
+   * 194 D-15: the record that failed the total-record minimum (the shorter, when both fail);
+   * present only when the state is withheld. null = absent or malformed, read as unknown.
+   */
+  sharpe_lift_failing_record: FigureRecord | null;
   dd_improvement: number;
   score: number;
 }

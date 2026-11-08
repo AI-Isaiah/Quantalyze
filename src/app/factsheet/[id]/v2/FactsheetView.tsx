@@ -144,6 +144,16 @@ import { venueLabel as venueDisplayName } from "@/lib/display-labels";
 import { resolvePalette, paletteToCssVars } from "./palette";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { CHART_CONFIGS, applyChartUnit } from "./chart-configs";
+import { RollingWindowChoice, applyRollingWindowChoice, type RollingChoice } from "./rolling-window-choice";
+import {
+  gateAnnualized,
+  gatedValue,
+  shortTrackNote,
+  coveredDays,
+  widenedShortNote,
+  widenedWithheldReason,
+  withheldReason,
+} from "@/lib/figure-gate";
 import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
 
 /**
@@ -238,6 +248,15 @@ interface OwnerLaneProps {
    * calling the idempotent mint route, which returns the same url every time.
    */
   ownerShare?: { hasActiveShare: boolean };
+  /**
+   * 194 D-22 — whether this viewer may see AUM (the header's AUM chip): a signed-in
+   * allocator or the strategy's own manager, decided per request on the server by
+   * `canViewAum`. Absent or false hides the chip, so a mount that never decided fails closed.
+   *
+   * ⛔ A RENDER PROP, NEVER A PAYLOAD FIELD: `payload.aum` rides the shared id-keyed cache,
+   * and a per-viewer decision folded into it would be served to everyone.
+   */
+  showAum?: boolean;
 }
 
 /** The masthead H1's class string, extracted so the owner and public arms of
@@ -252,6 +271,7 @@ export function FactsheetView({
   ownershipMark,
   renameTarget,
   ownerShare,
+  showAum,
 }: { payload: FactsheetPayload } & OwnerLaneProps) {
   return (
     // Phase 164.6.6.2.1 (D-01, D-18): the Units toggle lives HERE and nowhere
@@ -268,6 +288,7 @@ export function FactsheetView({
           ownershipMark={ownershipMark}
           renameTarget={renameTarget}
           ownerShare={ownerShare}
+          showAum={showAum}
         />
       </SelectedPayloadProvider>
     </UnitViewProvider>
@@ -321,6 +342,7 @@ function FactsheetShell({
   ownershipMark,
   renameTarget,
   ownerShare,
+  showAum,
 }: { payload: FactsheetPayload } & OwnerLaneProps) {
 
   // One-shot view event when the page mounts so adoption of the new
@@ -369,6 +391,7 @@ function FactsheetShell({
       ownershipMark={ownershipMark}
       renameTarget={renameTarget}
       ownerShare={ownerShare}
+      showAum={showAum}
     />
   );
 }
@@ -412,6 +435,7 @@ export function FactsheetBody({
   ownershipMark,
   renameTarget,
   ownerShare,
+  showAum = false,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
   const { colorblind } = useDisplay();
   // Phase 164 / SHARE-04 — the live-link fact, held HERE because two children on
@@ -469,10 +493,11 @@ export function FactsheetBody({
             payload={payload}
             ownershipMark={ownershipMark}
             renameTarget={renameTarget}
+            showAum={showAum}
           />
         )}
         {topSlot}
-        <KpiStrip />
+        <KpiStrip scenarioMode={scenarioMode} />
         <SectionNav />
         <ControlBar
           scenarioMode={scenarioMode}
@@ -760,6 +785,18 @@ function PerformanceCharts() {
   // unavailable case, and "no measurable volatility" would misstate the others.
   const volMatchedNoVol =
     cmpKey !== "none" && volMatchedAbsent && view.comparators[cmpKey]?.summary != null;
+  // 194 D-11 as superseded by D-15: the rolling verdict plan 14 computes once where the window
+  // is picked. Withheld (`gate`: the TOTAL record fails the minimum; `record`: no full window)
+  // draws nothing; short qualifies each chart with a note; absent draws as before.
+  const rollVerdict = roll.annualization;
+  const rollWithheld = rollVerdict?.state === "withheld";
+  const rollShortDays = rollVerdict?.state === "short" ? rollVerdict.days : null;
+  // 194 D-14 (additive): the row window stays the chart default on every record; `1y` is an
+  // option beside it, and only when the view carries the 365-day window. A basis switch can
+  // leave the state at `1y` on a view without it, so the effective choice falls back to the row.
+  const [rollChoice, setRollChoice] = React.useState<RollingChoice>("row");
+  const roll1y = view.rollingWindow1y ?? null;
+  const effectiveRollChoice: RollingChoice = rollChoice === "1y" && roll1y ? "1y" : "row";
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
@@ -777,11 +814,17 @@ function PerformanceCharts() {
       // payload: the strategy-side null shows up on the MTM / smoothed bundles.
       .filter(cfg => !(volMatchedAbsent && cfg.key === "volMatched"))
       .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
-      .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && !roll.enough))
+      .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && (!roll.enough || rollWithheld)))
       .map(cfg => {
         if (ROLLING_CHART_KEYS.has(cfg.key)) {
+          const avg = railAvgWithheld ? { showStratAverage: false } : {};
+          if (effectiveRollChoice === "1y") {
+            return { ...applyRollingWindowChoice(cfg, "1y", roll1y), ...avg };
+          }
           const title = cfg.title.replace(ROLL_LABEL_RE, `(${roll.label})`);
-          return { ...cfg, title, warmup: roll.window, ...(railAvgWithheld ? { showStratAverage: false } : {}) };
+          const note = rollShortDays === null ? null : widenedShortNote("rolling", rollShortDays);
+          const subtitle = note === null ? cfg.subtitle : cfg.subtitle ? `${cfg.subtitle} · ${note}` : note;
+          return { ...cfg, title, ...(subtitle === undefined ? {} : { subtitle }), warmup: roll.window, ...avg };
         }
         if (cfg.key === "rollingBeta") {
           const title = cfg.title.replace(ROLL_LABEL_RE, `(${beta.label})`);
@@ -791,12 +834,20 @@ function PerformanceCharts() {
         // `null` returns `cfg` itself, so a USD chart is the config it always was.
         return applyChartUnit(cfg, returnsUnit);
       });
-  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit, railAvgWithheld]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit, railAvgWithheld, rollWithheld, rollShortDays, effectiveRollChoice, roll1y]);
+
+  const firstRollingKey = configs.find(cfg => ROLLING_CHART_KEYS.has(cfg.key))?.key;
+  const rollingRecord = payload.figureRecord ?? null;
 
   return (
     <>
       {configs.map(cfg => (
-        <TimeSeriesChart key={cfg.key} config={cfg} />
+        <React.Fragment key={cfg.key}>
+          {roll1y && cfg.key === firstRollingKey && (
+            <RollingWindowChoice rowLabel={roll.label} value={effectiveRollChoice} onChange={setRollChoice} />
+          )}
+          <TimeSeriesChart config={cfg} />
+        </React.Fragment>
       ))}
       {/* FS-01/02 (composite-only): visually-hidden AT summary for the sparse
           stitched cumulative track. The seam/gap markers are pointerEvents-none,
@@ -849,10 +900,14 @@ function PerformanceCharts() {
               : ""}
         </p>
       )}
-      {!roll.enough && (
+      {(!roll.enough || rollWithheld) && (
         <NotEnoughDataPanel
           title="Rolling Metrics — Not enough data"
-          body="Strategy history is too short to compute even a 30-day rolling volatility / Sharpe / Sortino. Rolling charts will appear once the strategy has at least ~35 observations."
+          body={
+            rollingRecord == null
+              ? "Rolling annualized figures appear once the record covers one full rolling window."
+              : widenedWithheldReason(rollVerdict?.cause === "gate" ? "rolling" : "rolling-record", rollingRecord)
+          }
         />
       )}
       {!beta.enough && cmpKey !== "none" && (
@@ -1131,9 +1186,10 @@ function FactsheetHeader({
   payload: payloadProp,
   ownershipMark,
   renameTarget,
+  showAum = false,
 }: {
   payload: FactsheetPayload;
-} & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget">) {
+} & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget" | "showAum">) {
   const [renameOpen, setRenameOpen] = React.useState(false);
   // Phase 164.6.6.2.1 (D-19, UI-SPEC rule 4): every identity element below (H1,
   // unit chip, trust tier, FreshnessChip, SeriesRecencyLine, CapacityChip) reads
@@ -1333,7 +1389,7 @@ function FactsheetHeader({
               unavailable={payload.reconstructedRangesUnavailable}
             />
           </div>
-          {payload.aum != null && (
+          {showAum && payload.aum != null && (
             <CapacityChip
               aum={payload.aum}
               maxCapacity={payload.maxCapacity}
@@ -1716,7 +1772,7 @@ function CapacityChip({
   );
 }
 
-function KpiStrip() {
+function KpiStrip({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
   // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM via the persisted
@@ -1756,6 +1812,15 @@ function KpiStrip() {
   const selected = scope.kind === "selected";
   const m = selected ? wv.strategyMetrics : leverageApplied ? view.strategyMetrics : basisM;
   const j = wv.comparators[cmpKey].joint;
+  // Phase 194 (D-04 as superseded by D-15, TRUST-05): the strip's annualised cells and its one
+  // muted note read the SAME verdict the rail does. The TOTAL record (`payload.figureRecord`,
+  // the same object at full history and inside a range) decides whether they show; the window
+  // only qualifies them with the note under a year. A selected range is never withheld for
+  // being short. In the Scenario mount the record is the blend's.
+  const figureRec = payload.figureRecord ?? null;
+  const gateWindowSpan = selected ? coveredDays(scope.start, scope.end) : undefined;
+  const gateState = figureRec ? gateAnnualized(figureRec, gateWindowSpan) : "null";
+  const gv = (value: number | null | undefined) => gatedValue(value, gateState);
   // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the joint is
   // withheld, not absent. The α/IR cells stay (9 cells) and read "—", and one
   // muted line under the strip names the cause in the widget's words. Inside a
@@ -1787,12 +1852,12 @@ function KpiStrip() {
   const unitLabel = returnsUnit != null;
   const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean }> = [
     { label: withUnit("Cum. Return", returnsUnit), value: formatSignedPercent(m.cum_ret, 1), tone: percentTone(m.cum_ret, 1), unitLabel },
-    { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(m.cagr, 1), tone: percentTone(m.cagr, 1), unitLabel },
-    { label: "Sharpe", value: num(m.sharpe) },
-    { label: "Sortino", value: num(m.sortino) },
-    { label: "Calmar", value: num(m.calmar) },
+    { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(gv(m.cagr), 1), tone: percentTone(gv(m.cagr), 1), unitLabel },
+    { label: "Sharpe", value: num(gv(m.sharpe)) },
+    { label: "Sortino", value: num(gv(m.sortino)) },
+    { label: "Calmar", value: num(gv(m.calmar)) },
     { label: "Max DD", value: formatUnsignedPercent(m.max_dd, 1), tone: percentTone(m.max_dd, 1) === "negative" ? "negative" : undefined },
-    { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
+    { label: "Ann. Vol", value: pct(gv(m.ann_vol), 1) },
   ];
   // Hoisted from the α/IR block below: the flat-leg line under the strip is shown only
   // when those cells show the joint, so it reads the same predicate.
@@ -1872,6 +1937,31 @@ function KpiStrip() {
     j != null && !suppressRelative && !relativeWithheld && items.length > 7 && cmpKey !== "none" && wv.comparators[cmpKey].flatLeg === true
       ? flatLegReason(selected ? "range" : "record")
       : null;
+  // Phase 194 (D-13, D-15): the strip keeps ONE muted note. Its first sentence is the rail's
+  // verdict (withheld on a short TOTAL record, or the short-track note when the window is under
+  // a year). When the alpha and IR cells show the active comparator's joint, the overlap
+  // sentence of that block (plan 21's `jointAnnualization`) joins the same paragraph.
+  const gateNote =
+    figureRec && gateState === "withheld"
+      ? withheldReason(scenarioMode ? "blend" : "record", figureRec)
+      : figureRec && gateState === "short"
+        ? shortTrackNote(scenarioMode ? "blend" : selected ? "range" : "record", gateWindowSpan ?? figureRec.spanDays ?? 0)
+        : null;
+  const jointAnnualization = wv.comparators[cmpKey].jointAnnualization;
+  const overlapNote =
+    jointAnnualization && j != null && !suppressRelative && !relativeWithheld && items.length > 7 && cmpKey !== "none"
+      ? jointAnnualization.state === "withheld"
+        ? jointAnnualization.unreadable
+          ? widenedWithheldReason("overlap", {
+              ...(figureRec ?? { spanDays: null, observations: null, crypto: false }),
+              unreadable: true,
+            })
+          : figureRec
+            ? widenedWithheldReason("overlap", figureRec)
+            : null
+        : widenedShortNote("overlap", jointAnnualization.days)
+      : null;
+  const stripGateNote = [gateNote, overlapNote].filter((t): t is string => t != null).join(" ");
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
   // (`@`-prefixed variants), NOT the viewport. The KPI strip sits in the
   // factsheet body whose effective width varies (full ~1440 measure on the route
@@ -2020,44 +2110,19 @@ function KpiStrip() {
           {flatLegLine}
         </p>
       )}
-      {/* Short-track caveat: annualized CAGR/Sharpe/Sortino/Calmar/Ann.Vol
-          are statistically unreliable with fewer than 252 observations (~1y).
-          Surface the same warning here at the hero strip so mobile users who
-          never scroll to the MetricsColumn right-rail still see it. (NEW-C20-08) */}
-      {/* F8 (phase 103): the observation count follows the ACTIVE basis via the
-          view (matching the MetricsColumn right-rail caveat, which already reads
-          view.strategyMetrics.n). Under MTM the reconstructed series can have a
-          DIFFERENT (usually shorter) length than cash, so the persisted-overlay
-          `m.n` (always cash) would understate the low-N risk under an MTM label.
-          Under cash the view returns the payload by reference, so this is
-          byte-identical to `m.n`. */}
-      {/* Phase 169.1 (D-27): inside a window the count is the WINDOW's (`wv` is
-          `view` by reference at full history). */}
-      {wv.strategyMetrics.n < 252 && (
+      {/* Phase 194 (D-04 as superseded by D-15, D-13): the two amber short-record caveats (the
+          n < 252 observation count of NEW-C20-08 and the server `insufficientWindow` flag) are
+          ONE muted note. It carries the rail's verdict from the shared gate: the figures are
+          withheld only when the strategy's TOTAL record is under D-15's minimum, and a window
+          under a year (a selected range, a blend) only qualifies them. The wrapper and its
+          `borderTop` are the retired paragraphs'. */}
+      {stripGateNote !== "" && (
         <p
-          className="px-3 sm:px-4 py-2 text-micro font-mono"
-          style={{
-            borderTop: "1px solid var(--color-border)",
-            color: "var(--color-warning, #B45309)",
-          }}
+          className="px-3 sm:px-4 py-2 text-micro font-mono text-text-muted"
+          data-testid="strip-figure-gate-note"
+          style={{ borderTop: "1px solid var(--color-border)" }}
         >
-          ⚠ Only {wv.strategyMetrics.n} observation{wv.strategyMetrics.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
-        </p>
-      )}
-      {/* HARD-04 (#67): server-truth short-window flag from
-          data_quality_flags.insufficient_window (the CAGR-site DQ annotation).
-          Distinct from the n<252 client-count heuristic above — this is the
-          server's authoritative sub-90-day annualization-window signal. Reuses
-          the identical NEW-C20-08 amber caveat pattern. */}
-      {payload.dataQuality?.insufficientWindow === true && (
-        <p
-          className="px-3 sm:px-4 py-2 text-micro font-mono"
-          style={{
-            borderTop: "1px solid var(--color-border)",
-            color: "var(--color-warning, #B45309)",
-          }}
-        >
-          ⚠ Track record under 90 days — annualized metrics are flagged as computed on an insufficient window.
+          {stripGateNote}
         </p>
       )}
       {/* Phase 164.6.6.2 (D-25, founder 2026-10-08): server-truth small-base flag from

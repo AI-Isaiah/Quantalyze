@@ -78,6 +78,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
+import { withViewerAum } from "@/lib/factsheet/viewer-aum";
 
 // DO NOT cache at the edge. Shared caches are keyed on the URL, not on the
 // token's revocation state, so a cached response could be replayed after a
@@ -404,7 +405,8 @@ export default async function FactsheetSharePage({
   //    everyone (the T-150-27 rule).
   return (
     <FactsheetView
-      payload={payload}
+      // 194 D-22: a share-link recipient is not an allocator or the manager; no AUM in the data.
+      payload={withViewerAum(payload, false)}
       viewerNotice="shared_privately"
       recipientShare
     />

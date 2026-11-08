@@ -68,8 +68,9 @@
 -- is a SECURITY DEFINER cross-tenant read over the entire published universe,
 -- and assertions 1 and 4 are its only recurring executed coverage.
 --
--- NOTHING is skipped now. All six assertions (1, 2a, 2b, 3, 4a, 4b) execute on
--- every run, and the file ends in an 'ALL 6 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b)'
+-- NOTHING is skipped now. All fourteen assertions (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14)
+-- execute on every run (arms 7-14 are the Phase 194 D-15 cohort record gate, see below),
+-- and the file ends in an 'ALL 14 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14)'
 -- sentinel so that an arm neutered in place — deleted, renumbered or
 -- short-circuited — cannot exit 0 unnoticed. Keep the roster in that notice: as
 -- of 2026-08-25 `sql-tests` in .github/workflows/ci.yml counts its entries and
@@ -96,6 +97,23 @@
 -- delta. A REPEATABLE READ snapshot makes the delta attributable to this test's
 -- own writes and nothing else.
 --
+-- ⭐ ARMS 7-12 — THE D-15 COHORT RECORD GATE (Phase 194 FIGURETRUTH, plan 20)
+-- 20261107140000 leaves out of the peer cohort every strategy whose TOTAL record
+-- determinably fails D-15's minimum, in the count query AND the rank query. Without arms,
+-- that predicate could be deleted from either query and nothing would go red. 7: the count
+-- query leaves out a crypto 60-day row. 8: the crypto boundary (90 daily returns stay, 89 leave).
+-- 9: the rank query leaves out short rows (a hand-computed decile over the kept rows only).
+-- 10: the non-crypto boundary (60 observations stays, 59 leaves, the stored count deciding
+-- over the span). 11: the A-194-D15-02 fallback (no stored count -> the span decides).
+-- 12: an impossible calendar date (2026-02-31) in any of the three record dates must not
+-- fail the RPC, and the row stays in (the null rule). Each arm carries a RED-UNDER that the
+-- runner proved bites its own arm.
+-- D-18 (FOUNDER-DECIDED 2026-11-07, review WR-02): a short record leaves the annualised peer sets
+-- (Sharpe, Sortino) ONLY and stays in the Max DD set. Arm 9's oracle is Sharpe and Sortino over the
+-- kept rows and Max DD over every row. 13: the min-N floor applies per rank (a Max DD set of 20 ranks
+-- while the annualised set of 10 does not), cohort_n being the annualised cohort. 14: the Max DD decile
+-- counts the short rows. 7, 8, 10, 11 and 12 read cohort_n, the annualised cohort, and stand.
+--
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block with RAISE
 -- EXCEPTION on failure / RAISE NOTICE on pass, mirroring the sibling
 -- supabase/tests/test_*.sql files. No psql backslash meta-commands. Under
@@ -112,14 +130,25 @@
 -- throwaway pg-lane cluster to PROVE it reds on its own arm, then restores
 -- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
 -- what the lane applies before this gate.
--- ⚠️ THE OBJECT UNDER TEST IS THE REAL SECDEF from 20260821120000, and that
--- migration SELF-VERIFIES its own identity args, its SECDEF flag and its gate
--- occurrence count at apply time. Three twins are therefore LAYERED: the second
--- step removes the migration's own verification term so the GATE reds rather
--- than the apply — never to widen the mutation, only to let it reach the gate.
+-- ⚠️ THE OBJECT UNDER TEST IS THE REAL SECDEF, in its NEWEST definition: the lane
+-- applies 20260821120000 and then 20261107140000 (the Phase 194 D-15 re-base, which
+-- replaces the whole body), so every mutation below targets 20261107140000. A mutation
+-- of 20260821120000 alone would be overwritten by the later CREATE OR REPLACE and could
+-- never bite. Arm 0 renames a parameter, which CREATE OR REPLACE refuses over an existing
+-- definition (42P13), so it renames in both files. The newest migration SELF-VERIFIES its
+-- own identity args, its SECDEF flag, its gate occurrence count and its record-predicate
+-- count at apply time. Several twins are therefore LAYERED: the second step removes the
+-- migration's own verification term so the GATE reds rather than the apply — never to
+-- widen the mutation, only to let it reach the gate.
+-- 20260825120000 is in the list because the record predicate calls
+-- public.ledger_refresh_parse_series_date (defined there); without it the first RPC call
+-- fails 42883. Its own dependencies (compute_jobs queue, strategy_keys, stitch composite)
+-- precede it, in the order test_ledger_refresh_staleness.sql applies them.
+-- Fixtures 27 (strategy_analytics.metrics_json) and 42 (strategies.asset_class) declare the
+-- columns the record predicate reads.
 -- 19-fixture-cohort-rank-metrics.sql adds only sharpe/sortino/max_drawdown,
 -- whose values come entirely from this file's own seeds.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/09-fixture-migration-ledger.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/19-fixture-cohort-rank-metrics.sql","supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/09-fixture-migration-ledger.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/19-fixture-cohort-rank-metrics.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","scripts/pg-lane/fixtures/42-fixture-strategies-asset-class.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -129,6 +158,67 @@ DELETE FROM auth.users
   WHERE email = 'test-mig159-cohort-gate@quantalyze.test';
 
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+-- Seeding helpers for arms 7-12 (Phase 194 plan 20). pg_temp, so nothing outlives the session and
+-- nothing is visible to another one. They write only rows this file creates, and cr_retire is
+-- bound to the ids it is handed.
+--
+-- cr_series: a two-element returns_series where only the FIRST and LAST dates matter to the
+-- cohort predicate; `return` is a placeholder.
+CREATE FUNCTION pg_temp.cr_series(p_first TEXT, p_last TEXT) RETURNS JSONB
+  LANGUAGE sql IMMUTABLE AS $f$
+    SELECT jsonb_build_array(jsonb_build_object('date', p_first, 'return', 0.01),
+                             jsonb_build_object('date', p_last,  'return', 0.01))
+  $f$;
+
+-- cr_seed: one published strategy with a published verification and a COMPLETE analytics row,
+-- so every cohort predicate except the D-15 record one is satisfied. asset_class is always
+-- explicit. p_headline lands in data_quality_flags.headline_since; p_obs lands in
+-- metrics_json.record_observations. NULL for either leaves the key out entirely.
+CREATE FUNCTION pg_temp.cr_seed(p_uid UUID, p_tag TEXT, p_class TEXT, p_first TEXT, p_last TEXT,
+                                p_headline TEXT, p_obs INT, p_sharpe DOUBLE PRECISION,
+                                p_sortino DOUBLE PRECISION DEFAULT 2.0,
+                                p_dd DOUBLE PRECISION DEFAULT -0.10) RETURNS UUID
+  LANGUAGE plpgsql AS $f$
+DECLARE
+  v_id      UUID;
+  v_flags   JSONB;
+  v_metrics JSONB;
+BEGIN
+  IF p_headline IS NOT NULL THEN
+    v_flags := jsonb_build_object('headline_since', p_headline);
+  END IF;
+  IF p_obs IS NOT NULL THEN
+    v_metrics := jsonb_build_object('record_observations', p_obs);
+  END IF;
+
+  INSERT INTO strategies (user_id, name, status, source, strategy_types, subtypes, markets,
+                          supported_exchanges, asset_class)
+  VALUES (p_uid, 'mig194 cohort record ' || p_tag, 'published', 'csv', '{}', '{}', '{}',
+          ARRAY['binance'], p_class)
+  RETURNING id INTO v_id;
+
+  INSERT INTO strategy_verifications (strategy_id, wizard_session_id, status, trust_tier, flow_type, source)
+  VALUES (v_id, gen_random_uuid(), 'published', 'api_verified', 'csv', 'csv');
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, sharpe, sortino, max_drawdown,
+                                  returns_series, data_quality_flags, metrics_json)
+  VALUES (v_id, 'complete', p_sharpe, p_sortino, p_dd,
+          pg_temp.cr_series(p_first, p_last), v_flags, v_metrics);
+  RETURN v_id;
+END
+$f$;
+
+-- cr_retire: take the given strategies out of the cohort by failing their analytics row. Bound
+-- to the ids passed in, never table-wide (shared-TEST discipline).
+CREATE FUNCTION pg_temp.cr_retire(p_ids UUID[]) RETURNS VOID
+  LANGUAGE plpgsql AS $f$
+BEGIN
+  UPDATE strategy_analytics
+     SET computation_status = 'failed'
+   WHERE strategy_id = ANY (p_ids);
+END
+$f$;
 
 DO $$
 DECLARE
@@ -147,6 +237,19 @@ DECLARE
   n_before      INT;
   n_after       INT;
   n_unfossiled  INT;
+
+  -- Arms 7-12 (Phase 194 plan 20).
+  v_d0          CONSTANT DATE := DATE '2026-01-01';  -- fixed, so every seeded date is reproducible
+  v_seeded      UUID[] := '{}';  -- the rows the current arm seeded; retired by id, never table-wide
+  v_short       UUID[] := '{}';  -- arm 13/14: the short-record rows among them
+  v_id          UUID;
+  v_id2         UUID;
+  n_base        INT;
+  n_a           INT;
+  n_b           INT;
+  n_c           INT;
+  r             RECORD;
+  i             INT;
 
   -- The gate predicate exactly as the migration writes it. Dollar-quoted so the
   -- single quotes need no escaping. Deliberately the FULL predicate rather than
@@ -170,7 +273,7 @@ BEGIN
   --            LAYERED: the migration's own post-verify (a) compares the same
   --            identity-args string, so the third step re-cuts THAT string and
   --            nothing else.
-  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1}]}
   SELECT p.oid INTO v_fn_oid
     FROM pg_proc p
     WHERE p.proname = 'get_verified_cohort_rank'
@@ -204,7 +307,7 @@ BEGIN
   --            caller's own strategies — a wrong ranking, not an error.
   --            LAYERED: the migration's post-verify (b) asserts the flag, so the
   --            second step removes THAT term only.
-  -- RED-UNDER-M: {"arm":"2a","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"LANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog","replace":"LANGUAGE plpgsql\nSET search_path = public, pg_catalog","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  IF NOT COALESCE(v_secdef, false) THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"2a","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"LANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog","replace":"LANGUAGE plpgsql\nSET search_path = public, pg_catalog","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF NOT COALESCE(v_secdef, false) THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   SELECT prosecdef, proconfig INTO v_secdef, v_config
     FROM pg_proc WHERE oid = v_fn_oid;
   IF NOT COALESCE(v_secdef, false) THEN
@@ -270,7 +373,7 @@ BEGIN
   --            presence. min-N would then count rows the percentiles do not.
   --            LAYERED: the migration's post-verify (e) makes the same count, so
   --            the second step removes THAT term only.
-  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"    (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n)) / 10.0 ) * 10)::INT\n  FROM strategies s\n  JOIN strategy_analytics a ON a.strategy_id = s.id\n  WHERE s.status = 'published'\n    AND a.computation_status IN ('complete', 'complete_with_warnings')\n","replace":"    (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n)) / 10.0 ) * 10)::INT\n  FROM strategies s\n  JOIN strategy_analytics a ON a.strategy_id = s.id\n  WHERE s.status = 'published'\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  IF v_gate_hits < 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  WHERE s.status = 'published'\n    AND a.computation_status IN ('complete', 'complete_with_warnings')\n","replace":"  WHERE s.status = 'published'\n","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_gate_hits < 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   v_gate_hits := (length(v_def) - length(replace(v_def, v_gate_pred, '')))
                  / length(v_gate_pred);
   IF v_gate_hits < 2 THEN
@@ -285,7 +388,7 @@ BEGIN
   --            only the behavioural delta notices that the cohort went empty.
   --            The header records why that spelling is load-bearing: an earlier
   --            draft keyed on trust_tier IS NOT NULL, a tautology.
-  -- RED-UNDER-M: {"arm":"4a","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"      WHERE v.strategy_id = s.id AND v.status = 'published'","replace":"      WHERE v.strategy_id = s.id AND v.status = 'verified'","occurrences":2}]}
+  -- RED-UNDER-M: {"arm":"4a","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"      WHERE v.strategy_id = s.id AND v.status = 'published'","replace":"      WHERE v.strategy_id = s.id AND v.status = 'verified'","occurrences":2}]}
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid, '00000000-0000-0000-0000-000000000000',
           'test-mig159-cohort-gate@quantalyze.test', now(), now());
@@ -350,7 +453,290 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (4b): after flipping ONLY computation_status failed -> complete on the fossil row, cohort_n is % (expected % = baseline + 2). The row is therefore excluded by something OTHER than its computation status, which means assertion 4a proved nothing about the gate.', n_unfossiled, n_before + 2;
   END IF;
 
-  RAISE NOTICE 'ALL 6 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b) and passed — the RANK-01 gate appears in % cohort predicates, SECURITY DEFINER + search_path pinned, anon lacks EXECUTE, complete_with_warnings joins the cohort and a failed-with-KPIs row does not (proven causal by the status flip).', v_gate_hits;
+  -- ======================================================================
+  -- Phase 194 FIGURETRUTH plan 20 - ARMS 7-12: the D-15 cohort record gate
+  -- (20261107140000_get_verified_cohort_rank_span_gate.sql).
+  --
+  -- D-11 as superseded by D-15: a strategy whose TOTAL record determinably fails the minimum is
+  -- left out of the peer cohort, in the count query AND the rank query. The record is judged
+  -- per row: non-crypto with a stored integer record_observations -> under 60 observations;
+  -- every other strategy (crypto, or non-crypto without the count: the A-194-D15-02 fallback)
+  -- -> a span under 90 days, measured from the later of the first returns_series date and
+  -- data_quality_flags.headline_since. D-20 (founder 2026-11-08, "Count returns"): the span
+  -- counts the days the returns COVER, both ends included, so last date - first date + 1.
+  -- A record that cannot be determined stays in.
+  --
+  -- Every arm below seeds rows through pg_temp.cr_seed (one published, verified, computed row
+  -- with an explicit asset_class) and measures cohort_n as a DELTA against a base read just
+  -- before it seeds, so rows other sessions committed cannot move it. Arm 9 is the one
+  -- exception: percentiles cannot be a delta, so its oracle is hand-computed and it first
+  -- asserts the cohort is empty (0d). Every arm retires its own rows by id before the next one
+  -- reads its base, so no arm's seeds reach another's count.
+  -- ======================================================================
+
+  -- Take the two arm-4 rows out of the cohort (scoped to their ids) and read the base.
+  PERFORM pg_temp.cr_retire(ARRAY[strat_warned, strat_fossil]);
+
+  -- ----- (7) the COUNT query leaves out a crypto row with a 60-day record -----
+  -- RED-UNDER: neutralise the D-15 record predicate (the rec_ok flag) in the COUNT query only,
+  --            leaving the rank query's copy in place. The annualised cohort (v_n, which is
+  --            cohort_n and the Sharpe/Sortino min-N denominator) then counts a crypto strategy
+  --            whose whole record is 60 days, so cohort_n rises by one where it must not.
+  --            LAYERED: the migration's post-verify (h) demands exactly two copies of the
+  --            predicate, so the second step removes THAT term only; it never widens the
+  --            mutation.
+  -- RED-UNDER-M: {"arm":"7","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(","replace":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(FALSE AND ","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_rec_hits <> 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_id := pg_temp.cr_seed(uid, 'a7-crypto-60d', 'crypto', v_d0::text, (v_d0 + 60)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (7): cohort_n went % -> % after seeding ONE published, verified, computed crypto strategy whose whole record is 60 days; expected no change. The count query (the min-N denominator) is counting a strategy whose TOTAL record fails D-15 minimum of 90 days, so the denominator no longer matches the cohort the percentiles are computed over.', n_base, n_a;
+  END IF;
+  -- ANTI-VACUITY: the row was left out BY ITS RECORD and nothing else. Lengthen only its
+  -- returns_series and it must join; otherwise 7 passed because the row was malformed.
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 400)::text)
+   WHERE strategy_id = v_id;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (7): after lengthening ONLY the returns_series of the 60-day crypto row to 400 days, cohort_n went % -> % (expected +1). The row is excluded by something other than its record, so the first half of arm 7 proved nothing about the predicate.', n_base, n_b;
+  END IF;
+
+  -- ----- (8) the crypto boundary: 90 daily returns stay, 89 leave -------------
+  -- D-20: 90 daily returns run from v_d0 to v_d0 + 89 and cover 90 days; 89 returns end at v_d0 + 88.
+  -- RED-UNDER: make the span bound inclusive, `< v_min_span_days` becomes `<= v_min_span_days`
+  --            in both queries and in the migration's own v_rec_pred copy. A crypto record of
+  --            exactly 90 days then leaves the cohort. D-15 says a record is long enough AT 90.
+  --            (Dropping the D-20 `+ 1` from the span bites this arm too: 90 daily returns would
+  --            then read 89 days and leave.)
+  -- RED-UNDER-M: {"arm":"8","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_id := pg_temp.cr_seed(uid, 'a8-crypto-90d', 'crypto', v_d0::text, (v_d0 + 89)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (8): cohort_n went % -> % after seeding a crypto strategy with a record of EXACTLY 90 days; expected +1. D-15 withholds a figure only UNDER 90 days, so a 90-day record belongs in the cohort and the span bound has become inclusive.', n_base, n_a;
+  END IF;
+  v_id2 := pg_temp.cr_seed(uid, 'a8-crypto-89d', 'crypto', v_d0::text, (v_d0 + 88)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id2;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (8): cohort_n is % after also seeding a crypto strategy with an 89-day record (base %, expected base + 1: the 90-day row only). A record one day short of D-15 minimum joined the cohort.', n_b, n_base;
+  END IF;
+  -- ANTI-VACUITY: the 89-day row was left out by its span alone.
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 400)::text)
+   WHERE strategy_id = v_id2;
+  SELECT cohort_n INTO n_c FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_c - n_base) IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (8): after lengthening ONLY the 89-day row to 400 days, cohort_n went % -> % (expected +2 in total). The row is excluded by something other than its span.', n_base, n_c;
+  END IF;
+
+  -- ----- (9) the RANK query leaves short rows out of Sharpe and Sortino ONLY (D-18) -
+  -- ORACLE, computed by hand and independent of the predicate. 20 kept crypto rows, i = 1..20:
+  --   sharpe_i  = 0.5 + 0.1 i   (0.6 .. 2.5)      probe 1.55  -> i <= 10 qualify (1.5 <= 1.55) -> 10 of 20 = 50% -> decile 50
+  --   sortino_i = 1.0 + 0.2 i   (1.2 .. 5.0)      probe 3.9   -> i <= 14 qualify (3.8 <= 3.9)  -> 14 of 20 = 70% -> decile 70
+  -- No probe lands on a value, so no tie decides it. Ten short crypto rows (30-day record) sit
+  -- beside them with sharpe 0.1, sortino 0.2 and max_dd -0.01, each at or under all three
+  -- probes. D-18: they leave the annualised peer sets, so Sharpe and Sortino are ranked over the
+  -- 20 kept rows and cohort_n (the annualised cohort) is 20. Left in the Sharpe/Sortino numerators
+  -- they would count as hits against the same 20-row denominator: sharpe 20 of 20 -> 100, sortino
+  -- 24 of 20 -> 120. The Max DD decile, where the short rows STAY, is arm 14's, on its own rows;
+  -- it is not asserted here so that each arm's mutation reds its own arm first.
+  -- RED-UNDER: neutralise the D-15 record predicate in the RANK query only, leaving the count
+  --            query's copy in place. cohort_n stays 20 (the denominator), the short rows join
+  --            the Sharpe and Sortino numerators, and both deciles move. The migration's (h)
+  --            check is removed by a second step, as in arm 7.
+  -- RED-UNDER-M: {"arm":"9","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(","replace":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(FALSE AND ","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_rec_hits <> 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF n_base <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (0d): the cohort already holds % strategies that are not this file''s. Arm 9 compares a percentile against a decile computed by hand over this file''s rows only, which a non-empty cohort breaks. The SQL corpus runs on a database private to its runner (scripts/pg-lane, scripts/local-stack); do not point this file at a shared database that carries published, verified, computed strategies.', n_base;
+  END IF;
+  FOR i IN 1..20 LOOP
+    v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a9-kept-' || i, 'crypto', v_d0::text, (v_d0 + 120)::text, NULL, NULL,
+                                            (0.5 + 0.1 * i)::float8, (1.0 + 0.2 * i)::float8, (-(0.05 + 0.01 * i))::float8);
+  END LOOP;
+  FOR i IN 1..10 LOOP
+    v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a9-short-' || i, 'crypto', v_d0::text, (v_d0 + 30)::text, NULL, NULL,
+                                            0.1, 0.2, -0.01);
+  END LOOP;
+  SELECT * INTO r FROM public.get_verified_cohort_rank(1.55, 3.9, 0.095);
+  IF r.cohort_n IS DISTINCT FROM 20 THEN
+    RAISE EXCEPTION 'TEST FAILED (9): cohort_n is % with 20 kept and 10 short crypto strategies seeded into an empty cohort; expected 20. The count query is not leaving the short rows out.', r.cohort_n;
+  END IF;
+  IF r.sharpe_pct IS DISTINCT FROM 50 OR r.sortino_pct IS DISTINCT FROM 70 THEN
+    RAISE EXCEPTION 'TEST FAILED (9): the deciles are sharpe=% sortino=%, expected 50 / 70 computed by hand over the 20 kept rows only. Ten short-record rows (30 days, each at or under both probes) are being ranked: the rank query no longer leaves out of Sharpe and Sortino a strategy whose total record fails D-15 minimum, so the denominator and the numerator describe different cohorts.', r.sharpe_pct, r.sortino_pct;
+  END IF;
+
+  -- ----- (10) the non-crypto boundary: 60 observations stays, 59 leaves --------
+  -- RED-UNDER: make the observation bound inclusive, `::int < v_min_obs` becomes
+  --            `::int <= v_min_obs` in both queries and in the migration's v_rec_pred copy. A
+  --            traditional strategy with exactly 60 observations then leaves the cohort.
+  -- RED-UNDER-M: {"arm":"10","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  -- 60 observations over only 84 days: the span (84) is under 90 and the count (60) is not
+  -- under 60, so the strategy stays ONLY if the stored count, not the span, decides for a
+  -- non-crypto row.
+  v_id := pg_temp.cr_seed(uid, 'a10-trad-60obs', 'traditional', v_d0::text, (v_d0 + 84)::text, NULL, 60, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (10): cohort_n went % -> % after seeding a traditional strategy with record_observations = 60 spanning 84 days; expected +1. D-15 withholds a non-crypto figure only UNDER 60 observations, and a stored count decides over the span, so this row belongs in the cohort.', n_base, n_a;
+  END IF;
+  -- 59 observations over 400 days: the span is plenty and the count is one short, so it leaves
+  -- ONLY if the stored count decides.
+  v_id2 := pg_temp.cr_seed(uid, 'a10-trad-59obs', 'traditional', v_d0::text, (v_d0 + 400)::text, NULL, 59, 1.0);
+  v_seeded := v_seeded || v_id2;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (10): cohort_n is % after also seeding a traditional strategy with record_observations = 59 spanning 400 days (base %, expected base + 1: the 60-observation row only). One observation short of D-15 minimum joined the cohort.', n_b, n_base;
+  END IF;
+  -- ANTI-VACUITY: the 59-observation row was left out by its count alone.
+  UPDATE strategy_analytics
+     SET metrics_json = jsonb_build_object('record_observations', 60)
+   WHERE strategy_id = v_id2;
+  SELECT cohort_n INTO n_c FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_c - n_base) IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (10): after raising ONLY the stored count of the 59-observation row to 60, cohort_n went % -> % (expected +2 in total). The row is excluded by something other than its observation count.', n_base, n_c;
+  END IF;
+
+  -- ----- (11) the interim fallback (A-194-D15-02): no count -> the span decides -
+  -- D-20: 90 daily returns run from v_d0 to v_d0 + 89, 89 returns end at v_d0 + 88.
+  -- RED-UNDER: restrict the span arm to crypto rows, `WHEN (a.returns_series->0->>'date') ~`
+  --            becomes `WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~` in
+  --            both queries and in the migration's v_rec_pred copy. A non-crypto row without a
+  --            stored count is then never decided, and a traditional 89-day record stays in.
+  -- RED-UNDER-M: {"arm":"11","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"WHEN (a.returns_series->0->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"WHEN (a.returns_series->0->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"WHEN (a.returns_series->0->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_id := pg_temp.cr_seed(uid, 'a11-trad-90d', 'traditional', v_d0::text, (v_d0 + 89)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (11): cohort_n went % -> % after seeding a traditional strategy with no stored record_observations and a 90-day span; expected +1. The fallback measures such a row by its span, and 90 days is long enough.', n_base, n_a;
+  END IF;
+  v_id2 := pg_temp.cr_seed(uid, 'a11-trad-89d', 'traditional', v_d0::text, (v_d0 + 88)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id2;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (11): cohort_n is % after also seeding a traditional strategy with no stored record_observations and an 89-day span (base %, expected base + 1: the 90-day row only). A non-crypto row without a count is not being decided by the span fallback (A-194-D15-02).', n_b, n_base;
+  END IF;
+  -- ANTI-VACUITY: the 89-day row was left out by its span alone.
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 400)::text)
+   WHERE strategy_id = v_id2;
+  SELECT cohort_n INTO n_c FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_c - n_base) IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (11): after lengthening ONLY the 89-day traditional row to 400 days, cohort_n went % -> % (expected +2 in total). The row is excluded by something other than its span.', n_base, n_c;
+  END IF;
+
+  -- ----- (12) an impossible calendar date cannot fail the RPC for every caller ---
+  -- The record dates are parsed with public.ledger_refresh_parse_series_date, which returns
+  -- NULL for 2026-02-31 where a bare ::date raises 22008. A NULL leaves the record
+  -- undeterminable, and an undeterminable record stays in (the null rule). Three rows, one
+  -- impossible date each, so that restoring ANY ONE of the three casts fails the arm:
+  --   A  the FIRST returns_series date      B  the LAST returns_series date
+  --   C  data_quality_flags.headline_since  (A and B also carry a valid 200-day partner)
+  -- The date is shape-valid, so the migration's regex pre-filter lets it through to the parser.
+  -- RED-UNDER: restore the bare casts the predicate carried before review round 1 of plan 19
+  --            (`(x)::date` for each of the three record dates) in both queries and in the
+  --            migration's v_rec_pred copy. The RPC then raises 22008 for every caller the
+  --            moment one analytics row holds such a date.
+  -- RED-UNDER-M: {"arm":"12","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date')","replace":"(a.returns_series->-1->>'date')::date","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date')","replace":"(a.returns_series->-1->>'date')::date","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date')","replace":"(a.returns_series->-1->>'date')::date","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date')","replace":"(a.returns_series->0->>'date')::date","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date')","replace":"(a.returns_series->0->>'date')::date","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date')","replace":"(a.returns_series->0->>'date')::date","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since')","replace":"(a.data_quality_flags->>'headline_since')::date","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since')","replace":"(a.data_quality_flags->>'headline_since')::date","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since')","replace":"(a.data_quality_flags->>'headline_since')::date","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a12-bad-first', 'crypto', '2026-02-31', (v_d0 + 200)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a12-bad-last', 'crypto', v_d0::text, '2026-02-31', NULL, NULL, 1.0);
+  v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a12-bad-headline', 'crypto', v_d0::text, (v_d0 + 200)::text, '2026-02-31', NULL, 1.0);
+  BEGIN
+    SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (12): get_verified_cohort_rank RAISED (SQLSTATE %, %) with an impossible calendar date (2026-02-31) in a returns_series date or in headline_since. One bad analytics row must never fail the cohort RPC for every authenticated caller; the record dates are no longer parsed through ledger_refresh_parse_series_date.', SQLSTATE, SQLERRM;
+  END;
+  IF (n_a - n_base) IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (12): cohort_n went % -> % after seeding three crypto strategies that each carry one impossible date; expected +3. An undeterminable record stays in the cohort (the null rule), so none of the three may be left out.', n_base, n_a;
+  END IF;
+
+  -- ----- (13) the min-N floor applies PER RANK, and a short record is still a Max DD peer (D-18) -----
+  -- D-18: a record under the D-15 minimum leaves the annualised peer sets (Sharpe, Sortino) and
+  -- stays in the Max DD set. The floor of 20 therefore applies to each rank's OWN population.
+  -- Ten kept crypto rows (120 days) and ten short ones (30 days) give an annualised cohort of 10
+  -- and a Max DD cohort of 20, so Sharpe and Sortino are suppressed (NULL) while Max DD ranks.
+  -- cohort_n is the annualised cohort, 10: the smallest population any rank in the row uses.
+  -- This arm asserts the SHAPE (which ranks are NULL); arm 14 asserts the Max DD decile.
+  -- RED-UNDER: take the early min-N return off the Max DD population, `IF v_n_all < v_min_n`
+  --            becomes `IF v_n < v_min_n`. The Max DD rank is then suppressed by the annualised
+  --            cohort of 10 and reads NULL, where a short record in the Max DD set must carry it
+  --            to 20.
+  -- RED-UNDER-M: {"arm":"13","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_n_all < v_min_n THEN","replace":"  IF v_n < v_min_n THEN","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF n_base <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (0e): the cohort already holds % strategies that are not this file''s. Arms 13 and 14 compare a percentile against a decile computed by hand over this file''s rows only, which a non-empty cohort breaks. The SQL corpus runs on a database private to its runner (scripts/pg-lane, scripts/local-stack); do not point this file at a shared database that carries published, verified, computed strategies.', n_base;
+  END IF;
+  FOR i IN 1..10 LOOP
+    v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a13-kept-' || i, 'crypto', v_d0::text, (v_d0 + 120)::text, NULL, NULL,
+                                            (0.5 + 0.1 * i)::float8, (1.0 + 0.2 * i)::float8, (-(0.05 + 0.01 * i))::float8);
+  END LOOP;
+  FOR i IN 1..10 LOOP
+    v_id := pg_temp.cr_seed(uid, 'a13-short-' || i, 'crypto', v_d0::text, (v_d0 + 30)::text, NULL, NULL,
+                            0.1, 0.2, -0.01);
+    v_seeded := v_seeded || v_id;
+    v_short := v_short || v_id;
+  END LOOP;
+  SELECT * INTO r FROM public.get_verified_cohort_rank(1.55, 3.9, 0.095);
+  IF r.cohort_n IS DISTINCT FROM 10 THEN
+    RAISE EXCEPTION 'TEST FAILED (13): cohort_n is % with 10 kept and 10 short crypto strategies seeded into an empty cohort; expected 10 (the annualised cohort: the short rows leave it).', r.cohort_n;
+  END IF;
+  IF r.sharpe_pct IS NOT NULL OR r.sortino_pct IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (13): sharpe_pct=% sortino_pct=% with an annualised cohort of 10, expected both NULL. Sharpe and Sortino are ranked below the min-N floor of 20.', r.sharpe_pct, r.sortino_pct;
+  END IF;
+  IF r.max_dd_pct IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (13): max_dd_pct is NULL with a Max DD cohort of 20 (10 kept and 10 short rows). D-18: a short record stays in the Max DD set, so that rank clears the min-N floor on its own population and must not be suppressed by the annualised cohort of 10.';
+  END IF;
+
+  -- ----- (14) the Max DD decile is over the WHOLE cohort, short rows included (D-18) -----
+  -- ORACLE by hand, on the arm 13 rows. Max DD over all 20: kept i = 1..10 have abs 0.06 .. 0.15
+  -- (-(0.05 + 0.01 i)), probe 0.095 -> i <= 4 qualify (0.09 <= 0.095) -> 4 hits; the ten short rows
+  -- (abs 0.01) all qualify -> 10 hits. 14 of 20 = 70% -> 100-70 = 30 -> decile 30. A Max DD that
+  -- dropped the short rows would be below the floor (NULL, caught by 13) or, over the kept rows
+  -- alone against a denominator of 10, 4 of 10 = 40% -> 60 -> decile 60.
+  -- RED-UNDER: add the record flag to the Max DD numerator, `FILTER (WHERE abs(a.max_drawdown)`
+  --            becomes `FILTER (WHERE r.rec_ok AND abs(a.max_drawdown)`. The short rows stop
+  --            counting as hits against the whole-cohort denominator: 4 of 20 = 20% -> 80, not 30.
+  --            LAYERED: the migration's (j) check reads the deployed body for the unflagged
+  --            form, so the second step removes THAT term only.
+  -- RED-UNDER-M: {"arm":"14","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)","replace":"FILTER (WHERE r.rec_ok AND abs(a.max_drawdown) <= p_max_dd) / v_n_all)","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF position('FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)' IN v_def) = 0 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  IF r.max_dd_pct IS DISTINCT FROM 30 THEN
+    RAISE EXCEPTION 'TEST FAILED (14): max_dd_pct is %, expected 30 computed by hand over all 20 rows (4 kept hits + 10 short hits = 14 of 20 = 70%%, inverted). A short-record strategy must stay in the Max DD set (D-18); an 80 means the ten short rows no longer count as Max DD hits.', r.max_dd_pct;
+  END IF;
+  -- ANTI-VACUITY: the short rows were out of Sharpe and Sortino BY THEIR RECORD and nothing else.
+  -- Lengthen only their returns_series and the annualised cohort must become 20 with both ranks
+  -- present, while the Max DD decile does not move (the Max DD set was already the whole cohort).
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 400)::text)
+   WHERE strategy_id = ANY (v_short);
+  SELECT * INTO r FROM public.get_verified_cohort_rank(1.55, 3.9, 0.095);
+  IF r.cohort_n IS DISTINCT FROM 20 OR r.sharpe_pct IS NULL OR r.sortino_pct IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (14): after lengthening ONLY the returns_series of the ten short rows to 400 days, cohort_n=% sharpe_pct=% sortino_pct=%, expected cohort_n 20 and both ranks present. The rows were excluded from Sharpe and Sortino by something other than their record, so arms 13 and 14 proved nothing about the predicate.', r.cohort_n, r.sharpe_pct, r.sortino_pct;
+  END IF;
+  IF r.max_dd_pct IS DISTINCT FROM 30 THEN
+    RAISE EXCEPTION 'TEST FAILED (14): max_dd_pct moved to % after the short rows reached the minimum record, expected 30 unchanged. The Max DD set must be the same whole cohort whatever the record length.', r.max_dd_pct;
+  END IF;
+
+  PERFORM pg_temp.cr_retire(v_seeded);
+
+  RAISE NOTICE 'ALL 14 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14) and passed — the RANK-01 gate appears in % cohort predicates, SECURITY DEFINER + search_path pinned, anon lacks EXECUTE, complete_with_warnings joins the cohort and a failed-with-KPIs row does not (proven causal by the status flip); the D-15 record gate leaves a crypto 60-day row out of both queries, keeps crypto at 90 days and drops it at 89, keeps a traditional strategy at 60 observations and drops it at 59, decides a traditional strategy without a count by its span, ranks only the kept rows, and survives an impossible calendar date in any of the three record dates; D-18: a short record leaves the Sharpe and Sortino peer sets and stays in the Max DD set, the min-N floor applies to each rank on its own population, and cohort_n is the annualised cohort.', v_gate_hits;
 END
 $$;
 

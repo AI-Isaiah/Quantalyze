@@ -110,9 +110,9 @@ export function ExposureByClass({
 
       {/* KPI strip — GROSS / NET / LONG / SHORT. No color on direction. */}
       <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <KpiCell testid="kpi-gross" label="Gross" value={gross} />
+        <KpiCell testid="kpi-gross" label="Gross exposure" value={gross} />
         <div>
-          <p className="text-micro uppercase tracking-wider text-text-muted">Net</p>
+          <p className="text-micro uppercase tracking-wider text-text-muted">Net exposure</p>
           <p data-testid="kpi-net" className="text-h3 font-semibold font-metric text-text-primary">
             {formatCurrency(net)}
           </p>
@@ -187,8 +187,8 @@ export function ExposureByClass({
                 <th className="py-2 pr-4">Symbol</th>
                 <th className="py-2 pr-4">Type</th>
                 <th className="py-2 pr-4">Side</th>
-                <th className="py-2 pr-4 text-right font-metric">Gross</th>
-                <th className="py-2 text-right font-metric">Net</th>
+                <th className="py-2 pr-4 text-right font-metric">Gross exposure</th>
+                <th className="py-2 text-right font-metric">Net exposure</th>
               </tr>
             </thead>
             <tbody>

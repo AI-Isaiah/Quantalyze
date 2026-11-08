@@ -97,6 +97,7 @@ function bundle(clipped: DailyReturn[], periodsPerYear: number, benchmarkPrices:
     markets: [],
     strategyName: "Coverage Gap Fixture",
     benchmarkPrices,
+    figureRecord: null,
   });
 }
 

@@ -78,10 +78,14 @@ const SCENARIO_PEER: PeerPercentilePayload = {
 const DISCLOSURE = "hypothetical blend · ranked vs verified strategies · sample/252 basis";
 
 /** A valid csv payload carrying the scenario peer carve-out. */
-function csvPayload(scenarioPeer: PeerPercentilePayload | undefined): FactsheetPayload {
+function csvPayload(
+  scenarioPeer: PeerPercentilePayload | undefined,
+  periodsPerYear?: 252 | 365,
+): FactsheetPayload {
   return buildScenarioFactsheetPayload({
     portfolioDaily: makeReturnsSeries(300),
     benchmark: null,
+    ...(periodsPerYear ? { periodsPerYear } : {}),
     ...(scenarioPeer ? { scenarioPeer } : {}),
   });
 }
@@ -145,6 +149,13 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
     expect(queryByText(/Synthesized peer cohort/i)).toBeNull();
     // No DOM leaked from a stale api branch.
     expect(container.querySelector("section")).toBeTruthy();
+  });
+
+  // 194 R3 WR-02: the caption names the blend's own basis, never a constant.
+  it("a crypto blend (365) reads sample/365 basis, never sample/252", () => {
+    const { container } = renderPanel(csvPayload(SCENARIO_PEER, 365));
+    expect(container.textContent).toContain("sample/365 basis");
+    expect(container.textContent).not.toContain("sample/252 basis");
   });
 
   it("api path renders nothing: the demo cohort arm is gone (D-04)", () => {

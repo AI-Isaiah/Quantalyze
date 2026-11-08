@@ -149,6 +149,14 @@ const SimulatorOkBranch = z
     ...SimulatorCommonShape,
     proposed: SimulatorMetricsSchema,
     deltas: SimulatorDeltasSchema,
+    // 194 D-15 (2026-11-07): the risk clock both Sharpes were annualised at (365 when a
+    // book leg is crypto, else 252). The delta gate needs it to pick the crypto or the
+    // observation bound. OPTIONAL on purpose: the frontend deploys on merge and the
+    // analytics service after main CI, so a frontend can meet an older analytics deploy
+    // that does not send it, and this strict branch must not 500 on its absence. Absent
+    // has no risk clock to gate by, so the consumer WITHHOLDS the Sharpe change with a
+    // reason rather than printing it ungated (review SFH-M3).
+    annualization_periods: z.number().int().positive().optional(),
     equity_curve_current: z.array(EquityCurvePointSchema),
     equity_curve_proposed: z.array(EquityCurvePointSchema),
   })

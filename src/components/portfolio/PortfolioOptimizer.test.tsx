@@ -13,16 +13,20 @@
  * identically on /portfolios/[id].
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import PortfolioOptimizer, {
   type OptimizerSuggestion,
 } from "./PortfolioOptimizer";
+import { shortTrackMarkerTitle, widenedWithheldReason } from "@/lib/figure-gate";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn(), push: vi.fn(), replace: vi.fn() }),
 }));
+
+const { captureToSentryMock } = vi.hoisted(() => ({ captureToSentryMock: vi.fn() }));
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 const SUGGESTION: OptimizerSuggestion = {
   strategy_id: "s-1",
@@ -463,5 +467,161 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
 
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByText("Uncorrelated Vol")).toBeInTheDocument();
+  });
+});
+
+// 194 D-11 as superseded by D-15: the Sharpe lift cell reads the producer's verdict on the two
+// records it compares. Withheld prints a dash with the reason; short keeps the value with the
+// `<1y` marker; full, unknown and absent are the cell as before.
+describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
+  const BASE_TOOLTIP =
+    "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest.";
+
+  function renderWith(suggestions: OptimizerSuggestion[]) {
+    return render(
+      <PortfolioOptimizer
+        portfolioId="p1"
+        initialSuggestions={suggestions}
+        computedAt="2026-07-11T00:00:00Z"
+        computationStatus="complete"
+      />,
+    );
+  }
+
+  const label = () => screen.getByText("Sharpe lift");
+  const valueEl = () => label().parentElement!.querySelectorAll("p")[1] as HTMLElement;
+
+  it("withheld, crypto failing record of 50 days: a dash with no lift colour, the reason ends the tooltip", () => {
+    renderWith([
+      {
+        ...SUGGESTION,
+        sharpe_lift_state: "withheld",
+        sharpe_lift_span_days: 50,
+        sharpe_lift_failing_record: { span_days: 50, observations: 51, crypto: true },
+      },
+    ]);
+    const reason = widenedWithheldReason("delta", { spanDays: 50, observations: 51, crypto: true });
+    expect(valueEl().textContent).toBe("—");
+    expect(valueEl().className).toContain("text-text-muted");
+    expect(valueEl().className).not.toMatch(/text-(positive|negative)/);
+    expect(label().getAttribute("title")?.endsWith(reason)).toBe(true);
+    expect(screen.queryByText("<1y")).toBeNull();
+  });
+
+  it.each([
+    ["null", null],
+    ["a malformed object", { span_days: "abc", observations: 51, crypto: true }],
+  ])("withheld with a failing record that is %s: a dash, a generic reason in the tooltip, and a report (R2-M1)", (_name, record) => {
+    captureToSentryMock.mockClear();
+    renderWith([
+      {
+        ...SUGGESTION,
+        sharpe_lift_state: "withheld",
+        sharpe_lift_failing_record: record as unknown as OptimizerSuggestion["sharpe_lift_failing_record"],
+      },
+    ]);
+    expect(valueEl().textContent).toBe("—");
+    expect(label().getAttribute("title")).toBe(
+      `${BASE_TOOLTIP} Withheld: the record is too short to annualize.`,
+    );
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1].tags.stage).toBe("lift-record-unreadable");
+  });
+
+  it("withheld with a readable record: the specific reason, nothing reported", () => {
+    captureToSentryMock.mockClear();
+    renderWith([
+      {
+        ...SUGGESTION,
+        sharpe_lift_state: "withheld",
+        sharpe_lift_failing_record: { span_days: 50, observations: 51, crypto: true },
+      },
+    ]);
+    expect(label().getAttribute("title")).not.toContain("too short to annualize");
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it.each([60, 200])("short, span %i: the value prints with <1y and the span's marker title", (span) => {
+    renderWith([{ ...SUGGESTION, sharpe_lift_state: "short", sharpe_lift_span_days: span }]);
+    const title = shortTrackMarkerTitle(span);
+    expect(valueEl().textContent).toContain("+0.15");
+    const marker = screen.getByText("<1y", { exact: false });
+    expect(marker.getAttribute("title")).toBe(title);
+    expect(marker.querySelector(".sr-only")?.textContent).toBe(` ${title}`);
+    expect(label().getAttribute("title")?.endsWith(title)).toBe(true);
+  });
+
+  it("short with no span: the value shows, no marker invented", () => {
+    renderWith([{ ...SUGGESTION, sharpe_lift_state: "short", sharpe_lift_span_days: null }]);
+    expect(valueEl().textContent).toBe("+0.15");
+    expect(screen.queryByText("<1y", { exact: false })).toBeNull();
+  });
+
+  it.each([
+    ["full", { sharpe_lift_state: "full" as const, sharpe_lift_span_days: 400 }],
+    ["null", { sharpe_lift_state: "null" as const }],
+    ["absent", {}],
+  ])("state %s: identical to a pre-194 suggestion", (_name, extra) => {
+    renderWith([{ ...SUGGESTION, ...extra }]);
+    const gated = valueEl().outerHTML;
+    const gatedTitle = label().getAttribute("title");
+    cleanup();
+    renderWith([SUGGESTION]);
+    expect(valueEl().outerHTML).toBe(gated);
+    expect(label().getAttribute("title")).toBe(gatedTitle);
+    expect(gatedTitle).toBe(BASE_TOOLTIP);
+  });
+
+  it("a PRESENT but unrecognised stored state is withheld and reported, never shown as a value (R2-M2)", () => {
+    captureToSentryMock.mockClear();
+    renderWith([{ ...SUGGESTION, sharpe_lift_state: "bogus" as unknown as "short" }]);
+    expect(valueEl().textContent).toBe("—");
+    expect(valueEl().className).not.toMatch(/text-(positive|negative)/);
+    expect(screen.queryByText("<1y", { exact: false })).toBeNull();
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1].tags.stage).toBe("lift-state-unrecognised");
+  });
+
+  // R3 SFH-M1: the adapter has already coerced the state to "withheld" by the time the card sees
+  // it; the stored value must still reach Sentry under the real cause, not as an unreadable record.
+  it("an adapter-coerced state reports lift-state-unrecognised with the stored value (R3 SFH-M1)", () => {
+    captureToSentryMock.mockClear();
+    renderWith([{ ...SUGGESTION, sharpe_lift_state: "withheld", sharpe_lift_state_raw: "partial" }]);
+    expect(valueEl().textContent).toBe("—");
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    const ctx = captureToSentryMock.mock.calls[0][1];
+    expect(ctx.tags.stage).toBe("lift-state-unrecognised");
+    expect(ctx.extra.state).toBe("partial");
+  });
+
+  it("a genuine producer withheld with no failing record keeps the unreadable-record cause (R3 SFH-M1)", () => {
+    captureToSentryMock.mockClear();
+    renderWith([{ ...SUGGESTION, sharpe_lift_state: "withheld" }]);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1].tags.stage).toBe("lift-record-unreadable");
+  });
+
+  it.each([["absent", {}], ["null", { sharpe_lift_state: null }]])(
+    "an %s stored state is the pre-194 shape: the value shows and nothing is reported (D-17)",
+    (_name, extra) => {
+      captureToSentryMock.mockClear();
+      renderWith([{ ...SUGGESTION, ...extra }]);
+      expect(valueEl().textContent).toBe("+0.15");
+      expect(captureToSentryMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("suggestion order and the other two cells are unchanged by a withheld lift", () => {
+    renderWith([
+      { ...SUGGESTION, strategy_id: "s-1", strategy_name: "First", sharpe_lift_state: "withheld" },
+      { ...SUGGESTION, strategy_id: "s-2", strategy_name: "Second", corr_with_portfolio: 0.1 },
+    ]);
+    const names = screen.getAllByText(/^(First|Second)$/).map((n) => n.textContent);
+    expect(names).toEqual(["First", "Second"]);
+    expect(screen.getAllByText("Corr w/ portfolio")).toHaveLength(2);
+    const corr = screen.getAllByText("Corr w/ portfolio").map((l) => l.parentElement!.querySelectorAll("p")[1].textContent);
+    expect(corr).toEqual(["0.45", "0.10"]);
+    const dd = screen.getAllByText("DD improve").map((l) => l.parentElement!.querySelectorAll("p")[1].textContent);
+    expect(dd).toEqual(["+3.00%", "+3.00%"]);
   });
 });

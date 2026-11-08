@@ -49,6 +49,17 @@ const CLOSES = Array.from({ length: 61 }, (_, i) => ({
 }));
 const BTC = { prices: CLOSES, through: "2026-09-29", dropped: [] as string[] };
 
+// 194 plan 21 (D-15): the Overview's alpha is withheld while the book's TOTAL record is under
+// 90 days (crypto basis), so a 60-day book prints a dash there and the two surfaces are no longer
+// comparable on it. These parity cases are about the PAIRED count, so the book gets 90 earlier
+// days (2026-05-03 .. 2026-07-31) with no BTC close behind them: the record spans 100+ days and
+// clears D-15, and exactly the same days pair as before. 194 review V-b: the widget now gates
+// its annualised alpha on that same record (see the V-b cases at the end of this file).
+const PRE: DailyReturn[] = Array.from({ length: 90 }, (_, i) => ({
+  date: isoDay("2026-05-03", i),
+  value: 0.003 * Math.cos(i * 0.9) + 0.0002,
+}));
+
 function readyData(btcBenchmarkPrices: unknown): AlphaBetaWidgetData {
   // Typed as the parsed contract; the wrong-shape case goes through the
   // boundary's parse, which is the point of that case.
@@ -56,7 +67,7 @@ function readyData(btcBenchmarkPrices: unknown): AlphaBetaWidgetData {
     strategies: [],
     analytics: null,
     equityHistoryState: "ready",
-    equityDailyReturns: BOOK,
+    equityDailyReturns: [...PRE, ...BOOK],
     btcBenchmarkPrices,
   } as AlphaBetaWidgetData;
 }
@@ -67,14 +78,14 @@ describe("AlphaBetaDecomposition — the book against BTC (169.4-02, D-69)", () 
   it("parity: alpha and beta equal the Overview's BTC comparator block for the same book and closes", () => {
     const overview = buildAllocatorPortfolioFactsheetPayload([], {
       allocatorId: "a-1",
-      dailyReturns: BOOK,
+      dailyReturns: [...PRE, ...BOOK],
       btcBenchmarkPrices: BTC,
     });
     const joint = overview!.comparators.btc.joint!;
     expect(Number.isFinite(joint.alpha)).toBe(true);
     expect(Number.isFinite(joint.beta)).toBe(true);
 
-    const widget = computeBookAlphaBeta(readyData(BTC));
+    const widget = computeBookAlphaBeta({ ...readyData(BTC), equityDailyReturns: [...PRE, ...BOOK] });
     expect(widget.kind).toBe("ok");
     if (widget.kind !== "ok") return;
     expect(widget.alpha).toBe(joint.alpha);
@@ -198,12 +209,12 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
   // A book of the first n returns, with the BTC closes it needs (one before
   // its first date through its last), so every interval is paired.
   function book(n: number): AlphaBetaWidgetData {
-    return { ...readyData({ ...BTC, prices: CLOSES.slice(0, n + 1) }), equityDailyReturns: BOOK.slice(0, n) };
+    return { ...readyData({ ...BTC, prices: CLOSES.slice(0, n + 1) }), equityDailyReturns: [...PRE, ...BOOK.slice(0, n)] };
   }
   function overview(n: number) {
     return buildAllocatorPortfolioFactsheetPayload([], {
       allocatorId: "a-1",
-      dailyReturns: BOOK.slice(0, n),
+      dailyReturns: [...PRE, ...BOOK.slice(0, n)],
       btcBenchmarkPrices: { ...BTC, prices: CLOSES.slice(0, n + 1) },
     })!;
   }
@@ -258,12 +269,20 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
   });
 
   it.each([10, 30])("%i paired: the widget and the Overview show the same alpha", (n) => {
-    const widget = computeBookAlphaBeta(book(n));
+    // 194 plan 21 (D-15): 90 earlier unpaired days put the record over the Overview's minimum.
+    const padded = (): AlphaBetaWidgetData => ({ ...book(n), equityDailyReturns: [...PRE, ...BOOK.slice(0, n)] });
+    const paddedOverview = () =>
+      buildAllocatorPortfolioFactsheetPayload([], {
+        allocatorId: "a-1",
+        dailyReturns: [...PRE, ...BOOK.slice(0, n)],
+        btcBenchmarkPrices: { ...BTC, prices: CLOSES.slice(0, n + 1) },
+      })!;
+    const widget = computeBookAlphaBeta(padded());
     expect(widget.kind).toBe("ok");
     if (widget.kind !== "ok") return;
     expect(widget.pairedCount).toBe(n);
-    expect(overview(n).comparators.btc.jointWithheld).toBeNull();
-    const joint = overview(n).comparators.btc.joint!;
+    expect(paddedOverview().comparators.btc.jointWithheld).toBeNull();
+    const joint = paddedOverview().comparators.btc.joint!;
     expect(widget.alpha).toBe(joint.alpha);
     expect(widget.beta).toBe(joint.beta);
 
@@ -273,9 +292,73 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     expect(screen.getByText(`${sign}${(joint.alpha * 100).toFixed(1)}%`)).toBeTruthy();
     expect(screen.getByText("annualized")).toBeTruthy();
     unmount();
-    renderOverview(n);
+    const payload = paddedOverview();
+    render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      </FactsheetProvider>,
+    );
     expect(screen.queryByTestId("joint-floor-reason")).toBeNull();
     const cell = screen.getByText("α vs BTC").parentElement!;
     expect(within(cell).getByText(pctSigned(joint.alpha, 1))).toBeTruthy();
+  });
+});
+
+/**
+ * 194 review V-b (D-15, D-69 "one number or neither"). The Overview withholds its alpha while
+ * the book's TOTAL record (crypto basis: 90 covered days) is short; the widget used to print a
+ * number beside that dash. It now takes the same verdict on the same record. The reason text is
+ * typed by hand from the UI-SPEC copy, not read back from the gate module.
+ */
+describe("AlphaBetaDecomposition — the book's total record gates the annualised alpha (194 V-b)", () => {
+  const REASON_60 =
+    "Alpha, information ratio, Treynor and tracking error appear once the record reaches 90 days. This record covers 60 days.";
+
+  it("a 60-day book: the widget shows a dash and the reason, and the Overview's alpha is withheld too", () => {
+    const overview = buildAllocatorPortfolioFactsheetPayload([], {
+      allocatorId: "a-1",
+      dailyReturns: BOOK,
+      btcBenchmarkPrices: BTC,
+    })!;
+    expect(overview.comparators.btc.joint!.alpha).toBeNaN();
+    expect(overview.comparators.btc.jointAnnualization?.state).toBe("withheld");
+
+    const data = { ...readyData(BTC), equityDailyReturns: BOOK };
+    const result = computeBookAlphaBeta(data);
+    expect(result).toMatchObject({ kind: "withheld", reason: REASON_60 });
+    render(<AlphaBetaDecomposition data={data} {...base} />);
+    expect(screen.getByTestId("alpha-value").textContent).toBe("—");
+    expect(screen.getByTestId("alpha-withheld-reason").textContent).toBe(REASON_60);
+    expect(screen.queryByText(/%$/)).toBeNull();
+  });
+
+  it("review WR-04: a withheld alpha keeps the book's beta and its return contribution (beta is not annualised)", () => {
+    const data = { ...readyData(BTC), equityDailyReturns: BOOK };
+    const result = computeBookAlphaBeta(data);
+    if (result.kind !== "withheld") throw new Error("expected a withheld record");
+    expect(result.beta).not.toBeNull();
+    expect(Number.isFinite(result.beta!)).toBe(true);
+    expect(Number.isFinite(result.betaContribution!)).toBe(true);
+    render(<AlphaBetaDecomposition data={data} {...base} />);
+    expect(screen.getByTestId("beta-value").textContent).toMatch(/^-?\d+\.\d{2}$/);
+    expect(screen.getByTestId("beta-contribution").textContent).toMatch(/Beta contributed/);
+  });
+
+  it("the boundary is the Overview's: 90 calendar days shows, 89 is withheld", () => {
+    const at = (days: number) => ({
+      ...readyData(BTC),
+      equityDailyReturns: [...PRE.slice(PRE.length - (days - 60)), ...BOOK],
+    });
+    // BOOK alone covers 60 days (D-20: both ends counted); k PRE days ahead of it, contiguous, make `days` in all.
+    expect(computeBookAlphaBeta(at(89)).kind).toBe("withheld");
+    expect(computeBookAlphaBeta(at(90)).kind).toBe("ok");
+  });
+
+  it("a cleared record whose paired overlap is under a year keeps the figure and adds the one muted note", () => {
+    render(<AlphaBetaDecomposition data={readyData(BTC)} {...base} />);
+    expect(screen.getByTestId("alpha-short-note").textContent).toBe(
+      "Alpha, information ratio, Treynor and tracking error are annualized from 60 days of overlap, under one year.",
+    );
+    expect(screen.getByText("annualized")).toBeTruthy();
   });
 });

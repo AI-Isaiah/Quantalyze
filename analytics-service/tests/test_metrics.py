@@ -1548,12 +1548,9 @@ def test_qstats_scalars_dispatch_table_per_entry(
 @pytest.mark.parametrize(
     "scalar_key,qs_attr",
     [
-        ("var_1d_95", "value_at_risk"),
-        # Phase 159 / RANK-05: `cvar` is now an inline wrapper (0.0.81's
-        # `conditional_value_at_risk` drops `prepare_returns` before computing its
-        # VaR threshold), but the wrapper still calls the `value_at_risk`
-        # primitive — so that is where the fault is injected for this row.
-        ("cvar", "value_at_risk"),
+        # 194 D-02: `var_1d_95` and `cvar` are HISTORICAL now and no longer reach
+        # quantstats at all; their failure-soft contract is pinned by
+        # `test_compute_all_metrics_historical_var_cvar_failure_logs_warning` below.
         ("tail_ratio", "tail_ratio"),
         ("profit_factor", "profit_factor"),
     ],
@@ -1601,6 +1598,33 @@ def test_compute_all_metrics_inline_qstats_scalar_failures_log_warning(
     )
 
 
+@pytest.mark.parametrize("scalar_key", ["var_1d_95", "cvar"])
+def test_compute_all_metrics_historical_var_cvar_failure_logs_warning(
+    golden_returns, caplog, monkeypatch, scalar_key
+):
+    """194 D-02: the stored VaR and CVaR come from `_historical_var_cvar`, so the
+    fault is injected THERE (it used to be injected into quantstats'
+    `value_at_risk`, a call that no longer exists on this path). Contract kept:
+    failure-soft for the result (key absent/None, the rest still computed), loud
+    for the operator (a WARNING naming the failing scalar)."""
+    import services.metrics as metrics_module
+
+    def boom(_returns):
+        raise RuntimeError("simulated _historical_var_cvar failure")
+
+    monkeypatch.setattr(metrics_module, "_historical_var_cvar", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert scalar_key not in mj or mj[scalar_key] is None
+    assert mj["best_day"] is not None  # the rest of the metrics were still computed
+    matching = [
+        r for r in caplog.records
+        if scalar_key in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, f"a historical VaR/CVaR failure must log a WARNING naming {scalar_key!r}"
+
+
 def test_compute_all_metrics_does_not_call_qstats_gini(
     golden_returns, caplog
 ):
@@ -1630,37 +1654,23 @@ def test_compute_all_metrics_does_not_call_qstats_gini(
     )
 
 
-def test_compute_all_metrics_var_1d_95_uses_correct_kwarg(
+def test_compute_all_metrics_var_1d_95_is_populated_historical(
     golden_returns, caplog
 ):
-    """PR #181 take-2 red-team F2: pre-take2, the var_1d_95 call passed
-    `cutoff=0.05` but `qs.stats.value_at_risk`'s signature uses
-    `confidence=0.95`. Every analytics run raised TypeError; the
-    sweep's WARNING then made var_1d_95 a permanent Railway noise
-    floor. Post-take2 the call uses `confidence=0.95` and var_1d_95
-    is populated successfully — confirms the fix is wired and no
-    'cutoff' WARNING fires on the live qs version.
-    """
+    """194 D-02 (was the PR #181 take-2 kwarg test): the stored var_1d_95 is the
+    HISTORICAL quantile from `_historical_var_cvar`, not a quantstats call. On
+    healthy returns it is populated, finite, negative, and emits no WARNING."""
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         result = compute_all_metrics(golden_returns)
     mj = result["metrics_json"]
-    # Positive coverage: var_1d_95 is populated (a finite negative
-    # number for healthy returns since it's the lower-tail VaR).
-    assert mj.get("var_1d_95") is not None, (
-        "PR #181 take-2 expects var_1d_95 to be populated on the live "
-        "quantstats version after the cutoff->confidence kwarg fix"
+    var = mj.get("var_1d_95")
+    assert var is not None and math.isfinite(var) and var < 0, (
+        "var_1d_95 must be a finite negative number for healthy returns"
     )
-    # Negative assertion: no var_1d_95 WARNING should fire about kwargs.
-    bad_warnings = [
+    assert not [
         r for r in caplog.records
-        if "var_1d_95" in r.getMessage()
-        and r.levelno == logging.WARNING
-        and ("cutoff" in r.getMessage() or "unexpected keyword" in r.getMessage())
-    ]
-    assert not bad_warnings, (
-        "PR #181 take-2 fixed the cutoff/confidence kwarg drift; no "
-        "WARNING about unexpected keyword 'cutoff' should fire anymore"
-    )
+        if "var_1d_95" in r.getMessage() and r.levelno == logging.WARNING
+    ], "no var_1d_95 WARNING should fire on healthy returns"
 
 
 def test_compute_all_metrics_outlier_ratios_failure_logs_warning(
@@ -1858,9 +1868,10 @@ def test_compute_all_metrics_qstats_scalar_warnings_carry_exc_info(
     import services.metrics as metrics_module
 
     def boom(*args, **kwargs):
-        raise RuntimeError("simulated qs.stats.value_at_risk failure")
+        raise RuntimeError("simulated _historical_var_cvar failure")
 
-    monkeypatch.setattr(metrics_module.qs.stats, "value_at_risk", boom)
+    # 194 D-02: var_1d_95 is historical now; the fault goes into its helper.
+    monkeypatch.setattr(metrics_module, "_historical_var_cvar", boom)
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         compute_all_metrics(golden_returns)
     matching = [
@@ -2808,8 +2819,6 @@ _RANK05_PARITY_SITES = (
     ("profit_factor", "mj", lambda s: qs.stats.profit_factor(s)),
     ("smart_sharpe", "mj", lambda s: qs.stats.smart_sharpe(s)),
     ("smart_sortino", "mj", lambda s: qs.stats.smart_sortino(s)),
-    ("var_1d_95", "mj", lambda s: qs.stats.value_at_risk(s, confidence=0.95)),
-    ("cvar", "mj", lambda s: qs.stats.cvar(s)),
 )
 
 
@@ -2834,6 +2843,20 @@ def test_rank05_every_closed_site_matches_live_quantstats_on_a_benign_series(
     assert actual == pytest.approx(expected, rel=1e-9), (
         f"{key} drifted from live quantstats 0.0.81 on a benign series"
     )
+
+
+def test_stored_var_and_cvar_are_the_historical_helper_on_a_benign_series():
+    """194 D-02: `var_1d_95` and `cvar` left the quantstats parity set above (they
+    are no longer quantstats values) and are asserted against the historical helper
+    instead. The helper's own expected values are pinned by hand-derived vectors in
+    `tests/test_figure_parity.py`."""
+    from services.metrics import _historical_var_cvar
+
+    s = _rank05_benign_mixed()
+    mj = compute_all_metrics(s)["metrics_json"]
+    var, cvar = _historical_var_cvar(s)
+    assert mj["var_1d_95"] == pytest.approx(var, rel=1e-12)
+    assert mj["cvar"] == pytest.approx(cvar, rel=1e-12)
 
 
 def test_rank05_drawdown_series_matches_live_quantstats_on_a_benign_series():

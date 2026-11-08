@@ -210,14 +210,17 @@ vi.mock("@/lib/factsheet/fetch-and-build-payload", () => ({
 // two lane props so the recipient-mode assertions read what actually flowed in.
 vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
   FactsheetView: ({
+    payload,
     viewerNotice,
     recipientShare,
   }: {
+    payload?: { aum?: unknown };
     viewerNotice?: string;
     recipientShare?: boolean;
   }) => (
     <div
       data-testid="factsheet-view"
+      data-aum={String(payload?.aum)}
       data-viewer-notice={String(viewerNotice)}
       data-recipient-share={String(recipientShare)}
     />
@@ -366,6 +369,12 @@ describe("recipient render — a valid token shows the factsheet in recipient mo
     expect(html).toContain('data-testid="factsheet-view"');
     expect(html).toContain('data-viewer-notice="shared_privately"');
     expect(html).toContain('data-recipient-share="true"');
+  });
+
+  it("194 D-22: the payload handed to the recipient view carries no AUM", async () => {
+    buildMock.mockResolvedValue({ strategyId: "stub", aum: 5_000_000, maxCapacity: 9_000_000 } as never);
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain('data-aum="null"');
   });
 
   it("calls the SHARED builder with the matched strategy id and an IDENTITY predicate", async () => {

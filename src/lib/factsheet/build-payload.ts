@@ -1,10 +1,14 @@
-import type { BenchmarkPricesOpt, ComputeResult, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
+import type { BenchmarkPricesOpt, ComputeResult, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, RollWindowPick, TrustTierKind, IngestSource } from "./types";
 import type { ReconstructedRange } from "./trade-fetch-provenance";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq, metricsBasisSeries, worstDrawdowns } from "./compute";
-import { overlayBasisScalars } from "./basis-metrics";
-import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
+import { overlayBasisScalars, overlayStoredFigureDefs } from "./basis-metrics";
+import type { StoredFigureDefs } from "./basis-metrics";
+import { coveredDays, figureRecord, gateRollingWindow, isReadableDay } from "@/lib/figure-gate";
+import { captureToSentry } from "@/lib/sentry-capture";
+import type { FigureRecord } from "@/lib/figure-gate";
+import { rollingVol, rollingSharpe, rollingSortino, rollingCalendarStats, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D, ROLL_WINDOW_1Y_DAYS } from "./rolling";
 import { buildComparatorBlock, noneComparatorBlock, unavailableComparatorBlock } from "./comparator-block";
 import {
   BTC_DAILY,
@@ -122,6 +126,24 @@ export type BuildFactsheetOpts = {
   };
   /** Phase 169.5 (SC3, D-09) — BTC from the database; see {@link BenchmarkPricesOpt}. */
   benchmarkPrices?: BenchmarkPricesOpt;
+  /**
+   * Phase 194 (D-01) - the stored figures the single-key and composite read
+   * paths hand over beside the cash headline: the marker-gated overlay of 6 Month,
+   * 3 Month, VaR 95% and CVaR 95%. Set only when the stored cash headline was admitted.
+   */
+  storedFigureDefs?: StoredFigureDefs;
+  /**
+   * Phase 194 (D-15, review CR-01) - the stored observation count behind
+   * `payload.figureRecord`. A fact about the record, so it is set on every build
+   * (native, composite, USD view), never only when a cash headline was admitted.
+   */
+  recordObservations?: number | null;
+  /**
+   * 194 R6 WR-01: report an unreadable record to Sentry. Set only by the server builder
+   * (fetch-and-build-payload); a client re-derive (AllocationDashboardV2's useMemo) builds the
+   * same payload on every mount and must not report.
+   */
+  reportUnreadable?: boolean;
 };
 
 /**
@@ -314,6 +336,31 @@ export function hasBuildableSeries(rows: DailyReturn[]): rows is BuildableSeries
 }
 
 /**
+ * 194 D-14 (2026-11-07): the date of every entry of a `metricsBasisSeries` series.
+ * `positions[i]` is the index of `dates[i]` in the series (null when the basis excludes
+ * that day), so a kept day takes its own date; an entry no date maps to is a zero-filled
+ * calendar day of a composite, which sits between two present days, so it is the previous
+ * entry's date plus one day.
+ */
+function seriesDatesFor(positions: Array<number | null>, dates: string[], length: number): string[] {
+  const out: Array<string | null> = new Array(length).fill(null);
+  positions.forEach((pos, i) => {
+    if (pos !== null) out[pos] = dates[i];
+  });
+  const filled: string[] = [];
+  for (let j = 0; j < length; j++) {
+    const d = out[j];
+    if (d !== null) {
+      filled.push(d);
+    } else {
+      const next = new Date(Date.parse(`${filled[j - 1]}T00:00:00Z`) + 86_400_000);
+      filled.push(next.toISOString().slice(0, 10));
+    }
+  }
+  return filled;
+}
+
+/**
  * Phase 103 (MTM-04) — the ONE per-basis series derivation. Both the cash series
  * and the persisted MTM series flow through THIS function, so every dailies-
  * derivable panel (chart tracks + rolling + worst-10 + comparators + heatmaps +
@@ -367,6 +414,16 @@ export function deriveSeriesBundle(
      * figures are whole-record, so their comparator figures are too.
      */
     headlineCoversFrom?: string;
+    /**
+     * 194 D-15 (2026-11-07): the strategy's TOTAL record, the same object at every call
+     * site (the payload's `figureRecord`; `view.figureRecord` in the browser re-derives).
+     * Never a record built from this bundle's own returns, a selected slice or levered
+     * returns: the rolling verdict (D-11, as superseded by D-15) gates on the record the
+     * figure belongs to, never on the series it is drawn from. `null` is the unknown
+     * state: `rollingWindow` then carries no `annualization`. Required, so a new call
+     * site cannot forget it.
+     */
+    figureRecord: FigureRecord | null;
   },
 ): BasisSeriesBundle {
   const { periodsPerYear, isArithmetic, dayBasis, calendarDense, markets, strategyName } = args;
@@ -473,6 +530,53 @@ export function deriveSeriesBundle(
   // distribution scalars (skew/kurt/VaR/CVaR/omega/…) read off this via view.
   const { eq: _bundleEq, dd: _bundleDd, ...bundleMetrics } = fullMetrics;
 
+  // 194 D-11 / D-15 (2026-11-07): the rolling verdict rides the window it describes,
+  // computed once here beside the pick. The record is the TOTAL one handed in, so the
+  // rolling charts, the rail and every other page share one rule. Null record: absent.
+  const rollingPick: RollWindowPick = args.figureRecord
+    ? {
+        ...rollWindow,
+        annualization: gateRollingWindow(args.figureRecord, dates, { rows: rollWindow.window }, rollWindow.enough),
+      }
+    : rollWindow;
+
+  // 194 D-14 (2026-11-07): the 365-calendar-day window, ADDED beside the row window and
+  // never in its place. Computed from the first date whose span reaches 365 days; under
+  // 365 days all four keys are `null` (never omitted, never undefined): the basis merge
+  // spreads a bundle over the cash payload, and `null` survives the JSON payload cache.
+  const spans1y = dates.length >= 2 && coveredDays(dates[0], dates[dates.length - 1]) >= ROLL_WINDOW_1Y_DAYS;
+  let rolling1y: {
+    window: RollWindowPick | null;
+    vol: Array<number | null> | null;
+    sharpe: Array<number | null> | null;
+    sortino: Array<number | null> | null;
+  } = { window: null, vol: null, sharpe: null, sortino: null };
+  if (spans1y) {
+    // Each series' own dates: identity for the plain case, the kept days under the active
+    // basis, the zero-filled calendar days of a composite. Same split as the row windows.
+    const calOn = (series: { returns: number[]; positions: Array<number | null> }) => {
+      const sDates = seriesDatesFor(series.positions, dates, series.returns.length);
+      return rollingCalendarStats(series.returns, sDates, ROLL_WINDOW_1Y_DAYS, periodsPerYear);
+    };
+    const calBasis = calOn(basis);
+    const calDense = calOn(dense);
+    const first = dates.findIndex((d) => coveredDays(dates[0], d) >= ROLL_WINDOW_1Y_DAYS);
+    rolling1y = {
+      window: {
+        window: first + 1,
+        label: "1y",
+        enough: true,
+        calendarDays: ROLL_WINDOW_1Y_DAYS,
+        ...(args.figureRecord
+          ? { annualization: gateRollingWindow(args.figureRecord, dates, { calendarDays: ROLL_WINDOW_1Y_DAYS }, true) }
+          : {}),
+      },
+      vol: onDense(calDense.vol),
+      sharpe: onBasis(calBasis.sharpe),
+      sortino: onDense(calDense.sortino),
+    };
+  }
+
   return {
     dates,
     strategyReturns: stratRet,
@@ -481,7 +585,11 @@ export function deriveSeriesBundle(
     strategyRollingVol: onDense(rollingVol(dense.returns, rollWindow.window, periodsPerYear)),
     strategyRollingSharpe: onBasis(rollingSharpe(basis.returns, rollWindow.window, periodsPerYear)),
     strategyRollingSortino: onDense(rollingSortino(dense.returns, rollWindow.window, periodsPerYear)),
-    rollingWindow: rollWindow,
+    rollingWindow: rollingPick,
+    rollingWindow1y: rolling1y.window,
+    strategyRollingVol1y: rolling1y.vol,
+    strategyRollingSharpe1y: rolling1y.sharpe,
+    strategyRollingSortino1y: rolling1y.sortino,
     rollingBetaWindow: rollBetaWindow,
     strategyWorst10: worstDrawdowns(stratDd, 10),
     // Phase 169.5 D-59 (as amended 2026-09-27, Alternative A): each comparator's own
@@ -490,8 +598,8 @@ export function deriveSeriesBundle(
     // a weekday comparator ~252 times a year, a weekday strategy sees 7-day BTC ~252
     // times a year); the joint metrics keep the strategy's basis (166.4 D-A).
     comparators: {
-      btc: al.btc === null ? unavailableComparatorBlock("BTC-USD", "BTC") : buildComparatorBlock("BTC-USD", "BTC", al.btc, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("crypto")), args.headlineCoversFrom),
-      spx: buildComparatorBlock("S&P 500", "SPX", al.spx, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("traditional")), args.headlineCoversFrom),
+      btc: al.btc === null ? unavailableComparatorBlock("BTC-USD", "BTC") : buildComparatorBlock("BTC-USD", "BTC", al.btc, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("crypto")), args.headlineCoversFrom, args.figureRecord, rolling1y.window?.calendarDays),
+      spx: buildComparatorBlock("S&P 500", "SPX", al.spx, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("traditional")), args.headlineCoversFrom, args.figureRecord, rolling1y.window?.calendarDays),
       none: noneComparatorBlock,
     },
     // Phase 169.1 (D-31): the heatmap and Calmar by Year follow the method too,
@@ -735,7 +843,10 @@ function buildFromBuildableSeries(
   // composite AND on a rankable single-key row (built from its persisted
   // top-level scalars by `readSingleKeyBasisOpts`); only where it is absent is
   // this a no-op (overlayBasisScalars returns base unchanged).
-  const overlaid = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
+  const overlaid = overlayStoredFigureDefs(
+    overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement),
+    opts?.storedFigureDefs,
+  );
   // Phase 164.6.6.3.3 (D-01 "window returns", D-12): on a Dated row every stored
   // headline scalar covers the post-break suffix from `headlineCoversFrom`, so the
   // trailing windows are recomputed on that same suffix. Left on the whole record
@@ -783,6 +894,41 @@ function buildFromBuildableSeries(
   // (NEW-C20-01)
   const ingestSource: IngestSource = strategy.ingestSource ?? "csv";
 
+  // Phase 194 (D-15) - the ONE record every factsheet reader gates on. The
+  // observation count is the STORED one or null, never this payload's own return
+  // count (A-194-D15-02): every other page withholds a pre-recompute non-crypto
+  // record of 60 to 89 days, so the factsheet must too. Built before the bundles so
+  // all three of them (and, in the browser, every re-derive) gate on this one object.
+  const endsRecord = figureRecord({
+    seriesStart: dates[0],
+    seriesEnd: dates[dates.length - 1],
+    headlineSince: suffixStart,
+    observations: opts?.recordObservations,
+    periodsPerYear,
+  });
+  // 194 R5 WR-03 (D-17): readability is judged over EVERY series date, not only the two ends.
+  // A present but malformed interior date makes any zoom window that starts on it NaN, which the
+  // gate reads as unknown and shows. Marking the total record unreadable withholds every annualised
+  // figure under the one reason. One pass; a readable series is byte-identical to `endsRecord`.
+  const badDateIndex = dates.findIndex((d) => !isReadableDay(d));
+  const totalRecord: FigureRecord = badDateIndex >= 0 ? { ...endsRecord, unreadable: true } : endsRecord;
+  // 194 R5 SFH-M3: nothing else tells anyone an unreadable record is withholding its figures.
+  // Reported here, once per build, never from a render-time gate.
+  if (totalRecord.unreadable && opts?.reportUnreadable) {
+    captureToSentry(new Error("factsheet figure record unreadable: a series date is not a date"), {
+      tags: { op: "buildFactsheetPayload", reason: "figure-record-unreadable" },
+      level: "error",
+      extra: {
+        strategyId: strategy.id,
+        seriesStart: dates[0],
+        seriesEnd: dates[dates.length - 1],
+        headlineSince: suffixStart ?? null,
+        firstBadDateIndex: badDateIndex >= 0 ? badDateIndex : null,
+        firstBadDate: badDateIndex >= 0 ? dates[badDateIndex] : null,
+      },
+    });
+  }
+
   // Phase 103 (MTM-04) — the cash series bundle. The comparator's volMatched rides
   // the OVERLAID strategyMetrics.ann_vol so it stays byte-identical to the persisted
   // cash overlay (SC-4). missingSegments stays the composite cash gap-spans opt.
@@ -800,6 +946,7 @@ function buildFromBuildableSeries(
     benchmarkPrices,
     // B19: a Dated row's comparators also carry the summary over the same suffix.
     headlineCoversFrom: suffixStart,
+    figureRecord: totalRecord,
   });
 
   // Phase 103 (MTM-04) — the MTM per-basis bundle, derived by the SAME function
@@ -825,6 +972,7 @@ function buildFromBuildableSeries(
           // own computed vol (honest MTM; no persisted cash overlay applies).
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.mtmSeries.gapSpans }).missingSegments,
           benchmarkPrices,
+          figureRecord: totalRecord,
         }),
       };
     }
@@ -850,6 +998,7 @@ function buildFromBuildableSeries(
           // smoothed series' own computed vol (honest; no persisted cash overlay).
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.smoothedSeries.gapSpans }).missingSegments,
           benchmarkPrices,
+          figureRecord: totalRecord,
         }),
       };
     }
@@ -893,6 +1042,12 @@ function buildFromBuildableSeries(
     strategyRollingSharpe: cashBundle.strategyRollingSharpe,
     strategyRollingSortino: cashBundle.strategyRollingSortino,
     rollingWindow: cashBundle.rollingWindow,
+    // 194 D-14: the 1y window and series ride the payload beside the row window; `null`
+    // under 365 days, so a basis view cannot inherit another basis's 1y window.
+    rollingWindow1y: cashBundle.rollingWindow1y,
+    strategyRollingVol1y: cashBundle.strategyRollingVol1y,
+    strategyRollingSharpe1y: cashBundle.strategyRollingSharpe1y,
+    strategyRollingSortino1y: cashBundle.strategyRollingSortino1y,
     rollingBetaWindow: cashBundle.rollingBetaWindow,
     strategyDrawdowns: cashBundle.strategyDrawdowns,
     strategyWorst10: cashBundle.strategyWorst10,
@@ -948,6 +1103,8 @@ function buildFromBuildableSeries(
     // Phase 169.5 (SC3, D-09, D-21) — the BTC series every comparator above was
     // computed from; the browser re-derive reads it instead of the fixture.
     benchmarkPrices,
+    // Phase 194 (D-15) - the record built above, before the bundles.
+    figureRecord: totalRecord,
   };
 
   // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized

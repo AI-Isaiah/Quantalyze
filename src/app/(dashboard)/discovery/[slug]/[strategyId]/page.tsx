@@ -16,6 +16,7 @@ import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
 import { withPublishedOnly } from "@/lib/visibility";
+import { canViewAum, withViewerAum } from "@/lib/factsheet/viewer-aum";
 import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 
@@ -128,6 +129,11 @@ export default async function StrategyDetailPage({
     ? withTrustTier(built.payload, (strategy.trust_tier ?? null) as TrustTierKind | null)
     : null;
   const seriesReadFailed = built.reason === "read_error";
+  // 194 D-22: the AUM chip is for an allocator or the strategy's own manager only (D-06).
+  // Per viewer, so a render prop here, never a payload field.
+  const showAum = factsheetPayload
+    ? await canViewAum(supabase, user.id, strategy.user_id, "[discovery]")
+    : false;
 
   return (
     <>
@@ -164,7 +170,10 @@ export default async function StrategyDetailPage({
       </div>
 
       {factsheetPayload ? (
-        <FactsheetView payload={factsheetPayload} />
+        <FactsheetView
+          payload={withViewerAum(factsheetPayload, showAum)}
+          showAum={showAum}
+        />
       ) : (
         <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
           <p className="text-micro font-mono uppercase tracking-[0.22em] text-text-muted">

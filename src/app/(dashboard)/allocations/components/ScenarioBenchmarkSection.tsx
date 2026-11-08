@@ -3,6 +3,14 @@
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { methodologyLine } from "@/lib/scenario-history";
 import { evaluateSampleFloor } from "@/lib/sample-floor";
+import {
+  figureRecord,
+  gateAnnualized,
+  gatedValue,
+  coveredDays,
+  widenedShortNote,
+  widenedWithheldReason,
+} from "@/lib/figure-gate";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import {
   computeScenarioBenchmark,
@@ -113,7 +121,8 @@ export function ScenarioBenchmarkSection({
 }: ScenarioBenchmarkSectionProps) {
   // Pair FIRST so {N} is the paired count (D-68), not the union window. The
   // heading and the methodology line read this same n.
-  const n = btc === null ? 0 : pairScenarioWithBtc(portfolioDaily, btc).p.length;
+  const paired = btc === null ? null : pairScenarioWithBtc(portfolioDaily, btc);
+  const n = paired === null ? 0 : paired.p.length;
   const verdict = evaluateSampleFloor(n, BENCHMARK_FLOOR);
 
   // Empty-state routing (order matters — #509; the body must name the TRUE
@@ -142,6 +151,28 @@ export function ScenarioBenchmarkSection({
   // Metrics path. Each value flows through a formatter so null → "—".
   const m = computeScenarioBenchmark(portfolioDaily, btc, periodsPerYear);
 
+  // 194 D-11 as superseded by D-15: Tracking Error, Information Ratio and Alpha are
+  // annualized, so they are withheld only when the blend's TOTAL record (its own
+  // first and last date, its finite-return count, the blend basis) is under D-15's
+  // minimum. The paired span only qualifies them with the one muted note. Beta is
+  // not annualized and is never gated. `paired` is non-null here (n > 0).
+  const record = figureRecord({
+    seriesStart: portfolioDaily[0].date,
+    seriesEnd: portfolioDaily[portfolioDaily.length - 1].date,
+    headlineSince: null,
+    observations: portfolioDaily.filter((d) => Number.isFinite(d.value)).length,
+    periodsPerYear,
+  });
+  const pairedDates = paired?.dates ?? [];
+  const overlapDays = coveredDays(pairedDates[0], pairedDates[pairedDates.length - 1]);
+  const state = gateAnnualized(record, overlapDays);
+  const note =
+    state === "withheld"
+      ? widenedWithheldReason("overlap", record)
+      : state === "short"
+        ? widenedShortNote("overlap", overlapDays)
+        : null;
+
   return (
     <div>
       <h3 className="text-base font-semibold text-text-primary">
@@ -152,22 +183,30 @@ export function ScenarioBenchmarkSection({
         <MetricRow
           metric="tracking-error"
           label="Tracking Error"
-          value={formatPercent(m.trackingError)}
+          value={formatPercent(gatedValue(m.trackingError, state))}
         />
         <MetricRow
           metric="information-ratio"
           label="Information Ratio"
-          value={formatNumber(m.informationRatio)}
+          value={formatNumber(gatedValue(m.informationRatio, state))}
         />
         <MetricRow
           metric="alpha"
           label="Alpha"
-          value={formatPercent(m.alpha)}
+          value={formatPercent(gatedValue(m.alpha, state))}
         />
         <MetricRow metric="beta" label="Beta" value={formatNumber(m.beta)} />
       </div>
+      {note !== null ? (
+        <p
+          data-testid="scenario-benchmark-annualization-note"
+          className="mt-2 text-fixed-11 text-text-muted"
+        >
+          {note}
+        </p>
+      ) : null}
       <p className="mt-2 text-fixed-11 text-text-muted">
-        {methodologyLine(n)} Metrics are 252-day annualized active returns.
+        {methodologyLine(n)} Metrics are {periodsPerYear}-day annualized active returns.
       </p>
     </div>
   );

@@ -22,6 +22,16 @@ import { dateMapStrict } from "@/lib/keys";
 import { seamErrorCode, seamHumanMessage } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import {
+  figureRecord,
+  figureSpan,
+  gateDelta,
+  gatedValue,
+  widenedShortNote,
+  widenedWithheldReason,
+  type FigureRecord,
+  type FigureState,
+} from "@/lib/figure-gate";
 
 interface PortfolioImpactPanelProps {
   portfolioId: string;
@@ -250,9 +260,10 @@ export function PortfolioImpactPanel({
     [onClose],
   );
 
+  // 194 D-15: the same gate (`gateSimulatorDeltas`) feeds the chip, the note and this announcement.
   const announcement =
     state.kind === "success" && state.data.status === "ok"
-      ? buildDeltaAnnouncement(state.data.deltas)
+      ? buildDeltaAnnouncement(gateSimulatorDeltas(state.data))
       : "";
 
   return (
@@ -464,7 +475,7 @@ function SuccessBody({ data }: { data: SimulatorResponseOk }) {
       {data.partial_history && (
         <PartialHistoryBanner overlapDays={data.overlap_days} />
       )}
-      <DeltaHero deltas={data.deltas} />
+      <DeltaHero gated={gateSimulatorDeltas(data)} />
       <EquityOverlay
         current={data.equity_curve_current}
         proposed={data.equity_curve_proposed}
@@ -507,11 +518,86 @@ type DeltaChip = {
   value: number | null;
   format: "ratio" | "percent";
   hint: string;
+  // 194 D-15: when present, replaces the not-computable title (the withheld reason).
+  reason?: string;
 };
+
+/**
+ * 194 D-11 as superseded by D-15 (2026-11-07): the simulator's deltas with `sharpe_delta`
+ * gated. Both books are scored over the SAME aligned window, so ONE record (first and last
+ * curve date, `overlap_days` observations, the producer's `annualization_periods`) describes
+ * both sides and is judged with `gateDelta(record, record, span)`. Only `sharpe_delta` is
+ * annualized; MaxDD, Correlation and Concentration pass through untouched. Nothing is
+ * recomputed or rescaled here: the producer's value is shown or withheld.
+ *
+ * `annualization_periods` absent (an analytics deploy older than 194) has no record and so no
+ * risk clock to judge the Sharpe change by. It is WITHHELD, not shown ungated (review SFH-M3):
+ * an ungated chip would print a figure on a record the gate never saw. `record` stays null and
+ * the reason is `SHARPE_DELTA_UNAVAILABLE`.
+ */
+export interface GatedSimulatorDeltas {
+  deltas: SimulatorDeltas;
+  state: FigureState;
+  record: FigureRecord | null;
+  /** Calendar days from the first to the last curve date; null when unknown. */
+  spanDays: number | null;
+}
+
+export const SHARPE_DELTA_UNAVAILABLE = "Sharpe change is temporarily unavailable. Reload to retry.";
+
+/** Why the Sharpe change is withheld: the record's reason, or the unavailable line when there is no record. */
+function sharpeWithheldReason(gated: GatedSimulatorDeltas): string {
+  return gated.record !== null
+    ? widenedWithheldReason("delta", gated.record)
+    : SHARPE_DELTA_UNAVAILABLE;
+}
+
+export function gateSimulatorDeltas(data: SimulatorResponseOk): GatedSimulatorDeltas {
+  const periods = data.annualization_periods;
+  if (periods === undefined) {
+    return {
+      deltas: { ...data.deltas, sharpe_delta: null },
+      state: "withheld",
+      record: null,
+      spanDays: null,
+    };
+  }
+  // Both curves cover the same aligned window; read the union so one empty curve
+  // cannot hide the span. ISO dates compare lexically.
+  const dates = [...data.equity_curve_current, ...data.equity_curve_proposed].map((p) => p.date);
+  const seriesStart = dates.length > 0 ? dates.reduce((a, b) => (a < b ? a : b)) : null;
+  const seriesEnd = dates.length > 0 ? dates.reduce((a, b) => (a > b ? a : b)) : null;
+  const record = figureRecord({
+    seriesStart,
+    seriesEnd,
+    headlineSince: null,
+    observations: data.overlap_days,
+    periodsPerYear: periods,
+  });
+  const spanDays = figureSpan({ seriesStart, seriesEnd });
+  const state = gateDelta(record, record, spanDays);
+  return {
+    deltas: { ...data.deltas, sharpe_delta: gatedValue(data.deltas.sharpe_delta, state) },
+    state,
+    record,
+    spanDays,
+  };
+}
+
+/** The one muted line under the hero: the withheld reason, or the short-window note. */
+function annualizationNote(gated: GatedSimulatorDeltas): string | null {
+  if (gated.state === "withheld") return sharpeWithheldReason(gated);
+  if (gated.record === null) return null;
+  if (gated.state === "short" && gated.spanDays !== null) {
+    return widenedShortNote("delta", gated.spanDays);
+  }
+  return null;
+}
 
 // NEW-C11-06: read units from DELTA_UNITS (single source of truth in simulatorSchema.ts)
 // so this table and buildDeltaAnnouncement can't drift independently.
-function deltaChips(deltas: SimulatorDeltas): DeltaChip[] {
+function deltaChips(gated: GatedSimulatorDeltas): DeltaChip[] {
+  const { deltas } = gated;
   return [
     {
       key: "sharpe",
@@ -519,6 +605,7 @@ function deltaChips(deltas: SimulatorDeltas): DeltaChip[] {
       value: deltas.sharpe_delta,
       format: DELTA_UNITS.sharpe_delta,
       hint: "Change in portfolio Sharpe ratio.",
+      reason: gated.state === "withheld" ? sharpeWithheldReason(gated) : undefined,
     },
     {
       key: "maxdd",
@@ -544,8 +631,9 @@ function deltaChips(deltas: SimulatorDeltas): DeltaChip[] {
   ];
 }
 
-function DeltaHero({ deltas }: { deltas: SimulatorDeltas }) {
-  const chips = deltaChips(deltas);
+function DeltaHero({ gated }: { gated: GatedSimulatorDeltas }) {
+  const chips = deltaChips(gated);
+  const note = annualizationNote(gated);
   return (
     <section aria-label="Portfolio impact deltas">
       <h3 className="mb-2 text-micro font-medium uppercase tracking-wider text-text-muted">
@@ -556,6 +644,14 @@ function DeltaHero({ deltas }: { deltas: SimulatorDeltas }) {
           <DeltaChipCard key={chip.key} chip={chip} />
         ))}
       </div>
+      {note !== null && (
+        <p
+          data-testid="impact-delta-annualization-note"
+          className="mt-2 text-caption leading-relaxed text-text-muted"
+        >
+          {note}
+        </p>
+      )}
     </section>
   );
 }
@@ -591,7 +687,10 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
   return (
     <div
       className={`rounded-lg border ${accent} bg-surface px-3 py-3`}
-      title={notComputable ? `${chip.hint} (not computable — operand metric unavailable)` : chip.hint}
+      title={
+        chip.reason ??
+        (notComputable ? `${chip.hint} (not computable — operand metric unavailable)` : chip.hint)
+      }
     >
       <div className="flex items-center justify-between">
         <p className="text-micro font-medium uppercase tracking-wider text-text-muted">
@@ -805,14 +904,20 @@ function buildPath(points: ([number, number] | null)[]): string | null {
 
 // NEW-C11-06: read units from DELTA_UNITS — same map as deltaChips() so the two
 // can't drift independently.
-function buildDeltaAnnouncement(deltas: SimulatorDeltas): string {
+function buildDeltaAnnouncement(gated: GatedSimulatorDeltas): string {
+  const { deltas } = gated;
+  // 194 D-15: a withheld Sharpe change is not announced as a change; the reason is read instead.
+  const withheld = gated.state === "withheld";
   const parts = [
-    formatAnnouncementChip("Sharpe", deltas.sharpe_delta, DELTA_UNITS.sharpe_delta),
+    ...(withheld
+      ? []
+      : [formatAnnouncementChip("Sharpe", deltas.sharpe_delta, DELTA_UNITS.sharpe_delta)]),
     formatAnnouncementChip("Max drawdown", deltas.dd_delta, DELTA_UNITS.dd_delta),
     formatAnnouncementChip("Correlation", deltas.corr_delta, DELTA_UNITS.corr_delta),
     formatAnnouncementChip("Concentration", deltas.concentration_delta, DELTA_UNITS.concentration_delta),
   ];
-  return `Simulation complete. ${parts.join(". ")}.`;
+  const base = `Simulation complete. ${parts.join(". ")}.`;
+  return withheld ? `${base} ${sharpeWithheldReason(gated)}` : base;
 }
 
 function formatAnnouncementChip(

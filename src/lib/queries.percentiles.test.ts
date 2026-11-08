@@ -357,3 +357,288 @@ describe("getOwnRowPercentiles — RANK-01 gate on the SUBJECTS, not just the po
     expect(result!.populationSize).toBe(5);
   });
 });
+
+/**
+ * Phase 194 plan 18 (D-11 as superseded by D-15, founder-decided 2026-11-07) - a strategy
+ * whose TOTAL record fails D-15's minimum (crypto: spans under 90 days; non-crypto: under 60
+ * return observations) gets no rank for the five annualised metrics AND is left out of every
+ * other strategy's population for them. Max drawdown and cumulative return are not
+ * annualised and are unaffected. A row whose record cannot be determined keeps its ranks.
+ *
+ * Expected percentiles are computed BY HAND below from the fixture values with the
+ * documented formula (count of values <= v over n, times 100, inverted for
+ * max_drawdown/volatility, rounded); `scoreAgainstPopulation` is never called to find them.
+ */
+describe("getPercentiles - D-15 total-record rule on the peer set", () => {
+  const ANNUALISED = ["cagr", "sharpe", "sortino", "calmar", "volatility"] as const;
+
+  const kpis = (sharpe: number, maxDrawdown: number, cumulative: number) => ({
+    computation_status: "complete",
+    sharpe,
+    cagr: sharpe / 10,
+    sortino: sharpe,
+    calmar: sharpe,
+    volatility: 0.1 * sharpe,
+    max_drawdown: maxDrawdown,
+    cumulative_return: cumulative,
+  });
+
+  /** 2025-01-01 -> 2026-03-02 is 425 calendar days. */
+  const LONG = {
+    series_start: "2025-01-01",
+    series_end: "2026-03-02",
+    headline_since: null,
+    record_observations: 300,
+  };
+  /** 2026-01-01 -> 2026-03-02 is 60 calendar days. */
+  const SIXTY_DAYS = {
+    series_start: "2026-01-01",
+    series_end: "2026-03-02",
+    headline_since: null,
+    record_observations: 40,
+  };
+  /** 2026-01-01 -> 2026-03-26 is 84 calendar days, 60 observations. */
+  const SIXTY_OBS_84_DAYS = {
+    series_start: "2026-01-01",
+    series_end: "2026-03-26",
+    headline_since: null,
+    record_observations: 60,
+  };
+
+  /**
+   * Six published rows. F is a crypto record of 60 days (withheld); G a non-crypto record
+   * of exactly 60 observations over 84 days (clears); D carries no dated series at all (a
+   * record that cannot be determined keeps its ranks). F's Sharpe (10) is the largest so a
+   * leaked F would visibly move every other row.
+   */
+  type SourceRow = { id: string; asset_class: string; strategy_analytics: Record<string, unknown> };
+  const population = (): SourceRow[] => [
+    { id: "A", asset_class: "equity", strategy_analytics: { ...kpis(1, -0.5, 0.1), ...LONG } },
+    { id: "B", asset_class: "crypto", strategy_analytics: { ...kpis(2, -0.4, 0.2), ...LONG } },
+    { id: "C", asset_class: "equity", strategy_analytics: { ...kpis(3, -0.3, 0.3), ...LONG } },
+    { id: "D", asset_class: "crypto", strategy_analytics: kpis(4, -0.2, 0.4) },
+    { id: "F", asset_class: "crypto", strategy_analytics: { ...kpis(10, -0.05, 0.6), ...SIXTY_DAYS } },
+    { id: "G", asset_class: "equity", strategy_analytics: { ...kpis(5, -0.1, 0.5), ...SIXTY_OBS_84_DAYS } },
+  ];
+
+  it("gives the 60-day crypto row no annualised rank but keeps its max drawdown and cumulative return ranks", async () => {
+    strategiesResolver.data = population();
+    const map = (await getPercentiles())!;
+
+    for (const metric of ANNUALISED) expect(map.F[metric], metric).toBeUndefined();
+    // |max_drawdown| over all six rows = [0.5, 0.4, 0.3, 0.2, 0.1, 0.05]; F = 0.05 is the
+    // smallest, so count(<=) = 1, 1/6*100 = 16.67, inverted 83.33 -> 83.
+    expect(map.F.max_drawdown).toBe(83);
+    // cumulative_return over all six = [0.1 .. 0.6]; F = 0.6 is the largest: 6/6*100 = 100.
+    expect(map.F.cumulative_return).toBe(100);
+  });
+
+  it("ranks every other row against the five non-F rows only (hand-computed)", async () => {
+    strategiesResolver.data = population();
+    const map = (await getPercentiles())!;
+
+    // Sharpe over the five non-F rows = [1, 2, 3, 4, 5] -> A 1/5, B 2/5, C 3/5, D 4/5, G 5/5.
+    // With F leaked in (10) the six-value denominator would give A 17, B 33, C 50, D 67, G 83.
+    expect(map.A.sharpe).toBe(20);
+    expect(map.B.sharpe).toBe(40);
+    expect(map.C.sharpe).toBe(60);
+    expect(map.D.sharpe).toBe(80);
+    expect(map.G.sharpe).toBe(100);
+    // Volatility = 0.1 * sharpe, lower is better, same five values: A is the calmest (1/5 = 20,
+    // inverted 80) and G the wildest (5/5 = 100, inverted 0).
+    expect(map.A.volatility).toBe(80);
+    expect(map.G.volatility).toBe(0);
+  });
+
+  it("keeps the 60-observation non-crypto row's ranks (D-15 minimum is 60) and the row with no dated series", async () => {
+    strategiesResolver.data = population();
+    const map = (await getPercentiles())!;
+
+    for (const id of ["G", "D"]) {
+      for (const metric of ANNUALISED) expect(map[id][metric], `${id} ${metric}`).toBeTypeOf("number");
+    }
+  });
+
+  it("withholds a non-crypto row of 59 observations but not one of 60", async () => {
+    const rows = population();
+    rows[5] = {
+      id: "G",
+      asset_class: "equity",
+      strategy_analytics: { ...kpis(5, -0.1, 0.5), ...SIXTY_OBS_84_DAYS, record_observations: 59 },
+    };
+    strategiesResolver.data = rows;
+    const map = (await getPercentiles())!;
+
+    expect(map.G.sharpe).toBeUndefined();
+    expect(map.G.max_drawdown).toBeTypeOf("number");
+  });
+
+  it("judges crypto by the strategy's asset_class: 89 days is withheld and 90 days clears on a crypto row with no stored count", async () => {
+    const rows = population();
+    // 2026-01-01 -> 2026-03-30 covers 89 days; -> 2026-03-31 covers 90 (D-20 counts both ends).
+    const at = (end: string) => ({ ...SIXTY_DAYS, series_end: end, record_observations: null });
+    rows[4] = { id: "F", asset_class: "crypto", strategy_analytics: { ...kpis(10, -0.05, 0.6), ...at("2026-03-30") } };
+    strategiesResolver.data = rows;
+    expect((await getPercentiles())!.F.sharpe).toBeUndefined();
+
+    rows[4] = { id: "F", asset_class: "crypto", strategy_analytics: { ...kpis(10, -0.05, 0.6), ...at("2026-03-31") } };
+    strategiesResolver.data = rows;
+    expect((await getPercentiles())!.F.sharpe).toBeTypeOf("number");
+  });
+});
+
+/**
+ * Phase 194 plan 18 (D-11 as superseded by D-15, founder-decided 2026-11-07), the owner
+ * surface: /my-strategies applies the SAME total-record rule as discovery, on the published
+ * population AND on the owner's own (draft, private) subjects. Expected percentiles are
+ * computed by hand from the fixture values with the documented formula; the scorer is never
+ * called to find them.
+ */
+describe("getOwnRowPercentiles - D-15 total-record rule, population and subjects", () => {
+  const ANNUALISED = ["cagr", "sharpe", "sortino", "calmar", "volatility"] as const;
+
+  const kpis = (sharpe: number, maxDrawdown: number | null, cumulative: number | null) => ({
+    computation_status: "complete",
+    sharpe,
+    cagr: sharpe / 10,
+    sortino: sharpe,
+    calmar: sharpe,
+    volatility: 0.1 * sharpe,
+    max_drawdown: maxDrawdown,
+    cumulative_return: cumulative,
+  });
+
+  /** 2025-01-01 -> 2026-03-02 is 425 calendar days. */
+  const LONG = {
+    series_start: "2025-01-01",
+    series_end: "2026-03-02",
+    headline_since: null,
+    record_observations: 300,
+  };
+  /** 2026-01-01 -> 2026-03-02 is 60 calendar days. */
+  const SIXTY_DAYS = {
+    series_start: "2026-01-01",
+    series_end: "2026-03-02",
+    headline_since: null,
+    record_observations: 40,
+  };
+  /** 2026-01-01 -> 2026-03-26 is 84 calendar days, 60 observations. */
+  const SIXTY_OBS_84_DAYS = {
+    series_start: "2026-01-01",
+    series_end: "2026-03-26",
+    headline_since: null,
+    record_observations: 60,
+  };
+  /** 2025-09-01 -> 2026-03-20 is 200 calendar days. */
+  const TWO_HUNDRED_DAYS = {
+    series_start: "2025-09-01",
+    series_end: "2026-03-20",
+    headline_since: null,
+    record_observations: 140,
+  };
+
+  type SourceRow = { id: string; asset_class: string; strategy_analytics: Record<string, unknown> };
+
+  /**
+   * Seven published rows: P1..P5 on long records (sharpe 1..5, |max drawdown| 0.1..0.5),
+   * W a 60-day crypto record (sharpe 9, drawdown -0.05, cumulative 0.6: withheld for the five
+   * annualised metrics only) and X a 60-day crypto record with no drawdown and no cumulative
+   * return (withheld, and left with nothing to rank on at all).
+   */
+  const publishedPopulation = (): SourceRow[] => [
+    { id: "P1", asset_class: "equity", strategy_analytics: { ...kpis(1, -0.1, 0.1), ...LONG } },
+    { id: "P2", asset_class: "crypto", strategy_analytics: { ...kpis(2, -0.2, 0.2), ...LONG } },
+    { id: "P3", asset_class: "equity", strategy_analytics: { ...kpis(3, -0.3, 0.3), ...LONG } },
+    { id: "P4", asset_class: "crypto", strategy_analytics: { ...kpis(4, -0.4, 0.4), ...LONG } },
+    { id: "P5", asset_class: "equity", strategy_analytics: { ...kpis(5, -0.5, 0.5), ...LONG } },
+    { id: "W", asset_class: "crypto", strategy_analytics: { ...kpis(9, -0.05, 0.6), ...SIXTY_DAYS } },
+    { id: "X", asset_class: "crypto", strategy_analytics: { ...kpis(8, null, null), ...SIXTY_DAYS } },
+  ];
+
+  /** An own row as `getMyStrategies` hands it over: the strategy's class plus shaped analytics. */
+  const ownRow = (
+    id: string,
+    assetClass: string | null,
+    sharpe: number,
+    maxDrawdown: number,
+    record: Record<string, unknown>,
+  ) => ({
+    id,
+    asset_class: assetClass,
+    analytics: { ...kpis(sharpe, maxDrawdown, 0.25), ...record } as never,
+  });
+
+  it("gates the published population as discovery does: a 60-day row neither ranks nor counts for the five metrics", async () => {
+    strategiesResolver.data = publishedPopulation();
+    const result = (await getOwnRowPercentiles([]))!;
+
+    // Sharpe over the rows that stay in = [1..5]; P1 = 1/5*100 = 20, P5 = 100. W (9) and X (8)
+    // would have made them 14 and 71 had they leaked in.
+    expect(result.publishedMap.P1.sharpe).toBe(20);
+    expect(result.publishedMap.P5.sharpe).toBe(100);
+    for (const metric of ANNUALISED) expect(result.publishedMap.W[metric], metric).toBeUndefined();
+    // W is still ranked on max drawdown (not annualised): |dd| = [.1,.2,.3,.4,.5,.05] (X has none),
+    // W = 0.05 smallest -> 1/6*100 = 16.67, inverted 83.33 -> 83.
+    expect(result.publishedMap.W.max_drawdown).toBe(83);
+  });
+
+  it("populationSize counts exactly the rows that entered the ranking", async () => {
+    strategiesResolver.data = publishedPopulation();
+    const result = (await getOwnRowPercentiles([]))!;
+
+    // P1..P5 and W entered (W on two metrics). X had every annualised metric withheld and no
+    // drawdown or cumulative return, so it has no rank anywhere and is not counted.
+    expect(Object.keys(result.publishedMap).sort()).toEqual(["P1", "P2", "P3", "P4", "P5", "W"]);
+    expect(result.populationSize).toBe(6);
+  });
+
+  it("gives an unpublished crypto own row spanning 60 days no annualised rank, but still ranks its drawdown", async () => {
+    strategiesResolver.data = publishedPopulation();
+    const result = (await getOwnRowPercentiles([ownRow("own60", "crypto", 3.5, -0.25, SIXTY_DAYS)]))!;
+
+    for (const metric of ANNUALISED) expect(result.ownMap.own60[metric], metric).toBeUndefined();
+    // |dd| population = [.1,.2,.3,.4,.5,.05(W)] plus the subject's own .25 = 7 values;
+    // count(<= .25) = .05, .1, .2, .25 = 4 -> 4/7*100 = 57.14, inverted 42.86 -> 43.
+    expect(result.ownMap.own60.max_drawdown).toBe(43);
+  });
+
+  it("keeps the ranks of an own crypto row spanning 200 days, a non-crypto row of 60 observations, and a row with no record fields", async () => {
+    strategiesResolver.data = publishedPopulation();
+    const result = (await getOwnRowPercentiles([
+      ownRow("own200", "crypto", 3.5, -0.25, TWO_HUNDRED_DAYS),
+      ownRow("ownObs60", "equity", 3.5, -0.25, SIXTY_OBS_84_DAYS),
+      ownRow("ownBare", "crypto", 3.5, -0.25, {}),
+    ]))!;
+
+    // Sharpe population [1..5] plus the subject's 3.5 = 6 values; count(<= 3.5) = 1,2,3,3.5 = 4
+    // -> 4/6*100 = 66.67 -> 67, the same for each (a subject never shifts another subject).
+    for (const id of ["own200", "ownObs60", "ownBare"]) {
+      expect(result.ownMap[id].sharpe, id).toBe(67);
+      for (const metric of ANNUALISED) expect(result.ownMap[id][metric], `${id} ${metric}`).toBeTypeOf("number");
+    }
+  });
+
+  it("withholds an own non-crypto row of 59 observations", async () => {
+    strategiesResolver.data = publishedPopulation();
+    const result = (await getOwnRowPercentiles([
+      ownRow("ownObs59", "equity", 3.5, -0.25, { ...SIXTY_OBS_84_DAYS, record_observations: 59 }),
+    ]))!;
+
+    expect(result.ownMap.ownObs59.sharpe).toBeUndefined();
+    expect(result.ownMap.ownObs59.max_drawdown).toBeTypeOf("number");
+  });
+
+  it("scores an own row that is also published as its already-gated population row, so its ranks equal discovery's", async () => {
+    strategiesResolver.data = publishedPopulation();
+    // The own copies carry DIFFERENT figures; identity by id must still resolve to the
+    // population row, so the own map reads exactly the published map for those ids.
+    const result = (await getOwnRowPercentiles([
+      ownRow("P3", "equity", 99, -0.01, LONG),
+      ownRow("W", "crypto", 99, -0.01, LONG),
+    ]))!;
+
+    expect(result.ownMap.P3).toEqual(result.publishedMap.P3);
+    expect(result.ownMap.W).toEqual(result.publishedMap.W);
+    expect(result.ownMap.W.sharpe).toBeUndefined();
+  });
+});

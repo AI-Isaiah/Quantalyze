@@ -13,7 +13,9 @@ from services.dispersion import (
 from services.metrics import (
     DEFAULT_PERIODS_PER_YEAR,
     _safe_float,
+    blend_gate_crypto,
     blend_periods_per_year,
+    sharpe_lift_gate,
 )
 
 logger = logging.getLogger("quantalyze.analytics.portfolio_optimizer")
@@ -79,6 +81,10 @@ def find_improvement_candidates(
     # so two candidates with identical returns score equally whatever their label
     # (a per-candidate clock gave a crypto-tagged copy a sqrt(365/252) Sharpe bonus).
     book_ppy = blend_clock(asset_classes, port_cols)
+    # 194 D-11/D-15: the gate's crypto flag for the book's record. Unknown legs
+    # count as crypto (the TS `blendPeriodsPerYear` rule); this is NOT the risk
+    # clock above, which keeps unknown at 252.
+    book_gate_crypto = blend_gate_crypto((asset_classes or {}).get(sid) for sid in port_cols)
     results: list[dict[str, Any]] = []
     for cid, c_returns in candidate_returns.items():
         c_returns = c_returns[~c_returns.index.duplicated(keep="last")]
@@ -160,12 +166,28 @@ def find_improvement_candidates(
             + w2 * corr_reduction
             + w3 * (dd_improvement if dd_improvement is not None else 0.0)
         )
+        # 194 D-11 (as superseded by D-15): the span the lift is measured over and
+        # the verdict of the two records it compares. A display rule only: the
+        # stored `sharpe_lift` and `score` are untouched. The candidate's record is
+        # its own non-NaN returns; the book's is the book's own joined index.
+        lift_span, lift_state, lift_failing = sharpe_lift_gate(
+            c_returns.dropna().index,
+            port_df.index,
+            aligned.index,
+            # Unknown class is crypto here, as on the book side (194 R2-M3): both ends of
+            # the lift get the same stricter 90-day rule.
+            blend_gate_crypto([(asset_classes or {}).get(cid)]),
+            book_gate_crypto,
+        )
         results.append({
             "strategy_id": cid,
             "corr_with_portfolio": _safe_float(corr_with_portfolio),
             "sharpe_lift": _safe_float(sharpe_lift),
             "dd_improvement": _safe_float(dd_improvement),
             "score": _safe_float(score),
+            "sharpe_lift_span_days": lift_span,
+            "sharpe_lift_state": lift_state,
+            "sharpe_lift_failing_record": lift_failing,
         })
     return sorted(results, key=lambda x: x["score"], reverse=True)[:5]
 
@@ -285,18 +307,36 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
         # 166.1 D7: a None lift (no Sharpe on the baseline) is present as a key,
         # so `.get(..., 0)` returns None; it states no recommendation.
         sharpe_lift = best_suggestion.get("sharpe_lift")
-        if sharpe_lift is not None and sharpe_lift > 0 and worst_attr.get("strategy_name"):
+        # 194 D-11 (as superseded by D-15): a lift whose compared record is under
+        # D-15's minimum is never quoted. Withholding is the rule, not a missing
+        # prerequisite, so it skips BEFORE the M-0904 warning branch. A stored
+        # suggestion without a state (pre-194) keeps today's text (null rule).
+        lift_state = best_suggestion.get("sharpe_lift_state")
+        lift_withheld = lift_state == "withheld"
+        if (
+            not lift_withheld
+            and sharpe_lift is not None
+            and sharpe_lift > 0
+            and worst_attr.get("strategy_name")
+        ):
             # The recommendation sentence requires both a non-empty risk
             # decomposition AND a portfolio-level Sharpe to quote the before/after.
             portfolio_sharpe = analytics.get("portfolio_sharpe")
             risk_items = analytics.get("risk_decomposition", [])
             if risk_items and portfolio_sharpe is not None:
-                parts.append(
+                sentence = (
                     f"If you trim {worst_attr['strategy_name']} and redistribute to "
                     f"{best_suggestion.get('strategy_name', 'top candidates')}, "
                     f"expected Sharpe moves from {portfolio_sharpe:.2f} to "
                     f"{portfolio_sharpe + sharpe_lift:.2f}"
                 )
+                if lift_state == "short":
+                    lift_span = best_suggestion.get("sharpe_lift_span_days")
+                    if lift_span is not None:
+                        sentence += f", measured over {lift_span:,} days of overlap, under one year"
+                    else:
+                        sentence += ", under one year"
+                parts.append(sentence)
             else:
                 # M-0904: the recommendation is warranted (positive lift, named
                 # underperformer) but a prerequisite is missing, so the

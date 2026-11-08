@@ -93,6 +93,10 @@ function smallSeries(n: number, drift = 0.0015): DailyPoint[] {
   return pts;
 }
 
+// Phase 194 (D-15): this fixture exercises leverage / unit behaviour, not the record gate, so its
+// TOTAL record is a cleared one (a short fixture would print the withheld dash instead of the figure).
+const CLEARED_RECORD = { spanDays: 400, observations: 400, crypto: false };
+
 const SMALL_STRAT = smallSeries(50, 0.0018);
 const SMALL_BENCH = smallSeries(50, 0.0009);
 
@@ -112,9 +116,11 @@ function buildSmall(): {
     markets: p.markets,
     strategyName: p.strategyName,
     benchmarkPrices: fixtureBenchmarkPrices([clipped]),
+    figureRecord: null,
   });
   const payload = {
     ...p,
+    figureRecord: CLEARED_RECORD,
     periodsPerYear: 365,
     comparators: {
       ...p.comparators,

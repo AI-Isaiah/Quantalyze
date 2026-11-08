@@ -54,14 +54,14 @@ const STRATEGY = {
 const START = "2026-04-27";
 const N_DAYS = 30;
 
-function build(start: string = START): FactsheetPayload {
-  const rows: DailyReturn[] = Array.from({ length: N_DAYS }, (_, i) => ({
+function build(start: string = START, n: number = N_DAYS): FactsheetPayload {
+  const rows: DailyReturn[] = Array.from({ length: n }, (_, i) => ({
     date: addDays(start, i),
     value: ((i % 7) - 3) / 1000,
   }));
   // BTC closes from the day before the first date through the last: every
   // interval pairs with BTC, so only SPX is below the floor.
-  const btc: DailyPrice[] = Array.from({ length: N_DAYS + 1 }, (_, i) => ({
+  const btc: DailyPrice[] = Array.from({ length: n + 1 }, (_, i) => ({
     date: addDays(start, i - 1),
     close: 90000 + ((i * 37) % 11) * 250,
   }));
@@ -136,7 +136,9 @@ describe("below the paired floor the factsheet names the cause (169.4 review rou
   });
 
   it("BTC active on the same record: the figures render and no floor reason does", () => {
-    const base = build();
+    // 194 plan 21 (D-15): a 400-day record. A 30-day crypto record is under the 90-day minimum,
+    // so its alpha is withheld by the record gate, which this test (about the paired floor) is not.
+    const base = build(START, 400);
     mount({ ...base, activeComparator: "btc" });
     expect(cellValue("α vs BTC")).toMatch(/%$/);
     expect(screen.queryByTestId("joint-floor-reason")).toBeNull();
