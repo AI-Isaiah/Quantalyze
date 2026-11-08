@@ -13748,6 +13748,8 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 
 **Owner / Trigger:** unowned. Trigger: the next phase that edits `run_compute_intro_snapshot_job`, or a frozen snapshot that matches a scenario book. Closed when the worker applies the same `is_test=false` filter and a test that drops it goes red.
 
+**CLOSED 2026-11-08 (shipped in v0.133.28.3).** `_load_portfolio` now filters `.eq("is_test", False)`, the TS producer's rule. `analytics-service/tests/test_intro_snapshot_is_test.py` puts a newer what-if book beside an older real one, behind a fake that honours `eq`/`order`/`limit`. It was RED on the unfixed worker (the scenario Sharpe was frozen) and is GREEN with the filter.
+
 ### [194.1-CENSUS-HOLDINGDETAIL-REASON] — the figure-gate census excludes `HoldingDetail.tsx` as "dead: no importer", which is false, and its detector is import-only (booked 2026-11-08, Phase 194.1 VERIFICATION advisory)
 
 **Reading.** `HoldingsTable.tsx` imports `HoldingDetail.tsx` inside `DesignHoldingsTable`, and `HoldingDetail.tsx` prints `formatNumber(row.sharpe)` raw. It is dead only transitively: `DesignHoldingsTable` mounts when a `rows` prop is passed, and no non-test caller passes one. The census also counts `HoldingsTable.tsx` as gated because `StrategyRowsTable` in the same file imports the gate, while `DesignHoldingsTable` there prints a raw Sharpe. Nothing reaches a user today.
