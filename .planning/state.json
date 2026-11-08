@@ -16,6 +16,11 @@
     {
       "number": "194",
       "name": "FIGURETRUTH",
+      "status": "in_progress"
+    },
+    {
+      "number": "194.1",
+      "name": "D04SWEEP (INSERTED)",
       "status": "pending"
     },
     {
@@ -67,7 +72,7 @@
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phases 192, 193, 195, 202 and 203 complete; 194 planned, 194.1 booked behind it"
+    "reason": "Phase 3 of 13 · 38% · executing"
   },
-  "updated_at": "2026-11-07T14:57:12.742Z"
+  "updated_at": "2026-11-07T17:42:14.771Z"
 }

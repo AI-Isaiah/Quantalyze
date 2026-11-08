@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.27.1] - 2026-11-08 — records: Phase 194 plan 09 PROD recompute and residuals
+
+### Changed
+- **The Phase 194 records are on main.** This brings the phase directory (plans, summaries, reviews, VERIFICATION, the SC-1 reading and `194-RECOMPUTE.md`), the ROADMAP plan list with plan 09 ticked, STATE's Current Position set by hand, REQUIREMENTS and the Phase 194.1 CONTEXT.
+- **Plan 194-09 ran on PROD.** The deploy of `959ef982` was confirmed by Railway and by `/health`. After that, every complete analytics row (27) was recomputed through `enqueue_compute_job`, and every job finished `done`. Before the recompute, 27 rows lacked the Phase 194 facts. After it, 0 lack `figure_defs_version` 2, `record_observations` or the three 1y rolling keys. S1's 6 Month, 3 Month, VaR 95% and CVaR 95% now equal the factsheet engine's definitions. API-keyed rows were enqueued without waiting for their daily sync tick, which enqueues the same job kind.
+
+### Notes
+- VERIFICATION stays `human_needed` for the signed-in browser UAT only. The recompute and the CI item are passed. The phase is not marked complete.
+- TODOS books eight Phase 194 residuals, all owned by Phase 194.1:
+  - Holdings `figureRecordScalars` does not carry the unreadable flag.
+  - Malformed dates on the mark-to-market and smoothed axes, in `shapedRecordScalars` and in the SQL twin read as absent (R6 WR-02/03).
+  - `scenario-factsheet-payload` does not check interior dates.
+  - `percentileRecord` Sentry reports are not deduplicated.
+  - The wizard's HARD-04 caveat still uses the raw gap.
+  - A zoomed range whose benchmark covers less than the window has no note.
+  - The OG share card is not gated.
+  - The `get_verified_cohort_rank` stale-baseline drift needs a baseline re-dump. It leaves a red `sql-gate-lint` check on main and likely made Railway skip the first deploy of the Phase 194 merge.
+
 ## [0.133.27.0] - 2026-11-08 — Phase 194 FIGURETRUTH
 
 A figure means one thing everywhere and shows only when it is earned. 156 non-merge commits (about 100 source and test commits plus the planning and review records) across 22 plans in 9 waves and five review rounds. One SQL migration (`20261107140000_get_verified_cohort_rank_span_gate`), one new shared module (`figure-gate`), no new dependency.

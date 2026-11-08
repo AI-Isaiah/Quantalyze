@@ -96,6 +96,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story** - Key storage, encryption, TLS, factsheet access, listing cost and exchange count read the same on the home page, `/security`, `/for-quants` and Terms, each matched to a measurement; no key form for anonymous visitors on the home page; `/demo` looks finished (completed 2026-11-07)
 - [x] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row (completed 2026-11-07)
 - [ ] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified
+- [ ] **Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside FIGURETRUTH** (INSERTED) - Census pages B1-B13, admin included, plus Sharpe deltas and lifts, alpha/TE/IR, peer ranks and rolling charts on those pages
 - [x] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed (completed 2026-11-07)
 - [ ] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced"
 - [ ] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named
@@ -208,21 +209,58 @@ Plans:
 **Goal:** A metric with the same name shows the same value for the same strategy and period on My Strategies, the factsheet, the tearsheet, Scenario and Holdings, and where two figures differ on purpose the label says why. A figure that cannot be meaningful is withheld or plainly qualified, never shown at full confidence.
 **Requirements**: TRUST-04, TRUST-05
 **Depends on:** Phase 193 (mismatches are re-read on full-history views, so a saved clipped range cannot pass for a definition difference)
-**Plans:** 0 plans
+**Plans:** 24/24 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
 - Confirmed: the tearsheet shows "Calmar", "VaR (95%)", "CVaR" and "Minimum Allocation" (`src/app/factsheet/[id]/tearsheet/page.tsx:572`, `:582-585`, `:658`). My Strategies and discovery show a "6 Month" column (`src/components/strategy/StrategyTable.tsx:316`).
-- Not confirmed at HEAD (PROD readings from the review): 6 Month −21.31% vs −3.79%, the tearsheet VaR/CVaR at about double the factsheet's, Calmar meaning two things, "Minimum Allocation" equal to AUM, the book's AUM at 293,633 vs $367.9K gross / $284.3K net, and Quantum Drift's +1,698,884,891% next to 0.00% in the lists.
+- Not confirmed at HEAD (PROD readings from the review): 6 Month −21.31% vs −3.79%, the tearsheet VaR/CVaR at about double the factsheet's, Calmar meaning two things, "Minimum Allocation" equal to AUM, the book's AUM shown as one figure beside differing gross and net figures, and Quantum Drift's +1,698,884,891% next to 0.00% in the lists.
 
 **Success Criteria** (what must be TRUE):
 1. Before any code change, a read-only PROD reading records, for each metric TRUST-04 names, the value each page shows for the same strategy or book and period, and names the cause of each difference.
 2. For the same strategy and period, a metric with the same name shows the same value on My Strategies, the factsheet, the tearsheet, Scenario and Holdings. Where two figures differ on purpose (gross vs net, another period or definition), the label says which. A test goes RED on today's mismatch. The fix lands where the pages read the value, not as a per-page patch, because the tearsheet becomes the factsheet's print view later in this milestone.
 3. No field's label contradicts its value (for example, a "Minimum Allocation" that is really AUM is relabelled or removed).
 4. A cumulative return past a stated plausibility bound, and an annualised ratio on a record shorter than a year, are withheld or carry a plain qualifier on every surface that shows them, and no list shows 0.00% for a figure it does not have.
+   ⛔ **AMENDED 2026-11-07 (FIGURETRUTH D-05, founder override of the recommendation):** no plausibility bound is set or shown anywhere. An implausible value is shown with no badge, warning or withholding ("Show don't flag"). Only D-15's total-record rule (a crypto record under 90 calendar days or a non-crypto record under 60 observations is withheld; every window under one year is qualified) and genuine nulls withhold a figure.
+   ⛔ **AMENDED 2026-11-07 (FIGURETRUTH D-15, founder):** an annualised figure is withheld only when the strategy's TOTAL record is under the minimum: 90 calendar days for crypto, 60 return observations for non-crypto, and a blend is crypto if any leg is. Above it every window shows every figure (a selected range of any length, a blend overlap, a half, a rolling window, a peer rank), and a window under one year carries the one muted note (D-13). In the founder's words, "if a client zooms in, then he wants the KPIs on shorter timeframes, and is aware that they are less stable". This supersedes the window-length gating of D-04 and D-11, which stay in 194-CONTEXT.md as lineage. Recorded from the orchestrator's relay of the founder's answer.
+   ⛔ **AMENDED 2026-11-07 (FIGURETRUTH D-14, founder):** a 365-calendar-day rolling window is added. The producer stores it, the factsheet and Scenario draw it, it shows with no note, and the PROD recompute (plan 09) writes it with the rest.
 5. Never invent data: a withheld figure reads as withheld, never as 0 or a substitute value.
+   ⛔ **AMENDED 2026-11-07 (FIGURETRUTH D-16, D-17, D-18, founder, from the phase review):** the factsheet benchmark column follows D-15 on a zoom (Phase 170.6 D-07's 90-day overlap gate superseded); every analytics write that stores annualised KPIs also stores their return series, so an unmeasurable record does not arise from a missing series (existing rows repaired by plan 09's recompute); a record under the minimum leaves the Sharpe and Sortino peer sets only, never the Max drawdown set, in SQL and TS alike; and (D-19) the benchmark column's annualised cells are withheld when the strategy's total record is. Recorded in `194-CONTEXT.md`.
 
 UI changes are checked against `DESIGN.md` (Numbers Contract).
+
+Plans:
+- [x] 194-01-PLAN.md — SC-1 read-only PROD reading; D-05 override recorded in ROADMAP and REQUIREMENTS
+- [x] 194-02-PLAN.md — historical VaR/CVaR and calendar 3M/6M in the producer, one shared cross-language fixture
+- [x] 194-03-PLAN.md — figure-gate and list-figures shared modules; Scenario VaR/CVaR on the one helper
+- [x] 194-04-PLAN.md — factsheet fetch-path stored overlay and rail gate (blend wording in the Scenario mount)
+- [x] 194-05-PLAN.md — equity and exposure labels, D-08 site census, Scenario blend record gate and peer-rank request on D-15
+- [x] 194-06-PLAN.md — StrategyTable missing-last sort and filter, record aliases (after TRIM merges)
+- [x] 194-07-PLAN.md — tearsheet AUM role gate, row removal, VaR labels and annualised gate (after TRIM merges)
+- [x] 194-08-PLAN.md — factsheet strip note, remaining labels, cross-page parity test
+- [x] 194-09-PLAN.md — PROD recompute with founder clearance (figure definitions, observation count, 365-day rolling window), or booked fallback
+- [x] 194-10-PLAN.md — committed-census check; browse strategy page and CompareTable gate (after TRIM merges)
+- [x] 194-11-PLAN.md — live Holdings Sharpe gate through the row adapter (after plan 06)
+- [x] 194-12-PLAN.md — D-11 helpers and copy in figure-gate on the D-15 record rule (deltas, rolling windows, overlap, half-record)
+- [x] 194-13-PLAN.md — Python lift spans: optimizer suggestions, portfolio narrative and match reasons
+- [x] 194-14-PLAN.md — rolling-window verdict on the factsheet and Scenario payloads and on every client re-derive (levered view, zoom window), and the 365-day window added beside the row window
+- [x] 194-15-PLAN.md — factsheet rail: rolling table and the added 1y table, section IV overlap note, cumulative CAGR, Bootstrap
+- [x] 194-16-PLAN.md — JSON-LD CAGR gate and cache key; Style Drift, peer percentile and vs-your-book panels
+- [x] 194-17-PLAN.md — Scenario benchmark section, blend rolling panel with the 365D window, own-book delta span and records
+- [x] 194-18-PLAN.md — TS peer ranks leave out short records; tearsheet rank marker (after TRIM merges)
+- [x] 194-19-PLAN.md — cohort RPC record-gate migration, lane fixture, rollback and review (migration)
+- [x] 194-20-PLAN.md — cohort gate arms, CI censuses and mutation floors
+- [x] 194-21-PLAN.md — factsheet joint record gate and the comparator's 365-day series (after TRIM merges)
+- [x] 194-22-PLAN.md — impact-panel Sharpe delta and optimizer lift gates (optimizer after TRIM merges)
+- [x] 194-23-PLAN.md — D-14 365-day rolling window in the producer and its TS twin (shared fixture)
+- [x] 194-24-PLAN.md — factsheet rolling charts on the rolling verdict, with the added 1y window option (after TRIM merges)
+
+### Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside Phase 194: census pages B1-B13, admin included, plus deltas/lifts, alpha/TE/IR, peer ranks and rolling charts (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 194
+**Plans:** 0 plans
 
 Plans:
 - [ ] TBD — plans not listed yet
@@ -456,7 +494,8 @@ Plans:
 |-------|----------------|--------|-----------|
 | 192. PUBLICTRUTH | 15/15 | Complete | 2026-11-07 |
 | 193. QUIETVIEW | 7/7 | Complete | 2026-11-07 |
-| 194. FIGURETRUTH | 0/0 | Not started | - |
+| 194. FIGURETRUTH | 24/24 | In Progress (browser UAT pending) | - |
+| 194.1. D04SWEEP (INSERTED) | 0/0 | Not started | - |
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
 | 197. SCREEN | 0/0 | Not started | - |
