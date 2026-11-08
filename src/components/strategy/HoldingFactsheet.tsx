@@ -29,7 +29,10 @@ import {
   HOLDING_COMPARE_MIN_PRICED_DAYS,
   type HoldingCompareItem,
 } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
+import { annualizedCell } from "@/components/strategy/annualized-cell";
+import { annualizationPeriods } from "@/lib/closed-sets";
 import { formatRatio, formatUnsignedPercent } from "@/lib/factsheet/display-sign";
+import { figureRecord, gateAnnualized, gatedValue } from "@/lib/figure-gate";
 import { formatNumber } from "@/lib/utils";
 import { venueLabel } from "@/lib/display-labels";
 
@@ -111,6 +114,31 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
   // null vol, and the card must say why instead of printing two bare em-dashes.
   const needsAdjacentDays =
     analytics !== null && !tooFewPricedDays && analytics.vol === null;
+  // 194.1 plan 04 (census B11, assumption A1, D-15): Sharpe and annualised volatility are
+  // judged on the holding's PRICE record, the first to last priced day, at the crypto
+  // convention the adapter annualises at (a holding is priced against a crypto quote).
+  // The adapter's 30-priced-day floor stays the rule for all four figures and decides
+  // first: under it every cell is already null and no withheld title is added. Cumulative
+  // return and max drawdown are never gated by D-15. A payload without the two dates reads
+  // as an unknown record (state "null"), so its figures print as before.
+  const record = figureRecord({
+    seriesStart: analytics?.first_priced_day,
+    seriesEnd: analytics?.last_priced_day,
+    headlineSince: null,
+    observations: analytics?.priced_days,
+    periodsPerYear: annualizationPeriods("crypto"),
+  });
+  const annualizedState = tooFewPricedDays ? "null" : gateAnnualized(record);
+  const sharpeCell = annualizedCell(
+    fmtNum(gatedValue(analytics?.sharpe ?? null, annualizedState)),
+    annualizedState,
+    record,
+  );
+  const volCell = annualizedCell(
+    fmtPct(gatedValue(analytics?.vol ?? null, annualizedState)),
+    annualizedState,
+    record,
+  );
   return (
     <div
       data-testid="holding-factsheet"
@@ -156,7 +184,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
                 Sharpe
               </dt>
               <dd className="font-mono text-lg text-text-primary">
-                {fmtNum(analytics.sharpe)}
+                {sharpeCell}
               </dd>
             </div>
             <div>
@@ -172,7 +200,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
                 Vol (annualized)
               </dt>
               <dd className="font-mono text-lg text-text-primary">
-                {fmtPct(analytics.vol)}
+                {volCell}
               </dd>
             </div>
           </dl>

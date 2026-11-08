@@ -42,6 +42,17 @@ vi.mock("../lib/scenario-compare", async (importOriginal) => {
       inputs: ScenarioCompareInputs,
       opts?: { liveBook?: boolean },
     ) => mockComputeMetricsForDraft(draft, inputs, opts),
+    // 194.1 plan 03: the panel computes through computeDraftColumn (metrics plus the
+    // blend basis). The stand-in routes through the same mock, so every existing
+    // assertion on mockComputeMetricsForDraft keeps its meaning.
+    computeDraftColumn: (
+      draft: ScenarioDraft,
+      inputs: ScenarioCompareInputs,
+      opts?: { liveBook?: boolean },
+    ) => ({
+      metrics: mockComputeMetricsForDraft(draft, inputs, opts),
+      periodsPerYear: 365,
+    }),
     buildLiveBookDraft: () => mockBuildLiveBookDraft(),
   };
 });
@@ -164,6 +175,34 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
     expect(screen.getByTestId("sharpe-leader")).toHaveTextContent("Beta");
     // No second fetch issued — the live payload is reused.
     expect((globalThis.fetch as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  // 194.1 plan 03 — the blend basis from computeDraftColumn reaches the table, for a
+  // saved column and the live book alike: a 40-day crypto record is withheld in both.
+  it("carries the engine's blend basis to the table so a 40-day column and the live book are withheld", () => {
+    const short = metrics({
+      n: 40,
+      sharpe: 1.5,
+      effective_start: "2026-01-01",
+      effective_end: "2026-02-09",
+    });
+    mockComputeMetricsForDraft.mockReturnValue(short);
+
+    render(
+      <ScenarioComparePanel
+        selectedRows={[row("a", "Alpha", v2Draft("fp-a"))]}
+        includeLiveBook={true}
+        payload={PAYLOAD}
+      />,
+    );
+
+    for (const name of ["Alpha", "Live book"]) {
+      const cell = screen.getByTestId(`cell-${name}-sharpe`);
+      expect(cell.textContent?.startsWith("—")).toBe(true);
+      expect(cell.querySelector("[title]")?.getAttribute("title")).toBe(
+        "Withheld until the record reaches 90 days (40 days so far).",
+      );
+    }
   });
 
   // -------------------------------------------------------------------------

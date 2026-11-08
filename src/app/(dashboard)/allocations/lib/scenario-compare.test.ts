@@ -15,6 +15,7 @@ import {
   type StrategyForBuilderId,
 } from "./scenario-adapter";
 import {
+  computeDraftColumn,
   computeMetricsForDraft,
   buildLiveBookDraft,
   type ScenarioCompareInputs,
@@ -1211,6 +1212,43 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     const { cagr: _c2, ...nullRest } = nullOff;
     // The excluded crypto leg's asset_class is irrelevant to the basis → identical.
     expect(cryptoRest).toEqual(nullRest);
+  });
+
+  // 194.1 plan 03 (194 D-15): the compare table judges each column on its own blend
+  // record, and that record's crypto flag IS the basis the engine annualised the column
+  // at, so `computeDraftColumn` must hand back the engine's own basis, never one a
+  // caller re-derives from asset classes.
+  it("computeDraftColumn returns metrics deep-equal to computeMetricsForDraft and the blend basis (365 crypto, 252 all-traditional, live book by the same rule)", () => {
+    const dates = buildDates("2024-01-02", 80);
+    const S = altReturns(dates, 0.01, -0.008);
+    const win = { start: dates[3], end: dates[75] };
+    const d = draft({
+      addedStrategies: [addedStrat(SA, "A")],
+      toggleByScopeRef: { [SA]: true },
+      weightOverrides: { [SA]: 1 },
+      window: win,
+    });
+
+    const cryptoIn = addedInputs({ [SA]: S }, { [SA]: "crypto" });
+    const crypto = computeDraftColumn(d, cryptoIn);
+    expect(crypto.periodsPerYear).toBe(365);
+    expect(crypto.metrics.twr).not.toBeNull(); // non-vacuous
+    expect(crypto.metrics).toEqual(computeMetricsForDraft(d, cryptoIn));
+
+    const tradIn = addedInputs({ [SA]: S }, { [SA]: "equity" });
+    const trad = computeDraftColumn(d, tradIn);
+    expect(trad.periodsPerYear).toBe(252);
+    expect(trad.metrics).toEqual(computeMetricsForDraft(d, tradIn));
+
+    // Live book: per-key units are crypto, so the gate-satisfied own book rides 365.
+    const bookIn = perKeyLiveInputs({ "key-A": S }, { "key-A": 5000 });
+    const book = computeDraftColumn(buildLiveBookDraft(true, ["key-A"]), bookIn, {
+      liveBook: true,
+    });
+    expect(book.periodsPerYear).toBe(365);
+    expect(book.metrics).toEqual(
+      computeMetricsForDraft(buildLiveBookDraft(true, ["key-A"]), bookIn, { liveBook: true }),
+    );
   });
 });
 

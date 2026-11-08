@@ -35,7 +35,7 @@ const STORED_ROW = { ...SEVEN, computation_status: "complete", metrics_json_by_b
 const CHAIN = { twr_chain_broken: true, headline_since: "2023-02-01" };
 const DAY = 86_400_000;
 
-/** 400 days: clears the card's 0.95-year CAGR floor, so only the verdict can hide a figure. */
+/** 400 days: a record long enough to need no short-track note, so only the verdict can hide a figure. */
 const SERIES = Array.from({ length: 400 }, (_, i) => ({
   date: new Date(Date.parse("2023-01-01") + i * DAY).toISOString().slice(0, 10),
   value: i % 2 === 0 ? 0.002 : -0.001,

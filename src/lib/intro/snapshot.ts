@@ -2,6 +2,13 @@ import "server-only";
 
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
+import { figureRecord, type FigureRecord } from "@/lib/figure-gate";
+import {
+  RECORD_SCALAR_ALIASES,
+  recordFromScalars,
+  type RecordScalarRow,
+} from "@/lib/figure-record-scalars";
 import type { PortfolioAnalytics } from "@/lib/types";
 
 /**
@@ -18,6 +25,35 @@ import type { PortfolioAnalytics } from "@/lib/types";
  * compute_intro_snapshot compute job to finish the computation asynchronously.
  */
 
+/**
+ * Phase 194.1 B12c (194 D-12 / D-15, 2026-11-08) - the record a frozen Sharpe was
+ * computed on, frozen BESIDE it: `span_days` (covered days, D-20), the stored
+ * `observations` count, and `crypto`; `unreadable` only when a date was present but not a
+ * date. The admin intros page judges a Sharpe with `gateAnnualized` over this record.
+ * Optional on purpose: a snapshot frozen before this phase has none, and a missing record
+ * means "unknown, show the figure as stored", never a verdict. Python twin:
+ * `figure_record_from_scalars` in analytics-service/services/metrics.py (one shared
+ * fixture, `intro_snapshot_record_parity.json`, pins the pair).
+ */
+const SNAPSHOT_RECORD = z.object({
+  span_days: z.number().nullable(),
+  observations: z.number().nullable(),
+  crypto: z.boolean(),
+  unreadable: z.literal(true).optional(),
+});
+
+export type SnapshotRecord = z.infer<typeof SNAPSHOT_RECORD>;
+
+/** The frozen (snake_case) shape of a `FigureRecord`; `unreadable` appears only when true. */
+export function toSnapshotRecord(record: FigureRecord): SnapshotRecord {
+  return {
+    span_days: record.spanDays,
+    observations: record.observations,
+    crypto: record.crypto,
+    ...(record.unreadable ? { unreadable: true as const } : {}),
+  };
+}
+
 const STRATEGY_REF = z.object({
   // Stored as text — the surrounding system already validates UUIDs at
   // insert time. The snapshot schema's job is shape integrity, not
@@ -25,10 +61,13 @@ const STRATEGY_REF = z.object({
   strategy_id: z.string().min(1),
   strategy_name: z.string(),
   sharpe: z.number().nullable(),
+  sharpe_record: SNAPSHOT_RECORD.nullable().optional(),
 });
 
 const PORTFOLIO_SNAPSHOT_SCHEMA = z.object({
   sharpe: z.number().nullable(),
+  /** The book Sharpe's record (194.1 B12c); see `SNAPSHOT_RECORD`. Absent on a legacy snapshot. */
+  sharpe_record: SNAPSHOT_RECORD.nullable().optional(),
   max_drawdown: z.number().nullable(),
   /**
    * Herfindahl-Hirschman on allocation weights. 1/n = perfectly diversified,
@@ -42,6 +81,9 @@ const PORTFOLIO_SNAPSHOT_SCHEMA = z.object({
 
 export type PortfolioSnapshotJSON = z.infer<typeof PORTFOLIO_SNAPSHOT_SCHEMA>;
 export type PortfolioSnapshotStrategy = z.infer<typeof STRATEGY_REF>;
+
+const PORTFOLIO_ANALYTICS_SELECT: string =
+  "portfolio_sharpe, portfolio_max_drawdown, curve_start:portfolio_equity_curve->0->>date, curve_end:portfolio_equity_curve->-1->>date";
 
 /**
  * Compute the snapshot for the given user's primary portfolio. The
@@ -89,6 +131,7 @@ export async function computePortfolioSnapshot(
     // has nothing to read.
     return PORTFOLIO_SNAPSHOT_SCHEMA.parse({
       sharpe: null,
+      sharpe_record: null,
       max_drawdown: null,
       concentration: null,
       top_3_strategies: [],
@@ -109,7 +152,10 @@ export async function computePortfolioSnapshot(
   ] = await Promise.all([
     admin
       .from("portfolio_analytics")
-      .select("portfolio_sharpe, portfolio_max_drawdown")
+      // 194.1 B12c: the book's record comes from the first and last equity-curve dates
+      // (`->-1` is the last element; typed `string` so postgrest-js does not parse the
+      // select at the type level, the same reason as RECORD_SCALAR_ALIASES).
+      .select(PORTFOLIO_ANALYTICS_SELECT)
       .eq("portfolio_id", portfolioId)
       .order("computed_at", { ascending: false })
       .limit(1)
@@ -117,7 +163,7 @@ export async function computePortfolioSnapshot(
     admin
       .from("portfolio_strategies")
       .select(
-        "strategy_id, current_weight, allocated_amount, strategies ( id, name ), strategy_analytics:strategy_analytics ( strategy_id, sharpe )",
+        `strategy_id, current_weight, allocated_amount, strategies ( id, name, asset_class ), strategy_analytics:strategy_analytics ( strategy_id, sharpe, ${RECORD_SCALAR_ALIASES} )`,
       )
       .eq("portfolio_id", portfolioId),
     admin
@@ -130,22 +176,24 @@ export async function computePortfolioSnapshot(
   if (strategyLinksErr) throw strategyLinksErr;
   if (alertsErr) throw alertsErr;
 
-  const analytics = analyticsRow as
-    | Pick<PortfolioAnalytics, "portfolio_sharpe" | "portfolio_max_drawdown">
+  const analytics = analyticsRow as unknown as
+    | (Pick<PortfolioAnalytics, "portfolio_sharpe" | "portfolio_max_drawdown"> & {
+        curve_start?: string | null;
+        curve_end?: string | null;
+      })
     | null;
 
   // PostgREST returns embedded relations as arrays even when they are
   // logically 1:1; we collapse to the first element below. Cast through
   // unknown because the runtime shape is what we actually care about.
+  type StrategyEmbed = { id: string; name: string; asset_class?: string | null };
+  type AnalyticsEmbed = { strategy_id: string; sharpe: number | null } & RecordScalarRow;
   const links = ((strategyLinks ?? []) as unknown) as Array<{
     strategy_id: string;
     current_weight: number | null;
     allocated_amount: number | null;
-    strategies: { id: string; name: string } | { id: string; name: string }[] | null;
-    strategy_analytics:
-      | { strategy_id: string; sharpe: number | null }
-      | { strategy_id: string; sharpe: number | null }[]
-      | null;
+    strategies: StrategyEmbed | StrategyEmbed[] | null;
+    strategy_analytics: AnalyticsEmbed | AnalyticsEmbed[] | null;
   }>;
 
   function firstOrSingle<T>(value: T | T[] | null): T | null {
@@ -175,6 +223,7 @@ export async function computePortfolioSnapshot(
         strategy_id: l.strategy_id,
         strategy_name: name,
         sharpe,
+        sharpe_record: toSnapshotRecord(recordFromScalars(sa, strat?.asset_class)),
       };
     })
     .filter((s) => s.sharpe !== null)
@@ -185,8 +234,21 @@ export async function computePortfolioSnapshot(
   // is still "worst first" (readable in the admin UI).
   const bottom3 = ranked.slice(Math.max(0, ranked.length - 3)).reverse();
 
+  // 194.1 B12c: the book's record. Dates are cut to yyyy-mm-dd (the writer stores
+  // `Timestamp.isoformat()`); no observation count exists for a book, so the interim
+  // 90-day span rule decides; the crypto basis is the blend rule over every linked leg.
+  const bookRecord = figureRecord({
+    seriesStart: analytics?.curve_start?.slice(0, 10) ?? null,
+    seriesEnd: analytics?.curve_end?.slice(0, 10) ?? null,
+    observations: null,
+    periodsPerYear: blendPeriodsPerYear(
+      links.map((l) => ({ asset_class: firstOrSingle(l.strategies)?.asset_class })),
+    ),
+  });
+
   const snapshot: PortfolioSnapshotJSON = {
     sharpe: analytics?.portfolio_sharpe ?? null,
+    sharpe_record: toSnapshotRecord(bookRecord),
     max_drawdown: analytics?.portfolio_max_drawdown ?? null,
     concentration,
     top_3_strategies: top3,

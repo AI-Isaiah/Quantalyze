@@ -44,6 +44,13 @@ import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
 // link that actually resolves a scenario.
 import { toWealth } from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
+import {
+  figureRecord,
+  gateAnnualized,
+  gatedValue,
+  shortTrackNote,
+  withheldReason,
+} from "@/lib/figure-gate";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { Card } from "@/components/ui/Card";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
@@ -401,14 +408,40 @@ export default async function ScenarioSharePage({
   const btcWealth =
     btc !== null ? btcLevelsFromCloses(btc.prices, portfolioDaily[0]?.date) : undefined;
 
+  // 194.1 (census B4), 194 D-04 as superseded by D-15 — the shared link prints the
+  // verdict the owner's composer prints for the same blend. ONE blend record, built
+  // from the composer's `blendRecord` inputs: the blend's overlapping window, its
+  // observation count and the resolved basis (`periodsPerYear` already applies the
+  // any-crypto-leg rule, so the crypto flag is never recomputed here). A saved
+  // blend's total record IS its window. CAGR, Volatility, Sharpe and Sortino read
+  // `gatedValue`; Total return, Max drawdown and Avg |ρ| are never gated.
+  const blendRecord = figureRecord({
+    seriesStart: metrics.effective_start,
+    seriesEnd: metrics.effective_end,
+    headlineSince: null,
+    observations: metrics.n,
+    periodsPerYear,
+  });
+  const blendGateState = gateAnnualized(blendRecord);
+  // ONE muted caption: the withheld reason or the short-track note. Absent for a
+  // full record, an unknown record and an empty blend (nothing to explain).
+  const blendGateNote =
+    metrics.n <= 0
+      ? null
+      : blendGateState === "withheld"
+        ? withheldReason("blend", blendRecord)
+        : blendGateState === "short" && blendRecord.spanDays != null
+          ? shortTrackNote("blend", blendRecord.spanDays)
+          : null;
+
   // KPI strip — RETURN / PERCENTAGE form only. No USD, no AUM. Null/non-finite
   // metrics render the em-dash "—" via the shared formatters (never a 0).
   const kpis: Array<{ label: string; value: string }> = [
     { label: "Total return", value: formatPercent(metrics.twr) },
-    { label: "CAGR", value: formatPercent(metrics.cagr) },
-    { label: "Volatility", value: formatPercent(metrics.volatility) },
-    { label: "Sharpe", value: formatNumber(metrics.sharpe) },
-    { label: "Sortino", value: formatNumber(metrics.sortino) },
+    { label: "CAGR", value: formatPercent(gatedValue(metrics.cagr, blendGateState)) },
+    { label: "Volatility", value: formatPercent(gatedValue(metrics.volatility, blendGateState)) },
+    { label: "Sharpe", value: formatNumber(gatedValue(metrics.sharpe, blendGateState)) },
+    { label: "Sortino", value: formatNumber(gatedValue(metrics.sortino, blendGateState)) },
     { label: "Max drawdown", value: formatPercent(metrics.max_drawdown) },
     { label: "Avg |ρ|", value: formatNumber(metrics.avg_pairwise_correlation) },
   ];
@@ -469,6 +502,14 @@ export default async function ScenarioSharePage({
             </div>
           ))}
         </div>
+        {blendGateNote !== null && (
+          <p
+            data-testid="scenario-share-figure-gate-note"
+            className="mt-2 text-fixed-11 text-text-muted"
+          >
+            {blendGateNote}
+          </p>
+        )}
       </section>
 
       {/* Projected equity curve (+ BTC benchmark overlay when available). */}

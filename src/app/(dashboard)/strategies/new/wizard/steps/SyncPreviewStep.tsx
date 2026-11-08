@@ -31,6 +31,18 @@ import { buildEnvelope } from "@/lib/envelope";
 import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+import {
+  gateAnnualized,
+  gatedValue,
+  shortTrackNote,
+  withheldReason,
+  type FigureState,
+} from "@/lib/figure-gate";
+import {
+  RECORD_SCALAR_ALIASES,
+  recordFromScalars,
+  type RecordScalarRow,
+} from "@/lib/figure-record-scalars";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
@@ -380,6 +392,14 @@ export interface SyncPreviewSnapshot {
   sparkline: number[] | null;
   computedAt: string | null;
   /**
+   * Phase 194.1 plan 08 (B6, 2026-11-08; 194 D-15): the ONE muted panel note for the draft's
+   * annualised tiles - the withheld reason when they print a dash, the short-track qualifier
+   * when they print their stored value, null on a full or unknown record. It travels on the
+   * snapshot so SubmitStep's DRAFT summary, which reuses `metrics`, shows the same verdict
+   * the sync preview did (one verdict per draft, not two).
+   */
+  figureNote?: string | null;
+  /**
    * Additive composite payload — present only on the composite branch. The
    * single-key snapshot shape and the MetadataStep/SubmitStep consumers of
    * detectedMarkets/exchange/tradeCount/sparkline are unaffected (SC-4).
@@ -428,6 +448,27 @@ export function formatMetric(value: number | null, suffix = ""): string {
 
 export function formatCagr(value: number | null): string {
   return formatFixedSigned(value, { dp: 1, scale: 100, suffix: "%", plus: true });
+}
+
+/**
+ * Phase 194.1 plan 08 (B6, 2026-11-08; 194 D-04 as superseded by D-15): the draft's verdict
+ * on its TOTAL record, shared by both preview arms so they cannot drift. `state` gates the
+ * CAGR / Sharpe / Sortino / Volatility tiles through `gatedValue`; `note` is the one panel
+ * note (withheld reason, short-track qualifier, or null). The asset class is passed through
+ * as read - `annualizationPeriods` owns the crypto / non-crypto basis and nothing here
+ * defaults a missing class to crypto.
+ */
+function draftFigureVerdict(
+  row: RecordScalarRow | null | undefined,
+  assetClass: string | null | undefined,
+): { state: FigureState; note: string | null } {
+  const record = recordFromScalars(row, assetClass);
+  const state = gateAnnualized(record);
+  if (state === "withheld") return { state, note: withheldReason("record", record) };
+  if (state === "short" && record.spanDays != null) {
+    return { state, note: shortTrackNote("record", record.spanDays) };
+  }
+  return { state, note: null };
 }
 
 /**
@@ -1441,7 +1482,10 @@ export function SyncPreviewStep({
                     // same admissibility the admin approve path will apply, and
                     // that verdict is what decides it. Widening a column string
                     // adds no round trip.
-                    "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, metrics_json_by_basis, data_quality_flags, computed_at, series_completeness",
+                    // 194.1 B6 (D-15): the four record scalar aliases ride the same
+                    // member. `select()` is handed a `string` (not a literal) because
+                    // postgrest-js cannot parse the `->-1` index; the row is cast below.
+                    `cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, metrics_json_by_basis, data_quality_flags, computed_at, series_completeness, ${RECORD_SCALAR_ALIASES}`,
                   )
                   .eq("strategy_id", strategyId)
                   .maybeSingle(),
@@ -1480,7 +1524,9 @@ export function SyncPreviewStep({
                 }),
                 supabase
                   .from("strategies")
-                  .select("returns_denominator_config")
+                  // 194.1 B6: `asset_class` rides the existing read; a null row is
+                  // still tolerated (no class is read, never a crypto default).
+                  .select("returns_denominator_config, asset_class")
                   .eq("id", strategyId)
                   .maybeSingle(),
               ]);
@@ -1698,18 +1744,40 @@ export function SyncPreviewStep({
               return "done";
             }
 
+            // 194.1 B6 (D-15): one verdict on the composite's total record gates the
+            // four annualised tiles; Max DD and Cumulative are never gated.
+            const compositeVerdict = draftFigureVerdict(
+              analyticsRow as RecordScalarRow | null,
+              (stratRes.data as { asset_class?: string | null } | null)
+                ?.asset_class,
+            );
             const compositeMetrics: FactsheetPreviewMetric[] = [
               {
                 label: "CAGR",
-                value: formatCagr((analyticsRow?.cagr as number) ?? null),
+                value: formatCagr(
+                  gatedValue(
+                    (analyticsRow?.cagr as number) ?? null,
+                    compositeVerdict.state,
+                  ),
+                ),
               },
               {
                 label: "Sharpe",
-                value: formatMetric((analyticsRow?.sharpe as number) ?? null),
+                value: formatMetric(
+                  gatedValue(
+                    (analyticsRow?.sharpe as number) ?? null,
+                    compositeVerdict.state,
+                  ),
+                ),
               },
               {
                 label: "Sortino",
-                value: formatMetric((analyticsRow?.sortino as number) ?? null),
+                value: formatMetric(
+                  gatedValue(
+                    (analyticsRow?.sortino as number) ?? null,
+                    compositeVerdict.state,
+                  ),
+                ),
               },
               {
                 label: "Max DD",
@@ -1720,10 +1788,13 @@ export function SyncPreviewStep({
               },
               {
                 label: "Volatility",
-                value:
-                  analyticsRow?.volatility != null
-                    ? formatMetric(analyticsRow.volatility as number, "%")
-                    : "—",
+                value: formatMetric(
+                  gatedValue(
+                    (analyticsRow?.volatility as number | null) ?? null,
+                    compositeVerdict.state,
+                  ),
+                  "%",
+                ),
               },
               {
                 label: "Cumulative",
@@ -1766,6 +1837,7 @@ export function SyncPreviewStep({
               metrics: compositeMetrics,
               sparkline: compositeSparkline,
               computedAt: (analyticsRow?.computed_at as string) ?? null,
+              figureNote: compositeVerdict.note,
               composite: {
                 members,
                 perKey,
@@ -1818,6 +1890,7 @@ export function SyncPreviewStep({
             sampleRes,
             csvRowCountRes,
             keyRowResult,
+            assetClassRes,
           ] = await Promise.all([
             supabase
               .from("strategy_analytics")
@@ -1825,7 +1898,10 @@ export function SyncPreviewStep({
                 // `series_completeness` rides this existing member of the
                 // Promise.all — the gate needs the persisted completeness
                 // verdict, and widening a column string adds no round trip.
-                "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, series_completeness",
+                // 194.1 B6 (D-15): the four record scalar aliases ride the same
+                // member. The argument is a `string`, not a literal, because
+                // postgrest-js cannot parse the `->-1` index (the row is cast below).
+                `cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, series_completeness, ${RECORD_SCALAR_ALIASES}`,
               )
               .eq("strategy_id", strategyId)
               .maybeSingle(),
@@ -1874,6 +1950,13 @@ export function SyncPreviewStep({
                   .eq("id", apiKeyId)
                   .maybeSingle()
               : Promise.resolve({ data: null as { exchange?: string } | null }),
+            // 194.1 B6 (D-15): the draft's asset class, under the owner's RLS, picks the
+            // crypto / non-crypto basis the record is judged on.
+            supabase
+              .from("strategies")
+              .select("asset_class")
+              .eq("id", strategyId)
+              .maybeSingle(),
           ]);
 
           // C-3 / SEAMRIM-02 — EVERY member binds `error`, in the same shape the
@@ -1928,7 +2011,30 @@ export function SyncPreviewStep({
             );
           }
 
-          const analytics = analyticsRes.data;
+          // 194.1 B6: a failed class read throws into the same heavy-fetch escalation as
+          // every read above. The class is NEVER defaulted: a guessed crypto basis would
+          // judge a traditional record on calendar days and print figures the published
+          // factsheet withholds.
+          if (assetClassRes.error) {
+            throw new Error(
+              `strategy asset class read failed: ${assetClassRes.error.message}`,
+            );
+          }
+
+          // The select string is not a literal (see above), so the row is typed here.
+          const analytics = analyticsRes.data as
+            | (RecordScalarRow & {
+                cagr: number | null;
+                sharpe: number | null;
+                sortino: number | null;
+                max_drawdown: number | null;
+                volatility: number | null;
+                cumulative_return: number | null;
+                sparkline_returns: unknown;
+                computed_at: string | null;
+                series_completeness: string | null;
+              })
+            | null;
           const tradeCount = tradeCountRes.count;
           const earliest = earliestRes.data;
           const latest = latestRes.data;
@@ -2085,17 +2191,32 @@ export function SyncPreviewStep({
             return "done";
           }
 
+          // 194.1 B6 (D-15): one verdict on the draft's total record gates the four
+          // annualised tiles; Max DD and Cumulative are never gated.
+          const verdict = draftFigureVerdict(
+            analytics,
+            (assetClassRes.data as { asset_class?: string | null } | null)?.asset_class,
+          );
           const metrics: FactsheetPreviewMetric[] = [
-            { label: "CAGR", value: formatCagr(analytics?.cagr ?? null) },
-            { label: "Sharpe", value: formatMetric(analytics?.sharpe ?? null) },
-            { label: "Sortino", value: formatMetric(analytics?.sortino ?? null) },
+            {
+              label: "CAGR",
+              value: formatCagr(gatedValue(analytics?.cagr, verdict.state)),
+            },
+            {
+              label: "Sharpe",
+              value: formatMetric(gatedValue(analytics?.sharpe, verdict.state)),
+            },
+            {
+              label: "Sortino",
+              value: formatMetric(gatedValue(analytics?.sortino, verdict.state)),
+            },
             {
               label: "Max DD",
               value: analytics?.max_drawdown != null ? formatCagr(analytics.max_drawdown) : "—",
             },
             {
               label: "Volatility",
-              value: analytics?.volatility != null ? formatMetric(analytics.volatility, "%") : "—",
+              value: formatMetric(gatedValue(analytics?.volatility, verdict.state), "%"),
             },
             {
               label: "Cumulative",
@@ -2115,6 +2236,7 @@ export function SyncPreviewStep({
               ? (analytics.sparkline_returns as number[])
               : null,
             computedAt: analytics?.computed_at ?? null,
+            figureNote: verdict.note,
           };
 
           setSnapshot(nextSnapshot);
@@ -2691,6 +2813,7 @@ export function SyncPreviewStep({
             sparklineReturns={snapshot.sparkline}
             computedAt={snapshot.computedAt}
             verificationState="draft"
+            figureNote={snapshot.figureNote}
           />
           <ViewFullFactsheetLink strategyId={strategyId} />
         </div>
@@ -2969,6 +3092,7 @@ export function SyncPreviewStep({
             sparklineReturns={snapshot.sparkline}
             computedAt={snapshot.computedAt}
             verificationState="draft"
+            figureNote={snapshot.figureNote}
           />
           {/* ABOVE the CTA row below (UI-SPEC:120) — a preview affordance
               subordinate to the step's primary action, so it must not sit in

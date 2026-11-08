@@ -1,0 +1,127 @@
+{
+  "_comment": "Phase 194.1 plan 11 (B12c). The ONE parity fixture for the two producers of contact_requests.portfolio_snapshot's sharpe_record: TS toSnapshotRecord(figureRecord(...)) in src/lib/intro/snapshot.ts and Python figure_record_from_scalars in analytics-service/services/metrics.py. Both suites assert every case below and assert their RECORD_SCALAR_ALIASES constant equals `aliases`. Expected spans are hand-counted (194 D-20: first to last day, both counted). Deliberately omitted: a calendar-overflow day such as 2026-02-30 (Date.parse rolls it forward, date.fromisoformat rejects it; Python freezes it unreadable, the withheld direction; producers only write real yyyy-mm-dd days).",
+  "aliases": "series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations",
+  "cases": [
+    {
+      "name": "crypto 40 days",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09",
+        "headline_since": null,
+        "record_observations": 38,
+        "crypto": true
+      },
+      "expected": { "span_days": 40, "observations": 38, "crypto": true }
+    },
+    {
+      "name": "crypto 400 days",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2027-02-04",
+        "headline_since": null,
+        "record_observations": 398,
+        "crypto": true
+      },
+      "expected": { "span_days": 400, "observations": 398, "crypto": true }
+    },
+    {
+      "name": "traditional with count 59",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09",
+        "headline_since": null,
+        "record_observations": 59,
+        "crypto": false
+      },
+      "expected": { "span_days": 40, "observations": 59, "crypto": false }
+    },
+    {
+      "name": "headline_since later than series_start: the span runs from the headline",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09",
+        "headline_since": "2026-02-01",
+        "record_observations": 9,
+        "crypto": true
+      },
+      "expected": { "span_days": 9, "observations": 9, "crypto": true }
+    },
+    {
+      "name": "headline_since present but not a date: unreadable",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09",
+        "headline_since": "garbage",
+        "record_observations": 38,
+        "crypto": true
+      },
+      "expected": { "span_days": 40, "observations": 38, "crypto": true, "unreadable": true }
+    },
+    {
+      "name": "series_end absent: the span is unknown",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": null,
+        "headline_since": null,
+        "record_observations": null,
+        "crypto": true
+      },
+      "expected": { "span_days": null, "observations": null, "crypto": true }
+    },
+    {
+      "name": "numeric-string count is no count",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09",
+        "headline_since": null,
+        "record_observations": "59",
+        "crypto": false
+      },
+      "expected": { "span_days": 40, "observations": null, "crypto": false }
+    },
+    {
+      "name": "boolean count is no count",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09",
+        "headline_since": null,
+        "record_observations": true,
+        "crypto": false
+      },
+      "expected": { "span_days": 40, "observations": null, "crypto": false }
+    },
+    {
+      "name": "headline_since earlier than series_start is ignored",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09",
+        "headline_since": "2025-12-01",
+        "record_observations": 38,
+        "crypto": true
+      },
+      "expected": { "span_days": 40, "observations": 38, "crypto": true }
+    },
+    {
+      "name": "a series end that is a datetime is not a day: unreadable, span unknown",
+      "input": {
+        "series_start": "2026-01-01",
+        "series_end": "2026-02-09T00:00:00",
+        "headline_since": null,
+        "record_observations": null,
+        "crypto": true
+      },
+      "expected": { "span_days": null, "observations": null, "crypto": true, "unreadable": true }
+    },
+    {
+      "name": "series_start absent: the span is unknown even with a headline",
+      "input": {
+        "series_start": null,
+        "series_end": "2026-02-09",
+        "headline_since": "2026-02-01",
+        "record_observations": null,
+        "crypto": true
+      },
+      "expected": { "span_days": null, "observations": null, "crypto": true }
+    }
+  ]
+}

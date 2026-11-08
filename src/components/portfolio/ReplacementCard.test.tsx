@@ -2,6 +2,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplacementCard } from "./ReplacementCard";
 import type { BridgeCandidate } from "@/lib/types";
+import { BridgeResponseSchema } from "@/lib/analytics-schemas";
+
+const { captureToSentryMock } = vi.hoisted(() => ({ captureToSentryMock: vi.fn() }));
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
 /**
  * H-1077 (audit-2026-05-07) — ReplacementCard had zero component tests.
@@ -315,5 +319,180 @@ describe("<ReplacementCard> — H-1077", () => {
       const btn = screen.getByRole("button", { name: "Requesting..." });
       expect(btn).toBeDisabled();
     });
+  });
+});
+
+/**
+ * 194.1 plan 05 (D-11 as superseded by D-15) — the Sharpe delta chip prints the producer's
+ * verdict on the two records it compares. Every expected string is hand-typed.
+ */
+describe("<ReplacementCard> — 194.1 Sharpe delta verdict", () => {
+  const FAILING_50 = { span_days: 50, observations: 50, crypto: true };
+
+  it("withheld: the Sharpe chip is a toneless dash carrying the reason in its title", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({
+          sharpe_delta: 0.4,
+          sharpe_delta_state: "withheld",
+          sharpe_delta_span_days: 50,
+          sharpe_delta_failing_record: FAILING_50,
+        })}
+        replacementFor="old-1"
+      />,
+    );
+    const chip = screen.getByText("— Sharpe");
+    expect(chip.className).toContain("text-text-muted");
+    expect(chip.className).not.toContain("text-positive");
+    expect(chip.getAttribute("title")).toBe(
+      "Changes in annualized figures appear once both records reach 90 days. The shorter covers 50 days.",
+    );
+    expect(screen.queryByText("+0.40 Sharpe")).toBeNull();
+    // MaxDD and Corr are not gated.
+    expect(screen.getByText("+4.0% MaxDD")).toBeInTheDocument();
+    expect(screen.getByText("+10.0% Corr")).toBeInTheDocument();
+  });
+
+  it("short: the delta prints with the <1y marker and its hand-typed title", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({
+          sharpe_delta: 0.4,
+          sharpe_delta_state: "short",
+          sharpe_delta_span_days: 120,
+          sharpe_delta_failing_record: null,
+        })}
+        replacementFor="old-1"
+      />,
+    );
+    const chip = screen.getByText("+0.40 Sharpe");
+    expect(chip.className).toContain("text-positive");
+    const marker = screen.getByText("<1y", { selector: "span[title]" });
+    expect(marker.getAttribute("title")).toBe("Annualized from 120 days of record, under one year.");
+    expect(chip.textContent).toContain("+0.40 Sharpe<1y");
+  });
+
+  it("short with an unreadable span prints the delta without a marker", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({ sharpe_delta_state: "short", sharpe_delta_span_days: "x" })}
+        replacementFor="old-1"
+      />,
+    );
+    expect(screen.getByText("+0.25 Sharpe")).toBeInTheDocument();
+    expect(screen.queryByText("<1y")).toBeNull();
+  });
+
+  it("full: the chip is as today, with no title and no marker", () => {
+    render(
+      <ReplacementCard
+        candidate={buildCandidate({ sharpe_delta_state: "full", sharpe_delta_span_days: 400 })}
+        replacementFor="old-1"
+      />,
+    );
+    const chip = screen.getByText("+0.25 Sharpe");
+    expect(chip.hasAttribute("title")).toBe(false);
+    expect(chip.children).toHaveLength(0);
+  });
+});
+
+describe("<ReplacementCard> — 194.1 closed-set read, legacy response, report once", () => {
+  const WIRE_BASE = {
+    strategy_id: "s-1",
+    strategy_name: "Replacement Alpha",
+    sharpe_delta: 0.4,
+    dd_delta: 0.04,
+    corr_delta: 0.1,
+    composite_score: 0.82,
+    fit_label: "Strong fit",
+  };
+
+  /** The candidate exactly as the route hands it to the card: through the wire parse. */
+  function viaWire(extra: Record<string, unknown>): BridgeCandidate {
+    return BridgeResponseSchema.parse({ candidates: [{ ...WIRE_BASE, ...extra }] })
+      .candidates[0] as BridgeCandidate;
+  }
+
+  it("a response with none of the three keys renders the chip row as before", () => {
+    const { container } = render(
+      <ReplacementCard candidate={viaWire({})} replacementFor="old-1" />,
+    );
+    const row = container.querySelector(".flex.items-center.gap-4.mb-3");
+    expect(row?.innerHTML).toBe(
+      '<span class="font-metric text-caption tabular-nums text-positive">+0.40 Sharpe</span>' +
+        '<span class="font-metric text-caption tabular-nums text-positive">+4.0% MaxDD</span>' +
+        '<span class="font-metric text-caption tabular-nums text-positive">+10.0% Corr</span>',
+    );
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a bogus string", "bogus"],
+    ["a number", 5],
+  ])("state %s: the parse survives, the Sharpe chip is the dash, one report across re-renders", (_n, state) => {
+    const candidate = viaWire({ sharpe_delta_state: state });
+    const { rerender } = render(<ReplacementCard candidate={candidate} replacementFor="old-1" />);
+    rerender(<ReplacementCard candidate={candidate} replacementFor="old-1" />);
+    rerender(<ReplacementCard candidate={{ ...candidate }} replacementFor="old-1" />);
+
+    const chip = screen.getByText("— Sharpe");
+    expect(chip.className).toContain("text-text-muted");
+    expect(screen.queryByText("+0.40 Sharpe")).toBeNull();
+    expect(screen.getByText("+4.0% MaxDD")).toBeInTheDocument();
+    expect(screen.getByText("+10.0% Corr")).toBeInTheDocument();
+    expect(screen.getByText("Strong fit")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Request Intro" })).toBeInTheDocument();
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1]).toMatchObject({
+      tags: { component: "ReplacementCard", stage: "delta-state-unrecognised" },
+      extra: { state: String(state) },
+    });
+  });
+
+  it("withheld with an unreadable failing record: the dash, no restated sentence, reported once", () => {
+    const candidate = viaWire({
+      sharpe_delta_state: "withheld",
+      sharpe_delta_failing_record: { span_days: "x" },
+    });
+    const { container, rerender } = render(
+      <ReplacementCard candidate={candidate} replacementFor="old-1" />,
+    );
+    rerender(<ReplacementCard candidate={candidate} replacementFor="old-1" />);
+    const chip = screen.getByText("— Sharpe");
+    expect(chip.hasAttribute("title")).toBe(false);
+    expect(container.querySelector(".sr-only")).toBeNull();
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1]).toMatchObject({
+      tags: { component: "ReplacementCard", stage: "delta-record-unreadable" },
+    });
+  });
+
+  it("a readable withheld record is not reported", () => {
+    render(
+      <ReplacementCard
+        candidate={viaWire({
+          sharpe_delta_state: "withheld",
+          sharpe_delta_failing_record: { span_days: 50, observations: 50, crypto: true },
+        })}
+        replacementFor="old-1"
+      />,
+    );
+    expect(screen.getByText("— Sharpe")).toBeInTheDocument();
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("state full: MaxDD and Corr chips, fit badge and intro button are as today", () => {
+    render(
+      <ReplacementCard
+        candidate={viaWire({ sharpe_delta_state: "full", sharpe_delta_span_days: 400 })}
+        replacementFor="old-1"
+      />,
+    );
+    expect(screen.getByText("+0.40 Sharpe")).toBeInTheDocument();
+    expect(screen.getByText("+4.0% MaxDD")).toBeInTheDocument();
+    expect(screen.getByText("+10.0% Corr")).toBeInTheDocument();
+    expect(screen.getByText("Strong fit")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Request Intro" })).toBeInTheDocument();
+    expect(captureToSentryMock).not.toHaveBeenCalled();
   });
 });

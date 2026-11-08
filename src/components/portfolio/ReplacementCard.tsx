@@ -1,10 +1,19 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import type { BridgeCandidate, BridgeFitLabel, Improvement } from "@/lib/types";
 import { asImprovement } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import {
+  SHORT_TRACK_MARKER,
+  gatedValue,
+  shortTrackMarkerTitle,
+  widenedWithheldReason,
+  type FigureState,
+} from "@/lib/figure-gate";
+import { captureToSentry } from "@/lib/sentry-capture";
+import { parseLiftState, parseWireFigureRecord } from "@/lib/portfolio-analytics-adapter";
 
 const FIT_STYLES: Record<BridgeFitLabel, string> = {
   "Strong fit": "bg-positive/10 text-positive",
@@ -124,8 +133,53 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
   // "higher-better" — asImprovement keeps the sign and deltaColor greens positive.
   const improvementOf = (raw: number | null): Improvement | null =>
     raw === null ? null : asImprovement(raw, "higher-better");
+
+  // 194.1 D-11 / D-15: the producer's verdict on the two records the Sharpe delta compares.
+  // Read, never re-derived. An ABSENT state (an analytics deploy older than this change) shows the
+  // delta as before. A PRESENT state outside the closed set is not unknown: it fails closed to
+  // withheld (194 R2-M2). MaxDD and Corr are not annualized figures and are never gated.
+  const rawDeltaState = candidate.sharpe_delta_state;
+  const parsedDeltaState = parseLiftState(rawDeltaState);
+  const stateUnrecognised = rawDeltaState != null && parsedDeltaState === null;
+  const deltaState: FigureState = stateUnrecognised ? "withheld" : (parsedDeltaState ?? "null");
+  const failingRecord = parseWireFigureRecord(candidate.sharpe_delta_failing_record);
+  const recordUnreadable = deltaState === "withheld" && failingRecord === null;
+  // 194 R2-M1 / R2-M2: report a malformed wire value once per value, not once per render.
+  const deltaStateText = String(rawDeltaState);
+  useEffect(() => {
+    if (!stateUnrecognised && !recordUnreadable) return;
+    captureToSentry(
+      new Error(
+        stateUnrecognised
+          ? "the bridge candidate carried an unrecognised sharpe_delta_state"
+          : "the bridge candidate's withheld Sharpe delta carried an unreadable failing record",
+      ),
+      {
+        level: "warning",
+        tags: {
+          component: "ReplacementCard",
+          stage: stateUnrecognised ? "delta-state-unrecognised" : "delta-record-unreadable",
+        },
+        extra: { state: deltaStateText },
+      },
+    );
+  }, [stateUnrecognised, recordUnreadable, deltaStateText]);
+  const deltaSpan =
+    typeof candidate.sharpe_delta_span_days === "number" &&
+    Number.isFinite(candidate.sharpe_delta_span_days)
+      ? candidate.sharpe_delta_span_days
+      : null;
+  // A withheld chip with no readable record carries no reason text (nothing true to say).
+  const withheldReason =
+    deltaState === "withheld" && failingRecord !== null
+      ? widenedWithheldReason("delta", failingRecord)
+      : null;
+  const shortTitle =
+    deltaState === "short" && deltaSpan !== null ? shortTrackMarkerTitle(deltaSpan) : null;
+  const sharpeDelta = gatedValue(candidate.sharpe_delta, deltaState);
+
   const deltas: { label: string; raw: number | null; improvement: Improvement | null }[] = [
-    { label: "Sharpe", raw: candidate.sharpe_delta, improvement: improvementOf(candidate.sharpe_delta) },
+    { label: "Sharpe", raw: sharpeDelta, improvement: improvementOf(sharpeDelta) },
     { label: "MaxDD",  raw: candidate.dd_delta,     improvement: improvementOf(candidate.dd_delta) },
     { label: "Corr",   raw: candidate.corr_delta,   improvement: improvementOf(candidate.corr_delta) },
   ];
@@ -149,17 +203,33 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
 
       {/* Metric deltas */}
       <div className="flex items-center gap-4 mb-3">
-        {deltas.map((d) => (
-          <span
-            key={d.label}
-            className={cn(
-              "font-metric text-caption tabular-nums",
-              deltaColor(d.improvement, d.label),
-            )}
-          >
-            {formatDelta(d.raw, d.label)}
-          </span>
-        ))}
+        {deltas.map((d) => {
+          const isSharpe = d.label === "Sharpe";
+          return (
+            <span
+              key={d.label}
+              title={isSharpe && withheldReason ? withheldReason : undefined}
+              className={cn(
+                "font-metric text-caption tabular-nums",
+                deltaColor(d.improvement, d.label),
+              )}
+            >
+              {formatDelta(d.raw, d.label)}
+              {isSharpe && withheldReason && (
+                <span className="sr-only"> {withheldReason}</span>
+              )}
+              {isSharpe && shortTitle && (
+                <span
+                  title={shortTitle}
+                  className="ml-1 inline-block min-w-[3ch] text-right align-baseline text-micro font-mono tabular-nums text-text-muted"
+                >
+                  {SHORT_TRACK_MARKER}
+                  <span className="sr-only"> {shortTitle}</span>
+                </span>
+              )}
+            </span>
+          );
+        })}
       </div>
 
       {/* Intro button */}

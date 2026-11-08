@@ -11,6 +11,7 @@ from services.bridge_scoring import (
     CORR_SCALE,
     DD_SCALE,
 )
+from services.portfolio_optimizer import _compute_sharpe
 
 
 def _make_returns(seed: int, n: int = 60, mu: float = 0.001, sigma: float = 0.02) -> pd.Series:
@@ -386,3 +387,115 @@ class TestBaselineWindowAlignment:
             "a multi-strategy portfolio with dup dates on different days must "
             "dedupe to its clean twin, not 500 in the DataFrame constructor"
         )
+
+
+# ---------------------------------------------------------------------------
+# 194.1 plan 05: the D-15 verdict on the Bridge Sharpe delta (194-22's shape).
+# ---------------------------------------------------------------------------
+
+_BOOK_CRYPTO = {"s1": "crypto", "s2": "crypto"}
+_VERDICT_KEYS = {
+    "sharpe_delta_span_days",
+    "sharpe_delta_state",
+    "sharpe_delta_failing_record",
+}
+
+
+def _daily(n: int, start: str, seed: int) -> pd.Series:
+    dates = pd.date_range(start, periods=n, freq="D")
+    rng = np.random.default_rng(seed)
+    return pd.Series(rng.normal(0.001, 0.02, n), index=dates)
+
+
+def _bridge(book_n: int, cand_n: int, asset_classes, cand_start: str = "2025-01-01"):
+    portfolio = {"s1": _daily(book_n, "2025-01-01", 1), "s2": _daily(book_n, "2025-01-01", 2)}
+    candidates = {"c1": _daily(cand_n, cand_start, 3)}
+    out = find_replacement_candidates(
+        portfolio,
+        candidates,
+        {"s1": 0.5, "s2": 0.5},
+        incumbent_strategy_id="s2",
+        asset_classes=asset_classes,
+    )
+    return portfolio, candidates, out
+
+
+class TestSharpeDeltaVerdict:
+    def test_short_crypto_candidate_is_withheld_with_its_own_record(self):
+        _, cand, out = _bridge(400, 50, {**_BOOK_CRYPTO, "c1": "crypto"}, cand_start="2025-03-01")
+        assert len(out) == 1
+        assert out[0]["sharpe_delta_state"] == "withheld"
+        assert out[0]["sharpe_delta_failing_record"] == {
+            "span_days": 50,
+            "observations": 50,
+            "crypto": True,
+        }
+        assert out[0]["sharpe_delta_span_days"] == 50
+        assert len(cand["c1"]) == 50
+
+    def test_overlap_under_a_year_is_short_with_the_fixtures_own_span(self):
+        # Candidate 120 days from the book's start; the overlap is those 120 days.
+        portfolio, cand, out = _bridge(400, 120, {**_BOOK_CRYPTO, "c1": "crypto"})
+        overlap = portfolio["s1"].index.intersection(cand["c1"].index)
+        expected_span = (overlap[-1] - overlap[0]).days + 1  # D-20, from the fixture's dates
+        assert expected_span == 120
+        assert out[0]["sharpe_delta_state"] == "short"
+        assert out[0]["sharpe_delta_span_days"] == expected_span
+        assert out[0]["sharpe_delta_failing_record"] is None
+
+    def test_full_when_both_records_and_the_overlap_reach_a_year(self):
+        _, _, out = _bridge(400, 400, {**_BOOK_CRYPTO, "c1": "crypto"})
+        assert out[0]["sharpe_delta_state"] == "full"
+        assert out[0]["sharpe_delta_failing_record"] is None
+        assert out[0]["sharpe_delta_span_days"] == 400
+
+    def test_candidate_without_an_asset_class_counts_as_crypto(self):
+        # 70 obs / 70 days: clears the non-crypto 60-observation bound, fails crypto's 90 days.
+        _, _, out = _bridge(400, 70, dict(_BOOK_CRYPTO), cand_start="2025-03-01")
+        assert out[0]["sharpe_delta_state"] == "withheld"
+        assert out[0]["sharpe_delta_failing_record"] == {
+            "span_days": 70,
+            "observations": 70,
+            "crypto": True,
+        }
+
+    def test_short_crypto_book_is_judged_on_the_books_class(self):
+        # A 62-day book (62 obs, under 90 days): as non-crypto 62 observations would clear
+        # and the state would be "short"; as a crypto book it is withheld on the BOOK's record.
+        portfolio, _, out = _bridge(62, 400, {**_BOOK_CRYPTO, "c1": "crypto"})
+        book_days = (portfolio["s1"].index[-1] - portfolio["s1"].index[0]).days + 1
+        assert book_days == 62
+        assert len(out) == 1
+        assert out[0]["sharpe_delta_state"] == "withheld"
+        assert out[0]["sharpe_delta_failing_record"] == {
+            "span_days": book_days,
+            "observations": 62,
+            "crypto": True,
+        }
+        _, _, trad = _bridge(62, 400, {"s1": "traditional", "s2": "traditional", "c1": "traditional"})
+        assert trad[0]["sharpe_delta_state"] == "short"
+
+    def test_the_verdict_never_moves_the_score_or_the_order(self):
+        portfolio = {"s1": _daily(400, "2025-01-01", 1), "s2": _daily(400, "2025-01-01", 2)}
+        candidates = {f"c{i}": _daily(40 + 90 * i, "2025-01-01", 10 + i) for i in range(4)}
+        out = find_replacement_candidates(
+            portfolio, candidates, {"s1": 0.5, "s2": 0.5}, incumbent_strategy_id="s2",
+            asset_classes={"s1": "traditional", "s2": "traditional"},
+        )
+        assert len(out) == 4
+        # Every verdict is present, and the states differ across the list (the gate is live)...
+        assert {r["sharpe_delta_state"] for r in out} >= {"short", "withheld"}
+        assert all(_VERDICT_KEYS <= set(r) for r in out)
+        # ...while the stored delta and the score stay exactly what the scorer measured:
+        # an independent recompute over each candidate's own overlap, never the gated value.
+        w = np.array([0.5, 0.5])
+        for r in out:
+            c = candidates[r["strategy_id"]]
+            frame = pd.concat([portfolio["s1"], c.rename("c")], axis=1).dropna()
+            cur = (pd.concat([portfolio["s1"], portfolio["s2"]], axis=1).loc[frame.index] * w).sum(axis=1)
+            new = (frame * w).sum(axis=1)
+            assert r["sharpe_delta"] == pytest.approx(
+                _compute_sharpe(new, periods_per_year=252) - _compute_sharpe(cur, periods_per_year=252)
+            )
+        scores = [r["composite_score"] for r in out]
+        assert scores == sorted(scores, reverse=True)
