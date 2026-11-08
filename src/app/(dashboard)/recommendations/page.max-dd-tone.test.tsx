@@ -69,7 +69,17 @@ vi.mock("@/lib/supabase/server", () => ({
         Promise.resolve(
           table === "strategy_analytics"
             ? { data: seeded.statusRows, error: seeded.statusError }
-            : { data: [], error: null },
+            // 194.1 plan 07 (B5): the page's bounded, published-only `strategies` read
+            // answers `id, asset_class` for the recommended ids.
+            : table === "strategies"
+              ? {
+                  data: (seeded.recs as Array<{ strategy_id: string }>).map((r) => ({
+                      id: r.strategy_id,
+                      asset_class: "crypto",
+                    })),
+                  error: null,
+                }
+              : { data: [], error: null },
         ).then(onFulfilled);
       return chain;
     },

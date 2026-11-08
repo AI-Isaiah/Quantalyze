@@ -526,6 +526,52 @@ describe("BridgeResponseSchema", () => {
 });
 
 /**
+ * 194.1 plan 05 — the three Sharpe-delta verdict keys are typed PERMISSIVELY. A known field that
+ * fails to parse throws the whole Bridge response, so no wire value of them may fail the parse;
+ * the card reads them closed-set. Raw values must survive the parse for that read.
+ */
+describe("BridgeCandidateSchema — Sharpe delta verdict keys (194.1)", () => {
+  const FAILING = { span_days: 50, observations: 50, crypto: true };
+
+  it("parses a candidate carrying the three keys and keeps them", () => {
+    const parsed = BridgeResponseSchema.parse({
+      candidates: [
+        {
+          ...VALID_CANDIDATE,
+          sharpe_delta_span_days: 50,
+          sharpe_delta_state: "withheld",
+          sharpe_delta_failing_record: FAILING,
+        },
+      ],
+    });
+    expect(parsed.candidates[0]).toMatchObject({
+      sharpe_delta_span_days: 50,
+      sharpe_delta_state: "withheld",
+      sharpe_delta_failing_record: FAILING,
+    });
+  });
+
+  it("parses a candidate without them (an older analytics deploy)", () => {
+    const parsed = BridgeResponseSchema.parse({ candidates: [VALID_CANDIDATE] });
+    expect(parsed.candidates[0].sharpe_delta_state).toBeUndefined();
+  });
+
+  it.each([
+    ["a bogus string", { sharpe_delta_state: "bogus" }],
+    ["a number", { sharpe_delta_state: 5 }],
+    ["null", { sharpe_delta_state: null, sharpe_delta_failing_record: null }],
+    ["a malformed record", { sharpe_delta_state: "withheld", sharpe_delta_failing_record: { span_days: "x" } }],
+    ["a string span", { sharpe_delta_span_days: "120" }],
+  ])("does not throw the whole response on %s, and keeps the raw value", (_name, extra) => {
+    const parsed = BridgeResponseSchema.parse({
+      candidates: [VALID_CANDIDATE, { ...VALID_CANDIDATE, strategy_id: "strat-b", ...extra }],
+    });
+    expect(parsed.candidates).toHaveLength(2);
+    expect(parsed.candidates[1]).toMatchObject(extra);
+  });
+});
+
+/**
  * [140.3-03 / SEAMUX-07] LivePermissionsSchema — the PUBLISH GATE's contract.
  *
  * This schema is not a display contract. Two call sites turn this body into a

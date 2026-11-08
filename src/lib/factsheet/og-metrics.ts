@@ -14,13 +14,14 @@ import { headlineVerdict, storedCashHeadlineGate } from "@/lib/factsheet/headlin
  *    dispersion still has no Sharpe (`return-stats`), and that NaN is "—".
  *  - Sharpe rides the FREQUENCY clock: annualized on the strategy's asset-class
  *    basis (√365 crypto / √252 traditional) via `annualizationPeriods`. #597.
- *  - CAGR rides the CALENDAR clock (elapsed days / 365.25, asset-class-invariant)
- *    and is shown ONLY when the track spans ≥ 0.95 calendar years (exception E1,
- *    D-11) — a dense sub-year series (e.g. 300 trading days) is NOT enough.
- *    Otherwise NaN. A STORED CAGR is subject to E1 and E2 (below) and to nothing
- *    else; the positive-growth guard (`Math.pow` of a non-positive base is
- *    undefined) protects only a CAGR the card COMPUTES because the embed did not
- *    carry the key (B10).
+ *  - CAGR rides the CALENDAR clock (elapsed days / 365.25, asset-class-invariant).
+ *    A STORED CAGR prints at any span, as on the factsheet strip, and is subject to
+ *    E2 (below) and to nothing else. A CAGR the card COMPUTES (the embed did not
+ *    carry the key) needs a positive calendar span and a positive cumulative growth
+ *    (`Math.pow` of a non-positive base is undefined, B10) and must come out
+ *    finite; otherwise NaN. Whether the record is long enough to show annualized
+ *    figures at all is the route's call (the total-record gate, 194 D-15), not this
+ *    helper's.
  *  - maxDd is the peak-to-trough drawdown over the finite-value series, measured
  *    on at least two finite values; fewer is NaN, never a measured-looking 0.
  *  - NaN is the sentinel the card renders as "—" (hide). All three default to NaN.
@@ -50,10 +51,12 @@ import { headlineVerdict, storedCashHeadlineGate } from "@/lib/factsheet/headlin
  * value in their place. A Dated row (valid `headline_since`) shows its stored
  * Sharpe and Max DD, as the strip does.
  *
- * The card keeps exactly two NAMED CAGR differences from the factsheet (D-11), and
- * the parity test (`route.stored-parity.test.tsx`) enumerates them:
- *  - E1: a span under 0.95 calendar years. The card will not annualize a short
- *    record; the factsheet still prints its stored CAGR.
+ * 194.1 plan 06 (2026-11-08; census B3, 194 D-15): E1, the card's own sub-year CAGR
+ * rule, was dropped. Above D-15's minimum every KPI shows, CAGR included, so the card
+ * no longer second-guesses a stored CAGR by its calendar span.
+ *
+ * The card keeps exactly one NAMED CAGR difference from the factsheet (D-11), and
+ * the parity test (`route.stored-parity.test.tsx`) enumerates it:
  *  - E2 (169.4.1 review round 1, CR-01 / SFH-01, the D-46 chain-broken rule): the
  *    stored CAGR can cover a SHORTER span than the card's resolved series, which
  *    covers the whole record. The analytics service annualizes it over the suffix
@@ -155,28 +158,37 @@ export function computeOgHeadline(
   maxDd =
     stored?.max_drawdown !== undefined ? storedFigure(stored.max_drawdown) : values.length >= 2 ? dd : NaN;
 
-  // CAGR on the CALENDAR span, not the observation count: a sparse-but-
-  // year-long tradfi series qualifies; a dense 300-trading-day crypto series
-  // still does not (E1: years >= 0.95).
-  const times = finite
-    .map(r => (typeof r.date === "string" ? Date.parse(r.date) : NaN))
-    .filter(t => Number.isFinite(t));
-  if (times.length >= 2) {
-    const years = calendarYears(Math.min(...times), Math.max(...times));
-    if (years >= 0.95) {
-      if (stored?.cagr !== undefined) {
-        // B10: a STORED CAGR is subject to E1 and E2 only. Whatever the series'
-        // own cumulative growth, the stored figure never passes through it.
-        cagr = storedCagrCoversSuffixOnly ? NaN : storedFigure(stored.cagr);
-      } else if (cum > 0) {
-        // The computed fallback: `Math.pow` of a non-positive base is undefined.
-        cagr = Math.pow(cum, 1 / years) - 1;
+  // CAGR. A STORED CAGR prints at any span (194.1: E1 dropped) and is subject to E2
+  // only; whatever the series' own cumulative growth, the stored figure never passes
+  // through it (B10). The computed fallback rides the CALENDAR span, not the
+  // observation count, and needs a positive span.
+  if (stored?.cagr !== undefined) {
+    cagr = storedCagrCoversSuffixOnly ? NaN : storedFigure(stored.cagr);
+  } else {
+    const times = finite
+      .map(r => (typeof r.date === "string" ? Date.parse(r.date) : NaN))
+      .filter(t => Number.isFinite(t));
+    if (times.length >= 2) {
+      const years = calendarYears(Math.min(...times), Math.max(...times));
+      // `Math.pow` of a non-positive base is undefined; a zero span divides by zero.
+      if (years > 0 && cum > 0) {
+        const computed = Math.pow(cum, 1 / years) - 1;
+        cagr = Number.isFinite(computed) ? computed : NaN;
       }
     }
   }
 
   return { sharpe, cagr, maxDd };
 }
+
+/**
+ * Phase 194.1 plan 06 (2026-11-08): the version of the card's figure rules, carried by the
+ * factsheet's published OG URL (`?v=`). Bump it whenever the card's figure rules change, so
+ * the CDN and the unfurlers' own caches, which key a card by URL, are not answered under the
+ * new URL with a card rendered under the old rules. The route NEVER reads it: it only moves
+ * which cache entry answers.
+ */
+export const OG_CARD_VERSION = "2";
 
 /** A stored figure as the card renders it: a finite number, else NaN ("—"),
  *  the same rule as the factsheet's strict overlay (`overlayBasisScalars`). */

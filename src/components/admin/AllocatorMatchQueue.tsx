@@ -68,6 +68,9 @@ export interface CandidateRow {
     aum: number | null;
     max_capacity: number | null;
     user_id: string;
+    // 194.1 B12b: the basis `recordFromScalars` judges the record on. Optional: absent is
+    // an unknown class, never a default one.
+    asset_class?: string | null;
   } | null;
   analytics: {
     sharpe: number | null;
@@ -78,6 +81,11 @@ export interface CandidateRow {
     six_month_return: number | null;
     cumulative_return: number | null;
     sparkline_returns: unknown;
+    // The four record scalar aliases appended to the bulk read (RECORD_SCALAR_ALIASES).
+    series_start?: unknown;
+    series_end?: unknown;
+    headline_since?: unknown;
+    record_observations?: unknown;
   } | null;
 }
 

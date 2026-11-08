@@ -235,11 +235,13 @@ ALLOWED_RETURNS_SERIES_REFS: dict[str, _Allowance] = {
     "services/metrics.py": _Allowance(
         selects=0,
         logs=0,
-        sites={"compute_all_metrics": 6},
+        sites={"compute_all_metrics": 6, "<module>": 1},
         reason=(
             "the WRITER: compute_all_metrics builds the stored curve (a local list "
             "of {date, value} points, its downsample, its cap, and the metrics-dict "
-            "key). It produces the column, it does not read one."
+            "key). It produces the column, it does not read one. 194.1: the module "
+            "constant RECORD_SCALAR_ALIASES names two JSON-path scalar aliases "
+            "(the first and last point's date) for a select; it loads no curve."
         ),
     ),
     "services/strategy_matching.py": _Allowance(
@@ -309,13 +311,18 @@ def _classify_source(source: str) -> list[_Ref]:
         parent = parents.get(n)
         kind = KIND_SITE
         columns = ""
+        # 194.1: a select column list composed as an f-string or a `+` concatenation is still
+        # one select argument, so look through the composition to the enclosing call.
+        arg, call = n, parent
+        while isinstance(call, (ast.JoinedStr, ast.BinOp)):
+            arg, call = call, parents.get(call)
         if (
             isinstance(n, ast.Constant)
-            and isinstance(parent, ast.Call)
-            and n in parent.args
-            and isinstance(parent.func, ast.Attribute)
+            and isinstance(call, ast.Call)
+            and arg in call.args
+            and isinstance(call.func, ast.Attribute)
         ):
-            func = parent.func
+            func = call.func
             if func.attr == "select":
                 kind, columns = KIND_SELECT, str(n.value)
             elif (

@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { castRow, castRowOrNull, castRows } from "@/lib/supabase/cast";
+import { RECORD_SCALAR_ALIASES } from "@/lib/figure-record-scalars";
 
 /**
  * Shared payload builder for the per-allocator Match Queue.
@@ -176,7 +177,7 @@ export async function getAllocatorMatchPayload(
     .select(
       "id, strategy_id, score, score_breakdown, reasons, rank, exclusion_reason, exclusion_provenance, " +
         "strategies!match_candidates_strategy_id_fkey(id, name, codename, disclosure_tier, " +
-        "strategy_types, supported_exchanges, aum, max_capacity, user_id)",
+        "strategy_types, supported_exchanges, aum, max_capacity, user_id, asset_class)",
     )
     .eq("batch_id", batchRow.id as string)
     .order("rank", { ascending: true, nullsFirst: false });
@@ -201,7 +202,11 @@ export async function getAllocatorMatchPayload(
   if (strategyIds.length > 0) {
     const { data: analyticsRows, error: analyticsErr } = await admin
       .from("strategy_analytics")
-      .select(STRATEGY_ANALYTICS_MATCH_COLUMNS)
+      // 194.1 B12b (D-12 / D-15): the four record scalar aliases are appended HERE and not to
+      // STRATEGY_ANALYTICS_MATCH_COLUMNS, because the schema-sync backstop checks that every
+      // name in that constant is a real column and an alias like `series_end:...->-1->>date`
+      // is not one. `CandidateDetail` judges Sharpe, CAGR and Volatility on this record.
+      .select(`${STRATEGY_ANALYTICS_MATCH_COLUMNS}, ${RECORD_SCALAR_ALIASES}`)
       .in("strategy_id", strategyIds);
     // Fail loud, matching the fan-out error convention above (lines ~133-137).
     // The pre-fix code swallowed this error: a bad projection (e.g. the old

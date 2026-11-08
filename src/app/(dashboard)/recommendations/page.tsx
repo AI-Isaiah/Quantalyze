@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { unstable_noStore as noStore } from "next/cache";
 import { redirect } from "next/navigation";
@@ -8,12 +9,20 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
+import { annualizedCell } from "@/components/strategy/annualized-cell";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { drawdownTone } from "@/lib/factsheet/display-sign";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { deriveMandateIsSet } from "@/lib/queries";
+import { gateAnnualized, gatedValue, type FigureRecord, type FigureState } from "@/lib/figure-gate";
+import {
+  RECORD_SCALAR_ALIASES,
+  recordFromScalars,
+  type RecordScalarRow,
+} from "@/lib/figure-record-scalars";
+import { withPublishedOnly } from "@/lib/visibility";
 import type { AllocatorOwnPreferences } from "@/lib/preferences";
 
 export const metadata: Metadata = { title: "Recommendations" };
@@ -258,16 +267,32 @@ export default async function RecommendationsPage() {
   // venue's records came in (plan 09 preserves it on failed rows for the same
   // reason, D-06/D-10).
   const tradesFetchedAtById = new Map<string, string | null>();
+  // Phase 194.1 plan 07 (2026-11-08; census B5, 194 D-04 as superseded by D-15) — each
+  // card's CAGR and Sharpe are judged on THAT strategy's total record. The four record
+  // scalar aliases ride the same bounded status read (`RECORD_SCALAR_ALIASES` replaces
+  // the lone `series_end` alias, which they include), and the asset class comes from one
+  // bounded, published-only `strategies` read because the RPC returns none.
+  const scalarsById = new Map<string, RecordScalarRow>();
+  const assetClassById = new Map<string, string | null>();
+  // Fail closed: false when the asset-class read errored, so every card's annualised
+  // figures are nulled like an unverified run's (no invented reason).
+  let assetClassReadOk = true;
   if (recRows.length > 0) {
-    const { data: statusRows, error: statusError } = await supabase
-      .from("strategy_analytics")
-      .select(
-        "strategy_id, computation_status, trades_fetched_at, series_end:returns_series->-1->>date",
-      )
-      .in(
-        "strategy_id",
-        recRows.map((r) => r.strategy_id),
-      );
+    const recIds = recRows.map((r) => r.strategy_id);
+    const [
+      { data: statusRows, error: statusError },
+      { data: classRows, error: classError },
+    ] = await Promise.all([
+      supabase
+        .from("strategy_analytics")
+        .select(
+          `strategy_id, computation_status, trades_fetched_at, ${RECORD_SCALAR_ALIASES}`,
+        )
+        .in("strategy_id", recIds),
+      withPublishedOnly(
+        supabase.from("strategies").select("id, asset_class").in("id", recIds),
+      ),
+    ]);
     if (statusError) {
       // error-absent ≠ legit-absent (Rule 12): log the breadcrumb so a
       // schema/RLS fault is debuggable. The empty map already fails closed.
@@ -279,15 +304,38 @@ export default async function RecommendationsPage() {
     // The cast covers one postgrest-js TYPE-LEVEL limitation: its select
     // parser cannot read a negative JSONB index (the same cast, and the same
     // measured server behaviour, as `getStrategiesByCategory`).
-    for (const r of (statusRows ?? []) as unknown as Array<{
-      strategy_id: string;
-      computation_status: string | null;
-      series_end: string | null;
-      trades_fetched_at: string | null;
-    }>) {
+    for (const r of (statusRows ?? []) as unknown as Array<
+      RecordScalarRow & {
+        strategy_id: string;
+        computation_status: string | null;
+        series_end: string | null;
+        trades_fetched_at: string | null;
+      }
+    >) {
       computedById.set(r.strategy_id, isRankableAnalyticsRow(r));
       seriesEndById.set(r.strategy_id, r.series_end ?? null);
       tradesFetchedAtById.set(r.strategy_id, r.trades_fetched_at ?? null);
+      scalarsById.set(r.strategy_id, r);
+    }
+    if (classError) {
+      assetClassReadOk = false;
+      console.error(
+        "[recommendations] strategies asset_class read failed:",
+        classError.message,
+      );
+    } else {
+      for (const r of (classRows ?? []) as Array<{ id: string; asset_class: string | null }>) {
+        assetClassById.set(r.id, r.asset_class ?? null);
+      }
+      // A missing row (RLS or the published filter hid it, or the id is gone) is never
+      // read as a default class: either default would let the wrong minimum decide.
+      const missing = recIds.filter((id) => !assetClassById.has(id));
+      if (missing.length > 0) {
+        console.error(
+          "[recommendations] strategies asset_class read returned no row for:",
+          missing.join(", "),
+        );
+      }
     }
   }
 
@@ -308,9 +356,21 @@ export default async function RecommendationsPage() {
       computed_at: string | null;
       series_end: string | null;
       trades_fetched_at: string | null;
+      // B5: the per-card record verdict. `"null"` for an unverified run or an unknown
+      // asset class, so those keep today's plain dash.
+      figure_state: FigureState;
+      record: FigureRecord;
     };
   }> = recRows.map((row) => {
     const computed = computedById.get(row.strategy_id) === true;
+    // `.has`, never a `?? "crypto"` / `?? "traditional"` fallback (see above).
+    const classKnown = assetClassReadOk && assetClassById.has(row.strategy_id);
+    const record = recordFromScalars(
+      scalarsById.get(row.strategy_id),
+      assetClassById.get(row.strategy_id),
+    );
+    const figureState: FigureState =
+      computed && classKnown ? gateAnnualized(record) : "null";
     return {
       id: row.id,
       strategy_id: row.strategy_id,
@@ -326,14 +386,18 @@ export default async function RecommendationsPage() {
         // em-dash. The card keeps its rank, name, category and reasons — the
         // match SCORE is computed by the batch engine and is not a claim about
         // a current analytics run, so the recommendation itself stands.
-        cagr: computed ? row.cagr : null,
-        sharpe: computed ? row.sharpe : null,
+        // CAGR and Sharpe also need a known asset class and a record that clears
+        // the minimum (B5 / D-15); Max DD is never gated by the record.
+        cagr: computed && classKnown ? gatedValue(row.cagr, figureState) : null,
+        sharpe: computed && classKnown ? gatedValue(row.sharpe, figureState) : null,
         max_drawdown: computed ? row.max_drawdown : null,
         computed_at: computed ? (row.analytics_computed_at ?? null) : null,
         // Gated like the figures: an unverified run makes no age claim either.
         series_end: computed ? (seriesEndById.get(row.strategy_id) ?? null) : null,
         // NOT gated on `computed` — see `tradesFetchedAtById` above.
         trades_fetched_at: tradesFetchedAtById.get(row.strategy_id) ?? null,
+        figure_state: figureState,
+        record,
       },
     };
   });
@@ -501,6 +565,8 @@ function RecommendationCard({
       computed_at: string | null;
       series_end: string | null;
       trades_fetched_at: string | null;
+      figure_state: FigureState;
+      record: FigureRecord;
     };
   };
 }) {
@@ -550,8 +616,22 @@ function RecommendationCard({
             </p>
           )}
           <div className="mt-3 flex items-center gap-4 text-xs">
-            <Metric label="CAGR" value={formatPercent(strategy.cagr)} />
-            <Metric label="Sharpe" value={formatNumber(strategy.sharpe)} />
+            <Metric
+              label="CAGR"
+              value={annualizedCell(
+                formatPercent(strategy.cagr),
+                strategy.figure_state,
+                strategy.record,
+              )}
+            />
+            <Metric
+              label="Sharpe"
+              value={annualizedCell(
+                formatNumber(strategy.sharpe),
+                strategy.figure_state,
+                strategy.record,
+              )}
+            />
             <Metric
               label="Max DD"
               value={formatPercent(strategy.max_drawdown)}
@@ -578,7 +658,7 @@ function Metric({
   negative,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   negative?: boolean;
 }) {
   return (

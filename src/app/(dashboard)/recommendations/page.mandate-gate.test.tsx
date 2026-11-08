@@ -115,7 +115,17 @@ vi.mock("@/lib/supabase/server", () => ({
         return Promise.resolve(
           table === "strategy_analytics"
             ? { data: rows, error: seeded.statusError }
-            : { data: [], error: null },
+            // 194.1 plan 07 (B5): the page's bounded, published-only `strategies` read
+            // answers `id, asset_class` for the recommended ids.
+            : table === "strategies"
+              ? {
+                  data: (seeded.recs as Array<{ strategy_id: string }>).map((r) => ({
+                      id: r.strategy_id,
+                      asset_class: "crypto",
+                    })),
+                  error: null,
+                }
+              : { data: [], error: null },
         ).then(onFulfilled);
       };
       return chain;
@@ -630,7 +640,8 @@ describe("SC8 · /recommendations — every recommended record states where its 
     // 167.1.2.2.2 / SC-4 — the cron's trade-fetch record rides the same read.
     expect(cols).toContain("trades_fetched_at");
     // The whole returns_series blob is never projected; only the arrow alias.
-    expect(cols.replace("returns_series->-1->>date", "")).not.toContain("returns_series");
+    // 194.1 plan 07 (B5): the record scalar aliases add `->0->>date`, the same shape.
+    expect(cols.replace(/returns_series->-?\d+->>date/g, "")).not.toContain("returns_series");
   });
 });
 

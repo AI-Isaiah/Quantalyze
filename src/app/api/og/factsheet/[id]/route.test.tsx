@@ -201,9 +201,9 @@ const WEALTH_INDEX = [
 ];
 
 /**
- * A real-length wealth curve: 400 calendar days from 2024-01-01, so the
- * differenced series clears the card's one display rule (a span over 0.95
- * calendar years, for CAGR; Sharpe and Max DD have no card-only floor, D-06).
+ * A real-length wealth curve: 400 calendar days from 2024-01-01, a record long
+ * enough to clear 194 D-15's minimum and to need no short-track note, so every
+ * headline figure is finite (the card has no card-only floor or span rule, D-06).
  * Deterministic by construction — a fixed drift plus a fixed oscillation, no
  * randomness — so the finiteness assertions can never flake.
  */
@@ -401,8 +401,8 @@ describe("GET /api/og/factsheet/[id]", () => {
     // Same stored figures as O1d, plus the flag the analytics service stamps
     // when the stored CAGR covers only the suffix after an interior TWR chain
     // break, and the `headline_since` it stamps with it (a Dated row, D-01). The
-    // 400-day series passes the 0.95-year rule, so only the flag can hide the
-    // figure.
+    // 400-day series is long enough to need no short-track note, so only the
+    // flag (E2) can hide the figure.
     STATE.strategyRow!.strategy_analytics = [
       {
         daily_returns: null,

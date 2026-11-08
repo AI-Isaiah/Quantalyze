@@ -14930,6 +14930,14 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
 
     allocator_id = cr["allocator_id"]
 
+    # 194.1 B12c: each frozen Sharpe carries the record it was computed on (TS twin:
+    # toSnapshotRecord in src/lib/intro/snapshot.ts; one shared parity fixture pins the pair).
+    from services.metrics import (
+        RECORD_SCALAR_ALIASES,
+        blend_gate_crypto,
+        figure_record_from_scalars,
+    )
+
     # Primary portfolio = most recently created for this allocator.
     def _load_portfolio() -> dict[str, Any] | None:
         res = (
@@ -14947,6 +14955,7 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
 
     snapshot: dict[str, Any] = {
         "sharpe": None,
+        "sharpe_record": None,
         "max_drawdown": None,
         "concentration": None,
         "top_3_strategies": [],
@@ -14960,7 +14969,11 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
         def _load_portfolio_analytics() -> dict[str, Any] | None:
             res = (
                 supabase.table("portfolio_analytics")
-                .select("portfolio_sharpe, portfolio_max_drawdown")
+                .select(
+                    "portfolio_sharpe, portfolio_max_drawdown, "
+                    "curve_start:portfolio_equity_curve->0->>date, "
+                    "curve_end:portfolio_equity_curve->-1->>date"
+                )
                 .eq("portfolio_id", portfolio_id)
                 .order("computed_at", desc=True)
                 .limit(1)
@@ -14980,7 +14993,7 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
                 supabase.table("portfolio_strategies")
                 .select(
                     "strategy_id, current_weight, allocated_amount, "
-                    "strategies(id, name)"
+                    "strategies(id, name, asset_class)"
                 )
                 .eq("portfolio_id", portfolio_id)
                 .execute()
@@ -14989,14 +15002,36 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
 
         links = await db_execute(_load_links)
 
+        # 194.1 B12c: the book's record. Curve dates are cut to yyyy-mm-dd (the writer
+        # stores Timestamp.isoformat()); a book has no observation count, so the interim
+        # 90-day span rule decides; the crypto basis is the blend rule over every linked
+        # leg (an unknown class counts as crypto).
+        def _link_asset_class(link: dict[str, Any]) -> str | None:
+            strat = link.get("strategies")
+            ac = strat.get("asset_class") if isinstance(strat, dict) else None
+            return ac if isinstance(ac, str) else None
+
+        def _day_text(value: Any) -> Any:
+            return value[:10] if isinstance(value, str) else value
+
+        curve = analytics or {}
+        snapshot["sharpe_record"] = figure_record_from_scalars(
+            _day_text(curve.get("curve_start")),
+            _day_text(curve.get("curve_end")),
+            None,
+            None,
+            blend_gate_crypto(_link_asset_class(link) for link in links),
+        )
+
         # Per-strategy sharpe lookup (single query rather than N+1).
         strategy_ids = [link["strategy_id"] for link in links if link.get("strategy_id")]
         sharpe_map: dict[str, float | None] = {}
+        record_rows: dict[str, dict[str, Any]] = {}
         if strategy_ids:
             def _load_strategy_sharpes() -> list[dict[str, Any]]:
                 res = (
                     supabase.table("strategy_analytics")
-                    .select("strategy_id, sharpe")
+                    .select(f"strategy_id, sharpe, {RECORD_SCALAR_ALIASES}")
                     .in_("strategy_id", strategy_ids)
                     .execute()
                 )
@@ -15005,6 +15040,7 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
             sharpe_rows = await db_execute(_load_strategy_sharpes)
             for row in sharpe_rows:
                 sharpe_map[row["strategy_id"]] = row.get("sharpe")
+                record_rows[row["strategy_id"]] = row
 
         # Concentration (HHI): prefer current_weight, fall back to allocated_amount.
         weights = [
@@ -15027,7 +15063,7 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
 
         # Rank by sharpe for top/bottom 3 (strategies without a sharpe are
         # excluded — a NULL ranking tells the manager nothing).
-        ranked = []
+        ranked: list[dict[str, Any]] = []
         for link in links:
             sid = link.get("strategy_id")
             strat = link.get("strategies") or {}
@@ -15037,10 +15073,18 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
             # identical to the prior dict.get(None) → None lookup.
             sh = sharpe_map.get(sid) if sid is not None else None
             if sh is not None:
+                rec = record_rows.get(sid, {}) if sid is not None else {}
                 ranked.append({
                     "strategy_id": sid,
                     "strategy_name": name or "Unnamed strategy",
                     "sharpe": sh,
+                    "sharpe_record": figure_record_from_scalars(
+                        rec.get("series_start"),
+                        rec.get("series_end"),
+                        rec.get("headline_since"),
+                        rec.get("record_observations"),
+                        _link_asset_class(link) == "crypto",
+                    ),
                 })
         ranked.sort(key=lambda r: r["sharpe"] or 0.0, reverse=True)
         snapshot["top_3_strategies"] = ranked[:3]

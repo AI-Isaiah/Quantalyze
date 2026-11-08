@@ -779,6 +779,7 @@ export function SubmitStep({
           sparklineReturns={snapshot.sparkline}
           computedAt={snapshot.computedAt}
           verificationState="draft"
+          figureNote={snapshot.figureNote}
         />
       </div>
 

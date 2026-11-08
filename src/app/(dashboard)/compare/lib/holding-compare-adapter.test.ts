@@ -518,7 +518,37 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
     expect(item!.historyState).toBe("ready");
     expect(item!.analytics).toEqual({
       cumulative_return: null, sharpe: null, max_drawdown: null, vol: null, priced_days: 29,
+      first_priced_day: "2026-01-01", last_priced_day: "2026-01-29",
     });
+  });
+
+  // 194.1 plan 04 (census B11, D-15). WHY: the card judges Sharpe and annualised vol on
+  // the holding's price record, so the adapter must hand it the first and last date of
+  // exactly the points `priced_days` counts. Typed by hand from the fixture calendar.
+  it("B11: a spot item carries the first and last priced day beside an unchanged priced_days", async () => {
+    // Fixture day 1 is 2026-01-01; 90 consecutive days end 2026-03-31.
+    const rows = Array.from({ length: 90 }, (_, i) => row(i + 1, 100 + i));
+    const item = await fetchHoldingCompareItem({
+      allocator_id: ALLOC, holding_ref: REF, supabase: fakeSupabase(rows),
+    });
+    const a = item!.analytics!;
+    expect(a.priced_days).toBe(90);
+    expect(a.first_priced_day).toBe("2026-01-01");
+    expect(a.last_priced_day).toBe("2026-03-31");
+  });
+
+  it("B11: unpriced days inside the span do not move the first or last priced day", async () => {
+    // Days 1-2 and 40-41 carry the failed-ticker sentinel; 36 priced days span 3..39.
+    const rows = Array.from({ length: 41 }, (_, i) =>
+      row(i + 1, i + 1 <= 2 || i + 1 >= 40 ? 0 : 100 + i),
+    );
+    const item = await fetchHoldingCompareItem({
+      allocator_id: ALLOC, holding_ref: REF, supabase: fakeSupabase(rows),
+    });
+    const a = item!.analytics!;
+    expect(a.priced_days).toBe(37);
+    expect(a.first_priced_day).toBe("2026-01-03");
+    expect(a.last_priced_day).toBe("2026-02-08");
   });
 
   // M-R2-02 (167.1.1 round 2). WHY: the writer marks an asset with no
@@ -578,6 +608,7 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
         expect(item!.historyState).toBe("ready");
         expect(item!.analytics).toEqual({
           cumulative_return: null, sharpe: null, max_drawdown: null, vol: null, priced_days: 1,
+          first_priced_day: "2026-02-04", last_priced_day: "2026-02-04",
         });
         expect(warn).not.toHaveBeenCalled();
       } finally {
@@ -760,7 +791,22 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
       expect(item!.historyState).toBe("ready");
       expect(item!.analytics).toEqual({
         cumulative_return: null, sharpe: null, max_drawdown: null, vol: null, priced_days: 12,
+        first_priced_day: "2026-01-01", last_priced_day: "2026-01-12",
       });
+    });
+
+    it("B11: a derivative's first and last priced day come from the USABLE (directed) days it counts", async () => {
+      // Days 1-3 are flat (no direction, so not usable); days 4..40 are long: 37 usable days.
+      const rows = Array.from({ length: 40 }, (_, i) =>
+        derivRow(i + 1, 100 + i, { side: i + 1 <= 3 ? "flat" : "long" }),
+      );
+      const item = await fetchHoldingCompareItem({
+        allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
+      });
+      const a = item!.analytics!;
+      expect(a.priced_days).toBe(37);
+      expect(a.first_priced_day).toBe("2026-01-04");
+      expect(a.last_priced_day).toBe("2026-02-09");
     });
 
     it("is annualized on the crypto clock (365)", async () => {

@@ -44,6 +44,14 @@ export interface FactsheetPreviewProps {
    * render unchanged. Wizard SyncPreviewStep passes "draft".
    */
   verificationState?: FactsheetVerificationState;
+  /**
+   * Phase 194.1 plan 08 (B6, 2026-11-08; 194 D-15 and the UI-SPEC panel idiom): the ONE muted
+   * note under the metric row - the withheld reason when annualised tiles print a dash, or
+   * the short-track qualifier when they print their stored value. The caller decides it (it
+   * owns the record); this component only places it. Absent or empty renders nothing, so
+   * every other caller is unchanged.
+   */
+  figureNote?: string | null;
 }
 
 interface VerificationBadgeStyle {
@@ -93,6 +101,7 @@ export function FactsheetPreview({
   computedAt,
   sampleLabel,
   verificationState = "verified",
+  figureNote,
 }: FactsheetPreviewProps) {
   const badge = resolveBadge(verificationState, computedAt ?? null);
 
@@ -136,6 +145,16 @@ export function FactsheetPreview({
           </div>
         ))}
       </div>
+
+      {/* Panel figure note (194.1 B6): one line, only when the caller passes one */}
+      {figureNote && (
+        <p
+          data-testid="factsheet-preview-figure-note"
+          className="mt-2 px-6 pb-3 text-fixed-10 text-text-muted"
+        >
+          {figureNote}
+        </p>
+      )}
 
       {/* Equity sparkline — full-width under the metric row */}
       {sparklineReturns && sparklineReturns.length > 1 && (

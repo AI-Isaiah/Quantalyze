@@ -11,6 +11,7 @@ import {
   type PendingProfileRow,
   type PendingManagerRow,
 } from "@/components/admin/AdminTabs";
+import { RECORD_SCALAR_ALIASES } from "@/lib/figure-record-scalars";
 
 export const metadata: Metadata = { title: "Admin dashboard" };
 
@@ -36,9 +37,12 @@ export default async function AdminPage() {
     admin
       .from("strategies")
       .select(
-        `id, name, status, source, strategy_types, created_at, user_id,
+        // 194.1 B12a (D-12 / D-15): `asset_class` and the four record scalar aliases let each
+        // review card judge its CAGR and Sharpe on that strategy's total record. The aliases
+        // are scalar JSON paths, never `returns_series` or `metrics_json` whole.
+        `id, name, status, source, strategy_types, created_at, user_id, asset_class,
          profiles!strategies_user_id_fkey(display_name, email),
-         strategy_analytics (cagr, sharpe, max_drawdown, computation_status, computed_at)`,
+         strategy_analytics (cagr, sharpe, max_drawdown, computation_status, computed_at, ${RECORD_SCALAR_ALIASES})`,
       )
       .eq("status", "pending_review")
       .order("created_at", { ascending: false })

@@ -593,6 +593,141 @@ describe("HoldingFactsheet (finding g4)", () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // 194.1 plan 04 (census B11, D-15). WHY: a holding's Sharpe and annualised volatility
+  // must follow the same total-record rule as a strategy's (withheld under 90 days, marked
+  // under one year), or one figure would mean two things on one /compare page. Cumulative
+  // return and max drawdown are level metrics and stay on the 30-priced-day floor. Dates,
+  // day counts and the two titles are typed by hand, never read from figure-gate.
+  // -------------------------------------------------------------------------
+  const dailyRecord = (first: string, last: string, pricedDays: number): HoldingCompareItem => ({
+    ...SAMPLE,
+    historyState: "ready",
+    analytics: {
+      cumulative_return: 0.42,
+      sharpe: 1.8,
+      max_drawdown: -0.15,
+      vol: 0.55,
+      priced_days: pricedDays,
+      first_priced_day: first,
+      last_priced_day: last,
+    },
+  });
+  const cells = () =>
+    Array.from(screen.getByTestId("holding-factsheet").querySelectorAll("dd"));
+  const WITHHELD_60 = "Withheld until the record reaches 90 days (60 days so far).";
+
+  it("B11: 60 priced days covering 60 days withhold Sharpe and Vol with the reason in title, and keep return and drawdown", () => {
+    render(<HoldingFactsheet item={dailyRecord("2025-01-01", "2025-03-01", 60)} />);
+    const [ret, sharpe, dd, vol] = cells();
+    expect(ret.textContent).toBe("42.00%");
+    expect(dd.textContent).toBe("-15.00%");
+    for (const cell of [sharpe, vol]) {
+      expect(cell.querySelector("span")!.getAttribute("title")).toBe(WITHHELD_60);
+      expect(cell.textContent).toBe(`—${WITHHELD_60}`);
+      expect(cell.textContent).not.toMatch(/1\.80|55\.00%/);
+    }
+  });
+
+  it("B11: 200 days of record print Sharpe and Vol with the <1y marker and its title", () => {
+    render(<HoldingFactsheet item={dailyRecord("2025-01-01", "2025-07-19", 200)} />);
+    const [ret, sharpe, dd, vol] = cells();
+    expect(ret.textContent).toBe("42.00%");
+    expect(dd.textContent).toBe("-15.00%");
+    const reason = "Annualized from 200 days of record, under one year.";
+    expect(sharpe.textContent).toBe(`1.80<1y ${reason}`);
+    expect(vol.textContent).toBe(`55.00%<1y ${reason}`);
+    expect(sharpe.querySelector("span")!.getAttribute("title")).toBe(reason);
+    expect(vol.querySelector("span")!.getAttribute("title")).toBe(reason);
+  });
+
+  it("B11: 400 days of record leave all four cells exactly as before (no title, no marker)", () => {
+    render(<HoldingFactsheet item={dailyRecord("2025-01-01", "2026-02-04", 400)} />);
+    expect(cells().map((d) => d.textContent)).toEqual(["42.00%", "1.80", "-15.00%", "55.00%"]);
+    expect(cells().some((d) => d.querySelector("span"))).toBe(false);
+  });
+
+  it("B11: a derivative card follows the same rule on its usable days", () => {
+    const item = {
+      ...DERIVATIVE_READY,
+      analytics: {
+        ...DERIVATIVE_READY.analytics!,
+        priced_days: 60,
+        first_priced_day: "2025-01-01",
+        last_priced_day: "2025-03-01",
+      },
+    } as HoldingCompareItem;
+    render(<HoldingFactsheet item={item} />);
+    expect(cells()[1].querySelector("span")!.getAttribute("title")).toBe(WITHHELD_60);
+    expect(cells()[0].textContent).toBe("20.00%");
+  });
+
+  it("B11: the 30-priced-day floor note is unchanged by the gate", () => {
+    render(<HoldingFactsheet item={dailyRecord("2025-01-01", "2025-03-01", 60)} />);
+    expect(screen.getByTestId("holding-factsheet-price-basis").textContent).toBe(
+      "Computed from 60 days of BTC's daily price, so buying, selling or moving more of it does not count as a gain or loss.",
+    );
+  });
+
+  it("B11 floor: 20 priced days print four plain em-dashes and the unchanged note, with no withheld title (the floor decides, not D-15)", () => {
+    const item: HoldingCompareItem = {
+      ...SAMPLE,
+      historyState: "ready",
+      analytics: {
+        ...NULL_METRICS,
+        priced_days: 20,
+        first_priced_day: "2025-01-01",
+        last_priced_day: "2025-01-20",
+      },
+    };
+    render(<HoldingFactsheet item={item} />);
+    expect(cells().map((d) => d.textContent)).toEqual(["—", "—", "—", "—"]);
+    expect(cells().some((d) => d.querySelector("span"))).toBe(false);
+    expect(screen.getByTestId("holding-factsheet").innerHTML).not.toContain("Withheld until");
+    expect(screen.getByTestId("holding-factsheet-price-basis").textContent).toBe(
+      "Only 20 priced days of BTC so far. These four figures need at least 30 priced days.",
+    );
+  });
+
+  it("B11 floor: 45 priced days covering 45 days show return and drawdown, and withhold Sharpe and Vol", () => {
+    render(<HoldingFactsheet item={dailyRecord("2025-01-01", "2025-02-14", 45)} />);
+    const [ret, sharpe, dd, vol] = cells();
+    expect(ret.textContent).toBe("42.00%");
+    expect(dd.textContent).toBe("-15.00%");
+    const reason = "Withheld until the record reaches 90 days (45 days so far).";
+    expect(sharpe.textContent).toBe(`—${reason}`);
+    expect(vol.textContent).toBe(`—${reason}`);
+  });
+
+  it("B11 legacy payload: no first or last priced day reads as an unknown record, so all four cells print as before", () => {
+    // SAMPLE carries 40 priced days and neither date field.
+    expect(SAMPLE.analytics).not.toHaveProperty("first_priced_day");
+    render(<HoldingFactsheet item={SAMPLE} />);
+    expect(cells().map((d) => d.textContent)).toEqual(["42.00%", "1.80", "-15.00%", "55.00%"]);
+    expect(cells().some((d) => d.querySelector("span"))).toBe(false);
+    expect(screen.getByTestId("holding-factsheet").innerHTML).not.toMatch(/title=/);
+  });
+
+  it("B11 / D-05: a huge cumulative return prints like any finite value; no figure's size is judged", () => {
+    const big: HoldingCompareItem = {
+      ...dailyRecord("2025-01-01", "2026-02-04", 400),
+      historyState: "ready",
+      analytics: {
+        cumulative_return: 12345678901.23,
+        sharpe: 1.8,
+        max_drawdown: -0.15,
+        vol: 0.55,
+        priced_days: 400,
+        first_priced_day: "2025-01-01",
+        last_priced_day: "2026-02-04",
+      },
+    };
+    render(<HoldingFactsheet item={big} />);
+    expect(cells()[0].textContent).toBe("1234567890123.00%");
+    expect(cells()[0].querySelector("span")).toBeNull();
+    expect(cells()[1].textContent).toBe("1.80");
+  });
+
   it("lets an unbroken symbol wrap inside the card instead of pushing past it at 375px", () => {
     // Measured 2026-10-15 at 375x812 on the local stack: an MT5 `ACCOUNT-<48 hex>`
     // heading ran 160 px past its card. jsdom cannot measure layout, so this pins

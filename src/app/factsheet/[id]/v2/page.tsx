@@ -26,6 +26,7 @@ import {
 } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { OG_CARD_VERSION } from "@/lib/factsheet/og-metrics";
 import { provenanceFingerprint } from "@/lib/factsheet/provenance-fingerprint";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
 import { buildFactsheetJsonLd } from "@/lib/factsheet/json-ld";
@@ -325,14 +326,15 @@ export async function generateMetadata({
   // served under a URL that looks like a USD one. A unit therefore moves the URL.
   // The route NEVER reads `u` as data; it re-reads the unit from the database,
   // so a hand-edited `?u=` can change which cache entry answers but not what the
-  // card says. A USD strategy keeps today's URL exactly.
+  // card says. 194.1 plan 06: every URL also carries `v=OG_CARD_VERSION`, so cards cached before
+  // the card's figure rules changed are not answered under the new URL; the route ignores it too.
   const analytics = Array.isArray(data?.strategy_analytics)
     ? data.strategy_analytics[0]
     : data?.strategy_analytics;
   const unit = parseReturnsUnit(
     (analytics?.data_quality_flags as { native_unit?: unknown } | null | undefined)?.native_unit,
   );
-  const ogImage = `/api/og/factsheet/${id}${unit == null ? "" : `?u=${encodeURIComponent(unit)}`}`;
+  const ogImage = `/api/og/factsheet/${id}?v=${OG_CARD_VERSION}${unit == null ? "" : `&u=${encodeURIComponent(unit)}`}`;
   return {
     title: `${name} factsheet`,
     description,

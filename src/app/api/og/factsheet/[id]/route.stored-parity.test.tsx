@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render } from "@testing-library/react";
 import type { DailyReturn } from "@/lib/factsheet/types";
+import { recordFromScalars, type RecordScalarRow } from "@/lib/figure-record-scalars";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import { applyHeadlineBasis } from "@/lib/factsheet/composite-read-path";
@@ -15,9 +16,15 @@ import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
  * 30-observation gate, so a row with 25 daily points printed "0.12" on the
  * factsheet and an em dash on the card (the Fibonacci Ghost shape). The founder
  * moved any minimum-history rule into compute (D-06), so card and page cannot
- * disagree. CAGR keeps two NAMED exceptions (D-11): a span under 0.95 years (E1),
- * and a chain-broken or short-window headline whose stored CAGR covers only a
- * suffix the card cannot see (E2).
+ * disagree. CAGR keeps one NAMED exception (D-11): a chain-broken or short-window
+ * headline whose stored CAGR covers only a suffix the card cannot see (E2).
+ *
+ * Phase 194.1 plan 06 (census B3, 194 D-15): the card is gated on the strategy's total
+ * record like the strip, and its own sub-year CAGR rule (E1) is dropped, so the card and
+ * the strip print the same Sharpe and the same CAGR for the same record, a dash for a
+ * record under the minimum and the stored figures once it clears. The card's embed
+ * fixture carries the four record alias scalars; the strip is given the record built
+ * from the SAME scalars.
  *
  * Both sides are driven through the real code: the card through the real route
  * handler, the strip through `buildFactsheetPayload` + `FactsheetBody`, from the
@@ -95,7 +102,7 @@ function dated(values: number[], start = "2025-01-01"): DailyReturn[] {
 
 /** 25 daily points: the Fibonacci Ghost shape, under any 30-observation floor. */
 const SHORT = dated(Array.from({ length: 25 }, (_, i) => 0.0006 + 0.004 * Math.sin(i)));
-/** 400 daily points: past the 0.95-year span. */
+/** 400 daily points: a record long enough to need no short-record note. */
 const LONG = dated(Array.from({ length: 400 }, (_, i) => 0.0006 + 0.004 * Math.sin(i)));
 
 /** The seven BASIS_KPI_MAP server keys, with stored values the series cannot compute. */
@@ -155,10 +162,37 @@ function ogStat(node: unknown, label: string): StatProps | undefined {
 
 type Stored = { sharpe: number | null; cagr: number | null; max_drawdown: number | null };
 
+/**
+ * The four record alias scalars of a record that CLEARS the minimum and needs no
+ * short-record note (400 covered days, 400 observations). Cases that compare stored
+ * figures use it; the cases that pin the gate pass their own.
+ */
+const CLEARED_SCALARS: RecordScalarRow = {
+  series_start: "2025-01-01",
+  series_end: "2026-02-04",
+  headline_since: null,
+  record_observations: 400,
+};
+/** 25 covered days, 25 observations: under the crypto minimum. */
+const SHORT_SCALARS: RecordScalarRow = {
+  series_start: "2025-01-01",
+  series_end: "2025-01-25",
+  headline_since: null,
+  record_observations: 25,
+};
+/** 200 covered days, 200 observations: cleared, under one year. */
+const UNDER_YEAR_SCALARS: RecordScalarRow = {
+  series_start: "2025-01-01",
+  series_end: "2025-07-19",
+  headline_since: null,
+  record_observations: 200,
+};
+
 async function renderOgCard(
   series: DailyReturn[],
   stored: Stored,
   flags: Record<string, unknown> = {},
+  scalars: RecordScalarRow = CLEARED_SCALARS,
 ): Promise<{ sharpe: StatProps; cagr: StatProps; maxDd: StatProps }> {
   STATE.strategyRow = {
     id: ID,
@@ -181,6 +215,7 @@ async function renderOgCard(
         calmar: 0.3,
         metrics_json_by_basis: null,
         data_quality_flags: flags,
+        ...scalars,
       },
     ],
   };
@@ -218,11 +253,11 @@ function renderStrip(
   series: DailyReturn[],
   stored: Stored & { max_drawdown: number; sharpe: number; cagr: number },
   flags: Record<string, unknown> = {},
-  // Phase 194 plan 08 (D-15): the strip now withholds its annualised cells when the strategy's TOTAL
-  // record is under the minimum (a 24-day crypto record is). This file pins that the card and the strip
-  // print the same STORED figures, so by default the strip is given a record that clears the gate.
-  // `recordGate: "live"` leaves the payload's own record, for the one case that pins the divergence.
-  recordGate: "cleared" | "live" = "cleared",
+  // Phase 194 plan 08 (D-15): the strip withholds its annualised cells when the strategy's TOTAL
+  // record is under the minimum (a 24-day crypto record is). The strip is given the record built
+  // from the same four alias scalars the card's embed carries (194.1 plan 06, B3), so both surfaces
+  // judge one record; by default it is a record that clears the gate.
+  scalars: RecordScalarRow = CLEARED_SCALARS,
 ): { sharpe: string; cagr: string; maxDd: string; colors: { cagr: string; maxDd: string } } {
   // The read path's own applier decides Dated vs Withheld; the strip is built
   // from what it returns, exactly as the page's real read path builds it.
@@ -233,10 +268,7 @@ function renderStrip(
   };
   const built = buildFactsheetPayload(STRATEGY, series, opts);
   if (!built) throw new Error("fixture must build a payload");
-  const payload =
-    recordGate === "cleared"
-      ? { ...built, figureRecord: { spanDays: 400, observations: 400, crypto: true } }
-      : built;
+  const payload = { ...built, figureRecord: recordFromScalars(scalars, "crypto") };
   const { container, unmount } = render(
     <FactsheetProvider payload={payload} persist={false}>
       <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
@@ -271,11 +303,11 @@ function renderStrip(
 }
 
 // ---------------------------------------------------------------------------
-// The named exceptions (D-11): CAGR only, exactly two
+// The named exception (D-11): CAGR only, exactly one (E2)
 // ---------------------------------------------------------------------------
 
 type CagrException = {
-  id: "E1" | "E2";
+  id: "E2";
   /** Why the card withholds a CAGR the factsheet still shows. */
   reason: string;
   series: DailyReturn[];
@@ -283,12 +315,6 @@ type CagrException = {
 };
 
 const EXCEPTIONS: CagrException[] = [
-  {
-    id: "E1",
-    reason: "a span under 0.95 years: the card will not annualize a short record",
-    series: SHORT,
-    flags: {},
-  },
   {
     id: "E2",
     reason: "a chain-broken headline: the stored CAGR covers only the span after the break",
@@ -318,29 +344,39 @@ describe("the share card equals the factsheet strip for a stored row (D-06, B9)"
     expect(card.maxDd.value).toBe(strip.maxDd);
   });
 
-  // Phase 194 plan 08 (D-15, B3): the strip withholds a short TOTAL record's annualised cells; the share
-  // card (route.tsx) does not read the record gate yet, so for the same 25-point row the card prints the
-  // stored Sharpe and the strip prints a dash. The card is census row B3, assigned to Phase 194.1 (D-10).
-  // This case pins the divergence so it is a decision and not drift: when 194.1 gates the card it goes
-  // RED, and the author deletes it and drops `recordGate` from `renderStrip`.
-  it("KNOWN DIVERGENCE (B3, Phase 194.1): on a 25-point crypto record the strip withholds Sharpe and CAGR while the card still prints the stored Sharpe", async () => {
-    const card = await renderOgCard(SHORT, STORED_SHORT);
-    const strip = renderStrip(SHORT, STORED_SHORT, {}, "live");
-    expect(strip.sharpe).toBe("—");
-    expect(strip.cagr).toBe("—");
-    expect(card.sharpe.value).toBe("0.12");
+  // Phase 194.1 plan 06 (B3, D-15): both surfaces judge the SAME 25-day crypto record, so both
+  // withhold Sharpe and CAGR with a dash and print the same stored Max DD. Hand-typed oracles
+  // beside the equality, so a card that prints the stored Sharpe cannot pass.
+  it("a 25-day crypto record: card and strip both print a dash for Sharpe and CAGR and the same Max DD", async () => {
+    const card = await renderOgCard(SHORT, STORED_SHORT, {}, SHORT_SCALARS);
+    const strip = renderStrip(SHORT, STORED_SHORT, {}, SHORT_SCALARS);
+    expect([strip.sharpe, strip.cagr]).toEqual(["—", "—"]);
+    expect([card.sharpe.value, card.cagr.value]).toEqual(["—", "—"]);
     expect(strip.maxDd).toBe("-3.7%");
     expect(card.maxDd.value).toBe(strip.maxDd);
   });
 
-  it("exactly two exceptions are named, both for CAGR (D-11)", () => {
-    expect(EXCEPTIONS.map((e) => e.id)).toEqual(["E1", "E2"]);
+  // The pair of the case above: once the record clears, the card prints the stored CAGR at any
+  // span (E1 dropped), as the strip does.
+  it("a cleared 200-day crypto record: card and strip print the same stored Sharpe and the same stored CAGR", async () => {
+    const card = await renderOgCard(SHORT, STORED_SHORT, {}, UNDER_YEAR_SCALARS);
+    const strip = renderStrip(SHORT, STORED_SHORT, {}, UNDER_YEAR_SCALARS);
+    expect(strip.sharpe).toBe("0.12");
+    expect(strip.cagr).toBe("+0.7%");
+    expect(card.sharpe.value).toBe(strip.sharpe);
+    expect(card.cagr.value).toBe(strip.cagr);
+    expect(card.maxDd.value).toBe(strip.maxDd);
+    expect(strip.maxDd).toBe("-3.7%");
+  });
+
+  it("exactly one exception is named, for CAGR (D-11): E2", () => {
+    expect(EXCEPTIONS.map((e) => e.id)).toEqual(["E2"]);
   });
 
   it.each(EXCEPTIONS.map((e) => [e.id, e] as const))(
     "%s: the card withholds CAGR where the strip shows one; Sharpe and Max DD still equal",
     async (_id, ex) => {
-      const stored = ex.series === SHORT ? STORED_SHORT : STORED_LONG;
+      const stored = STORED_LONG;
       const card = await renderOgCard(ex.series, stored, ex.flags);
       const strip = renderStrip(ex.series, stored, ex.flags);
       expect(card.cagr.value, ex.reason).toBe("—");
@@ -426,11 +462,15 @@ describe("the card colours only real, non-zero figures (D-07)", () => {
     expect(card.sharpe.color).toBe(NEUTRAL);
   });
 
-  it("an E1 or E2 dash CAGR has no tone either (the dash is never coloured)", async () => {
-    const card = await renderOgCard(SHORT, STORED_SHORT);
-    expect(card.cagr.value).toBe("—");
-    expect(card.cagr.tone).toBeUndefined();
-    expect(card.cagr.color).toBe(NEUTRAL);
+  it("a withheld 25-day record's dash CAGR and an E2 dash CAGR have no tone either (the dash is never coloured)", async () => {
+    const withheld = await renderOgCard(SHORT, STORED_SHORT, {}, SHORT_SCALARS);
+    expect(withheld.cagr.value).toBe("—");
+    expect(withheld.cagr.tone).toBeUndefined();
+    expect(withheld.cagr.color).toBe(NEUTRAL);
+    const e2 = await renderOgCard(LONG, STORED_LONG, EXCEPTIONS[0].flags);
+    expect(e2.cagr.value).toBe("—");
+    expect(e2.cagr.tone).toBeUndefined();
+    expect(e2.cagr.color).toBe(NEUTRAL);
   });
 });
 
