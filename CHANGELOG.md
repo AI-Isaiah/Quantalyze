@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.133.28.0] - 2026-11-08 — Phase 194.1 D04SWEEP
+
+Phase 194's total-record rule (D-15) now reaches every page outside Phase 194. A CAGR, Sharpe, Sortino, volatility, Sharpe delta or reason sentence shows only when the strategy's total record reaches 90 days (crypto) or 60 observations (otherwise). Above that it shows, with the one muted note while the record is under a year (D-13). 30 source and test commits across 13 plans in 4 waves and three review rounds. No migration, no new dependency.
+
+### Added
+- **Client-safe record scalars.** `figure-record-scalars` (`RECORD_SCALAR_ALIASES`, `recordFromScalars`) turns the four stored record scalars into a gate verdict outside server code. A test pins it equal to the reviewed `RECORD_SPAN_SELECT`, so no whole `returns_series`, `metrics_json` or `data_quality_flags` column is projected. The Python twin is `figure_record_from_scalars` and `record_clears` in `services/metrics.py`.
+- **An every-page census.** `figure-gate-census.test.ts` walks every source file and fails on a file that renders an annualised figure without importing a gate. Exclusions take a reason from a closed set and are checked for staleness, and a planted self-test proves the census goes RED.
+- **Record fields on three wires, all optional so either deploy order is safe:**
+  - The Bridge response gains `sharpe_delta_state` and the two record fields.
+  - `GET /api/strategies/[id]/returns` gains `figure_span_days`, `figure_observations`, `figure_crypto` and `figure_unreadable`.
+  - The intro snapshot freezes a `sharpe_record` beside each Sharpe, written by both the TS route and the Python worker and pinned by one shared fixture.
+
+### Changed
+- **Gated on the total record (D-15):**
+  - The shared scenario page's KPI strip.
+  - Each saved-scenario compare column. A withheld column never wins and never counts as a comparison, and the blend basis is the engine's own.
+  - The `/compare` holding card's Sharpe and volatility. The 30-day floor stays on cumulative return and max drawdown.
+  - The Bridge replacement card's Sharpe delta. A malformed state fails closed to withheld and is reported once. The ranking is unchanged.
+  - Each recommendation card. An asset-class read error or a missing row withholds and never defaults to a class.
+  - The wizard's preview tiles and submit summary, including composites and non-crypto drafts.
+  - A Scenario constituent's CAGR and Sharpe on its own record. This covers book legs and drawer-added legs.
+  - The admin review card, the admin match candidate and the admin intros page.
+- **The match engine's "Sharpe X" reason sentence** is gated on the candidate's stored record and asset class, and omitted when withheld. Score and rank are untouched.
+- **The factsheet share card (OG)** follows D-15. Its own sub-year CAGR rule (E1) is dropped, it shows the one muted note under a year, and its URL carries `OG_CARD_VERSION` so cached cards are not reused.
+
+### Fixed
+- **Review round 1 (WR-01):** the returns route no longer serves an unreadable record's figures as if they were current.
+- **Review round 2 (R2 WR-01):** a drawer-added leg with an unreadable record shows its CAGR and Sharpe as withheld, with the reason "the record's dates could not be read". It no longer shows the false "No computed metrics" sentence. The route now sends the stored values plus `figure_unreadable`, and the client gate withholds them.
+
+### Tests
+- Every gated site carries neuter-RED proofs.
+- The census has a planted-file self-test.
+- TS and Python parity runs on one intro-snapshot fixture.
+- The match-reason gate has cases for non-crypto, unknown, unreadable and legacy records.
+- The wealth-returns census reads a select column list composed as an f-string as one select, and lists `RECORD_SCALAR_ALIASES` as the one module-level alias constant in `services/metrics.py`.
+
+### Notes
+- **Skipped on purpose:** `/strategy/[id]`, `/strategy/[id]/v2`, `/browse/[slug]/[strategyId]`, `/discovery/[slug]/[strategyId]` and the StrategyV2Shell panels. Phase 196 D-03 redirects those routes to `/factsheet/[id]` and drops the panels (founder pick 2026-11-08, "Drop now, book a phase"). The census excludes those six files with that reason. Whichever of 194.1 and 196 merges second deletes the stale entries.
+- **Known limits:**
+  - Match batches and intro snapshots frozen before this release keep their stored text.
+  - The Bridge chip and the match reason need the analytics service deploy of this release.
+  - The holdings book payload cannot carry the unreadable flag, so a malformed book-leg record shows as stored.
+
 ## [0.133.27.1] - 2026-11-08 — records: Phase 194 plan 09 PROD recompute and residuals
 
 ### Changed
