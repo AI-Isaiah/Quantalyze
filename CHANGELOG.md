@@ -26,6 +26,7 @@ Found by the phase review (gsd-code-reviewer and silent-failure-hunter, three ro
 - New: `StrategyTable.headers.test.tsx`, `StrategyTable.stale-series.test.tsx`, the selection test, `CompareAddStrategy.test.tsx`, `compare-href.test.ts`, `shared-account-partners.test.ts`, the `SharedAccountNote` tests, and new cases in `figure-gate.test.ts`, `freshness.test.ts`, `StrategyGrid.test.tsx` and the discovery page test.
 - Phase-149 parity pin 2c asserts that the anonymous browse page carries neither the partner prop nor the reader.
 - The default-mounts byte-pin fixture, the cross-surface guards, `figure-parity-pages` (volatility compared by value), the pinned-cell census and `e2e/layout-narrow.spec.ts` move to the new header and four-cell pinned-stack contract. Every changed hunk was classified before the pin moved.
+- **The seeded layout probes now sample each metric column beside the pinned edge.** The wider discovery columns (Track plus two-line headers) moved CAGR and Sharpe into the gap between the fixed scroll stops 300 and max, so `e2e/layout-narrow.spec.ts` (MYSTRATTABLE wide V1100, SC6-DISCOVERY V360 to V768) and `assertPinnedStackDoesNotCover` never looked at them. Each probe now also scrolls every metric column to the stuck pinned column's measured right edge. All the old stops and checks stay, so a real cover still fails.
 - Each data-integrity or user-facing gate was shown to fail: the fix was neutered from a byte backup, the test went RED, and the restore was `cmp`-identical.
 
 ### Notes
