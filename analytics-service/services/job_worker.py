@@ -14938,12 +14938,15 @@ async def run_compute_intro_snapshot_job(job: dict[str, Any]) -> DispatchResult:
         figure_record_from_scalars,
     )
 
-    # Primary portfolio = most recently created for this allocator.
+    # Primary portfolio = most recently created REAL portfolio for this allocator. A saved
+    # what-if scenario is an is_test=true portfolio whose made-up KPIs must never reach the
+    # manager (TS twin: computePortfolioSnapshot, audit G8.E.1 / P338).
     def _load_portfolio() -> dict[str, Any] | None:
         res = (
             supabase.table("portfolios")
             .select("id")
             .eq("user_id", allocator_id)
+            .eq("is_test", False)
             .order("created_at", desc=True)
             .limit(1)
             .execute()
