@@ -351,8 +351,9 @@ export async function assertChildrenInside(
  * Phase 170.2 SC-6, second half (UI-SPEC P-1..P-4, X-1): where the Discovery
  * table pins its name column, the pinned stack never covers a metric.
  *
- * For each scrollLeft in [0, 60, 150, 300, max] and each body cell of each
- * metric column, the visible interval is `[max(cell.left, stackRight,
+ * For each scrollLeft in [0, 60, 150, 300, max], plus one per metric column that
+ * puts that column's left edge at the stuck pinned header's right edge (Phase
+ * 197), and each body cell of each metric column, the visible interval is `[max(cell.left, stackRight,
  * region.left), min(cell.right, region.right)]`, with `stackRight` the pinned
  * name header's right edge. An interval narrower than 4 px is scrolled out or
  * fully under the stack and is not probed; any other must hit the cell (or a
@@ -425,7 +426,21 @@ export async function assertPinnedStackDoesNotCover(
         return `${t.tagName}${cls ? `.${cls}` : ""} "${(t.textContent ?? "").trim().slice(0, 24)}"`;
       };
       const maxLeft = region.scrollWidth - region.clientWidth;
-      const stops = Array.from(new Set([0, 60, 150, 300, maxLeft]))
+      // Phase 197: the fixed stops only reach a metric column that sits within
+      // about 300 px of the pinned edge. The Track column and the two-line headers
+      // put CAGR and Sharpe further in than that, so beside a narrow room (the
+      // manager table at V1100) no fixed stop showed them and the probe never ran.
+      // Each metric column also gets the stop that puts its left edge at the stuck
+      // pinned header's right edge, the position a reader scrolls to in order to
+      // read it beside the stack. The fixed stops stay, so this only adds probes.
+      const regionLeftNow = () => region.getBoundingClientRect().left + region.clientLeft;
+      region.scrollLeft = maxLeft;
+      const stuckRight = heads[pinnedIdx].getBoundingClientRect().right - regionLeftNow();
+      region.scrollLeft = 0;
+      const columnStops = metricCols.map((m) =>
+        Math.floor(heads[m.i].getBoundingClientRect().left - regionLeftNow() - stuckRight),
+      );
+      const stops = Array.from(new Set([0, 60, 150, 300, maxLeft, ...columnStops]))
         .filter((s) => s >= 0 && s <= maxLeft)
         .sort((a, b) => a - b);
       const probed = new Set<string>();

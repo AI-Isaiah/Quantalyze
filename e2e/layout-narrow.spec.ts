@@ -1676,7 +1676,22 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
             // Every Return %, CAGR and Sharpe cell is fully inside the region
             //     and not covered at some scroll position.
             const maxLeft = region.scrollWidth - region.clientWidth;
-            const stops = [0, 60, 150, 300, maxLeft];
+            // Phase 197: Track and the two-line headers moved CAGR and Sharpe past
+            // the fixed stops' reach, so below about 450 px of room no fixed stop
+            // showed them whole. Each metric column also gets the stop that puts its
+            // left edge at the pinned Strategy column's right edge once that column
+            // is stuck (it is at the maximum, 5a), where a reader scrolls to read
+            // it. The fixed stops stay and each stop's test is unchanged.
+            const regionLeftNow = () => region.getBoundingClientRect().left + region.clientLeft;
+            region.scrollLeft = maxLeft;
+            const stuckRight = heads[strategyIdx].getBoundingClientRect().right - regionLeftNow();
+            region.scrollLeft = 0;
+            const columnStops = metricCols.map((m) =>
+              Math.floor(heads[m.i].getBoundingClientRect().left - regionLeftNow() - stuckRight),
+            );
+            const stops = Array.from(new Set([0, 60, 150, 300, maxLeft, ...columnStops]))
+              .filter((s) => s >= 0 && s <= maxLeft)
+              .sort((a, b) => a - b);
             const reached = new Map<string, boolean>();
             for (const left of stops) {
               region.scrollLeft = left;
