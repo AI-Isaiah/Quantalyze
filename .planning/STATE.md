@@ -5,17 +5,17 @@ milestone_name: UX — trustworthy, navigable, lean
 current_phase: 194
 current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 status: executing
-stopped_at: Completed 194-13-PLAN.md
-last_updated: "2026-11-08T19:05:40.162Z"
+stopped_at: Phase 194.1 complete (#1222)
+last_updated: "2026-11-08T19:39:00.173Z"
 last_activity: 2026-11-08
-last_activity_desc: Phase 194 execution started
-state_head: e9277565edbd14430a02efcd648f4cd3487bb75a
+last_activity_desc: Phase 194.1 D04SWEEP shipped and closed
+state_head: 290d68df5a62a4f1097ec18cd5c96998ff6b8223
 progress:
   total_phases: 14
-  completed_phases: 5
-  total_plans: 62
-  completed_plans: 62
-  percent: 33
+  completed_phases: 6
+  total_plans: 75
+  completed_plans: 75
+  percent: 43
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 194 (FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something) — EXECUTING
 Plan: 24 of 24 (code merged as #1219; plan 09 PROD recompute done 2026-11-08, 194-RECOMPUTE.md lacking=0)
 Status: Verification human_needed (signed-in browser UAT only)
-Last activity: 2026-11-08 — Phase 194 deployed (959ef982) and PROD recompute done (plan 09); browser UAT next
-Progress: [███░░░░░░░] 33% (5 of 12 phases)
+Last activity: 2026-11-08 — Phase 194.1 D04SWEEP shipped (#1222, v0.133.28.0) and closed (VERIFICATION passed); Phase 194.2 FIGURERESIDUALS booked
+Progress: [████░░░░░░] 43% (6 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1763,7 +1763,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Completed 194-13-PLAN.md
+**Stopped At:** Phase 194.1 complete (#1222)
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
