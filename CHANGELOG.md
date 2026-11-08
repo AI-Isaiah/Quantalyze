@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.28.3] - 2026-11-08 — fix: the Python intro snapshot never freezes a what-if book
+
+### Fixed
+- **A manager can no longer receive a what-if scenario's KPIs in an intro snapshot.** `run_compute_intro_snapshot_job` (`analytics-service/services/job_worker.py`) picked the allocator's newest portfolio by `created_at` with no `is_test` filter. A saved what-if scenario is an `is_test=true` portfolio, so the worker could freeze that book's made-up Sharpe, max drawdown and top/bottom strategy lists into `contact_requests.portfolio_snapshot`. `_load_portfolio` now filters `is_test = false`, the rule the TS producer `computePortfolioSnapshot` already applies (audit G8.E.1 / P338). An allocator with only scenario books now gets the empty snapshot, as on the TS path.
+
+### Tests
+- `analytics-service/tests/test_intro_snapshot_is_test.py` puts a newer what-if book beside an older real one, behind a fake that honours `eq`, `order` and `limit`, and asserts the snapshot carries the real book's figures. It was RED on the unfixed worker (the scenario's Sharpe was frozen) and is GREEN with the filter.
+
+### Notes
+- **TODOS closes `194.1-PY-INTRO-PORTFOLIO-IS-TEST`.**
+- Snapshots already frozen are not rewritten. A `portfolio_snapshot` is a point-in-time record, and this fix changes only the snapshots frozen from now on.
+
 ## [0.133.28.2] - 2026-11-08 — records: close Phase 194.1 D04SWEEP and book Phase 194.2 FIGURERESIDUALS
 
 ### Changed
