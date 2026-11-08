@@ -84,10 +84,10 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-11-04 |
+| Taken | 2026-11-08 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `41932983784`) |
-| sha256 | `aa24e1a48ec3e5fa005f1e9799ea8bd462985e3894c5b5df12cd668bc85d45a6` |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `42479251239`) |
+| sha256 | `00ff175d655134d859dad0231ef2c5941b760ab4da8539512fe94b292ac80994` |
 | Shape | 66 tables, 153 policies, 134 function statements (132 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,26 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-11-08 — automated re-dump after Supabase Migrate run 42479251239
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `42479251239`, after that run's `apply` job applied merge `959ef982` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261107140000_get_verified_cohort_rank_span_gate.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-11-08 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 66 → 66, policies 153 → 153, function statements 134 → 134, distinct function names 132 → 132 |
+| Data statements | 0 → 0 |
+| sha256 | `aa24e1a4…` → `00ff175d…` |
+| Currency gate | `baseline-currency: carried=317 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-11-04 — automated re-dump after Supabase Migrate run 41932983784
 

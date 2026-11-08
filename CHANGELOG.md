@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.28.1] - 2026-11-08 — BASELINE: automated re-dump after the PROD apply of 959ef982
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `42479251239`, after the PROD apply of merge `959ef982`: sha256 `aa24e1a4…` → `00ff175d…`.
+- Shape, old → new: tables 66 → 66, policies 153 → 153, function statements 134 → 134, distinct function names 132 → 132, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261107140000_get_verified_cohort_rank_span_gate.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-08` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.28.0 → 0.133.28.1 (re-picked when landed, since 0.133.27.1 and 0.133.28.0 shipped first).
+- The gates on the composed tree, verbatim: `baseline-currency: carried=317 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `42479251239` succeeded, and this entry was composed by the `redump-pr` job. Run `42479251239` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.28.0] - 2026-11-08 — Phase 194.1 D04SWEEP
 
 Phase 194's total-record rule (D-15) now reaches every page outside Phase 194. A CAGR, Sharpe, Sortino, volatility, Sharpe delta or reason sentence shows only when the strategy's total record reaches 90 days (crypto) or 60 observations (otherwise). Above that it shows, with the one muted note while the record is under a year (D-13). 30 source and test commits across 13 plans in 4 waves and three review rounds. No migration, no new dependency.
