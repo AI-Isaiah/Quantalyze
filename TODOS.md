@@ -13692,37 +13692,39 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 
 **Reading.** Every other Phase 194 reader passes the unreadable-record flag through `figureRecord`, so a record whose dates cannot be read is withheld with its reason. The Holdings path builds its scalars through `figureRecordScalars` without that flag, so an unreadable record there is read as an ordinary one.
 
-**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the Holdings path carries the flag and a test that neuters it goes red.
+**Owner / Trigger:** Phase 194.2 (FIGURERESIDUALS), re-routed 2026-11-08: Phase 194.1's CONTEXT did not cover it, so 194.1 shipped without it. Closed when the Holdings path carries the flag and a test that neuters it goes red.
+
+**Wider since 194.1 (2026-11-08).** The Scenario composer judges a book-held leg on the same book scalars (`constituentFigure` in `src/app/(dashboard)/allocations/lib/constituent-figure.ts`), so a malformed book-leg record shows as stored while the same record on a drawer-added leg is withheld (194.1 REVIEW-R3, out of scope there). Close both together.
 
 ### [194-MALFORMED-DATES-ABSENT] — the mark-to-market and smoothed date arrays, `shapedRecordScalars` and the SQL cohort twin read a malformed date as absent (booked 2026-11-08, Phase 194 review R6 WR-02 and WR-03, DATA INTEGRITY, user-facing)
 
 **Reading.** R5 WR-03 is closed on the cash date axis only: a malformed interior date on the mark-to-market or smoothed axis still shows annualised figures with no note on a zoom (R6 WR-02). Producers that normalise a malformed date to `null` before `figureRecord`, `shapedRecordScalars` among them, and the SQL cohort twin bypass the D-17 headline-start and series-start rule, so one strategy can be withheld on its factsheet and shown in the discovery list (R6 WR-03).
 
-**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when every date axis and the SQL twin treat a malformed date as unreadable, not absent, and a parity test pins the factsheet and list verdicts together.
+**Owner / Trigger:** Phase 194.2 (FIGURERESIDUALS), re-routed 2026-11-08: Phase 194.1's CONTEXT did not cover it, so 194.1 shipped without it. Closed when every date axis and the SQL twin treat a malformed date as unreadable, not absent, and a parity test pins the factsheet and list verdicts together.
 
 ### [194-SCENARIO-INTERIOR-DATES] — `scenario-factsheet-payload` does not check interior dates (booked 2026-11-08, Phase 194 close)
 
 **Reading.** The Scenario factsheet payload checks the record's first and last dates but not the interior ones, so a malformed interior date passes as a readable record.
 
-**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the payload applies the interior-date check the cash axis uses.
+**Owner / Trigger:** Phase 194.2 (FIGURERESIDUALS), re-routed 2026-11-08: Phase 194.1's CONTEXT did not cover it, so 194.1 shipped without it. Closed when the payload applies the interior-date check the cash axis uses.
 
 ### [194-PERCENTILE-SENTRY-DEDUP] — `percentileRecord` Sentry reports are not deduplicated (booked 2026-11-08, Phase 194 close)
 
 **Reading.** Each render that reaches an unreadable record in `percentileRecord` sends its own Sentry report, so one bad record produces a report per render rather than one per record.
 
-**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the report is sent once per record (or fingerprinted so Sentry groups it) and a test pins the count.
+**Owner / Trigger:** Phase 194.2 (FIGURERESIDUALS), re-routed 2026-11-08: Phase 194.1's CONTEXT did not cover it, so 194.1 shipped without it. Closed when the report is sent once per record (or fingerprinted so Sentry groups it) and a test pins the count.
 
 ### [194-WIZARD-HARD04-RAW-GAP] — the wizard's HARD-04 `insufficient_window` caveat still uses the raw gap (booked 2026-11-08, Phase 194 close, user-facing)
 
 **Reading.** The wizard decides the HARD-04 `insufficient_window` caveat on the raw calendar gap between the first and last dates, not on the D-15 rule (60 observations or 90 days crypto) every Phase 194 page now applies, so the wizard and the pages can disagree on whether a record is long enough.
 
-**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the wizard reads the same gate as the pages.
+**Owner / Trigger:** Phase 194.2 (FIGURERESIDUALS), re-routed 2026-11-08: Phase 194.1's CONTEXT did not cover it, so 194.1 shipped without it. Closed when the wizard reads the same gate as the pages.
 
 ### [194-ZOOM-BENCHMARK-COVERAGE] — a zoomed range whose benchmark covers less than the window has no note (booked 2026-11-08, Phase 194 close, user-facing)
 
 **Reading.** On a narrowed factsheet range, a benchmark series that starts after the window start (or ends before its end) is compared over the shorter overlap with no note saying so.
 
-**Owner / Trigger:** Phase 194.1 (D04SWEEP). Closed when the zoomed view names the benchmark's covered span whenever it is shorter than the window.
+**Owner / Trigger:** Phase 194.2 (FIGURERESIDUALS), re-routed 2026-11-08: Phase 194.1's CONTEXT did not cover it, so 194.1 shipped without it. Closed when the zoomed view names the benchmark's covered span whenever it is shorter than the window.
 
 ### [194-OG-CARD-DIVERGENCE] — the OG share card prints stored CAGR, Sharpe and volatility with no D-15 gate (booked 2026-11-08, Phase 194 VERIFICATION deferral, census B3)
 
@@ -13730,8 +13732,36 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 
 **Owner / Trigger:** Phase 194.1 (D04SWEEP), census row B3. Closed when the card applies the gate and the known-divergence case is removed.
 
+**CLOSED 2026-11-08 (Phase 194.1 D04SWEEP plan 06, shipped in v0.133.28.0, #1222).** The card applies `gateAnnualized` on the total record, its own sub-year CAGR rule (E1) is dropped, it shows the one muted note under a year, its URL carries `OG_CARD_VERSION`, and the known-divergence case is removed.
+
 ### [194-BASELINE-REDUMP-COHORT-RANK] — main CI's `sql-gate-lint` reports stale-baseline drift for `get_verified_cohort_rank` (booked 2026-11-08, Phase 194 close, CI)
 
 **Reading.** Phase 194's migration `20261107140000_get_verified_cohort_rank_span_gate.sql` changed `get_verified_cohort_rank`, and `supabase/schema/baseline.sql` still carries the pre-migration body, so `sql-gate-lint`'s baseline-content check reads DRIFT on main. Repo rules count that drift as green for merging, but it leaves main's head SHA with a red check, which very likely made Railway skip the `quantalyze-analytics` deploy of the Phase 194 merge (the founder redeployed it by hand on 2026-11-08). Every later merge carries the same red until the baseline is re-dumped.
 
 **Owner / Trigger:** Phase 194.1 (D04SWEEP), before its ship, unless a CI-only phase takes it first. Closed when the baseline is re-dumped with `baseline-carried-migrations.txt` regenerated in the same commit (`supabase/schema/BASELINE.md`, `## Regenerating`) and main's `sql-gate-lint` reads no DRIFT row.
+
+**CLOSED 2026-11-08 (founder: "just action a baseline redump in CI").** Landed as the automated redump PR #1220 (Supabase Migrate run `42479251239`, after the PROD apply of `959ef982`), with main merged in and the version re-picked to v0.133.28.1. On that tree `baseline-content-drift` reads `findings 0` and `baseline-currency` reads `marker-sha=match defects=0`.
+
+### [194.1-PY-INTRO-PORTFOLIO-IS-TEST] — the Python intro-snapshot producer can freeze a what-if scenario book and send its KPIs to a manager (booked 2026-11-08, Phase 194.1 plan 11, DATA INTEGRITY, user-facing, pre-existing)
+
+**Reading.** The intro snapshot is frozen by two producers. The TS producer (`computePortfolioSnapshot`, `src/lib/intro/snapshot.ts`) picks the newest portfolio with `.eq("is_test", false)`, the fix for audit G8.E.1 / P338: a saved what-if scenario is an `is_test=true` portfolio, and without the filter its made-up Sharpe, max drawdown and top/bottom lists reach the manager through `contact_requests.portfolio_snapshot`. The Python worker's `_load_portfolio` in `run_compute_intro_snapshot_job` (`analytics-service/services/job_worker.py`) orders by `created_at` with no `is_test` filter, so a snapshot it freezes can be a scenario book's. It predates 194.1, which only found it.
+
+**Owner / Trigger:** unowned. Trigger: the next phase that edits `run_compute_intro_snapshot_job`, or a frozen snapshot that matches a scenario book. Closed when the worker applies the same `is_test=false` filter and a test that drops it goes red.
+
+### [194.1-CENSUS-HOLDINGDETAIL-REASON] — the figure-gate census excludes `HoldingDetail.tsx` as "dead: no importer", which is false, and its detector is import-only (booked 2026-11-08, Phase 194.1 VERIFICATION advisory)
+
+**Reading.** `HoldingsTable.tsx` imports `HoldingDetail.tsx` inside `DesignHoldingsTable`, and `HoldingDetail.tsx` prints `formatNumber(row.sharpe)` raw. It is dead only transitively: `DesignHoldingsTable` mounts when a `rows` prop is passed, and no non-test caller passes one. The census also counts `HoldingsTable.tsx` as gated because `StrategyRowsTable` in the same file imports the gate, while `DesignHoldingsTable` there prints a raw Sharpe. Nothing reaches a user today.
+
+**Owner / Trigger:** Phase 194.2 (FIGURERESIDUALS), which touches Holdings. Closed when the dead `DesignHoldingsTable` / `HoldingDetail` path is deleted or gated and the exclusion reason is true.
+
+### [194.1-CENSUS-196-STALE-EXCLUSIONS] — six census exclusions name routes Phase 196 deletes (booked 2026-11-08, Phase 194.1 ship)
+
+**Reading.** `src/__tests__/figure-gate-census.test.ts` excludes six files with the reason "redirected by 196 D-03 (founder 2026-11-08)". 194.1 merged first, so when Phase 196 deletes those routes and panels the census's stale-entry check goes red naming each entry.
+
+**Owner / Trigger:** Phase 196 (ONESTRATEGYPAGE). Closed when 196 deletes the six entries in the same PR that deletes the files.
+
+### [194.1-CENSUS-NO-FORWARD-CHECK] — nothing stops a later edit moving a live 194.1 site into the census exclusions (booked 2026-11-08, Phase 194.1 security audit advisory on T-194.1-28)
+
+**Reading.** Plan 13 deleted the pending map, and the assertion that no live 194.1 site sits in `EXCLUDED` went with it. Today every live site imports a gate and none is excluded, and the census header forbids it, but a later edit could add a live site to `EXCLUDED` as "no render" and the census would stay green.
+
+**Owner / Trigger:** unowned. Trigger: the next phase that edits the census's `EXCLUDED` map. Closed when the census pins the live 194.1 site files as never excluded.

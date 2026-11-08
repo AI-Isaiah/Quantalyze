@@ -21,6 +21,11 @@
     {
       "number": "194.1",
       "name": "D04SWEEP (INSERTED)",
+      "status": "complete"
+    },
+    {
+      "number": "194.2",
+      "name": "FIGURERESIDUALS (INSERTED)",
       "status": "pending"
     },
     {
@@ -71,8 +76,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 3 of 13 · 38% · executing"
+    "label": "Advance to the next step (verify)",
+    "reason": "Phase 3 of 14 · 43% · ready to verify"
   },
-  "updated_at": "2026-11-07T17:42:14.771Z"
+  "updated_at": "2026-11-08T19:39:00.202Z"
 }

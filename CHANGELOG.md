@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.133.28.2] - 2026-11-08 — records: close Phase 194.1 D04SWEEP and book Phase 194.2 FIGURERESIDUALS
+
+### Changed
+- **The Phase 194.1 records are on main.** They include the phase directory (CONTEXT, RESEARCH, PATTERNS, VALIDATION, 13 plans and summaries, SITES, three review rounds, VERIFICATION `passed`, SECURITY `verified` with 32 of 32 threats closed). The ROADMAP ticks all 13 plans and marks the phase complete. STATE's Current Position is corrected by hand, because `phase complete` moved it to Phase 194 with the wrong status while other phases are in flight.
+- **Phase 194.2 FIGURERESIDUALS is booked** (founder 2026-11-08) for the six Phase 194 figure-gate residuals that 194.1's CONTEXT did not cover. Their TODOS entries are re-routed to it.
+
+### Notes
+- **TODOS closes two entries:**
+  - `194-OG-CARD-DIVERGENCE`, by #1222.
+  - `194-BASELINE-REDUMP-COHORT-RANK`, by the redump PR #1220.
+- **TODOS books four new entries:**
+  - `194.1-PY-INTRO-PORTFOLIO-IS-TEST`: the Python intro-snapshot worker has no `is_test=false` filter, so it can freeze a what-if scenario book. This is user-facing, pre-existing and unowned.
+  - `194.1-CENSUS-HOLDINGDETAIL-REASON`: owned by 194.2.
+  - `194.1-CENSUS-196-STALE-EXCLUSIONS`: owned by 196.
+  - `194.1-CENSUS-NO-FORWARD-CHECK`: unowned.
+- The B1/B2/v2 rows stay skipped under Phase 196 D-03 (founder pick 2026-11-08, "Drop now, book a phase").
+
 ## [0.133.28.1] - 2026-11-08 — BASELINE: automated re-dump after the PROD apply of 959ef982
 
 ### Changed

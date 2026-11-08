@@ -96,7 +96,8 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story** - Key storage, encryption, TLS, factsheet access, listing cost and exchange count read the same on the home page, `/security`, `/for-quants` and Terms, each matched to a measurement; no key form for anonymous visitors on the home page; `/demo` looks finished (completed 2026-11-07)
 - [x] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row (completed 2026-11-07)
 - [ ] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified
-- [ ] **Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside FIGURETRUTH** (INSERTED) - Census pages B1-B13, admin included, plus Sharpe deltas and lifts, alpha/TE/IR, peer ranks and rolling charts on those pages
+- [x] **Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside FIGURETRUTH** (INSERTED) - Census pages B1-B13, admin included, plus Sharpe deltas and lifts, alpha/TE/IR, peer ranks and rolling charts on those pages (completed 2026-11-08)
+- [ ] **Phase 194.2: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed** (INSERTED) - A record whose dates cannot be read is withheld on every path, including Holdings and book legs; the wizard caveat and zoomed benchmark note follow the page rules; one Sentry report per bad record
 - [x] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed (completed 2026-11-07)
 - [ ] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced"
 - [ ] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named
@@ -257,13 +258,43 @@ Plans:
 
 ### Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside Phase 194: census pages B1-B13, admin included, plus deltas/lifts, alpha/TE/IR, peer ranks and rolling charts (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
+**Goal:** Every page outside Phase 194 shows a CAGR, Sharpe, Sortino, volatility, Sharpe delta or reason sentence only on the strategy's total record (194 D-15), with the one muted note under a year (D-13). The census test fails on any new ungated file.
 **Requirements**: TBD
 **Depends on:** Phase 194
+**Plans:** 13/13 plans complete
+**Skipped rows (2026-11-08):** census rows B1 (`/strategy/[id]`), B2 (`/strategy/[id]/v2`) and the v2-only rolling and greeks panels are out of this phase. Phase 196 D-03 redirects those routes to `/factsheet/[id]` and drops StrategyV2Shell's panels (founder pick 2026-11-08, "Drop now, book a phase"). `194.1-CONTEXT.md` carries the same note.
+
+Plans:
+**Wave 1**
+- [x] 194.1-01-PLAN.md — client-safe record-scalar module and the every-page census test
+- [x] 194.1-02-PLAN.md — scenario-share KPI strip on the blend record (B4)
+- [x] 194.1-03-PLAN.md — saved-scenario compare columns; a withheld figure never wins (B7)
+- [x] 194.1-04-PLAN.md — /compare holding Sharpe and volatility under D-15 (B11)
+- [x] 194.1-05-PLAN.md — Bridge replacement card Sharpe delta, producer and card
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 194.1-06-PLAN.md — factsheet OG card on the total record, E1 dropped, versioned URL (B3)
+- [x] 194.1-07-PLAN.md — recommendation cards CAGR and Sharpe (B5)
+- [x] 194.1-08-PLAN.md — strategy wizard preview, both arms, carried to submit (B6)
+- [x] 194.1-09-PLAN.md — Scenario composer constituent CAGR and Sharpe (B8)
+- [x] 194.1-10-PLAN.md — admin review cards and match candidate detail (B12a, B12b)
+- [x] 194.1-11-PLAN.md — intro snapshot record from both producers, gated intros page (B12c)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 194.1-12-PLAN.md — match-engine "Sharpe X" reason sentence on the candidate record
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 194.1-13-PLAN.md — close: census finalised, parity extended, closed site census
+
+### Phase 194.2: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed (INSERTED)
+
+**Goal:** The six Phase 194 figure-gate residuals booked to 194.1 on 2026-11-08 that 194.1's scope did not cover are closed. (The seventh, the baseline re-dump, lands through the CI redump PR, not a phase.) Each closes on its own TODOS trigger: `194-HOLDINGS-UNREADABLE-FLAG` (the Holdings and book-leg path carries the unreadable flag), `194-MALFORMED-DATES-ABSENT` (every date axis, `shapedRecordScalars` and the SQL cohort twin read a malformed date as unreadable), `194-SCENARIO-INTERIOR-DATES`, `194-WIZARD-HARD04-RAW-GAP` (the wizard reads the D-15 gate), `194-ZOOM-BENCHMARK-COVERAGE` and `194-PERCENTILE-SENTRY-DEDUP`.
+**Requirements**: TBD
+**Depends on:** Phase 194.1; coordinate with Phase 196, which keeps the factsheet this phase touches
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] TBD (run /gsd-plan-phase 194.2 to break down)
 
 ### Phase 195: TRIM — leftover and duplicate surfaces are gone
 
@@ -495,7 +526,8 @@ Plans:
 | 192. PUBLICTRUTH | 15/15 | Complete | 2026-11-07 |
 | 193. QUIETVIEW | 7/7 | Complete | 2026-11-07 |
 | 194. FIGURETRUTH | 24/24 | In Progress (browser UAT pending) | - |
-| 194.1. D04SWEEP (INSERTED) | 0/0 | Not started | - |
+| 194.1. D04SWEEP (INSERTED) | 13/13 | Complete    | 2026-11-08 |
+| 194.2. FIGURERESIDUALS (INSERTED) | 0/0 | Not started | - |
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
 | 197. SCREEN | 0/0 | Not started | - |
