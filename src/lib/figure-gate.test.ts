@@ -22,10 +22,13 @@ import {
   gatedValue,
   notShownLine,
   recordClears,
+  recordStartDay,
   shortTrackMarkerTitle,
   shortTrackNote,
   coveredDays,
   spanDays,
+  TRACK_MIN_MONTH_DAYS,
+  trackMonths,
   windowNeedsTitle,
   withheldCellTitle,
   withheldReason,
@@ -176,6 +179,56 @@ describe("figureSpan and figureRecord", () => {
   it("a non-finite observation count is stored as null, never as a number", () => {
     const rec = figureRecord({ seriesStart: "2025-01-01", seriesEnd: "2025-06-01", observations: NaN, periodsPerYear: 252 });
     expect(rec.observations).toBeNull();
+  });
+});
+
+describe("recordStartDay (Phase 197 D-05: the first day the Track title names)", () => {
+  // WHY: the Track cell's title prints this day beside the span it explains, so the two must
+  // come from one rule. figureSpan calls this function; if they ever diverge the title lies.
+  it("is the LATER of the series start and a readable headline_since", () => {
+    expect(recordStartDay({ seriesStart: "2025-01-01", headlineSince: "2025-11-01" })).toBe("2025-11-01");
+    expect(recordStartDay({ seriesStart: "2025-06-01", headlineSince: "2025-01-01" })).toBe("2025-06-01");
+  });
+
+  it("ignores an absent or unreadable headline_since and falls back to the series start", () => {
+    expect(recordStartDay({ seriesStart: "2025-01-01" })).toBe("2025-01-01");
+    expect(recordStartDay({ seriesStart: "2025-01-01", headlineSince: null })).toBe("2025-01-01");
+    expect(recordStartDay({ seriesStart: "2025-01-01", headlineSince: "not-a-date" })).toBe("2025-01-01");
+  });
+
+  it("agrees with figureSpan on a chain-broken record: span = covered days from this start", () => {
+    const input = { seriesStart: "2025-01-01", seriesEnd: "2026-01-01", headlineSince: "2025-11-01" };
+    expect(figureSpan(input)).toBe(coveredDays(recordStartDay(input), input.seriesEnd));
+  });
+});
+
+describe("trackMonths (Phase 197 D-05: the Track column's figure)", () => {
+  it("is null for an unknown span: the cell shows an em dash, never an invented length", () => {
+    expect(trackMonths(null)).toBeNull();
+  });
+
+  // WHY 30: a month is the smallest unit Track names. Under it the cell says "<1" rather than 0.
+  it("reads <1 under the one-month floor and 1 at it", () => {
+    expect(TRACK_MIN_MONTH_DAYS).toBe(30);
+    expect(trackMonths(0)).toBe("<1");
+    expect(trackMonths(29)).toBe("<1");
+    expect(trackMonths(30)).toBe(1);
+  });
+
+  // WHY: Track divides by ONE_YEAR_DAYS (365), the 194 gate's bound, not 365.25. A record of exactly
+  // 365 covered days carries no <1y marker, so Track must read 12 there, and 364 (which does carry
+  // the marker) must read 11. With 365.25 the 365-day row would print 11 beside unmarked figures.
+  it("agrees with the 194 <1y marker at the one-year boundary", () => {
+    expect(trackMonths(ONE_YEAR_DAYS)).toBe(12);
+    expect(trackMonths(ONE_YEAR_DAYS - 1)).toBe(11);
+    expect(gateAnnualized(crypto(ONE_YEAR_DAYS))).toBe("full");
+    expect(gateAnnualized(crypto(ONE_YEAR_DAYS - 1))).toBe("short");
+  });
+
+  it("floors whole months and never rounds a partial month up", () => {
+    expect(trackMonths(60)).toBe(1); // 60 * 12 / 365 = 1.97
+    expect(trackMonths(61)).toBe(2); // 2.005
+    expect(trackMonths(730)).toBe(24);
   });
 });
 

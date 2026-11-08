@@ -108,11 +108,23 @@ describe("StrategyTable — every column on a phone (170.6.1 SC-1)", () => {
 
   it("(2) the priority-collapse columns sit before Actions and every body row has as many cells as the header row", () => {
     renderTable();
-    const labels = Array.from(document.querySelectorAll("thead tr th")).map((th) =>
-      (th.textContent ?? "").trim(),
+    // Phase 197 D-05: a header is a label line plus a qualifier line. Match each by its accessible
+    // name (the sort button's aria-label, the plain header's own aria-label, or Actions' text).
+    const labels = Array.from(document.querySelectorAll("thead tr th")).map(
+      (th) =>
+        th.querySelector("button")?.getAttribute("aria-label") ??
+        th.getAttribute("aria-label") ??
+        (th.textContent ?? "").trim(),
     );
     let from = -1;
-    for (const l of ["Volatility", "6 Month", "AUM", "Return", "Underwater", "Actions"]) {
+    for (const l of [
+      "Volatility, full record, annualized",
+      "Return, last 6 months, not annualized",
+      "AUM, stated by manager",
+      "Return curve, full record",
+      "Underwater, full record",
+      "Actions",
+    ]) {
       const i = labels.indexOf(l);
       expect(i, `${l} header present`).toBeGreaterThan(from);
       from = i;

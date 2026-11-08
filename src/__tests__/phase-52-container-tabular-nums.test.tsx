@@ -202,8 +202,10 @@ describe("Phase 52 container-query tabular-nums alignment contract (TYPE-04)", (
       document.querySelectorAll<HTMLTableCellElement>("thead tr th"),
     );
   const bodyCellUnder = (label: string): HTMLTableCellElement => {
+    // Phase 197 D-05: a header is a label line plus a qualifier line; its accessible name
+    // ("Volatility, full record, annualized") is on the th, and its first clause is the label.
     const idx = headerCells().findIndex(
-      (th) => (th.textContent ?? "").trim() === label,
+      (th) => (th.getAttribute("aria-label") ?? (th.textContent ?? "").trim()).split(",")[0] === label,
     );
     expect(idx, `header "${label}" must exist`).toBeGreaterThanOrEqual(0);
     const row = document.querySelector("tbody tr")!;
@@ -225,9 +227,17 @@ describe("Phase 52 container-query tabular-nums alignment contract (TYPE-04)", (
       expect(th.className).not.toContain("@max-3xl:hidden");
       expect(th.className).not.toContain("@3xl:hidden");
     }
-    const labels = headers.map((th) => (th.textContent ?? "").trim());
+    // Phase 197 D-05: the th's accessible name carries the period and annualisation.
+    const labels = headers.map((th) => th.getAttribute("aria-label") ?? (th.textContent ?? "").trim());
     const at = (l: string) => labels.indexOf(l);
-    const order = ["Volatility", "6 Month", "AUM", "Return", "Underwater", "Actions"];
+    const order = [
+      "Volatility, full record, annualized",
+      "Return, last 6 months, not annualized",
+      "AUM, stated by manager",
+      "Return curve, full record",
+      "Underwater, full record",
+      "Actions",
+    ];
     for (const l of order) expect(at(l), `${l} header present`).toBeGreaterThanOrEqual(0);
     for (let k = 1; k < order.length; k++) {
       expect(at(order[k]), `${order[k]} sits right of ${order[k - 1]}`).toBeGreaterThan(
@@ -245,7 +255,8 @@ describe("Phase 52 container-query tabular-nums alignment contract (TYPE-04)", (
     fixture.analytics.volatility = 0.3377;
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
 
-    const expected = "+33.77%"; // formatPercent(0.3377)
+    // Phase 197 D-05: unsigned, volatility can never be negative (this pinned the signed form).
+    const expected = "33.77%";
     // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
     // Exactly once: a second copy would mean a relocation survived.
     expect(screen.getAllByText(expected)).toHaveLength(1);

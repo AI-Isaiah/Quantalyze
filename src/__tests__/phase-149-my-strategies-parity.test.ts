@@ -455,6 +455,31 @@ describe("NAV-01 — the two PUBLIC category pages pass nothing new (absence-as-
       expect(src).toContain("<StrategyTable");
     });
   }
+
+  // Phase 197 / ROUTE-05 (D-04, T-197-14, UI-SPEC A-5): `selectable` turns on the Compare selection
+  // column and bar. Compare needs the allocator role, which only /discovery/[slug] is gated to, so
+  // the ANONYMOUS /browse page must never pass it (the shared table would otherwise offer a control
+  // whose target an anonymous reader cannot open). Non-vacuity: the discovery page passes it, so
+  // this absence is a distinction between the two pages, not a property of a prop nobody uses.
+  it("pin 2b - the anonymous browse page never passes selectable; the discovery page does", () => {
+    expect(stripComments(readSource(BROWSE_PAGE))).not.toContain("selectable");
+    expect(stripComments(readSource(DISCOVERY_PAGE))).toContain("selectable");
+  });
+
+  // Phase 197 / CLAR-05 (D-01, T-197-15): `sharedAccountPartners` is ADMIN-ONLY data (the names of the
+  // published strategies sharing a listing's exchange account), read with the service role by
+  // `getSharedAccountPartners`. The ANONYMOUS /browse page must never pass the prop nor import the
+  // reader: an anonymous reader is by definition not an admin, and a prop on a client component
+  // rides in the RSC payload. Non-vacuity: the discovery page does both, so this absence separates
+  // the two pages rather than describing a prop nobody uses.
+  it("pin 2c - the anonymous browse page never passes sharedAccountPartners nor imports the reader; the discovery page does", () => {
+    const browse = stripComments(readSource(BROWSE_PAGE));
+    expect(browse).not.toContain("sharedAccountPartners");
+    expect(browse).not.toContain("shared-account-partners");
+    const discovery = stripComments(readSource(DISCOVERY_PAGE));
+    expect(discovery).toContain("sharedAccountPartners");
+    expect(discovery).toContain("shared-account-partners");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

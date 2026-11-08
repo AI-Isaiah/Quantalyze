@@ -377,11 +377,23 @@ function renderTable(assetClass: "crypto" | "traditional", analytics: Row, serie
   );
 }
 
+/**
+ * Phase 197 D-05: a table header is now a label line plus a qualifier line ("Returnfull record
+ * not ann." once whitespace is squeezed), so a metric is found by its label-line prefix. The two
+ * Return columns are told apart by the qualifier: the full-record one is the first header that
+ * starts with "Return" (Track precedes it), the 6-month one starts "Returnlast6months".
+ */
+const TABLE_HEADER_PREFIX: Record<string, string> = {
+  "Return %": "Return",
+  "6 Month": "Returnlast6months",
+};
+
 /** The text of the first body row's cell under the header that starts with `label`. */
 function tableCell(label: string): string {
   const squeeze = (t: string | null | undefined) => (t ?? "").replace(/\s+/g, "");
   const headers = Array.from(document.querySelectorAll("thead th"));
-  const idx = headers.findIndex((th) => squeeze(th.textContent).startsWith(squeeze(label)));
+  const prefix = squeeze(TABLE_HEADER_PREFIX[label] ?? label);
+  const idx = headers.findIndex((th) => squeeze(th.textContent).startsWith(prefix));
   if (idx < 0) throw new Error(`StrategyTable has no column named ${label}`);
   const row = document.querySelector("tbody tr") as HTMLElement;
   return row.querySelectorAll("td")[idx].textContent ?? "";
@@ -640,7 +652,8 @@ describe.each(FIXTURES)("one stored row, every page ($name)", ({ stored }) => {
     expect(tableCell("CAGR"), "CAGR").toBe(formatPercent(stored.cagr));
     expect(tableCell("Sharpe"), "Sharpe").toBe(formatNumber(stored.sharpe));
     expect(tableCell("Max DD"), "Max DD").toBe(formatPercent(stored.max_drawdown));
-    expect(tableCell("Volatility"), "Volatility").toBe(formatPercent(stored.volatility));
+    // Phase 197 D-05: volatility can never be negative, so the table prints it unsigned.
+    expect(tableCell("Volatility"), "Volatility").toBe(formatPercent(stored.volatility, 2, { signed: false }));
     expect(tableCell("6 Month"), "6 Month").toBe(formatPercent(stored.six_month_return));
   });
 
@@ -678,7 +691,14 @@ describe.each(FIXTURES)("one stored row, every page ($name)", ({ stored }) => {
       Volatility: tearsheetValue(container, "Volatility"),
       "6 Month": tearsheetValue(container, "6 Month"),
     };
-    expect(table).toEqual(tearsheet);
+    // Phase 197 D-05 (founder-approved): the table prints volatility unsigned; the tearsheet still
+    // prints its "+" (Phase 196 owns the factsheet and tearsheet files; Phase 201 books the tearsheet
+    // and CompareTable sign). So Volatility is compared BY VALUE, stripping a leading "+" from the
+    // tearsheet side for that ONE metric. Every other metric stays an exact text comparison.
+    expect(table).toEqual({
+      ...tearsheet,
+      Volatility: tearsheet.Volatility.replace(/^\+/, ""),
+    });
   });
 
   it("D-05: the stored cumulative return is shown whatever its size, on the table and the tearsheet", async () => {

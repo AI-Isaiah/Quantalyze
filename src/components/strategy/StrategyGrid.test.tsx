@@ -11,6 +11,7 @@
 import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/react";
 import { StrategyGrid } from "./StrategyGrid";
+import { DISCOVERY_COLUMNS } from "./discovery-columns";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
@@ -240,5 +241,38 @@ describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERY
       <StrategyGrid strategies={[venueCard(["deribit"])]} categorySlug="crypto-sma" />,
     );
     expect(badgeOf(container).querySelector("span.font-medium")?.textContent).toBe("Deribit");
+  });
+});
+
+describe("StrategyGrid - footer labels read the table's column map (Phase 197 D-05, U-07)", () => {
+  // WHY: the grid is the same list's other view. If its footer said "Return" while the table
+  // said "Return, full record, not annualized", an allocator switching views would read two
+  // different claims about one figure. Both read DISCOVERY_COLUMNS, and the literal strings are
+  // pinned here so a changed map entry fails by name instead of silently moving both views.
+  it("labels the two footer figures with their period, and ann. only on the annualized one", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
+    const { container } = render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    const labels = Array.from(container.querySelectorAll("span.text-text-muted")).map((n) => n.textContent ?? "");
+    expect(labels).toContain("Return \u00b7 full record ");
+    expect(labels).toContain("CAGR \u00b7 full record \u00b7 ann. ");
+  });
+
+  it("builds those labels from the map entries, not from a second copy", () => {
+    const ret = DISCOVERY_COLUMNS.find((c) => c.key === "cumulative_return")!;
+    const cagr = DISCOVERY_COLUMNS.find((c) => c.key === "cagr")!;
+    const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
+    const { container } = render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    const text = container.textContent ?? "";
+    expect(text).toContain(`${ret.label} \u00b7 ${ret.period}`);
+    expect(ret.annualized).toBe(false);
+    expect(text).toContain(`${cagr.label} \u00b7 ${cagr.period} \u00b7 ann.`);
+    expect(cagr.annualized).toBe(true);
+  });
+
+  it("stacks the two footer items at 375px", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
+    const { container } = render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    const footer = container.querySelector("div.border-t.border-border.pt-2\\.5");
+    expect(footer?.className).toContain("max-[375px]:flex-col");
   });
 });

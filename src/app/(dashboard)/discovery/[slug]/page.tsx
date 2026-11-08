@@ -9,6 +9,7 @@ import {
   getMyWatchlist,
   getPercentiles,
 } from "@/lib/queries";
+import { getSharedAccountPartners } from "@/lib/discovery/shared-account-partners";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
@@ -55,6 +56,17 @@ export default async function DiscoveryPage({
     getPercentiles(slug),
   ]);
 
+  // Phase 197 / CLAR-05 (D-01, D-02): the admin-only shared-exchange-account partners. A separate
+  // read (it needs the listed ids). The reader refuses a non-admin BEFORE it touches the service
+  // role and returns null on any failure, so the page holds no second admin check and cannot throw
+  // because of this informational line. `partners` is null for every non-admin and every failure:
+  // the prop is then not passed at all, so the names are absent from the RSC payload (fail closed).
+  const partners = await getSharedAccountPartners(
+    supabase,
+    user,
+    strategies.map((s) => s.id),
+  );
+
   const watchlistFailed = watchedSet === null;
   const initialWatchedSet = watchedSet ?? new Set<string>();
 
@@ -99,6 +111,12 @@ export default async function DiscoveryPage({
         userId={user.id}
         initialWatchedSet={initialWatchedSet}
         percentiles={percentiles ?? undefined}
+        // Phase 197 / ROUTE-05 (D-04): the Compare selection column and bar. This page only: the
+        // discovery layout gates it to the allocator role that /compare requires.
+        selectable
+        {...(partners !== null && { sharedAccountPartners: partners })}
+        // eslint-disable-next-line react-hooks/purity -- an async server page runs once per request, not per re-render: the clock is read once and serialised
+        nowMs={Date.now()}
       />
     </div>
   );

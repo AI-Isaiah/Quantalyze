@@ -7,13 +7,29 @@ import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { sparklineColor } from "@/lib/sparkline-color";
 import { SyncBadge } from "./SyncBadge";
+import { SharedAccountNote } from "./SharedAccountNote";
+import { StaleSeriesChip } from "./StaleSeriesChip";
 import { TrustTierLabel } from "./TrustTierLabel";
 import { HealthScore } from "./HealthScore";
 import { StarToggle } from "./StarToggle";
+import { SelectCheckbox } from "./SelectCheckbox";
 import { formatPercent, formatCurrency, metricColor } from "@/lib/utils";
 import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
 import { annualizedCell, rowRecord } from "./annualized-cell";
+import { DISCOVERY_COLUMNS, type DiscoveryColumn } from "./discovery-columns";
+import type { ListSeriesVerdictResult } from "@/lib/freshness";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
+
+// Phase 197 D-05 (U-07): the card footer's two labels read from the SAME map as the table header,
+// so the two views of one list cannot name a column differently. "Return \u00b7 full record" and
+// "CAGR \u00b7 full record \u00b7 ann." (the token only where the map says the figure is annualized).
+function footerLabel(key: DiscoveryColumn["key"]): string {
+  const col = DISCOVERY_COLUMNS.find((c) => c.key === key);
+  if (!col) throw new Error(`discovery-columns has no entry for ${key}`);
+  return [col.label, col.period, col.annualized ? "ann." : null].filter(Boolean).join(" \u00b7 ");
+}
+const RETURN_FOOTER_LABEL = footerLabel("cumulative_return");
+const CAGR_FOOTER_LABEL = footerLabel("cagr");
 
 type StrategyWithAnalytics = Strategy & {
   analytics: StrategyAnalytics;
@@ -41,6 +57,29 @@ interface StrategyGridProps {
   userId?: string;
   watchedSet?: Set<string>;
   onToggleStar?: (strategyId: string, nextStarred: boolean) => void;
+  /**
+   * Phase 197 / CLAR-02 (D-03) — the table's per-row data-age verdicts, passed down rather than
+   * recomputed so the card and the table row cannot disagree (the card order is already the
+   * table's, since the grid renders the table's own sorted page). ABSENT renders nothing, which is
+   * the owner mounts and every existing grid caller.
+   */
+  seriesVerdicts?: ReadonlyMap<string, ListSeriesVerdictResult>;
+  /**
+   * Phase 197 / ROUTE-05 (D-04) - the discovery Compare selection, in the grid view. When
+   * `selectable`, each card carries the same checkbox as the table row, as an overlay SIBLING of the
+   * card link (never inside the anchor), top-right and left of the star. `selectedIds` is the
+   * table's selection, `selectionFull` says the cap is reached (unchecked boxes disable). ABSENT
+   * renders the grid exactly as before.
+   */
+  selectable?: boolean;
+  selectedIds?: readonly string[];
+  onToggleSelected?: (strategyId: string) => void;
+  selectionFull?: boolean;
+  /**
+   * Phase 197 / CLAR-05 (D-01, D-02) - the admin-only partner names, passed down from the table so
+   * the card prints the same line as the row. ABSENT renders the grid exactly as before.
+   */
+  sharedAccountPartners?: Record<string, string[]>;
 }
 
 export function StrategyGrid({
@@ -50,7 +89,14 @@ export function StrategyGrid({
   userId,
   watchedSet,
   onToggleStar,
+  seriesVerdicts,
+  selectable = false,
+  selectedIds,
+  onToggleSelected,
+  selectionFull = false,
+  sharedAccountPartners,
 }: StrategyGridProps) {
+  const showSelect = selectable && onToggleSelected !== undefined;
   if (strategies.length === 0) {
     return (
       <div className="text-center py-12 text-text-muted text-sm">
@@ -68,6 +114,7 @@ export function StrategyGrid({
         const record = rowRecord(s);
         const gate = gateAnnualized(record);
         const cagrShown = gatedValue(s.analytics.cagr, gate);
+        const seriesVerdict = seriesVerdicts?.get(s.id);
         return (
         <div key={s.id} className="relative">
           <Link
@@ -112,12 +159,27 @@ export function StrategyGrid({
                   {/* Reserve right-edge space so the absolute-positioned star
                       below never overlaps badges/title. The star is rendered
                       OUTSIDE the <Link> so its <button> is not nested in <a>. */}
-                  {userId !== undefined && <span className="shrink-0 w-8 h-8" aria-hidden="true" />}
+                  {userId !== undefined && (
+                    <span
+                      className={`shrink-0 h-8 ${showSelect ? "w-20" : "w-8"}`}
+                      aria-hidden="true"
+                    />
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-1 mt-1.5 max-[375px]:flex-col max-[375px]:gap-0.5">
                   {s.strategy_types.map((t) => (
                     <Badge key={t} label={t} />
                   ))}
+                  {/* Phase 197 / CLAR-02 (U-03): the same amber data-date chip as the table row,
+                      under the badge row. The table's map holds a verdict for displayed rows only. */}
+                  {seriesVerdict && (
+                    <StaleSeriesChip
+                      verdict={seriesVerdict.verdict}
+                      seriesEnd={s.analytics.series_end}
+                      ageDays={seriesVerdict.ageDays}
+                      thresholdDays={seriesVerdict.thresholdDays}
+                    />
+                  )}
                 </div>
               </div>
 
@@ -168,6 +230,8 @@ export function StrategyGrid({
                   className="mb-2"
                 />
               )}
+              {/* Phase 197 / CLAR-05: one line below SyncBadge, admin viewers only. */}
+              <SharedAccountNote names={sharedAccountPartners?.[s.id] ?? []} className="mb-2" />
 
               {/* AUM / Max Capacity */}
               <div className="flex items-center gap-4 text-xs text-text-muted mb-3 max-[375px]:mb-2 max-[375px]:gap-2">
@@ -197,15 +261,15 @@ export function StrategyGrid({
               </div>
 
               {/* Footer metrics */}
-              <div className="flex items-center justify-between border-t border-border pt-2.5 min-h-[44px]">
+              <div className="flex items-center justify-between border-t border-border pt-2.5 min-h-[44px] max-[375px]:flex-col max-[375px]:items-start max-[375px]:justify-center max-[375px]:gap-1">
                 <div className="text-xs">
-                  <span className="text-text-muted">Return </span>
+                  <span className="text-text-muted">{RETURN_FOOTER_LABEL} </span>
                   <span className={`font-metric font-medium ${metricColor(s.analytics.cumulative_return, "percent")}`}>
                     {formatPercent(s.analytics.cumulative_return)}
                   </span>
                 </div>
                 <div className="text-xs">
-                  <span className="text-text-muted">CAGR </span>
+                  <span className="text-text-muted">{CAGR_FOOTER_LABEL} </span>
                   <span className={`font-metric font-medium ${metricColor(cagrShown, "percent")}`}>
                     {annualizedCell(formatPercent(cagrShown), gate, record)}
                   </span>
@@ -215,6 +279,19 @@ export function StrategyGrid({
           </Link>
           {/* Top-right star overlay (sibling to the <Link>, NOT a child, to
               keep <button>-inside-<a> illegal markup out of the DOM). */}
+          {/* Phase 197 / ROUTE-05: the select checkbox, a sibling of the <Link> for the same reason,
+              top-right and left of the star (the star is 32 wide at right-2, so right-10). */}
+          {showSelect && (
+            <div className="absolute top-0.5 right-10 z-10">
+              <SelectCheckbox
+                strategyId={s.id}
+                name={s.name}
+                checked={selectedIds?.includes(s.id) ?? false}
+                atCap={selectionFull}
+                onToggle={onToggleSelected}
+              />
+            </div>
+          )}
           {userId !== undefined && onToggleStar && (
             <div className="absolute top-2 right-2 z-10">
               <StarToggle

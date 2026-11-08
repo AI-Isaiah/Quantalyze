@@ -606,7 +606,10 @@ test.describe("/strategies — MYSTRATTABLE phones", () => {
               const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
               const idx = (label: string) =>
                 heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(label));
-              const cols = ["Return %", "CAGR", "Sharpe", "Max DD"].map((label) => ({
+              // Phase 197 D-05: the header is a label line plus a qualifier line, so a label matches by
+              // prefix. "Return" is the first header starting with it: the full-record Return, because
+              // Track (a scrolling column, never pinned) precedes it and the 6-month one reads "Return" too, later.
+              const cols = ["Return", "CAGR", "Sharpe", "Max DD"].map((label) => ({
                 label,
                 i: idx(label),
               }));
@@ -855,7 +858,7 @@ test.describe("/strategies — MYSTRATTABLE wide", () => {
         console.log(
           `MYSTRATTABLE wide ${vp.id} region clientWidth=${pre.clientWidth} scrollWidth=${pre.scrollWidth} scrollable=${pre.scrollWidth - pre.clientWidth} headers=${pre.heads.map((h) => h.slice(0, 10) || "?").join("|")}`,
         );
-        for (const label of ["Status", "Created", "Actions", "Return %", "CAGR", "Sharpe"]) {
+        for (const label of ["Status", "Created", "Actions", "Return", "CAGR", "Sharpe"]) {
           expect(
             pre.heads.some((h) => h.startsWith(label)),
             `${vp.id}: precondition: the ${label} column is missing (headers: ${pre.heads.join(" | ")})`,
@@ -915,7 +918,7 @@ test.describe("/strategies — MYSTRATTABLE wide", () => {
               page,
               region,
               `${vp.id} pinned stack`,
-              { metrics: ["Return %", "CAGR", "Sharpe"] },
+              { metrics: ["Return", "CAGR", "Sharpe"] },
             );
             console.log(
               `MYSTRATTABLE wide ${vp.id} occlusion probes=${r.probes} stops=${r.stops.join("/")}`,
@@ -1165,7 +1168,7 @@ test.describe("/compare — N-CMP", () => {
     await page.goto(`/compare?ids=${fixtureId}`);
     await expect(
       page.getByText(
-        "One strategy selected. Adding a second strategy from this page is not available yet.",
+        "One strategy selected. Add another to compare.",
       ),
     ).toBeVisible({ timeout: 15_000 });
     await assertNoReflow(page, "h1");
@@ -1619,6 +1622,26 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
           );
         });
 
+        // 5a'. Phase 197 / ROUTE-05 (D-04): below @3xl the select column scrolls away with rank
+        //      and star (only Strategy stays pinned, 5a). At the maximum scroll the select header
+        //      and every select cell sit wholly left of the region's left edge.
+        await collect("select column scrolls away (D-04)", async () => {
+          const res = await region.evaluate((el) => {
+            el.scrollLeft = el.scrollWidth;
+            const left = el.getBoundingClientRect().left;
+            const cells = Array.from(
+              el.querySelectorAll<HTMLElement>("thead th:first-child, tbody tr > td:first-child"),
+            ).filter((c) => (c.textContent ?? "").trim() === "Select to compare" || c.querySelector("input[data-select-for]"));
+            const stuck = cells.filter((c) => c.getBoundingClientRect().right > left + 1);
+            const out = { cells: cells.length, stuck: stuck.length };
+            el.scrollLeft = 0;
+            return out;
+          });
+          if (res.cells === 0) throw new Error("no select cell found: the precondition is vacuous");
+          if (res.stuck > 0)
+            throw new Error(`${res.stuck} of ${res.cells} select cells stay inside the region at maximum scroll`);
+        });
+
         // 5b. Every metric cell reachable (D-01, D-05).
         await collect("metrics reachable", async () => {
           const res = await page.evaluate(() => {
@@ -1630,7 +1653,7 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
             const idx = (label: string) =>
               heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(label));
             const strategyIdx = idx("Strategy");
-            const metricCols = ["Return %", "CAGR", "Sharpe"].map((l) => ({
+            const metricCols = ["Return", "CAGR", "Sharpe"].map((l) => ({
               label: l,
               i: idx(l),
             }));
@@ -1874,8 +1897,11 @@ const PINNED_VIEWPORTS: { id: string; width: number; height: number }[] = [
 // (`w-14 px-2` and `w-11 px-2`, no `min-w-*`): width 3.5rem / 2.75rem, min-width 0,
 // horizontal padding 0.5rem. Applied inline to every pinned rank and star cell to
 // rebuild the plan-07 layout inside the same page, then removed.
+// Phase 197 / ROUTE-05 (D-04): the discovery page now has a leading select cell too
+// (`w-11 px-0`: 2.75rem wide, no horizontal padding), rebuilt the same way with its own box.
 type PinnedBoxCss = { width: string; minWidth: string; paddingLeft: string; paddingRight: string };
-const PLAN_07_PINNED_BOX_CSS: { rank: PinnedBoxCss; star: PinnedBoxCss } = {
+const PLAN_07_PINNED_BOX_CSS: { select: PinnedBoxCss; rank: PinnedBoxCss; star: PinnedBoxCss } = {
+  select: { width: "2.75rem", minWidth: "0", paddingLeft: "0", paddingRight: "0" },
   rank: { width: "3.5rem", minWidth: "0", paddingLeft: "0.5rem", paddingRight: "0.5rem" },
   star: { width: "2.75rem", minWidth: "0", paddingLeft: "0.5rem", paddingRight: "0.5rem" },
 };
@@ -1949,7 +1975,9 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
           return {
             clientWidth: el.clientWidth,
             scrollWidth: el.scrollWidth,
-            star: (heads[1]?.textContent ?? "").trim().startsWith("Watchlist"),
+            // Phase 197 / ROUTE-05: the pinned stack is select, rank, star, Strategy.
+            select: (heads[0]?.textContent ?? "").trim().startsWith("Select to compare"),
+            star: (heads[2]?.textContent ?? "").trim().startsWith("Watchlist"),
             pinned: el.clientWidth >= at3xl,
           };
         }, AT_3XL_PX);
@@ -1958,6 +1986,7 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
         );
         expect(pre.pinned, `${vp.id}: precondition: the table must be at or above @3xl (clientWidth ${pre.clientWidth})`).toBe(true);
         expect(pre.star, `${vp.id}: precondition: the star column must show (signed in)`).toBe(true);
+        expect(pre.select, `${vp.id}: precondition: the select column must lead (the discovery page is selectable)`).toBe(true);
 
         // 0. Absolute readings for the record (nothing from them is written into code).
         const readings = await region.evaluate((el) => {
@@ -1984,7 +2013,7 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
             page,
             region,
             `${vp.id} pinned stack`,
-            { metrics: ["Return %", "CAGR", "Sharpe"] },
+            { metrics: ["Return", "CAGR", "Sharpe"] },
           );
           console.log(
             `SC6-DISCOVERY pinned ${vp.id} occlusion probes=${r.probes} stops=${r.stops.join("/")}`,
@@ -1998,8 +2027,9 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
         await collect("P-2/P-3 pinned cells match their headers", async () => {
           await assertPinnedCellsMatchHeaders(region, `SC6-DISCOVERY pinned ${vp.id}`, {
             pinned: [
-              { header: 0, name: "rank" },
-              { header: 1, name: "star" },
+              { header: 0, name: "select" },
+              { header: 1, name: "rank" },
+              { header: 2, name: "star" },
               { header: "Strategy", name: "Strategy" },
             ],
           });
@@ -2010,10 +2040,11 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
             const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
             const idx = (t: string) =>
               heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(t));
-            const rankI = 0;
-            const starI = 1;
+            const selectI = 0;
+            const rankI = 1;
+            const starI = 2;
             const nameI = idx("Strategy");
-            const metricI = ["Return %", "CAGR", "Sharpe"].map((l) => idx(l));
+            const metricI = ["Return", "CAGR", "Sharpe"].map((l) => idx(l));
             const rows = Array.from(el.querySelectorAll<HTMLElement>("tbody tr")).filter(
               (r) => r.querySelector("td"),
             );
@@ -2025,10 +2056,14 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
               el.scrollLeft = left;
               const rr = el.getBoundingClientRect();
               const R = (n: Element) => n.getBoundingClientRect();
+              const select = R(heads[selectI]);
               const rank = R(heads[rankI]);
               const star = R(heads[starI]);
               const name = R(heads[nameI]);
-              // P-1
+              // P-1. Phase 197 / ROUTE-05: the select cell is the first of the stack, so its
+              // right edge meets the rank cell's left edge, at rest and at maximum scroll.
+              if (Math.abs(select.right - rank.left) > 1)
+                problems.push(`P-1 @${tag}: select right ${select.right.toFixed(1)} != rank left ${rank.left.toFixed(1)} (delta ${(select.right - rank.left).toFixed(1)})`);
               if (Math.abs(rank.right - star.left) > 1)
                 problems.push(`P-1 @${tag}: rank right ${rank.right.toFixed(1)} != star left ${star.left.toFixed(1)} (delta ${(rank.right - star.left).toFixed(1)})`);
               if (Math.abs(star.right - name.left) > 1)
@@ -2068,7 +2103,7 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
             el.scrollLeft = 0;
             const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
             const nameI = heads.findIndex((h) => (h.textContent ?? "").trim().startsWith("Strategy"));
-            const pinnedIdx = new Set([0, 1, nameI]);
+            const pinnedIdx = new Set([0, 1, 2, nameI]);
             const measure = () =>
               heads.map((h) => {
                 const r = h.getBoundingClientRect();
@@ -2079,11 +2114,12 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
               (r) => r.querySelector("td"),
             );
             const targets: [HTMLElement, PinnedBoxCss][] = [
-              [heads[0], css.rank],
-              [heads[1], css.star],
+              [heads[0], css.select],
+              [heads[1], css.rank],
+              [heads[2], css.star],
               ...rows.flatMap((row) => {
                 const c = Array.from(row.querySelectorAll<HTMLElement>(":scope > td"));
-                return [[c[0], css.rank], [c[1], css.star]] as [HTMLElement, PinnedBoxCss][];
+                return [[c[0], css.select], [c[1], css.rank], [c[2], css.star]] as [HTMLElement, PinnedBoxCss][];
               }),
             ];
             const saved = targets.map(([t]) => t.getAttribute("style"));

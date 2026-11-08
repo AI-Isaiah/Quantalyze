@@ -164,6 +164,8 @@ The `—` rule is load-bearing: a zeroed or blanked null reads as a real value a
 misleads an LP. A dash is honest about absence. (See also the Color gates: a
 `—` cell never carries a semantic color.)
 
+2026-11-08 (Phase 197 D-05, approved by the founder): a figure that cannot be negative, volatility, carries no sign, so the `+` rule above applies to signed quantities only.
+
 **Rule: one formatter module per surface family.** Each surface family owns a
 single formatter module (as the factsheet owns `format.ts`) — never inline
 `toFixed`/`toLocaleString` at a call site. This keeps the contract enforceable

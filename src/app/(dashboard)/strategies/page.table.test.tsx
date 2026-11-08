@@ -302,11 +302,23 @@ async function renderPage(): Promise<HTMLElement> {
   return container;
 }
 
-/** A header's label without its sort-arrow glyph. */
+/**
+ * Phase 197 D-05: the discovery metric headers are a label line plus a qualifier line, and the th
+ * carries the accessible name that holds both ("Return, full record, not annualized"). The
+ * Status, Created and Actions headers have no aria-label, so their text is their label.
+ */
 function labelOf(h: HTMLElement): string {
+  const named = h.getAttribute("aria-label");
+  if (named) return named;
   // The Rank header's visible "#" glyph is part of its text, not its label.
   return (h.textContent ?? "").replace(/[\u2191\u2193]/g, "").replace(/#$/, "").trim();
 }
+
+/** The four metric headers this suite reads, by accessible name (Phase 197 D-05). */
+const H_RETURN = "Return, full record, not annualized";
+const H_CAGR = "CAGR, full record, annualized";
+const H_SHARPE = "Sharpe, full record, annualized";
+const H_MAX_DD = "Max DD, full record, not annualized";
 
 function headerNames(): string[] {
   return screen.getAllByRole("columnheader").map(labelOf);
@@ -407,7 +419,7 @@ describe("StrategiesPage — Status, Created and Actions (D-01, D-09, P2)", () =
       expect(names[strategyIdx + 2]).toBe("Created");
       expect(names[names.length - 1]).toBe("Actions");
       // Discovery's metric columns are still there.
-      for (const metric of ["Return %", "CAGR", "Sharpe", "Max DD"]) {
+      for (const metric of [H_RETURN, H_CAGR, H_SHARPE, H_MAX_DD]) {
         expect(names, `${metric} column`).toContain(metric);
       }
     },
@@ -449,7 +461,7 @@ describe("StrategiesPage — Status, Created and Actions (D-01, D-09, P2)", () =
 });
 
 describe("StrategiesPage — honest dashes (D-03, P3)", () => {
-  const DASH_COLUMNS = ["Rank", "Return %", "CAGR", "Sharpe", "Max DD"];
+  const DASH_COLUMNS = ["Rank", H_RETURN, H_CAGR, H_SHARPE, H_MAX_DD];
 
   it(
     "a strategy with no analytics, and a failed run with stored figures, read exactly a dash",
@@ -481,7 +493,7 @@ describe("StrategiesPage — honest dashes (D-03, P3)", () => {
       // Anti-vacuity: the computed row's same cells are NOT dashes, so "reads a
       // dash" is not what every cell of this table does.
       const ok = dataRow("Strategy s-ok");
-      for (const col of ["Return %", "CAGR", "Sharpe", "Max DD"]) {
+      for (const col of [H_RETURN, H_CAGR, H_SHARPE, H_MAX_DD]) {
         expect(cellUnder(ok, col).textContent, `s-ok / ${col}`).not.toBe("—");
       }
     },

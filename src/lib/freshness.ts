@@ -12,6 +12,8 @@
  *   stale — computed 48+ hours ago, or never computed, or unknown
  */
 
+import { annualizationPeriods } from "./closed-sets";
+
 export type Freshness = "fresh" | "warm" | "stale";
 
 export const FRESH_HOURS = 12;
@@ -122,6 +124,91 @@ export function computeFreshness(
  */
 export const SERIES_FRESH_DAYS = 3;
 export const SERIES_STALE_DAYS = 7;
+
+/**
+ * ── Phase 197 / CLAR-02, D-03: the LIST verdict ─────────────────────────────
+ *
+ * Whether a discovery row may rank as current. The ONE field read is the newest
+ * stored return day, `strategy_analytics.returns_series`' last date, which the
+ * ranked-list embed projects as `series_end` (`returns_series->-1->>date`,
+ * `CATEGORY_RANKING_ANALYTICS_COLUMNS` in lib/queries.ts).
+ *
+ * ⛔ `computed_at` AND `trades_fetched_at` ARE NEVER READ HERE. They are instants
+ * written by our own pipeline: a recompute stamps `computed_at` today over a
+ * return series that ended months ago, which is exactly how a dead strategy came
+ * to rank #1. Only the date of the newest return bar says how old the track
+ * record is.
+ *
+ * THE THRESHOLD is more than `SERIES_STALE_DAYS` (7) whole UTC days for a crypto
+ * strategy (`annualizationPeriods(asset_class) === 365`, a market that prints a
+ * bar every day) and more than `SERIES_STALE_DAYS_TRADITIONAL` (10) for
+ * everything else, a null asset class included (a weekend plus a holiday must
+ * not flag a healthy equity strategy). A series exactly at its threshold is
+ * current; one day older is stale.
+ *
+ * WHOLE DAYS, NOT HOURS: `series_end` is a UTC DATE, so the age is the floor of
+ * elapsed days against the same UTC-midnight arithmetic `bucketSeriesAge` uses.
+ * A fractional age would judge the same bar differently at 01:00 and 23:00.
+ *
+ * `unknown` is a missing or unparseable day. It is NOT current: an age we cannot
+ * read cannot support a ranking claim (the cautious direction, U-08).
+ *
+ * A DATE UP TO 2 WHOLE UTC DAYS AHEAD IS `current`; FURTHER AHEAD IS `unknown`.
+ * A bar stamped tomorrow is an MT5 broker east of UTC (or a reader west of it)
+ * writing today's bar (RESEARCH A3), so timezone skew is tolerated up to 2 days.
+ * A date beyond that is a corrupt write, and it must NOT rank as current: a
+ * negative age is otherwise always under the threshold, so a far-future
+ * `series_end` (2099-01-01) would make a dead strategy rank as current and
+ * unchipped, the exact defect this verdict exists to remove. It reads as
+ * `unknown` (not ranked, "Data date unknown"), like any other unreadable day.
+ * The same holds for a calendar-impossible day (2026-02-31): `Date.parse` rolls
+ * it over to March 3, so the day must round-trip to the same string to count.
+ */
+export const SERIES_STALE_DAYS_TRADITIONAL = 10;
+
+export type ListSeriesVerdict = "current" | "stale" | "unknown";
+
+export interface ListSeriesVerdictResult {
+  verdict: ListSeriesVerdict;
+  /** Whole elapsed UTC days since the newest return day; null when it cannot be read. Negative for a date up to 2 days ahead. */
+  ageDays: number | null;
+  /** The threshold this row was judged against, so copy can name it without restating it. */
+  thresholdDays: number;
+}
+
+const UTC_DAY_MS = 24 * 60 * 60 * 1000;
+/** Whole UTC days a `series_end` may sit ahead of the reader's clock before it reads as a corrupt write. */
+const SERIES_END_MAX_DAYS_AHEAD = 2;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+export function listSeriesVerdict(
+  seriesEnd: string | null | undefined,
+  assetClass: string | null | undefined,
+  nowMs: number,
+): ListSeriesVerdictResult {
+  const thresholdDays =
+    annualizationPeriods(assetClass) === 365
+      ? SERIES_STALE_DAYS
+      : SERIES_STALE_DAYS_TRADITIONAL;
+  const day = typeof seriesEnd === "string" ? seriesEnd.slice(0, 10) : "";
+  const endMs = ISO_DAY.test(day) ? Date.parse(`${day}T00:00:00Z`) : NaN;
+  if (
+    !Number.isFinite(endMs) ||
+    !Number.isFinite(nowMs) ||
+    new Date(endMs).toISOString().slice(0, 10) !== day
+  ) {
+    return { verdict: "unknown", ageDays: null, thresholdDays };
+  }
+  const ageDays = Math.floor((nowMs - endMs) / UTC_DAY_MS);
+  if (ageDays < -SERIES_END_MAX_DAYS_AHEAD) {
+    return { verdict: "unknown", ageDays: null, thresholdDays };
+  }
+  return {
+    verdict: ageDays > thresholdDays ? "stale" : "current",
+    ageDays,
+    thresholdDays,
+  };
+}
 
 /**
  * Which fact a freshness verdict is actually ABOUT.

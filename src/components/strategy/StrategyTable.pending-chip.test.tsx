@@ -598,15 +598,15 @@ describe("StrategyTable Delta 5 — unranked placeholder rows for bare keys", ()
     );
 
     const headerCount = document.querySelectorAll("thead th").length;
-    // No star column on this surface (no userId prop): rank + 8 COLUMNS +
-    // Return spark + Underwater spark + Actions = 12.
+    // No star column on this surface (no userId prop): rank + 9 COLUMNS (Track
+    // included, Phase 197 D-05) + Return spark + Underwater spark + Actions = 13.
     // 2026-10-13 Phase 170.6.1 D-01: the per-row Details column is gone (13 -> 12)
-    expect(headerCount).toBe(12);
+    expect(headerCount).toBe(13);
     // Guard against a vacuous pass: the loop below must actually iterate.
     expect(placeholderRows()).toHaveLength(2);
 
     for (const p of placeholderRows()) {
-      expect(cells(p)).toHaveLength(12);
+      expect(cells(p)).toHaveLength(13);
       // If a column is ever added to the header, this reddens instead of the
       // placeholder rows silently misaligning against the ranked rows.
       expect(cells(p).length).toBe(headerCount);

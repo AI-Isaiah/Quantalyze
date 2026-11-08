@@ -25,6 +25,9 @@ import React from "react";
 
 vi.mock("server-only", () => ({}));
 vi.mock("next/navigation", () => ({ redirect: vi.fn() }));
+vi.mock("./CompareAddStrategy", () => ({
+  CompareAddStrategy: () => React.createElement("div", { "data-testid": "add-strategy" }),
+}));
 vi.mock("@/components/layout/PageHeader", () => ({
   PageHeader: () => React.createElement("h1"),
 }));

@@ -349,3 +349,45 @@ describe("CompareTable: annualised rows follow the total record (D-04 as superse
     expect(valueSpan(cell("CAGR", 0)).textContent).toContain("—");
   });
 });
+
+describe("CompareTable: per-column Remove links (197 plan 04, D-04 / U-10)", () => {
+  it("renders one Remove link per strategy column, with the aria-label and href from the map", () => {
+    render(
+      <CompareTable
+        items={TWO_STRATEGIES}
+        removeHrefs={{
+          [STRATEGY_ID_A]: `/compare?ids=${STRATEGY_ID_B}`,
+          [STRATEGY_ID_B]: `/compare?ids=${STRATEGY_ID_A}`,
+        }}
+      />,
+    );
+    const links = screen.getAllByRole("link", { name: /^Remove .* from the comparison$/ });
+    expect(links).toHaveLength(2);
+    // WHY: a full comparison (4) hides the search, so Remove is the only way to
+    // change it; each link must drop exactly its own column.
+    expect(links[0]).toHaveAttribute("href", `/compare?ids=${STRATEGY_ID_B}`);
+    expect(links[0]).toHaveAccessibleName(`Remove ${STRATEGY_A_NAME} from the comparison`);
+    expect(links[1]).toHaveAttribute("href", `/compare?ids=${STRATEGY_ID_A}`);
+  });
+
+  it("keeps the header title (full name on hover) when a Remove link is present", () => {
+    render(
+      <CompareTable items={TWO_STRATEGIES} removeHrefs={{ [STRATEGY_ID_A]: "/compare" }} />,
+    );
+    expect(screen.getByTitle(STRATEGY_A_NAME)).toBeInTheDocument();
+  });
+
+  it("renders no Remove link without removeHrefs (existing mounts unchanged)", () => {
+    render(<CompareTable items={TWO_STRATEGIES} />);
+    expect(screen.queryByText("Remove")).toBeNull();
+  });
+
+  it("gives a holding panel no Remove link", () => {
+    const holding = {
+      kind: "holding",
+      holding_ref: "holding:okx:BTC:spot",
+    } as unknown as HoldingCompareItem;
+    render(<CompareTable items={[holding, ...TWO_STRATEGIES]} removeHrefs={{}} />);
+    expect(screen.queryByText("Remove")).toBeNull();
+  });
+});

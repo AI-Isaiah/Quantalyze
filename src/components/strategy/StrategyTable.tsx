@@ -14,6 +14,8 @@ import {
 } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Tooltip } from "@/components/ui/Tooltip";
 import { NowrapWords } from "@/components/ui/NowrapWords";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { Sparkline } from "@/components/charts/Sparkline";
@@ -29,8 +31,13 @@ import {
 } from "./StrategyFilters";
 import { StrategyGrid } from "./StrategyGrid";
 import { rowRecord, annualizedCell } from "./annualized-cell";
+import { DISCOVERY_COLUMNS } from "./discovery-columns";
 import { SyncBadge } from "./SyncBadge";
+import { SharedAccountNote } from "./SharedAccountNote";
+import { DATA_STATE_CHIP, StaleSeriesChip, notRankedReason } from "./StaleSeriesChip";
 import { StarToggle } from "./StarToggle";
+import { SelectCheckbox } from "./SelectCheckbox";
+import { COMPARE_MAX_ITEMS, compareHref } from "@/lib/compare-href";
 import { WatchlistTabs } from "./WatchlistTabs";
 import { EmptyWatchlist } from "./EmptyWatchlist";
 import { CustomizeDrawer } from "./CustomizeDrawer";
@@ -41,7 +48,8 @@ import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { signTone, drawdownTone } from "@/lib/factsheet/display-sign";
 import { formatPercent, formatNumber, formatCurrency, formatIsoDay } from "@/lib/utils";
 import { isComputedAnalytics, deriveEmptySeriesState } from "@/lib/closed-sets";
-import { gateAnnualized, gatedValue, notShownLine } from "@/lib/figure-gate";
+import { listSeriesVerdict, type ListSeriesVerdictResult } from "@/lib/freshness";
+import { gateAnnualized, gatedValue, notShownLine, recordStartDay, trackMonths } from "@/lib/figure-gate";
 import { compareWithMissingLast, isMissingFigure, rangeMatches } from "@/lib/list-figures";
 import {
   DEFAULTS,
@@ -96,8 +104,9 @@ type StrategyWithAnalytics = Strategy & {
 };
 
 // "created_at" (170.7 / D-09) is a TABLE sort key only: it is not a `SortKey`,
-// so the filter bar's Sort menu (Discovery's) never lists it.
-type TableSortKey = SortKey | "name" | "six_month_return" | "created_at";
+// so the filter bar's Sort menu (Discovery's) never lists it. "track" (Phase 197 D-05) is
+// table-only for the same reason: it is never a `SortKey`, so it can never reach the saved prefs.
+type TableSortKey = SortKey | "name" | "six_month_return" | "created_at" | "track";
 
 type PercentileMetric = keyof PercentileMap[string];
 
@@ -124,9 +133,19 @@ const HEADER_LABEL = "text-micro font-mono uppercase tracking-[0.14em]";
 // laid out) keeps them. No measured px literal lives in this file.
 const PIN_RANK_FALLBACK = "3.5rem";
 const PIN_STRATEGY_FALLBACK_WITH_STAR = "6.25rem";
+// Phase 197 / ROUTE-05 (D-04): the select column, one touch target wide (the checkbox's label is
+// h-11 w-11). Its cells carry no horizontal padding, so the column is exactly this wide.
+const PIN_SELECT_FALLBACK = "2.75rem";
 
-function usePinnedStackOffsets(showStarColumn: boolean) {
+// Phase 197 / ROUTE-05: when the select column shows (`selectable`) it is the FIRST pinned cell, at
+// left-0, and the stack shifts right by its measured width:
+//   --pin-rank-left     = select width
+//   --pin-star-left     = select width + rank width
+//   --pin-strategy-left = select width + rank width + star width
+// A table without it sets no `--pin-rank-left` and every other value is the one above, unchanged.
+function usePinnedStackOffsets(showStarColumn: boolean, showSelectColumn: boolean) {
   const [frame, setFrame] = useState<HTMLDivElement | null>(null);
+  const selectThRef = useRef<HTMLTableCellElement | null>(null);
   const rankThRef = useRef<HTMLTableCellElement | null>(null);
   const starThRef = useRef<HTMLTableCellElement | null>(null);
 
@@ -134,40 +153,44 @@ function usePinnedStackOffsets(showStarColumn: boolean) {
     const rankTh = rankThRef.current;
     if (!frame || !rankTh) return;
     const starTh = showStarColumn ? starThRef.current : null;
+    const selectTh = showSelectColumn ? selectThRef.current : null;
     const apply = () => {
       const rank = rankTh.getBoundingClientRect().width;
       const star = starTh ? starTh.getBoundingClientRect().width : 0;
+      const select = selectTh ? selectTh.getBoundingClientRect().width : 0;
       // Zero width = not laid out (jsdom, display:none): keep the fallbacks.
-      if (rank <= 0 || (starTh && star <= 0)) return;
-      frame.style.setProperty("--pin-star-left", `${rank}px`);
-      frame.style.setProperty("--pin-strategy-left", `${rank + star}px`);
+      if (rank <= 0 || (starTh && star <= 0) || (selectTh && select <= 0)) return;
+      if (selectTh) frame.style.setProperty("--pin-rank-left", `${select}px`);
+      frame.style.setProperty("--pin-star-left", `${select + rank}px`);
+      frame.style.setProperty("--pin-strategy-left", `${select + rank + star}px`);
     };
     apply();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(apply);
     observer.observe(rankTh);
     if (starTh) observer.observe(starTh);
+    if (selectTh) observer.observe(selectTh);
     return () => observer.disconnect();
-  }, [frame, showStarColumn]);
+  }, [frame, showStarColumn, showSelectColumn]);
 
-  const frameStyle = {
-    "--pin-star-left": PIN_RANK_FALLBACK,
-    "--pin-strategy-left": showStarColumn
-      ? PIN_STRATEGY_FALLBACK_WITH_STAR
-      : PIN_RANK_FALLBACK,
-  } as CSSProperties;
-  return { setFrame, rankThRef, starThRef, frameStyle };
+  const strategyFallback = showStarColumn ? PIN_STRATEGY_FALLBACK_WITH_STAR : PIN_RANK_FALLBACK;
+  const frameStyle = (
+    showSelectColumn
+      ? {
+          "--pin-rank-left": PIN_SELECT_FALLBACK,
+          "--pin-star-left": `calc(${PIN_SELECT_FALLBACK} + ${PIN_RANK_FALLBACK})`,
+          "--pin-strategy-left": `calc(${PIN_SELECT_FALLBACK} + ${strategyFallback})`,
+        }
+      : {
+          "--pin-star-left": PIN_RANK_FALLBACK,
+          "--pin-strategy-left": strategyFallback,
+        }
+  ) as unknown as CSSProperties;
+  return { setFrame, selectThRef, rankThRef, starThRef, frameStyle };
 }
 
-// Phase 149 Delta 4 — the 147 chip BASE, copied VERBATIM from
-// CoverageStateChip.tsx:58 (tokens, not the component: importing an
-// allocations-scoped component into the shared discovery table would drag a
-// second chip vocabulary onto /discovery). `rounded-sm` (4px) is DELIBERATE
-// against the adjacent status Badge's `rounded-md` (6px): the two chip
-// families encode different semantics (publication status vs data state) and
-// both radii are established DESIGN.md ladder members. Do NOT harmonize.
-const DATA_STATE_CHIP =
-  "inline-flex items-center rounded-sm px-2 py-0.5 text-fixed-11 font-medium uppercase tracking-wide";
+// Phase 197 plan 03 — `DATA_STATE_CHIP` (the Phase 149 Delta 4 chip base, with its comment) moved
+// verbatim to StaleSeriesChip.tsx so the grid can render the same chip without importing this file.
 
 // Phase 150 / OWN-03 — the ghost text-action treatment for the owner row
 // actions, taken from RemoveStrategyButton.tsx:51-57 with `hover:text-negative`
@@ -301,20 +324,45 @@ function isRankedRow(s: StrategyWithAnalytics): boolean {
 // relocated the same values) is gone: the disclosure hid four columns from a
 // phone user for no gain. Cells keep their single-source values and the honest
 // em-dash for a null, never a fabricated zero (no-invented-data / STATE-02).
+// Phase 197 D-05: derived from the shared label map (`discovery-columns.ts`), in map order, so
+// the table header and the grid footer cannot name a column differently.
 const COLUMNS: {
   key: TableSortKey;
   label: string;
+  period?: string;
+  annualized?: boolean;
+  accessibleName: string;
+  tooltip?: string;
   align?: "right";
-}[] = [
-  { key: "name", label: "Strategy" },
-  { key: "cumulative_return", label: "Return %", align: "right" },
-  { key: "cagr", label: "CAGR", align: "right" },
-  { key: "sharpe", label: "Sharpe", align: "right" },
-  { key: "max_drawdown", label: "Max DD", align: "right" },
-  { key: "volatility", label: "Volatility", align: "right" },
-  { key: "six_month_return", label: "6 Month", align: "right" },
-  { key: "aum", label: "AUM", align: "right" },
-];
+}[] = DISCOVERY_COLUMNS.flatMap((col) => (col.sortable ? [col] : []));
+
+// Phase 197 D-05: the qualifier line under a header label. Units (the period, then "ann." or
+// "not ann.") are each whitespace-nowrap so the only break point is the " \u00b7 " separator,
+// which is aria-hidden; a header is at most three lines. Null when the column names no period
+// (Strategy). Annualisation shows only where the map defines it (never on Track, AUM or the curves).
+function renderQualifier(col: {
+  period?: string;
+  annualized?: boolean;
+  align?: "right";
+}): ReactNode {
+  const units: string[] = [];
+  if (col.period) units.push(col.period);
+  if (col.annualized !== undefined) units.push(col.annualized ? "ann." : "not ann.");
+  if (units.length === 0) return null;
+  return (
+    <span className={`block text-text-muted ${col.align === "right" ? "text-right" : "text-left"}`}>
+      {units.map((unit, u) => (
+        <Fragment key={unit}>
+          {u > 0 && <span aria-hidden="true"> {"\u00b7"} </span>}
+          <span className="whitespace-nowrap">{unit}</span>
+        </Fragment>
+      ))}
+    </span>
+  );
+}
+
+// The two plain (not sortable) sparkline headers, read from the same map as the sortable ones.
+const PLAIN_COLUMNS = DISCOVERY_COLUMNS.filter((col) => !col.sortable);
 
 const PAGE_SIZE = 20;
 
@@ -487,6 +535,45 @@ interface StrategyTableProps {
    * below — rendering nothing beats rendering a control that cannot work.
    */
   onRename?: (s: StrategyWithAnalytics) => void;
+  /**
+   * Phase 197 / CLAR-02 (D-03, RESEARCH Pitfall 6) — the server's clock, in epoch milliseconds, that
+   * the stale-data verdict is judged against. The verdict changes row ORDER and row TEXT, so the
+   * server render and the hydration must judge the same instant: a page that passes
+   * `nowMs={Date.now()}` has it serialised once and the table seeds `mountedAtMs` from it.
+   *
+   * OPTIONAL. A mount that omits it (today /browse/[slug], whose page file is shared with Phase 196
+   * and is not edited here) judges by the table's own once-per-mount instant, exactly as before, and
+   * so still flags and orders stale rows. The residual that leaves is a whole-UTC-day one: server
+   * render and hydration can disagree only across a UTC midnight, and only for a row exactly at its
+   * 7 or 10 day threshold (booked as T-197-18). Pass it on that mount once 196 has landed.
+   */
+  nowMs?: number;
+  /**
+   * Phase 197 / ROUTE-05 (D-04) - turns on row selection: a leading checkbox column, the sticky
+   * "Compare (n)" bar from two selected (at most four) and the grid card checkbox. Passed ONLY by
+   * `/discovery/[slug]`, whose layout gates it to the allocator role: Compare requires that role
+   * (UI-SPEC A-5), so `/browse/[slug]` (anonymous), `/my-strategies` and the manager `/strategies`
+   * never pass it and render no checkbox, no bar and no status region.
+   *
+   * ABSENT means byte-identical output: the rank, star and Strategy class strings, the frame style
+   * and every colspan are exactly what shipped before, and `StrategyTable.default-mounts.test.tsx`
+   * pins the three default mounts to HTML captured before this prop existed. Every selection branch
+   * in this file is gated on it, the way the manager branches are gated on `managerRows`.
+   *
+   * The selection is table state keyed by strategy id in tick order. It is never written to the URL
+   * or to storage (U-13): leaving the page forgets it, and the only thing that leaves the table is
+   * the Compare link's `ids`.
+   */
+  selectable?: boolean;
+  /**
+   * Phase 197 / CLAR-05 (D-01, D-02) - ADMIN-ONLY data: for each strategy id, the names of the OTHER
+   * published strategies that draw on the same exchange account. The discovery page passes it only
+   * when `getSharedAccountPartners` returned a map, and that reader returns null for every non-admin
+   * and every failure, so for any other viewer the prop is absent from the RSC payload itself, not
+   * merely hidden. ABSENT means byte-identical output on every mount. Never pass an empty object to
+   * a non-admin, and never put an account identifier, key id or label in it: names only.
+   */
+  sharedAccountPartners?: Record<string, string[]>;
 }
 
 // --- Range filter and sort: the D-09 missing-figure contract ---
@@ -517,6 +604,12 @@ function getSortValue(s: StrategyWithAnalytics, key: TableSortKey): number | str
       return s.analytics.computed_at ?? "";
     case "six_month_return":
       return s.analytics.six_month_return ?? null;
+    case "track":
+      // Phase 197 D-05: the covered-day span the 194 gate reads (D-20), never an observation
+      // count. Null (unknown) sorts last in both directions through compareWithMissingLast.
+      // An unreadable record (present but malformed date) is unknown too: the gate refuses to
+      // read its length, so the sort must not order by the generous full-series span (197 WR-01).
+      return rowRecord(s).unreadable ? null : rowRecord(s).spanDays;
     case "created_at":
       // ISO timestamps compare chronologically as strings. A missing date
       // sorts as "" (oldest), never as an invented date.
@@ -545,6 +638,9 @@ export function StrategyTable({
   onFinishSetup,
   onMarkOwnership,
   onRename,
+  nowMs,
+  selectable = false,
+  sharedAccountPartners,
 }: StrategyTableProps) {
   const reactId = useId();
   const tabIdBase = `watchlist${reactId}`;
@@ -586,8 +682,11 @@ export function StrategyTable({
 
   // 2026-10-09 Phase 170.2 SC-6: pinned-stack offsets that follow the measured
   // rank and star header widths (see usePinnedStackOffsets).
-  const { setFrame, rankThRef, starThRef, frameStyle } =
-    usePinnedStackOffsets(userId !== undefined);
+  const { setFrame, selectThRef, rankThRef, starThRef, frameStyle } =
+    usePinnedStackOffsets(userId !== undefined, selectable);
+  // The rank cells pin at left-0 unless the select column is first, then after it. Each rank cell
+  // below writes both class strings out in full: the default string stays a literal in the source
+  // (the pin in StrategyTable.test.tsx reads it there) and Tailwind sees both.
 
   // Column header sort (uses a superset of SortKey)
   const [tableSortKey, setTableSortKey] = useState<TableSortKey>(
@@ -598,7 +697,35 @@ export function StrategyTable({
   );
 
   // Capture wall-clock time at mount for the track-record filter (stable across renders)
-  const [mountedAtMs] = useState(() => Date.now());
+  // Phase 197 D-03: seeded from the page's server instant when it passes one (`nowMs`), else the
+  // client clock, as it always was.
+  const [mountedAtMs] = useState(() => nowMs ?? Date.now());
+
+  // Phase 197 / CLAR-02 (D-03) — ONE verdict per row per mount, read by the sort, the `#n` ordinals,
+  // the percentile suffix and the chip, so none of them can disagree about whether a row is current
+  // (the STALE-01 "one hoisted predicate" rule). The field is the newest stored return day
+  // (`series_end`); `computed_at` and `trades_fetched_at` are never read. Judged on the PUBLISHED-ONLY
+  // mounts (/discovery, /browse) and null elsewhere: the owner mounts keep today's ranking (U-04).
+  const seriesVerdicts = useMemo(() => {
+    if (visibility !== "published-only") return null;
+    const verdicts = new Map<string, ListSeriesVerdictResult>();
+    for (const s of strategies) {
+      // Displayed rows only: an undisplayed row has no figures, no series to date and no `#n`, and
+      // the grid reads this map as "which cards carry a chip", so it must not hold a verdict for a
+      // row that shows nothing. The comparator only asks about rows that are BOTH ranked.
+      if (isDisplayedRow(s)) {
+        verdicts.set(s.id, listSeriesVerdict(s.analytics.series_end, s.asset_class, mountedAtMs));
+      }
+    }
+    return verdicts;
+  }, [strategies, visibility, mountedAtMs]);
+  // The one predicate for "current": true when the verdict is off (owner mounts) so every row there
+  // stays rankable exactly as before.
+  const isCurrentRow = useCallback(
+    (s: StrategyWithAnalytics) =>
+      seriesVerdicts === null || seriesVerdicts.get(s.id)?.verdict === "current",
+    [seriesVerdicts],
+  );
 
   // Watchlist scope + watched-set. Hydrated from the SSR initialWatchedSet
   // so the leading star column reflects persisted state without a flash.
@@ -617,6 +744,66 @@ export function StrategyTable({
       return next;
     });
   }, []);
+
+  // Phase 197 / ROUTE-05 (D-04, U-13) - the selection, strategy ids in tick order. Table state only:
+  // never the URL, never storage. The cap is enforced HERE as well as by the disabled boxes, so a
+  // fifth id cannot enter the selection (and so the Compare link) by any path.
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const toggleSelected = useCallback((strategyId: string) => {
+    setSelectedIds((prev) => {
+      if (prev.includes(strategyId)) return prev.filter((id) => id !== strategyId);
+      if (prev.length >= COMPARE_MAX_ITEMS) return prev;
+      return [...prev, strategyId];
+    });
+  }, []);
+
+  // Focus after a selection change that unmounts the control that held it (Clear, a chip x, the bar
+  // itself). The handler records HOW to find the target; the effect runs it once the new DOM is
+  // committed. Targets are found by `data-select-for` / `data-chip-remove-for`, which are rendered
+  // only when `selectable`, inside the list panel.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const pendingFocus = useRef<(() => HTMLElement | null) | null>(null);
+  const selectBoxes = () =>
+    Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-select-for]") ?? []);
+  const checkboxFor = (strategyId: string) =>
+    selectBoxes().find((el) => el.dataset.selectFor === strategyId) ?? null;
+  const chipRemoveFor = (strategyId: string) =>
+    Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-chip-remove-for]") ?? []).find(
+      (el) => el.dataset.chipRemoveFor === strategyId,
+    ) ?? null;
+  useEffect(() => {
+    const resolve = pendingFocus.current;
+    if (!resolve) return;
+    pendingFocus.current = null;
+    resolve()?.focus();
+  }, [selectedIds]);
+
+  // Clear: the bar unmounts, so focus goes to the first visible row's checkbox.
+  const clearSelection = () => {
+    pendingFocus.current = () => selectBoxes()[0] ?? null;
+    setSelectedIds([]);
+  };
+  // A chip x: focus the next chip's x, else the previous one. When fewer than two remain the bar
+  // unmounts, and focus goes to that strategy's checkbox when its row is visible (a filter or the
+  // page can hide it), else to the first visible checkbox.
+  const removeFromSelection = (strategyId: string) => {
+    const at = selectedIds.indexOf(strategyId);
+    const remaining = selectedIds.filter((id) => id !== strategyId);
+    if (remaining.length >= 2) {
+      const target = remaining[at] ?? remaining[at - 1];
+      pendingFocus.current = () => chipRemoveFor(target);
+    } else {
+      pendingFocus.current = () => checkboxFor(strategyId) ?? selectBoxes()[0] ?? null;
+    }
+    setSelectedIds(remaining);
+  };
+  const selectedAtCap = selectedIds.length >= COMPARE_MAX_ITEMS;
+  // A chip names its strategy from the PROP, so a selected strategy a filter or the scope hides
+  // still has its name in the bar.
+  const strategyNameById = useMemo(
+    () => new Map(strategies.map((st) => [st.id, st.name])),
+    [strategies],
+  );
 
   // useDiscoveryPrefs(undefined, slug) is a safe no-op on the persistence
   // path — /browse callers (no userId) never write to localStorage.
@@ -721,6 +908,35 @@ export function StrategyTable({
       setTableSortDir("desc");
     }
     setPage(0);
+  }
+
+  // Phase 197 D-05: a sortable metric header is two lines inside the sort button, a label line
+  // (sort glyph after it) and, when the column names a period, a qualifier line. Each qualifier
+  // unit is whitespace-nowrap, so the only place it can break is the " \u00b7 " separator and a
+  // header is at most three lines. `aria-label` carries the UI-SPEC accessible name explicitly
+  // (inline sr-only fragments compute differently in jsdom and browsers); the visible label text
+  // is contained in it (WCAG 2.5.3). The Tooltip wraps the button, so hover or keyboard focus of
+  // the sort control shows the definition; on touch, tapping still sorts.
+  function renderSortHeader(col: (typeof COLUMNS)[number], sortedHere: boolean) {
+    const right = col.align === "right";
+    const qualifier = renderQualifier(col);
+    const button = (
+      <button
+        type="button"
+        onClick={() => handleColumnSort(col.key)}
+        aria-label={col.accessibleName}
+        className={`-mx-1 inline-flex ${qualifier ? `flex-col ${right ? "items-end" : "items-start"}` : "items-center gap-1"} rounded px-1 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${HEADER_LABEL} ${sortedHere ? "text-text-primary" : "text-text-muted hover:text-text-primary"}`}
+      >
+        <span className="inline-flex items-center gap-1">
+          {col.label}
+          {sortedHere && (
+            <span aria-hidden="true">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
+          )}
+        </span>
+        {qualifier}
+      </button>
+    );
+    return col.tooltip ? <Tooltip content={col.tooltip}>{button}</Tooltip> : button;
   }
 
   // Sync top-bar sort changes to column sort
@@ -904,6 +1120,27 @@ export function StrategyTable({
         const aRanked = isRankedRow(a);
         const bRanked = isRankedRow(b);
         if (aRanked !== bRanked) return aRanked ? -1 : 1;
+
+        // Phase 197 / CLAR-02 (D-03, U-08) — the STALE partition, the second one, directly after the
+        // ranked partition and ahead of every column comparison. A displayed row whose newest return
+        // day is older than its threshold (or unreadable) sorts after EVERY current displayed row.
+        //
+        // Direction-independent for the reason the partition above is: a row is subordinate because
+        // of what is KNOWN about its data, not because of which header was clicked last. Flipping
+        // Sharpe to ascending must not march a dormant strategy to the top.
+        //
+        // NOT exempted for `name` or `track`: those are orderings of a fact the row has, but the
+        // list's claim is "current strategies first, then the ones that stopped reporting", and a
+        // name sort that interleaved them would put a dead strategy between two live ones. Stale
+        // rows keep their position BETWEEN themselves by the active sort, as undisplayed rows do.
+        //
+        // Unreached under `created_at`: that sort exists only on the manager mount, where
+        // `isCurrentRow` is always true. The exemption is moot, recorded rather than re-decided.
+        if (aRanked && bRanked) {
+          const aCurrent = isCurrentRow(a);
+          const bCurrent = isCurrentRow(b);
+          if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+        }
       }
 
       // D-09: a missing figure (null, or withheld) sorts after every finite value in
@@ -921,7 +1158,7 @@ export function StrategyTable({
     // Deterministic label order (the filter order), not the order rows were visited.
     const notShownLabels = activeSpecs.map((spec) => spec.label).filter((l) => missingLabels.has(l));
     return { rows: result, missingExcluded, notShownLabels };
-  }, [strategies, visibility, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, effectiveViewMode, mountedAtMs, scope, watchedSet]);
+  }, [strategies, visibility, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, effectiveViewMode, mountedAtMs, scope, watchedSet, isCurrentRow]);
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -941,10 +1178,11 @@ export function StrategyTable({
     const ordinals = new Map<string, number>();
     let next = 0;
     for (const s of filtered) {
-      if (isRankedRow(s)) ordinals.set(s.id, ++next);
+      // Phase 197 / CLAR-02 (U-09): a stale or age-unknown row is not ranked, so it takes no ordinal.
+      if (isRankedRow(s) && isCurrentRow(s)) ordinals.set(s.id, ++next);
     }
     return ordinals;
-  }, [filtered]);
+  }, [filtered, isCurrentRow]);
 
   // Phase 149 Delta 5 — deliberately derived OUTSIDE `filtered`/`paged`/`rank`
   // (the UI-SPEC subordination rule): `#n`, `totalPages` and the pagination
@@ -1016,13 +1254,15 @@ export function StrategyTable({
 
   // Column count for the "no rows" placeholder. Leading rank column (1) +
   // Strategy + Return% + CAGR + Sharpe + Max DD (5), then Volatility + 6 Month
-  // + AUM + Return spark + Underwater spark (5), and Actions (1) = 12; +1
+  // + AUM + Return spark + Underwater spark (5), Track (1, Phase 197 D-05), and Actions (1) = 13; +1
   // leading star column when userId is present, and +2 (Status and Created)
   // when managerRows is set (170.7 / D-01, D-09).
   // 2026-10-13 Phase 170.6.1 D-01: one fewer column than before, because the
-  // per-row disclosure column is gone (13 -> 12, star 14 -> 13).
+  // per-row disclosure column is gone (13 -> 12, star 14 -> 13). Phase 197 D-05 adds Track
+  // (12 -> 13, star 13 -> 14).
   const showStarColumn = userId !== undefined;
-  const emptyRowColSpan = (showStarColumn ? 13 : 12) + (managerRows ? 2 : 0);
+  // Phase 197 / ROUTE-05: +1 leading select column when `selectable`.
+  const emptyRowColSpan = (showStarColumn ? 14 : 13) + (managerRows ? 2 : 0) + (selectable ? 1 : 0);
 
   const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
 
@@ -1044,6 +1284,9 @@ export function StrategyTable({
   // sorted column, or a missing/non-finite entry → renders nothing.
   const pctSuffix = (s: StrategyWithAnalytics, colKey: TableSortKey) => {
     if (!percentiles || tableSortKey !== colKey) return null;
+    // Phase 197 / CLAR-02 (U-09): a percentile is a ranking claim, so a row with no `#n` (stale,
+    // age-unknown or undisplayed) carries none either.
+    if (!rankOrdinals.has(s.id)) return null;
     const metric = PERCENTILE_BY_SORT_KEY[colKey];
     if (!metric) return null;
     const p = percentiles[s.id]?.[metric];
@@ -1059,6 +1302,16 @@ export function StrategyTable({
       </span>
     );
   };
+
+  // Phase 197 / ROUTE-05 - the sr-only status line (UI-SPEC screen-reader table).
+  const selectionStatusText =
+    selectedIds.length === 0
+      ? ""
+      : selectedIds.length === 1
+        ? "1 selected. Select one more to compare."
+        : selectedIds.length >= COMPARE_MAX_ITEMS
+          ? `${selectedIds.length} selected, the maximum.`
+          : `${selectedIds.length} selected for comparison.`;
 
   return (
     <div>
@@ -1109,6 +1362,7 @@ export function StrategyTable({
 
       <div
         id={panelId}
+        ref={listRef}
         {...(userId !== undefined
           ? {
               role: "tabpanel",
@@ -1147,6 +1401,18 @@ export function StrategyTable({
               <table className="w-full text-body">
                 <thead>
                   <tr className="border-b border-border">
+                    {/* Phase 197 / ROUTE-05 (D-04) - the leading select column, only when
+                        `selectable`. 44px (the checkbox's touch target), no visible text: the
+                        accessible name is the sr-only "Select to compare", the star header's idiom. */}
+                    {selectable && (
+                      <th
+                        ref={selectThRef}
+                        scope="col"
+                        className={`sticky @3xl:left-0 top-0 z-30 w-11 bg-surface px-0 py-3 text-left ${HEADER_LABEL} text-text-muted`}
+                      >
+                        <span className="sr-only">Select to compare</span>
+                      </th>
+                    )}
                     {/* Leading rank column — the sticky-left corner (z-30). Not
                         sortable: rank is derived from the ACTIVE sort, so sorting
                         by it is meaningless. Its visible glyph is "#"; the
@@ -1154,7 +1420,11 @@ export function StrategyTable({
                     <th
                       ref={rankThRef}
                       scope="col"
-                      className={`sticky @3xl:left-0 top-0 z-30 w-14 bg-surface px-2 py-3 text-right ${HEADER_LABEL} text-text-muted`}
+                      className={
+                        selectable
+                          ? `sticky @3xl:left-(--pin-rank-left) top-0 z-30 w-14 bg-surface px-2 py-3 text-right ${HEADER_LABEL} text-text-muted`
+                          : `sticky @3xl:left-0 top-0 z-30 w-14 bg-surface px-2 py-3 text-right ${HEADER_LABEL} text-text-muted`
+                      }
                     >
                       <span className="sr-only">Rank</span>
                       <span aria-hidden="true">#</span>
@@ -1212,6 +1482,12 @@ export function StrategyTable({
                         <Fragment key={col.key}>
                           <th
                             scope="col"
+                            // Phase 197 D-05: the column header carries the same accessible name as
+                            // its sort button (label + period + annualisation). Name-from-content
+                            // over the two visible lines concatenates without separators in some
+                            // engines ("Returnfull record"), so the cell a reader hears for a
+                            // figure is set explicitly, once, from the shared map.
+                            aria-label={col.accessibleName}
                             // aria-sort exposes the current sort state to assistive
                             // tech (WCAG 4.1.2) \u2014 the visual \u2191/\u2193 glyph alone is not an
                             // accessible cue.
@@ -1229,16 +1505,7 @@ export function StrategyTable({
                                 <th> could not be sorted from the keyboard. The
                                 actively-sorted header darkens to text-text-primary
                                 so the sort target is scannable. */}
-                            <button
-                              type="button"
-                              onClick={() => handleColumnSort(col.key)}
-                              className={`-mx-1 inline-flex items-center gap-1 rounded px-1 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${HEADER_LABEL} ${sortedHere ? "text-text-primary" : "text-text-muted hover:text-text-primary"}`}
-                            >
-                              {col.label}
-                              {sortedHere && (
-                                <span aria-hidden="true">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
-                              )}
-                            </button>
+                            {renderSortHeader(col, sortedHere)}
                           </th>
                           {/* Phase 170.7 / D-01 — the manager Status column, emitted
                               INSIDE the map right after the Strategy header
@@ -1290,8 +1557,16 @@ export function StrategyTable({
                         </Fragment>
                       );
                     })}
-                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}>Return</th>
-                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}>Underwater</th>
+                    {PLAIN_COLUMNS.map((col) => (
+                      <th
+                        key={col.key}
+                        aria-label={col.accessibleName}
+                        className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}
+                      >
+                        {col.tooltip ? <Tooltip content={col.tooltip}>{col.label}</Tooltip> : col.label}
+                        {renderQualifier(col)}
+                      </th>
+                    ))}
                     <th className={`sticky top-0 z-20 bg-surface pl-4 pr-8 py-3 text-right ${HEADER_LABEL} text-text-muted`}>Actions</th>
                   </tr>
                 </thead>
@@ -1309,7 +1584,19 @@ export function StrategyTable({
                     const cagrShown = gatedValue(s.analytics.cagr, gate);
                     const sharpeShown = gatedValue(s.analytics.sharpe, gate);
                     const volatilityShown = gatedValue(s.analytics.volatility, gate);
-                    const volatilityText = formatPercent(volatilityShown);
+                    // Phase 197 D-05: volatility can never be negative, so it carries no sign (DESIGN.md Numbers Contract).
+                    const volatilityText = formatPercent(volatilityShown, 2, { signed: false });
+                    // Phase 197 D-05 - Track: months of record from the SAME covered-day span
+                    // the 194 gate reads, titled with the first and last day it counts. The
+                    // first day is `recordStartDay`, the rule `figureSpan` itself calls.
+                    // An unreadable record is an unknown length, as the withheld figures beside it say (197 WR-01).
+                    const trackSpan = record.unreadable ? null : record.spanDays;
+                    const trackShown = trackMonths(trackSpan);
+                    const { series_start: trackFirst, series_end: trackLast, headline_since: trackHeadline } = s.analytics;
+                    const trackTitle =
+                      trackSpan != null && trackFirst && trackLast
+                        ? `${formatNumber(trackSpan, 0)} days of record, ${formatIsoDay(recordStartDay({ seriesStart: trackFirst, headlineSince: trackHeadline }))} to ${formatIsoDay(trackLast)}.`
+                        : undefined;
                     const sixMonthText = formatPercent(s.analytics.six_month_return);
                     const aumText = formatCurrency(s.aum);
                     // Phase 149 Delta 4 — the chip-state status, from the ONE
@@ -1323,6 +1610,12 @@ export function StrategyTable({
                       s.created_at ?? null,
                     );
                     const hasComputedAnalytics = isDisplayedRow(s);
+                    // Phase 197 / CLAR-02: this row's data-age verdict (null on the owner mounts).
+                    const seriesVerdict = seriesVerdicts?.get(s.id) ?? null;
+                    const notRankedText =
+                      hasComputedAnalytics && seriesVerdict
+                        ? notRankedReason(seriesVerdict.verdict, seriesVerdict.thresholdDays)
+                        : null;
                     // Phase 162 / HONEST-03, UI-SPEC C-6 — an `is_example` row
                     // NEVER claims a sync recency, whatever its status. The
                     // "Example" chip already carries the row's identity, and a
@@ -1410,6 +1703,19 @@ export function StrategyTable({
                         }
                         style={{ height: "var(--row-h)" }}
                       >
+                        {/* Phase 197 / ROUTE-05 (D-04) - the select cell. A placeholder row never
+                            gets one (below it is an empty cell that only keeps the td count). */}
+                        {selectable && (
+                          <td className="sticky @3xl:left-0 z-10 w-11 bg-surface px-0 py-3 align-middle">
+                            <SelectCheckbox
+                              strategyId={s.id}
+                              name={s.name}
+                              checked={selectedIds.includes(s.id)}
+                              atCap={selectedAtCap}
+                              onToggle={toggleSelected}
+                            />
+                          </td>
+                        )}
                         {/* Sticky rank cell — solid bg-surface (NOT the
                             translucent row hover) so scrolled cells don't bleed
                             through, matching the sticky identity column.
@@ -1432,8 +1738,19 @@ export function StrategyTable({
                             Phase 149 rule that a public row must never be
                             shouted at is honoured by saying LESS here, not by
                             adding a public error state. */}
-                        <td className="sticky @3xl:left-0 z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
-                          {hasComputedAnalytics ? `#${rank}` : "—"}
+                        <td
+                          className={
+                            selectable
+                              ? "sticky @3xl:left-(--pin-rank-left) z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted"
+                              : "sticky @3xl:left-0 z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted"
+                          }
+                          title={notRankedText ?? undefined}
+                        >
+                          {rank !== undefined ? `#${rank}` : "—"}
+                          {/* Phase 197 / CLAR-02 (U-08): the em dash on a displayed stale or
+                              age-unknown row says why, to a screen reader as well as on hover. An
+                              undisplayed row keeps today's plain dash. */}
+                          {notRankedText && <span className="sr-only">{notRankedText}</span>}
                         </td>
                         {showStarColumn && (
                           <td className="sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface px-2 py-3 align-middle">
@@ -1529,6 +1846,20 @@ export function StrategyTable({
                                 <Badge key={t} label={t} className="whitespace-nowrap" />
                               ))}
                             </div>
+                            {/* Phase 197 / CLAR-02 (D-03, U-03) — the amber
+                                data-date chip, after the strategy-type badges
+                                and before the sync badge. Only a displayed row
+                                can be non-current (an undisplayed row has no
+                                series to date), and `seriesVerdicts` is null
+                                on the owner mounts, so those render nothing. */}
+                            {hasComputedAnalytics && seriesVerdict && (
+                              <StaleSeriesChip
+                                verdict={seriesVerdict.verdict}
+                                seriesEnd={s.analytics.series_end}
+                                ageDays={seriesVerdict.ageDays}
+                                thresholdDays={seriesVerdict.thresholdDays}
+                              />
+                            )}
                             {/* W-B — an uncomputed row must never claim
                                 "Synced …": EMPTY_ANALYTICS's `computed_at: ""`
                                 is falsy so absent rows were already badge-null,
@@ -1629,6 +1960,12 @@ export function StrategyTable({
                                 </span>
                               ))}
                           </div>
+                          {/* Phase 197 / CLAR-05 (D-01, D-02) — the admin-only
+                              third line. The map exists only for an admin
+                              viewer (the page passes it only then), so for
+                              every other mount this is a lookup on undefined
+                              and renders nothing. */}
+                          <SharedAccountNote names={sharedAccountPartners?.[s.id] ?? []} />
                         </td>
                         {/* Phase 170.7 / D-01 — the manager Status cell, directly
                             after the Strategy cell so it lines up with the
@@ -1651,6 +1988,17 @@ export function StrategyTable({
                             {formatIsoDay(s.created_at)}
                           </td>
                         )}
+                        {/* Phase 197 D-05 — the Track cell: whole months of record from the
+                            covered-day span the 194 gate reads (`rowRecord(s).spanDays`, D-20),
+                            emitted after the manager Status/Created cells so it lines up with
+                            its header (index 1 of the label map). No tone: a short record is a
+                            fact, not a verdict. An unknown span is the em dash, never blank. */}
+                        <td
+                          className={`px-4 py-3 text-right font-metric tabular-nums ${typeof trackShown === "number" ? "text-text-secondary" : "text-text-muted"} group-hover:bg-page/50 transition-colors`}
+                          title={trackTitle}
+                        >
+                          {trackShown == null ? "\u2014" : typeof trackShown === "number" ? formatNumber(trackShown, 0) : trackShown}
+                        </td>
                         {/* Return / 6 Month carry a sign → sign-tinted (green/red)
                             only for a finite value. CAGR / Sharpe are magnitudes →
                             neutral ink. Max DD is red only when finitely negative.
@@ -1803,7 +2151,16 @@ export function StrategyTable({
                         className="bg-surface-subtle border-b border-border last:border-0"
                         style={{ height: "var(--row-h)" }}
                       >
-                        <td className="sticky @3xl:left-0 z-10 w-14 bg-surface-subtle px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
+                        {selectable && (
+                          <td className="sticky @3xl:left-0 z-10 w-11 bg-surface-subtle px-0 py-3 align-middle" />
+                        )}
+                        <td
+                          className={
+                            selectable
+                              ? "sticky @3xl:left-(--pin-rank-left) z-10 w-14 bg-surface-subtle px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted"
+                              : "sticky @3xl:left-0 z-10 w-14 bg-surface-subtle px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted"
+                          }
+                        >
                           —
                         </td>
                         {/* The owner surface passes no `userId`, so this is
@@ -1845,6 +2202,11 @@ export function StrategyTable({
                             <span className="text-text-muted">—</span>
                           </td>
                         )}
+                        {/* Phase 197 D-05 — the Track cell: no series, so no record
+                            length. Keeps the td count equal to the th count. */}
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
                         {/* Every metric cell is an honest em-dash: there is no
                             run, no series, nothing to average. A 0 / 0.00 /
                             +0.0% here would be invented data (SC-4). */}
@@ -1916,6 +2278,12 @@ export function StrategyTable({
             userId={userId}
             watchedSet={watchedSet}
             onToggleStar={onToggleStar}
+            seriesVerdicts={seriesVerdicts ?? undefined}
+            selectable={selectable}
+            selectedIds={selectable ? selectedIds : undefined}
+            onToggleSelected={selectable ? toggleSelected : undefined}
+            selectionFull={selectedAtCap}
+            sharedAccountPartners={sharedAccountPartners}
           />
         )}
 
@@ -1939,6 +2307,82 @@ export function StrategyTable({
               >
                 Next
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Phase 197 / ROUTE-05 (D-04) - the screen-reader line is ALWAYS mounted while selection is
+            on (a live region must exist before its text changes to be announced), and the bar
+            below it renders from two selected. */}
+        {selectable && (
+          <p
+            role="status"
+            aria-live="polite"
+            data-testid="selection-status"
+            className="sr-only"
+          >
+            {selectionStatusText}
+          </p>
+        )}
+        {selectable && selectedIds.length >= 2 && (
+          <div
+            data-testid="compare-bar"
+            className="@container sticky bottom-0 z-40 mt-4 border border-border bg-surface px-4 py-2 shadow-card"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="text-body text-text-secondary">{selectedIds.length} selected</span>
+                {/* The chips (and the cap line that follows them) show from the bar's own @2xl
+                    width; under it the bar is the count and the two buttons on one line. */}
+                <ul className="hidden min-w-0 flex-wrap items-center gap-2 @2xl:flex">
+                  {selectedIds.map((id) => {
+                    const chipName = strategyNameById.get(id);
+                    if (chipName === undefined) return null;
+                    return (
+                      <li
+                        key={id}
+                        className="inline-flex min-w-0 items-center gap-1 rounded-sm border border-border bg-surface px-2 py-1 text-caption text-text-primary"
+                      >
+                        <span className="max-w-64 truncate" title={chipName}>
+                          {chipName}
+                        </span>
+                        <button
+                          type="button"
+                          aria-label={`Remove ${chipName} from the selection`}
+                          data-chip-remove-for={id}
+                          onClick={() => removeFromSelection(id)}
+                          className="inline-flex items-center justify-center rounded-sm px-1 text-text-muted hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+                        >
+                          <span aria-hidden="true">&times;</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                  {selectedAtCap && (
+                    <li className="text-caption text-text-muted">
+                      Up to {COMPARE_MAX_ITEMS}. Remove one to add another.
+                    </li>
+                  )}
+                </ul>
+              </div>
+              <div className="flex shrink-0 items-center gap-3">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="md"
+                  aria-label="Clear the selection"
+                  onClick={clearSelection}
+                >
+                  Clear
+                </Button>
+                <Link
+                  href={compareHref(selectedIds)}
+                  aria-label={`Compare ${selectedIds.length} strategies`}
+                  className="inline-flex items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 bg-accent text-white hover:bg-accent-hover min-h-[44px] px-4 py-2.5 text-body"
+                >
+                  Compare ({selectedIds.length})
+                </Link>
+              </div>
             </div>
           </div>
         )}
