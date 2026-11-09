@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.30.2] - 2026-11-09 — Phase 198 MYBOOK gap 198-UAT-01: the note under the glance agrees with the glance
+## [0.133.30.3] - 2026-11-09 — Phase 198 MYBOOK gap 198-UAT-01: the note under the glance agrees with the glance
 
 ### Fixed
 - **The Overview no longer says book return and risk are hidden while the glance prints them.** Browser UAT on 2026-11-09 found the Book at a glance showing YTD TWR, Sharpe and Max DD while the "What is missing" note directly below said the latest rebuild "did not pass its checks, so book return and risk are not shown". The glance reads the live per-key figures, which the history state never withholds (Phase 198 D-06, research C7); only the equity chart and the factsheet are hidden while the history is withheld. The two book-level lines in `MissingDataMessage.tsx` now say what is actually hidden:
@@ -20,6 +20,14 @@
 - Two clauses stay passive ("is recomputed once a day", "so it is not shown") against DESIGN.md's active-voice rule, because comments in `queries.ts`, `EquityHistoryRebuilding.tsx` and the Scenario own-book sentence quote them verbatim.
 - MT5 account-balance rows on Holdings stay typed Spot (founder, 2026-11-09; research assumption A1 confirmed). No code change.
 - The founder's browser re-check of the fixed message on the deployed build is the last step before Phase 198 closes.
+
+## [0.133.30.2] - 2026-11-09 — records: close Phase 194 FIGURETRUTH and widen Phase 194.2
+
+### Notes
+- **Phase 194 is closed.** The signed-in browser UAT ran on quantalyze.xyz at v0.133.30.0 (main `46ec99450`) and passed. `194-UAT.md` records the reading: the tearsheet AUM row is hidden for the founder account, which is correct under D-06; Book equity matches between the glance panel and Holdings, and Scenario's Modelled equity shows the same value; the Gross and Net exposure labels read in place. `194-VERIFICATION.md` is now `status: passed`, with `verified_at_sha` set to the main commit the UAT was read on.
+- **One case was not checked in a browser, and the founder closed the phase anyway (2026-11-09, "Close it").** The tearsheet AUM row in its shown state (an allocator, or the strategy's own manager) could not be seen from the founder account, which is neither. Its gate is covered in code and tests (VERIFICATION truth 3).
+- `phase complete 194` ticked TRUST-04 and TRUST-05, the ROADMAP bullet and the Progress row. Its move of STATE's Current Position to "the next phase" was corrected by hand, because phases run in parallel: the position now names 198 (verification outstanding), 197 (shipped) and 194.2 (not planned).
+- **Phase 194.2 FIGURERESIDUALS takes the two extras the UAT found** (founder routing, booked through `/gsd-phase --edit 194.2`): the tearsheet Equity Curve overflows its card by about 157px at a 1470px viewport, and one strategy's record length reads 193 days on discovery and the tearsheet but 192 on the factsheet.
 
 ## [0.133.30.1] - 2026-11-09 — fix: a discovery-ranking test fixture aged past the Phase 197 stale line
 

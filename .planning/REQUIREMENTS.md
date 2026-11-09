@@ -13,8 +13,8 @@
 - [x] **TRUST-01**: A visitor reading the home, `/security`, `/for-quants` and Terms pages gets one consistent, true account of how API keys are stored and encrypted, which TLS versions are accepted, who can view a factsheet, what listing costs, and how many exchanges are supported. The home page no longer asks an anonymous visitor for a key and secret.
 - [x] **TRUST-02**: Scrolling over a factsheet chart never changes its date range by itself. A narrowed range is always labelled with a one-click reset, and is never silently restored on a later visit.
 - [x] **TRUST-03**: No factsheet shows developer notes, placeholder copy, or demo content that belongs to another strategy or portfolio.
-- [ ] **TRUST-04**: A metric with the same name shows the same value for the same strategy and period on every page (My Strategies, factsheet, tearsheet, Scenario, Holdings). Where two figures differ on purpose (gross vs net, a different period or definition), the label says so.
-- [ ] **TRUST-05**: A figure that cannot be meaningful (an implausible cumulative return, an annualised ratio on a record shorter than a year) is withheld or plainly qualified, never shown at full confidence. Amended 2026-11-07 (Phase 194 D-05, founder): the implausible-cumulative-return clause is dropped; values are shown, not flagged.
+- [x] **TRUST-04**: A metric with the same name shows the same value for the same strategy and period on every page (My Strategies, factsheet, tearsheet, Scenario, Holdings). Where two figures differ on purpose (gross vs net, a different period or definition), the label says so.
+- [x] **TRUST-05**: A figure that cannot be meaningful (an implausible cumulative return, an annualised ratio on a record shorter than a year) is withheld or plainly qualified, never shown at full confidence. Amended 2026-11-07 (Phase 194 D-05, founder): the implausible-cumulative-return clause is dropped; values are shown, not flagged.
 - [x] **TRUST-06**: Opening any page writes nothing on the user's behalf (for example, viewing a strategy no longer creates an empty note).
 
 ### Route — no dead ends
@@ -79,8 +79,8 @@ Deferred, tracked, not in this roadmap.
 | TRUST-01 | Phase 192 | Satisfied (192-VERIFICATION.md passed, UAT passed 2026-11-07) |
 | TRUST-02 | Phase 193 | Complete |
 | TRUST-03 | Phase 193 | Complete |
-| TRUST-04 | Phase 194 | Pending |
-| TRUST-05 | Phase 194 | Pending |
+| TRUST-04 | Phase 194 | Complete |
+| TRUST-05 | Phase 194 | Complete |
 | TRUST-06 | Phase 193 | Complete |
 | ROUTE-01 | Phase 199 | Pending |
 | ROUTE-02 | Phase 196 | Pending |
