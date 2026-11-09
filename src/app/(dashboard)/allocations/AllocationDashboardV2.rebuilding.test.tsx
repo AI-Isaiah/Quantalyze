@@ -132,6 +132,10 @@ const REASONS = REASON_LINES.map(([reason]) => reason);
 const HIDDEN_FOR_NOW =
   "The equity chart and the ratios built from it are hidden for now.";
 
+// 198-14 SFH-01: the sr-only pointer a glance dash carries when no live series
+// exists and the missing-data note renders below.
+const NO_LIVE_FIGURES_POINTER = "No live figures yet. See the note below.";
+
 const baseProps = {
   portfolio: {
     id: "p1",
@@ -588,15 +592,18 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(after(section, insight)).toBe(true);
     expect(glance.nextElementSibling).toBe(section);
 
-    // 198-UAT-01 (D-10): no line of the note explains a glance figure (C7), so
-    // no glance cell points at it.
-    expect(screen.getByTestId("glance-ytd").textContent).toBe("—");
-    expect(glance.textContent).not.toMatch(/note below/i);
+    // 198-14 SFH-01: this payload carries no live baseline, so the glance is
+    // all dashes and the note below is the only explanation of them: the dash
+    // cells carry the narrow sr-only pointer to it.
+    expect(screen.getByTestId("glance-ytd").textContent).toBe(
+      `—${NO_LIVE_FIGURES_POINTER}`,
+    );
+    expect(glance.textContent).not.toMatch(/not shown/i);
     // The Risk section's pointer points at a note that exists.
     expect(screen.getByText(/See the note above\./)).toBeInTheDocument();
   });
 
-  it("every reason prints at least one line, so the Risk pointer is true and the glance points at no note", () => {
+  it("every reason prints at least one line, so the Risk pointer and the glance's no-live-figures pointer are true", () => {
     for (const reason of [...REASONS, null]) {
       render(
         <AllocationDashboardV2
@@ -610,7 +617,8 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       const glanceText = screen.getByRole("region", {
         name: "Book at a glance",
       }).textContent;
-      expect(glanceText).not.toMatch(/note below/i);
+      // No live baseline here, so each dash cell points at the note that exists.
+      expect(glanceText).toContain(NO_LIVE_FIGURES_POINTER);
       expect(glanceText).not.toMatch(/not shown/i);
       cleanup();
     }

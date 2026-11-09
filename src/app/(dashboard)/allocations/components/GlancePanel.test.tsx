@@ -1,9 +1,14 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 
+// queries.ts is server-only; the SFH-01 test reads its `emptyLiveBaselineMetrics`
+// builder only, so the guard is replaced with an empty module.
+vi.mock("server-only", () => ({}));
+
 import { AllocationDashboardV2 } from "../AllocationDashboardV2";
 import { BOOK_FIGURES_SERIES_CAPTION, liveBookFigures } from "../lib/book-figures";
 import { withheldCellTitle, shortTrackMarkerTitle } from "@/lib/figure-gate";
+import { emptyLiveBaselineMetrics } from "@/lib/queries";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // ---------------------------------------------------------------------------
@@ -385,4 +390,98 @@ describe("198-UAT-01: the glance and the missing-data note agree on a rebuilding
       }
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// 198-14 SFH-01. The no-live-series state (key_not_syncing, account_identity_pending,
+// awaiting_derivation, history_read_failed) prints every Return and Risk cell as a
+// dash, and the note below is the only explanation. So that state, and only that
+// state, carries the sr-only pointer. A cell that prints a value never does (the
+// 198-UAT-01 contradiction), and a withheld Sharpe carries its own reason.
+// ---------------------------------------------------------------------------
+
+describe("198-14 SFH-01: the sr-only pointer is narrow", () => {
+  afterEach(() => cleanup());
+
+  const POINTER = "No live figures yet. See the note below.";
+  const CELLS = ["glance-ytd", "glance-sharpe", "glance-maxdd"] as const;
+
+  it("with the empty live baseline and a rebuilding reason, each Return and Risk dash points at the note", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+          liveBaselineMetrics: emptyLiveBaselineMetrics([]),
+        })}
+      />,
+    );
+    expect(screen.getByTestId("overview-missing-data")).toBeInTheDocument();
+    for (const id of CELLS) {
+      const cell = screen.getByTestId(id);
+      expect(cell.textContent, id).toBe(`—${POINTER}`);
+      expect(cell.querySelector(".sr-only")?.textContent, id).toBe(POINTER);
+    }
+    // Holdings cells are not Return or Risk cells and carry no pointer.
+    expect(screen.getByTestId("glance-positions").textContent).not.toContain(
+      POINTER,
+    );
+  });
+
+  it("the all-keys-stale dashes carry no pointer: the staleness banner explains them", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          allKeysStale: true,
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+          liveBaselineMetrics: emptyLiveBaselineMetrics([]),
+        })}
+      />,
+    );
+    for (const id of CELLS) {
+      expect(screen.getByTestId(id).textContent, id).toBe("—");
+    }
+  });
+
+  it("a cell that prints a value never carries the pointer, even with a note below", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+        })}
+      />,
+    );
+    expect(screen.getByTestId("overview-missing-data")).toBeInTheDocument();
+    expect(glance().textContent).not.toContain(POINTER);
+    expect(screen.getByTestId("glance-ytd").textContent).toBe("+4.21%");
+  });
+
+  it("a withheld Sharpe carries its own reason, never the pointer", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+          liveBaselineMetrics: baseline(60),
+        })}
+      />,
+    );
+    const cell = screen.getByTestId("glance-sharpe");
+    expect(cell.textContent).not.toContain(POINTER);
+    expect(cell.querySelector(".sr-only")?.textContent).toBe(
+      withheldCellTitle(liveBookFigures(baseline(60) as never).sharpeRecord),
+    );
+  });
+
+  it("a ready book with no live baseline renders no note and no pointer", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({ liveBaselineMetrics: emptyLiveBaselineMetrics([]) })}
+      />,
+    );
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+    expect(glance().textContent).not.toContain(POINTER);
+  });
 });

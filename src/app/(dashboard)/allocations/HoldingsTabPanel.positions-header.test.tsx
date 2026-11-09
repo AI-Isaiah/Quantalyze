@@ -86,6 +86,7 @@ function renderBoth(holdingsSummary: unknown[]) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         holdingsSummary={p.holdingsSummary as any}
         allKeysStale={false}
+        noteBelow={false}
       />
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
       <HoldingsTabPanel {...(p as any)} />

@@ -280,13 +280,15 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       )}
       {/* Phase 198 plan 01 (D-06, ROUTE-07): the book at a glance. Figures come
           from the shared book-figures module Scenario's live strip also reads,
-          and do not depend on the history state (research C7). The glance carries
-          no pointer to the missing-data message: its lines explain the withheld
-          history and never a glance figure (198-UAT-01, D-10). */}
+          and do not depend on the history state (research C7). A cell that
+          prints a value never points at the missing-data note (198-UAT-01,
+          D-10). Only when there is no live series and the note renders below
+          does a dash cell carry the sr-only pointer to it (198-14 SFH-01). */}
       <GlancePanel
         liveBaselineMetrics={props.liveBaselineMetrics}
         holdingsSummary={props.holdingsSummary ?? []}
         allKeysStale={allKeysStale}
+        noteBelow={missingLines.length > 0}
       />
       {/* Phase 198 plan 09 (D-01): what is missing, per key, directly under the
           glance. Renders nothing when nothing is missing. */}
