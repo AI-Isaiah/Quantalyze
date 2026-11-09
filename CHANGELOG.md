@@ -71,6 +71,7 @@ Three rounds of phase review (gsd-code-reviewer and silent-failure-hunter) found
   - `DashboardChrome.test.tsx` allows the viewer bar's and visitor header's widths;
   - the anon-projection route list drops `src/app/strategy`;
   - the redirect-origin guard checks its query index before it slices.
+- **The `layout-narrow` MYSTRATTABLE e2e arm expects `?from=strategies`.** It loads `/strategies`, whose table carries the `strategies` origin (the unit test `page.table.test.tsx` pins the same href); an earlier edit in this phase assumed the My Strategies origin and turned `e2e-seeded` red.
 - **Fixtures:**
   - the phase 190 seam fixture's `series_end` now follows the real clock;
   - the deep-link kind `not_own_capital` is renamed `unmarked_own` to satisfy the OWN-03 mark-literal census.
