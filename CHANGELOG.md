@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.30.1] - 2026-11-09 — fix: a discovery-ranking test fixture aged past the Phase 197 stale line
+
+### Fixed
+- **`frontend-test (1)` is green again on `main` and on every PR.** Three "phase 190 seam" cases in `src/components/strategy/StrategyTable.stale-analytics.test.tsx` failed from 2026-11-09: a re-running row expected `#1` and read "Not ranked: the data is more than 10 days old.", the warning-tone and computing-row ordering cases followed. The product code is right; the fixture was wrong.
+
+### Root cause
+- The fixture `rerunDbRow` carried a hard-coded `series_end: "2026-10-29"`. Phase 197 made discovery judge a row by `series_end` against the real clock (stale above 7 days for crypto, above 10 for everything else), so the fixed date passed the 10-day line on 2026-11-09 and the row lost its rank. The same file's `analyticsEmbed` already builds `series_end` from `Date.now()`; `rerunDbRow` now does the same (yesterday).
+- **Swept for the same time bomb elsewhere.** The full vitest suite (5584 files, 25172 tests) was run twice locally, once on the real clock and once with the wall clock shifted 60 days forward through a temporary, uncommitted probe in the test setup. Both runs failed the same set: this fixture plus two cases known to fail before this change (`compute.conventions` fixtures B and C, recorded in Phase 194's `deferred-items.md`). No other test depends on an absolute date going stale in the next 60 days.
+
+### Tests
+- The fix can fail: setting the fixture's `series_end` 11 days back from a byte backup turns the same three cases RED with the CI messages; the restore was `cmp`-identical and the file went back to 23/23 green.
+
 ## [0.133.30.0] - 2026-11-09 — Phase 197 SCREEN: discovery reads plainly and a shortlist can be compared
 
 ### Added

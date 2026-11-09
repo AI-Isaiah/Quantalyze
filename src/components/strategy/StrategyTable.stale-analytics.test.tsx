@@ -746,7 +746,9 @@ const RERUN_TEXT = ["+77.00%", "+31.00%", "2.50", "-9.00%", "14.00%", "+21.00%"]
 function rerunDbRow(id: string, name: string, status = "computing"): Record<string, unknown> {
   const r = dbRow(id, name, status, RERUN_KPIS);
   Object.assign(r.strategy_analytics as Record<string, unknown>, {
-    series_end: "2026-10-29",
+    // Relative to the real clock, like `analyticsEmbed`'s: a fixed date here aged past the Phase 197
+    // stale line on 2026-11-09 and the row lost its `#n`, which these seam cases are not about.
+    series_end: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
     cumulative_method: "geometric",
   });
   return r;
