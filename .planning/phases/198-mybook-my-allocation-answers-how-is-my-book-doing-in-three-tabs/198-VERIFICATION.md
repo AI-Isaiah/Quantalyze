@@ -1,8 +1,8 @@
 ---
 phase: 198-mybook
 verified: 2026-11-09T00:00:00Z
-status: human_needed
-score: 10/10 must-haves verified (code and unit/component evidence); 0 gaps; seeded e2e CI-pending
+status: gaps_found
+score: 10/10 must-haves verified at issue; browser UAT 2026-11-09 found 1 gap (198-UAT-01, see 198-UAT.md)
 verified_at_sha: 87878904ed3bb27d8c350cec7d9e73d5585b9250
 drift_subjects:
   - src/app/(dashboard)/allocations/AllocationsTabs.tsx
@@ -22,6 +22,20 @@ drift_subjects:
   - src/lib/queries.ts
   - e2e/allocations-add.spec.ts
 behavior_unverified: 0
+gaps:
+  - truth: "SC-2 second half: the missing-data message agrees with what the Overview shows"
+    gap_id: 198-UAT-01
+    status: failed
+    source: 198-UAT.md test 3 (browser UAT 2026-11-09)
+    reason: "The glance prints YTD TWR, Sharpe and Max DD (D-06, C7) while the book-level line below says the latest rebuild 'did not pass its checks, so book return and risk are not shown'; a null glance cell's sr-only text points at that note, which does not explain it."
+    artifacts:
+      - "src/app/(dashboard)/allocations/components/MissingDataMessage.tsx"
+      - "src/app/(dashboard)/allocations/components/GlancePanel.tsx"
+      - "src/app/(dashboard)/allocations/AllocationDashboardV2.tsx"
+    missing:
+      - "Book-level lines name what the withheld history hides (the equity chart and the ratios built from it), never 'book return and risk'"
+      - "No glance cell points at a note that does not explain it"
+      - "A failing-capable test pinning both on a rebuilding book with populated live figures"
 overrides_applied: 0
 human_verification:
   - test: "Seeded e2e e2e/allocations-add.spec.ts (valid ?add=<id> opens step 2 pre-filled, add leaves the URL, axe clean on both steps, reload does not reopen; malformed id opens step 1 with the not-available notice)"
@@ -36,7 +50,7 @@ human_verification:
 
 **Phase Goal:** An allocator opening My allocation sees the book's return, risk and holdings at a glance (or exactly what is missing), "+ Allocation" opens the allocator's own flow, Holdings labels positions correctly, and the page has at most three tabs with each position listed once and dust hidden.
 **Verified:** 2026-11-09 at `87878904ed3bb27d8c350cec7d9e73d5585b9250` (worktree `quantalyze-198`, branch `feat/198-mybook`)
-**Status:** human_needed
+**Status:** gaps_found (was human_needed at issue; browser UAT 2026-11-09 found gap 198-UAT-01, see 198-UAT.md)
 **Re-verification:** No, initial verification
 
 ## Goal Achievement
