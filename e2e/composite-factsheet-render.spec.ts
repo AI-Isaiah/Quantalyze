@@ -105,7 +105,9 @@ function kpiValue(page: Page, label: string) {
   return page
     .locator("#factsheet-main")
     .getByText(label, { exact: true })
-    .locator("xpath=following-sibling::p");
+    // Phase 196 (D-04): the document layout prints the comparator's value in a second <p>
+    // under each KPI (`factsheet-kpi-bench`), so name the value <p> by its test id.
+    .locator('xpath=following-sibling::p[@data-testid="factsheet-kpi-value"]');
 }
 
 test.describe("Phase 91 — composite factsheet render + axe (QA-02/QA-03)", () => {

@@ -158,9 +158,10 @@ test.describe("Phase 149 — /my-strategies (NAV-01)", () => {
     // SHAPE against the seeded id — click-through is optional per the plan
     // and skipped: a draft's factsheet render state is a different surface's
     // contract.
+    // Phase 196 / ROUTE-04 (D-01): the My Strategies mount's origin rides on the link.
     await expect(ownRowLink).toHaveAttribute(
       "href",
-      `/factsheet/${draftA.strategyId}`,
+      `/factsheet/${draftA.strategyId}?from=my-strategies`,
     );
   });
 });

@@ -507,3 +507,34 @@ describe.each([
     expect(c.repeatedMetrics).toEqual(ROLLING_REPEATS_OPEN_ITEM[name]);
   });
 });
+
+// axe `heading-order` on the e2e lane (PR #1235): the opening view's equity figure put an <h3>
+// straight after the masthead <h1>, because its Performance <h2> lived on the CollapsibleSection
+// the document layout no longer renders. Every heading may go at most one level deeper than the
+// heading before it, closed and with Advanced open.
+describe("heading order (axe heading-order)", () => {
+  function headingJumps(container: HTMLElement): string[] {
+    const levels = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6")).map((h) => ({
+      level: Number(h.tagName[1]),
+      text: (h.textContent ?? "").trim(),
+    }));
+    const jumps: string[] = [];
+    for (let i = 1; i < levels.length; i++) {
+      if (levels[i].level > levels[i - 1].level + 1)
+        jumps.push(`h${levels[i - 1].level} "${levels[i - 1].text}" -> h${levels[i].level} "${levels[i].text}"`);
+    }
+    return jumps;
+  }
+
+  it.each([
+    ["A", censusPayloadA],
+    ["B", censusPayloadB],
+    ["C", censusPayloadC],
+  ])("fixture %s: no heading skips a level, closed or with Advanced open", async (_n, make) => {
+    const { container } = mountView(make());
+    expect(headingJumps(container)).toEqual([]);
+    fireEvent.click(advancedEl(container).querySelector("summary")!);
+    await waitFor(() => expect(advancedEl(container).open).toBe(true));
+    expect(headingJumps(container)).toEqual([]);
+  });
+});

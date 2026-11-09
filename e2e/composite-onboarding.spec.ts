@@ -377,8 +377,11 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     // (proves the lookup returned nothing) AND the draft's name is absent
     // (proves the draft content did not leak).
     await page.goto(`/factsheet/${failed.strategyId}`);
+    // Phase 196 (SF-05): /factsheet/[id] now has its own not-found boundary, so the
+    // factsheet's not-found card renders here, not the root "Page not found". It reads the
+    // same for an unpublished and a missing id.
     await expect(
-      page.getByRole("heading", { name: /page not found/i }),
+      page.getByRole("heading", { name: /this factsheet isn.t available/i }),
       "the #338 failed-member composite must NOT be publicly discoverable — a " +
         "permanent-failed composite must never reach published status; the " +
         "public factsheet must render the not-found page for a draft seen by a non-owner",

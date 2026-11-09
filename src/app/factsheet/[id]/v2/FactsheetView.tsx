@@ -569,6 +569,10 @@ export function FactsheetBody({
                 SC-5 census counts (scripts/factsheet-census/count.ts). */}
             <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
               <div data-census-section="equity" className="flex flex-col gap-10 min-w-0">
+                {/* The full layout's Performance <h2> sits on its CollapsibleSection, which this
+                    layout does not render; without one the figure's <h3> skips a level
+                    (axe heading-order). Screen-reader only: the census and the eye see no change. */}
+                <h2 className="sr-only">Performance</h2>
                 <MasterBrush />
                 <PerformanceCharts variant="equity" />
                 {/* The page's one chart hint (D-04): every chart below points at it. The
