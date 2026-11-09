@@ -9,11 +9,10 @@ import { BTC_DAILY } from "@/lib/factsheet/benchmarks";
 import { BasisProvider, useBasis, useBasisSeriesView } from "./basis-context";
 import { LeverageProvider, useLeverage } from "./leverage-context";
 import { BENCHMARK_READ_FAILED_MESSAGE } from "@/lib/factsheet/fetch-and-build-payload";
-import StrategyDetailPage from "@/app/(dashboard)/discovery/[slug]/[strategyId]/page";
+import FactsheetV2Page from "./page";
 import { createClient } from "@/lib/supabase/server";
-import { getStrategyDetail } from "@/lib/queries";
+import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 /*
  * Doubles for the D-23 block at the foot of this file (the build tests
@@ -36,7 +35,12 @@ vi.mock("next/navigation", () => ({
   },
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
-vi.mock("@/lib/queries", () => ({ getStrategyDetail: vi.fn() }));
+// unstable_cache -> identity: the factsheet page wraps its public build in it, and
+// this file tests the REAL builder, not Next's cache plumbing.
+vi.mock("next/cache", () => ({
+  unstable_cache: (fn: (...args: unknown[]) => unknown) => fn,
+}));
+vi.mock("@/lib/queries", () => ({ readPublicVerificationSignals: vi.fn() }));
 
 type BenchCall = { ascending: boolean; gte?: string; lte?: string; lt?: string };
 const fake = vi.hoisted(() => ({
@@ -246,7 +250,9 @@ describe("169.5-02 SC3 / D-09: the browser re-derive aligns BTC from the payload
  * builder assembly to the factsheet route's BTC read. Phase 169.1 plan 01 moved
  * the page onto the shared `fetchAndBuildPayloadWithReason` and deleted that case
  * (one path, nothing to keep in lockstep). The error-arm cases below stay: they
- * pin what the discovery page shows when the BTC read fails.
+ * pin what the factsheet page shows when the BTC read fails. Phase 196 (D-03)
+ * retired the discovery detail page; the same arms now drive the factsheet page
+ * (`./page`), which builds through the same resolve stage.
  *
  * The fixture: a single-key crypto row whose persisted MTM series starts TWO days
  * before its cash series (so the all-axis read bound differs from a cash-only one),
@@ -257,7 +263,6 @@ describe("169.5-02 SC3 / D-09: the browser re-derive aligns BTC from the payload
  * --------------------------------------------------------------------------- */
 
 const LOCK_ID = "00000000-0000-4000-8000-0000000169b2";
-const LOCK_SLUG = DISCOVERY_CATEGORIES[0]!.slug;
 const LOCK_CASH_DATES = days("2024-01-04", 30);
 const LOCK_MTM_DATES = days("2024-01-02", 32);
 const LOCK_LAST = LOCK_MTM_DATES[LOCK_MTM_DATES.length - 1];
@@ -326,14 +331,26 @@ function seedLockstep() {
       : { date: p.date, close_price: p.close * (1 + 0.01 * Math.cos(i)) },
   );
   fake.bench.probeRows = [{ date: "2024-01-06" }];
-  vi.mocked(createClient).mockResolvedValue({
-    auth: { getUser: () => Promise.resolve({ data: { user: { id: "user-1" } } }) },
-  } as never);
-  vi.mocked(getStrategyDetail).mockResolvedValue({
-    strategy: lockStrategy(),
-    analytics: lockAnalytics(),
-    disclosureTier: "exploratory",
-  } as never);
+  // The factsheet page's outer signature probe, on the request client.
+  const probe = {
+    select: () => probe,
+    eq: () => probe,
+    maybeSingle: () =>
+      Promise.resolve({
+        data: {
+          id: LOCK_ID,
+          name: "Lockstep Fixture",
+          codename: null,
+          disclosure_tier: "exploratory",
+          strategy_analytics: { computed_at: lockAnalytics().computed_at },
+        },
+        error: null,
+      }),
+  };
+  vi.mocked(createClient).mockResolvedValue({ from: () => probe } as never);
+  vi.mocked(readPublicVerificationSignals).mockResolvedValue(
+    new Map([[LOCK_ID, { trust_tier: "api_verified", status: "verified" }]]) as never,
+  );
 }
 
 /** Depth-first search of an RSC element tree for the FactsheetView payload prop. */
@@ -351,16 +368,14 @@ function findPayload(node: unknown): FactsheetPayload | null {
   return findPayload(el.props?.children ?? null);
 }
 
-async function discoveryPayload(): Promise<FactsheetPayload> {
-  const jsx = await StrategyDetailPage({
-    params: Promise.resolve({ slug: LOCK_SLUG, strategyId: LOCK_ID }),
-  });
+async function pagePayload(): Promise<FactsheetPayload> {
+  const jsx = await FactsheetV2Page({ params: Promise.resolve({ id: LOCK_ID }) });
   const payload = findPayload(jsx);
-  if (!payload) throw new Error("the discovery page built no payload");
+  if (!payload) throw new Error("the factsheet page built no payload");
   return payload;
 }
 
-describe("169.5-02 D-23: the discovery detail page reads BTC exactly as the factsheet route does", () => {
+describe("169.5-02 D-23: the factsheet page shows BTC as unavailable when the BTC read fails", () => {
   beforeEach(() => {
     fake.bench.rows = [];
     fake.bench.error = null;
@@ -373,21 +388,21 @@ describe("169.5-02 D-23: the discovery detail page reads BTC exactly as the fact
     seedLockstep();
   });
 
-  // LOCKSTEP case removed (169.1 D-23 as amended 2026-09-25): the discovery page now builds through the shared `fetchAndBuildPayloadWithReason`, so there is one path and nothing to keep in lockstep; the phase-147 source guard and `page.one-path.test.tsx` replace it.
+  // LOCKSTEP case removed (169.1 D-23 as amended 2026-09-25): the page builds through the shared `fetchAndBuildPayloadWithReason`, so there is one path and nothing to keep in lockstep; the phase-147 source guard replaces it (Phase 196 D-03 retired the discovery page and its `page.one-path.test.tsx`).
 
   const errorArms: Array<[string, () => void]> = [
     ["the reader answers ok:false", () => (fake.bench.error = { code: "PGRST000", message: "boom" })],
     ["the client throws", () => (fake.bench.throws = true)],
   ];
   for (const [name, arm] of errorArms) {
-    it(`discovery page, ${name}: BTC is the unavailable form, logged, never the fixture, never captured`, async () => {
+    it(`factsheet page, ${name}: BTC is the unavailable form, logged, never the fixture, never captured`, async () => {
       // Control: the same page with a healthy read (unrelated captures, if any).
-      await discoveryPayload();
+      await pagePayload();
       const controlCaptures = vi.mocked(captureToSentry).mock.calls.length;
       vi.mocked(captureToSentry).mockClear();
       vi.mocked(console.error).mockClear();
       arm();
-      const page = await discoveryPayload();
+      const page = await pagePayload();
       expect(page.benchmarkPrices).toEqual({ unavailable: true });
       expect(page.comparators.btc).toEqual(unavailableComparatorBlock("BTC-USD", "BTC"));
       expect(vi.mocked(console.error)).toHaveBeenCalledWith(

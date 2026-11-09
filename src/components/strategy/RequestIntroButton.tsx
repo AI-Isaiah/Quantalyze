@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
 import { cn, UI_EXCHANGE_CODES } from "@/lib/utils";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 type RequestStatus = "pending" | "intro_made" | "completed" | "declined";
 
@@ -16,6 +17,9 @@ const STATUS_MESSAGES: Record<RequestStatus, string> = {
   completed: "Introduction completed",
   declined: "Request declined",
 };
+
+const SEND_FAILED_MESSAGE =
+  "Your request was not sent. Check your connection and try again.";
 
 const ASSET_CLASS_OPTIONS = ["Spot", "Perp", "Mixed"] as const;
 // UI_EXCHANGE_CODES (not SUPPORTED_EXCHANGES): this is a user-facing chip
@@ -42,24 +46,36 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
   const [uiState, setUiState] = useState<"idle" | "loading" | "sent" | "checking" | "error">("checking");
   const [requestStatus, setRequestStatus] = useState<RequestStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // React state cannot stop a second click delivered before the re-render
+  // that disables the button; this ref can. The server's 409 on a unique
+  // violation remains the cross-tab backstop.
+  const inFlight = useRef(false);
 
   useEffect(() => {
     async function checkExisting() {
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setUiState("idle"); return; }
+      // A failed read must not leave the button disabled for good: fall back to idle
+      // (the server's 409 on a unique violation is the backstop for a duplicate).
+      try {
+        const supabase = createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) { setUiState("idle"); return; }
 
-      const { data } = await supabase
-        .from("contact_requests")
-        .select("id, status")
-        .eq("allocator_id", user.id)
-        .eq("strategy_id", strategyId)
-        .maybeSingle();
+        const { data, error: readError } = await supabase
+          .from("contact_requests")
+          .select("id, status")
+          .eq("allocator_id", user.id)
+          .eq("strategy_id", strategyId)
+          .maybeSingle();
+        if (readError) throw new Error(`contact_requests read failed: ${readError.message}`);
 
-      if (data) {
-        setUiState("sent");
-        setRequestStatus(data.status as RequestStatus);
-      } else {
+        if (data) {
+          setUiState("sent");
+          setRequestStatus(data.status as RequestStatus);
+        } else {
+          setUiState("idle");
+        }
+      } catch (err) {
+        captureToSentry(err, { tags: { area: "request-intro-existing-check" }, level: "warning" });
         setUiState("idle");
       }
     }
@@ -84,6 +100,8 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
   }
 
   async function handleSubmit() {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setUiState("loading");
     setError(null);
 
@@ -109,7 +127,7 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.error ?? "Failed to send request. Please try again.");
+        setError(data.error ?? SEND_FAILED_MESSAGE);
         setUiState("error");
         return;
       }
@@ -117,8 +135,10 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
       setUiState("sent");
       setRequestStatus("pending");
     } catch {
-      setError("Failed to send request. Please try again.");
+      setError(SEND_FAILED_MESSAGE);
       setUiState("error");
+    } finally {
+      inFlight.current = false;
     }
   }
 
@@ -139,11 +159,12 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
       <Button
         onClick={() => setOpen(true)}
         disabled={uiState === "checking"}
+        aria-busy={uiState === "checking"}
       >
-        {uiState === "checking" ? "..." : "Request Intro"}
+        Request intro
       </Button>
 
-      <Modal open={open && uiState !== "sent"} onClose={() => setOpen(false)} title="Request Introduction">
+      <Modal open={open && uiState !== "sent"} onClose={() => setOpen(false)} title="Request an introduction">
         <p className="text-sm text-text-secondary mb-4">
           The team will review your request and facilitate an introduction
           with the strategy manager.
@@ -258,10 +279,10 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
         {error && <p className="text-sm text-negative mb-4">{error}</p>}
         <div className="flex justify-end gap-3">
           <Button variant="secondary" onClick={() => setOpen(false)}>
-            Cancel
+            Close without sending
           </Button>
           <Button onClick={handleSubmit} disabled={uiState === "loading"}>
-            {uiState === "loading" ? "Sending..." : "Send Request"}
+            {uiState === "loading" ? "Sending…" : "Send request"}
           </Button>
         </div>
       </Modal>

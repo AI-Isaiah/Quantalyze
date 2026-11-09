@@ -62,6 +62,13 @@ vi.mock("@/lib/visibility", () => ({
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
+// Phase 196 plan 16: the per-request peer-rank read is not what this file is about, and its own
+// Sentry report would break the exact capture counts asserted below. Its own tests:
+// peer-ranks.test.ts and page.peer-ranks.test.tsx.
+vi.mock("@/lib/factsheet/peer-ranks", () => ({
+  readPeerRanks: vi.fn().mockResolvedValue(null),
+  withPeerRanks: (payload: unknown) => payload,
+}));
 vi.mock("@/lib/queries", () => ({
   readPublicVerificationSignals: vi.fn(),
 }));
@@ -240,7 +247,8 @@ function mockRequestClient() {
         error: null,
       }),
   };
-  return { from: () => chain };
+  // SF-01: a session read that throws is now reported, so the harness answers it (anonymous).
+  return { from: () => chain, auth: { getUser: async () => ({ data: { user: null }, error: null }) } };
 }
 
 function findPayload(node: unknown): FactsheetPayload | null {

@@ -10,6 +10,7 @@ import { LiveRegion } from "@/components/ui/LiveRegion";
 import { cn, formatNumber, formatPercent } from "@/lib/utils";
 import { RouteResponseError } from "@/lib/route-response-error";
 import { signTone } from "@/lib/factsheet/display-sign";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import {
   SHORT_TRACK_MARKER,
   gatedValue,
@@ -238,7 +239,7 @@ function SuggestionRow({
       </div>
       <div className="flex items-center gap-2">
         <Link
-          href={`/factsheet/${suggestion.strategy_id}`}
+          href={buildFactsheetHref(suggestion.strategy_id, { key: "allocations" })}
           className="text-caption font-medium text-accent hover:text-accent-hover underline-offset-2 hover:underline"
         >
           View strategy

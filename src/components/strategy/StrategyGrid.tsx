@@ -14,6 +14,7 @@ import { HealthScore } from "./HealthScore";
 import { StarToggle } from "./StarToggle";
 import { SelectCheckbox } from "./SelectCheckbox";
 import { formatPercent, formatCurrency, metricColor } from "@/lib/utils";
+import { buildFactsheetHref, type FactsheetOrigin } from "@/lib/factsheet/origin";
 import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
 import { annualizedCell, rowRecord } from "./annualized-cell";
 import { DISCOVERY_COLUMNS, type DiscoveryColumn } from "./discovery-columns";
@@ -47,8 +48,12 @@ type StrategyWithAnalytics = Strategy & {
 
 interface StrategyGridProps {
   strategies: StrategyWithAnalytics[];
-  categorySlug: string;
-  basePath?: string;
+  /**
+   * Phase 196 / ROUTE-04 (D-01): where a card's factsheet link leads back to. Set by the
+   * table (which gets it from its mount), never read from the URL. ABSENT yields a bare
+   * `/factsheet/<id>` link, which the factsheet reads as "no origin".
+   */
+  origin?: FactsheetOrigin;
   /**
    * When present (allocator on /discovery) each card renders a top-right
    * <StarToggle> wired to the parent's watchedSet + onToggleStar. Undefined
@@ -84,8 +89,7 @@ interface StrategyGridProps {
 
 export function StrategyGrid({
   strategies,
-  categorySlug,
-  basePath = "/discovery",
+  origin,
   userId,
   watchedSet,
   onToggleStar,
@@ -118,7 +122,7 @@ export function StrategyGrid({
         return (
         <div key={s.id} className="relative">
           <Link
-            href={`${basePath}/${categorySlug}/${s.id}`}
+            href={buildFactsheetHref(s.id, origin)}
             className="block group"
           >
             <Card

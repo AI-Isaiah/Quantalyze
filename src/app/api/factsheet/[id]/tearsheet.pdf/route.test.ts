@@ -56,6 +56,21 @@ function mkParams(id: string = STRATEGY_ID): {
   return { params: Promise.resolve({ id }) };
 }
 
+/**
+ * A `page.evaluate` stand-in that runs the route's own callback against a document that
+ * carries only the given element ids, so the marker the route looks for is the one tested.
+ */
+function evaluateOn(ids: string[]) {
+  return vi.fn(async (fn: () => unknown) => {
+    vi.stubGlobal("document", { getElementById: (id: string) => (ids.includes(id) ? {} : null) });
+    try {
+      return fn();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+}
+
 function singlePublishedComplete() {
   const single = vi.fn().mockResolvedValue({
     data: {
@@ -155,6 +170,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — SSRF + UUID validation (C-00
       setDefaultNavigationTimeout: vi.fn(),
       setDefaultTimeout: vi.fn(),
       setViewport: vi.fn().mockResolvedValue(undefined),
+      evaluate: evaluateOn(["tearsheet-main"]),
       pdf: vi
         .fn()
         .mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
@@ -341,6 +357,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — Cache-Control + Vary (C-0093
       setDefaultNavigationTimeout: vi.fn(),
       setDefaultTimeout: vi.fn(),
       setViewport: vi.fn().mockResolvedValue(undefined),
+      evaluate: evaluateOn(["tearsheet-main"]),
       pdf: vi
         .fn()
         .mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
@@ -430,6 +447,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — an error page is never print
   // for 5 minutes, with no Sentry capture. The route must fail loud instead.
   let goto: ReturnType<typeof vi.fn>;
   let pdf: ReturnType<typeof vi.fn>;
+  let evaluate: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -443,11 +461,13 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — an error page is never print
     vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
     goto = vi.fn();
     pdf = vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    evaluate = evaluateOn(["tearsheet-main"]);
     const newPage = vi.fn().mockResolvedValue({
       goto,
       setDefaultNavigationTimeout: vi.fn(),
       setDefaultTimeout: vi.fn(),
       setViewport: vi.fn().mockResolvedValue(undefined),
+      evaluate,
       pdf,
     });
     vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
@@ -493,5 +513,46 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — an error page is never print
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/pdf");
     expect(pdf).toHaveBeenCalledTimes(1);
+  });
+
+  // R2-01: `[id]/loading.tsx` (round 1) made the tear sheet stream a 200 for a throw, a
+  // `notFound()` and the pending state, so the status check above cannot see them. The
+  // positive marker is what keeps them out of a publicly cached PDF.
+  it("a 200 page without #tearsheet-main (error, not-found or pending render) answers a non-cacheable 503, reports to Sentry and prints nothing", async () => {
+    goto.mockResolvedValue({ status: () => 200 });
+    evaluate.mockImplementation(evaluateOn([]));
+    vi.mocked(captureToSentry).mockClear();
+    const res = await get();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("retry-after")).toBe("10");
+    expect(res.headers.get("content-type")).not.toContain("application/pdf");
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("#tearsheet-main") }),
+      expect.objectContaining({
+        tags: { area: "tearsheet-pdf", step: "marker_absent" },
+        level: "error",
+      }),
+    );
+    expect(pdf).not.toHaveBeenCalled();
+  });
+
+  it("a 200 page that carries only the factsheet marker is still not the tear sheet (503)", async () => {
+    goto.mockResolvedValue({ status: () => 200 });
+    evaluate.mockImplementation(evaluateOn(["factsheet-main"]));
+    const res = await get();
+    expect(res.status).toBe(503);
+    expect(pdf).not.toHaveBeenCalled();
+  });
+
+  it("a 200 page with #tearsheet-main prints the PDF (control)", async () => {
+    goto.mockResolvedValue({ status: () => 200 });
+    vi.mocked(captureToSentry).mockClear();
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/pdf");
+    expect(pdf).toHaveBeenCalledTimes(1);
+    expect(captureToSentry).not.toHaveBeenCalled();
   });
 });

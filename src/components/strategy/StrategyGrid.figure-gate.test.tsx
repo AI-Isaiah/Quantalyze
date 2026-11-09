@@ -93,7 +93,7 @@ function cagrCell(): HTMLElement {
 }
 
 function renderGrid(r: Row) {
-  render(<StrategyGrid strategies={[r]} categorySlug="momentum" />);
+  render(<StrategyGrid strategies={[r]} />);
 }
 
 afterEach(cleanup);

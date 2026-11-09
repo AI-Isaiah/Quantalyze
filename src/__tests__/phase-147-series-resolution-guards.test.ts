@@ -315,7 +315,6 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
       "src/app/scenario-share/[token]/share-resolve.ts",
       "src/app/scenario-share/[token]/page.tsx",
       "src/app/factsheet/[id]/v2/page.tsx",
-      "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx",
       "src/lib/factsheet/resolve-series.ts",
     ];
     for (const rel of allowlist) {
@@ -431,21 +430,12 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
     // Either exported builder counts: 167.2.1 (WR-03) moved the page onto
     // `fetchAndBuildPayloadWithReason`, which runs the same `resolveAndBuild`.
     expect(src).toMatch(/fetchAndBuildPayload(?:WithReason)?\(/);
-  });
-
-  // Phase 169.1 plan 01 (D-23 as amended 2026-09-25, D-26, D-81): the
-  // discovery page used to resolve the series ITSELF with a second copy of the
-  // builder's assembly, kept in step by a lockstep test. It now resolves
-  // through the shared builder, exactly as the v2 page does, so it is pinned
-  // the same way, and the assembly it removed is pinned ABSENT: any one of
-  // these calls back on the page is a second path that can drift from the
-  // factsheet route's numbers.
-  it("REFERENCE discovery strategy page resolves its series THROUGH the shared builder, never its own assembly", () => {
-    const src = stripComments(
-      readSource("src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx"),
-    );
-    expect(src).toContain("@/lib/factsheet/fetch-and-build-payload");
-    expect(src).toMatch(/fetchAndBuildPayload(?:WithReason)?\(/);
+    // Phase 169.1 plan 01 (D-23 as amended 2026-09-25, D-26, D-81): the
+    // discovery page once resolved the series ITSELF with a second copy of the
+    // builder's assembly. Phase 196 (D-03) retired that page; the factsheet is
+    // the one page now, so the "never its own assembly" pin moved here: any one
+    // of these calls on the page is a second path that can drift from the
+    // factsheet route's numbers.
     const ownAssembly = [
       "buildFactsheetPayload(",
       RESOLVER_CALL,
@@ -453,7 +443,7 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
       "readSingleKeyBasisOpts(",
       "readFactsheetBenchmark(",
     ].filter((call) => src.includes(call));
-    expect(ownAssembly, "the discovery page assembles the factsheet itself").toEqual([]);
+    expect(ownAssembly, "the factsheet page assembles the factsheet itself").toEqual([]);
   });
 
   // --- The resolver itself -----------------------------------------------

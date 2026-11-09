@@ -376,6 +376,7 @@ describe("StrategyTable visibility — SC-5a: the name cell links to the owner-s
       <StrategyTable
         strategies={[privateRow()]}
         categorySlug="vis-spec"
+        origin={{ key: "strategies" }}
         visibility="owner-all-statuses"
       />,
     );
@@ -383,7 +384,7 @@ describe("StrategyTable visibility — SC-5a: the name cell links to the owner-s
     const link = within(rowFor(NAME_PRIVATE)).getByRole("link", {
       name: NAME_PRIVATE,
     });
-    expect(link).toHaveAttribute("href", `/factsheet/${ID_PRIVATE}`);
+    expect(link).toHaveAttribute("href", `/factsheet/${ID_PRIVATE}?from=strategies`);
   });
 });
 

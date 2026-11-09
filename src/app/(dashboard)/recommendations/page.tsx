@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { drawdownTone } from "@/lib/factsheet/display-sign";
@@ -577,7 +578,7 @@ function RecommendationCard({
       strategy.category_slug)
     : null;
 
-  const viewHref = `/factsheet/${strategy.id}`;
+  const viewHref = buildFactsheetHref(strategy.id, { key: "recommendations" });
 
   return (
     <Card>

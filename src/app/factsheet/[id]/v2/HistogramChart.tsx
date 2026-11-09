@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { WheelEvent as ReactWheelEvent } from "react";
 import { usePayload, useXRange, useActiveComparator } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
@@ -8,6 +8,7 @@ import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { isZoomWheel } from "./wheel-zoom";
+import { ChartHintContext } from "./chart-hint";
 
 const VB_W = 880;
 // Desktop viewBox height = today's literal (200). CHART-03 portrait: a taller
@@ -40,6 +41,9 @@ const STRAT_NATURAL_QUANTILE = 0.99;
  * outer bound so a zoomed-out histogram still shows the natural data extent.
  */
 export function HistogramChart() {
+  // Phase 196 (D-04): the document layout carries one shared hint; this chart then renders none
+  // of its own and points at it. Absent (the full layout) the visible line below renders.
+  const sharedHintId = useContext(ChartHintContext);
   // F1 (phase 103, MTM-follow): route through the basis view so the strategy
   // daily-returns distribution follows the active basis. Under cash (or an
   // absent MTM bundle) `useBasisSeriesView` returns the payload BY REFERENCE,
@@ -260,9 +264,11 @@ export function HistogramChart() {
             <span className="text-text-2">{cmp.name}{zoom ? ` · ${inWindowBench.toLocaleString()} of ${totalBench.toLocaleString()}` : ""}</span>
           </span>
         )}
-        <span className="ml-auto text-[10px] italic text-text-muted">
-          Ctrl/Cmd + wheel to zoom · double-click to reset
-        </span>
+        {sharedHintId === null && (
+          <span className="ml-auto text-[10px] italic text-text-muted">
+            Ctrl/Cmd + wheel to zoom · double-click to reset
+          </span>
+        )}
       </div>
 
       <ResponsiveChartFrame
@@ -271,6 +277,7 @@ export function HistogramChart() {
         height={VB_H}
         role="img"
         aria-label={`Distribution of daily returns: ${payload.strategyName}${bench ? ` overlaid with ${cmp.name}` : ""}`}
+        aria-describedby={sharedHintId ?? undefined}
         className="select-none"
         style={{ cursor: zoom ? "zoom-out" : "zoom-in" }}
         onWheel={onWheel}

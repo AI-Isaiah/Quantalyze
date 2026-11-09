@@ -45,6 +45,7 @@ import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
 import { venueLabel } from "@/lib/display-labels";
 import { nativeAmount, parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 // Phase 150: `formatUsd` was module-private here; it is now the ONE money
 // formatter for this surface (shared with the Phase-150 mark/allocate
 // dialogs). Body unchanged — a second money formatter here is forbidden.
@@ -540,7 +541,7 @@ function StrategyRowsTable({
                 <td className="px-4 py-2 font-medium text-text-primary">
                   <span className="inline-flex items-center gap-1.5">
                     <Link
-                      href={`/factsheet/${row.id}`}
+                      href={buildFactsheetHref(row.id, { key: "allocations" })}
                       className="text-accent hover:underline"
                     >
                       {row.strategy}

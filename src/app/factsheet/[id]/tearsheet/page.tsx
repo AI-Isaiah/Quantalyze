@@ -1,50 +1,24 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { getFactsheetDetail, getPercentiles } from "@/lib/queries";
-import { isRankableAnalyticsRow } from "@/lib/closed-sets";
+import { notFound } from "next/navigation";
+import { getFactsheetDetail, getPercentiles, readPublicVerificationSignals } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
-import { formatPercent, formatNumber } from "@/lib/utils";
-import { formatUnsignedPercent, signTone } from "@/lib/factsheet/display-sign";
-import { Sparkline } from "@/components/charts/Sparkline";
 import { ANALYTICS_ONLY_TEXT } from "@/components/ui/Disclaimer";
-import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
-import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
+import { buttonClassName } from "@/components/ui/Button";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
+import { PeerRanksSection } from "@/components/strategy/PeerRanksSection";
 import { PrintButton } from "@/components/ui/PrintButton";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { canViewAum } from "@/lib/factsheet/viewer-aum";
-import { formatUsd } from "@/lib/dollar-validation";
-import { annualizationPeriods } from "@/lib/closed-sets";
-import {
-  FIGURE_DEFS_VERSION,
-  VAR_METHOD_LINE,
-  figureRecord,
-  gateAnnualized,
-  gatedValue,
-  shortTrackNote,
-  withheldReason,
-} from "@/lib/figure-gate";
-import { readRecordSpan } from "@/lib/record-span-read";
+import { canViewAum, withViewerAum } from "@/lib/factsheet/viewer-aum";
+import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
+import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
+import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
+import type { TrustTierKind } from "@/lib/factsheet/types";
 import { withPublishedOnly } from "@/lib/visibility";
-import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
-import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
-import {
-  parseUnrecoveredGaps,
-  readReconstructedRanges,
-  type ReconstructedRange,
-  type UnrecoveredGap,
-} from "@/lib/factsheet/trade-fetch-provenance";
-import { captureToSentry } from "@/lib/sentry-capture";
-import {
-  ReconstructedRangeLines,
-  TradeFetchLineView,
-  TradeFetchUnavailableLine,
-  UnrecoveredGapLines,
-} from "../trade-fetch-lines";
+import { FactsheetView } from "../v2/FactsheetView";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // Pin to dynamic rendering. The disclosure-tier redaction depends on the
 // per-request authentication state (cookies → supabase.auth.getUser()).
@@ -55,203 +29,6 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 // /discovery/layout.tsx pin that gates the rest of the disclosure-tier
 // system on attestation.
 export const dynamic = "force-dynamic";
-
-/**
- * Phase 164.6.6.2 plan 07 (D-09, D-21) - the unit this strategy's returns are
- * measured in, or null for the USD family.
- *
- * Why a read here and not a wider `getFactsheetDetail`: that projection is
- * `PUBLIC_ANALYTICS_COLUMNS`, the anon ranked projection, and
- * `data_quality_flags` is deliberately not in it (it carries internal
- * data-quality state). Widening it would hand that column to every ranked-list
- * caller to serve this one page. So the page makes the same request-scoped,
- * published-only read the OG route makes of this column, bounded to the one
- * strategy id, and keeps ONLY the parsed unit: nothing else about the flags
- * leaves this function. No admin client.
- *
- * Called after `getFactsheetDetail` has returned a strategy, so the published
- * gate has already run; `withPublishedOnly` repeats it on this read so the
- * guarantee does not depend on call order.
- *
- * Fails CLOSED (SFH-2). "The read succeeded and recorded no unit" (USD family)
- * and "the unit could not be determined" are different facts and are returned
- * as different shapes. An undetermined unit logs one line and the page withholds
- * the return-denominated figures: this is a printable, shareable document, and a
- * BTC strategy's figures must never be printed unlabelled as if they were USD.
- */
-type ReturnsUnitRead = { determined: true; unit: string | null } | { determined: false };
-
-async function readReturnsUnit(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  strategyId: string,
-): Promise<ReturnsUnitRead> {
-  try {
-    const { data, error } = await withPublishedOnly(
-      supabase
-        .from("strategies")
-        .select("strategy_analytics ( data_quality_flags )")
-        .eq("id", strategyId),
-    ).maybeSingle();
-    if (error) {
-      console.error("[tearsheet] returns unit read failed", { message: error.message });
-      return { determined: false };
-    }
-    const embed = (data as { strategy_analytics?: unknown } | null)?.strategy_analytics;
-    const analytics = (Array.isArray(embed) ? embed[0] : embed) as
-      | { data_quality_flags?: { native_unit?: unknown } | null }
-      | null
-      | undefined;
-    return {
-      determined: true,
-      unit: parseReturnsUnit(analytics?.data_quality_flags?.native_unit),
-    };
-  } catch (err) {
-    console.error("[tearsheet] returns unit read failed", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return { determined: false };
-  }
-}
-
-/**
- * Phase 167.1.2.2.2 (TRADESYNC, plan 11, D-06 / D-10 / D-02) - the two facts the
- * tear sheet prints under the Data pill: when the exchange was last read, and
- * which days nobody has supplied.
- *
- * Why a read of its own and not `getFactsheetDetail`: that projection is the anon
- * ranked projection and deliberately carries neither `series_provenance` (the
- * gap record) nor the strategy's api-key exchange. The exchange is the F3 venue
- * (never `supported_exchanges`, which a CSV strategy may declare without ever
- * being trade-fetched), it sits behind `api_keys`, and that table has no anon
- * read, so this is the SAME service-role read the factsheet payload builder makes
- * (`fetch-and-build-payload.ts`), behind the same published-only gate and with
- * the same minimal embed: `exchange` alone (T-167.1.2.2.2-32), no key material.
- * Only plain values leave this function.
- *
- * Fails to a NEUTRAL "unavailable" line, never to silence and never to a false
- * sentence (SFH-M2). "Nothing to claim" (a CSV strategy: no key, no stamp, zero
- * gaps) and "we could not read it" are different facts and are returned as
- * different shapes:
- *
- *   - `readable: false` - the read errored, threw, or returned no row for a
- *     strategy the page has just rendered. Neither the fetch line nor the gap
- *     lines can be claimed; the page says the status is unavailable.
- *   - `readable: true, fetchKnown: false` - the row came back but the stamp (or
- *     the key's exchange) is not the shape the column promises. A non-string
- *     stamp must NOT be coerced to "no stamp": for an OKX key that would print
- *     "No trade fetch recorded yet", a false statement on a printable page. The
- *     fetch line is replaced by the unavailable line; the gap record is a
- *     separate column and its lines are unaffected.
- *   - `readable: true, reconstructedRangesUnavailable: true` - the
- *     `reconstructed_ranges` record is present but malformed (review round 1,
- *     F5 / IN-01). The rebuild RPC already took those days out of
- *     `unrecovered_gaps`, so printing nothing would present rebuilt days as
- *     live; the page says the record of rebuilt days is unavailable.
- *
- * Every one of these is reported to Sentry through `captureToSentry`, the helper
- * the factsheet resolver uses: `console.*` does not reach Sentry in this repo,
- * so a log line alone left a degraded public page invisible to everyone. It
- * never takes the printable page down (the PDF wrapper screenshots this route).
- */
-type TradeFactsRead =
-  | { readable: false }
-  | {
-      readable: true;
-      /** False when the stamp / exchange is malformed: say "unavailable", not "never". */
-      fetchKnown: boolean;
-      tradesFetchedAt: string | null;
-      tradeFetchVenue: string | null;
-      unrecoveredGaps: UnrecoveredGap[];
-      /** Phase 167.1.2.2.2.1 D-06: ranges rebuilt from OKX's quarterly statement. */
-      reconstructedRanges: ReconstructedRange[];
-      /** F5 / IN-01: the stored record was malformed; say so instead of printing nothing. */
-      reconstructedRangesUnavailable: boolean;
-    };
-
-function reportTradeFactsFailure(
-  strategyId: string,
-  reason: "read_error" | "read_threw" | "no_row" | "malformed_field" | "reconstructed_ranges_malformed",
-  detail: string,
-): void {
-  captureToSentry(new Error(`tearsheet: trade facts ${reason}`), {
-    tags: { stage: "tearsheet-trade-facts", reason, strategy_id: strategyId },
-    extra: { detail },
-  });
-}
-
-async function readTradeFacts(strategyId: string): Promise<TradeFactsRead> {
-  try {
-    const { data, error } = await withPublishedOnly(
-      createAdminClient()
-        .from("strategies")
-        .select(
-          "api_keys!strategies_api_key_id_fkey ( exchange ), strategy_analytics ( trades_fetched_at, series_provenance )",
-        )
-        .eq("id", strategyId),
-    ).maybeSingle();
-    if (error) {
-      console.error("[tearsheet] trade facts read failed", { message: error.message });
-      reportTradeFactsFailure(strategyId, "read_error", error.message);
-      return { readable: false };
-    }
-    if (!data) {
-      // The page has just rendered this published strategy, so no row is an
-      // anomaly (an unpublish race at worst), not "nothing to claim".
-      reportTradeFactsFailure(strategyId, "no_row", "no strategies row returned");
-      return { readable: false };
-    }
-    const row = data as unknown as {
-      api_keys?: { exchange?: unknown } | Array<{ exchange?: unknown }> | null;
-      strategy_analytics?:
-        | { trades_fetched_at?: unknown; series_provenance?: unknown }
-        | Array<{ trades_fetched_at?: unknown; series_provenance?: unknown }>
-        | null;
-    };
-    const apiKey = Array.isArray(row.api_keys) ? row.api_keys[0] : row.api_keys;
-    const analytics = Array.isArray(row.strategy_analytics)
-      ? row.strategy_analytics[0]
-      : row.strategy_analytics;
-
-    const rawStamp = analytics?.trades_fetched_at;
-    const rawExchange = apiKey?.exchange;
-    // null / undefined is "no value recorded"; anything else must be a string
-    // (and the stamp a parseable instant) or the column is not what it promises.
-    const stampMalformed =
-      rawStamp != null && (typeof rawStamp !== "string" || Number.isNaN(Date.parse(rawStamp)));
-    const exchangeMalformed = rawExchange != null && typeof rawExchange !== "string";
-    const fetchKnown = !stampMalformed && !exchangeMalformed;
-    if (!fetchKnown) {
-      reportTradeFactsFailure(
-        strategyId,
-        "malformed_field",
-        `${stampMalformed ? `trades_fetched_at is ${typeof rawStamp}` : ""}${
-          stampMalformed && exchangeMalformed ? "; " : ""
-        }${exchangeMalformed ? `api_keys.exchange is ${typeof rawExchange}` : ""}`,
-      );
-    }
-    // F5 / IN-01: a malformed reconstructed_ranges record is reported and
-    // disclosed, never rendered as "nothing was rebuilt".
-    const reconstructed = readReconstructedRanges(analytics?.series_provenance);
-    if (reconstructed.malformed !== null) {
-      reportTradeFactsFailure(strategyId, "reconstructed_ranges_malformed", reconstructed.malformed);
-    }
-    return {
-      readable: true,
-      fetchKnown,
-      tradesFetchedAt: typeof rawStamp === "string" && !stampMalformed ? rawStamp : null,
-      tradeFetchVenue:
-        typeof rawExchange === "string" && rawExchange.length > 0 ? rawExchange.toLowerCase() : null,
-      unrecoveredGaps: parseUnrecoveredGaps(analytics?.series_provenance),
-      reconstructedRanges: reconstructed.ranges,
-      reconstructedRangesUnavailable: reconstructed.malformed !== null,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("[tearsheet] trade facts read failed", { message });
-    reportTradeFactsFailure(strategyId, "read_threw", message);
-    return { readable: false };
-  }
-}
 
 export async function generateMetadata({
   params,
@@ -268,10 +45,21 @@ export async function generateMetadata({
 }
 
 /**
- * Institutional-lane tear sheet. Print-first layout (8.5 × 11 portrait, 1"
- * margins ≈ 6.5 × 9" of content). Primary user flow is `window.print()`.
- * The PDF wrapper at `/api/factsheet/[id]/tearsheet.pdf` renders this same
- * page with Puppeteer for an emailable version.
+ * Institutional-lane tear sheet = the factsheet's PRINT VIEW (Phase 196 D-03,
+ * LEAN-02, LEAN-05). Print-first layout (8.5 × 11 portrait, 1" margins ≈ 6.5 × 9"
+ * of content). Primary user flow is `window.print()`. The PDF wrapper at
+ * `/api/factsheet/[id]/tearsheet.pdf` renders this same page with Puppeteer for an
+ * emailable version.
+ *
+ * ONE DATA PATH, ONE LAYOUT. The opening view (masthead, KPI strip with its one
+ * note, equity curve with drawdown, Main metrics table) is the factsheet's own
+ * `FactsheetView` in `printView`, fed by the SAME payload builder the factsheet's
+ * published lane uses, so a figure, a label and a gate cannot differ between the
+ * two. Advanced never renders here. After the opening view come the tear sheet's own
+ * kept blocks, in this order: the Generated date line, the peer-relative ranks, the
+ * manager identity panel, the contact block, and the Risk Disclosure as the page's
+ * one disclaimer. Every figure the HEAD tear sheet printed has a named home (see
+ * 196-13-SUMMARY.md).
  *
  * Two redaction layers cooperate to keep institutional identity off the
  * exploratory-tier panel:
@@ -319,11 +107,14 @@ export default async function TearSheetPage({
 }) {
   const { id } = await params;
 
+  // Kept (not replaced by the payload): the manager identity for the panel, the
+  // disclosure tier, the owner id the AUM gate compares against, and the category slug
+  // the peer ranks are scoped to (`strategy.discovery_categories?.slug`, as before).
+  // The factsheet payload carries none of these.
   const result = await getFactsheetDetail(id);
 
-  if (!result || !result.analytics) {
-    return <div className="p-8 text-center text-text-muted">Strategy not found.</div>;
-  }
+  // A missing, unpublished or not-yet-computed strategy is a 404, never a 200 text page.
+  if (!result || !result.analytics) notFound();
 
   // Authoritative gate — must match /discovery/layout.tsx (the other
   // disclosure-tier wall) so the public tearsheet route can't be used to
@@ -350,7 +141,7 @@ export default async function TearSheetPage({
   let showAum = false;
   // The server-validated user id from the one `getUser()` below; null for anonymous.
   let viewerId: string | null = null;
-  // Hoisted so the returns-unit read below shares this request's client.
+  // Hoisted so the AUM gate below shares this request's client.
   let supabase: Awaited<ReturnType<typeof createClient>> | null = null;
   try {
     supabase = await createClient();
@@ -380,17 +171,7 @@ export default async function TearSheetPage({
     showAum = await canViewAum(supabase, viewerId, result.strategy.user_id, "[tearsheet]");
   }
 
-  const { strategy, analytics, manager, disclosureTier } = result;
-  // Phase 164.6.6.2 plan 07 / SFH-2: a null client means the lookup above
-  // already threw and logged. That is "unit undetermined", not "USD": fail
-  // closed (see readReturnsUnit).
-  const unitRead: ReturnsUnitRead = supabase
-    ? await readReturnsUnit(supabase, strategy.id)
-    : { determined: false };
-  const unitUndetermined = !unitRead.determined;
-  const returnsUnit = unitRead.determined ? unitRead.unit : null;
-  // Shown in place of every return-denominated figure while the unit is unknown.
-  const WITHHELD = "—";
+  const { strategy, manager, disclosureTier } = result;
   // For non-attested callers (anonymous OR logged-in-but-unattested), force
   // the panel into the exploratory (redacted) lane regardless of the
   // strategy's actual disclosure tier. This is the C-0189 closure:
@@ -403,70 +184,72 @@ export default async function TearSheetPage({
     (strategy as { discovery_categories?: { slug?: string } | null }).discovery_categories?.slug ??
     undefined;
 
-  // D-06 / D-10 / D-02: read only when the pill below will render (same gate),
-  // so a withheld pill never has a trade-fetch statement standing alone.
-  const tradeRead = isRankableAnalyticsRow(analytics) ? await readTradeFacts(strategy.id) : null;
-
-  const percentileMap = await getPercentiles(categorySlug);
-  const percentiles = percentileMap?.[strategy.id] ?? null;
-
-  const m = analytics.metrics_json as Record<string, number> | null;
-
-  // 194 D-04 as superseded by D-15: the TOTAL record decides whether the five
-  // annualised figures print. One scalar-alias read (published-only, this request's
-  // client), one record, one verdict. A read that cannot be made fails CLOSED: the
-  // figures print as dashes and no caption is claimed about a record we could not read.
-  const spanRead = supabase ? await readRecordSpan(supabase, strategy.id) : null;
-  const spanReadFailed = !spanRead || !spanRead.determined;
-  if (spanReadFailed) {
-    // A null read means no request client was available; readRecordSpan has already
-    // reported its own failures to Sentry, so this is the one log line either way.
-    console.error("[tearsheet] record span read failed", { strategyId: strategy.id, noClient: !supabase });
+  // The factsheet's own payload, built exactly as its published lane builds it:
+  // `fetchAndBuildPayloadWithReason` directly (never the id-keyed cached wrapper, whose
+  // key carries no viewer), published-only on the service-role client, then the trust
+  // tier overlaid per request. The reason says what a null payload means (SF-04): only a
+  // strategy that is not visible is a 404; a failed read goes to the error boundary (the
+  // resolve stage has already reported it); every other reason is a fact about a row
+  // that is not built yet and gets the pending state the factsheet shows.
+  const [built, verificationSignals, percentileMap] = await Promise.all([
+    fetchAndBuildPayloadWithReason(id, withPublishedOnly),
+    readPublicVerificationSignals([id]),
+    getPercentiles(categorySlug),
+  ]);
+  if (built.payload === null) {
+    if (built.reason === "not_visible") notFound();
+    if (built.reason === "read_error") throw new Error("tearsheet payload read failed");
+    return (
+      <main className="mx-auto max-w-2xl px-6 py-16" data-testid="tearsheet-pending">
+        <h1 className="font-serif text-fixed-28 leading-tight text-text-primary">{displayName}</h1>
+        <p className="mt-6 text-fixed-13 text-text-secondary">{KCS10_PUBLIC_SENTENCE}</p>
+        <Link
+          href={buildFactsheetHref(id)}
+          className={buttonClassName({ variant: "secondary", size: "md", className: "mt-6" })}
+        >
+          Back to factsheet
+        </Link>
+      </main>
+    );
   }
-  const record = spanRead?.determined
-    ? figureRecord({
-        seriesStart: spanRead.seriesStart,
-        seriesEnd: spanRead.seriesEnd,
-        headlineSince: spanRead.headlineSince,
-        observations: spanRead.observations,
-        periodsPerYear: annualizationPeriods(strategy.asset_class),
-      })
-    : null;
-  const gateState = record ? gateAnnualized(record) : "withheld";
-  // The one caption under the hero grid: why the figures are dashes, or that they are
-  // annualized from under a year. A cleared record of a year or more says nothing.
-  const gateNote =
-    record && gateState === "withheld"
-      ? withheldReason("record", record)
-      : record && gateState === "short" && record.spanDays != null
-        ? shortTrackNote("record", record.spanDays)
-        : spanReadFailed
-          ? "Annualized figures are temporarily unavailable. Reload to retry."
-          : null;
-  const annualized = (value: number | null | undefined) =>
-    gatedValue(value, gateState);
-  // D-02: VaR/CVaR print only from a row written under the historical definition.
-  // An older row holds the parametric figure, which must never sit under the
-  // historical label.
-  const historicalVar =
-    typeof m?.figure_defs_version === "number" && m.figure_defs_version >= FIGURE_DEFS_VERSION;
+  const builtPayload = built.payload;
+  const rawTrustTier = verificationSignals.get(id)?.trust_tier ?? null;
+  const trustTier: TrustTierKind | null =
+    rawTrustTier === "api_verified" || rawTrustTier === "csv_uploaded" || rawTrustTier === "self_reported"
+      ? rawTrustTier
+      : null;
+  const payload = withTrustTier(builtPayload, trustTier);
+
+  const generated = new Date().toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 
   return (
-    <div className="tearsheet mx-auto my-0 bg-white text-text-primary print:m-0 print:p-0">
+    // `id="tearsheet-main"` is the positive marker of the FULL tear sheet: the pending,
+    // not-found and error renders do not carry it, and `tearsheet.pdf` refuses to print a
+    // page without it (R2-01), so an error or placeholder page is never cached as a PDF.
+    <main
+      id="tearsheet-main"
+      className="tearsheet mx-auto my-0 bg-white text-text-primary print:m-0 print:p-0"
+    >
       <style>{`
-        /* Print layout: 8.5 × 11 portrait, 1" (96px) margins */
+        /* Screen: wide enough for the factsheet's own two-column opening view.
+           Print: Letter portrait, 1" (96px) margins, 6.5" of content. */
         @page {
           size: Letter portrait;
           margin: 1in;
         }
         .tearsheet {
-          width: 6.5in;
-          padding: 0.75in 0.75in 0.75in 0.75in;
+          width: 100%;
+          max-width: 72rem;
+          padding: 1rem;
           font-family: var(--font-dm-sans), sans-serif;
         }
         @media print {
           .tearsheet {
-            width: 100%;
+            max-width: none;
             padding: 0;
           }
           .print\\:hidden { display: none !important; }
@@ -476,95 +259,20 @@ export default async function TearSheetPage({
         }
       `}</style>
 
-      {/* Header strip */}
-      <header className="mb-6 flex items-start justify-between border-b border-border pb-4">
-        <div className="min-w-0">
-          <p className="text-fixed-10 uppercase tracking-wider text-text-muted">
-            {PLATFORM_NAME} · Institutional Tear Sheet
-          </p>
-          <h1 className="mt-1 font-display text-3xl leading-tight text-text-primary">
-            {displayName}
-          </h1>
-          <p className="mt-1 text-xs text-text-muted">
-            {strategy.strategy_types?.join(" · ")} · {strategy.markets?.join(", ")}
-          </p>
-          {/* D-09: says, once, that every return and drawdown below is in the
-              strategy's native unit. Zero nodes for a USD strategy. */}
-          <ReturnsUnitChip unit={returnsUnit} className="mt-1" />
-          {unitUndetermined && (
-            <p className="mt-1 text-fixed-10 text-text-muted">
-              Return unit could not be confirmed; figures withheld. Reload to try again.
-            </p>
-          )}
-        </div>
-        <div className="shrink-0 text-right">
-          {/* STALE-01 — the badge is a claim about WHEN these numbers were
-              produced, and a row that is not a terminal success has no such
-              moment to name. `getFactsheetDetail` already substitutes the dead
-              KPIs server-side, but that substitution CANNOT reach this badge:
-              FreshnessBadge does not early-return on a blank `computed_at`, it
-              routes it through `computeFreshness` (unparseable → "stale") and
-              renders "Data: Stale" — a confident age statement standing over a
-              grid of em-dashes. Withhold it instead. Same decision, same
-              reason, as the SyncBadge gate on the ranked list: no new UI, one
-              fewer claim.
+      {/* The factsheet's opening view in print form: no ControlBar, no Advanced,
+          no footer stamp. The AUM chip follows 194 D-22 through the same two calls
+          the factsheet makes, and the payload handed down is the stripped copy. */}
+      <FactsheetView payload={withViewerAum(payload, showAum)} showAum={showAum} printView />
 
-              Gated on the SHARED terminal-success predicate, reading the
-              `computation_status` the shaper deliberately preserves — never on
-              `computed_at` itself, which is falsy for an absent row and
-              non-empty for a live job, i.e. wrong in both directions. */}
-          {isRankableAnalyticsRow(analytics) && (
-            <FreshnessBadge
-              computedAt={analytics.computed_at}
-              label="Data"
-              variant="pill"
-            />
-          )}
-          {/* Phase 167.1.2.2.2 (TRADESYNC, plan 11, D-06/D-10/D-02/F1): the same
-              two statements the factsheet header makes, from the same module, at
-              the print size. Behind the pill's own gate (`tradeFacts` is only
-              read for a terminal-success row) and shown to EVERY viewer. The
-              wrapper bounds the width: this column is `shrink-0`, so an unbounded
-              sentence would size the column to its full single-line length and
-              push the title; bounded, a long gap line wraps inside it. */}
-          {tradeRead && (
-            <div className="ml-auto max-w-[14rem]">
-              {tradeRead.readable && tradeRead.fetchKnown ? (
-                <TradeFetchLineView
-                  tradesFetchedAt={tradeRead.tradesFetchedAt}
-                  tradeFetchVenue={tradeRead.tradeFetchVenue}
-                  nowMs={Date.now()}
-                  size="fixed-10"
-                />
-              ) : (
-                // SFH-M2: an unreadable / malformed state is neither "never
-                // fetched" nor "nothing to claim"; say it is unavailable.
-                <TradeFetchUnavailableLine size="fixed-10" />
-              )}
-              {tradeRead.readable && (
-                <>
-                  <UnrecoveredGapLines gaps={tradeRead.unrecoveredGaps} size="fixed-10" />
-                  {/* D-06: the rebuilt ranges, directly after the gap lines,
-                      same words as the factsheet header (SC-4). */}
-                  <ReconstructedRangeLines
-                    ranges={tradeRead.reconstructedRanges}
-                    unavailable={tradeRead.reconstructedRangesUnavailable}
-                    size="fixed-10"
-                  />
-                </>
-              )}
-            </div>
-          )}
-          <p className="mt-1 text-fixed-10 text-text-muted">
-            Generated{" "}
-            {new Date().toLocaleDateString("en-US", {
-              year: "numeric",
-              month: "short",
-              day: "numeric",
-            })}
-          </p>
-        </div>
-      </header>
+      <p className="mb-6 mt-2 text-caption text-text-muted">Generated {generated}</p>
+
+      {/* Peer-relative ranks: the same getPercentiles source, the same 194 gate, the
+          record read from the payload (one record, one verdict). */}
+      <PeerRanksSection
+        percentiles={percentileMap?.[strategy.id] ?? null}
+        categoryLabel={categorySlug}
+        record={payload.figureRecord ?? null}
+      />
 
       {/* Manager identity (non-attested callers see the redacted exploratory block — see SECURITY GATE comment above) */}
       <section className="mb-6">
@@ -575,206 +283,22 @@ export default async function TearSheetPage({
         />
       </section>
 
-      {/* Hero metrics */}
-      <section className="mb-6 grid grid-cols-4 gap-3">
-        <HeroMetric
-          label={withUnit("CAGR", returnsUnit)}
-          value={unitUndetermined ? WITHHELD : formatPercent(annualized(analytics.cagr))}
-        />
-        <HeroMetric label="Sharpe" value={formatNumber(annualized(analytics.sharpe))} />
-        <HeroMetric label="Sortino" value={formatNumber(annualized(analytics.sortino))} />
-        <HeroMetric
-          label="Max DD"
-          value={unitUndetermined ? WITHHELD : formatPercent(analytics.max_drawdown)}
-          // Phase 170.6 D-03, D-04: red only when the drawdown ROUNDS below zero at the 2 dp
-          // it prints; a 0.00% or a withheld drawdown is not a loss.
-          danger={!unitUndetermined && signTone(analytics.max_drawdown, 2, 100) === "negative"}
-        />
-      </section>
-      {gateNote && (
-        <p className="mt-2 text-xs text-text-muted" data-testid="tearsheet-figure-gate-note">
-          {gateNote}
-        </p>
-      )}
-
-      {/* Equity curve */}
-      {!unitUndetermined && analytics.sparkline_returns && analytics.sparkline_returns.length > 0 && (
-        <section className="mb-6 rounded-lg border border-border p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-text-primary">{withUnit("Equity Curve", returnsUnit)}</h2>
-            <span className="text-fixed-10 text-text-muted">
-              {strategy.start_date ? `Live since ${strategy.start_date}` : ""}
-            </span>
-          </div>
-          <div className="h-32">
-            <Sparkline
-              data={analytics.sparkline_returns}
-              width={620}
-              height={120}
-              color="#1B6B5A"
-            />
-          </div>
-        </section>
-      )}
-
-      {/* Percentile ranks */}
-      {percentiles && (
-        <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold text-text-primary">
-            Peer-relative ranks
-          </h2>
-          <div className="flex flex-wrap gap-2">
-            {(["cagr", "sharpe", "sortino", "max_drawdown", "volatility"] as const).map(
-              (metric) => (
-                <PercentileRankBadge
-                  key={metric}
-                  metric={metric}
-                  // 194 D-18 (review WR-01): the figures beside these ranks are dashes
-                  // when the record is withheld or unreadable, so the annualised ranks
-                  // go with them. Max DD is not annualised and keeps its rank.
-                  percentile={
-                    metric !== "max_drawdown" && gateState === "withheld"
-                      ? null
-                      : percentiles[metric]
-                  }
-                  categoryLabel={categorySlug}
-                  shortTrackDays={
-                    metric !== "max_drawdown" && gateState === "short" ? record?.spanDays : null
-                  }
-                />
-              ),
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* Detail metrics */}
-      <section className="mb-6 grid grid-cols-4 gap-3">
-        <DetailMetric
-          label="Volatility"
-          value={unitUndetermined ? WITHHELD : formatPercent(annualized(analytics.volatility))}
-        />
-        <DetailMetric label="Calmar" value={formatNumber(annualized(analytics.calmar))} />
-        <DetailMetric
-          label="6 Month"
-          value={unitUndetermined ? WITHHELD : formatPercent(analytics.six_month_return)}
-        />
-        <DetailMetric
-          label={withUnit("Cumulative", returnsUnit)}
-          value={unitUndetermined ? WITHHELD : formatPercent(analytics.cumulative_return)}
-        />
-        <DetailMetric
-          label="VaR 95%"
-          value={unitUndetermined || !historicalVar ? WITHHELD : formatPercent(m?.var_1d_95)}
-        />
-        <DetailMetric
-          label="CVaR 95%"
-          value={unitUndetermined || !historicalVar ? WITHHELD : formatPercent(m?.cvar)}
-        />
-        <DetailMetric
-          label="Best Day"
-          value={unitUndetermined ? WITHHELD : formatPercent(m?.best_day)}
-        />
-        <DetailMetric
-          label="Worst Day"
-          value={unitUndetermined ? WITHHELD : formatPercent(m?.worst_day)}
-        />
-      </section>
-      <p className="mt-2 text-xs text-text-muted" data-testid="tearsheet-var-method-line">
-        {VAR_METHOD_LINE}
-      </p>
-
-      {/* Monthly returns heatmap */}
-      {!unitUndetermined && analytics.monthly_returns && (
-        <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold text-text-primary">Monthly Returns</h2>
-          <div className="overflow-x-auto">
-            <table className="w-full text-fixed-10">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="py-1 pr-2 text-left font-medium text-text-muted">Year</th>
-                  {MONTHS.map((mm) => (
-                    <th
-                      key={mm}
-                      className="py-1 px-1 text-right font-medium text-text-muted"
-                    >
-                      {mm}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(analytics.monthly_returns)
-                  .sort()
-                  .map(([year, months]) => (
-                    <tr key={year} className="border-b border-border/30">
-                      <td className="py-1 pr-2 font-medium text-text-primary">{year}</td>
-                      {MONTHS.map((mm) => {
-                        const val = (months as Record<string, number>)[mm];
-                        // Phase 170.6 D-02, D-03: print and colour through the one rule at the
-                        // 1 dp the cell shows; a month that rounds to 0.0% is unsigned, neutral.
-                        const tone = signTone(val, 1, 100);
-                        return (
-                          <td
-                            key={mm}
-                            className={`py-1 px-1 text-right font-metric ${
-                              val == null
-                                ? "text-text-muted"
-                                : tone === "positive"
-                                  ? "text-positive"
-                                  : tone === "negative"
-                                    ? "text-negative"
-                                    : "text-text-primary"
-                            }`}
-                          >
-                            {val != null ? formatUnsignedPercent(val, 1) : ""}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {/* Leverage, benchmark; AUM only for an allocator or the own manager (D-06) */}
-      <section className="mb-6 rounded-lg border border-border p-4">
-        <h2 className="mb-3 text-sm font-semibold text-text-primary">Allocation Terms</h2>
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
-          {/* D-06: `strategy.aum` is the manager's declared USD AUM, so the row says AUM
-              (it was labelled Minimum Allocation, which it never was). Absent from the
-              DOM, with no placeholder, for every viewer who is not an allocator or the
-              strategy's own manager. D-21: beside a native unit a USD amount would read
-              as an amount in that unit, so a unit strategy shows a dash. */}
-          {showAum && (
-            <TermRow
-              label="AUM"
-              value={
-                unitUndetermined || returnsUnit != null ? WITHHELD : formatUsd(strategy.aum ?? null)
-              }
-            />
-          )}
-          <TermRow label="Leverage" value={strategy.leverage_range ?? "Not disclosed"} />
-          <TermRow label="Benchmark" value={strategy.benchmark ?? "BTC"} />
-        </dl>
-      </section>
-
-      {/* Contact CTA */}
-      <section className="mb-6 rounded-lg border border-accent/30 bg-accent/5 p-4 text-center">
-        <p className="text-sm font-semibold text-text-primary">
+      {/* Contact: the tear sheet's own copy, left-aligned under a hairline with no
+          accent tint (UI-SPEC closing-line treatment). It carries only the display
+          name the H1 shows: no manager identity and no AUM. The link is screen-only. */}
+      <section className="mb-6 border-t border-border pt-4">
+        <p className="text-caption font-semibold text-text-primary">
           Interested in {displayName}?
         </p>
-        <p className="mt-1 text-xs text-text-secondary">
+        <p className="mt-1 text-caption text-text-secondary">
           Request an introduction through {PLATFORM_NAME}. The manager will be
           notified and will respond directly.
         </p>
         <Link
-          href={`/factsheet/${strategy.id}`}
-          className="mt-3 inline-flex items-center rounded-md bg-accent px-4 py-2 text-xs font-medium text-white hover:bg-accent-hover transition-colors print:hidden"
+          href={buildFactsheetHref(strategy.id)}
+          className="mt-2 inline-block text-caption text-accent underline underline-offset-4 print:hidden"
         >
-          View full factsheet →
+          Open the factsheet
         </Link>
       </section>
 
@@ -798,63 +322,23 @@ export default async function TearSheetPage({
         </p>
       </section>
 
-      {/* Print + PDF buttons — hidden in print/PDF output */}
-      <div className="mt-6 flex items-center justify-center gap-3 print:hidden">
+      {/* Screen-only controls — hidden in print/PDF output. Primary last, rightmost. */}
+      <div className="mt-6 flex flex-wrap items-center gap-2 print:hidden">
+        <Link
+          href={buildFactsheetHref(id)}
+          className={buttonClassName({ variant: "secondary", size: "md" })}
+        >
+          Back to factsheet
+        </Link>
         <PrintButton />
         <a
           href={`/api/factsheet/${id}/tearsheet.pdf`}
           target="_blank"
-          className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+          className={buttonClassName({ variant: "primary", size: "md" })}
         >
           Download PDF
         </a>
       </div>
-    </div>
+    </main>
   );
 }
-
-/* ---------- Sub-components ---------- */
-
-function HeroMetric({
-  label,
-  value,
-  danger,
-}: {
-  label: string;
-  value: string;
-  danger?: boolean;
-}) {
-  return (
-    <div className="rounded-lg border border-border p-3 text-center">
-      <p className="text-fixed-9 uppercase tracking-wider text-text-muted">{label}</p>
-      <p
-        className={`mt-1 font-metric text-xl font-bold ${
-          danger ? "text-negative" : "text-text-primary"
-        }`}
-      >
-        {value}
-      </p>
-    </div>
-  );
-}
-
-function DetailMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="text-center">
-      <p className="text-fixed-9 uppercase tracking-wider text-text-muted">{label}</p>
-      <p className="mt-0.5 font-metric text-sm font-medium text-text-primary">
-        {value}
-      </p>
-    </div>
-  );
-}
-
-function TermRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between">
-      <dt className="text-text-muted">{label}</dt>
-      <dd className="font-medium text-text-primary">{value}</dd>
-    </div>
-  );
-}
-

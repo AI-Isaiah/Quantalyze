@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { HoldingsTable } from "./HoldingsTable";
+import { backTargetFor, parseOrigin } from "@/lib/factsheet/origin";
 import { HoldingsTabPanel } from "../HoldingsTabPanel";
 import { EMPTY_EXPOSURE } from "../lib/exposure-props";
 import { toStrategyRows } from "../lib/strategies-row-adapter";
@@ -236,7 +237,23 @@ describe("HoldingsTable — strategy-rows render (F4b)", () => {
     const link = within(row as HTMLElement).getByRole("link", {
       name: "Delta Neutral",
     });
-    expect(link).toHaveAttribute("href", "/factsheet/strat-42");
+    expect(link).toHaveAttribute("href", "/factsheet/strat-42?from=allocations");
+  });
+
+  it("the strategy link's origin makes the factsheet back link read Back to My allocation", () => {
+    // WHY: the href is the only thing that tells the factsheet where the reader
+    // came from; without from=allocations the back link names no origin (D-01).
+    const { container } = renderPositions([
+      makeStrategy({ strategy_id: "strat-42", alias: "Delta Neutral" }),
+    ]);
+    const row = container.querySelector('[data-strategy-row="strat-42"]')!;
+    const href = within(row as HTMLElement)
+      .getByRole("link", { name: "Delta Neutral" })
+      .getAttribute("href")!;
+    const target = backTargetFor(
+      parseOrigin(new URL(href, "http://x").searchParams),
+    );
+    expect(target).toEqual({ label: "Back to My allocation", href: "/allocations" });
   });
 
   describe("Manager column preserves disclosure-tier redaction", () => {

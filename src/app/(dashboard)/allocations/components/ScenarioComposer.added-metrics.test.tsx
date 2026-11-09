@@ -452,7 +452,7 @@ describe("ScenarioComposer — drawer-added metrics (Phase 162 / HONEST-05, UI-S
     // The remedy is still reachable and is still the panel's only action.
     expect(
       within(panel()).getByRole("link", { name: /view factsheet/i }),
-    ).toHaveAttribute("href", `/factsheet/${ADDED_ID}`);
+    ).toHaveAttribute("href", `/factsheet/${ADDED_ID}?from=allocations`);
     // Falsifier for a `?? 0` "fix": a zero-shaped figure means a fabricated
     // metric. A note-only assertion would not catch it.
     expect(panel().textContent).not.toMatch(/0\.00/);
@@ -538,7 +538,7 @@ describe("ScenarioComposer — drawer-added metrics (Phase 162 / HONEST-05, UI-S
     // lives, and in this state it is very likely to HAVE one.
     expect(
       within(panel()).getByRole("link", { name: /view factsheet/i }),
-    ).toHaveAttribute("href", `/factsheet/${ADDED_ID}`);
+    ).toHaveAttribute("href", `/factsheet/${ADDED_ID}?from=allocations`);
     warn.mockRestore();
   });
 

@@ -66,6 +66,7 @@ import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
 import { drainById } from "@/lib/drain-by-id";
 import { venueLabel } from "@/lib/display-labels";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import type {
   SyncProgressResponse,
   MemberProgressStatus,
@@ -595,7 +596,7 @@ function ViewFullFactsheetLink({ strategyId }: { strategyId: string }) {
   return (
     <div className="mt-3">
       <Link
-        href={`/factsheet/${strategyId}/v2`}
+        href={buildFactsheetHref(strategyId, { key: "my-strategies" })}
         target="_blank"
         rel="noopener noreferrer"
         data-testid="wizard-view-full-factsheet"

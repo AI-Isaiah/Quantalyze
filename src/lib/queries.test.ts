@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 /**
- * Tests for the manager-identity redaction in `getStrategyDetail()` and
- * `getPublicStrategyDetail()`. These functions implement T4.3a from the
+ * Tests for the manager-identity redaction in `getFactsheetDetail()` (the
+ * only detail reader left after Phase 196 plan 14 deleted `getStrategyDetail()`
+ * and `getPublicStrategyDetail()`). It implements T4.3a from the
  * disclosure-tier plan: a strategy with `disclosure_tier='exploratory'`
  * MUST NOT leak manager bio/years/aum/linkedin to the client.
  *
@@ -27,10 +28,10 @@ const recorders = vi.hoisted(() => {
     strategyData: null as unknown,
     // M-1159: error the strategies-table `.single()` resolves with. Default
     // null (every existing test sees a clean resolve); set to a PostgrestError
-    // shape to drive getStrategyDetailV2's error-vs-missing branch.
+    // shape to drive an error-vs-missing branch.
     strategyError: null as unknown,
     managerRowData: null as unknown,
-    // RPC recorder for fetchStrategyLazyMetrics tests (Plan 12-08 / METRICS-15).
+    // RPC recorder (Plan 12-08 / METRICS-15).
     // Each call records (rpcName, args); each test seeds a single response.
     rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
     rpcResponse: { data: null as unknown, error: null as unknown },
@@ -189,7 +190,7 @@ vi.mock("@/lib/supabase/server", () => ({
         table === "strategies",
       );
     },
-    // .rpc() recorder for fetchStrategyLazyMetrics (Plan 12-08 / METRICS-15).
+    // .rpc() recorder (Plan 12-08 / METRICS-15).
     // Existing disclosure-tier tests don't touch this path; they keep working.
     rpc: (name: string, args: Record<string, unknown>) => {
       recorders.rpcCalls.push({ name, args });
@@ -210,25 +211,12 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-// 2026-10-09 Phase 170.5 (D-07): getStrategyDetailV2 now reads the factsheet's live
-// joint through an admin chain this file's thin mock does not model. The helper is
-// replaced here (default: computed with null values); queries.v2-joint.test.ts
-// owns the real wiring assertions.
-const jointMock = vi.hoisted(() => ({ read: vi.fn() }));
-vi.mock("@/lib/factsheet/v2-joint", async (importActual) => ({
-  ...(await importActual<typeof import("@/lib/factsheet/v2-joint")>()),
-  readV2BenchmarkJoint: jointMock.read,
-}));
-
 import {
   getStrategiesByCategory,
   shapeRowAnalytics,
-  getStrategyDetail,
-  getPublicStrategyDetail,
-  fetchStrategyLazyMetrics,
+  getFactsheetDetail,
   getMyWatchlist,
   getPortfolioStrategies,
-  getStrategyDetailV2,
   derivePhase07Fields,
   deriveStrategyLinkedKeyIds,
   deriveStrategylessKeys,
@@ -268,7 +256,7 @@ beforeEach(() => {
   recorders.strategyData = null;
   // M-1159: reset the seeded strategies-table error per-test, matching every
   // sibling recorder. Without this, a test that leaves a non-PGRST116 error set
-  // would leak into later strategies-table tests (getStrategyDetailV2 would
+  // would leak into later strategies-table tests (a reader would
   // throw the stale error), reporting red on correct code.
   recorders.strategyError = null;
   recorders.managerRowData = null;
@@ -283,102 +271,6 @@ beforeEach(() => {
   recorders.listRows = null;
   recorders.listError = null;
   recorders.sentryCalls = [];
-  jointMock.read.mockReset();
-  jointMock.read.mockResolvedValue({
-    values: { alpha: null, beta: null, correlation: null, ir: null, treynor: null },
-    status: { kind: "computed", paired: 0, flatLeg: false },
-  });
-});
-
-describe("getStrategyDetail — disclosure tier redaction", () => {
-  it("returns null manager + does NOT query profiles for exploratory strategies", async () => {
-    recorders.strategyData = {
-      ...baseStrategy,
-      disclosure_tier: "exploratory",
-    };
-    recorders.managerRowData = fullManagerRow; // would leak if hit
-
-    const result = await getStrategyDetail("strat_123");
-
-    expect(result).not.toBeNull();
-    expect(result!.disclosureTier).toBe("exploratory");
-    expect(result!.manager).toBeNull();
-    // The profiles table must NEVER be queried (on either client) for an
-    // exploratory strategy — that is the whole security guarantee.
-    expect(recorders.fromCalls).not.toContain("profiles");
-    expect(recorders.adminFromCalls).not.toContain("profiles");
-    expect(recorders.fromCalls).toContain("strategies");
-  });
-
-  it("populates manager fields for institutional strategies via admin client", async () => {
-    recorders.strategyData = {
-      ...baseStrategy,
-      disclosure_tier: "institutional",
-    };
-    recorders.managerRowData = fullManagerRow;
-
-    const result = await getStrategyDetail("strat_123");
-
-    expect(result).not.toBeNull();
-    expect(result!.disclosureTier).toBe("institutional");
-    expect(result!.manager).toEqual({
-      display_name: "Jane Doe",
-      company: "Acme Capital",
-      bio: "20 years trading equities",
-      years_trading: 20,
-      aum_range: "$50M-$100M",
-      linkedin: "https://linkedin.com/in/janedoe",
-    });
-    // The manager identity fetch MUST go through the admin (service_role)
-    // client because migration 012 REVOKE'd column SELECT on bio/years/aum
-    // from anon + authenticated. The user-scoped client must NOT be used.
-    expect(recorders.adminFromCalls).toContain("profiles");
-    expect(recorders.fromCalls).not.toContain("profiles");
-  });
-
-  it("defaults missing disclosure_tier to exploratory (safest fallback)", async () => {
-    // No disclosure_tier on the row at all → must NOT query profiles.
-    recorders.strategyData = { ...baseStrategy };
-    recorders.managerRowData = fullManagerRow;
-
-    const result = await getStrategyDetail("strat_123");
-
-    expect(result!.disclosureTier).toBe("exploratory");
-    expect(result!.manager).toBeNull();
-    expect(recorders.fromCalls).not.toContain("profiles");
-    expect(recorders.adminFromCalls).not.toContain("profiles");
-  });
-});
-
-/**
- * NEW-C03-03 regression: getStrategyDetail must always filter by
- * status='published'. Without it, RLS allows the strategy owner to see
- * their own draft/pending_review strategies on the discovery page while
- * /factsheet/[id] correctly 404s — the two surfaces disagree on "live."
- */
-describe("getStrategyDetail — status=published predicate (NEW-C03-03)", () => {
-  it("sends status=published eq predicate on the strategies query", async () => {
-    recorders.strategyData = {
-      ...baseStrategy,
-      disclosure_tier: "exploratory",
-    };
-    await getStrategyDetail("strat_123");
-    // eq calls are recorded when recordStrategySelect=true (strategies table)
-    const statusCall = recorders.strategyEqCalls.find(
-      ([col]) => col === "status",
-    );
-    expect(statusCall).toBeDefined();
-    expect(statusCall![1]).toBe("published");
-  });
-
-  it("returns null when strategy data is null (non-published strategies return null from DB)", async () => {
-    // Simulate the DB returning null (e.g. a pending_review strategy whose
-    // owner requests /discovery/<slug>/<id>) — the query now always gates on
-    // status='published' so non-published rows return null → notFound().
-    recorders.strategyData = null;
-    const result = await getStrategyDetail("strat_draft");
-    expect(result).toBeNull();
-  });
 });
 
 /**
@@ -572,72 +464,6 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
   });
 });
 
-/**
- * Phase 159 (159-03, RANK-02 / decision D-02) — `getStrategyDetail` splatted
- * `strategy_analytics (*)`. RESEARCH Open Question 2 framed the tension as
- * "the anon /strategy/[id] page and the authed discovery detail page share
- * this function, and only one of them may see data_quality_flags", and the
- * resolution is CALLER-SCOPED projections rather than one shared list.
- *
- * ⚠️ Measured correction (159-03): at HEAD `/strategy/[id]` does NOT call this
- * function — it calls `getPublicStrategyDetail` (aliased locally through
- * `cache()`), which already carries an explicit projection. This function's
- * only production caller is the AUTHED discovery detail page. The `public`
- * variant is therefore the SAFE DEFAULT for the exported surface, not a live
- * anon path: any future anon caller gets the minimal projection unless it
- * explicitly opts into the wider discovery list.
- *
- * Phase 169.1 plan 01 (D-26): the wider discovery list is gone. The discovery
- * page builds its factsheet through the shared `fetchAndBuildPayloadWithReason`,
- * which reads the series itself, so the two cases that pinned that list's
- * columns were deleted with it; the minimal projection is now the only one.
- */
-describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () => {
-  const captureEmbed = async (run: () => Promise<unknown>) => {
-    recorders.strategyData = { ...baseStrategy, disclosure_tier: "exploratory" };
-    await run();
-    const cols = recorders.strategySelectCols.at(-1) ?? "";
-    return { cols, embed: /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "" };
-  };
-
-  it("the detail projection excludes the three columns and keeps computation_status", async () => {
-    const { cols, embed } = await captureEmbed(() => getStrategyDetail("strat_123"));
-    expect(cols).not.toContain("strategy_analytics (*)");
-    expect(embed).not.toBe("*");
-    // computation_status is MANDATORY in every variant — the detail surfaces
-    // derive their still-computing placeholder from it.
-    expect(embed).toContain("computation_status");
-    expect(cols).not.toContain("daily_returns");
-    expect(cols).not.toContain("data_quality_flags");
-    // catches `metrics_json` AND `metrics_json_by_basis`, allows a `->` alias
-    expect(embed).not.toMatch(/metrics_json(?!->)/);
-  });
-
-  /**
-   * The public variant and `getPublicStrategyDetail`'s PUBLIC_ANALYTICS_COLUMNS
-   * describe the SAME thing — what an anonymous reader needs from a strategy
-   * detail row.
-   *
-   * ⚠️ WHAT THIS PINS CHANGED, and the wording is kept honest about it. It was
-   * written when the two were byte-identical LITERALS, where drift between the
-   * copies was the live hazard. `STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS` is
-   * now bound to `PUBLIC_ANALYTICS_COLUMNS` (queries.ts), so that particular
-   * drift is impossible by construction and this test can no longer catch it.
-   * What it still catches is the remaining failure mode, one level up: a CALL
-   * SITE that stops routing through the shared constant — an inlined list at
-   * the variant switch, or a widened embed in either fetcher. That is now the
-   * only way these two projections can diverge, and it reds here.
-   */
-  it("public variant stays in lockstep with the anon factsheet projection", async () => {
-    const detail = await captureEmbed(() => getStrategyDetail("strat_123"));
-    const factsheet = await captureEmbed(() => getPublicStrategyDetail("11111111-1111-4111-8111-111111111111"));
-    const members = (embed: string) =>
-      embed.split(",").map((c) => c.trim()).sort();
-    expect(members(detail.embed).length).toBeGreaterThan(0);
-    expect(members(detail.embed)).toEqual(members(factsheet.embed));
-  });
-});
-
 describe("PUBLIC_ANALYTICS_COLUMNS — the trade fetch time reaches every anon strategy read (D-06)", () => {
   const captureEmbed = async (run: () => Promise<unknown>) => {
     recorders.strategyData = { ...baseStrategy, disclosure_tier: "exploratory" };
@@ -647,16 +473,59 @@ describe("PUBLIC_ANALYTICS_COLUMNS — the trade fetch time reaches every anon s
   };
   const members = (embed: string) => embed.split(",").map((c) => c.trim());
 
-  it("getPublicStrategyDetail projects trades_fetched_at", async () => {
-    const { cols, embed } = await captureEmbed(() => getPublicStrategyDetail("11111111-1111-4111-8111-111111111111"));
+  // Phase 196 plan 14: getPublicStrategyDetail and getStrategyDetail were deleted;
+  // getFactsheetDetail is the one remaining reader of the constant.
+  it("getFactsheetDetail projects trades_fetched_at", async () => {
+    const { cols, embed } = await captureEmbed(() => getFactsheetDetail("11111111-1111-4111-8111-111111111111"));
     expect(members(embed)).toContain("trades_fetched_at");
     expect(cols).not.toContain("series_provenance");
   });
+});
 
-  it("getStrategyDetail (bound to the same constant) projects trades_fetched_at", async () => {
-    const { cols, embed } = await captureEmbed(() => getStrategyDetail("strat_123"));
-    expect(members(embed)).toContain("trades_fetched_at");
-    expect(cols).not.toContain("series_provenance");
+/**
+ * T4.3a manager-identity redaction, moved here from the deleted getStrategyDetail /
+ * getPublicStrategyDetail describes (Phase 196 plan 14): `getFactsheetDetail` is the
+ * reader that remains, and it loads the manager through the same tier gate. A neutered
+ * gate (reading profiles for an exploratory strategy) reds the first arm.
+ */
+describe("getFactsheetDetail — disclosure tier redaction", () => {
+  const FACTSHEET_ID = "11111111-1111-4111-8111-111111111111";
+  const withAnalytics = (disclosure_tier: string) => ({
+    ...baseStrategy,
+    disclosure_tier,
+    strategy_analytics: { computation_status: "complete", computed_at: "2026-01-01T00:00:00Z" },
+  });
+
+  it("returns null manager + does NOT query profiles for exploratory strategies", async () => {
+    recorders.strategyData = withAnalytics("exploratory");
+    recorders.managerRowData = fullManagerRow; // would leak if hit
+
+    const result = await getFactsheetDetail(FACTSHEET_ID);
+
+    expect(result).not.toBeNull();
+    expect(result!.disclosureTier).toBe("exploratory");
+    expect(result!.manager).toBeNull();
+    expect(recorders.fromCalls).not.toContain("profiles");
+    expect(recorders.adminFromCalls).not.toContain("profiles");
+  });
+
+  it("populates manager fields for institutional strategies via admin client", async () => {
+    recorders.strategyData = withAnalytics("institutional");
+    recorders.managerRowData = fullManagerRow;
+
+    const result = await getFactsheetDetail(FACTSHEET_ID);
+
+    expect(result!.disclosureTier).toBe("institutional");
+    expect(result!.manager).toEqual({
+      display_name: "Jane Doe",
+      company: "Acme Capital",
+      bio: "20 years trading equities",
+      years_trading: 20,
+      aum_range: "$50M-$100M",
+      linkedin: "https://linkedin.com/in/janedoe",
+    });
+    expect(recorders.adminFromCalls).toContain("profiles");
+    expect(recorders.fromCalls).not.toContain("profiles");
   });
 });
 
@@ -778,232 +647,6 @@ describe("shapeRowAnalytics — the D-15 record scalars (phase 194 plan 06)", ()
   });
 });
 
-describe("getPublicStrategyDetail — disclosure tier redaction", () => {
-  it("returns null manager + does NOT query profiles for exploratory strategies", async () => {
-    recorders.strategyData = {
-      ...baseStrategy,
-      disclosure_tier: "exploratory",
-    };
-    recorders.managerRowData = fullManagerRow;
-
-    const result = await getPublicStrategyDetail("11111111-1111-4111-8111-111111111111");
-
-    expect(result).not.toBeNull();
-    expect(result!.disclosureTier).toBe("exploratory");
-    expect(result!.manager).toBeNull();
-    expect(recorders.fromCalls).not.toContain("profiles");
-    expect(recorders.adminFromCalls).not.toContain("profiles");
-  });
-
-  it("populates manager fields for institutional strategies via admin client", async () => {
-    recorders.strategyData = {
-      ...baseStrategy,
-      disclosure_tier: "institutional",
-    };
-    recorders.managerRowData = fullManagerRow;
-
-    const result = await getPublicStrategyDetail("11111111-1111-4111-8111-111111111111");
-
-    expect(result!.disclosureTier).toBe("institutional");
-    expect(result!.manager).toEqual({
-      display_name: "Jane Doe",
-      company: "Acme Capital",
-      bio: "20 years trading equities",
-      years_trading: 20,
-      aum_range: "$50M-$100M",
-      linkedin: "https://linkedin.com/in/janedoe",
-    });
-    expect(recorders.adminFromCalls).toContain("profiles");
-    expect(recorders.fromCalls).not.toContain("profiles");
-  });
-});
-
-/**
- * Plan 12-08 / METRICS-15 (consumer half): fetchStrategyLazyMetrics RPC consumer
- * tests. Phase 12 ships only the consumer + type union; Phase 14b actually calls
- * it from panels 4–7. Tests cover:
- *   1. Correct RPC name + arg shape (p_strategy_id / p_panel_id) — guards against
- *      drift from the SQL signature in migration 087.
- *   2. Pass-through of populated payload on success.
- *   3. Empty-object fallback on RPC error (T-12-08-01: never reveal strategy
- *      existence via the error path; UI sees the same shape as a private miss).
- *   4. Empty-object fallback on null data (defensive — supabase clients can
- *      return { data: null, error: null } for an empty visibility result).
- */
-describe("fetchStrategyLazyMetrics — RPC consumer (Plan 12-08 / METRICS-15)", () => {
-  it("calls the fetch_strategy_lazy_metrics RPC with the correct args", async () => {
-    recorders.rpcResponse = { data: {}, error: null };
-    await fetchStrategyLazyMetrics(
-      "00000000-0000-0000-0000-000000000001",
-      "rolling",
-    );
-    expect(recorders.rpcCalls).toHaveLength(1);
-    expect(recorders.rpcCalls[0]).toEqual({
-      name: "fetch_strategy_lazy_metrics",
-      args: {
-        p_strategy_id: "00000000-0000-0000-0000-000000000001",
-        p_panel_id: "rolling",
-      },
-    });
-  });
-
-  it("returns the data field on success", async () => {
-    const payload = {
-      rolling_sortino_3m: [{ date: "2026-01-01", value: 1.5 }],
-    };
-    recorders.rpcResponse = { data: payload, error: null };
-    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
-    expect(result).toEqual(payload);
-  });
-
-  it("returns empty object on RPC error", async () => {
-    recorders.rpcResponse = {
-      data: null,
-      error: { message: "boom", code: "PGRST000" },
-    };
-    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
-    expect(result).toEqual({});
-  });
-
-  it("returns empty object on null data with no error", async () => {
-    recorders.rpcResponse = { data: null, error: null };
-    const result = await fetchStrategyLazyMetrics("strategy-id", "overview");
-    expect(result).toEqual({});
-  });
-
-  // audit-2026-05-07 H-0489/H-0494: the RPC response is `any` and the
-  // function previously did `(data ?? {}) as LazyMetricsPayload`, which
-  // accepted ANY shape (arrays, primitives, false, 0). A typo'd panelId
-  // / SECURITY DEFINER mis-return would silently corrupt every consumer
-  // that destructures `payload.rolling_sortino_3m`. Reject non-plain-object
-  // payloads at the boundary and collapse to `{}` to match the
-  // visibility-miss contract.
-  it("returns {} when RPC returns an array (non-object payload)", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    recorders.rpcResponse = { data: [1, 2, 3] as unknown, error: null };
-    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
-    expect(result).toEqual({});
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining("unexpected RPC payload shape"),
-      expect.objectContaining({ type: "array" }),
-    );
-    errSpy.mockRestore();
-  });
-
-  it("returns {} when RPC returns a primitive (false / number / string)", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    recorders.rpcResponse = { data: false as unknown, error: null };
-    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
-    recorders.rpcResponse = { data: 0 as unknown, error: null };
-    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
-    recorders.rpcResponse = { data: "oops" as unknown, error: null };
-    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
-    errSpy.mockRestore();
-  });
-
-  // Phase B pr-test-analyzer F1 — audit-2026-05-07 H-0488 contract:
-  // RPC errors must escalate to Sentry, not just console.error (Vercel
-  // runtime logs are not monitored continuously).
-  it("captures the RPC error to Sentry with op + panel_id + rpc_code tags", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const rpcError = { message: "rls denied", code: "PGRST301" };
-    recorders.rpcResponse = { data: null, error: rpcError };
-    await fetchStrategyLazyMetrics("strategy-id", "rolling");
-    expect(recorders.sentryCalls).toHaveLength(1);
-    expect(recorders.sentryCalls[0].err).toBe(rpcError);
-    expect(recorders.sentryCalls[0].opts).toEqual(
-      expect.objectContaining({
-        tags: expect.objectContaining({
-          op: "fetchStrategyLazyMetrics",
-          panel_id: "rolling",
-          rpc_code: "PGRST301",
-        }),
-        level: "error",
-      }),
-    );
-    errSpy.mockRestore();
-  });
-
-  it("defaults rpc_code to 'unknown' when error.code is absent", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    recorders.rpcResponse = {
-      data: null,
-      error: { message: "no code field" },
-    };
-    await fetchStrategyLazyMetrics("strategy-id", "exposure");
-    expect(recorders.sentryCalls).toHaveLength(1);
-    expect(
-      (recorders.sentryCalls[0].opts as { tags: { rpc_code: string } }).tags
-        .rpc_code,
-    ).toBe("unknown");
-    errSpy.mockRestore();
-  });
-
-  // Phase B silent-failure F3 + type-design F4: shape-mismatch path must
-  // ALSO escalate to Sentry (a SECURITY DEFINER return-type drift was
-  // previously invisible because only the error-channel went to Sentry).
-  it("captures shape-mismatch (array payload) to Sentry with reason=unexpected_payload_shape", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    recorders.rpcResponse = { data: [1, 2, 3] as unknown, error: null };
-    await fetchStrategyLazyMetrics("strategy-id", "rolling");
-    expect(recorders.sentryCalls).toHaveLength(1);
-    expect(recorders.sentryCalls[0].opts).toEqual(
-      expect.objectContaining({
-        tags: expect.objectContaining({
-          op: "fetchStrategyLazyMetrics",
-          panel_id: "rolling",
-          reason: "unexpected_payload_shape",
-        }),
-        level: "error",
-      }),
-    );
-    errSpy.mockRestore();
-  });
-
-  // Phase B silent-failure F2: a legitimate `null` data ("visibility miss")
-  // must NOT log or escalate — only real shape regressions should.
-  it("does NOT log or capture on null data (legitimate visibility miss)", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    recorders.rpcResponse = { data: null, error: null };
-    await fetchStrategyLazyMetrics("strategy-id", "rolling");
-    expect(errSpy).not.toHaveBeenCalled();
-    expect(recorders.sentryCalls).toHaveLength(0);
-    errSpy.mockRestore();
-  });
-
-  // Phase B type-design F4: unexpected keys (e.g. SQL CASE typo
-  // `rollig_sortino_3m`) must be filtered out AND escalated to Sentry.
-  it("filters unexpected keys from the payload and captures to Sentry", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    recorders.rpcResponse = {
-      data: {
-        rolling_sortino_3m: [{ date: "2026-01-01", value: 1.0 }],
-        rollig_sortino_typo: [{ date: "2026-01-01", value: 99 }],
-      },
-      error: null,
-    };
-    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
-    expect(result).toEqual({
-      rolling_sortino_3m: [{ date: "2026-01-01", value: 1.0 }],
-    });
-    expect(recorders.sentryCalls).toHaveLength(1);
-    expect(recorders.sentryCalls[0].opts).toEqual(
-      expect.objectContaining({
-        tags: expect.objectContaining({
-          op: "fetchStrategyLazyMetrics",
-          panel_id: "rolling",
-          reason: "unexpected_payload_keys",
-        }),
-      }),
-    );
-    expect(
-      (recorders.sentryCalls[0].opts as { extra: { unexpected: string[] } })
-        .extra.unexpected,
-    ).toEqual(["rollig_sortino_typo"]);
-    errSpy.mockRestore();
-  });
-});
-
 /**
  * Phase 13 / Plan 13-01 / DISCO-01 — getMyWatchlist server-side query.
  *
@@ -1120,517 +763,6 @@ describe("getMyWatchlist (Plan 13-01 / DISCO-01)", () => {
     const result = await getMyWatchlist(USER_ID);
     expect(result).toBeInstanceOf(Set);
     expect((result as Set<string>).size).toBe(0);
-  });
-});
-
-/**
- * Plan 14b-06 Task 1 — getStrategyDetailV2 panel4..7 input mappings.
- *
- * Wave-3 integration extends `StrategyV2Detail` with eager inputs for
- * Panels 4-7 (mapped from the analytics blob already fetched via the
- * existing `from('strategies').select('*, strategy_analytics (*)')` join).
- * No new RPC, no schema change, no migration.
- *
- * Tests cover:
- *   1. Interface extension (panel4Inputs / panel5Inputs / panel6Inputs / panel7Inputs)
- *   2. Mapping fidelity from analytics row to each panelNInputs sub-object
- *   3. metrics_json extraction for benchmark_returns + greeks scalars
- *   4. Pitfall 8 honored — computation_status !== 'complete' returns null
- *      everywhere
- *   5. Visibility gate preserved — unpublished strategy returns null
- *   6. Greeks long-name vs short-name fallback
- */
-describe("getStrategyDetailV2 — Plan 14b-06 panel4..7 mappings", () => {
-  const STRAT_ID = "00000000-0000-0000-0000-000000000abc";
-
-  function buildAnalyticsRow(overrides: Record<string, unknown> = {}) {
-    return {
-      computation_status: "complete",
-      cumulative_return: 0.42,
-      cagr: 0.18,
-      sharpe: 1.5,
-      sortino: 2.1,
-      max_drawdown: -0.12,
-      volatility: 0.16,
-      returns_series: [
-        { date: "2024-01-01", value: 1.0 },
-        { date: "2024-12-31", value: 1.42 },
-      ],
-      drawdown_series: [{ date: "2024-06-15", value: -0.12 }],
-      monthly_returns: { "2024": { Jan: 0.01, Feb: 0.02 } },
-      return_quantiles: { Daily: [-0.05, -0.01, 0, 0.01, 0.05] },
-      rolling_metrics: {
-        sharpe_30d: [{ date: "2024-01-01", value: 0.5 }],
-        sharpe_90d: [{ date: "2024-01-01", value: 0.7 }],
-        sharpe_365d: [{ date: "2024-01-01", value: 1.0 }],
-      },
-      trade_metrics: {
-        total_positions: 100,
-        open_positions: 5,
-        closed_positions: 95,
-        win_rate: 0.6,
-        avg_roi: 0.05,
-        avg_duration_days: 4.2,
-        long_count: 60,
-        short_count: 40,
-        best_trade_roi: 0.5,
-        worst_trade_roi: -0.2,
-        expectancy: 0.04,
-        risk_reward_ratio: 2.1,
-        weighted_risk_reward_ratio: 2.0,
-        sqn: 1.8,
-        profit_factor_long: 1.5,
-        profit_factor_short: 1.2,
-      },
-      metrics_json: {
-        history_days: 365,
-        equity_series_1y: [{ date: "2024-01-01", value: 1.0 }],
-        btc_benchmark_returns: [{ date: "2024-01-01", value: 1.0 }],
-        benchmark_returns: [
-          { date: "2024-01-01", value: 0 },
-          { date: "2024-01-02", value: 0.001 },
-        ],
-        alpha: 0.05,
-        beta: 0.92,
-        information_ratio: 0.42,
-        treynor_ratio: 0.18,
-        ...((overrides.metrics_json as Record<string, unknown>) ?? {}),
-      },
-      ...overrides,
-    };
-  }
-
-  function buildStrategyRow(extra: Record<string, unknown> = {}) {
-    return {
-      id: STRAT_ID,
-      user_id: "user-1",
-      category_id: null,
-      api_key_id: null,
-      name: "Test Strategy",
-      description: null,
-      strategy_types: ["systematic"],
-      subtypes: ["trend"],
-      markets: ["crypto"],
-      supported_exchanges: ["Binance"],
-      leverage_range: "1-3x",
-      avg_daily_turnover: 250000,
-      aum: null,
-      max_capacity: null,
-      start_date: "2024-01-01",
-      status: "published",
-      is_example: false,
-      benchmark: "BTC",
-      created_at: "2024-01-01T00:00:00Z",
-      strategy_analytics: buildAnalyticsRow(),
-      ...extra,
-    };
-  }
-
-  it("Test 1: returns panel4Inputs / panel5Inputs / panel6Inputs / panel7Inputs sub-objects", async () => {
-    recorders.strategyData = buildStrategyRow();
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result).not.toBeNull();
-    expect(result!.panel4Inputs).toBeDefined();
-    expect(result!.panel5Inputs).toBeDefined();
-    expect(result!.panel6Inputs).toBeDefined();
-    expect(result!.panel7Inputs).toBeDefined();
-  });
-
-  it("Test 2: panel4Inputs maps monthly_returns / return_quantiles / returns_series from analytics", async () => {
-    recorders.strategyData = buildStrategyRow();
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel4Inputs.monthly_returns).toEqual({
-      "2024": { Jan: 0.01, Feb: 0.02 },
-    });
-    expect(result!.panel4Inputs.return_quantiles).toEqual({
-      Daily: [-0.05, -0.01, 0, 0.01, 0.05],
-    });
-    expect(result!.panel4Inputs.returns_series).toEqual([
-      { date: "2024-01-01", value: 1.0 },
-      { date: "2024-12-31", value: 1.42 },
-    ]);
-  });
-
-  it("Test 3: panel4Inputs.benchmark_returns reads from metrics_json.benchmark_returns", async () => {
-    recorders.strategyData = buildStrategyRow();
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel4Inputs.benchmark_returns).toEqual([
-      { date: "2024-01-01", value: 0 },
-      { date: "2024-01-02", value: 0.001 },
-    ]);
-  });
-
-  // 2026-10-09 Phase 170.5 (D-07): stored metrics_json greeks are no longer the source
-  it("Test 4: panel7Inputs.benchmark_greeks is the live joint's five values; stored metrics_json greeks (long names, and the producer's info_ratio) do not reach it", async () => {
-    jointMock.read.mockResolvedValue({
-      values: { alpha: 0.2, beta: 0.38, correlation: 0.4, ir: 0.5, treynor: 0.1 },
-      status: { kind: "computed", paired: 111, flatLeg: false },
-    });
-    recorders.strategyData = buildStrategyRow({
-      strategy_analytics: buildAnalyticsRow({
-        metrics_json: { info_ratio: -1.8457, treynor: -2.8659 },
-      }),
-    });
-    const result = await getStrategyDetailV2(STRAT_ID);
-    // The fixture stores alpha 0.05, beta 0.92, information_ratio 0.42, treynor_ratio 0.18.
-    expect(result!.panel7Inputs.benchmark_greeks).toEqual({
-      alpha: 0.2,
-      beta: 0.38,
-      correlation: 0.4,
-      ir: 0.5,
-      treynor: 0.1,
-    });
-    expect(result!.panel7Inputs.benchmark_joint).toEqual({
-      kind: "computed",
-      paired: 111,
-      flatLeg: false,
-    });
-  });
-
-  // 2026-10-09 Phase 170.5 (D-07): stored metrics_json greeks are no longer the source
-  it("Test 4b: stored short-name greeks (ir, treynor) are not a fallback any more; a helper null stays null", async () => {
-    recorders.strategyData = buildStrategyRow({
-      strategy_analytics: buildAnalyticsRow({
-        metrics_json: {
-          history_days: 365,
-          alpha: 0.01,
-          beta: 0.5,
-          ir: 0.3,
-          treynor: 0.15,
-        },
-      }),
-    });
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel7Inputs.benchmark_greeks.ir).toBeNull();
-    expect(result!.panel7Inputs.benchmark_greeks.treynor).toBeNull();
-    expect(result!.panel7Inputs.benchmark_greeks.alpha).toBeNull();
-    expect(result!.panel7Inputs.benchmark_greeks.beta).toBeNull();
-  });
-
-  it("Test 5: panel5Inputs.rolling_metrics maps from analytics.rolling_metrics; sharpe scalar passes through", async () => {
-    recorders.strategyData = buildStrategyRow();
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(Object.keys(result!.panel5Inputs.rolling_metrics ?? {}).sort()).toEqual([
-      "sharpe_30d",
-      "sharpe_365d",
-      "sharpe_90d",
-    ]);
-    expect(result!.panel5Inputs.sharpe).toBe(1.5);
-  });
-
-  it("Test 6: Pitfall 8 — when computation_status !== 'complete', all new fields are null/empty", async () => {
-    recorders.strategyData = buildStrategyRow({
-      strategy_analytics: buildAnalyticsRow({ computation_status: "pending" }),
-    });
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel4Inputs.monthly_returns).toBeNull();
-    expect(result!.panel4Inputs.return_quantiles).toBeNull();
-    expect(result!.panel4Inputs.returns_series).toBeNull();
-    expect(result!.panel4Inputs.benchmark_returns).toBeNull();
-    expect(result!.panel5Inputs.rolling_metrics).toBeNull();
-    expect(result!.panel5Inputs.sharpe).toBeNull();
-    expect(result!.panel6Inputs.trade_metrics).toBeNull();
-    // 2026-10-09 Phase 170.5 (D-07): five values incl. correlation, and a status
-    expect(result!.panel7Inputs.benchmark_greeks).toEqual({
-      alpha: null,
-      beta: null,
-      correlation: null,
-      ir: null,
-      treynor: null,
-    });
-    expect(result!.panel7Inputs.benchmark_joint).toEqual({ kind: "not_computed" });
-    expect(jointMock.read).not.toHaveBeenCalled();
-    expect(result!.panel7Inputs.correlation_analytics.returns_series).toBeNull();
-    expect(result!.panel7Inputs.correlation_analytics.metrics_json).toBeNull();
-  });
-
-  it("Test 6b (mig-20260707120000): complete_with_warnings is a terminal success — panels POPULATE (call site invokes isComputedAnalytics, not exact-match)", async () => {
-    // Wiring guard, not a helper test: a warned row must render metrics, else
-    // every panel goes blank for warned strategies. Reverting queries.ts:687 to
-    // `=== "complete"` makes these assertions fail.
-    recorders.strategyData = buildStrategyRow({
-      strategy_analytics: buildAnalyticsRow({
-        computation_status: "complete_with_warnings",
-      }),
-    });
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel4Inputs.monthly_returns).toEqual({
-      "2024": { Jan: 0.01, Feb: 0.02 },
-    });
-    expect(result!.panel4Inputs.returns_series).toEqual([
-      { date: "2024-01-01", value: 1.0 },
-      { date: "2024-12-31", value: 1.42 },
-    ]);
-    expect(result!.panel5Inputs.sharpe).not.toBeNull();
-    expect(result!.panel6Inputs.trade_metrics).not.toBeNull();
-  });
-
-  it("Test 7: visibility gate — getStrategyDetailV2 returns null when supabase reports an error", async () => {
-    // No row data + the mock chain's .single() returns { data: null, error: null }
-    // The function checks `error || !strategy` — when both are falsy, the
-    // existing chain returns null which we reproduce by leaving strategyData null.
-    recorders.strategyData = null;
-    const result = await getStrategyDetailV2("nonexistent-id");
-    expect(result).toBeNull();
-  });
-
-  // M-1159: getStrategyDetailV2 must NOT collapse a transient DB/transport
-  // error into the same `null` it returns for a genuine 0-row miss. A clean
-  // PGRST116 (no rows — also how RLS hides an invisible row) stays null so the
-  // v2 page renders notFound() (404). Any OTHER error must THROW so the
-  // route's error.tsx boundary (Reload + fall-back-to-v1 CTA) engages instead
-  // of a misleading "Strategy Not Found". WHY it matters: a Supabase outage on
-  // a real, published strategy should be a recoverable error state, never a
-  // 404 that tells the allocator the strategy does not exist.
-  it("Test 7b (M-1159): throws on a transient (non-PGRST116) DB error so error.tsx engages", async () => {
-    recorders.strategyData = null;
-    recorders.strategyError = {
-      code: "57014",
-      message: "canceling statement due to statement timeout",
-    };
-    await expect(getStrategyDetailV2("transient-err-id")).rejects.toThrow(
-      /getStrategyDetailV2.*failed/,
-    );
-  });
-
-  it("Test 7c (M-1159): returns null (not throw) on a clean PGRST116 0-row miss → notFound()", async () => {
-    recorders.strategyData = null;
-    recorders.strategyError = {
-      code: "PGRST116",
-      message: "JSON object requested, multiple (or no) rows returned",
-    };
-    const result = await getStrategyDetailV2("clean-miss-id");
-    expect(result).toBeNull();
-  });
-
-  it("Test 8: panel6Inputs.trade_metrics maps from analytics.trade_metrics", async () => {
-    recorders.strategyData = buildStrategyRow();
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel6Inputs.trade_metrics).not.toBeNull();
-    expect(result!.panel6Inputs.trade_metrics!.total_positions).toBe(100);
-    expect(result!.panel6Inputs.trade_metrics!.win_rate).toBe(0.6);
-    expect(result!.panel6Inputs.trade_metrics!.expectancy).toBe(0.04);
-  });
-
-  it("Test 9: correlation_analytics carries returns_series + metrics_json subset", async () => {
-    recorders.strategyData = buildStrategyRow();
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel7Inputs.correlation_analytics.returns_series).toEqual([
-      { date: "2024-01-01", value: 1.0 },
-      { date: "2024-12-31", value: 1.42 },
-    ]);
-    expect(result!.panel7Inputs.correlation_analytics.metrics_json).toBeDefined();
-    expect(
-      (result!.panel7Inputs.correlation_analytics.metrics_json as Record<string, unknown>)["alpha"],
-    ).toBe(0.05);
-  });
-});
-
-/**
- * METRICS-15 path-extraction contract.
- *
- * Locks the two halves of the SC#3b p95<50ms detail-fetch contract that
- * queries.ts:391-407 documents:
- *
- *   1. Wire shape — getStrategyDetailV2 must NEVER hit the strategies row
- *      with `select *`. The explicit STRATEGY/ANALYTICS column lists are the
- *      bandwidth win; a regression to `*` would silently double the bytes
- *      crossing the wire and miss the p95 budget under load.
- *
- *   2. In-memory unpack — the panel{1..7} mapper that runs after Supabase
- *      returns must execute well under the 50ms budget so the network is the
- *      dominant cost. Microbenchmark over a maximally-populated analytics row
- *      against a deterministic-data mock; assert p95 stays inside the budget.
- *
- * Why no LATERAL join migration: the doc comment at queries.ts:391-407
- * (and migration 087) makes explicit that PostgREST cannot project a JSONB
- * sub-tree without an RPC. The lazy fetch via fetch_strategy_lazy_metrics
- * IS the LATERAL/sibling-table architecture; the eager projection above
- * trims the surrounding bandwidth. Both halves of the contract live here.
- */
-describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () => {
-  const STRAT_ID = "00000000-0000-0000-0000-000000000abc";
-
-  function buildAnalyticsRow() {
-    return {
-      computation_status: "complete",
-      cumulative_return: 0.42,
-      cagr: 0.18,
-      sharpe: 1.5,
-      sortino: 2.1,
-      max_drawdown: -0.12,
-      volatility: 0.16,
-      // Heaviest realistic shapes the eager unpack must walk: 1y daily series
-      // (~252 entries), 12mo monthly grid, full quantiles + rolling families,
-      // trade_metrics, drawdown_series. The lazy sibling-table series live
-      // outside this projection (path-extracted via fetch_strategy_lazy_metrics)
-      // so they don't pad the row.
-      returns_series: Array.from({ length: 252 }, (_, i) => ({
-        date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
-        value: 1 + i * 0.001,
-      })),
-      drawdown_series: Array.from({ length: 30 }, (_, i) => ({
-        date: new Date(2024, 5, 1 + i).toISOString().slice(0, 10),
-        value: -0.01 * (i + 1),
-      })),
-      monthly_returns: {
-        "2023": Object.fromEntries(
-          ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].map(
-            (m, i) => [m, i * 0.005],
-          ),
-        ),
-        "2024": Object.fromEntries(
-          ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].map(
-            (m, i) => [m, i * 0.006],
-          ),
-        ),
-      },
-      return_quantiles: {
-        Daily: Array.from({ length: 21 }, (_, i) => -0.05 + i * 0.005),
-        Weekly: Array.from({ length: 21 }, (_, i) => -0.1 + i * 0.01),
-        Monthly: Array.from({ length: 21 }, (_, i) => -0.2 + i * 0.02),
-      },
-      rolling_metrics: {
-        sharpe_30d: Array.from({ length: 90 }, (_, i) => ({
-          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
-          value: 0.5 + i * 0.001,
-        })),
-        sharpe_90d: Array.from({ length: 90 }, (_, i) => ({
-          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
-          value: 0.7 + i * 0.001,
-        })),
-        sharpe_365d: Array.from({ length: 90 }, (_, i) => ({
-          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
-          value: 1.0 + i * 0.001,
-        })),
-      },
-      trade_metrics: {
-        total_positions: 100,
-        open_positions: 5,
-        closed_positions: 95,
-        win_rate: 0.6,
-        avg_roi: 0.05,
-        avg_duration_days: 4.2,
-        long_count: 60,
-        short_count: 40,
-        best_trade_roi: 0.5,
-        worst_trade_roi: -0.2,
-        expectancy: 0.04,
-        risk_reward_ratio: 2.1,
-        weighted_risk_reward_ratio: 2.0,
-        sqn: 1.8,
-        profit_factor_long: 1.5,
-        profit_factor_short: 1.2,
-      },
-      metrics_json: {
-        history_days: 365,
-        equity_series_1y: Array.from({ length: 252 }, (_, i) => ({
-          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
-          value: 1 + i * 0.0005,
-        })),
-        btc_benchmark_returns: Array.from({ length: 252 }, (_, i) => ({
-          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
-          value: 1 + i * 0.0003,
-        })),
-        benchmark_returns: Array.from({ length: 252 }, (_, i) => ({
-          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
-          value: i * 0.0001,
-        })),
-        alpha: 0.05,
-        beta: 0.92,
-        information_ratio: 0.42,
-        treynor_ratio: 0.18,
-      },
-    };
-  }
-
-  function buildStrategyRow() {
-    return {
-      id: STRAT_ID,
-      name: "METRICS-15 perf fixture",
-      start_date: "2024-01-01",
-      supported_exchanges: ["Binance"],
-      strategy_types: ["systematic"],
-      subtypes: ["trend"],
-      markets: ["crypto"],
-      leverage_range: "1-3x",
-      avg_daily_turnover: 250000,
-      status: "published",
-      strategy_analytics: buildAnalyticsRow(),
-    };
-  }
-
-  it("uses an explicit column projection on the strategies row (no `select *`)", async () => {
-    recorders.strategyData = buildStrategyRow();
-    await getStrategyDetailV2(STRAT_ID);
-
-    expect(recorders.strategySelectCols.length).toBeGreaterThanOrEqual(1);
-    const selectCols = recorders.strategySelectCols[0];
-
-    expect(selectCols).not.toMatch(/\*/);
-
-    for (const col of [
-      "id",
-      "name",
-      "start_date",
-      "supported_exchanges",
-      "strategy_types",
-      "leverage_range",
-      "avg_daily_turnover",
-      "strategy_analytics",
-      "metrics_json",
-      "trade_metrics",
-      "rolling_metrics",
-      // CRITICAL: data_quality_flags MUST be in the projection. PR #106
-      // added the typed AnalyticsDataQualityFlags interface and PR #107
-      // added the no_linked_api_key flag, but the v2 SELECT was never
-      // updated to pull the column — so PostgREST silently returned
-      // rows without it and every chip both PRs added was dead in
-      // production. See queries.ts:404 + the integration test below.
-      "data_quality_flags",
-    ]) {
-      expect(selectCols).toContain(col);
-    }
-  });
-
-  it("panel6Inputs.data_quality_flags maps from analytics.data_quality_flags (no chip is dead-on-arrival)", async () => {
-    const strategyRow = buildStrategyRow();
-    (strategyRow.strategy_analytics as Record<string, unknown>).data_quality_flags = {
-      account_balance_unavailable: true,
-      no_linked_api_key: false,
-      trade_mix_approximation: true,
-    };
-    recorders.strategyData = strategyRow;
-
-    const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result).not.toBeNull();
-    expect(result!.panel6Inputs.data_quality_flags).not.toBeNull();
-    expect(result!.panel6Inputs.data_quality_flags?.account_balance_unavailable).toBe(true);
-    expect(result!.panel6Inputs.data_quality_flags?.trade_mix_approximation).toBe(true);
-  });
-
-  it("in-memory unpack p95 stays under the 50ms detail-fetch budget", async () => {
-    recorders.strategyData = buildStrategyRow();
-
-    // Warm the JIT a few times before measuring so the first iteration's
-    // cold-start cost doesn't pollute the percentile.
-    for (let i = 0; i < 3; i++) await getStrategyDetailV2(STRAT_ID);
-
-    const N = 50;
-    const samples: number[] = [];
-    for (let i = 0; i < N; i++) {
-      const t0 = performance.now();
-      await getStrategyDetailV2(STRAT_ID);
-      samples.push(performance.now() - t0);
-    }
-    samples.sort((a, b) => a - b);
-    const p95 = samples[Math.floor(N * 0.95) - 1];
-
-    // The SC#3b end-to-end budget is 50ms; this measures pure in-memory
-    // unpack against a mocked Supabase chain so 100ms gives the test
-    // headroom against GC pauses on noisy CI runners while still flagging
-    // any 10x regression in the panel-mapper hot path.
-    expect(p95).toBeLessThan(100);
   });
 });
 

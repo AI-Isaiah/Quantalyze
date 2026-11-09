@@ -9,6 +9,7 @@
 
 import type { GuardReason } from "./headline-basis";
 import type { FigureRecord, RollingVerdict } from "@/lib/figure-gate";
+import type { PercentileMap } from "@/lib/percentile-core";
 import type { ReconstructedRange } from "./trade-fetch-provenance";
 
 /** One day of strategy or benchmark returns. `value` is a decimal return (not %). */
@@ -642,6 +643,16 @@ export type BasisSeriesBundle = {
 };
 
 /**
+ * The peer-rank slice carried per request: the category the cohort was scoped to (null when the
+ * strategy has none, so it ranks against every published strategy) and this strategy's own
+ * `getPercentiles` entry. Rendered by `PeerRanksSection`, which applies the 194 record gate.
+ */
+export type PeerRanks = {
+  categorySlug: string | null;
+  percentiles: PercentileMap[string];
+};
+
+/**
  * Fields shared by every factsheet payload regardless of ingest source.
  * The discriminated {@link FactsheetPayload} adds `ingestSource` plus the
  * api-only synthesized panels on top of this base.
@@ -699,6 +710,13 @@ export type FactsheetCommon = {
    */
   reconstructedRangesUnavailable?: boolean;
   trustTier: TrustTierKind | null;
+  /**
+   * Phase 196 plan 16: this strategy's peer-relative ranks, the tear sheet's five. Per-request,
+   * overlaid AFTER the shared cache by `withPeerRanks` (src/lib/factsheet/peer-ranks.ts) and
+   * never stored in the cached object, so the cache key needs no version bump. Present only on
+   * the published lane; absent on the owner lane, the share-token route and the allocator mounts.
+   */
+  peerRanks?: PeerRanks | null;
   /** Author-provided strategy description (registry row `strategies.description`). */
   description: string | null;
   /** Author-provided substrategy tags — e.g. ["basis_trade", "calendar_spread"]. */

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { TRUST_TIER_TOKENS, type TrustTier } from "@/lib/design-tokens/trust-tier";
 import { cn } from "@/lib/utils";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import type { FavoriteRow } from "../lib/watchlist-read";
 
 /**
@@ -232,7 +233,7 @@ export function WatchlistPanel({
       <td className="py-2.5 pr-3">
         <div className="flex flex-wrap items-center gap-2">
           <Link
-            href={`/factsheet/${row.strategy_id}`}
+            href={buildFactsheetHref(row.strategy_id, { key: "allocations" })}
             data-testid="watchlist-name"
             className="text-small font-medium text-accent hover:text-accent-hover hover:underline"
           >

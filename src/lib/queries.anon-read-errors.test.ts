@@ -8,7 +8,7 @@
  * value the page renders as a normal state:
  *
  *   getStrategiesByCategory -> [] (an empty category, no Sentry)
- *   getPublicStrategyDetail -> null (a 404 and a "not found" unfurl, no log)
+ *   getPublicStrategyDetail -> null (a 404 and a "not found" unfurl, no log; deleted in 196 plan 14)
  *   getFactsheetDetail      -> null (a 404 tearsheet, no log)
  *
  * so the outage was invisible and indistinguishable from "no such strategy".
@@ -62,7 +62,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-import { getStrategiesByCategory, getPublicStrategyDetail, getFactsheetDetail } from "./queries";
+import { getStrategiesByCategory, getFactsheetDetail } from "./queries";
 
 const PERMISSION_DENIED = { code: "42501", message: "permission denied for table strategies" };
 // What PostgREST answers when a non-UUID string is compared to a uuid column.
@@ -100,34 +100,6 @@ describe("getStrategiesByCategory - a read error is not an empty category", () =
     seeded.error = null;
     // data: null with no error is the mock's "no rows" answer
     await expect(getStrategiesByCategory("crypto-sma")).resolves.toEqual([]);
-    expect(seeded.sentry).toHaveLength(0);
-  });
-});
-
-describe("getPublicStrategyDetail - a read error is not a 404", () => {
-  it("resolves a non-UUID id to null with no query and no Sentry event (a truncated share link is a 404, not an outage)", async () => {
-    // Were it queried, the database would answer 22P02, which is not PGRST116.
-    seeded.error = INVALID_UUID;
-    await expect(getPublicStrategyDetail("not-a-uuid")).resolves.toBeNull();
-    expect(seeded.queries).toBe(0);
-    expect(seeded.sentry).toHaveLength(0);
-  });
-
-  it("throws on a 42501 and reports it to Sentry", async () => {
-    seeded.error = PERMISSION_DENIED;
-    await expect(getPublicStrategyDetail(STRATEGY_ID)).rejects.toThrow(
-      /getPublicStrategyDetail.*3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c.*failed/,
-    );
-    expect(seeded.sentry).toHaveLength(1);
-    expect(seeded.sentry[0].opts).toEqual({
-      tags: { op: "getPublicStrategyDetail", code: "42501" },
-      level: "error",
-    });
-  });
-
-  it("returns null and stays quiet for PGRST116 (no such published strategy)", async () => {
-    seeded.error = NO_ROW;
-    await expect(getPublicStrategyDetail(STRATEGY_ID)).resolves.toBeNull();
     expect(seeded.sentry).toHaveLength(0);
   });
 });

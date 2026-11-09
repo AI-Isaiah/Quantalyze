@@ -222,7 +222,7 @@ export function windowCoverageNote(
  *     view already slices both legs) keeps the whole-record summary.
  * Win Rate, Profit Factor and Longest DD never read this: they stay whole-record.
  */
-function headlineBenchSource(
+export function headlineBenchSource(
   dataQuality: FactsheetPayload["dataQuality"],
   basis: Basis,
   selected: boolean,
@@ -233,6 +233,9 @@ function headlineBenchSource(
   return block.summarySince !== undefined ? block.summarySince : block.summary;
 }
 
+/** Which half of the rail `MetricsColumn` renders (Phase 196, D-04). */
+export type MetricsPart = "all" | "main" | "detailed";
+
 /**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
  * Style, Benchmark — each introduced by a serif-italic eyebrow over a thick
@@ -242,7 +245,19 @@ function headlineBenchSource(
  * structure, matching DESIGN.md's "data density > card density" rule and
  * the FactSet quarterly-factsheet reference.
  */
-export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean }) {
+export function MetricsColumn({
+  scenarioMode = false,
+  part = "all",
+}: {
+  scenarioMode?: boolean;
+  /**
+   * Phase 196 (D-04, LEAN-05): which half of the rail to render. `"all"` (the default, every
+   * existing mount) is the whole rail, unchanged. `"main"` is the one Main metrics table of the
+   * opening view; `"detailed"` is everything else, for inside Advanced, with every row the
+   * Main metrics table or the KPI strip owns removed (UI-SPEC "Metric home table").
+   */
+  part?: MetricsPart;
+}) {
   // Phase 42 (PEER-01, ADR-0025): scenarioMode now gates the additive
   // scenarioPeer carve-out below. It is false on every existing call site (the
   // real route, Discovery, Overview), so the api peer path is provably
@@ -374,6 +389,194 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         ? `${bn}: ${shortTrackNote("record", jointCmp.coveredShortSpanDays)}`
         : null;
 
+  // Phase 196 (D-04): Style drift is the one Style panel that can render nothing on a
+  // non-scenario factsheet; the detailed part reads it here so it can leave the whole section
+  // out instead of printing an empty heading (UI-SPEC "Empty sections").
+  const hasStyleDrift = useBasisSeriesView(payload).styleDrift != null;
+
+  // Best / Worst Period and Section IV are used by the whole rail and by the detailed part, so
+  // each is built once here. `variant` only reaches Section IV's body: "document" drops the
+  // two rows the KPI strip owns (UI-SPEC "Metric home table").
+  const bestWorstPanel = (
+    <Panel title="Best / Worst Period">
+      <table className="w-full text-fixed-11">
+        <thead>
+          <tr className="border-b border-text">
+            <th className="text-left py-1 pr-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Scale</th>
+            <th className="text-right py-1 px-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Best</th>
+            <th className="text-right py-1 pl-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Worst</th>
+          </tr>
+        </thead>
+        <tbody>
+          <BwRow scale="Day" best={m.best_day} worst={m.worst_day} dash={wholeRecordWithheld} />
+          <BwRow scale="Week" best={m.best_week} worst={m.worst_week} dash={wholeRecordWithheld} />
+          <BwRow scale="Month" best={m.best_month} worst={m.worst_month} dash={wholeRecordWithheld} />
+          <BwRow scale="Quarter" best={m.best_quarter} worst={m.worst_quarter} dash={wholeRecordWithheld} />
+          <BwRow scale="Year" best={m.best_year} worst={m.worst_year} dash={wholeRecordWithheld} />
+        </tbody>
+      </table>
+    </Panel>
+  );
+  const benchmarkSection = (variant: "full" | "document") =>
+    payload.returnsUnit && cmpKey === "none" ? (
+      // Phase 164.6.6.2 (D-10, UI-SPEC A15): a strategy whose returns are in a native
+      // unit has no BTC benchmark (measured in BTC it is a flat line; the USD-priced
+      // one mixes units), so §IV stays, every row reads "—", and one line says why
+      // ("show null with the reason"). With SPX active the arms below render as today.
+      <EditorialSection label="IV" name="Benchmark — vs BTC">
+        <BenchmarkMetricsBody
+          variant={variant}
+          joint={null}
+          withheldReason={
+            // Phase 164.6.6.2.1 (D-15): the USD view's returns were CONVERTED, so the
+            // native view's "flat line" sentence is false there; it says why in its own words.
+            payload.convertedFrom != null
+              ? `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit, payload.convertedFrom)}, so they carry the ${payload.convertedFrom} price by construction.`
+              : `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit)}. A BTC benchmark measured in ${payload.returnsUnit} is a flat line.`
+          }
+        />
+      </EditorialSection>
+    ) : jointCmp.joint ? (
+      <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
+        {/* Phase 164.6.6.3.3 (D-04, UI-SPEC 2.2): a flat strategy leg's joint carries NaN for
+            alpha, beta, IR and the captures ("—") and the block's `flatLeg` marker picks the
+            one muted reason line. The marker, never the NaN values, selects it. */}
+        <BenchmarkMetricsBody
+          variant={variant}
+          joint={wholeRecordWithheld ? null : jointCmp.joint}
+          withheldReason={jointCmp.flatLeg && !wholeRecordWithheld ? flatLegReason(selected ? "range" : "record") : undefined}
+          reasonTestId="joint-flat-leg-reason"
+          annualizationNote={wholeRecordWithheld ? undefined : jointAnnualizationNote(jointCmp.jointAnnualization, figureRec)}
+        />
+      </EditorialSection>
+    ) : jointCmp.jointWithheld && bn != null ? (
+      // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor §IV
+      // stays, every joint figure reads "—" and one muted line names the
+      // cause in the Allocations widget's words. No figure is shown (D-69).
+      <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
+        <BenchmarkMetricsBody
+          variant={variant}
+          joint={null}
+          withheldReason={pairedFloorReason(
+            bn,
+            jointCmp.jointWithheld.paired,
+            // D-85: inside a window the count is the slice's, named as the range's.
+            selected ? "range" : "record",
+            jointCmp.jointWithheld.floor,
+            // D-08 (170.6): dated only when the comparator's prices end before the strategy's.
+            benchThrough,
+          )}
+        />
+      </EditorialSection>
+    ) : null;
+
+  // Phase 196 (D-04, LEAN-05) — the two halves of the rail the one-page layout mounts: `main` in
+  // the opening view, `detailed` inside Advanced. Every figure below is the same expression the
+  // whole rail uses (same `gv` / `wr` wrappers and formatters), moved; none is re-derived, so the
+  // Phase 194 gate decides exactly what it decided before. Home table: UI-SPEC "Metric home table".
+  if (part === "main") {
+    return (
+      <aside className="flex flex-col gap-6">
+        <RangeEyebrow scope={scope} surface="rail" />
+        <Panel title="Main metrics" benchHeader={bnDated}>
+          {/* Phase 196 (UI-SPEC "One small-sample warning"): the rail's `figure-gate-note` is not
+              rendered here; the KPI strip's note is the page's one small-sample statement.
+              `bench-figure-gate-note` (comparator-specific) and the span note stay. */}
+          {benchNote && (
+            <p className="mb-2 text-fixed-10 italic text-text-muted" data-testid="bench-figure-gate-note">
+              {benchNote}
+            </p>
+          )}
+          {spanNote && (
+            <p className="mb-2 text-fixed-10 italic" style={{ color: headlineNoteColor(spanNote.variant) }}>
+              {headlineNoteGlyph(spanNote.variant)}
+              {spanNote.text}
+            </p>
+          )}
+          <GroupHeading first>Record</GroupHeading>
+          <Kpm>
+            <Row label="Start Date" value={isoToMonthDay(m.start)} bench="" />
+            <Row label="End Date" value={isoToMonthDay(m.end)} bench="" />
+            <Row label="Years Observed" value={recordLength.years} bench="" />
+          </Kpm>
+          <GroupHeading>Returns</GroupHeading>
+          {selected && (
+            <p className="mb-2 text-fixed-11 text-text-muted" data-testid="window-trailing-note">
+              The trailing and since-inception returns end on the record&apos;s last date, so they are hidden while a range is selected; resetting the range shows them.
+            </p>
+          )}
+          {returnsSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{returnsSpan.text}</p>}
+          <Kpm>
+            {!selected && (
+              <>
+                <Row windowKey="mtd" label={monthRowLabel(m.end)} value={pctSigned(m.mtd, 2)} bench={pctSigned(hb?.mtd, 2)} />
+                <Row windowKey="ytd" label="Year-to-date" value={pctSigned(m.ytd, 2)} bench={pctSigned(hb?.ytd, 2)} />
+                <Row windowKey="p3m" label="3 Month" value={pctSigned(m.p3m, 2)} bench={pctSigned(hb?.p3m, 2)} />
+                {(m.p6m != null || covers6m) && <Row windowKey="p6m" label="6 Month" value={pctSigned(m.p6m, 2)} bench={pctSigned(hb?.p6m, 2)} />}
+                {(m.p1y != null || covers1y) && <Row windowKey="p1y" label="1 Year" value={pctSigned(m.p1y, 2)} bench={pctSigned(hb?.p1y, 2)} />}
+                {m.p3y != null && <Row label="3 Year" value={pctSigned(m.p3y, 2)} bench="" />}
+                {m.p5y != null && <Row label="5 Year" value={pctSigned(m.p5y, 2)} bench="" />}
+              </>
+            )}
+            <Row label="Win Rate (days)" value={wr(pct(m.win_rate, 2))} bench={wr(pct(b?.win_rate, 2))} />
+            <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
+          </Kpm>
+          <GroupHeading>Risk</GroupHeading>
+          {maxDdSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{maxDdSpan.text}</p>}
+          <Kpm>
+            <Row label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
+            <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
+            <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
+            <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
+            <Row label="Skew" value={wr(signed(m.skew))} bench="" />
+            <Row label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
+          </Kpm>
+          <p className="mt-2 text-fixed-10 italic text-text-muted" data-testid="var-method-line">{VAR_METHOD_LINE}</p>
+        </Panel>
+      </aside>
+    );
+  }
+
+  if (part === "detailed") {
+    return (
+      <aside className="flex flex-col gap-12">
+        <header className="border-b border-border pb-1">
+          <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">Detailed metrics</h3>
+        </header>
+        <StrategyThesisPanel />
+        <EditorialSection label="I" name="Performance">
+          <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
+          <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} record={figureRec} variant="document" />
+        </EditorialSection>
+
+        <EditorialSection label="II" name="Risk">
+          <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} figureState={gateState} variant="document" />
+          {bestWorstPanel}
+          <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
+          <WorstDrawdownsTablePanel />
+          <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} variant="document" />
+        </EditorialSection>
+
+        {(hasStyleDrift || scenarioMode) && (
+          <EditorialSection label="III" name="Style" scopeNote={selected ? FULL_HISTORY_NOTE : undefined}>
+            <StyleDriftPanel />
+            {scenarioMode && payload.ingestSource === "csv" && payload.scenarioPeer != null && <PeerPercentilePanel />}
+            {scenarioMode && <OwnBookDeltaPanel />}
+          </EditorialSection>
+        )}
+
+        <EditorialSection label="V" name="Terms">
+          {scenarioMode && <ConstituentMandatePanel />}
+          <LeverageProfilePanel />
+          <TermsPanel variant="document" />
+        </EditorialSection>
+
+        {benchmarkSection("document")}
+      </aside>
+    );
+  }
+
   return (
     <aside className="flex flex-col gap-12">
       <StrategyThesisPanel />
@@ -473,24 +676,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         </Panel>
         {/* D-04 / D-15: the panel follows the windowed view, so it gets the same record-scope verdict as the headline rows. */}
         <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} figureState={gateState} />
-        <Panel title="Best / Worst Period">
-          <table className="w-full text-fixed-11">
-            <thead>
-              <tr className="border-b border-text">
-                <th className="text-left py-1 pr-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Scale</th>
-                <th className="text-right py-1 px-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Best</th>
-                <th className="text-right py-1 pl-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Worst</th>
-              </tr>
-            </thead>
-            <tbody>
-              <BwRow scale="Day" best={m.best_day} worst={m.worst_day} dash={wholeRecordWithheld} />
-              <BwRow scale="Week" best={m.best_week} worst={m.worst_week} dash={wholeRecordWithheld} />
-              <BwRow scale="Month" best={m.best_month} worst={m.worst_month} dash={wholeRecordWithheld} />
-              <BwRow scale="Quarter" best={m.best_quarter} worst={m.worst_quarter} dash={wholeRecordWithheld} />
-              <BwRow scale="Year" best={m.best_year} worst={m.worst_year} dash={wholeRecordWithheld} />
-            </tbody>
-          </table>
-        </Panel>
+        {bestWorstPanel}
         <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
         <WorstDrawdownsTablePanel />
         <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} />
@@ -528,54 +714,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <TermsPanel />
       </EditorialSection>
 
-      {payload.returnsUnit && cmpKey === "none" ? (
-        // Phase 164.6.6.2 (D-10, UI-SPEC A15): a strategy whose returns are in a native
-        // unit has no BTC benchmark (measured in BTC it is a flat line; the USD-priced
-        // one mixes units), so §IV stays, every row reads "—", and one line says why
-        // ("show null with the reason"). With SPX active the arms below render as today.
-        <EditorialSection label="IV" name="Benchmark — vs BTC">
-          <BenchmarkMetricsBody
-            joint={null}
-            withheldReason={
-              // Phase 164.6.6.2.1 (D-15): the USD view's returns were CONVERTED, so the
-              // native view's "flat line" sentence is false there; it says why in its own words.
-              payload.convertedFrom != null
-                ? `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit, payload.convertedFrom)}, so they carry the ${payload.convertedFrom} price by construction.`
-                : `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit)}. A BTC benchmark measured in ${payload.returnsUnit} is a flat line.`
-            }
-          />
-        </EditorialSection>
-      ) : jointCmp.joint ? (
-        <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
-          {/* Phase 164.6.6.3.3 (D-04, UI-SPEC 2.2): a flat strategy leg's joint carries NaN for
-              alpha, beta, IR and the captures ("—") and the block's `flatLeg` marker picks the
-              one muted reason line. The marker, never the NaN values, selects it. */}
-          <BenchmarkMetricsBody
-            joint={wholeRecordWithheld ? null : jointCmp.joint}
-            withheldReason={jointCmp.flatLeg && !wholeRecordWithheld ? flatLegReason(selected ? "range" : "record") : undefined}
-            reasonTestId="joint-flat-leg-reason"
-            annualizationNote={wholeRecordWithheld ? undefined : jointAnnualizationNote(jointCmp.jointAnnualization, figureRec)}
-          />
-        </EditorialSection>
-      ) : jointCmp.jointWithheld && bn != null ? (
-        // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor §IV
-        // stays, every joint figure reads "—" and one muted line names the
-        // cause in the Allocations widget's words. No figure is shown (D-69).
-        <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
-          <BenchmarkMetricsBody
-            joint={null}
-            withheldReason={pairedFloorReason(
-              bn,
-              jointCmp.jointWithheld.paired,
-              // D-85: inside a window the count is the slice's, named as the range's.
-              selected ? "range" : "record",
-              jointCmp.jointWithheld.floor,
-              // D-08 (170.6): dated only when the comparator's prices end before the strategy's.
-              benchThrough,
-            )}
-          />
-        </EditorialSection>
-      ) : null}
+      {benchmarkSection("full")}
     </aside>
   );
 }
@@ -631,7 +770,13 @@ function BenchmarkMetricsBody({
   withheldReason,
   reasonTestId = "joint-floor-reason",
   annualizationNote,
+  variant = "full",
 }: {
+  /**
+   * Phase 196 (D-04): `"document"` drops Alpha (ann) and Information Ratio, which the KPI strip
+   * owns (UI-SPEC "Metric home table"); every other row is unchanged. `"full"` is today's body.
+   */
+  variant?: "full" | "document";
   joint: JointMetrics | null;
   withheldReason?: string;
   /** `joint-floor-reason` for the native-unit and paired-floor arms; the flat-leg arm passes its own. */
@@ -646,16 +791,18 @@ function BenchmarkMetricsBody({
   return (
     <Panel title="Joint Metrics" hideHeaderRule>
       <Kpm>
-        <Row
-          label="Alpha (ann)"
-          value={v(j => pctSigned(j.alpha, 2))}
-          bench=""
-          accent={joint != null}
-        />
+        {variant === "full" && (
+          <Row
+            label="Alpha (ann)"
+            value={v(j => pctSigned(j.alpha, 2))}
+            bench=""
+            accent={joint != null}
+          />
+        )}
         <Row label="Beta" value={v(j => ratio(j.beta))} bench="" />
         <Row label="Correlation" value={v(j => ratio(j.corr))} bench="" />
         <Row label="R²" value={v(j => ratio(j.r2))} bench="" />
-        <Row label="Information Ratio" value={v(j => ratio(j.info_ratio))} bench="" />
+        {variant === "full" && <Row label="Information Ratio" value={v(j => ratio(j.info_ratio))} bench="" />}
         <Row label="Treynor" value={v(j => ratio(j.treynor))} bench="" />
         <Row label="Tracking Error" value={v(j => pct(j.tracking_error, 2))} bench="" />
         <Row label="Up Capture" value={v(j => ratio(j.up_capture))} bench="" />
@@ -718,6 +865,23 @@ function Panel({
       </header>
       {children}
     </section>
+  );
+}
+
+/**
+ * Phase 196 (D-04): a group sub-heading inside the one Main metrics panel, in the panel
+ * sub-heading style the Terms panel's "Fees & Subscription" heading already uses.
+ */
+function GroupHeading({ children, first = false }: { children: ReactNode; first?: boolean }) {
+  return (
+    <h4
+      className={
+        (first ? "" : "mt-4 ") +
+        "mb-2 text-fixed-10 font-semibold uppercase tracking-[0.18em] text-text-muted border-b border-border/60 pb-1"
+      }
+    >
+      {children}
+    </h4>
   );
 }
 
@@ -954,11 +1118,19 @@ function RollingMetricsPanel({
   scope,
   wholeRecordWithheld,
   record,
+  variant = "full",
 }: {
   scope: RangeScope;
   wholeRecordWithheld: boolean;
   /** The rail's TOTAL record (`payload.figureRecord`, read once in `MetricsColumn`). */
   record: FigureRecord | null;
+  /**
+   * Phase 196 (D-04, UI-SPEC "One small-sample warning"): `"document"` leaves out the muted
+   * "annualized from a N-day window, under one year" sentence, the rolling charts' short-track
+   * statement, which the KPI strip's note replaces. A withheld window's reason stays: it is the
+   * per-figure reason, not a small-sample warning. `"full"` is today's panel.
+   */
+  variant?: "full" | "document";
 }) {
   // Phase 103 (MTM-04 follow-through, Finding B): read the rolling arrays from the
   // basis view — the paired rolling CHARTS already render `view.strategyRolling*`
@@ -988,7 +1160,7 @@ function RollingMetricsPanel({
     return dash ? { ...r, current: null, avg: null, min: null, max: null } : r;
   };
   const dashRows = wholeRecordWithheld || verdict?.state === "withheld";
-  const note = rollingVerdictNote(verdict, record);
+  const note = variant === "document" && verdict?.state === "short" ? null : rollingVerdictNote(verdict, record);
   // Phase 194 (D-14, ADDITIVE): from 365 days the payload also carries a 365-calendar-day window
   // (`null` under that, so a shorter basis view never shows the cash view's window). It is a
   // SECOND table after the row-window one, never a replacement or a retitle of it. Its own
@@ -1148,7 +1320,19 @@ function CumulativeReturnsPanel({ figureState }: { figureState: FigureState }) {
  * scattered across the headline panels so a reader can scan tail behaviour in
  * one place: skew, kurtosis, VaR/CVaR, win/loss asymmetry, profit factor.
  */
-function ExtendedMetricsPanel({ wholeRecordWithheld }: { wholeRecordWithheld: boolean }) {
+function ExtendedMetricsPanel({
+  wholeRecordWithheld,
+  variant = "full",
+}: {
+  wholeRecordWithheld: boolean;
+  /**
+   * Phase 196 (D-04): `"document"` drops every row another surface owns (Skew, Kurtosis, VaR,
+   * CVaR, Profit Factor: the Main metrics table; P5, P95, Median: the distribution box) and the
+   * VaR method line that went with VaR. `"full"` is today's panel.
+   */
+  variant?: "full" | "document";
+}) {
+  const full = variant === "full";
   // Phase 103 (MTM-04 follow-through, Finding A): the quantile rows (P5/P95/Median)
   // AND the extended distribution scalars (skew/kurtosis/VaR/CVaR/omega/profit-
   // factor/pain/ulcer/…) are pure functions of the daily series, so they all follow
@@ -1173,14 +1357,18 @@ function ExtendedMetricsPanel({ wholeRecordWithheld }: { wholeRecordWithheld: bo
   return (
     <Panel title="Extended Metrics">
       <Kpm>
-        <Row label="Skew" value={wr(signed(m.skew))} bench="" />
-        <Row label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
-        <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-        <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
-        <Row label="P5 (daily)" value={wr(pctSigned(q.p05, 2))} bench="" />
-        <Row label="P95 (daily)" value={wr(pctSigned(q.p95, 2))} bench="" />
-        <Row label="Median (daily)" value={wr(pctSigned(q.p50, 2))} bench="" />
-        <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench="" />
+        {full && (
+          <>
+            <Row label="Skew" value={wr(signed(m.skew))} bench="" />
+            <Row label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
+            <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
+            <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row label="P5 (daily)" value={wr(pctSigned(q.p05, 2))} bench="" />
+            <Row label="P95 (daily)" value={wr(pctSigned(q.p95, 2))} bench="" />
+            <Row label="Median (daily)" value={wr(pctSigned(q.p50, 2))} bench="" />
+            <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench="" />
+          </>
+        )}
         <Row label="Omega (θ=0)" value={wr(ratio(m.omega_ratio))} bench="" />
         <Row label="Tail Ratio (P95/|P5|)" value={wr(ratio(tailRatio))} bench="" />
         <Row label="Common-sense Ratio" value={wr(ratio(commonSenseRatio))} bench="" />
@@ -1189,7 +1377,7 @@ function ExtendedMetricsPanel({ wholeRecordWithheld }: { wholeRecordWithheld: bo
         <Row label="Ulcer Index" value={wr(pct(m.ulcer_index, 2))} bench="" />
         <Row label="Avg Win / Avg Loss" value={wr(ratioStr(m.avg_win, m.avg_loss))} bench="" />
       </Kpm>
-      <p className="mt-2 text-fixed-10 italic text-text-muted" data-testid="var-method-line">{VAR_METHOD_LINE}</p>
+      {full && <p className="mt-2 text-fixed-10 italic text-text-muted" data-testid="var-method-line">{VAR_METHOD_LINE}</p>}
     </Panel>
   );
 }

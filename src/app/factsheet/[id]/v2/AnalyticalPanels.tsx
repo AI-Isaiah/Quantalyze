@@ -360,7 +360,15 @@ export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld
 export function BootstrapCIPanel({
   wholeRecordWithheld,
   figureState = "null",
+  variant = "full",
 }: {
+  /**
+   * Phase 196 (D-04, UI-SPEC "Metric home table" and "One small-sample warning"): `"document"`
+   * shows the 95% CI column only (the Point column is the sample statistic, which the KPI strip
+   * owns) and leaves out the "resamples are drawn from N observations" line (the strip's note is
+   * the page's one small-sample statement). `"full"` is today's panel.
+   */
+  variant?: "full" | "document";
   wholeRecordWithheld: boolean;
   /**
    * Phase 194 (D-04 as superseded by D-15): the rail's record-scope verdict for the annualized
@@ -420,7 +428,7 @@ export function BootstrapCIPanel({
       <header className="mb-2 border-b border-text pb-1">
         <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Bootstrap 95% Confidence</h3>
       </header>
-      {lowN && (
+      {lowN && variant === "full" && (
         // Phase 194 (D-13, A-194-D13-01): a short-record warning, so it is muted with no glyph;
         // the trigger and the words are unchanged.
         <p className="mb-2 text-micro italic text-text-muted">
@@ -432,14 +440,16 @@ export function BootstrapCIPanel({
         <thead>
           <tr className="border-b border-border/60">
             <th className="py-1 pr-2 text-left font-mono text-micro uppercase tracking-wider text-text-muted">Metric</th>
-            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Point</th>
+            {variant === "full" && (
+              <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Point</th>
+            )}
             <th className="py-1 pl-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">95% CI</th>
           </tr>
         </thead>
         <tbody>
-          <Row label="Sharpe" point={ratio(b.sharpe.point)} ci={`[${ratio(b.sharpe.lo)}, ${ratio(b.sharpe.hi)}]`} />
-          <Row label="Sortino" point={ratio(b.sortino.point)} ci={`[${ratio(b.sortino.lo)}, ${ratio(b.sortino.hi)}]`} />
-          <Row label="Max Drawdown" point={pct(b.max_dd.point, 2)} ci={`[${pct(b.max_dd.lo, 2)}, ${pct(b.max_dd.hi, 2)}]`} />
+          <Row label="Sharpe" point={variant === "full" ? ratio(b.sharpe.point) : null} ci={`[${ratio(b.sharpe.lo)}, ${ratio(b.sharpe.hi)}]`} />
+          <Row label="Sortino" point={variant === "full" ? ratio(b.sortino.point) : null} ci={`[${ratio(b.sortino.lo)}, ${ratio(b.sortino.hi)}]`} />
+          <Row label="Max Drawdown" point={variant === "full" ? pct(b.max_dd.point, 2) : null} ci={`[${pct(b.max_dd.lo, 2)}, ${pct(b.max_dd.hi, 2)}]`} />
         </tbody>
       </table>
 
@@ -596,11 +606,12 @@ function degenerateNote(title: string, nValid: number | undefined, nTotal: numbe
   return `all ${nValid.toLocaleString()} of ${nTotal.toLocaleString()} resamples with a ${title} produced ${shown}`;
 }
 
-function Row({ label, point, ci }: { label: string; point: string; ci: string }) {
+/** `point` is `null` for the CI-only (document) variant: no Point cell is rendered. */
+function Row({ label, point, ci }: { label: string; point: string | null; ci: string }) {
   return (
     <tr className="border-b border-border/30 last:border-0">
       <td className="py-1 pr-2 text-text-2">{label}</td>
-      <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{point}</td>
+      {point !== null && <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{point}</td>}
       <td className="py-1 pl-2 text-right font-mono tabular-nums text-text-2">{ci}</td>
     </tr>
   );

@@ -26,6 +26,7 @@ import {
   buildAllocationRequest,
   commitSucceeded,
   heldStrategyIdsFrom,
+  isNotOwnCapital,
   resolveDeepLink,
   successAnnouncement,
   validateAllocationDate,
@@ -387,6 +388,83 @@ describe("resolveDeepLink", () => {
   it("a listed id that is not held is prefill, with its row", () => {
     expect(resolveDeepLink(OTHER_ID, rows, false, held)).toEqual({
       kind: "prefill",
+      row: rows[1],
+    });
+  });
+});
+
+/**
+ * 198-ADD-DEEPLINK-UNMARKED-OWN. WHY: the picker disables an own strategy that is
+ * not marked own capital, because the allocation route answers 409 for it every
+ * time. `/allocations?add=<id>` (built by the factsheet's "Add to my allocation")
+ * resolved the same row to `prefill`, so the allocator reached the amount step and
+ * only learned of the refusal after typing an amount and submitting. The deep link
+ * must apply the picker's own test, so one rule decides both.
+ */
+describe("isNotOwnCapital: the picker's test, single-sourced", () => {
+  const marked = new Set([OWN_ID]);
+
+  it("an own, active strategy outside the own-capital set is not selectable", () => {
+    expect(isNotOwnCapital({ id: OTHER_ID, isOwn: true, status: "published" }, marked)).toBe(true);
+  });
+
+  it("an own strategy inside the set is selectable", () => {
+    expect(isNotOwnCapital({ id: OWN_ID, isOwn: true, status: "published" }, marked)).toBe(false);
+  });
+
+  it("someone else's strategy is never refused by this test", () => {
+    expect(isNotOwnCapital({ id: OTHER_ID, isOwn: false, status: "published" }, marked)).toBe(false);
+    expect(isNotOwnCapital({ id: OTHER_ID }, marked)).toBe(false);
+  });
+
+  it("an archived own strategy is not decided here: the set omits archived rows, and the route's 409 still refuses", () => {
+    expect(isNotOwnCapital({ id: OTHER_ID, isOwn: true, status: "archived" }, marked)).toBe(false);
+  });
+
+  it("a failed own-capital read (set undefined) never disables a row", () => {
+    expect(isNotOwnCapital({ id: OTHER_ID, isOwn: true, status: "published" }, undefined)).toBe(false);
+  });
+});
+
+describe("resolveDeepLink: an own strategy not marked own capital", () => {
+  const rows = [
+    { id: OWN_ID, name: "Marked own", isOwn: true, status: "published" },
+    { id: OTHER_ID, name: "Unmarked own", isOwn: true, status: "published" },
+    { id: THIRD_ID, name: "Third party", isOwn: false, status: "published" },
+  ];
+  const marked = new Set([OWN_ID]);
+
+  it("lands on the disabled row's reason, with its row, instead of the amount step", () => {
+    expect(resolveDeepLink(OTHER_ID, rows, false, new Set(), marked)).toEqual({
+      kind: "unmarked_own",
+      row: rows[1],
+    });
+  });
+
+  it("a marked own strategy still prefills", () => {
+    expect(resolveDeepLink(OWN_ID, rows, false, new Set(), marked)).toEqual({
+      kind: "prefill",
+      row: rows[0],
+    });
+  });
+
+  it("a third-party strategy still prefills", () => {
+    expect(resolveDeepLink(THIRD_ID, rows, false, new Set(), marked)).toEqual({
+      kind: "prefill",
+      row: rows[2],
+    });
+  });
+
+  it("with no own-capital set (the read failed) it prefills, so a blip never blocks the link", () => {
+    expect(resolveDeepLink(OTHER_ID, rows, false, new Set())).toEqual({
+      kind: "prefill",
+      row: rows[1],
+    });
+  });
+
+  it("a held strategy is reported as held, which says more than the own-capital reason", () => {
+    expect(resolveDeepLink(OTHER_ID, rows, false, new Set([OTHER_ID]), marked)).toEqual({
+      kind: "held",
       row: rows[1],
     });
   });

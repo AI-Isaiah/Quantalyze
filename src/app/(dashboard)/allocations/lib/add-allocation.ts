@@ -250,11 +250,34 @@ export function heldStrategyIdsFrom(
 
 // ─────────────────────────────────────────────────────────────── deep link
 
+/**
+ * The picker's "not selectable" test for an OWN strategy, single-sourced so the
+ * picker row and the `?add=` deep link cannot disagree. The allocation route
+ * refuses an own strategy that is not marked own capital with a 409 every time,
+ * so the flow must stop it before the amount step.
+ *
+ * The own-capital set omits archived strategies, so it cannot decide them (the
+ * route's 409 still refuses an unmarked one, review R3-02). An `undefined` set
+ * means the read failed: a blip never disables a row.
+ */
+export function isNotOwnCapital(
+  row: { id: string; isOwn?: boolean; status?: string | null },
+  ownCapitalStrategyIds: ReadonlySet<string> | undefined,
+): boolean {
+  return (
+    row.isOwn === true &&
+    row.status !== "archived" &&
+    ownCapitalStrategyIds !== undefined &&
+    !ownCapitalStrategyIds.has(row.id)
+  );
+}
+
 export type DeepLinkResolution<Row extends { id: string }> =
   | { kind: "none" }
   | { kind: "unavailable"; reason: "malformed" | "unlisted" }
   | { kind: "not_loaded" }
   | { kind: "held"; row: Row }
+  | { kind: "unmarked_own"; row: Row }
   | { kind: "prefill"; row: Row };
 
 /**
@@ -262,12 +285,20 @@ export type DeepLinkResolution<Row extends { id: string }> =
  * never trusted: it must be a uuid AND be in the allocator-gated list. Absence
  * from a TRUNCATED list proves nothing, so that is `not_loaded`, not
  * `unavailable`. The write routes re-validate regardless.
+ *
+ * A listed own strategy that is not marked own capital resolves to
+ * `unmarked_own` (the picker's own test, `isNotOwnCapital`), so the link lands
+ * on the disabled row's reason instead of reaching an amount step whose submit
+ * the route refuses. Already-held is checked first: it is the more useful answer.
  */
-export function resolveDeepLink<Row extends { id: string }>(
+export function resolveDeepLink<
+  Row extends { id: string; isOwn?: boolean; status?: string | null },
+>(
   raw: string,
   rows: readonly Row[],
   hasMore: boolean,
   held: ReadonlySet<string>,
+  ownCapitalStrategyIds?: ReadonlySet<string>,
 ): DeepLinkResolution<Row> {
   const value = raw.trim();
   if (value === "") return { kind: "none" };
@@ -279,7 +310,11 @@ export function resolveDeepLink<Row extends { id: string }>(
       ? { kind: "not_loaded" }
       : { kind: "unavailable", reason: "unlisted" };
   }
-  return held.has(row.id) ? { kind: "held", row } : { kind: "prefill", row };
+  if (held.has(row.id)) return { kind: "held", row };
+  if (isNotOwnCapital(row, ownCapitalStrategyIds)) {
+    return { kind: "unmarked_own", row };
+  }
+  return { kind: "prefill", row };
 }
 
 // ──────────────────────────────────────────────────────── commit response

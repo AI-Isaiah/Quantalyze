@@ -80,7 +80,7 @@ describe("WatchlistPanel", () => {
     const link = screen.getByRole("link", { name: "Zephyr Momentum" });
     expect(link).toHaveAttribute(
       "href",
-      "/factsheet/aaaaaaaa-0000-0000-0000-000000000001",
+      "/factsheet/aaaaaaaa-0000-0000-0000-000000000001?from=allocations",
     );
     // TrustTierLabel renders a data-trust-tier attribute per variant.
     expect(screen.getAllByTestId("trust-tier-label").length).toBe(2); // null tier renders nothing

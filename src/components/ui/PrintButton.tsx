@@ -1,12 +1,19 @@
 "use client";
 
+import { buttonClassName } from "@/components/ui/Button";
+
+/**
+ * The tear sheet's screen-only print control. Secondary, so the row's one accent
+ * fill is the "Download PDF" link beside it (Phase 196 UI-SPEC, Print and Tearsheet).
+ */
 export function PrintButton() {
   return (
     <button
+      type="button"
       onClick={() => window.print()}
-      className="rounded-lg bg-accent px-6 py-2 text-sm font-medium text-white hover:bg-accent/90 transition-colors"
+      className={buttonClassName({ variant: "secondary", size: "md" })}
     >
-      Download as PDF
+      Print tearsheet
     </button>
   );
 }

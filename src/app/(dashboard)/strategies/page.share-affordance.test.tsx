@@ -419,13 +419,12 @@ describe("StrategiesPage — private-link control is a small secondary peer (170
   });
 });
 
-describe("one predicate, three sites — the drift pin", () => {
+describe("one predicate, two sites — the drift pin (196 D-03 retired the discovery detail site)", () => {
   const ROOT = join(__dirname, "..", "..", "..", "..");
   const readSrc = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 
   const SITES = [
     "src/app/(dashboard)/strategies/page.tsx",
-    "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx",
   ];
 
   it.each(SITES)(

@@ -18,16 +18,16 @@
  * Roles swept (fixtures OWNED BY the logged-in user, per the project e2e RLS
  * rule):
  *   - OWNER ("both" role): the manager /strategies/[id]/edit surface (the MT5
- *     tag) AND the public factsheet /strategy/[id] (the badge).
- *   - ALLOCATOR (the SAME "both" user): the /browse/<slug>/<id> discovery
- *     presentation, whose VerifiedBadge follows the public trust tier
+ *     tag) AND the public factsheet /factsheet/[id] (the badge).
+ *   - ALLOCATOR (the SAME "both" user): the retired /browse/<slug>/<id> link
+ *     (308 to the factsheet since Phase 196), whose masthead badge follows the public trust tier
  *     (trust_tier = api_verified, from get_published_trust_signals) since
  *     Phase 170.6.1.1, because public rows no longer carry api_key_id (the
  *     seed still links the mt5 key: owner surfaces and the key-scope badge
  *     read it).
  *   - ADMIN (a separate is_admin-elevated session): a NON-owner viewer reads the
  *     same seeded mt5 strategy's api_verified tier through the public factsheet.
- *   - ANON (logged-out): the /strategy/[id] factsheet is publicly viewable and
+ *   - ANON (logged-out): the /factsheet/[id] factsheet is publicly viewable and
  *     the api_verified badge is public provenance (Phase 126 FACTSHEET-01; the
  *     anti-mask regression net).
  *   - PUBLIC-DEMO: N/A. The /demo surface runs on sentinel fixtures with no mt5
@@ -145,8 +145,8 @@ test.describe("Plan 138-03 — connected-MT5 badge + tag (MT5UI-02)", () => {
     test.skip(!HAS_SEED_ENV, "mt5-badge: seed-env not wired (visible skip, not a silent pass).");
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
-    await page.goto(`/strategy/${seeded.strategyId}`);
-    await expect(page).toHaveURL(new RegExp(`/strategy/${seeded.strategyId}`), {
+    await page.goto(`/factsheet/${seeded.strategyId}`);
+    await expect(page).toHaveURL(new RegExp(`/factsheet/${seeded.strategyId}`), {
       timeout: 10_000,
     });
 
@@ -159,18 +159,23 @@ test.describe("Plan 138-03 — connected-MT5 badge + tag (MT5UI-02)", () => {
     expect(results.violations).toEqual([]);
   });
 
-  test("allocator: the browse presentation shows the api_verified badge", async ({
+  test("allocator: the old browse link lands on the factsheet and shows the api_verified badge", async ({
     page,
   }) => {
     test.skip(!HAS_SEED_ENV, "mt5-badge: seed-env not wired (visible skip, not a silent pass).");
     // Same "both" user — it owns the allocator/browse surfaces too.
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
-    // The browse detail page fetches the strategy by id (getPublicStrategyDetail)
-    // — category membership is not required for the direct-id route. Its
-    // VerifiedBadge follows the public trust tier (trust_tier = api_verified)
-    // since Phase 170.6.1.1; the seed's api_verified verification drives it.
+    // Phase 196 ONESTRATEGYPAGE (D-03): /browse/<slug>/<id> is retired and 308s
+    // to /factsheet/<id>?from=browse&cat=<slug>. The old browse page is gone, so
+    // this leg follows the redirect and asserts the same api_verified badge on
+    // the factsheet masthead (TrustTierLabel, data-trust-tier="api_verified"),
+    // which reads the public trust tier (get_published_trust_signals).
     await page.goto(`/browse/crypto-sma/${seeded.strategyId}`);
+    await expect(page).toHaveURL(
+      new RegExp(`/factsheet/${seeded.strategyId}`),
+      { timeout: 10_000 },
+    );
     await expect(
       page.locator("h1").first(),
     ).toBeVisible({ timeout: 10_000 });
@@ -193,8 +198,8 @@ test.describe("Plan 138-03 — connected-MT5 badge + tag (MT5UI-02)", () => {
     // get_published_trust_signals SECURITY DEFINER RPC (queries.readPublicVerificationSignals,
     // normal client + anon EXECUTE — NOT service role), so ANY non-owner viewer
     // now sees the api_verified badge. This asserts that corrected intent.
-    await page.goto(`/strategy/${seeded.strategyId}`);
-    await expect(page).toHaveURL(new RegExp(`/strategy/${seeded.strategyId}`), {
+    await page.goto(`/factsheet/${seeded.strategyId}`);
+    await expect(page).toHaveURL(new RegExp(`/factsheet/${seeded.strategyId}`), {
       timeout: 10_000,
     });
 
@@ -207,14 +212,14 @@ test.describe("Plan 138-03 — connected-MT5 badge + tag (MT5UI-02)", () => {
     page,
   }) => {
     test.skip(!HAS_SEED_ENV, "mt5-badge: seed-env not wired (visible skip, not a silent pass).");
-    // NO login — the /strategy/[id] factsheet of a PUBLISHED strategy is
+    // NO login — the /factsheet/[id] factsheet of a PUBLISHED strategy is
     // publicly viewable, and the api_verified badge is public provenance. This
     // is the core FACTSHEET-01 requirement (badge visible to EVERYONE incl.
     // logged-out) AND the anti-mask net: it fails RED on the pre-126 code where
     // the RLS-scoped verification embed returned zero rows for anon → tier null
     // → the badge silently vanished. Do NOT log in here.
-    await page.goto(`/strategy/${seeded.strategyId}`);
-    await expect(page).toHaveURL(new RegExp(`/strategy/${seeded.strategyId}`), {
+    await page.goto(`/factsheet/${seeded.strategyId}`);
+    await expect(page).toHaveURL(new RegExp(`/factsheet/${seeded.strategyId}`), {
       timeout: 10_000,
     });
 

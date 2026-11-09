@@ -92,7 +92,7 @@ describe("PortfolioOptimizer suggestion card (Phase 195 D-02)", () => {
     );
 
     const view = screen.getByRole("link", { name: "View strategy" });
-    expect(view).toHaveAttribute("href", `/factsheet/${SUGGESTION.strategy_id}`);
+    expect(view).toHaveAttribute("href", `/factsheet/${SUGGESTION.strategy_id}?from=allocations`);
     expect(screen.queryByRole("link", { name: "Add to portfolio" })).toBeNull();
     expect(screen.queryByText("Add to portfolio")).toBeNull();
   });

@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type Locator, type Page } from "./helpers/hydration-guard";
 import { assertNoReflow } from "./helpers/reflow";
+import { openAdvanced } from "./helpers/open-advanced";
 import {
   assertChildrenInside,
   assertEmittersMeasured,
@@ -465,7 +466,7 @@ async function readMystrNote(region: Locator, id: string, stop: "0" | "max") {
     (el, args) => {
       el.scrollLeft = args.stop === "max" ? el.scrollWidth : 0;
       const rr = el.getBoundingClientRect();
-      const link = el.querySelector<HTMLElement>(`a[href="/factsheet/${args.id}"]`);
+      const link = el.querySelector<HTMLElement>(`a[href^="/factsheet/${args.id}?"]`);
       const row = link?.closest("tr");
       const footer = row?.nextElementSibling?.querySelector<HTMLElement>(
         '[data-testid="strategy-row-footer"]',
@@ -505,7 +506,7 @@ function mystrRow(page: Page, id: string) {
   return page
     .getByRole("region", { name: /^Strategies:/ })
     .locator("tbody tr")
-    .filter({ has: page.locator(`a[href="/factsheet/${id}"]`) });
+    .filter({ has: page.locator(`a[href^="/factsheet/${id}?"]`) });
 }
 
 test.describe("/strategies — MYSTRATTABLE phones", () => {
@@ -587,9 +588,10 @@ test.describe("/strategies — MYSTRATTABLE phones", () => {
         // 4. Every name opens its factsheet, whatever the status (D-02).
         for (const s of seeded) {
           await collect(`name link (${s.label})`, async () => {
-            const link = region.locator(`a[href="/factsheet/${s.id}"]`);
+            const link = region.locator(`a[href^="/factsheet/${s.id}?"]`);
             await expect(link).toHaveCount(1);
-            await expect(link).toHaveAttribute("href", `/factsheet/${s.id}`);
+            // Phase 196 / ROUTE-04 (D-01): this table is the /strategies page, so its own origin rides on the link.
+            await expect(link).toHaveAttribute("href", `/factsheet/${s.id}?from=strategies`);
             expect(
               ((await link.textContent()) ?? "").replace(/\s+/g, " ").trim(),
               `the ${s.label} name link text`,
@@ -616,7 +618,7 @@ test.describe("/strategies — MYSTRATTABLE phones", () => {
               const out: Record<string, Record<string, string>> = {};
               for (const [key, id] of Object.entries(ids)) {
                 const row = el
-                  .querySelector(`a[href="/factsheet/${id}"]`)
+                  .querySelector(`a[href^="/factsheet/${id}?"]`)
                   ?.closest("tr");
                 const tds = row ? row.querySelectorAll<HTMLElement>(":scope > td") : [];
                 out[key] = {};
@@ -1273,6 +1275,9 @@ test.describe("factsheet KPI — N-KPI", () => {
         throw new Error(`/factsheet/<seeded>/v2 returned HTTP ${res.status()} (W-02)`);
       }
       await assertKpiTilesRead(page, `${vp.id} published factsheet N-KPI`);
+      // Phase 196 (D-04): the tiles are in the opening view; the reflow walk covers the whole
+      // article, Advanced included, as it did before the sections moved behind it.
+      await openAdvanced(page);
       await assertNoReflow(page, "#factsheet-main");
     });
   }

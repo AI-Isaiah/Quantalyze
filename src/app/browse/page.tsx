@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { getBrowseCategories } from "./browse-categories";
+import { hasBrowseSession } from "./session";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
@@ -19,6 +20,9 @@ export default async function BrowsePage() {
   if (onlySlug) {
     redirect(`/browse/${onlySlug}`);
   }
+
+  // ROUTE-02: a signed-in reader is never asked to sign up on /browse.
+  const signedIn = await hasBrowseSession();
 
   return (
     <>
@@ -55,25 +59,27 @@ export default async function BrowsePage() {
         </div>
       )}
 
-      <div className="mt-12 border-t border-border pt-8">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h2 className="font-display text-2xl text-text-primary">
-              Want full analytics and introductions?
-            </h2>
-            <p className="mt-2 text-sm text-text-secondary">
-              Sign up to access detailed performance reports, request
-              introductions to managers, and model an allocation.
-            </p>
+      {!signedIn && (
+        <div className="mt-12 border-t border-border pt-8">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="font-display text-2xl text-text-primary">
+                Want full analytics and introductions?
+              </h2>
+              <p className="mt-2 text-sm text-text-secondary">
+                Sign up to access detailed performance reports, request
+                introductions to managers, and model an allocation.
+              </p>
+            </div>
+            <Link
+              href="/signup"
+              className="inline-flex shrink-0 items-center justify-center rounded-lg bg-accent px-5 py-3 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+            >
+              Get Started Free
+            </Link>
           </div>
-          <Link
-            href="/signup"
-            className="inline-flex shrink-0 items-center justify-center rounded-lg bg-accent px-5 py-3 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-          >
-            Get Started Free
-          </Link>
         </div>
-      </div>
+      )}
 
       <Disclaimer variant="footer" />
     </>

@@ -30,6 +30,11 @@ import {
   type RangeFilter,
 } from "./StrategyFilters";
 import { StrategyGrid } from "./StrategyGrid";
+import {
+  buildFactsheetHref,
+  type FactsheetCategorySlug,
+  type FactsheetOrigin,
+} from "@/lib/factsheet/origin";
 import { rowRecord, annualizedCell } from "./annualized-cell";
 import { DISCOVERY_COLUMNS } from "./discovery-columns";
 import { SyncBadge } from "./SyncBadge";
@@ -394,6 +399,13 @@ interface StrategyTableProps {
   categorySlug: string;
   basePath?: string;
   /**
+   * Phase 196 / ROUTE-04 (D-01): where a row's factsheet link leads back to. The MOUNT states
+   * it (a prop), the table never derives it from the URL. When absent it defaults from
+   * `basePath` and `categorySlug`: `/browse` is "browse", anything else "discovery", with
+   * the category slug as `cat` (the builder drops a slug that is not a discovery category).
+   */
+  origin?: FactsheetOrigin;
+  /**
    * Sprint 6 Task 6.4: the authenticated user's single real portfolio id.
    * When present, each row renders a "Simulate Impact" button that opens
    * the PortfolioImpactPanel. When null, the button is disabled with an
@@ -627,6 +639,7 @@ export function StrategyTable({
   strategies,
   categorySlug,
   basePath = "/discovery",
+  origin,
   portfolioId = null,
   userId,
   initialWatchedSet,
@@ -642,6 +655,12 @@ export function StrategyTable({
   selectable = false,
   sharedAccountPartners,
 }: StrategyTableProps) {
+  // The cast is safe by construction: `buildFactsheetHref` re-validates `cat` against
+  // DISCOVERY_CATEGORIES and drops anything else (a mount on a non-category slug).
+  const linkOrigin: FactsheetOrigin = origin ?? {
+    key: basePath === "/browse" ? "browse" : "discovery",
+    cat: categorySlug as FactsheetCategorySlug,
+  };
   const reactId = useId();
   const tabIdBase = `watchlist${reactId}`;
   const panelId = `strategy-list${reactId}`;
@@ -659,8 +678,8 @@ export function StrategyTable({
   const [page, setPage] = useState(0);
 
   // Phase 149 / NAV-01 — the SINGLE enforcement point for "grid view is
-  // unreachable on the owner surface". A grid card links to
-  // `${basePath}/${categorySlug}/${id}` (StrategyGrid.tsx:52-55), which resolves
+  // unreachable on the owner surface". A grid card USED TO link to
+  // `${basePath}/${categorySlug}/${id}`, which resolved
   // through getStrategyDetail → withPublishedOnly (queries.ts:530) →
   // notFound() for an own unpublished row — a 404 dead end AND an existence
   // oracle (RESEARCH Pitfall 3). Founder ruling 2026-08-05: keep grid
@@ -1771,7 +1790,7 @@ export function StrategyTable({
                         >
                           <div className="flex items-center gap-1.5">
                             <Link
-                              href={`/factsheet/${s.id}`}
+                              href={buildFactsheetHref(s.id, linkOrigin)}
                               className="font-medium text-text-primary hover:text-accent transition-colors"
                             >
                               <NowrapWords text={s.name} />
@@ -2273,8 +2292,7 @@ export function StrategyTable({
         ) : (
           <StrategyGrid
             strategies={paged}
-            categorySlug={categorySlug}
-            basePath={basePath}
+            origin={linkOrigin}
             userId={userId}
             watchedSet={watchedSet}
             onToggleStar={onToggleStar}

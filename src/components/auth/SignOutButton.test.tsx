@@ -132,6 +132,7 @@ describe("SignOutButton — T-13-02-01 cross-account localStorage purge", () => 
       "admin-compute-jobs-auto-refresh", // ComputeJobsTable.tsx
       "factsheet-v2:{strategyId}", // factsheet-context.tsx (templated, B7c)
       "factsheet-collapse:{strategyId}:{section}", // CollapsibleSection.tsx (templated, B7c)
+      "factsheet-collapse:advanced", // AdvancedDisclosure.tsx (Phase 196 D-04; global per viewer, not per strategy)
       "composer-collapse:controls", // ScenarioComposer.tsx CollapsibleSection (Phase 31)
       "composer.coverageDefaultChangeNoteDismissed", // DefaultChangeNote.tsx (Phase 58 POLISH-03)
     ];

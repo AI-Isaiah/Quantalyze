@@ -9,6 +9,7 @@ import {
   type OutcomesWidgetData,
 } from "../lib/widget-data";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { computeOutcomeKPIs, type OutcomeKPIs } from "@/lib/outcomes-kpi";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 // Phase 08 Plan 04 Task 2 — "Your note" section inside ExpandedPanel
@@ -609,7 +610,7 @@ function TimelineRow({
           <div className="flex items-center gap-2.5">
             {originalStrategy ? (
               <a
-                href={`/strategy/${originalStrategy.id}`}
+                href={buildFactsheetHref(originalStrategy.id, { key: "allocations" })}
                 onClick={(e) => e.stopPropagation()}
                 className="text-fixed-12 hover:underline"
                 style={{ color: "var(--color-text-muted)" }}
@@ -633,7 +634,7 @@ function TimelineRow({
             </span>
             {replacementStrategy ? (
               <a
-                href={`/strategy/${replacementStrategy.id}`}
+                href={buildFactsheetHref(replacementStrategy.id, { key: "allocations" })}
                 onClick={(e) => e.stopPropagation()}
                 className="text-fixed-13 font-medium hover:underline"
                 style={{ color: "var(--color-text-primary)" }}

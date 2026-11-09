@@ -181,7 +181,7 @@ test.describe("DISCO-01 watchlist", () => {
     const seededRow = page
       .locator(SELECTORS.tableRows)
       .filter({
-        has: page.locator(`a[href="/factsheet/${strategyId}"]`),
+        has: page.locator(`a[href^="/factsheet/${strategyId}?"]`),
       });
     await expect(
       seededRow,
@@ -189,6 +189,12 @@ test.describe("DISCO-01 watchlist", () => {
         `(strategyId=${strategyId}) — published-filter, RLS, ` +
         "or discovery_categories.slug inner-join regression",
     ).toBeVisible({ timeout: 10000 });
+    // Phase 196 / ROUTE-04 (D-01): the row's link says where it came from, so the
+    // factsheet can offer "Back to Discovery" to this category.
+    await expect(
+      seededRow.locator(`a[href^="/factsheet/${strategyId}?"]`).first(),
+      "the discovery row's factsheet link carries no from=discovery&cat=crypto-sma origin",
+    ).toHaveAttribute("href", `/factsheet/${strategyId}?from=discovery&cat=crypto-sma`);
     // Belt-and-braces: the seeded strategy's star button must actually
     // exist on the targeted row. If the row rendered but StarToggle
     // failed to hydrate, this surfaces the structural failure with the
@@ -225,7 +231,7 @@ test.describe("DISCO-01 watchlist", () => {
     const seededRowAfterReload = page
       .locator(SELECTORS.tableRows)
       .filter({
-        has: page.locator(`a[href="/factsheet/${strategyId}"]`),
+        has: page.locator(`a[href^="/factsheet/${strategyId}?"]`),
       });
     await expect(
       seededRowAfterReload.locator(SELECTORS.starRemoveButton),
@@ -252,7 +258,7 @@ test.describe("DISCO-01 watchlist", () => {
     // pass against an unrelated starred row.
     await watchTab.click();
     await expect(
-      page.locator(`table tbody tr a[href="/factsheet/${strategyId}"]`),
+      page.locator(`table tbody tr a[href^="/factsheet/${strategyId}?"]`),
       "My Watchlist tab did not filter to the seeded row — server-side " +
         "user_favorites scope regression or hydration race",
     ).toBeVisible({ timeout: 5000 });

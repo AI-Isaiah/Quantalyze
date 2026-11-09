@@ -15929,7 +15929,7 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
     expect(within(untiered).queryByTestId("trust-tier-label")).toBeNull();
   });
 
-  it("SCEN-03 factsheet link: href is exactly /factsheet/{id} and the text is the pinned CTA", () => {
+  it("SCEN-03 factsheet link: href is exactly /factsheet/{id}?from=allocations and the text is the pinned CTA", () => {
     renderScen(bookedPayload());
     add(D_A, "Scen03 Strat A");
     openDetail(D_A, "Scen03 Strat A");
@@ -15939,7 +15939,7 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
     });
     // getAttribute, not `.href`: jsdom resolves the property to an absolute URL,
     // which would still pass against a wrong base path.
-    expect(link.getAttribute("href")).toBe(`/factsheet/${D_A}`);
+    expect(link.getAttribute("href")).toBe(`/factsheet/${D_A}?from=allocations`);
   });
 
   it("SCEN-03 wiring: the name button's aria-controls names the panel's own id", () => {

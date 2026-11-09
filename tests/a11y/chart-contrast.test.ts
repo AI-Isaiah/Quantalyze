@@ -45,8 +45,9 @@ const FORBIDDEN_TEXT_FILLS = ["#94A3B8", "#718096"];
 const V2_DIR = resolve(process.cwd(), "src/components/strategy-v2");
 
 /**
- * Phase 14b-07 / UI-SPEC §12.2 — scan the 6 NEW chart files added in
- * Phase 14b for the same forbidden text-fill regression. These files are
+ * Phase 14b-07 / UI-SPEC §12.2 — scan the NEW chart files added in
+ * Phase 14b (four of the six were deleted by Phase 196 plan 14, so two
+ * remain) for the same forbidden text-fill regression. These files are
  * NOT under src/components/strategy-v2/, so the V2_DIR walker doesn't
  * catch them. We list them explicitly rather than blanket-globbing
  * src/components/charts/** to avoid sweeping legacy v1 chart components
@@ -54,12 +55,8 @@ const V2_DIR = resolve(process.cwd(), "src/components/strategy-v2");
  * forbidden pattern is text-FILL on text/legend nodes, not stroke).
  */
 const PHASE_14B_CHART_FILES = [
-  "src/components/charts/DailyHeatmap.tsx",
-  "src/components/charts/NetGrossExposureChart.tsx",
-  "src/components/charts/TurnoverChart.tsx",
   "src/components/charts/RollingVolatilityChart.tsx",
   "src/components/charts/RollingSortinoChart.tsx",
-  "src/components/charts/RollingAlphaBetaChart.tsx",
 ].map((p) => resolve(process.cwd(), p));
 
 function listTsxFiles(dir: string): string[] {
@@ -138,7 +135,7 @@ describe("chart-axis contrast (A11Y-01)", () => {
   });
 
   it("zero forbidden text-fill colors in Phase 14b chart files (UI-SPEC §12.2)", () => {
-    expect(PHASE_14B_CHART_FILES.length).toBe(6);
+    expect(PHASE_14B_CHART_FILES.length).toBe(2);
     const violations: { file: string; pattern: string }[] = [];
     for (const file of PHASE_14B_CHART_FILES) {
       const content = readFileSync(file, "utf-8");

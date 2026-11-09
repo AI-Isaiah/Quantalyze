@@ -16,6 +16,7 @@ import { buildEnvelope, type ErrorEnvelope } from "@/lib/envelope";
 import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { scrubSeamError } from "@/lib/seam-redaction";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import type { MetadataDraft } from "./MetadataStep";
 import {
   getWizardCorrelationId,
@@ -843,7 +844,7 @@ export function CsvSubmitStep({
                 now, described but not rendered. */}
             <div className="mt-3">
               <Link
-                href={`/factsheet/${echoNotice.strategyId}/v2`}
+                href={buildFactsheetHref(echoNotice.strategyId, { key: "my-strategies" })}
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="wizard-csv-echo-view-factsheet"

@@ -5,8 +5,10 @@ import { describe, it, expect, vi } from "vitest";
 // outside an RSC bundle). Stub it, as composite-read-path.test.ts does.
 vi.mock("server-only", () => ({}));
 // The both-surfaces case (Task 2) drives the two REAL callers: the factsheet
-// route's builder and the discovery detail page. Their data sources are stubbed;
-// the assembly under test is not. Mirrors the two page.smoothed-wiring harnesses.
+// route's builder and the factsheet page (/factsheet/[id]/v2). Their data
+// sources are stubbed; the assembly under test is not. Mirrors the factsheet
+// page's page.smoothed-wiring harness (Phase 196 D-03 retired the discovery
+// detail page that was the second caller).
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 vi.mock("next/navigation", () => ({
   notFound: () => {
@@ -18,7 +20,12 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
-vi.mock("@/lib/queries", () => ({ getStrategyDetail: vi.fn() }));
+// unstable_cache -> identity: the test exercises the REAL builder, not Next's
+// cache plumbing (the factsheet page wraps its public build in it).
+vi.mock("next/cache", () => ({
+  unstable_cache: (fn: (...args: unknown[]) => unknown) => fn,
+}));
+vi.mock("@/lib/queries", () => ({ readPublicVerificationSignals: vi.fn() }));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readSingleKeyBasisOpts, singleKeyDataQuality } from "./composite-read-path";
@@ -28,11 +35,10 @@ import { annualizationPeriods } from "@/lib/closed-sets";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { fetchAndBuildPayload } from "./fetch-and-build-payload";
 import type { DailyReturn, FactsheetPayload } from "./types";
-import StrategyDetailPage from "@/app/(dashboard)/discovery/[slug]/[strategyId]/page";
+import FactsheetV2Page from "@/app/factsheet/[id]/v2/page";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getStrategyDetail } from "@/lib/queries";
-import { DISCOVERY_CATEGORIES } from "@/lib/constants";
+import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
@@ -287,13 +293,13 @@ describe("169 D-10 / SC4 — the single-key factsheet headline reads the persist
 
 /**
  * D-10 "one shared owner, two callers": the factsheet route (through
- * `fetchAndBuildPayload`'s resolve stage) and the discovery detail page (through
- * its own assembly, until Phase 169.1 plan 169.1-01 consolidates it) must both hand
+ * `fetchAndBuildPayload`'s resolve stage) and the factsheet page (through its
+ * cached wrapper over the same resolve stage) must both hand
  * the analytics row to `readSingleKeyBasisOpts`. Same row in, same CAGR and Sharpe
  * out, and both equal to what the lists show. A caller that stops passing the row
  * falls back to the TypeScript headline and reddens this case.
  */
-describe("169 D-10 — both factsheet surfaces render the persisted CAGR and Sharpe", () => {
+describe("169 D-10 — both factsheet callers render the persisted CAGR and Sharpe", () => {
   const STRATEGY_ID = "55555555-5555-4555-8555-555555555555";
 
   function strategyColumns() {
@@ -366,28 +372,36 @@ describe("169 D-10 — both factsheet surfaces render the persisted CAGR and Sha
 
   it("same row through both call shapes → equal CAGR and Sharpe, and both equal the persisted values", async () => {
     vi.mocked(createAdminClient).mockReturnValue(mockAdmin() as never);
-    vi.mocked(createClient).mockResolvedValue({
-      auth: { getUser: () => Promise.resolve({ data: { user: { id: "user-1" } } }) },
-    } as never);
-    vi.mocked(getStrategyDetail).mockResolvedValue({
-      strategy: strategyColumns(),
-      analytics: sharedAnalyticsRow(),
-      disclosureTier: "exploratory",
-    } as never);
+    // The factsheet page's outer signature probe, on the request client.
+    const probe = {
+      select: () => probe,
+      eq: () => probe,
+      maybeSingle: () =>
+        Promise.resolve({
+          data: {
+            id: STRATEGY_ID,
+            name: "Headline Source Test",
+            codename: null,
+            disclosure_tier: "exploratory",
+            strategy_analytics: { computed_at: sharedAnalyticsRow().computed_at },
+          },
+          error: null,
+        }),
+    };
+    vi.mocked(createClient).mockResolvedValue({ from: () => probe } as never);
+    vi.mocked(readPublicVerificationSignals).mockResolvedValue(
+      new Map([[STRATEGY_ID, { trust_tier: "api_verified", status: "verified" }]]) as never,
+    );
 
     const route = await fetchAndBuildPayload(STRATEGY_ID, (q) => q);
-    const discovery = findPayload(
-      await StrategyDetailPage({
-        params: Promise.resolve({ slug: DISCOVERY_CATEGORIES[0]!.slug, strategyId: STRATEGY_ID }),
-      }),
-    );
+    const page = findPayload(await FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) }));
     expect(route, "factsheet route payload").not.toBeNull();
-    expect(discovery, "discovery detail payload").not.toBeNull();
+    expect(page, "factsheet page payload").not.toBeNull();
 
     expect(route!.strategyMetrics.cagr).toBe(0.12);
     expect(route!.strategyMetrics.sharpe).toBe(1.5);
-    expect(discovery!.strategyMetrics.cagr).toBe(route!.strategyMetrics.cagr);
-    expect(discovery!.strategyMetrics.sharpe).toBe(route!.strategyMetrics.sharpe);
+    expect(page!.strategyMetrics.cagr).toBe(route!.strategyMetrics.cagr);
+    expect(page!.strategyMetrics.sharpe).toBe(route!.strategyMetrics.sharpe);
   });
 });
 

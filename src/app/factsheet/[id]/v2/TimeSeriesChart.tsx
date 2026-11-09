@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useDeferredValue, useMemo, useRef, useState, useCallback, useEffect } from "react";
+import { memo, useContext, useDeferredValue, useMemo, useRef, useState, useCallback, useEffect } from "react";
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { usePayload, useXRange, useActiveComparator, useRegimes } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useRangeGesture } from "./basis-context";
@@ -21,6 +21,7 @@ import {
 } from "@/lib/nav-marks-start";
 import { formatIsoDate } from "../trade-fetch-lines";
 import { isZoomWheel } from "./wheel-zoom";
+import { ChartHintContext } from "./chart-hint";
 
 const VB_W = 880;
 // `left` is the minimum gutter: it grows from the widest y tick label (see `padLeft`).
@@ -81,6 +82,10 @@ function firstIndexAfter(dates: readonly string[], target: string): number {
 export const TimeSeriesChart = memo(TimeSeriesChartInner);
 
 function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
+  // Phase 196 (D-04): in the document layout the page states the interactions once and this
+  // chart points at that element instead of carrying its own sr-only copy. Absent (the full
+  // layout) it renders exactly as before.
+  const sharedHintId = useContext(ChartHintContext);
   // Phase 103 (MTM-04): every series/dates/marker/worst-10/comparator read goes
   // through the active-basis view — under mark_to_market with a bundle it is the
   // MTM merge ({...payload, ...seriesByBasis.mark_to_market}); under cash or an
@@ -847,12 +852,14 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
 
   return (
     <figure className="flex flex-col gap-2" style={cvStyle}>
-      <span id={chartHelpId} className="sr-only">
-        Arrow keys pan the timeline. Plus and minus zoom around the center.
-        Home or zero resets the view. Hold Control or Command and turn the mouse wheel to zoom toward the cursor; the wheel alone scrolls the page.
-        Drag inside the plot to pan; drag the left axis to scale Y; drag the
-        bottom axis to scale X.
-      </span>
+      {sharedHintId === null && (
+        <span id={chartHelpId} className="sr-only">
+          Arrow keys pan the timeline. Plus and minus zoom around the center.
+          Home or zero resets the view. Hold Control or Command and turn the mouse wheel to zoom toward the cursor; the wheel alone scrolls the page.
+          Drag inside the plot to pan; drag the left axis to scale Y; drag the
+          bottom axis to scale X.
+        </span>
+      )}
       <header className="flex items-baseline justify-between">
         <div>
           <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
@@ -932,7 +939,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         height={height}
         role="img"
         aria-label={ariaLabel(config, view.strategyName, cmp.name, !!cmp.cumulative)}
-        aria-describedby={`chart-help-${config.key}`}
+        aria-describedby={sharedHintId ?? `chart-help-${config.key}`}
         tabIndex={0}
         focusable="true"
         className="cursor-crosshair touch-pan-y select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"

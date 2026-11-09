@@ -9,7 +9,7 @@
  * way, so the NEXT anonymous wildcard reader fails a unit test before it ships, not in production.
  *
  * WHAT IT PINS.
- *   1. `getStrategiesByCategory`, `getPublicStrategyDetail` and `getFactsheetDetail`
+ *   1. `getStrategiesByCategory` and `getFactsheetDetail`
  *      (`src/lib/queries.ts`): the `.select(` that follows the function's `.from("strategies")`
  *      contains `STRATEGY_PUBLIC_COLUMNS`, is not a wildcard, and does not name `api_key_id`.
  *      A function, `.from("strategies")` or `.select(` that cannot be found FAILS (a missing
@@ -45,7 +45,6 @@ const LANDING_PATH = join(REPO_ROOT, "src", "app", "(marketing)", "page.tsx");
 /** The anonymous route directories (D-02): public pages, share links, OG and factsheet routes. */
 const ANON_ROUTE_DIRS = [
   "src/app/browse",
-  "src/app/strategy",
   "src/app/factsheet",
   "src/app/factsheet-share",
   "src/app/scenario-share",
@@ -61,11 +60,6 @@ const ANON_ROUTE_DIRS = [
  * of flagged selects in that file, so a second wildcard added to an exempt file is still caught.
  */
 const ANON_ROUTE_EXEMPTIONS: Record<string, { hits: number; reason: string }> = {
-  "src/app/factsheet/[id]/tearsheet/page.tsx": {
-    hits: 1,
-    reason:
-      "readTradeFacts embeds api_keys!strategies_api_key_id_fkey through createAdminClient(): a service-role read that bypasses column grants, never the anon client.",
-  },
   "src/app/factsheet/[id]/v2/page.tsx": {
     hits: 1,
     reason:
@@ -209,7 +203,8 @@ function strategiesSelects(src: string): Array<{ arg: string | null; index: numb
 
 // ---------------------------------------------------------------- the pins
 
-const ANON_READERS = ["getStrategiesByCategory", "getPublicStrategyDetail", "getFactsheetDetail"];
+// Phase 196 plan 14 deleted getPublicStrategyDetail with the routes that read it.
+const ANON_READERS = ["getStrategiesByCategory", "getFactsheetDetail"];
 
 describe("ANONKEYID: STRATEGY_PUBLIC_COLUMNS_ARR", () => {
   it("holds 31 unique entries and never api_key_id", () => {

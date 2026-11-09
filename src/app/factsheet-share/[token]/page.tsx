@@ -1,5 +1,5 @@
 // SECURITY BOUNDARY:
-// This is a PUBLIC, sessionless route and the ONLY tokenized factsheet surface
+// This is a PUBLIC route and the ONLY tokenized factsheet surface
 // (ruling D-04 — the tearsheet and PDF routes are deliberately OUT of scope and
 // still 404 for a recipient). Four reads happen here, all on the admin
 // (service_role) transport:
@@ -28,8 +28,19 @@
 //       strategy has composite members, so (3)'s job selection can prefer the
 //       stitch job (Phase 167.2 review IN-03/IN-05). Added 2026-09-24.
 //
-// ⛔ THE CONSTANT-TIME HMAC MATCH IS THE AUTHORIZATION. There is no session, no
-// RLS gate, and no status predicate on the payload read — deliberately, because
+// ⛔ THE SESSION READ (Phase 196 OQ-3, 2026-11-08). After the match, and only
+// then, the page asks ONE question of the request client: does a session exist.
+// The answer is one boolean that chooses the slim visitor header's chrome (the
+// "Sign up" button and the sign-up line are shown without a session, never with
+// one). It does not read a profile, a role or any owner state, it is never
+// passed to `fetchAndBuildPayload` or `withViewerAum`, and it changes no data,
+// no AUM rule and no owner control: every recipient gets the same payload.
+// The rate-limit card and the 410 redirects run before it, so the enumeration
+// defence is unchanged. The header links leave this URL, which is why
+// `next.config.ts` sends `Referrer-Policy: no-referrer` for this path.
+//
+// ⛔ THE CONSTANT-TIME HMAC MATCH IS THE ONLY AUTHORIZATION. There is no RLS
+// gate, and no status predicate on the payload read — deliberately, because
 // the whole point is that an UNPUBLISHED strategy renders for the holder of a
 // valid capability. If you are about to add a query here, ask what bounds it:
 // (1) is bounded by `revoked_at IS NULL`, (2), (3) and (4) are bounded by the
@@ -58,6 +69,7 @@ import { headers } from "next/headers";
 import type { Metadata } from "next";
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { verifyShareToken } from "@/lib/strategy-share-token";
 import {
@@ -75,10 +87,11 @@ import {
 import { SHARE_CARD_COPY } from "@/lib/status-surface-copy";
 import { countCompositeMembers } from "@/lib/strategy-shape";
 import { captureToSentry } from "@/lib/sentry-capture";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { isAuthSessionMissingError, type SupabaseClient } from "@supabase/supabase-js";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { withViewerAum } from "@/lib/factsheet/viewer-aum";
+import { SignUpLine, VisitorHeader } from "@/components/factsheet/VisitorHeader";
 
 // DO NOT cache at the edge. Shared caches are keyed on the URL, not on the
 // token's revocation state, so a cached response could be replayed after a
@@ -319,6 +332,29 @@ async function readShareComputeState(
   }
 }
 
+/**
+ * Whether the recipient holds a session (OQ-3, session wins). Chrome only: the
+ * result picks the visitor header's "Sign up" and the sign-up line, and goes
+ * nowhere else. Any failure reads as "no session", which shows the sign-up
+ * chrome and changes nothing a recipient can see of the strategy.
+ */
+async function readRecipientSession(): Promise<boolean> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser();
+    if (error && !isAuthSessionMissingError(error)) {
+      captureToSentry(error, { tags: { area: "factsheet-share-session", stage: "get-user" } });
+    }
+    return Boolean(user);
+  } catch (err) {
+    captureToSentry(err, { tags: { area: "factsheet-share-session", stage: "get-user" } });
+    return false;
+  }
+}
+
 export default async function FactsheetSharePage({
   params,
 }: {
@@ -363,6 +399,10 @@ export default async function FactsheetSharePage({
     redirect(GONE_PATH);
   }
 
+  // 3b. Session presence, for the visitor header only (OQ-3). After the match,
+  //     so the rate limit and every 410 path never touch it.
+  const signedIn = await readRecipientSession();
+
   // 4. The SAME builder the owner lane calls, invoked DIRECTLY — never through
   //    the cached wrapper, which this module cannot reach (see the header).
   const payload = await fetchAndBuildPayload(match.strategy_id, withTokenBearer);
@@ -387,12 +427,15 @@ export default async function FactsheetSharePage({
         ? "in_progress"
         : "not_available";
     return (
-      <main className="mx-auto max-w-3xl px-4 py-16">
-        <EmptyStateCard
-          heading={SHARE_CARD_COPY[arm].heading}
-          body={SHARE_CARD_COPY[arm].body}
-        />
-      </main>
+      <>
+        <VisitorHeader showSignUp={!signedIn} />
+        <main className="mx-auto max-w-3xl px-4 py-16">
+          <EmptyStateCard
+            heading={SHARE_CARD_COPY[arm].heading}
+            body={SHARE_CARD_COPY[arm].body}
+          />
+        </main>
+      </>
     );
   }
 
@@ -404,11 +447,17 @@ export default async function FactsheetSharePage({
   //    shared public cache serves and lane state inside it would be published to
   //    everyone (the T-150-27 rule).
   return (
-    <FactsheetView
-      // 194 D-22: a share-link recipient is not an allocator or the manager; no AUM in the data.
-      payload={withViewerAum(payload, false)}
-      viewerNotice="shared_privately"
-      recipientShare
-    />
+    <>
+      <VisitorHeader showSignUp={!signedIn} />
+      <main>
+        <FactsheetView
+          // 194 D-22: a share-link recipient is not an allocator or the manager; no AUM in the data.
+          payload={withViewerAum(payload, false)}
+          viewerNotice="shared_privately"
+          recipientShare
+          beforeFooterSlot={signedIn ? undefined : <SignUpLine />}
+        />
+      </main>
+    </>
   );
 }

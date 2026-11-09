@@ -19,6 +19,7 @@ import { isComputedAnalytics } from "@/lib/closed-sets";
 import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
 import { recordFromScalars } from "@/lib/figure-record-scalars";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
 import { analyticsStatusLabel, strategySourceLabel } from "@/lib/display-labels";
 import { ComputeJobsTable } from "./ComputeJobsTable";
@@ -567,7 +568,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
                 </div>
                 <div className="flex flex-col items-end gap-2">
                   <a
-                    href={`/factsheet/${s.id}`}
+                    href={buildFactsheetHref(s.id, { key: "admin" })}
                     className="text-micro text-text-muted underline-offset-4 hover:text-accent hover:underline"
                     target="_blank"
                     rel="noopener"

@@ -1023,6 +1023,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
             // passed, so the table persists no sort or density here and
             // `initialSort` is not overwritten by a hydrated preference.
             categorySlug="strategies"
+            origin={{ key: "strategies" }}
             visibility="owner-all-statuses"
             managerRows={managerRows}
             initialSort={{ key: "created_at", dir: "desc" }}

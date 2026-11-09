@@ -106,6 +106,7 @@ export function MyStrategiesSection({
         // and this surface needs its own scope so its sort/density choices do
         // not overwrite a real category's saved prefs.
         categorySlug="my-strategies"
+        origin={{ key: "my-strategies" }}
         portfolioId={portfolioId}
         percentiles={percentiles ?? undefined}
         visibility="owner-all-statuses"

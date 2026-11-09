@@ -23,6 +23,27 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: Size;
 }
 
+/**
+ * The exact class string `Button` renders. Exported so a link that navigates
+ * (`Add to my allocation`, `Edit strategy`, `Sign up`) can carry the same look
+ * as a `<Button>` without being a `<button>` with a router push (UI-SPEC).
+ */
+export function buttonClassName({
+  variant = "primary",
+  size = "md",
+  className = "",
+}: {
+  variant?: Variant;
+  size?: Size;
+  className?: string;
+} = {}): string {
+  // Tailwind v4 emits `.inline-flex` after `.hidden`, so a caller class of
+  // `hidden` loses and the control stays visible (N-MATCH). Omit the base
+  // display when the caller owns it.
+  const callerOwnsDisplay = /(?:^|\s)hidden(?:\s|$)/.test(className);
+  return cn(!callerOwnsDisplay && "inline-flex", "items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-50 disabled:pointer-events-none", variantStyles[variant], sizeStyles[size], className);
+}
+
 export function Button({
   variant = "primary",
   size = "md",
@@ -30,13 +51,9 @@ export function Button({
   children,
   ...props
 }: ButtonProps) {
-  // Tailwind v4 emits `.inline-flex` after `.hidden`, so a caller class of
-  // `hidden` loses and the control stays visible (N-MATCH). Omit the base
-  // display when the caller owns it.
-  const callerOwnsDisplay = /(?:^|\s)hidden(?:\s|$)/.test(className);
   return (
     <button
-      className={cn(!callerOwnsDisplay && "inline-flex", "items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-50 disabled:pointer-events-none", variantStyles[variant], sizeStyles[size], className)}
+      className={buttonClassName({ variant, size, className })}
       {...props}
     >
       {children}

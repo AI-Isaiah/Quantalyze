@@ -6,6 +6,7 @@ import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategiesByCategory, getPercentiles } from "@/lib/queries";
 import { getBrowseCategories } from "../browse-categories";
+import { hasBrowseSession } from "../session";
 import type { Metadata } from "next";
 
 export async function generateMetadata({
@@ -36,10 +37,13 @@ export default async function PublicCategoryPage({
   // returns null for a peer set under 5 strategies (or on a transient DB/RLS
   // error) → passed as undefined so the table renders no suffix (honest
   // absence), never a fabricated rank.
-  const [strategies, percentiles, { onlySlug }] = await Promise.all([
+  // The session read (ROUTE-02: no sign-up box for a signed-in reader) rides
+  // in the same fan-out; hasBrowseSession is request-cached, never throws.
+  const [strategies, percentiles, { onlySlug }, signedIn] = await Promise.all([
     getStrategiesByCategory(slug),
     getPercentiles(slug),
     getBrowseCategories(),
+    hasBrowseSession(),
   ]);
 
   return (
@@ -76,18 +80,20 @@ export default async function PublicCategoryPage({
         percentiles={percentiles ?? undefined}
       />
 
-      <div className="mt-8 rounded-xl border border-border bg-page p-5 text-center">
-        <p className="text-sm text-text-secondary">
-          Sign up for full analytics, detailed performance reports, and to
-          request introductions.
-        </p>
-        <Link
-          href="/signup"
-          className="mt-3 inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-        >
-          Sign up free
-        </Link>
-      </div>
+      {!signedIn && (
+        <div className="mt-8 rounded-xl border border-border bg-page p-5 text-center">
+          <p className="text-sm text-text-secondary">
+            Sign up for full analytics, detailed performance reports, and to
+            request introductions.
+          </p>
+          <Link
+            href="/signup"
+            className="mt-3 inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+          >
+            Sign up free
+          </Link>
+        </div>
+      )}
 
       <Disclaimer variant="footer" />
     </>

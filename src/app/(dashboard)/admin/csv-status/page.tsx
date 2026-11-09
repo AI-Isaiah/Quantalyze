@@ -7,6 +7,7 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { TrustTierLabel, type TrustTier } from "@/components/strategy/TrustTierLabel";
 import { verificationStatusLabel } from "@/lib/display-labels";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 
 export const metadata: Metadata = {
   title: "CSV submissions",
@@ -151,13 +152,13 @@ export default async function CsvStatusPage() {
                     <td className="px-3 py-2">
                       {strat?.id && strat.status === "published" ? (
                         <Link
-                          href={`/strategy/${strat.id}`}
+                          href={buildFactsheetHref(strat.id, { key: "admin" })}
                           className="text-caption text-accent hover:underline"
                         >
                           View factsheet →
                         </Link>
                       ) : (
-                        // The public factsheet (/strategy/[id]) is
+                        // The public factsheet (/factsheet/[id]) is
                         // status='published'-gated (getPublicStrategyDetail →
                         // notFound otherwise) and there is no admin view for
                         // another team's unpublished strategy, so a link on a

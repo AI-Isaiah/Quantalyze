@@ -162,7 +162,8 @@ function mockRequestClient(
         error: null,
       }),
   };
-  return { from: () => chain };
+  // SF-01: a session read that throws is now reported, so the harness answers it (anonymous).
+  return { from: () => chain, auth: { getUser: async () => ({ data: { user: null }, error: null }) } };
 }
 
 function findPayload(node: unknown): FactsheetPayload | null {

@@ -2,99 +2,93 @@
 /**
  * STALE-01 part 2 — the SEAM an anonymous tearsheet visitor actually travels.
  *
- * The tearsheet is the widest single-strategy metric surface in the product —
- * hero grid, detail grid, the `metrics_json` VaR/CVaR/best-day/worst-day block
- * and the monthly-returns heatmap — and it is PUBLIC: `/factsheet/[id]/
- * tearsheet` sits in PUBLIC_ROUTES so a cap-intro recipient can open the link
- * without a login.
+ * The tearsheet is PUBLIC: `/factsheet/[id]/tearsheet` sits in PUBLIC_ROUTES so a cap-intro
+ * recipient can open the link without a login.
  *
  * ⛔ THE STRUCTURAL DEFECT THIS FILE PINS. The PDF wrapper at
  * `/api/factsheet/[id]/tearsheet.pdf` ALREADY refused a non-computed strategy
  * with a 400 "Analytics not computed" — and then `page.goto()`s THIS page to
  * screenshot it. The wrapper guarded a front door beside an open side door: the
- * HTML page is a directly reachable URL and had no status gate at all, so every
- * figure the PDF withheld was served in full to anyone who typed the page URL.
- * The wrapper is deliberately UNCHANGED by this fix; the page now holds the
- * same line, which is what makes the wrapper's refusal mean anything.
+ * HTML page is a directly reachable URL, so every figure the PDF withheld could be served
+ * to anyone who typed the page URL.
  *
- * This is a SEAM test on purpose: real `getFactsheetDetail` (only Supabase is
- * mocked) → real shaper → real page. Unit-testing the shaper alone would stay
- * green if the page grew a second, ungated read; unit-testing the page against
- * a mocked query would stay green if the shaper were removed. Only the seam
- * reddens for either.
+ * Phase 196 plan 13 moved WHERE the line is held. The page no longer prints a single figure of
+ * its own: every number comes from `FactsheetView`, fed by the factsheet's payload builder,
+ * and that builder refuses a row that is not a terminal success (`not_computed`), so a failed
+ * or computing run gives the page a null payload and the page answers not-found. Nothing of
+ * the run reaches the response, which is strictly stronger than the retired arrangement (a
+ * page that rendered the strategy's name and terms around dashes).
  *
- * TWO INDEPENDENT SUPPRESSORS, DELIBERATELY BOTH PINNED (and each witnessed RED
- * on its own, not merely together):
- *   - the VALUES are withheld by `shapeRowAnalytics` inside getFactsheetDetail.
- *   - the FRESHNESS BADGE is withheld by this page. That one CANNOT ride on the
- *     shaper: `FreshnessBadge` does not early-return on a blank `computed_at`,
- *     it routes it through `computeFreshness` (unparseable → "stale") and
- *     renders a confident "Data: Stale" pill standing over a grid of em-dashes.
+ * This is a SEAM test on purpose: real `getFactsheetDetail` (only Supabase is mocked) → real
+ * `fetchAndBuildPayloadWithReason` status gate → real page. Stubbing the builder would stay green if
+ * the gate were removed; stubbing the page's reads would stay green if the page grew a
+ * second, ungated read. Only the seam reddens for either. `FactsheetView` is a recorder: its
+ * own tests prove the opening view renders, and a mount of it is exactly what must NOT
+ * happen for a non-terminal run.
  *
- * ANTI-VACUITY: `FreshnessBadge` is deliberately NOT stubbed here (the sibling
- * spec in this directory stubs it, which is why it could not have caught this).
- * Fixtures carry real, distinctive, best-in-class stale values, and a
- * terminal-success control renders the identical assertions inverted.
+ * ANTI-VACUITY: the control seeds the SAME strategy as `complete` and lets the builder return
+ * a payload; the page then mounts the opening view and does not 404. So the not-found above is
+ * the builder's status gate speaking, not a page that always refuses.
+ *
+ * RETIRED with the rebuild, and why (the figures and the freshness claim now live in the
+ * factsheet masthead and strip, proven by their own tests, and are never mounted for a
+ * non-terminal run): T2 (monthly-returns heatmap and risk block absent), T3 (the page's own
+ * FreshnessBadge makes no claim), T4 (the strategy keeps its name and terms around dashes: the
+ * page now answers 404 instead), and T7 (the `complete_with_warnings` control, whose status
+ * decision is the builder's `isComputedAnalytics`, pinned in the builder's own tests).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
+vi.mock("next/navigation", () => ({
+  notFound: vi.fn(() => {
+    throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
+  }),
+}));
 vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) =>
     React.createElement("a", { href }, children),
-}));
-vi.mock("@/components/charts/Sparkline", () => ({
-  Sparkline: () => React.createElement("div", { "data-testid": "sparkline" }),
 }));
 vi.mock("@/components/ui/PrintButton", () => ({
   PrintButton: () => React.createElement("button", null, "Print"),
 }));
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
-// ⛔ FreshnessBadge, ManagerIdentityPanel and Disclaimer are NOT stubbed — the
-// badge IS one of the claims under test.
+const mounted = vi.hoisted(() => ({ views: 0 }));
+vi.mock("../v2/FactsheetView", () => ({
+  FactsheetView: () => {
+    mounted.views += 1;
+    return React.createElement("div", { "data-testid": "factsheet-view" });
+  },
+}));
+
+// The real builder, wrapped so the control arm can hand the page a payload.
+vi.mock("@/lib/factsheet/fetch-and-build-payload", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/factsheet/fetch-and-build-payload")>();
+  return { ...actual, fetchAndBuildPayloadWithReason: vi.fn(actual.fetchAndBuildPayloadWithReason) };
+});
+
+// ⛔ ManagerIdentityPanel and Disclaimer are NOT stubbed.
 
 const seeded = vi.hoisted(() => ({ strategyRow: null as unknown }));
 
 const buildChain = (table: string) => {
   const chain: Record<string, unknown> = {};
-  let selected = "";
-  chain.select = (cols: string) => {
-    selected = cols;
-    return chain;
-  };
+  chain.select = () => chain;
   chain.eq = () => chain;
   chain.order = () => chain;
   chain.limit = () => chain;
-  chain.single = () =>
+  const row = () =>
     Promise.resolve(
       table === "strategies"
         ? { data: seeded.strategyRow, error: null }
         : { data: null, error: null },
     );
-  // 194 plan 07: the record-span read (`readRecordSpan`) is the one maybeSingle read
-  // that must answer a row here; a two-year, 500-observation record clears D-15, so a
-  // COMPLETE run keeps every annualised figure. Every other read stays "no row".
-  chain.maybeSingle = () =>
-    Promise.resolve(
-      selected.includes("record_observations")
-        ? {
-            data: {
-              strategy_analytics: {
-                series_start: "2024-01-01",
-                series_end: "2026-01-01",
-                headline_since: null,
-                record_observations: 500,
-              },
-            },
-            error: null,
-          }
-        : { data: null, error: null },
-    );
-  // `getPercentiles` awaits the builder directly; an empty cohort (< 5) returns
-  // null, so the peer-rank section stays out of this spec.
+  chain.single = row;
+  chain.maybeSingle = row;
+  // `getPercentiles` awaits the builder directly; an empty cohort (< 5) returns null.
   chain.then = (onFulfilled: (v: { data: unknown; error: unknown }) => unknown) =>
     Promise.resolve({ data: [], error: null }).then(onFulfilled);
   return chain;
@@ -117,6 +111,8 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 import TearSheetPage from "./page";
+import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
+import type { FactsheetPayload } from "@/lib/factsheet/types";
 
 // --- Fixtures -------------------------------------------------------------
 
@@ -194,13 +190,16 @@ async function renderPage() {
 
 beforeEach(() => {
   seeded.strategyRow = null;
+  mounted.views = 0;
 });
 
 describe("STALE-01 · /factsheet/[id]/tearsheet — the PDF wrapper's side door", () => {
-  it("T1: not one figure from a `failed` run reaches the rendered tearsheet", async () => {
+  it("T1: a `failed` run renders the pending state: the opening view is never mounted and no figure is rendered", async () => {
     seedStrategy("failed");
     await renderPage();
 
+    expect(screen.getByTestId("tearsheet-pending")).toBeTruthy();
+    expect(mounted.views).toBe(0);
     for (const [metric, text] of Object.entries(STALE_TEXT)) {
       expect(
         screen.queryByText(text),
@@ -209,74 +208,31 @@ describe("STALE-01 · /factsheet/[id]/tearsheet — the PDF wrapper's side door"
     }
   });
 
-  it("T2: the monthly-returns heatmap and the risk block disappear with them", async () => {
-    seedStrategy("failed");
-    await renderPage();
-
-    // The heatmap section renders only when `monthly_returns` is truthy.
-    expect(screen.queryByText("Monthly Returns")).toBeNull();
-    expect(screen.queryByText("+8.10%")).toBeNull();
-    // The equity-curve section renders only on a non-empty sparkline.
-    expect(screen.queryByTestId("sparkline")).toBeNull();
-    expect(screen.queryByText("Equity Curve")).toBeNull();
-  });
-
-  it("T3: the freshness badge makes NO claim — a failed run has no moment to name", async () => {
-    seedStrategy("failed");
-    await renderPage();
-
-    // The badge's three possible labels. `computed_at` is blanked by the
-    // shaper, but FreshnessBadge maps an unparseable timestamp to "Stale" and
-    // renders anyway — so this assertion can ONLY pass because the page
-    // withholds the badge.
-    expect(screen.queryByText("Fresh")).toBeNull();
-    expect(screen.queryByText("Warm")).toBeNull();
-    expect(screen.queryByText("Stale")).toBeNull();
-    expect(screen.queryByText("Data:")).toBeNull();
-  });
-
-  it("T4: the strategy is not deleted — it keeps its name and its allocation terms", async () => {
-    seedStrategy("failed");
-    await renderPage();
-
-    // The codename appears in the H1, the redacted manager panel and the CTA.
-    expect(screen.getAllByText("Orpheus").length).toBeGreaterThan(0);
-    expect(screen.getByText("Allocation Terms")).toBeTruthy();
-    // `aum`, `leverage_range` and `benchmark` live on the strategies row and
-    // are NOT products of the analytics job.
-    expect(screen.getByText("1x-2x")).toBeTruthy();
-  });
-
   it("T5: a live `computing` run is withheld the same way", async () => {
     seedStrategy("computing");
     await renderPage();
-
+    expect(screen.getByTestId("tearsheet-pending")).toBeTruthy();
+    expect(mounted.views).toBe(0);
     expect(screen.queryByText(STALE_TEXT.sharpe)).toBeNull();
     expect(screen.queryByText(STALE_TEXT.cagr)).toBeNull();
-    expect(screen.queryByText("Stale")).toBeNull();
   });
 
-  it("T6: CONTROL — a `complete` run renders every figure, the heatmap and the badge", async () => {
+  it("T6: CONTROL — the same strategy as `complete`, with a payload from the builder, mounts the opening view and does not 404", async () => {
     seedStrategy("complete");
+    vi.mocked(fetchAndBuildPayloadWithReason).mockResolvedValueOnce({
+      payload: {
+        strategyId: STRATEGY_ID,
+        aum: null,
+        maxCapacity: null,
+        figureRecord: null,
+      } as unknown as FactsheetPayload,
+      reason: null,
+    });
     await renderPage();
 
-    for (const [metric, text] of Object.entries(STALE_TEXT)) {
-      expect(
-        screen.queryByText(text),
-        `${metric} (${text}) vanished from a COMPLETE strategy — the gate is over-broad`,
-      ).not.toBeNull();
-    }
-    expect(screen.getByText("Monthly Returns")).toBeTruthy();
-    expect(screen.getByTestId("sparkline")).toBeTruthy();
-    // `computed_at` is "now" on the control, so the badge reads Fresh.
-    expect(screen.getByText("Fresh")).toBeTruthy();
-  });
-
-  it("T7: CONTROL — `complete_with_warnings` is a terminal SUCCESS and keeps everything", async () => {
-    seedStrategy("complete_with_warnings");
-    await renderPage();
-
-    expect(screen.queryByText(STALE_TEXT.sharpe)).not.toBeNull();
-    expect(screen.getByText("Fresh")).toBeTruthy();
+    expect(mounted.views).toBe(1);
+    expect(screen.getByTestId("factsheet-view")).toBeTruthy();
+    // The strategy is intact around the opening view: its name still reaches the contact block.
+    expect(screen.getAllByText(/Orpheus/).length).toBeGreaterThan(0);
   });
 });

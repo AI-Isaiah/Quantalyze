@@ -26,6 +26,7 @@ import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
+import { PeerRanksSection, hasPeerRanks } from "@/components/strategy/PeerRanksSection";
 import { formatCloseDay, formatUnpricedDays, withUnit } from "@/lib/factsheet/returns-unit";
 import { TINY_BASE_PERCENT, TINY_BASE_WINDOW_DAYS } from "@/lib/tiny-base-flag";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
@@ -73,10 +74,12 @@ import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
 import {
   MetricsColumn,
+  type MetricsPart,
   RangeEyebrow,
   comparatorPartialThrough,
   headlineCoverageNote,
   headlineNoteColor,
+  headlineBenchSource,
   headlineNoteGlyph,
   isHeadlineWithheld,
   useFullHistoryWithheld,
@@ -88,6 +91,9 @@ import { MasterBrush } from "./MasterBrush";
 import { StressWindowsPanel } from "./StressWindowsPanel";
 import { CollapsibleSection, COLLAPSIBLE_OPEN_ALL_EVENT } from "@/components/ui/CollapsibleSection";
 import { LazyMount } from "./LazyMount";
+import { AdvancedDisclosure } from "./AdvancedDisclosure";
+import { CHART_HINT_ID, ChartHint, ChartHintContext } from "./chart-hint";
+import { buildTearsheetHref } from "@/lib/factsheet/origin";
 // IMPORTANT-1/FINDING-8 (b06-codereview/silentfailure): Import the single-source
 // formatters from format.ts so FactsheetView uses the same implementation that
 // the audit tests cover. The private pct/pctSigned/num copies below were
@@ -272,7 +278,9 @@ export function FactsheetView({
   renameTarget,
   ownerShare,
   showAum,
-}: { payload: FactsheetPayload } & OwnerLaneProps) {
+  beforeFooterSlot,
+  printView,
+}: { payload: FactsheetPayload } & OwnerLaneProps & Pick<FactsheetBodyOptions, "beforeFooterSlot" | "printView">) {
   return (
     // Phase 164.6.6.2.1 (D-01, D-18): the Units toggle lives HERE and nowhere
     // else, so `/strategy/[id]/v2` and the composer, which mount FactsheetBody
@@ -289,6 +297,8 @@ export function FactsheetView({
           renameTarget={renameTarget}
           ownerShare={ownerShare}
           showAum={showAum}
+          beforeFooterSlot={beforeFooterSlot}
+          printView={printView}
         />
       </SelectedPayloadProvider>
     </UnitViewProvider>
@@ -330,6 +340,9 @@ function UsdViewLeverageHold({ children }: { children: ReactNode }) {
   return <LeverageContext.Provider value={inUsd ? held : real}>{children}</LeverageContext.Provider>;
 }
 
+/** Every details element the print hardening forces open: all of them but the Advanced disclosure. */
+const PRINT_FORCE_OPEN_SELECTOR = "details:not(#factsheet-advanced)";
+
 /**
  * Shell that reads the colorblind toggle from context and applies the FT
  * Oxford Blue / Claret palette overrides via CSS custom property scoping on
@@ -343,7 +356,9 @@ function FactsheetShell({
   renameTarget,
   ownerShare,
   showAum,
-}: { payload: FactsheetPayload } & OwnerLaneProps) {
+  beforeFooterSlot,
+  printView,
+}: { payload: FactsheetPayload } & OwnerLaneProps & Pick<FactsheetBodyOptions, "beforeFooterSlot" | "printView">) {
 
   // One-shot view event when the page mounts so adoption of the new
   // surface can be measured cleanly without folding into the v1 funnel.
@@ -357,20 +372,22 @@ function FactsheetShell({
 
   // Print hardening: collapsed <details> sections are hidden by default
   // browser behavior, so a print would lose any section the user closed.
-  // beforeprint forces every detail open; afterprint restores prior state.
+  // beforeprint forces every detail open EXCEPT #factsheet-advanced (Phase 196, D-04: it prints in the
+  // state the reader left it; closed prints the opening view only). The sections INSIDE an
+  // open Advanced are still forced open. afterprint restores prior state.
   React.useEffect(() => {
     if (typeof window === "undefined") return;
     let previous: WeakMap<HTMLDetailsElement, boolean> | null = null;
     const beforeprint = () => {
       previous = new WeakMap();
-      document.querySelectorAll<HTMLDetailsElement>("details").forEach(el => {
+      document.querySelectorAll<HTMLDetailsElement>(PRINT_FORCE_OPEN_SELECTOR).forEach(el => {
         previous!.set(el, el.open);
         el.open = true;
       });
     };
     const afterprint = () => {
       if (!previous) return;
-      document.querySelectorAll<HTMLDetailsElement>("details").forEach(el => {
+      document.querySelectorAll<HTMLDetailsElement>(PRINT_FORCE_OPEN_SELECTOR).forEach(el => {
         const prior = previous!.get(el);
         if (prior != null) el.open = prior;
       });
@@ -392,6 +409,12 @@ function FactsheetShell({
       renameTarget={renameTarget}
       ownerShare={ownerShare}
       showAum={showAum}
+      beforeFooterSlot={beforeFooterSlot}
+      // Phase 196 (D-04, OQ-4): this is the factsheet / share / print mount, the
+      // document layout. The allocator mounts call FactsheetBody directly and keep
+      // the default "full".
+      layout="document"
+      printView={printView}
     />
   );
 }
@@ -415,6 +438,30 @@ export interface FactsheetBodyOptions extends OwnerLaneProps {
    *  site (page.tsx, the Discovery detail page, the Overview EquityChartWidget)
    *  byte-identical. */
   scenarioMode?: boolean;
+  /** Phase 196 (D-05, OQ-6) — chrome the PAGE builds for the viewer, rendered
+   *  immediately before the footer so the footer stamp and the page's one
+   *  disclaimer stay last: the sign-up line for a reader with no session, the
+   *  viewer's own note card for a signed-in one. Absent on every other mount.
+   *
+   *  ⛔ A RENDER PROP (a ReactNode), NEVER A PAYLOAD FIELD: the payload is the
+   *  object the shared id-keyed cache serves, so anything decided per viewer
+   *  that rode it would be published to every later reader (T-150-27). */
+  beforeFooterSlot?: ReactNode;
+  /** Phase 196 (D-04, LEAN-05, OQ-4) — which body to render.
+   *
+   *  - `"full"` (default): the whole factsheet, as before: SectionNav, the six
+   *    sections beside the metrics rail. The two allocator mounts (My allocation
+   *    Overview, the Scenario composer chart) take this.
+   *  - `"document"`: the opening view — summary strip, ControlBar, one equity figure
+   *    (curve + drawdown), one Main metrics table — then everything else behind one
+   *    collapsed "Advanced" disclosure. `FactsheetView` (factsheet, share, print)
+   *    passes this. SectionNav is not rendered: its anchors would point into hidden
+   *    content. */
+  layout?: "document" | "full";
+  /** Print view (document layout only): the opening view without the ControlBar,
+   *  Advanced, the before-footer slot or the footer. The tearsheet page brings its own
+   *  Risk Disclosure as the page's one disclaimer (Phase 195 D-09). */
+  printView?: boolean;
 }
 
 /**
@@ -436,7 +483,11 @@ export function FactsheetBody({
   renameTarget,
   ownerShare,
   showAum = false,
+  beforeFooterSlot,
+  layout = "full",
+  printView = false,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
+  const isDocument = layout === "document";
   const { colorblind } = useDisplay();
   // Phase 164 / SHARE-04 — the live-link fact, held HERE because two children on
   // opposite sides of the tree read it (the notice above the masthead, the share
@@ -465,6 +516,7 @@ export function FactsheetBody({
   // broken; hide the entire Returns Signatures collapsible instead.
   const { key: cmpKey } = useActiveComparator();
   const hasComparator = cmpKey !== "none";
+  const showSignatures = signaturesSectionRenders(payload, hasComparator);
   return (
     // Phase 90 (FS-03): BasisProvider wraps the tree so useBasis() resolves in
     // KpiStrip + ControlBar. It renders children only (no DOM) → transparent to
@@ -497,106 +549,336 @@ export function FactsheetBody({
           />
         )}
         {topSlot}
-        <KpiStrip scenarioMode={scenarioMode} />
-        <SectionNav />
-        <ControlBar
-          scenarioMode={scenarioMode}
-          recipientShare={recipientShare}
-          ownerShare={ownerShare ? { hasActiveShare: shareLive } : undefined}
-          onShareLiveChange={setShareLive}
-        />
-
-        <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
-          <section className="flex flex-col gap-10 min-w-0">
-            <MasterBrush />
-            <CollapsibleSection
-              id="factsheet-perf"
-              title="Performance"
-              storageKey={`factsheet-collapse:${payload.strategyId}:perf`}
-              defaultOpen
-              onToggle={trackSectionToggle("factsheet-perf")}
-            >
-              <PerformanceCharts />
-            </CollapsibleSection>
-            <CollapsibleSection
-              id="factsheet-dist"
-              title="Distribution"
-              storageKey={`factsheet-collapse:${payload.strategyId}:dist`}
-              defaultOpen
-              onToggle={trackSectionToggle("factsheet-dist")}
-            >
-              <HistogramChart />
-              <QuantileBoxPlotPanel />
-              <EndOfYearBars />
-              <CorrelationStripPanel />
-              <CorrelationsMatrixPanel />
-            </CollapsibleSection>
-            <CollapsibleSection
-              id="factsheet-heatmaps"
-              title="Heatmaps"
-              storageKey={`factsheet-collapse:${payload.strategyId}:heatmaps`}
-              defaultOpen
-              onToggle={trackSectionToggle("factsheet-heatmaps")}
-            >
-              <MonthlyReturns />
-              <DailyReturnsHeatmap />
-            </CollapsibleSection>
-            <CollapsibleSection
-              id="factsheet-stress"
-              title="Stress Windows"
-              storageKey={`factsheet-collapse:${payload.strategyId}:stress`}
-              defaultOpen
-              onToggle={trackSectionToggle("factsheet-stress")}
-            >
-              <StressWindowsPanel />
-            </CollapsibleSection>
-            {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
-                in addition to hasComparator. Event signatures stitch the internal BTC
-                fixture alongside the strategy returns; for CSV strategies with too few
-                observations aggregate() filled empty trace populations with all-zero
-                arrays — fabricating a flat zero band line indistinguishable from a
-                real observation at 0% delta. Suppress for CSV to prevent false panels.
-                (Phase 169.4 CR-01: aggregate() now returns null for an empty population
-                and the panels render the em-dash state; the api-arm gate stands.) */}
-            {/* Phase 164.6.6.2 (D-10, UI-SPEC A16): a strategy whose returns are in a native
-                unit renders the section whatever the comparator, because its panels are
-                the withheld form with the stated reason, not an empty page. */}
-            {(hasComparator || payload.returnsUnit != null) && payload.ingestSource === "api" && (
-              <CollapsibleSection
-                id="factsheet-signatures"
-                title="Returns Signatures"
-                subtitle="event studies — heavy compute, defaults open"
-                storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
-                defaultOpen
-                onToggle={trackSectionToggle("factsheet-signatures")}
-              >
-                <LazyMount minHeight={500}>
-                  <SignaturesSection />
-                </LazyMount>
-                <LazyMount minHeight={500}>
-                  <CrossSignaturesSection />
-                </LazyMount>
-              </CollapsibleSection>
+        <KpiStrip scenarioMode={scenarioMode} comparatorLine={isDocument} />
+        {isDocument ? (
+          <ChartHintContext.Provider value={CHART_HINT_ID}>
+            {!printView && (
+              <ControlBar
+                scenarioMode={scenarioMode}
+                recipientShare={recipientShare}
+                ownerShare={ownerShare ? { hasActiveShare: shareLive } : undefined}
+                onShareLiveChange={setShareLive}
+                // Presence of `ownerShare` means an unpublished row; the print view
+                // route is published-only (D-09), so no link there.
+                showPrintView={ownerShare === undefined}
+              />
             )}
-            <CollapsibleSection
-              id="factsheet-streak"
-              title="Streaks"
-              storageKey={`factsheet-collapse:${payload.strategyId}:streak`}
-              defaultOpen
-              onToggle={trackSectionToggle("factsheet-streak")}
-            >
-              <StreakDistributionPanel />
-            </CollapsibleSection>
-          </section>
-          <div id="factsheet-metrics" className="contents" />
-          <MetricsColumnWithBasis scenarioMode={scenarioMode} />
-        </div>
 
-        {!hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
+            {/* The opening view: one equity figure (curve, drawdown beneath) beside
+                one Main metrics table. data-census-section is the DOM contract the
+                SC-5 census counts (scripts/factsheet-census/count.ts). */}
+            <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
+              <div data-census-section="equity" className="flex flex-col gap-10 min-w-0">
+                {/* The full layout's Performance <h2> sits on its CollapsibleSection, which this
+                    layout does not render; without one the figure's <h3> skips a level
+                    (axe heading-order). Screen-reader only: the census and the eye see no change. */}
+                <h2 className="sr-only">Performance</h2>
+                <MasterBrush />
+                <PerformanceCharts variant="equity" />
+                {/* The page's one chart hint (D-04): every chart below points at it. The
+                    wrapper cancels the column's gap so the hint sits under the drawdown
+                    chart at the UI-SPEC's `mt-2` offset. */}
+                <div className="factsheet-v2-no-print -mt-10">
+                  <ChartHint />
+                </div>
+              </div>
+              <div data-census-section="main-metrics" className="min-w-0">
+                <MetricsColumnWithBasis scenarioMode={scenarioMode} part="main" />
+              </div>
+            </div>
+
+            {!printView && (
+              <DocumentAdvanced payload={payload} showSignatures={showSignatures} scenarioMode={scenarioMode} />
+            )}
+          </ChartHintContext.Provider>
+        ) : (
+          <>
+            <SectionNav />
+            <ControlBar
+              scenarioMode={scenarioMode}
+              recipientShare={recipientShare}
+              ownerShare={ownerShare ? { hasActiveShare: shareLive } : undefined}
+              onShareLiveChange={setShareLive}
+            />
+
+            <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
+              <section className="flex flex-col gap-10 min-w-0">
+                <MasterBrush />
+                <FactsheetSections
+                  payload={payload}
+                  showSignatures={showSignatures}
+                  performanceVariant="all"
+                />
+              </section>
+              <div id="factsheet-metrics" className="contents" />
+              <MetricsColumnWithBasis scenarioMode={scenarioMode} />
+            </div>
+          </>
+        )}
+
+        {!printView && beforeFooterSlot}
+        {!printView && !hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
     </BasisProvider>
     </UsdViewLeverageHold>
     </LeverageProvider>
+  );
+}
+
+/**
+ * Phase 164.6.6.2 (D-10, UI-SPEC A16) + FINDING-2 — the one predicate for whether the
+ * Returns Signatures section renders. A strategy whose returns are in a native unit renders
+ * it whatever the comparator (its panels are the withheld form with the stated reason); any
+ * other needs a comparator, and an API source (event signatures stitch the internal BTC
+ * fixture, which a CSV strategy's too-few observations would turn into a fabricated flat
+ * band). Extracted so the section's mount and Advanced's contents line read ONE condition.
+ */
+function signaturesSectionRenders(payload: FactsheetPayload, hasComparator: boolean): boolean {
+  return (hasComparator || payload.returnsUnit != null) && payload.ingestSource === "api";
+}
+
+/**
+ * The sections Advanced holds, in render order. The contents line names exactly these, so it
+ * is built from the SAME `showSignatures` the section mount reads; `FactsheetSections` below
+ * renders the same ids (an arm in FactsheetBody.advanced.test.tsx pins the two together).
+ */
+function advancedSectionList(present: AdvancedPresence): { id: string; title: string }[] {
+  return [
+    { id: "factsheet-perf", title: "Performance" },
+    { id: "factsheet-dist", title: "Distribution" },
+    { id: "factsheet-heatmaps", title: "Heatmaps" },
+    { id: "factsheet-stress", title: "Stress Windows" },
+    { id: "factsheet-signatures", title: "Returns Signatures" },
+    { id: "factsheet-streak", title: "Streaks" },
+  ].filter((section) => present[section.id as AdvancedSectionId]);
+}
+
+type AdvancedSectionId =
+  | "factsheet-perf"
+  | "factsheet-dist"
+  | "factsheet-heatmaps"
+  | "factsheet-stress"
+  | "factsheet-signatures"
+  | "factsheet-streak";
+type AdvancedPresence = Record<AdvancedSectionId, boolean>;
+
+/** Every section present: the full layout, which never hides a section. */
+const ALL_SECTIONS_PRESENT: AdvancedPresence = {
+  "factsheet-perf": true,
+  "factsheet-dist": true,
+  "factsheet-heatmaps": true,
+  "factsheet-stress": true,
+  "factsheet-signatures": true,
+  "factsheet-streak": true,
+};
+
+/**
+ * Phase 196 (D-04, UI-SPEC "Empty sections", T-196-26) — the content predicates for the
+ * sections inside Advanced. A section is mounted, and named in the contents line, only when at
+ * least one figure in it would draw something. A figure that would draw only its own placeholder
+ * (a withheld frame, a one-line "nothing to evaluate", a "no usable daily returns" box) counts as
+ * absent: the section is a frame around nothing, which the document layout never shows.
+ *
+ * Each predicate reads the SAME basis view its panels read (`useBasisSeriesView`), and the same
+ * field the panel itself tests before it renders its empty or placeholder branch, so a section
+ * can never be hidden while a panel inside it has a figure, nor shown with only placeholders.
+ * The full layout ignores all of this (`ALL_SECTIONS_PRESENT`).
+ *
+ *   - Performance      `dates` and `strategyReturns` (the rest charts: daily returns, worst
+ *                      drawdowns, the rolling charts the rolling gates leave in)
+ *   - Distribution     a finite `strategyReturns` value (the histogram bins them), or
+ *                      `strategyMetrics.yearly` (EOY bars), `correlations` (strip) or
+ *                      `correlationMatrix.labels` (matrix)
+ *   - Heatmaps         `monthlyReturns` (monthly grid) or `dailyHeatmap` (calendars)
+ *   - Stress Windows   `stressWindows.windows` (the panel's one-line "all outside the record"
+ *                      state is a placeholder, so it does not count)
+ *   - Returns Signatures  `signaturesSectionRenders` (the section's own gate, unchanged)
+ *   - Streaks          `streaks.totalWins + totalLosses` (an all-zero streak count draws two
+ *                      empty histograms)
+ */
+export function advancedSectionContent(view: FactsheetPayload, showSignatures: boolean): AdvancedPresence {
+  const hasReturns = view.strategyReturns.some((v) => Number.isFinite(v));
+  return {
+    "factsheet-perf": view.dates.length > 0 && view.strategyReturns.length > 0,
+    "factsheet-dist":
+      hasReturns ||
+      Object.keys(view.strategyMetrics.yearly).length > 0 ||
+      view.correlations.length > 0 ||
+      view.correlationMatrix.labels.length > 0,
+    "factsheet-heatmaps": view.monthlyReturns.length > 0 || view.dailyHeatmap.length > 0,
+    "factsheet-stress": view.stressWindows.windows.length > 0,
+    "factsheet-signatures": showSignatures,
+    "factsheet-streak": view.streaks.totalWins + view.streaks.totalLosses > 0,
+  };
+}
+
+/**
+ * The Advanced disclosure of the document layout, with the sections that have content. Lives
+ * inside BasisProvider so its predicates read the same basis view the panels do. Renders
+ * nothing when there is neither a section nor a rail.
+ */
+function DocumentAdvanced({
+  payload,
+  showSignatures,
+  scenarioMode,
+}: {
+  payload: FactsheetPayload;
+  showSignatures: boolean;
+  scenarioMode: boolean;
+}) {
+  const view = useBasisSeriesView(payload);
+  const present = advancedSectionContent(view, showSignatures);
+  const sections = advancedSectionList(present);
+  // The Detailed metrics rail derives every figure from the record: with no observations there
+  // is no rail. (With any record it always carries its Extended Metrics and Terms rows.)
+  // Phase 196 plan 16: the peer ranks sit at the end of the rail, so they count as rail content
+  // (D-04: an empty Advanced is omitted, a non-empty one is not). `hasPeerRanks` is the section's
+  // own predicate, gated on the same `figureRecord` it renders with.
+  const peerRankPercentiles = payload.peerRanks?.percentiles ?? null;
+  const peerRankRecord = payload.figureRecord ?? null;
+  const hasRanks = hasPeerRanks(peerRankPercentiles, peerRankRecord);
+  const hasRailContent = view.dates.length > 0 || hasRanks;
+  if (sections.length === 0 && !hasRailContent) return null;
+  return (
+    <AdvancedDisclosure sections={sections} hasRailContent={hasRailContent}>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
+        <section className="flex flex-col gap-10 min-w-0">
+          <FactsheetSections
+            payload={payload}
+            showSignatures={showSignatures}
+            performanceVariant="rest"
+            present={present}
+          />
+        </section>
+        {hasRailContent && (
+          <div className="flex min-w-0 flex-col gap-12">
+            {view.dates.length > 0 && <MetricsColumnWithBasis scenarioMode={scenarioMode} part="detailed" />}
+            {/* Phase 196 plan 16 (LEAN-02): the tear sheet's peer-relative ranks, kept on the
+                strategy's one page at the end of the Detailed metrics rail. Base cohort ranks
+                like the other pre-computed peer panels, so basis, leverage and the USD view do
+                not move them: read from the native payload, gated on its `figureRecord`. A rank
+                badge is not a Row, strip cell or KPI tile, so the census counts nothing here. */}
+            <PeerRanksSection
+              percentiles={peerRankPercentiles}
+              categoryLabel={payload.peerRanks?.categorySlug ?? undefined}
+              record={peerRankRecord}
+            />
+          </div>
+        )}
+      </div>
+    </AdvancedDisclosure>
+  );
+}
+
+/**
+ * The six collapsible sections (Performance ... Streaks), shared by both layouts so the
+ * full body's output is unchanged and Advanced mounts the same sections with the same
+ * storage keys, defaults and gates. `performanceVariant` is "all" in the full layout and
+ * "rest" inside Advanced (the equity pair already sits in the opening view).
+ */
+function FactsheetSections({
+  payload,
+  showSignatures,
+  performanceVariant,
+  present = ALL_SECTIONS_PRESENT,
+}: {
+  payload: FactsheetPayload;
+  showSignatures: boolean;
+  performanceVariant: PerformanceVariant;
+  /** Which sections have content (document layout, `advancedSectionContent`). Default: all. */
+  present?: AdvancedPresence;
+}) {
+  return (
+    <>
+      {present["factsheet-perf"] && (
+        <CollapsibleSection
+          id="factsheet-perf"
+          title="Performance"
+          storageKey={`factsheet-collapse:${payload.strategyId}:perf`}
+          defaultOpen
+          onToggle={trackSectionToggle("factsheet-perf")}
+        >
+          <PerformanceCharts variant={performanceVariant} />
+        </CollapsibleSection>
+      )}
+      {present["factsheet-dist"] && (
+        <CollapsibleSection
+          id="factsheet-dist"
+          title="Distribution"
+          storageKey={`factsheet-collapse:${payload.strategyId}:dist`}
+          defaultOpen
+          onToggle={trackSectionToggle("factsheet-dist")}
+        >
+          <HistogramChart />
+          <QuantileBoxPlotPanel />
+          <EndOfYearBars />
+          <CorrelationStripPanel />
+          <CorrelationsMatrixPanel />
+        </CollapsibleSection>
+      )}
+      {present["factsheet-heatmaps"] && (
+        <CollapsibleSection
+          id="factsheet-heatmaps"
+          title="Heatmaps"
+          storageKey={`factsheet-collapse:${payload.strategyId}:heatmaps`}
+          defaultOpen
+          onToggle={trackSectionToggle("factsheet-heatmaps")}
+        >
+          <MonthlyReturns />
+          <DailyReturnsHeatmap />
+        </CollapsibleSection>
+      )}
+      {present["factsheet-stress"] && (
+        <CollapsibleSection
+          id="factsheet-stress"
+          title="Stress Windows"
+          storageKey={`factsheet-collapse:${payload.strategyId}:stress`}
+          defaultOpen
+          onToggle={trackSectionToggle("factsheet-stress")}
+        >
+          <StressWindowsPanel />
+        </CollapsibleSection>
+      )}
+      {/* FINDING-2 (b06-silentfailure): Gate signatures on ingestSource === "api"
+          in addition to hasComparator. Event signatures stitch the internal BTC
+          fixture alongside the strategy returns; for CSV strategies with too few
+          observations aggregate() filled empty trace populations with all-zero
+          arrays — fabricating a flat zero band line indistinguishable from a
+          real observation at 0% delta. Suppress for CSV to prevent false panels.
+          (Phase 169.4 CR-01: aggregate() now returns null for an empty population
+          and the panels render the em-dash state; the api-arm gate stands.) */}
+      {/* Phase 164.6.6.2 (D-10, UI-SPEC A16): a strategy whose returns are in a native
+          unit renders the section whatever the comparator, because its panels are
+          the withheld form with the stated reason, not an empty page. */}
+      {showSignatures && (
+        <CollapsibleSection
+          id="factsheet-signatures"
+          title="Returns Signatures"
+          subtitle="event studies — heavy compute, defaults open"
+          storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
+          defaultOpen
+          onToggle={trackSectionToggle("factsheet-signatures")}
+        >
+          <LazyMount minHeight={500}>
+            <SignaturesSection />
+          </LazyMount>
+          <LazyMount minHeight={500}>
+            <CrossSignaturesSection />
+          </LazyMount>
+        </CollapsibleSection>
+      )}
+      {present["factsheet-streak"] && (
+        <CollapsibleSection
+          id="factsheet-streak"
+          title="Streaks"
+          storageKey={`factsheet-collapse:${payload.strategyId}:streak`}
+          defaultOpen
+          onToggle={trackSectionToggle("factsheet-streak")}
+        >
+          <StreakDistributionPanel />
+        </CollapsibleSection>
+      )}
+    </>
   );
 }
 
@@ -616,7 +898,7 @@ export function FactsheetBody({
  * when the eyebrow is not shown (single-key OR composite-cash) this renders EXACTLY
  * the bare <MetricsColumn> — byte-identical to before (GUARD-02).
  */
-function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
+function MetricsColumnWithBasis({ scenarioMode, part = "all" }: { scenarioMode: boolean; part?: MetricsPart }) {
   const payload = usePayload();
   const { basis } = useBasis();
   const composite = payload.dataQuality?.composite === true;
@@ -651,7 +933,7 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // A plain single-key non-MTM-participant strategy
   // therefore returns the BARE <MetricsColumn> — no wrapper div, no empty eyebrow gap.
   if (!composite) {
-    if (!mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
+    if (!mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} part={part} />;
     return (
       <div className="flex flex-col gap-4 min-w-0">
         <p
@@ -660,7 +942,7 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
         >
           {onMtm ? basisEyebrowLabel : " "}
         </p>
-        <MetricsColumn scenarioMode={scenarioMode} />
+        <MetricsColumn scenarioMode={scenarioMode} part={part} />
       </div>
     );
   }
@@ -685,7 +967,7 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
       >
         {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
       </p>
-      <MetricsColumn scenarioMode={scenarioMode} />
+      <MetricsColumn scenarioMode={scenarioMode} part={part} />
     </div>
   );
 }
@@ -720,7 +1002,18 @@ function MonthlyReturns() {
   return <MonthlyReturnsHeatmap fullHistoryWithheld={fullHistoryWithheld} />;
 }
 
-function PerformanceCharts() {
+type PerformanceVariant = "all" | "equity" | "rest";
+
+/** The two charts the opening view keeps: the equity curve and the drawdown beneath it. */
+const EQUITY_CHART_KEYS = new Set(["cumulative", "underwaterAcc"]);
+
+/**
+ * `variant` (Phase 196, D-04): "all" (default) is every chart and panel, unchanged; "equity"
+ * is the opening view's pair (cumulative + underwater) with the basis caption and its status
+ * region, which describe the series those charts draw; "rest" is the remaining charts, the
+ * rolling-window choice and the not-enough-data panels, which live inside Advanced.
+ */
+function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }) {
   const payload = usePayload();
   const { key: cmpKey } = useActiveComparator();
   // Phase 103 (MTM-04): charts NOW follow the basis (each chart reads through
@@ -790,7 +1083,13 @@ function PerformanceCharts() {
   // draws nothing; short qualifies each chart with a note; absent draws as before.
   const rollVerdict = roll.annualization;
   const rollWithheld = rollVerdict?.state === "withheld";
-  const rollShortDays = rollVerdict?.state === "short" ? rollVerdict.days : null;
+  // Phase 196 (D-04, UI-SPEC "One small-sample warning"): the document layout ("equity" and
+  // "rest") states a short record ONCE, in the KPI strip's figure-gate note. So here the rolling
+  // charts carry no short-track subtitle suffix and the "Not enough data" / "Not available"
+  // cards are not drawn (their panels are simply absent; see `advancedSectionContent`). Only
+  // the full layout ("all", the allocator mounts) keeps both, unchanged.
+  const documentLayout = variant !== "all";
+  const rollShortDays = rollVerdict?.state === "short" && !documentLayout ? rollVerdict.days : null;
   // 194 D-14 (additive): the row window stays the chart default on every record; `1y` is an
   // option beside it, and only when the view carries the 365-day window. A basis switch can
   // leave the state at `1y` on a view without it, so the effective choice falls back to the row.
@@ -799,6 +1098,7 @@ function PerformanceCharts() {
   const effectiveRollChoice: RollingChoice = rollChoice === "1y" && roll1y ? "1y" : "row";
   const configs = React.useMemo(() => {
     return CHART_CONFIGS
+      .filter(cfg => variant === "all" || EQUITY_CHART_KEYS.has(cfg.key) === (variant === "equity"))
       .filter(cfg => !(cmpKey === "none" && cfg.stratField === null && cfg.comparatorAsPrimary))
       // 2026-05-20: drop volMatched too when no comparator. Without one the
       // "Cumulative Returns — Volatility Matched" panel renders just the raw
@@ -834,7 +1134,7 @@ function PerformanceCharts() {
         // `null` returns `cfg` itself, so a USD chart is the config it always was.
         return applyChartUnit(cfg, returnsUnit);
       });
-  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit, railAvgWithheld, rollWithheld, rollShortDays, effectiveRollChoice, roll1y]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit, railAvgWithheld, rollWithheld, rollShortDays, effectiveRollChoice, roll1y, variant]);
 
   const firstRollingKey = configs.find(cfg => ROLLING_CHART_KEYS.has(cfg.key))?.key;
   const rollingRecord = payload.figureRecord ?? null;
@@ -852,7 +1152,7 @@ function PerformanceCharts() {
       {/* FS-01/02 (composite-only): visually-hidden AT summary for the sparse
           stitched cumulative track. The seam/gap markers are pointerEvents-none,
           so this is the authoritative AT surface. */}
-      {composite && (() => {
+      {variant !== "rest" && composite && (() => {
         // F6 (IN-05): N boundaries ⇒ N+1 keys, but a 1-member composite has 0
         // boundaries and therefore NO handoffs — don't claim "1 keys" or "seam
         // markers at each key handoff". Pluralize and guard the handoff clause.
@@ -883,7 +1183,7 @@ function PerformanceCharts() {
             - MTM + bundle present     → charts DID follow → mark-to-market copy
             - MTM + bundle ABSENT      → honest fallback (stale cache / not yet
               re-derived/backfilled — Zavara pre-backfill) → cash charts + cash copy */}
-      {mtmToggleAvailable && (
+      {variant !== "rest" && mtmToggleAvailable && (
         <p role="status" className="text-caption text-text-secondary">
           {/* Phase 133 (SMTM-01): the caption is now per-basis three-state. Cash → ""
               (unchanged idiom); MTM → its byte-identical two copies; smoothed → the
@@ -900,7 +1200,7 @@ function PerformanceCharts() {
               : ""}
         </p>
       )}
-      {(!roll.enough || rollWithheld) && (
+      {variant === "all" && (!roll.enough || rollWithheld) && (
         <NotEnoughDataPanel
           title="Rolling Metrics — Not enough data"
           body={
@@ -910,13 +1210,13 @@ function PerformanceCharts() {
           }
         />
       )}
-      {!beta.enough && cmpKey !== "none" && (
+      {variant === "all" && !beta.enough && cmpKey !== "none" && (
         <NotEnoughDataPanel
           title="Rolling β — Not enough data"
           body="Strategy history is too short to compute even a 30-day rolling beta against the comparator. This panel will appear once the strategy has at least ~35 observations."
         />
       )}
-      {volMatchedNoVol && (
+      {variant === "all" && volMatchedNoVol && (
         <NotEnoughDataPanel
           title="Volatility Matched — Not available"
           body="The strategy or the comparator has no measurable volatility on this basis, so there is no scale to match the comparator to. This panel will appear once both do."
@@ -1772,7 +2072,17 @@ function CapacityChip({
   );
 }
 
-function KpiStrip({ scenarioMode = false }: { scenarioMode?: boolean }) {
+function KpiStrip({
+  scenarioMode = false,
+  comparatorLine = false,
+}: {
+  scenarioMode?: boolean;
+  /** Phase 196 (OQ-2, D-04), document layout only: under each of the seven headline cells, one
+   *  muted line with the active comparator's value for the same figure. The Main metrics table
+   *  no longer repeats the headline rows' comparator column beside them, so the strip keeps the
+   *  headline comparison. Absent (the full layout): no line. */
+  comparatorLine?: boolean;
+}) {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
   // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM via the persisted
@@ -1850,14 +2160,35 @@ function KpiStrip({ scenarioMode = false }: { scenarioMode?: boolean }) {
   // two-column strip, Phase 170 (j)); `withUnit(label, null)` is the label itself.
   const returnsUnit = payload.returnsUnit ?? null;
   const unitLabel = returnsUnit != null;
-  const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean }> = [
-    { label: withUnit("Cum. Return", returnsUnit), value: formatSignedPercent(m.cum_ret, 1), tone: percentTone(m.cum_ret, 1), unitLabel },
-    { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(gv(m.cagr), 1), tone: percentTone(gv(m.cagr), 1), unitLabel },
-    { label: "Sharpe", value: num(gv(m.sharpe)) },
-    { label: "Sortino", value: num(gv(m.sortino)) },
-    { label: "Calmar", value: num(gv(m.calmar)) },
-    { label: "Max DD", value: formatUnsignedPercent(m.max_dd, 1), tone: percentTone(m.max_dd, 1) === "negative" ? "negative" : undefined },
-    { label: "Ann. Vol", value: pct(gv(m.ann_vol), 1) },
+  // OQ-2: the comparator's value for each of the seven headline cells, from the SAME source the
+  // rail's headline benchmark cells read (`headlineBenchSource`, with the rail's arguments: the
+  // windowed view's comparator block, the basis, the selected flag), through the cell's own
+  // formatter and the same annualisation gate `gv`. A withheld row has no source, so every line
+  // reads "—"; a non-finite value prints the dash as well. No tone: a comparator figure is never
+  // coloured (DESIGN.md), so the line carries no tone field at all.
+  const hb =
+    comparatorLine && cmpKey !== "none"
+      ? headlineBenchSource(payload.dataQuality, basis, selected, wv.comparators[cmpKey])
+      : undefined;
+  const benchLines = comparatorLine && cmpKey !== "none"
+    ? {
+        cum_ret: formatSignedPercent(hb?.cum_ret, 1),
+        cagr: formatSignedPercent(gv(hb?.cagr), 1),
+        sharpe: num(gv(hb?.sharpe)),
+        sortino: num(gv(hb?.sortino)),
+        calmar: num(gv(hb?.calmar)),
+        max_dd: formatUnsignedPercent(hb?.max_dd, 1),
+        ann_vol: pct(gv(hb?.ann_vol), 1),
+      }
+    : null;
+  const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean; bench?: string }> = [
+    { label: withUnit("Cum. Return", returnsUnit), value: formatSignedPercent(m.cum_ret, 1), tone: percentTone(m.cum_ret, 1), unitLabel, bench: benchLines?.cum_ret },
+    { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(gv(m.cagr), 1), tone: percentTone(gv(m.cagr), 1), unitLabel, bench: benchLines?.cagr },
+    { label: "Sharpe", value: num(gv(m.sharpe)), bench: benchLines?.sharpe },
+    { label: "Sortino", value: num(gv(m.sortino)), bench: benchLines?.sortino },
+    { label: "Calmar", value: num(gv(m.calmar)), bench: benchLines?.calmar },
+    { label: "Max DD", value: formatUnsignedPercent(m.max_dd, 1), tone: percentTone(m.max_dd, 1) === "negative" ? "negative" : undefined, bench: benchLines?.max_dd },
+    { label: "Ann. Vol", value: pct(gv(m.ann_vol), 1), bench: benchLines?.ann_vol },
   ];
   // Hoisted from the α/IR block below: the flat-leg line under the strip is shown only
   // when those cells show the joint, so it reads the same predicate.
@@ -2089,6 +2420,14 @@ function KpiStrip({ scenarioMode = false }: { scenarioMode?: boolean }) {
             >
               {it.value}
             </p>
+            {it.bench !== undefined && (
+              <p
+                data-testid="factsheet-kpi-bench"
+                className="mt-1 text-caption font-metric text-text-muted break-words"
+              >
+                {cn} {it.bench}
+              </p>
+            )}
           </div>
         ))}
       </div>
@@ -2589,9 +2928,14 @@ function ControlBar({
   recipientShare = false,
   ownerShare,
   onShareLiveChange,
+  showPrintView = false,
 }: {
   scenarioMode?: boolean;
   recipientShare?: boolean;
+  /** Phase 196 (D-09) — render the "Print view" link. The caller passes true only for the
+   *  document layout on a published strategy; the bar additionally withholds it from a
+   *  share-token recipient, a `?share=1` reader and the scenario composer. */
+  showPrintView?: boolean;
   /** Phase 164 (SHARE-04) — owner-lane share state; see `OwnerLaneProps`.
    *  Absent on every non-owner mount, which is what keeps the published
    *  `?share=1` lane byte-identical (D-09). */
@@ -2931,6 +3275,19 @@ function ControlBar({
           className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
         >
           Compare strategies
+        </a>
+      )}
+      {/* Phase 196 (D-09) — replaces the retired discovery page's "Tear Sheet" link. Same
+          classes as Compare strategies, never accent. Published and not a share-token
+          recipient only: the tearsheet route is published-only, so a recipient or an
+          unpublished owner would be sent to a 404 (T-196-24). */}
+      {showPrintView && !scenarioMode && !shareMode && !recipientShare && (
+        <a
+          href={buildTearsheetHref(payload.strategyId)}
+          title="Open the print view of this factsheet"
+          className="px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+        >
+          Print view
         </a>
       )}
       {/* Phase 164 (SHARE-04) — a RECIPIENT must never see this control. It

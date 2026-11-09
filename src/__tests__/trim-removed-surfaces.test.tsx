@@ -579,7 +579,6 @@ describe("trim-removed-surfaces — f. disclaimer once", () => {
     ["src/app/browse/layout.tsx", 0],
     ["src/app/browse/page.tsx", 1],
     ["src/app/browse/[slug]/page.tsx", 1],
-    ["src/app/browse/[slug]/[strategyId]/page.tsx", 1],
     ["src/app/factsheet/[id]/tearsheet/page.tsx", 0],
   ];
 
@@ -592,11 +591,6 @@ describe("trim-removed-surfaces — f. disclaimer once", () => {
       ).toBe(expected);
     });
   }
-
-  it("the public strategy page's one block is the strategy-page variant (D-09)", () => {
-    const src = code("src/app/browse/[slug]/[strategyId]/page.tsx");
-    expect(src, fix("D-09")).toMatch(/<Disclaimer[^>]*variant="strategy-page"/);
-  });
 
   it("positive control: Disclaimer.tsx still defines the footer, custody, strategy, factsheet and strategy-page variants", () => {
     const src = code("src/components/ui/Disclaimer.tsx");

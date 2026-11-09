@@ -230,6 +230,24 @@ export async function GET(
       throw new Error(`tearsheet page answered ${response ? response.status() : "no response"}`);
     }
 
+    // R2-01: the status above cannot see an in-page failure when the response has already
+    // started streaming (a throw, a `notFound()` or the pending state all answer 200). Only
+    // the full tear sheet carries `#tearsheet-main`, so its absence means the page is not
+    // the document: refuse it with a non-cacheable 503 instead of printing it.
+    const isTearSheet = await page.evaluate(() => !!document.getElementById("tearsheet-main"));
+    if (!isTearSheet) {
+      const markerErr = new Error("tear sheet article #tearsheet-main is not on the page");
+      console.error("[tearsheet-pdf] Refusing to print a page that is not the tear sheet:", markerErr);
+      captureToSentry(markerErr, {
+        tags: { area: "tearsheet-pdf", step: "marker_absent" },
+        level: "error",
+      });
+      return NextResponse.json(
+        { error: "PDF render incomplete, retry shortly" },
+        { status: 503, headers: { "Retry-After": "10", "Cache-Control": "no-store" } },
+      );
+    }
+
     const pdfBuffer = await page.pdf({
       format: "Letter",
       printBackground: true,

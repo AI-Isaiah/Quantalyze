@@ -1,11 +1,14 @@
 import Link from "next/link";
 import { LegalFooter } from "@/components/legal/LegalFooter";
+import { BrowseDiscoveryLink } from "./BrowseDiscoveryLink";
+import { hasBrowseSession } from "./session";
 
-export default function BrowseLayout({
+export default async function BrowseLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const signedIn = await hasBrowseSession();
   return (
     <div className="min-h-full bg-white">
       {/* Minimal nav */}
@@ -17,20 +20,24 @@ export default function BrowseLayout({
           >
             Quantalyze
           </Link>
-          <div className="flex items-center gap-2">
-            <Link
-              href="/login"
-              className="inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-medium text-text-secondary hover:bg-page hover:text-text-primary transition-colors"
-            >
-              Log in
-            </Link>
-            <Link
-              href="/signup"
-              className="inline-flex min-h-[44px] items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-            >
-              Sign up
-            </Link>
-          </div>
+          {signedIn ? (
+            <BrowseDiscoveryLink />
+          ) : (
+            <div className="flex items-center gap-2">
+              <Link
+                href="/login"
+                className="inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-medium text-text-secondary hover:bg-page hover:text-text-primary transition-colors"
+              >
+                Log in
+              </Link>
+              <Link
+                href="/signup"
+                className="inline-flex min-h-[44px] items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+              >
+                Sign up
+              </Link>
+            </div>
+          )}
         </div>
       </header>
 

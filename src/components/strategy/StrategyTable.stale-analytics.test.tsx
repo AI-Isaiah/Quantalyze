@@ -584,7 +584,7 @@ describe("STALE-01 ordinal — the table refuses to rank what it may not print",
     expect(dead.innerHTML).not.toContain("bg-track");
     // ...and the row is still a live link to its factsheet, not a dead end.
     expect(
-      dead.querySelector(`a[href="/factsheet/${ID_DEAD}"]`),
+      dead.querySelector(`a[href^="/factsheet/${ID_DEAD}?"]`),
     ).toBeTruthy();
   });
 });
@@ -694,7 +694,6 @@ describe("HONEST-03 / C-6 — is_example rows never claim a sync recency", () =>
           exampleRow(ID_LIVE, NAME_LIVE),
           withFreshComputedAt(clientRow(ID_DEAD, NAME_DEAD, "complete", LIVE)),
         ]}
-        categorySlug="stale-spec"
       />,
     );
     // Both cards carry an identical current trade fetch, so exactly ONE

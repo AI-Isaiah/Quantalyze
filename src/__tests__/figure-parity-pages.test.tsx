@@ -14,14 +14,16 @@
  *     select string (the plan-04 aliases are projected, not handed over whole, so a
  *     dropped alias really loses the column);
  *   - the StrategyTable cell (discovery list);
- *   - the tearsheet page;
+ *   - the tearsheet page (Phase 196 plan 13: the factsheet's PRINT VIEW, so it is checked as a
+ *     CONSTRUCTION: the page hands `FactsheetView printView` the payload the factsheet's own
+ *     builder makes, and that payload is compared like the factsheet's);
  *   - the Holdings tab (`toStrategyRows`).
  *
  * "SAME VALUE" IS CHECKED IN THE FORM EACH SURFACE EXPOSES. A DATA surface (the payload's
  * `strategyMetrics`, the Holdings adapter output) is compared as a number within 1e-12 of
- * the stored field. A RENDERED surface (the table cell, the tearsheet value) is compared
- * as text equal to that surface's own formatter applied to the stored field, the same
- * `formatPercent` / `formatNumber` the cell imports. No rendered value is parsed back.
+ * the stored field. A RENDERED surface (the table cell) is compared as text equal to that
+ * surface's own formatter applied to the stored field, the same `formatPercent` /
+ * `formatNumber` the cell imports. No rendered value is parsed back.
  *
  * DELIBERATE DIFFERENCES are labelled, not compared: a narrowed factsheet range carries
  * the "Selected range" label (Phase 193) and a Scenario blend its methodology line.
@@ -66,6 +68,16 @@ vi.mock("@/components/discovery/SimulateImpactButton", () => ({
 vi.mock("@/lib/queries", () => ({
   getFactsheetDetail: vi.fn(),
   getPercentiles: vi.fn().mockResolvedValue(null),
+  readPublicVerificationSignals: vi.fn().mockResolvedValue(new Map()),
+}));
+// Phase 196 plan 13: the tearsheet renders the factsheet's own component, so it is a recorder here.
+// What the page hands it is the subject; the component's rendering is proven by its own tests.
+const printViews = vi.hoisted(() => ({ props: [] as Array<{ payload: unknown; printView?: boolean }> }));
+vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
+  FactsheetView: (props: { payload: unknown; printView?: boolean }) => {
+    printViews.props.push(props);
+    return React.createElement("div", { "data-testid": "factsheet-view" });
+  },
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ getUserRolesResult: vi.fn() }));
@@ -77,9 +89,8 @@ type Row = Record<string, unknown>;
  * serves it from ONE seeded DB-shaped row and PROJECTS the `strategy_analytics ( ... )`
  * embed by the select string it is asked for, as PostgREST does: a plain token returns
  * that column, `alias:metrics_json->key` returns that key of the jsonb column under the
- * alias, and a token that is not asked for is not returned. The tearsheet's own trade-fetch
- * read hits the same client; it is told apart by its select string and answers "no row
- * facts" (the quiet path).
+ * alias, and a token that is not asked for is not returned. The tearsheet now builds its payload
+ * through the same `fetchAndBuildPayload`, so it reads this fake too.
  */
 const fake = vi.hoisted(() => ({
   strategyRow: null as Row | null,
@@ -126,13 +137,6 @@ vi.mock("@/lib/supabase/admin", () => {
         if (!row) return { data: null, error: null };
         return {
           data: { ...row, strategy_analytics: projectEmbed(select, row.strategy_analytics as Row) },
-          error: null,
-        };
-      }
-      if (table === "strategies") {
-        // The tearsheet's trade-fetch facts: nothing to claim.
-        return {
-          data: { api_keys: null, strategy_analytics: { trades_fetched_at: null, series_provenance: null } },
           error: null,
         };
       }
@@ -399,13 +403,17 @@ function tableCell(label: string): string {
   return row.querySelectorAll("td")[idx].textContent ?? "";
 }
 
-/** Tearsheet: the page, with its detail read and record-span read answered from the stored row. */
+/**
+ * Tearsheet: the page, run over the same stored row the factsheet's fetch path reads. Returns what
+ * the page handed `FactsheetView` (its payload and `printView`), which is all the page decides.
+ * The detail read only identifies the strategy for the identity panel and the ranks' category.
+ */
 async function renderTearsheet(
   assetClass: "crypto" | "traditional",
   analytics: Row,
-  series: { date: string }[],
-  observations: number | null,
 ) {
+  fake.strategyRow = strategyRowFor(assetClass, analytics);
+  printViews.props.length = 0;
   vi.mocked(getFactsheetDetail).mockResolvedValueOnce({
     strategy: {
       id: STRATEGY_ID,
@@ -414,74 +422,23 @@ async function renderTearsheet(
       status: "published",
       disclosure_tier: "exploratory",
       user_id: "u-1",
-      strategy_types: ["Momentum"],
-      markets: ["BTC"],
-      start_date: "2024-01-01",
-      leverage_range: "1x-2x",
-      benchmark: "BTC",
-      aum: 100_000,
       asset_class: assetClass,
       discovery_categories: { slug: "momentum" },
     },
-    analytics: {
-      cagr: analytics.cagr,
-      sharpe: analytics.sharpe,
-      sortino: analytics.sortino,
-      max_drawdown: analytics.max_drawdown,
-      volatility: analytics.volatility,
-      calmar: analytics.calmar,
-      six_month_return: analytics.six_month_return,
-      cumulative_return: analytics.cumulative_return,
-      computed_at: "2024-06-01T00:00:00Z",
-      computation_status: "complete",
-      sparkline_returns: [0.01, 0.02, -0.01, 0.03],
-      monthly_returns: { "2024": { Jan: 0.05, Feb: 0.03 } },
-      metrics_json: analytics.metrics_json,
-    },
+    analytics: { computation_status: "complete" },
     manager: null,
     disclosureTier: "exploratory",
   } as unknown as Awaited<ReturnType<typeof getFactsheetDetail>>);
   vi.mocked(getUserRolesResult).mockResolvedValue({ roles: [] } as unknown as Awaited<ReturnType<typeof getUserRolesResult>>);
-  const from = vi.fn(() => {
-    let isSpan = false;
-    const builder = {
-      select: (cols: string) => {
-        isSpan = cols.includes("record_observations");
-        return builder;
-      },
-      eq: () => builder,
-      maybeSingle: async () =>
-        isSpan
-          ? {
-              data: {
-                strategy_analytics: {
-                  series_start: series[0].date,
-                  series_end: series[series.length - 1].date,
-                  headline_since: null,
-                  record_observations: observations,
-                },
-              },
-              error: null,
-            }
-          : { data: { strategy_analytics: { data_quality_flags: {} } }, error: null },
-    };
-    return builder;
-  });
   vi.mocked(createClient).mockResolvedValueOnce({
     auth: { getUser: vi.fn().mockResolvedValue({ data: { user: null }, error: null }) },
-    from,
+    from: vi.fn(),
   } as unknown as Awaited<ReturnType<typeof createClient>>);
   const page = await TearSheetPage({ params: Promise.resolve({ id: STRATEGY_ID }) });
-  return render(page as React.ReactElement);
-}
-
-/** The value under the tearsheet metric labelled `label` (a label `<p>` and its next-sibling value `<p>`). */
-function tearsheetValue(container: HTMLElement, label: string): string {
-  const hit = Array.from(container.querySelectorAll("p")).find(
-    (p) => p.textContent === label && p.nextElementSibling?.tagName === "P",
-  );
-  if (!hit) throw new Error(`the tearsheet has no metric labelled ${label}`);
-  return hit.nextElementSibling!.textContent ?? "";
+  render(page as React.ReactElement);
+  expect(printViews.props, "the tearsheet must mount the factsheet view exactly once").toHaveLength(1);
+  const view = printViews.props[0];
+  return { printView: view.printView, payload: view.payload as FactsheetPayload };
 }
 
 /** Holdings: the marked-strategy half of the union, as the Holdings tab feeds it. */
@@ -657,58 +614,45 @@ describe.each(FIXTURES)("one stored row, every page ($name)", ({ stored }) => {
     expect(tableCell("6 Month"), "6 Month").toBe(formatPercent(stored.six_month_return));
   });
 
-  it("tearsheet: each hero and detail value reads the page's own formatter applied to the stored field", async () => {
-    const { container } = await renderTearsheet("crypto", analytics(), MARKED_SERIES, MARKED_OBSERVATIONS);
-    expect(tearsheetValue(container, "CAGR"), "CAGR").toBe(formatPercent(stored.cagr));
-    expect(tearsheetValue(container, "Sharpe"), "Sharpe").toBe(formatNumber(stored.sharpe));
-    expect(tearsheetValue(container, "Sortino"), "Sortino").toBe(formatNumber(stored.sortino));
-    expect(tearsheetValue(container, "Max DD"), "Max DD").toBe(formatPercent(stored.max_drawdown));
-    expect(tearsheetValue(container, "Volatility"), "Volatility").toBe(formatPercent(stored.volatility));
-    expect(tearsheetValue(container, "Calmar"), "Calmar").toBe(formatNumber(stored.calmar));
-    expect(tearsheetValue(container, "6 Month"), "6 Month").toBe(formatPercent(stored.six_month_return));
-    expect(tearsheetValue(container, "Cumulative"), "Cumulative").toBe(formatPercent(stored.cumulative_return));
-    expect(tearsheetValue(container, "VaR 95%"), "VaR 95%").toBe(formatPercent(STORED_JSON.var_1d_95));
-    expect(tearsheetValue(container, "CVaR 95%"), "CVaR 95%").toBe(formatPercent(STORED_JSON.cvar));
+  it("tearsheet: renders the factsheet's own view in printView, on a payload whose every shared metric is the stored field to within 1e-12", async () => {
+    const { printView, payload } = await renderTearsheet("crypto", analytics());
+    expect(printView).toBe(true);
+    const m = payload.strategyMetrics;
+    expect(
+      disagreements([
+        ["Return %", m.cum_ret, stored.cumulative_return],
+        ["CAGR", m.cagr, stored.cagr],
+        ["Sharpe", m.sharpe, stored.sharpe],
+        ["Sortino", m.sortino, stored.sortino],
+        ["Calmar", m.calmar, stored.calmar],
+        ["Volatility", m.ann_vol, stored.volatility],
+        ["Max DD", m.max_dd, stored.max_drawdown],
+        ["6 Month", m.p6m, stored.six_month_return],
+        ["VaR 95%", m.var95, STORED_JSON.var_1d_95],
+        ["CVaR 95%", m.cvar95, STORED_JSON.cvar],
+      ]),
+    ).toEqual([]);
   });
 
-  it("the StrategyTable and the tearsheet print the SAME text for every metric they share", async () => {
-    renderTable("crypto", analytics(), MARKED_SERIES, MARKED_OBSERVATIONS);
-    const table = {
-      "Return %": tableCell("Return %"),
-      CAGR: tableCell("CAGR"),
-      Sharpe: tableCell("Sharpe"),
-      "Max DD": tableCell("Max DD"),
-      Volatility: tableCell("Volatility"),
-      "6 Month": tableCell("6 Month"),
-    };
-    cleanup();
-    const { container } = await renderTearsheet("crypto", analytics(), MARKED_SERIES, MARKED_OBSERVATIONS);
-    const tearsheet = {
-      "Return %": tearsheetValue(container, "Cumulative"),
-      CAGR: tearsheetValue(container, "CAGR"),
-      Sharpe: tearsheetValue(container, "Sharpe"),
-      "Max DD": tearsheetValue(container, "Max DD"),
-      Volatility: tearsheetValue(container, "Volatility"),
-      "6 Month": tearsheetValue(container, "6 Month"),
-    };
-    // Phase 197 D-05 (founder-approved): the table prints volatility unsigned; the tearsheet still
-    // prints its "+" (Phase 196 owns the factsheet and tearsheet files; Phase 201 books the tearsheet
-    // and CompareTable sign). So Volatility is compared BY VALUE, stripping a leading "+" from the
-    // tearsheet side for that ONE metric. Every other metric stays an exact text comparison.
-    expect(table).toEqual({
-      ...tearsheet,
-      Volatility: tearsheet.Volatility.replace(/^\+/, ""),
-    });
+  it("the tearsheet and the factsheet reach the same figures BY CONSTRUCTION: the print view's payload is the factsheet fetch path's, metrics and record included", async () => {
+    // Phase 196 D-03: the tearsheet no longer derives its own figures, so parity is that the page
+    // hands the factsheet component what the factsheet's own builder makes from the same row.
+    const factsheet = await factsheetPayload("crypto", analytics());
+    const { printView, payload } = await renderTearsheet("crypto", analytics());
+    expect(printView).toBe(true);
+    expect(payload.strategyMetrics).toEqual(factsheet.strategyMetrics);
+    expect(payload.figureRecord).toEqual(factsheet.figureRecord);
   });
 
-  it("D-05: the stored cumulative return is shown whatever its size, on the table and the tearsheet", async () => {
+  it("D-05: the stored cumulative return is shown whatever its size, on the table and the tearsheet payload", async () => {
     renderTable("crypto", analytics(), MARKED_SERIES, MARKED_OBSERVATIONS);
     const cell = tableCell("Return %");
     expect(cell).toBe(formatPercent(stored.cumulative_return));
     expect(cell).not.toBe("—");
     cleanup();
-    const { container } = await renderTearsheet("crypto", analytics(), MARKED_SERIES, MARKED_OBSERVATIONS);
-    expect(tearsheetValue(container, "Cumulative")).toBe(cell);
+    // The print view carries the same stored cumulative return, unrounded and unwithheld.
+    const { payload } = await renderTearsheet("crypto", analytics());
+    expect(disagreements([["Return %", payload.strategyMetrics.cum_ret, stored.cumulative_return]])).toEqual([]);
   });
 });
 
@@ -749,9 +693,10 @@ describe("D-15 interim parity: an unmarked non-crypto row of 60 weekday returns 
     expect(cell).not.toContain(formatNumber(STORED.sharpe));
   });
 
-  it("tearsheet: the Sharpe value prints the dash", async () => {
-    const { container } = await renderTearsheet("traditional", unmarkedAnalytics(), UNMARKED_SERIES, null);
-    expect(tearsheetValue(container, "Sharpe")).toBe("—");
+  it("tearsheet: the print view's payload carries the withheld record, so the figures dash and the ranks drop", async () => {
+    const { payload } = await renderTearsheet("traditional", unmarkedAnalytics());
+    expect(payload.figureRecord?.observations).toBeNull();
+    expect(gateAnnualized(payload.figureRecord!)).toBe("withheld");
   });
 
   it("194.1 recordFromScalars: the four alias scalars carry no count and the gate withholds", () => {
@@ -822,8 +767,9 @@ describe("CR-01 parity: a non-crypto record of 62 observations over under 90 day
     renderTable("traditional", analytics, SHORT_COUNTED_SERIES, SHORT_COUNTED_OBSERVATIONS);
     expect(tableCell("Sharpe")).toContain(formatNumber(STORED.sharpe));
     cleanup();
-    const { container } = await renderTearsheet("traditional", analytics, SHORT_COUNTED_SERIES, SHORT_COUNTED_OBSERVATIONS);
-    expect(tearsheetValue(container, "Sharpe")).toBe(formatNumber(STORED.sharpe));
+    const { payload } = await renderTearsheet("traditional", analytics);
+    expect(payload.figureRecord?.observations).toBe(SHORT_COUNTED_OBSERVATIONS);
+    expect(gateAnnualized(payload.figureRecord!)).not.toBe("withheld");
   });
 
   it("194.1 recordFromScalars and CandidateDetail (B12b) reach the same verdict: the Sharpe shows", () => {

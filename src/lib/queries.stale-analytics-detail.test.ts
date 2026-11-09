@@ -14,19 +14,16 @@
  * fetchers read the same columns off the same rows and rendered them with the
  * same ungated confidence:
  *
- *   getPublicStrategyDetail → /browse/[slug]/[strategyId]'s hero + mini grids
- *                           → /strategy/[id]'s `generateMetadata`, where the
- *                             KPI triple becomes `<meta description>`,
- *                             OpenGraph and Twitter card text — the one place
- *                             a dead figure OUTLIVES the page, because unfurl
- *                             caches keep their own copy.
  *   getFactsheetDetail      → /factsheet/[id]/tearsheet, the widest public
  *                             metric surface: hero grid, detail grid, the
  *                             `metrics_json` VaR/CVaR block, the monthly
  *                             heatmap. It is in PUBLIC_ROUTES.
- *   getStrategyDetail       → /discovery/[slug]/[strategyId], authed but
- *                             CROSS-TENANT — every allocator reads other
- *                             managers' rows through it.
+ *
+ * Phase 196 plan 14 deleted the other two single-strategy fetchers
+ * (`getPublicStrategyDetail`, `getStrategyDetail`) with the routes that called
+ * them, and their groups A and C with them. The one shaper they shared,
+ * `shapeRowAnalytics`, is still pinned directly by group D below and through
+ * `getFactsheetDetail` by group B.
  *
  * WHY THE DATE MAKES IT A FALSE CLAIM AND NOT MERELY A STALE ONE: the SQL
  * status bridge re-stamps `computed_at = now()` on the branches it writes,
@@ -94,12 +91,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-import {
-  getPublicStrategyDetail,
-  getFactsheetDetail,
-  getStrategyDetail,
-  shapeRowAnalytics,
-} from "./queries";
+import { getFactsheetDetail, shapeRowAnalytics } from "./queries";
 import type { StrategyAnalytics } from "./types";
 
 // --- Fixtures -------------------------------------------------------------
@@ -213,97 +205,6 @@ beforeEach(() => {
 });
 
 // =========================================================================
-// Group A — getPublicStrategyDetail (/browse/[slug]/[id] + /strategy/[id]'s
-//           generateMetadata, which is the OG / Twitter / meta-description
-//           builder)
-// =========================================================================
-
-describe("STALE-01 · getPublicStrategyDetail withholds a failed run's figures", () => {
-  it("A1: every KPI a `failed` row still carries comes back null", async () => {
-    seeded.strategyRow = strategyRow(DEAD_ROW());
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    expect(result).not.toBeNull();
-    for (const key of KPI_KEYS) {
-      expect(
-        result!.analytics![key],
-        `${key} leaked a failed run's value (${String(STALE_KPIS[key as keyof typeof STALE_KPIS])})`,
-      ).toBeNull();
-    }
-    // The equity curve is a job output too — /browse renders it as a card.
-    expect(result!.analytics!.sparkline_returns).toBeNull();
-  });
-
-  it("A2: the timestamp is cleared — it dated the FAILURE, not the numbers", async () => {
-    seeded.strategyRow = strategyRow(DEAD_ROW());
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    expect(result!.analytics!.computed_at).not.toBe(DEAD_COMPUTED_AT);
-    expect(result!.analytics!.computed_at).toBeFalsy();
-  });
-
-  it("A3: the REAL status survives — laundering it to 'pending' would spin a forever-Syncing chip", async () => {
-    seeded.strategyRow = strategyRow(DEAD_ROW());
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    expect(result!.analytics!.computation_status).toBe("failed");
-  });
-
-  it("A4: the strategy itself is NOT dropped — name, AUM and start_date are not analytics outputs", async () => {
-    seeded.strategyRow = strategyRow(DEAD_ROW());
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    expect(result!.strategy.name).toBe("Orpheus");
-    expect(result!.strategy.aum).toBe(1_000_000);
-    expect(result!.strategy.start_date).toBe("2024-01-01");
-  });
-
-  it("A5: CONTROL — a `complete` row is handed through untouched", async () => {
-    seeded.strategyRow = strategyRow(LIVE_ROW());
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    for (const key of KPI_KEYS) {
-      expect(result!.analytics![key]).toBe(LIVE_KPIS[key as keyof typeof LIVE_KPIS]);
-    }
-    expect(result!.analytics!.computed_at).toBe(LIVE_COMPUTED_AT);
-  });
-
-  it("A6: CONTROL — `complete_with_warnings` is a terminal SUCCESS and keeps its figures", async () => {
-    seeded.strategyRow = strategyRow(WARNED_ROW());
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    expect(result!.analytics!.sharpe).toBe(LIVE_KPIS.sharpe);
-    expect(result!.analytics!.cagr).toBe(LIVE_KPIS.cagr);
-  });
-
-  it("A7: a live `computing` job is withheld too — there is no honest date for the PREVIOUS run's numbers", async () => {
-    seeded.strategyRow = strategyRow(COMPUTING_ROW());
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    expect(result!.analytics!.sharpe).toBeNull();
-    expect(result!.analytics!.computation_status).toBe("computing");
-  });
-
-  it("A8: an ABSENT analytics row still returns null — the pre-existing not-found path is unchanged", async () => {
-    seeded.strategyRow = strategyRow(null);
-
-    const result = await getPublicStrategyDetail(STRATEGY_ID);
-
-    // /browse/[slug]/[id] gates on `!result.analytics` to render "Strategy not
-    // found". Substituting EMPTY_ANALYTICS here would resurrect a page for a
-    // strategy that never had analytics at all.
-    expect(result!.analytics).toBeNull();
-  });
-});
-
-// =========================================================================
 // Group B — getFactsheetDetail (/factsheet/[id]/tearsheet, PUBLIC_ROUTES)
 // =========================================================================
 
@@ -345,56 +246,6 @@ describe("STALE-01 · getFactsheetDetail withholds a failed run's figures", () =
     expect(result!.analytics.computed_at).toBe(LIVE_COMPUTED_AT);
   });
 });
-
-// =========================================================================
-// Group C — getStrategyDetail (/discovery/[slug]/[strategyId], cross-tenant)
-// =========================================================================
-
-describe("STALE-01 · getStrategyDetail withholds a failed run's figures", () => {
-  it("C1: the SERIES the discovery factsheet is built from are withheld, not just the scalars", async () => {
-    seeded.strategyRow = strategyRow(DEAD_ROW());
-
-    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma");
-
-    expect(result).not.toBeNull();
-    for (const key of KPI_KEYS) {
-      expect(result!.analytics[key], `${key} leaked`).toBeNull();
-    }
-    // Phase 169.1 plan 01 (D-26): the discovery page no longer builds from
-    // these columns (it builds through the shared path, whose own G1 gate
-    // refuses a failed run), and the default projection does not request
-    // them. Shaping still withholds whatever arrives, so a future projection
-    // that widened again could not leak a dead run's series through here.
-    expect(result!.analytics.daily_returns).toBeNull();
-    expect(result!.analytics.returns_series).toBeNull();
-    // `metrics_json_by_basis` is not on the `StrategyAnalytics` interface, so
-    // read it off the raw row shape.
-    expect(
-      (result!.analytics as unknown as { metrics_json_by_basis?: unknown })
-        .metrics_json_by_basis ?? null,
-    ).toBeNull();
-  });
-
-  it("C2: the real status survives so the detail read still reports the truth", async () => {
-    seeded.strategyRow = strategyRow(DEAD_ROW());
-
-    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma");
-
-    expect(result!.analytics.computation_status).toBe("failed");
-    expect(result!.analytics.computed_at).toBeFalsy();
-  });
-
-  it("C3: CONTROL — a `complete` row keeps its scalars AND whatever series arrive", async () => {
-    seeded.strategyRow = strategyRow(LIVE_ROW());
-
-    const result = await getStrategyDetail(STRATEGY_ID, "crypto-sma");
-
-    expect(result!.analytics.sharpe).toBe(LIVE_KPIS.sharpe);
-    expect(result!.analytics.daily_returns).toEqual(HEAVY.daily_returns);
-    expect(result!.analytics.returns_series).toEqual(HEAVY.returns_series);
-  });
-});
-
 
 // =========================================================================
 // Group D — phase 190 (FACTSHEETQUEUED, D-02, D-05): a row RE-COMPUTING over a

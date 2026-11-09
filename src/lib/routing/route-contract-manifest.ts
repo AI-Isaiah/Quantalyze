@@ -203,8 +203,10 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   },
   {
     route: "/discovery/:slug/:strategyId",
-    class: "private",
-    notes: "Discovery strategy detail — session-gated.",
+    class: "exception",
+    redirectFrom: "/discovery/:slug/:strategyId",
+    notes:
+      "RETIRED 2026-11-08 (Phase 196 D-03): config-level 308 to /factsheet/[id]; no backing page. Old links keep working through the redirect.",
   },
   {
     route: "/my-strategies",
@@ -291,8 +293,10 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   },
   {
     route: "/browse/:slug/:strategyId",
-    class: "public",
-    notes: "Public browse strategy detail — covered by the /browse prefix.",
+    class: "exception",
+    redirectFrom: "/browse/:slug/:strategyId",
+    notes:
+      "RETIRED 2026-11-08 (Phase 196 D-03): config-level 308 to /factsheet/[id]; no backing page. Old links keep working through the redirect.",
   },
   {
     route: "/factsheet/:id",
@@ -377,14 +381,17 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   },
   {
     route: "/strategy/:id",
-    class: "public",
+    class: "exception",
+    redirectFrom: "/strategy/:id",
     notes:
-      "Share-token strategy deep link — covered by the /strategy PUBLIC_ROUTES prefix + bounce-exempt. In-the-wild link — NEVER MOVE.",
+      "RETIRED 2026-11-08 (Phase 196 D-03): config-level 308 to /factsheet/[id]; no backing page. Old links keep working through the redirect.",
   },
   {
     route: "/strategy/:id/v2",
-    class: "public",
-    notes: "Strategy v2 deep link — covered by the /strategy PUBLIC_ROUTES prefix.",
+    class: "exception",
+    redirectFrom: "/strategy/:id/v2",
+    notes:
+      "RETIRED 2026-11-08 (Phase 196 D-03): config-level 308 to /factsheet/[id]; no backing page. Old links keep working through the redirect.",
   },
 
   // ----- exceptions (do not follow the public/private PUBLIC_ROUTES rule) -----

@@ -1401,6 +1401,7 @@ true for 146 and half of 142–145, and **false for 141**.
 - [ ] **[198-SHARED-ACCOUNT-FALLBACK-UNNAMED]** (logged 2026-11-09, Phase 198 MYBOOK review round 3 residual of R3-01, MEDIUM, user-facing; owner: unassigned). In `MissingDataMessage.tsx`, the `not_syncing` fallback now prints unless every attributed key is named. `shared_account_failing` still counts printed lines, not the keys the reason attributes, because its producer carries no attributed-key list. So a shared-account key whose history reaches yesterday can go unnamed when another key of the same cause prints a line. Fix: have the producer in `key-data-gaps.ts` / `queries.ts` (`deriveKeyDataGapsField`) emit the attributed key ids for that cause, then apply the R3-01 rule to it. Test: two keys, both shared-account failing, one with a gap and one with data through yesterday; both must be covered.
 
 - [ ] **[198-ADD-DEEPLINK-UNMARKED-OWN]** (logged 2026-11-09, Phase 198 MYBOOK review round 3, below MEDIUM; owner: Phase 196 ONESTRATEGYPAGE, which builds the first `?add=` link). `/allocations?add=<id>` for an own strategy NOT marked own capital resolves in `resolveDeepLink` (`add-allocation.ts`) and reaches the amount step, where the own route answers 409. The picker already disables such rows (`notOwnCapital`, review R2-02). `resolveDeepLink` should apply the same test, so the link lands on the disabled row's reason instead. Nothing in `src/` builds an `?add=` link yet.
+  - ✅ **CLOSED 2026-11-09 by Phase 196 ONESTRATEGYPAGE (plan 05, commit `a0f56dabe`).** The entry above is kept as lineage. `resolveDeepLink` now takes the own-capital set and returns `not_own_capital` through `isNotOwnCapital`, the single source of the picker's own test, so `/allocations?add=<id>` for an own strategy not marked own capital lands on step 1 with the picker row's reason ("Not marked as your own capital. Mark it on My Strategies first."; the row stays disabled) and never reaches the amount step. A failed own-capital read and an archived own row still prefill, as in the picker; a held strategy is checked before the own-capital test. The viewer bar's "Add to my allocation" is the first builder of an `?add=` link. OQ-5's "until 198 merges" clause no longer applies. Red-first arms in `add-allocation.test.ts` and `AddAllocationFlow.test.tsx`, neutered and shown RED.
 
 - [ ] **[DEPS-REACT-HOOKS-7.1-LINT]** (logged 2026-10-30, found landing PR #1157, which superseded Dependabot #1122-#1124; owner: unassigned, book a phase when taken up) `eslint-config-next` 16.3.8 to 16.4.2 was LEFT OUT of #1157 because it pulls `eslint-plugin-react-hooks` 7.1.1, which raises 64 new lint errors in `src/` across six rules: `set-state-in-effect`, `refs`, `purity`, `immutability`, `preserve-manual-memoization` and `error-boundaries`. ⛔ Do NOT land it by downgrading those rules to `warn`; fix the sites, then take the bump. Dependabot will re-propose it; that PR stays red until the sites are fixed. Done when `eslint-config-next` is at 16.4.2 or later, `eslint.config.mjs` is unchanged in rule severity, and `npm run lint` exits 0.
 
@@ -1489,6 +1490,149 @@ true for 146 and half of 142–145, and **false for 141**.
 - **[166.3.1-M3-ANCHOR-OPTIONS-UPL-RESIDUE]** (logged 2026-10-15, NAVBREACH plan 05, MEDIUM, data integrity; owner/trigger: Phase 167.1.2.1.1 WRITERRESIDUALS or the next phase touching the Deribit anchor). Two recomputes of the composite in two quiet UTC sessions agree to the last digit on members 1 and 2 but member 3 differs on 64 of 143 common days, by up to 5.5e-08 (none above 1e-7; median 2.3e-09). Hypothesis, unconfirmed: member 3 holds an open options book (probe: `has_open_options_book` true, `options_session_upl_nonzero` true, `gate_candidate_rpl_only` `breach:1.54`), and its session options UPL moves the anchor between sessions; members 1 and 2 have no options book and are exact. SC-3 was accepted at 1e-7 absolute (D-12). Done when the comparison is re-run on a session where the options book is flat, or the anchor is computed with and without the options UPL, and the residue is either removed or shown to be float noise.
 - **[166.3.1-STITCH-ATTEMPT1-STALL]** (logged 2026-10-15, NAVBREACH plan 05, MEDIUM; owner: the next phase touching the job worker or `stitch_composite`). Run 2's `stitch_composite` was claimed, then showed no update for about 25 minutes and was reclaimed by the worker's own recovery; attempt 2 ran to `done`, 49 minutes after the enqueue in total against about 18 minutes for run 1. Cause not investigated. Done when the worker logs for that window say why the first attempt stalled (a deploy restart, a lost heartbeat, a hung venue call) and the cause is fixed or recorded as benign.
 - **[CI-LIVE-DB-LANE-GATEWAY-502]** (logged 2026-10-15, main CI run 38711968694 on the #1042 merge; owner: the next phase touching `scripts/local-stack/run.sh` or the live-DB lane). `frontend-live-db-lane` failed once: the claim RPC call in `compute-jobs-audit-2026-05-07-g10b.test.ts` (arm "P12-harm: a parented child is not claimable before its parent is done") received "An invalid response was received from the upstream server" from the runner-private local stack's gateway, so the execution ledger flagged one NEW failing arm. The same arm passed on the PR's own run and on main's next push; the lane passed 22 of the last 23 executed runs. Not a fan-in logic failure. Done when a second occurrence is either absent over the next 50 lane runs (close), or, if it recurs, the gateway or PostgREST log for that window names the cause and it is fixed at the source (never a retry around the arm).
+
+### 196-V2-PANELS-REVIVAL-01 — revive the Trades & positions and Exposure & benchmark greeks panels dropped with /strategy/[id]/v2 (booked 2026-11-09, Phase 196 D-06, founder decision 2026-11-08)
+
+**Why it is open.** The two panels rendered only inside `StrategyV2Shell` on `/strategy/[id]/v2`, which Phase 196 retired (D-03). The founder chose "drop now, book a phase" (D-06), so they were deleted with the shell, their tests and their library helpers. The factsheet carries none of what they showed:
+
+- **Trades & positions** showed trade counts (total, long, short, wins, losses, win rate), position counts (open, closed, average duration), the risk-reward profile (R:R, weighted R:R, profit factor, payoff ratio, long and short profit factor, expectancy, SQN), volume metrics (gross volume, mean trade size, daily and monthly turnover) and a Trade mix sub-panel (long and short maker and taker buckets, entry counts).
+- **Exposure & benchmark greeks** showed the net and gross exposure chart, the turnover chart, the benchmark greeks table (alpha, beta, information ratio, Treynor) and the 90-day rolling correlation with BTC chart, each with a say-why line when its series was absent.
+
+Beta, alpha, information ratio and Treynor still appear on the factsheet through its own rail and Advanced Detailed metrics. What is gone is the trade and position counts, the risk-reward and volume figures, the exposure and turnover charts and the rolling correlation chart.
+
+**Owner:** unrouted, a follow-up phase to be booked (`/gsd-phase`).
+
+**Trigger.** A founder or an allocator asks for trades, positions, exposure or greeks on the factsheet.
+
+**What closing it means.** Both panels live inside the factsheet's Advanced disclosure under the document layout, each with a say-why line for an absent series, behind the same figure gates as the rest of the page, and with tests (including the record-gate and unit arms). The panel hooks, readers and charts were deleted in Phase 196 plan 14 and must be rebuilt or restored from history; the original files are in the git history before the plan 14 commits. The 13 chart-token exports and three minimum-history constants plan 14 left behind (see `196-ORPHANS-01`) are the ones those panels read.
+
+### 196-ROLLING-REPEATS-01 — with Advanced open, the rolling tables repeat Sharpe, Sortino and Volatility, so SC-5's "0 repeated metrics" is met only with Advanced closed (booked 2026-11-09, Phase 196 plans 09 and 11, open item 1)
+
+**Why it is open.** The census counts a label once per table. "Rolling Metrics (6mo)" and, on a record of a year or more, "Rolling Metrics (1y)" both list Volatility, Sharpe and Sortino, and the strip carries Sharpe and Sortino. Measured on the fixtures at the end of Phase 196 (Advanced open, jsdom): fixture A repeats `sharpe`, `sortino`, `volatility`; fixtures B and C repeat `sharpe`, `sortino`. Advanced closed is 0 on all three. The UI-SPEC target is 0 in both states. The plan and UI-SPEC keep Rolling Metrics in the detailed part, so no plan relabelled, merged or exempted them; this is a design call, not decided.
+
+**Owner:** unrouted, founder or planner call. Options named so far: relabel the rolling rows, merge the two tables, or exempt rolling rows in the counter.
+
+**Trigger.** The next phase that edits `MetricsColumn.tsx` or `RollingMetricsPanel`, or the production census after-run reporting `repeated > 0` with Advanced open.
+
+**What closing it means.** The decision is recorded, `ROLLING_REPEATS_OPEN_ITEM` in `FactsheetBody.census.test.tsx` goes RED the day the rolling labels change and is then set to `[]`, and `196-CENSUS.md` reads "met" for repeated metrics, Advanced open.
+
+### 196-STYLE-DRIFT-CENSUS-BLIND-01 — the census counter cannot see the Style Drift table, so "0 repeated metrics" does not cover its rows (booked 2026-11-09, Phase 196 plan 09, open item 3)
+
+**Why it is open.** Style Drift lists Sharpe, Sortino, Ann. Volatility, Skew, Kurtosis and Max Drawdown per half in a `text-fixed-11` table; `countFactsheetCensus` reads `table.text-fixed-12` rows only. They are first-half and second-half figures, arguably not repeats of the headline ones, but the counter cannot say either way. Two small-sample notes in `BatchDPanels.tsx` (`style-drift-figure-gate-note`, "One or both halves have < 126 obs") also read as small-sample statements and were outside plan 09's files.
+
+**Owner:** unrouted, founder or planner call.
+
+**Trigger.** The next edit to `countFactsheetCensus` or to `BatchDPanels.tsx`.
+
+**What closing it means.** Either the counter reads the Style Drift rows and the decision on whether per-half figures are repeats is recorded, or the exclusion is written into the counter's definitions in `196-CENSUS.md`; and the two small-sample notes are either added to the note family or ruled out of it.
+
+### 196-HINT-COPY-PARITY-01 — the one chart hint dropped two interactions the per-chart screen-reader text described (booked 2026-11-09, Phase 196 plan 11, open item 2)
+
+**Why it is open.** The UI-SPEC's hint copy was used verbatim. The per-chart screen-reader text it replaced said "Home or zero resets" and "the wheel alone scrolls the page"; the UI-SPEC copy says "Home resets" and omits the plain-wheel statement. The chart code also resets on `0` and `Escape` (code, not copy). A screen-reader user told only "Home resets" loses the `0` alias, and nothing says a plain wheel scrolls the page. The histogram's "double-click to reset" is kept. Copy is a designer decision, so it was recorded, not changed.
+
+**Owner:** unrouted, founder or designer call. Proposal on the table: "Home, 0 or Escape resets".
+
+**Trigger.** The next edit to `chart-hint.tsx`, or an accessibility review of the factsheet.
+
+**What closing it means.** The copy states every reset key the charts accept and the plain-wheel behaviour, or the omission is decided and recorded in the UI-SPEC; a test pins the copy against the keys the chart handlers accept.
+
+### 196-FACTSHEET-DETAIL-CALLS-01 — four small design calls Phase 196 recorded and did not decide (booked 2026-11-09, Phase 196 plans 09, 10 and 11)
+
+**Why it is open.** Each is a one-line design call on the factsheet's detail, left as it was because it needed a designer or founder decision:
+
+1. **BASIS eyebrow twice (plan 10).** `part="detailed"` still renders the BASIS eyebrow, so on a composite or MTM strategy with Advanced open the eyebrow shows once above Main metrics and once above Detailed metrics.
+2. **`maxDdSpan` wording (plan 09).** The Risk group's kept note says "Max Drawdown covers only that span; the other figures in this panel cover the whole record", but Max Drawdown lives in the strip now.
+3. **Signatures for a native-unit strategy (plan 11).** The section renders with withheld-form panels (a 164.6.6.2 D-10 decision), which the "empty sections are not rendered" rule could be read to cover. It stays on its own gate.
+4. **No "Strategy" column label in Main metrics (plan 09).** The UI-SPEC says the header carries `Strategy` plus the comparator column; the existing `Panel` has no per-column Strategy header, and only the dated `vs <comparator>` header is there.
+
+**Owner:** unrouted, founder or designer call.
+
+**Trigger.** The next edit to `MetricsColumn.tsx`, `AdvancedDisclosure.tsx` or the Signatures gate.
+
+**What closing it means.** Each of the four is decided and either changed with a test or recorded as accepted in the UI-SPEC.
+
+### 196-BENCHMARK-ROW-FULL-LAYOUT-01 — the Terms Benchmark row also shows on the full-layout mounts (allocator and composer), not only on the published factsheet (booked 2026-11-09, Phase 196 plan 16, deviation 3)
+
+**Why it is open.** Plan 16 added a Benchmark row to Terms, rendered when `native.benchmark` is a non-empty string, and the plan named no variant. `TermsPanel` also renders in the full layout (the allocator mounts and the composer), so a declared benchmark now shows there too. No test pinned the full layout's Terms rows against a declared benchmark, and the `v2` suite stayed green. Whether the allocator mounts were meant to stay byte-identical is a design call.
+
+**Owner:** unrouted, founder call.
+
+**Trigger.** The next edit to `MandatePanels.tsx`, or a report that an allocator mount shows a benchmark it did not before.
+
+**What closing it means.** Either the row is gated on the document variant (`documentVariant &&`) with a test that the full layout renders no Benchmark row, or the full-layout row is accepted and pinned.
+
+### 196-TEARSHEET-NONTERMINAL-404-01 — the tearsheet now answers 404 for a strategy whose analytics run is failed, computing or unbuildable; it used to render a 200 page of dashes (booked 2026-11-09, Phase 196 plan 13)
+
+**Why it is open.** The tearsheet is now the factsheet's print view on the published-only payload builder. A strategy the builder cannot build answers `notFound()`. HEAD rendered a 200 page with the name, terms and dashes. It is strictly stronger for STALE-01, and the PDF wrapper already answered 400 for the same strategies. The side effects are user-facing: a link to the tearsheet of a strategy mid-recompute reads as a missing page, and the tearsheet's own "trade fetch status unavailable" state and its Sentry report went with the old page. Whether a 404 or a stated "not available yet" page is right for a recompute window is a product call.
+
+**Owner:** unrouted, founder call.
+
+**Trigger.** A report of a tearsheet link 404ing during a recompute, or the next edit to the tearsheet page.
+
+**What closing it means.** The behaviour for a non-terminal run is decided and pinned by a test: either 404 is accepted and recorded, or the page states why it is not available.
+
+  - ✅ **CLOSED 2026-11-09 by Phase 196 review round 1 (SF-04).** The entry above is kept as lineage. The tearsheet page now reads the build with its reason (`fetchAndBuildPayloadWithReason`): `not_visible` is the one 404, `read_error` throws to the error boundary (now present above the tearsheet since SF-05), and every other reason (`not_computed`, `composite_unbuildable`, `too_few_points`, `malformed_series`) renders a pending page with the factsheet's own sentence (`KCS10_PUBLIC_SENTENCE`), the display name and a link back to the factsheet; no figure and no opening view is mounted. Pinned in `src/app/factsheet/[id]/tearsheet/page.test.tsx` and `page.stale-analytics.test.tsx`, neutered and shown RED. Known residual: for a strategy whose status is complete but whose payload cannot build, `/api/factsheet/[id]/tearsheet.pdf` (which gates on the status only) now prints the pending page as a 200 PDF where it used to answer 500; no figure leaks, it is an honest page, but it is cached for the route's `s-maxage`.
+  - ⚠️ **2026-11-09, review round 2 (R2-01): that residual no longer holds.** `tearsheet.pdf` now waits for `#tearsheet-main`, which the pending page does not carry, and answers 503 `no-store` instead of a cached 200 PDF. What remains (a pending page answered as retryable) is booked as `196-PDF-ROUTE-RETRY-CLASSES-01`.
+
+### 196-CANONICAL-LINK-01 — the published factsheet has no canonical link, so its `?share=1` and `?from=` variants are indexable as separate URLs (booked 2026-11-09, Phase 196 plan 19)
+
+**Why it is open.** D-07 made the published factsheet indexable, and the 308s from `/browse` and `/strategy` land on it with `from`, `cat` and other query strings passed through. No `<link rel="canonical">` exists, so those variants can be indexed beside the bare URL. `generateMetadata` drops `noindex` only when the published-only probe finds the strategy; the owner, unpublished and share-token lanes keep `noindex`.
+
+**Owner:** unrouted, founder call (SEO).
+
+**Trigger.** Search Console showing variant URLs, or the first edit to `generateMetadata` in the factsheet page.
+
+**What closing it means.** `generateMetadata` emits a canonical to the bare `/factsheet/<id>` on the published lane, pinned by a metadata test, and no canonical on the noindex lanes.
+
+  - ✅ **CLOSED 2026-11-09 by Phase 196 review round 1 (WR-02).** The entry above is kept as lineage. The published branch of `generateMetadata` now emits `alternates.canonical` as the bare `/factsheet/<id>` on the `NEXT_PUBLIC_APP_URL` origin (absolute, because the repo sets no `metadataBase`; the build already asserts that origin is canonical), and the noindex lanes (a probe miss and a probe error) carry none. Pinned in `src/app/factsheet/[id]/v2/page.metadata.test.tsx`, neutered and shown RED. The optional `/factsheet/:id/v2` redirect was not added: the canonical covers the `/v2` alias.
+
+### 196-ORPHANS-01 — orphans Phase 196 plan 14 left because their files were not declared, plus stale mentions (booked 2026-11-09, Phase 196 plan 21, residuals R2 to R5)
+
+**Why it is open.** Plan 14 deleted every orphan it had declared and recorded the rest, none deleted undeclared. The end-of-phase knip reading (`196-KNIP-BASELINE.txt`, `## end of phase`) has four entries the pre-phase reading lacks:
+
+- **R2** `TradeFetchUnavailableLine` and the `fixed-10` size variant in `src/app/factsheet/[id]/trade-fetch-lines.tsx`: orphaned by plans 13, 15 and 17. Only a comment in `FactsheetView.reconstructed-range.test.tsx` names the former.
+- **R3** the unused `chart-tokens.ts` exports `CHART_SURFACE`, `CHART_TRACK`, `CHART_NEUTRAL`, `CHART_POSITIVE_*` and `CHART_NEGATIVE_*` (100, 300, 700, 800) and `CHART_TEXT_ON_LIGHT_POSITIVE` and `CHART_TEXT_ON_LIGHT_NEGATIVE`. Their last readers were the deleted charts; token-drift tests pin them.
+- **R4** the unused `min-history.ts` constants `CORRELATION_90D_MIN_DAYS`, `BENCHMARK_ROLLING_WINDOW_DAYS` and `WORST_DRAWDOWNS_MIN_DAYS`.
+- **R5** `LazyMetricsPayload` in `types.ts` (type-only, pinned by `types-design-tests.test.ts`, no production user) and its `self-referential-oracle` allowlist entry.
+- `readRecordSpan` in `src/lib/record-span-read.ts` has no non-test importer after plan 13 (comments only); knip does not list it because its tests import it.
+- `src/lib/queries.stale-analytics-detail.test.ts` has two unused fixtures, `WARNED_ROW` and `COMPUTING_ROW`, left when plan 14 removed the test groups that used them; `npm run lint` reports them as two new warnings (0 errors).
+- `scripts/factsheet-census/run.ts` is listed as an unused file, like the other standalone scripts in the baseline; it is a manual Playwright driver and not wired to CI by design.
+
+Stale mentions, comment-only or in generated maps: `.planning/codebase/STACK.md` and `INTEGRATIONS.md` still describe `BookIntroCall` and `NEXT_PUBLIC_SCHEDULING_URL`; `src/test-setup.ts`'s IntersectionObserver stub comment names `useLazyPanelMetrics`; comments in `FactsheetView.tsx` and `composite-read-path.ts` still mention the deleted discovery page or "three sites".
+
+**Owner:** unrouted. If `196-V2-PANELS-REVIVAL-01` is taken up, R3 and R4 are its to reuse or delete; otherwise the next dead-code pass.
+
+**Trigger.** The next dead-code pass, or the `196-V2-PANELS-REVIVAL-01` phase (which would reuse the chart tokens and minimum-history constants).
+
+**What closing it means.** Each item is deleted with its test rows in the same commit, or kept with a reason in the file; `npx knip --include files,exports --reporter compact` shows no entry the `## pre-phase` section of `196-KNIP-BASELINE.txt` lacks; the generated maps are regenerated.
+
+### 196-INTRO-API-ATTESTATION-01 — `/api/intro` does not require the accredited-investor attestation; only the factsheet buttons do (booked 2026-11-09, Phase 196 review rounds 1-2, CR-01 / R2-02)
+
+**Why it is open.** Before Phase 196 the only "Request intro" button lived behind `/discovery`'s attestation gate. Phase 196 put it on the factsheet, so review round 1 (CR-01, HIGH) restored the gate in `resolveFactsheetViewer`: an approved allocator without an `investor_attestations` row sees neither Request intro nor Add to my allocation. Round 1 also enforced the attestation in `/api/intro`, but that blocked the Bridge's ReplacementCard intro on `/allocations`, which has no attestation prompt (R2-02), so round 2 reverted the route to its pre-phase state. The route therefore still accepts an unattested approved allocator who posts directly, exactly as before the phase. An unattested allocator who lands on a factsheet sees no actions and no hint to attest (round-2 silent-failure M6); `/discovery` would show them the gate.
+
+**Owner:** unrouted, founder call (compliance scope).
+
+**Trigger.** A decision on whether attestation gates every intro, or the next change to `/api/intro` or the Bridge.
+
+**What closing it means.** Either the founder records that UI-only gating is intended, or `/api/intro` enforces the attestation with a distinct `attestation_required` code that the Bridge and the factsheet both route to an attestation prompt.
+
+### 196-PDF-ROUTE-RETRY-CLASSES-01 — the two factsheet PDF routes still mislabel some failures for their callers (booked 2026-11-09, Phase 196 review round 3, R3-02 and silent-failure M-B)
+
+**Why it is open.** Two review-round-3 survivors, both fail-loud, neither data-integrity. (1) R3-02: `src/app/api/factsheet/[id]/pdf/route.ts` budgets its waits against a 27 s deadline (`maxDuration - 3`), but the founder LP cron aborts its fetch at `FETCH_TIMEOUT_MS = 25_000` (`src/app/api/cron/founder-lp-report/route.ts`), so the 503 the cron retries on arrives after the cron gave up; the cron alerts instead of retrying. Not a regression against pre-phase. (2) M-B: `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts` answers a permanently pending tear sheet (complete analytics, unbuildable payload) with the same retryable 503 and error-level Sentry event as a broken render; the LP route splits these (409 for not built).
+
+**Owner:** unrouted.
+
+**Trigger.** A founder LP report alert that was a slow render, or the next edit to either PDF route.
+
+**What closing it means.** The route budget is pinned below the cron's fetch timeout by a test, and `tearsheet.pdf` reads `[data-testid="tearsheet-pending"]` and answers it with a non-retryable 409 and no error-level event.
+
+### 196-ERROR-BOUNDARY-UNSTABLE-RETRY-01 — the repo's other error boundaries read `unstable_retry`, which Next 16.4.2 does not pass (booked 2026-11-09, found in Phase 196 review round 1)
+
+**Why it is open.** `node_modules/next/dist/client/components/error-boundary.js` (Next 16.4.2) renders the error component with `{ error, reset, retry }` only. The root `error.tsx`, `(auth)`, `(dashboard)/admin`, strategies, allocations, compare and the wizard boundaries still destructure `unstable_retry`, so their Try again button would call `undefined`. Read from the installed Next source; not reproduced in a running app. Phase 196's own factsheet boundary uses `retry`. Pre-existing on main, out of Phase 196's diff.
+
+**Owner:** unrouted. **Trigger:** now (user-facing on every error page that has one).
+
+**What closing it means.** Every boundary uses the prop the installed Next passes, with a test that renders each boundary through Next's own error-boundary props.
 
 ### 202-KIT-RESIDUALS-01 — four review survivors in Phase 202's untracked capture kit, to fix before the kit is reused (booked 2026-11-07, Phase 202 review round 3)
 
@@ -4687,6 +4831,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
 - **[195-DEMO-PDF-SECRET-REMOVAL]** (logged 2026-11-07, Phase 195 TRIM, 195-01-SUMMARY; owner: the founder; trigger: any time, no code depends on it). `DEMO_PDF_SECRET` is read nowhere since Phase 195 deleted `src/lib/pdf-render-token.ts` and its `.env.example` entry, but it is still set in Vercel and in GitHub secrets. **Closed when:** the founder has removed it from every Vercel environment and from the GitHub repository secrets.
 
 - **[195-EXCHANGE-MONITORING-CLAIM]** (logged 2026-11-07, Phase 195 TRIM, review IN-03 and IN-04, VERIFICATION advisory; owner: Phase 196 ONESTRATEGYPAGE; user-facing). Three surfaces still claim read-only exchange-API monitoring for every trust tier, the claim Phase 195 removed from the `strategy-page` disclaimer variant for tiers other than `api_verified`: the tearsheet Risk Disclosure (`src/app/factsheet/[id]/tearsheet/page.tsx`), the `custody` variant of `src/components/ui/Disclaimer.tsx`, and the "Exchange-verified" meta description on `src/app/browse/[slug]/[strategyId]/page.tsx`. **Closed when:** each surface states exchange-API monitoring only for an `api_verified` strategy, pinned by a test per surface.
+  - ⚠️ **RE-MEASURED 2026-11-09 at Phase 196 close (not closed; the owner field still names Phase 196 and nothing took it, so it needs routing).** No Phase 196 plan took this item. Of the three surfaces, the `/browse/[slug]/[strategyId]` page and its meta description are GONE (plan 17 deleted the route; the URL is a 308 to the factsheet). The other two remain: the tearsheet Risk Disclosure in `src/app/factsheet/[id]/tearsheet/page.tsx` (plan 13 kept its five literal sentences, including "monitored via read-only exchange") and the `custody` variant of `src/components/ui/Disclaimer.tsx`. Neither is gated on `api_verified`.
 
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
@@ -13767,6 +13912,8 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Reading.** `src/__tests__/figure-gate-census.test.ts` excludes six files with the reason "redirected by 196 D-03 (founder 2026-11-08)". 194.1 merged first, so when Phase 196 deletes those routes and panels the census's stale-entry check goes red naming each entry.
 
 **Owner / Trigger:** Phase 196 (ONESTRATEGYPAGE). Closed when 196 deletes the six entries in the same PR that deletes the files.
+
+**CLOSED 2026-11-09 by Phase 196 ONESTRATEGYPAGE (plans 18 and 14).** The entry above is kept as lineage. Plan 18 removed the `src/app/strategy/[id]/page.tsx` row from `EXCLUDED` in the commit that deleted the page (`29aa5a581`). Plan 14 removed the other five `src/components/strategy-v2/*` rows as each file was deleted (`1921b9eea`, `442b734e0`), then the `REDIRECTED` constant, its reason pattern, the "196-redirected files" test and the header paragraph. The census's stale-entry check passes with no row naming a deleted file, and plan 14 showed it RED by planting a deleted path back into `EXCLUDED`. Plan 17 also dropped the deleted browse detail page from the census `ANCHORS` and `GATED_ANCHORS`.
 
 ### [194.1-CENSUS-NO-FORWARD-CHECK] — nothing stops a later edit moving a live 194.1 site into the census exclusions (booked 2026-11-08, Phase 194.1 security audit advisory on T-194.1-28)
 
