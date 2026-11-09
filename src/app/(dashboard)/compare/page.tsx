@@ -17,6 +17,8 @@ import { CompareTable } from "@/components/strategy/CompareTable";
 import { CompareEquityOverlay } from "@/components/strategy/CompareEquityOverlay";
 import { CompareCorrelationMatrix } from "@/components/strategy/CompareCorrelationMatrix";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
+import { COMPARE_MAX_ITEMS, compareHref } from "@/lib/compare-href";
+import { CompareAddStrategy } from "./CompareAddStrategy";
 import {
   parseHoldingCompareId,
   fetchHoldingCompareItem,
@@ -60,24 +62,24 @@ export default async function ComparePage({
   await requireRolePage(supabase, user, "allocator");
 
   const params = await searchParams;
-  const ids = params.ids?.split(",").filter(Boolean).slice(0, 4) ?? [];
+  const ids = params.ids?.split(",").filter(Boolean).slice(0, COMPARE_MAX_ITEMS) ?? [];
 
   if (ids.length === 0) {
     return (
       <>
         {/* 52-UI-SPEC copy contract: the empty-selection state names what is
-            missing + what to do (honest absence, neutral muted card — never a
-            fabricated zero/count-up; STATE-02). The "Compare strategies"
-            PageHeader title is preserved verbatim — it is the 52-01 e2e
-            reflow-sweep anchor (h1:has-text("Compare strategies")).
-            Phase 170, 2026-09-27: the old sentence named a control that does
-            not exist. */}
+            missing + what to do (honest absence, never a fabricated zero; STATE-02).
+            The "Compare strategies" PageHeader title is preserved verbatim: it is
+            the 52-01 e2e reflow-sweep anchor (h1:has-text("Compare strategies")).
+            Phase 197 (D-04): the page now adds strategies itself, so the removed
+            copy that said adding was unavailable is gone and the search leads. */}
         <PageHeader
           title="Compare strategies"
           breadcrumb={COMPARE_BREADCRUMB}
         />
-        <p className="text-sm text-text-muted text-center py-16">
-          Open a strategy&apos;s factsheet and choose &quot;Compare strategies&quot; to start a comparison. Adding strategies to a comparison from this page is not available yet.
+        <CompareAddStrategy currentIds={[]} />
+        <p className="text-caption text-text-muted">
+          No strategies selected yet. Add one above, or select 2 to 4 in Discovery and choose Compare.
         </p>
       </>
     );
@@ -231,8 +233,28 @@ export default async function ComparePage({
         <p className="text-sm text-text-muted text-center py-16">
           This comparison isn&apos;t available.
         </p>
+        <CompareAddStrategy currentIds={[]} />
       </>
     );
+  }
+
+  // The ids the page actually renders (strategy ids and holding refs), in display
+  // order. The search and the Remove links build their URLs from these, never from
+  // the raw `ids` value: an id the page could not resolve is dropped, and the cap
+  // counts what is on screen.
+  const currentIds = items.map((it) =>
+    it.kind === "strategy" ? it.strategy.id : it.holding_ref,
+  );
+
+  // Remove link per strategy column: the same comparison without that id. Removing
+  // the last one gives compareHref([]), which is /compare.
+  const removeHrefs: Record<string, string> = {};
+  for (const it of items) {
+    if (it.kind === "strategy") {
+      removeHrefs[it.strategy.id] = compareHref(
+        currentIds.filter((id) => id !== it.strategy.id),
+      );
+    }
   }
 
   // Title: mixed mode says "items", pure-strategy says "Strategies"
@@ -296,10 +318,19 @@ export default async function ComparePage({
         title={title}
         breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
       />
-      {items.length === 1 ? (
-        <p className="text-caption text-text-muted">
-          One strategy selected. Adding a second strategy from this page is not available yet.
-        </p>
+      {/* Phase 197 (D-04): one item gets a caption above the search; every state
+          below the cap gets the search, built from the resolved ids. The cap caption
+          sits inside the content stack below. Spacing uses space-y here, not margin
+          classes, so the box-inset match with loading.tsx (loading.test.tsx) holds. */}
+      {items.length < COMPARE_MAX_ITEMS ? (
+        <div className="space-y-4">
+          {items.length === 1 ? (
+            <p className="text-caption text-text-muted">
+              One strategy selected. Add another to compare.
+            </p>
+          ) : null}
+          <CompareAddStrategy currentIds={currentIds} />
+        </div>
       ) : null}
       {/* APPLY-01 / TYPE-03: compare is a DATA surface. It fluid-filled
           toward ~1920px until 2026-08-09, when the founder ruled that a fixed
@@ -308,7 +339,12 @@ export default async function ComparePage({
           owned solely by DashboardChrome's `isWide` arm. */}
       <div>
         <div className="space-y-8">
-          <CompareTable items={tableItems} />
+          {items.length >= COMPARE_MAX_ITEMS ? (
+            <p className="text-caption text-text-muted">
+              Comparing {COMPARE_MAX_ITEMS} strategies, the maximum. Remove one to add another.
+            </p>
+          ) : null}
+          <CompareTable items={tableItems} removeHrefs={removeHrefs} />
           <CompareEquityOverlay items={overlayItems} />
           <CompareCorrelationMatrix items={strategyOnlyItems} />
         </div>

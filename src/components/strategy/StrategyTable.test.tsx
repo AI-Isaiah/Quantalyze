@@ -69,6 +69,12 @@ function makeAnalytics(
     exposure_metrics: null,
     data_quality_flags: null,
     trades_fetched_at: null,
+    // Phase 197 plan 03 (CLAR-02, D-03): a CURRENT newest return day by default (yesterday, against
+    // the real clock, far inside the 7-day line). The published-only table now judges a row by
+    // `series_end`, and a fixture without one is "age unknown": it would lose its `#n` and sort
+    // after dated rows, which this file's ordinal and order cases are not about. A test that needs
+    // a stale or undated row passes `series_end` explicitly (stale-series.test.tsx owns those).
+    series_end: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
     ...overrides,
   };
 }
@@ -782,7 +788,11 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     const heads = Array.from(
       document.querySelectorAll<HTMLTableCellElement>("thead tr th"),
     );
-    const idx = heads.findIndex((th) => (th.textContent ?? "").trim() === label);
+    // Phase 197 D-05: a header is a label line plus a qualifier line, so match the sort button's
+    // accessible name ("Volatility, full record, annualized"), whose first clause is the label.
+    const idx = heads.findIndex((th) =>
+      (th.querySelector("button")?.getAttribute("aria-label") ?? "").startsWith(`${label},`),
+    );
     expect(idx, `header "${label}" must exist`).toBeGreaterThanOrEqual(0);
     return document
       .querySelector("tbody tr")!
@@ -795,7 +805,9 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     fixture.analytics.volatility = 0.3377;
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
 
-    const expected = "+33.77%"; // formatPercent(0.3377)
+    // Phase 197 D-05: volatility can never be negative, so it prints without a sign. This pinned
+    // the signed form of 0.3377, which read as a gain; the unsigned form is formatPercent(0.3377, 2, { signed: false }).
+    const expected = "33.77%";
     // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
     expect(screen.getAllByText(expected)).toHaveLength(1);
     expect(cellUnderHeader("Volatility").textContent).toContain(expected);
@@ -1019,7 +1031,10 @@ describe("StrategyTable — v1.11 sign-restricted color policy", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     fixture.analytics.cumulative_return = null as unknown as number;
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
-    const cell = screen.getByText("—").closest("td")!;
+    // The Return cell itself, not the first "—" on the page: the Track cell of a row with no
+    // series dates is also an em dash (Phase 197 D-05).
+    const cell = metricCell("Return");
+    expect(cell.textContent?.trim()).toBe("—");
     expect(cell.className).not.toContain("text-positive");
     expect(cell.className).not.toContain("text-negative");
   });
@@ -1397,13 +1412,17 @@ describe("StrategyTable — container-gated pinning (170.2 D-05, 170.6.1 D-09)",
     // name cell off the header cell's edge unseen. Three of each, exactly.
     const tokens = pinnedStrings();
     const count = (want: string) => tokens.filter((t) => t === want).length;
-    expect(count("@3xl:left-0")).toBe(3);
+    // Phase 197 / ROUTE-05: six, not three. The three rank cells keep their default `@3xl:left-0`
+    // literal (their `selectable` twin reads `@3xl:left-(--pin-rank-left)`, which this census does
+    // not match), and the opt-in select column adds its own three at left-0 (header, data row,
+    // placeholder row). A non-`selectable` mount renders only the first three.
+    expect(count("@3xl:left-0")).toBe(6);
     expect(count("@3xl:left-(--pin-star-left)")).toBe(3);
     expect(count("@3xl:left-(--pin-strategy-left)")).toBe(3);
     // 170.6.1 D-09: plus the Strategy column's three bare left-0 tokens.
     expect(count("left-0")).toBe(3);
     // Nothing else (no fixed 14 / 6.25rem survives next to the variables).
-    expect(tokens.length).toBe(12);
+    expect(tokens.length).toBe(15);
   });
 
   it("the placeholder star and Strategy cells carry the same widths and offsets as the data row", () => {
@@ -1544,6 +1563,9 @@ describe("StrategyTable - Verified check follows the public trust signal (Phase 
 /** One named column's cell on the single rendered data row. */
 function metricCell(label: string): HTMLElement {
   const headers = Array.from(document.querySelectorAll("thead th"));
+  // Phase 197 D-05: a header's text is now label + qualifier ("Returnfullrecord·notann." once spaces
+  // are stripped), so a label matches by prefix. "Return" is the FIRST header starting with it, the
+  // full-record Return, because Track precedes it and the 6-month one is "Returnlast6months".
   const idx = headers.findIndex((th) => th.textContent?.replace(/\s+/g, "").startsWith(label));
   if (idx < 0) throw new Error(`no header named ${label}`);
   const row = document.querySelector("tbody tr") as HTMLElement;
@@ -1661,7 +1683,7 @@ describe("StrategyTable - the CAGR cell follows D-15's total record (phase 194 p
     );
     expect(metricCell("Return").textContent).toContain("42.00%");
     expect(metricCell("MaxDD").textContent).toContain("12.00%");
-    expect(metricCell("6Month").textContent).toContain("21.00%");
+    expect(metricCell("Returnlast6months").textContent).toContain("21.00%");
   });
 
   it("a record of a year or more carries no marker, and a row with no record scalars shows its stored value", () => {
@@ -1847,6 +1869,6 @@ describe("StrategyTable - D-09 missing figures sort last and never match a filte
     }
     expect(metricCell("Return").textContent).toContain("42.00%");
     expect(metricCell("MaxDD").textContent).toContain("12.00%");
-    expect(metricCell("6Month").textContent).toContain("21.00%");
+    expect(metricCell("Returnlast6months").textContent).toContain("21.00%");
   });
 });

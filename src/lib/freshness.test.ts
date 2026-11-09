@@ -10,6 +10,9 @@ import {
   FRESHNESS_COLORS,
   FRESH_HOURS,
   WARM_HOURS,
+  SERIES_STALE_DAYS,
+  SERIES_STALE_DAYS_TRADITIONAL,
+  listSeriesVerdict,
 } from "./freshness";
 
 describe("computeFreshness", () => {
@@ -250,5 +253,105 @@ describe("resolveTradeFetch", () => {
         "current",
       );
     });
+  });
+});
+
+/**
+ * Phase 197 / CLAR-02 (D-03) - the list verdict. It exists so a strategy whose return series ended
+ * weeks ago cannot rank as current, and it must read the newest return DAY, never a pipeline instant.
+ * The boundaries are asserted on the constants' values AND by name, so moving a threshold without
+ * moving its copy goes red.
+ */
+describe("listSeriesVerdict (Phase 197 D-03)", () => {
+  const NOW_MS = Date.parse("2026-11-08T12:00:00.000Z");
+  const dayAgo = (n: number) =>
+    new Date(NOW_MS - n * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  it("pins the two thresholds the copy interpolates", () => {
+    expect(SERIES_STALE_DAYS).toBe(7);
+    expect(SERIES_STALE_DAYS_TRADITIONAL).toBe(10);
+  });
+
+  it("crypto: 7 whole days old is current, 8 is stale", () => {
+    expect(listSeriesVerdict(dayAgo(7), "crypto", NOW_MS)).toEqual({
+      verdict: "current",
+      ageDays: 7,
+      thresholdDays: SERIES_STALE_DAYS,
+    });
+    expect(listSeriesVerdict(dayAgo(8), "crypto", NOW_MS)).toEqual({
+      verdict: "stale",
+      ageDays: 8,
+      thresholdDays: SERIES_STALE_DAYS,
+    });
+  });
+
+  it("traditional: 10 whole days old is current, 11 is stale", () => {
+    expect(listSeriesVerdict(dayAgo(10), "traditional", NOW_MS)).toEqual({
+      verdict: "current",
+      ageDays: 10,
+      thresholdDays: SERIES_STALE_DAYS_TRADITIONAL,
+    });
+    expect(listSeriesVerdict(dayAgo(11), "traditional", NOW_MS).verdict).toBe("stale");
+  });
+
+  it("a null or unrecognised asset class takes the traditional threshold, not the crypto one", () => {
+    // 9 days old: stale for crypto (>7), current for everything else (<=10).
+    expect(listSeriesVerdict(dayAgo(9), null, NOW_MS).verdict).toBe("current");
+    expect(listSeriesVerdict(dayAgo(9), undefined, NOW_MS).thresholdDays).toBe(10);
+    expect(listSeriesVerdict(dayAgo(9), "CRYPTO", NOW_MS).verdict).toBe("current");
+    expect(listSeriesVerdict(dayAgo(9), "crypto", NOW_MS).verdict).toBe("stale");
+    expect(listSeriesVerdict(dayAgo(11), null, NOW_MS).verdict).toBe("stale");
+  });
+
+  it("counts whole UTC days: the same bar reads the same at 00:30 and 23:30", () => {
+    const end = dayAgo(7);
+    const early = Date.parse("2026-11-08T00:30:00.000Z");
+    const late = Date.parse("2026-11-08T23:30:00.000Z");
+    expect(listSeriesVerdict(end, "crypto", early).verdict).toBe("current");
+    expect(listSeriesVerdict(end, "crypto", late).verdict).toBe("current");
+    // One UTC midnight later the same bar is 8 whole days old.
+    expect(listSeriesVerdict(end, "crypto", Date.parse("2026-11-09T00:00:00.000Z")).verdict).toBe("stale");
+  });
+
+  it("accepts a full ISO timestamp by its first ten characters", () => {
+    expect(listSeriesVerdict(`${dayAgo(30)}T00:00:00Z`, "crypto", NOW_MS).ageDays).toBe(30);
+  });
+
+  it("missing or unparseable series_end is unknown, never current", () => {
+    for (const bad of [null, undefined, "", "not a day", "2026-13-45", "2026/11/01", "11-08-2026"]) {
+      expect(listSeriesVerdict(bad, "crypto", NOW_MS)).toEqual({
+        verdict: "unknown",
+        ageDays: null,
+        thresholdDays: SERIES_STALE_DAYS,
+      });
+    }
+  });
+
+  it("a non-finite instant cannot be judged", () => {
+    expect(listSeriesVerdict(dayAgo(1), "crypto", NaN).verdict).toBe("unknown");
+  });
+
+  it("a date within the 2-day skew tolerance is current: one day ahead (timezone skew, RESEARCH A3)", () => {
+    expect(listSeriesVerdict(dayAgo(-1), "crypto", NOW_MS).verdict).toBe("current");
+  });
+
+  it("a date more than 2 whole UTC days ahead is unknown, never current: a dead strategy must not rank as current", () => {
+    for (const end of [dayAgo(-3), "2099-01-01"]) {
+      expect(listSeriesVerdict(end, "crypto", NOW_MS)).toEqual({
+        verdict: "unknown",
+        ageDays: null,
+        thresholdDays: SERIES_STALE_DAYS,
+      });
+    }
+    expect(listSeriesVerdict("2099-01-01", "traditional", NOW_MS).verdict).toBe("unknown");
+  });
+
+  it("a calendar-impossible day is unknown, not rolled over to the next month", () => {
+    // Date.parse("2026-02-31T00:00:00Z") is 2026-03-03 in V8: only a round-trip check refuses it.
+    for (const bad of ["2026-02-31", "2026-04-31", "2025-02-29"]) {
+      expect(listSeriesVerdict(bad, "crypto", Date.parse("2026-03-04T12:00:00.000Z")).verdict).toBe("unknown");
+    }
+    // A real leap day still reads.
+    expect(listSeriesVerdict("2028-02-29", "crypto", Date.parse("2028-03-01T12:00:00.000Z")).verdict).toBe("current");
   });
 });

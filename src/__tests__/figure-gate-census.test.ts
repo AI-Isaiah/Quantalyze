@@ -101,6 +101,8 @@ const EXCLUDED: Record<string, string> = {
   "src/app/(dashboard)/allocations/components/WeightOptimizerSection.tsx": "label only",
   "src/components/admin/PreferencesPanel.tsx": "label only",
   "src/components/strategy/CustomizeDrawer.tsx": "label only",
+  // Phase 197 plan 01 (D-05): the discovery header label map; strings only, the gated cells live in StrategyTable.
+  "src/components/strategy/discovery-columns.ts": "label only",
   "src/components/strategy/StrategyFilters.tsx": "label only",
   "src/components/discovery/SimulateImpactButton.tsx": "label only",
   // static copy: prose, no data.

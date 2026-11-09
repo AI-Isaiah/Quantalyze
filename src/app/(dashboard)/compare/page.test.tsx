@@ -11,7 +11,7 @@
  * - RLS-gated empty holdings → "not available" (D-15)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import React from "react";
 import { COMPARE_ANALYTICS_COLUMNS } from "@/lib/queries";
 
@@ -27,6 +27,17 @@ vi.mock("server-only", () => ({}));
 // Mock next/navigation so redirect() is a no-op in tests
 vi.mock("next/navigation", () => ({
   redirect: vi.fn(),
+}));
+
+// The "Add strategy" search is a client component with its own suite
+// (CompareAddStrategy.test.tsx). A recording stub keeps useRouter out of this
+// server-page suite and records the ids the page hands it.
+let addStrategyIds: readonly string[] | null = null;
+vi.mock("./CompareAddStrategy", () => ({
+  CompareAddStrategy: ({ currentIds }: { currentIds: readonly string[] }) => {
+    addStrategyIds = currentIds;
+    return React.createElement("div", { "data-testid": "add-strategy" });
+  },
 }));
 
 // Mock Breadcrumb + PageHeader as minimal stubs (they rely on server context)
@@ -923,73 +934,112 @@ describe("ComparePage — a failed load is surfaced, not reported as 'not availa
 });
 
 /**
- * N-CMP (Phase 170, 2026-09-27). No prior assertion pinned the old empty-state
- * sentence. These cases pin the copy that replaced it: no ids name the
- * factsheet control, one resolved item states the limit, two do not.
+ * Phase 197 plan 04 (ROUTE-05, D-04). /compare adds and removes strategies itself,
+ * so no state may say adding is unavailable, and the search and captions follow the
+ * UI-SPEC state table: 0 ids, none resolvable, 1, 2-3 and 4 items.
  */
 const EMPTY_COMPARE =
-  'Open a strategy\'s factsheet and choose "Compare strategies" to start a comparison. Adding strategies to a comparison from this page is not available yet.';
-const ONE_COMPARE =
-  "One strategy selected. Adding a second strategy from this page is not available yet.";
+  "No strategies selected yet. Add one above, or select 2 to 4 in Discovery and choose Compare.";
+const ONE_COMPARE = "One strategy selected. Add another to compare.";
+const CAP_COMPARE = "Comparing 4 strategies, the maximum. Remove one to add another.";
+const ID_A = "11111111-2222-4333-8444-555555555555";
+const ID_B = "22222222-3333-4444-8555-666666666666";
+const ID_C = "33333333-4444-4555-8666-777777777777";
+const ID_D = "44444444-5555-4666-8777-888888888888";
 
-describe("ComparePage — zero, one and many ids (N-CMP)", () => {
+describe("ComparePage: every state, the search and Remove (197 plan 04)", () => {
   beforeEach(() => {
     mockStrategyData = [];
     mockHoldingData = [];
     mockStrategyError = null;
     mockHoldingError = null;
+    addStrategyIds = null;
   });
 
-  it("with no ids, keeps Compare strategies and names the factsheet control", async () => {
-    const ComparePage = await getComparePage();
-    const Page = await ComparePage({ searchParams: Promise.resolve({}) });
-    render(Page as React.ReactElement);
-    expect(
-      screen.getByRole("heading", { name: "Compare strategies" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText(EMPTY_COMPARE)).toBeInTheDocument();
-    expect(screen.queryByText(/checkboxes/i)).toBeNull();
-  });
-
-  it("with one resolvable id, shows the one-strategy note in text-caption text-text-muted", async () => {
-    mockStrategyData = [
-      makeSampleStrategy(
-        "11111111-2222-4333-8444-555555555555",
-        "Strategy Alpha",
-      ),
-    ];
+  const renderIds = async (ids?: string) => {
     const ComparePage = await getComparePage();
     const Page = await ComparePage({
-      searchParams: Promise.resolve({
-        ids: "11111111-2222-4333-8444-555555555555",
-      }),
+      searchParams: Promise.resolve(ids === undefined ? {} : { ids }),
     });
     render(Page as React.ReactElement);
+  };
+  const strategies = (...ids: string[]) =>
+    ids.map((id, i) => makeSampleStrategy(id, `Strategy ${"ABCD"[i]}`));
+
+  it("with no ids, keeps the Compare strategies heading, shows the search and the new caption", async () => {
+    await renderIds();
+    expect(screen.getByRole("heading", { name: "Compare strategies" })).toBeInTheDocument();
+    expect(screen.getByTestId("add-strategy")).toBeInTheDocument();
+    expect(addStrategyIds).toEqual([]);
+    const caption = screen.getByText(EMPTY_COMPARE);
+    expect(caption.className).toContain("text-caption");
+    expect(caption.className).toContain("text-text-muted");
+    expect(caption.className).not.toContain("text-center");
+    // WHY: the removed copy told the allocator the very thing this page now does.
+    expect(screen.queryByText(/from this page/i)).toBeNull();
+  });
+
+  it("with ids that resolve to nothing, says so and still offers the search with no current ids", async () => {
+    await renderIds(ID_A);
+    expect(screen.getByText("This comparison isn't available.")).toBeInTheDocument();
+    expect(screen.getByTestId("add-strategy")).toBeInTheDocument();
+    expect(addStrategyIds).toEqual([]);
+  });
+
+  it("with one item, shows the caption, the search and the table", async () => {
+    mockStrategyData = strategies(ID_A);
+    await renderIds(ID_A);
     const note = screen.getByText(ONE_COMPARE);
     expect(note.className).toContain("text-caption");
     expect(note.className).toContain("text-text-muted");
+    expect(addStrategyIds).toEqual([ID_A]);
+    expect(document.querySelector("table")).not.toBeNull();
+    expect(screen.queryByText(/from this page/i)).toBeNull();
   });
 
-  it("with two resolvable ids, does not show the one-strategy note", async () => {
-    mockStrategyData = [
-      makeSampleStrategy(
-        "11111111-2222-4333-8444-555555555555",
-        "Strategy Alpha",
-      ),
-      makeSampleStrategy(
-        "22222222-3333-4444-8555-666666666666",
-        "Strategy Beta",
-      ),
-    ];
-    const ComparePage = await getComparePage();
-    const Page = await ComparePage({
-      searchParams: Promise.resolve({
-        ids: "11111111-2222-4333-8444-555555555555,22222222-3333-4444-8555-666666666666",
-      }),
-    });
-    render(Page as React.ReactElement);
+  it("with two or three items, shows the search and no caption", async () => {
+    mockStrategyData = strategies(ID_A, ID_B, ID_C);
+    await renderIds(`${ID_A},${ID_B},${ID_C}`);
+    expect(screen.getByTestId("add-strategy")).toBeInTheDocument();
+    expect(addStrategyIds).toEqual([ID_A, ID_B, ID_C]);
     expect(screen.queryByText(ONE_COMPARE)).toBeNull();
-    expect(screen.queryByText(/not available yet/i)).toBeNull();
+    expect(screen.queryByText(CAP_COMPARE)).toBeNull();
+  });
+
+  it("with four items, shows the cap caption and no search", async () => {
+    mockStrategyData = strategies(ID_A, ID_B, ID_C, ID_D);
+    await renderIds(`${ID_A},${ID_B},${ID_C},${ID_D}`);
+    // WHY: a fifth id must never be addable, so the search is not mounted at the cap.
+    expect(screen.queryByTestId("add-strategy")).toBeNull();
+    expect(screen.getByText(CAP_COMPARE)).toBeInTheDocument();
+  });
+
+  it("counts only what the page shows: an unresolved id is not echoed to the search", async () => {
+    mockStrategyData = strategies(ID_A);
+    await renderIds(`${ID_A},${ID_B}`);
+    expect(addStrategyIds).toEqual([ID_A]);
+  });
+
+  it("Remove on one of two strategies links to the other alone; on the only one, to /compare", async () => {
+    mockStrategyData = strategies(ID_A, ID_B);
+    await renderIds(`${ID_A},${ID_B}`);
+    const removeA = screen.getByRole("link", { name: "Remove Strategy A from the comparison" });
+    expect(removeA).toHaveAttribute("href", `/compare?ids=${ID_B}`);
+    cleanup();
+    mockStrategyData = strategies(ID_A);
+    await renderIds(ID_A);
+    expect(
+      screen.getByRole("link", { name: "Remove Strategy A from the comparison" }),
+    ).toHaveAttribute("href", "/compare");
+  });
+
+  it("keeps a holding ref in a strategy's Remove href (it still counts toward the 4)", async () => {
+    mockStrategyData = strategies(ID_A);
+    mockHoldingData = makeSampleHoldings("BTC", 40);
+    await renderIds(`holding:binance:BTC:spot,${ID_A}`);
+    expect(
+      screen.getByRole("link", { name: "Remove Strategy A from the comparison" }),
+    ).toHaveAttribute("href", "/compare?ids=holding%3Abinance%3ABTC%3Aspot");
   });
 });
 

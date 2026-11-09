@@ -13773,3 +13773,28 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Reading.** Plan 13 deleted the pending map, and the assertion that no live 194.1 site sits in `EXCLUDED` went with it. Today every live site imports a gate and none is excluded, and the census header forbids it, but a later edit could add a live site to `EXCLUDED` as "no render" and the census would stay green.
 
 **Owner / Trigger:** unowned. Trigger: the next phase that edits the census's `EXCLUDED` map. Closed when the census pins the live 194.1 site files as never excluded.
+## Phase 197 (SCREEN) — routed items (logged 2026-11-08)
+
+### [197-VOL-SIGN-TEARSHEET-COMPARE] — the tearsheet and `CompareTable` print volatility with a plus sign, discovery prints it unsigned (booked 2026-11-08, Phase 197 plan 06, RESEARCH Pitfall 4)
+
+**Reading.** Discovery prints volatility unsigned (D-05: volatility cannot be negative), while the tearsheet and `CompareTable` still print it with a plus sign. `src/__tests__/figure-parity-pages.test.tsx` therefore compares volatility by value on the table side rather than as exact text, until the surfaces agree.
+
+**Owner / Trigger:** Phase 201 (PLAINWORDS). Closed when both surfaces print volatility unsigned and the parity test compares volatility as exact text again.
+
+### [197-SYNCBADGE-SERIES-LADDER] — `SyncBadge` judges the series on one 3/7-day ladder for every asset class, so it can disagree with the discovery stale chip (booked 2026-11-08, Phase 197 plan 06, UI-SPEC A-4, RESEARCH Pitfall 10)
+
+**Reading.** `SyncBadge` judges the track record's last date on one 3/7-day ladder for every asset class. A stale crypto row can therefore show its red series dot beside the amber stale chip, and a traditional row 8 to 10 days old shows the red dot while it still ranks as current under D-03's 10 days. `SyncBadge` is shared with the portfolio tables, so Phase 197 left it unchanged.
+
+**Owner / Trigger:** unrouted, needs a phase (SyncBadge is shared with the portfolio tables). Closed when the badge and the discovery verdict agree per asset class, or the founder records the difference as intended.
+
+### [197-PERCENTILE-COHORT-STALE] — percentile cohorts still include stale peers (booked 2026-11-08, Phase 197 plan 06, RESEARCH Pitfall 9)
+
+**Reading.** `getPercentiles` still ranks current rows against cohorts that include stale peers, so a current row's percentile is partly relative to dormant records. Phase 197 left the cohort unchanged on purpose (orchestrator resolution 3).
+
+**Owner / Trigger:** unrouted. Closed when the cohort excludes stale rows or the founder records the cohort rule.
+
+### [197-COMPARE-NAME-PSEUDONYMITY] — the `/compare` search names other managers' strategies by codename while discovery prints the raw name (booked 2026-11-08, Phase 197 plan 06, RESEARCH Open Question 1, user-facing)
+
+**Reading.** The `/compare` "Add strategy" search names other managers' rows by codename (`displayStrategyName`), while discovery and `CompareTable` print the raw strategy name, so an allocator who types a name seen in discovery may find nothing (orchestrator resolution 1).
+
+**Owner / Trigger:** unrouted, needs a founder decision on the pseudonymity contract. Closed when one naming rule applies to all three surfaces.

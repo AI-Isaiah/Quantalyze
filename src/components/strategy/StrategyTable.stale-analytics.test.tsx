@@ -122,7 +122,7 @@ const STALE = {
   cagr: 0.6612, //             "+66.12%"
   sharpe: 3.77, //             "3.77"
   max_drawdown: -0.0311, //    "-3.11%"
-  volatility: 0.1855, //       "+18.55%"
+  volatility: 0.1855, //       "18.55%" (unsigned since Phase 197 D-05)
   six_month_return: 0.4409, // "+44.09%"
 } as const;
 
@@ -136,7 +136,9 @@ const LIVE = {
   six_month_return: 0.07,
 } as const;
 
-const STALE_TEXT = ["+91.34%", "+66.12%", "3.77", "-3.11%", "+18.55%", "+44.09%"];
+// "18.55%" is unsigned (Phase 197 D-05: volatility carries no sign). It is a substring of both the
+// signed and unsigned forms, so the leak assertion stays meaningful whichever the table prints.
+const STALE_TEXT = ["+91.34%", "+66.12%", "3.77", "-3.11%", "18.55%", "+44.09%"];
 
 /**
  * The metric bundle a fixture carries. Widened from `typeof STALE | typeof
@@ -161,6 +163,12 @@ function analyticsEmbed(
     // assertion below is non-vacuous: the row has a claim to make, and only the
     // table's gates stop it.
     trades_fetched_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    // Phase 197 plan 03 (CLAR-02, D-03): every fixture row carries a CURRENT newest return day
+    // (yesterday, against the same real clock `computed_at` uses, far inside the 7-day line). Since
+    // the discovery verdict reads `series_end`, a row without one is "age unknown" and would lose
+    // its `#n`, which this file's ordinal cases are not about. The stale and unknown cases live in
+    // StrategyTable.stale-series.test.tsx.
+    series_end: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
     computation_status: status,
     sparkline_returns: [1, 2, 3, 4, 5],
     sparkline_drawdown: [0, -0.1, -0.2, -0.05, 0],
@@ -337,16 +345,17 @@ describe("STALE-01 seam — anonymous browse render of a failed-computation row"
     await renderPublicCategory();
 
     const dead = rowFor(NAME_DEAD);
-    // Visible metric cells of a 13-td row: Return, CAGR, Sharpe, Max DD, Vol,
-    // 6 Month. (AUM at index 8 lives on the `strategies` row, is NOT a product
+    // Visible metric cells of a 14-td row: Return, CAGR, Sharpe, Max DD, Vol,
+    // 6 Month at 3..8 (index 2 is Track, Phase 197 D-05, which is not a product of the
+    // analytics job either). (AUM at index 9 lives on the `strategies` row, is NOT a product
     // of the analytics job, and must survive — asserted separately below.)
-    for (const i of [2, 3, 4, 5, 6, 7]) {
+    for (const i of [3, 4, 5, 6, 7, 8]) {
       const text = (dead.querySelectorAll("td")[i]?.textContent ?? "").trim();
       expect(text, `metric cell ${i} of a failed row`).toContain(EM_DASH);
       expect(text).not.toContain("0.00");
     }
     // AUM is a fact about the strategy, not an output of the computation.
-    expect((dead.querySelectorAll("td")[8]?.textContent ?? "").trim()).toBe("$1.0M");
+    expect((dead.querySelectorAll("td")[9]?.textContent ?? "").trim()).toBe("$1.0M");
   });
 
   it("makes no sync claim for a failed row, while the computed row keeps its badge", async () => {
@@ -731,7 +740,7 @@ const RERUN_KPIS: Metrics = {
   volatility: 0.14,
   six_month_return: 0.21,
 };
-const RERUN_TEXT = ["+77.00%", "+31.00%", "2.50", "-9.00%", "+14.00%", "+21.00%"];
+const RERUN_TEXT = ["+77.00%", "+31.00%", "2.50", "-9.00%", "14.00%", "+21.00%"]; // volatility unsigned, Phase 197 D-05
 
 /** A list row re-computing over a stored success: marker and series end projected. */
 function rerunDbRow(id: string, name: string, status = "computing"): Record<string, unknown> {
@@ -810,7 +819,8 @@ describe("phase 190 seam — a re-running row on the discovery list", () => {
 
     const first = rowFor(NAME_FIRST);
     expect(rankText(first)).toBe(EM_DASH);
-    for (const i of [2, 3, 4, 5, 6, 7]) {
+    // Cells 3..8 are the six metrics; 2 is Track (Phase 197 D-05).
+    for (const i of [3, 4, 5, 6, 7, 8]) {
       expect((first.querySelectorAll("td")[i]?.textContent ?? "").trim()).toContain(EM_DASH);
     }
     expect(renderedOrder()).toEqual([NAME_RERUN, NAME_LIVE, NAME_FIRST]);

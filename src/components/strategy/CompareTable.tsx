@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import { getMetricLabel, LABEL_COLORS } from "@/lib/metric-labels";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
@@ -93,7 +94,18 @@ function findWinner(
   return bestIdx;
 }
 
-export function CompareTable({ items }: { items: CompareItem[] }) {
+export function CompareTable({
+  items,
+  removeHrefs,
+}: {
+  items: CompareItem[];
+  /**
+   * Phase 197 (D-04, U-10): strategy id to the comparison URL without it. When an
+   * entry exists the column header gets a Remove link; absent, the header is
+   * unchanged. Holding panels never get one.
+   */
+  removeHrefs?: Record<string, string>;
+}) {
   if (items.length === 0) {
     return <p className="text-sm text-text-muted text-center py-8">Select strategies to compare.</p>;
   }
@@ -136,7 +148,20 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
                     title={item.strategy.name}
                     className="text-right px-4 @3xl:px-8 py-3 text-xs font-semibold text-text-primary whitespace-nowrap"
                   >
-                    {item.strategy.name}
+                    {removeHrefs?.[item.strategy.id] ? (
+                      <>
+                        <span className="block">{item.strategy.name}</span>
+                        <Link
+                          href={removeHrefs[item.strategy.id]}
+                          aria-label={`Remove ${item.strategy.name} from the comparison`}
+                          className="text-caption font-normal text-text-muted underline hover:text-text-primary"
+                        >
+                          Remove
+                        </Link>
+                      </>
+                    ) : (
+                      item.strategy.name
+                    )}
                   </th>
                 ))}
               </tr>

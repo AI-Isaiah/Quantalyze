@@ -85,8 +85,18 @@ export function isReadableDay(d: string): boolean {
 }
 
 /**
- * The record's span in covered days (D-20). The start is the LATER of `seriesStart` and
- * `headlineSince` (a chain-broken row's headline covers only the suffix). A `headlineSince`
+ * Phase 197 D-05: the first day of the record a row's figures are computed on. The LATER of
+ * `seriesStart` and a READABLE `headlineSince` (a chain-broken row's headline covers only the
+ * suffix; a present but unreadable one never wins the compare). `figureSpan` calls this, and the
+ * Track cell's title prints it, so the span and the date beside it can never disagree.
+ */
+export function recordStartDay(input: { seriesStart: string; headlineSince?: string | null }): string {
+  const { seriesStart, headlineSince } = input;
+  return headlineSince && isReadableDay(headlineSince) && headlineSince > seriesStart ? headlineSince : seriesStart;
+}
+
+/**
+ * The record's span in covered days (D-20). The start is `recordStartDay`. A `headlineSince`
  * that is present but not a date never wins the compare here, so this span alone would read the
  * generous `seriesStart` one; `figureRecord` marks such a record `unreadable` (withheld, R5 WR-02),
  * so that span is never what a gate judges on. Null when either series end is missing or
@@ -99,10 +109,30 @@ export function figureSpan(input: {
 }): number | null {
   const { seriesStart, seriesEnd, headlineSince } = input;
   if (!seriesStart || !seriesEnd) return null;
-  const start =
-    headlineSince && isReadableDay(headlineSince) && headlineSince > seriesStart ? headlineSince : seriesStart;
-  const days = coveredDays(start, seriesEnd);
+  const days = coveredDays(recordStartDay({ seriesStart, headlineSince }), seriesEnd);
   return Number.isFinite(days) ? Math.max(0, days) : null;
+}
+
+/**
+ * Phase 197 D-05: a record under this many covered days reads `<1` in the Track column; from it, at
+ * least 1. A month is the smallest unit Track names, and 30 days counts as one.
+ */
+export const TRACK_MIN_MONTH_DAYS = 30;
+
+/**
+ * Phase 197 D-05: the Track column's figure, whole months of record from the covered-day span
+ * (`FigureRecord.spanDays`, the count the 194 gate reads). Null for an unknown span (the cell shows an
+ * em dash), `"<1"` under `TRACK_MIN_MONTH_DAYS`, otherwise floor(days x 12 / ONE_YEAR_DAYS), at least 1.
+ *
+ * Divides by `ONE_YEAR_DAYS` (365), NOT the UI-SPEC's 365.25: with 365.25 a record of exactly 365
+ * covered days prints 11 beside figures that carry no `<1y` marker. Track and the marker agree on
+ * one row only when both use the same year. The `Math.max(1, ...)` clamp keeps a 30-day record at 1
+ * (30 x 12 / 365 floors to 0).
+ */
+export function trackMonths(spanDays: number | null): number | "<1" | null {
+  if (spanDays == null || !Number.isFinite(spanDays)) return null;
+  if (spanDays < TRACK_MIN_MONTH_DAYS) return "<1";
+  return Math.max(1, Math.floor((spanDays * 12) / ONE_YEAR_DAYS));
 }
 
 /**

@@ -81,6 +81,12 @@ function makeAnalytics(
     exposure_metrics: null,
     data_quality_flags: null,
     trades_fetched_at: null,
+    // Phase 197 plan 03 (CLAR-02, D-03): a CURRENT newest return day by default (yesterday, against
+    // the real clock, far inside the 7-day line). The published-only table now judges a row by
+    // `series_end`, and a fixture without one is "age unknown": it would lose its `#n` and sort
+    // after dated rows, which this file's ordinal and order cases are not about. A test that needs
+    // a stale or undated row passes `series_end` explicitly (stale-series.test.tsx owns those).
+    series_end: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
     ...overrides,
   };
 }
@@ -162,10 +168,13 @@ afterEach(() => {
 
 // --- Helpers -------------------------------------------------------------
 
-/** The sortable column-header labels, arrow glyph stripped. */
+/**
+ * The sortable column headers' accessible names. Phase 197 D-05: a header is a label line plus a
+ * qualifier line, and the sort button's `aria-label` is the UI-SPEC accessible name that holds both.
+ */
 function headerLabels(): string[] {
-  return Array.from(document.querySelectorAll("thead th button")).map((b) =>
-    (b.textContent ?? "").replace(/[↑↓]/g, "").trim(),
+  return Array.from(document.querySelectorAll("thead th button")).map(
+    (b) => b.getAttribute("aria-label") ?? "",
   );
 }
 
@@ -269,21 +278,23 @@ describe("StrategyTable visibility — SC-2a: column parity with the discovery r
     const ownerFirstRow = document.querySelector("tbody tr")?.textContent ?? "";
 
     // Literal expectation (Oracle Independence — never imported from COLUMNS).
+    // Phase 197 D-05: Track joined the set and every name states its period and annualisation.
     const EXPECTED = [
       "Strategy",
-      "Return %",
-      "CAGR",
-      "Sharpe",
-      "Max DD",
-      "Volatility",
-      "6 Month",
-      "AUM",
+      "Track, months of record",
+      "Return, full record, not annualized",
+      "CAGR, full record, annualized",
+      "Sharpe, full record, annualized",
+      "Max DD, full record, not annualized",
+      "Volatility, full record, annualized",
+      "Return, last 6 months, not annualized",
+      "AUM, stated by manager",
     ];
     expect(discoveryHeaders).toEqual(EXPECTED);
     expect(ownerHeaders).toEqual(EXPECTED);
 
-    // Every header is a real sort button under both recipes (8 of them).
-    expect(document.querySelectorAll("thead th button")).toHaveLength(8);
+    // Every header is a real sort button under both recipes (9 of them, Track included).
+    expect(document.querySelectorAll("thead th button")).toHaveLength(9);
 
     // The leading rank cell is present in both — ranking is inherited, not
     // re-implemented for the owner surface.
@@ -339,21 +350,21 @@ describe("StrategyTable visibility — SC-4c: own private rows get the full metr
     const priv = rowFor(NAME_PRIVATE);
     const pub = rowFor(NAME_PUBLISHED);
 
-    // Cell order: 0 = rank, 1 = Strategy, 2 = Return %, 3 = CAGR, 4 = Sharpe,
-    // 5 = Max DD, 6 = Volatility, 7 = 6 Month, 8 = AUM. No star column (no
+    // Cell order: 0 = rank, 1 = Strategy, 2 = Track (Phase 197 D-05), 3 = Return, 4 = CAGR,
+    // 5 = Sharpe, 6 = Max DD, 7 = Volatility, 8 = 6 Month, 9 = AUM. No star column (no
     // userId), so the indices match the COLUMNS order after the rank cell.
     // Literal expectations, from the fixture analytics (0.42 / 0.18 / 1.5 /
-    // -0.12 / 0.22 / 0.21) through the honest-null formatters.
-    expect(cellText(priv, 2)).toBe("+42.00%");
-    expect(cellText(priv, 3)).toBe("+18.00%");
-    expect(cellText(priv, 4)).toBe("1.50");
-    expect(cellText(priv, 5)).toBe("-12.00%");
-    expect(cellText(priv, 6)).toBe("+22.00%");
-    expect(cellText(priv, 7)).toBe("+21.00%");
+    // -0.12 / 0.22 / 0.21) through the honest-null formatters. Volatility is unsigned (D-05).
+    expect(cellText(priv, 3)).toBe("+42.00%");
+    expect(cellText(priv, 4)).toBe("+18.00%");
+    expect(cellText(priv, 5)).toBe("1.50");
+    expect(cellText(priv, 6)).toBe("-12.00%");
+    expect(cellText(priv, 7)).toBe("22.00%");
+    expect(cellText(priv, 8)).toBe("+21.00%");
 
     // …and no reduced column set: the private row's metrics equal the published
     // row's, cell for cell.
-    for (const i of [2, 3, 4, 5, 6, 7, 8]) {
+    for (const i of [2, 3, 4, 5, 6, 7, 8, 9]) {
       expect(cellText(priv, i)).toBe(cellText(pub, i));
     }
   });

@@ -171,15 +171,18 @@ const MANAGER_HEADERS = [
   "Strategy",
   "Status",
   "Created",
-  "Return %",
-  "CAGR",
-  "Sharpe",
-  "Max DD",
-  "Volatility",
-  "6 Month",
-  "AUM",
-  "Return",
-  "Underwater",
+  // Phase 197 D-05: Track joins, and every metric header's accessible name states its period and
+  // annualisation (the sort button's aria-label; the two sparkline headers carry their own).
+  "Track, months of record",
+  "Return, full record, not annualized",
+  "CAGR, full record, annualized",
+  "Sharpe, full record, annualized",
+  "Max DD, full record, not annualized",
+  "Volatility, full record, annualized",
+  "Return, last 6 months, not annualized",
+  "AUM, stated by manager",
+  "Return curve, full record",
+  "Underwater, full record",
   "Actions",
 ];
 
@@ -237,7 +240,7 @@ describe("StrategyTable managerRows — header order (D-01)", () => {
     const hs = headers();
     expect(hs).toHaveLength(MANAGER_HEADERS.length);
     MANAGER_HEADERS.forEach((name, i) => {
-      // Exact-string role query: 'Return' must not match 'Return %'.
+      // Exact-string role query on the full accessible name.
       expect(screen.getByRole("columnheader", { name })).toBe(hs[i]);
     });
   });
@@ -953,7 +956,7 @@ describe("StrategyTable initialSort (D-09)", () => {
       screen.getByRole("columnheader", { name: "Created" }).getAttribute("aria-sort"),
     ).toBe("descending");
     expect(
-      screen.getByRole("columnheader", { name: "Sharpe" }).getAttribute("aria-sort"),
+      screen.getByRole("columnheader", { name: "Sharpe, full record, annualized" }).getAttribute("aria-sort"),
     ).toBe("none");
   });
 
@@ -1002,7 +1005,7 @@ describe("StrategyTable initialSort (D-09)", () => {
     const sortBy = screen.getByRole("combobox", { name: "Sort by" }) as HTMLSelectElement;
     expect(sortBy.value).toBe("sharpe");
     expect(
-      screen.getByRole("columnheader", { name: "Sharpe" }).getAttribute("aria-sort"),
+      screen.getByRole("columnheader", { name: "Sharpe, full record, annualized" }).getAttribute("aria-sort"),
     ).toBe("descending");
   });
 
@@ -1012,7 +1015,7 @@ describe("StrategyTable initialSort (D-09)", () => {
     });
     expect(visibleNames()).toEqual([NAME_MID, NAME_OLD, NAME_NEW]);
     expect(
-      screen.getByRole("columnheader", { name: "Sharpe" }).getAttribute("aria-sort"),
+      screen.getByRole("columnheader", { name: "Sharpe, full record, annualized" }).getAttribute("aria-sort"),
     ).toBe("descending");
   });
 });
