@@ -590,8 +590,8 @@ test.describe("/strategies — MYSTRATTABLE phones", () => {
           await collect(`name link (${s.label})`, async () => {
             const link = region.locator(`a[href^="/factsheet/${s.id}?"]`);
             await expect(link).toHaveCount(1);
-            // Phase 196 / ROUTE-04 (D-01): the My Strategies mount's origin rides on the link.
-            await expect(link).toHaveAttribute("href", `/factsheet/${s.id}?from=my-strategies`);
+            // Phase 196 / ROUTE-04 (D-01): this table is the /strategies page, so its own origin rides on the link.
+            await expect(link).toHaveAttribute("href", `/factsheet/${s.id}?from=strategies`);
             expect(
               ((await link.textContent()) ?? "").replace(/\s+/g, " ").trim(),
               `the ${s.label} name link text`,
