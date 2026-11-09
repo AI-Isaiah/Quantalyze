@@ -364,7 +364,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           </div>
         ) : (
           <p className="mt-3 text-sm text-text-secondary">
-            Risk figures need the equity history. See the note above.
+            This section needs your book&apos;s history. See the note above.
           </p>
         )}
       </section>
