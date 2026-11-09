@@ -280,14 +280,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       )}
       {/* Phase 198 plan 01 (D-06, ROUTE-07): the book at a glance. Figures come
           from the shared book-figures module Scenario's live strip also reads,
-          and do not depend on the history state (research C7). `noteBelow` points
-          assistive tech at the missing-data message, so it is bound to the
-          message rendering and never to the gate alone. */}
+          and do not depend on the history state (research C7). The glance carries
+          no pointer to the missing-data message: its lines explain the withheld
+          history and never a glance figure (198-UAT-01, D-10). */}
       <GlancePanel
         liveBaselineMetrics={props.liveBaselineMetrics}
         holdingsSummary={props.holdingsSummary ?? []}
         allKeysStale={allKeysStale}
-        noteBelow={missingLines.length > 0}
       />
       {/* Phase 198 plan 09 (D-01): what is missing, per key, directly under the
           glance. Renders nothing when nothing is missing. */}
