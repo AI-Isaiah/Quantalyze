@@ -72,6 +72,8 @@ Three rounds of phase review (gsd-code-reviewer and silent-failure-hunter) found
   - the anon-projection route list drops `src/app/strategy`;
   - the redirect-origin guard checks its query index before it slices.
 - **The `layout-narrow` MYSTRATTABLE e2e arm expects `?from=strategies`.** It loads `/strategies`, whose table carries the `strategies` origin (the unit test `page.table.test.tsx` pins the same href); an earlier edit in this phase assumed the My Strategies origin and turned `e2e-seeded` red.
+- **The opening view names its Performance section.** The document layout no longer renders the Performance collapsible section, so the equity figure's `<h3>` followed the masthead `<h1>` and axe failed `heading-order` on every factsheet run of the seeded e2e lane. A screen-reader-only `<h2>` restores the outline; a census-file arm walks every heading on three fixtures, closed and with Advanced open, and was RED before the fix.
+- **Three e2e specs follow intended phase changes:** `composite-factsheet-render` reads the KPI value `<p>` by test id (each cell now has a comparator line), `composite-onboarding` #338 expects the factsheet's own not-found card (SF-05 gave `/factsheet/[id]` its boundary), and `my-strategies` expects `?from=my-strategies`.
 - **Fixtures:**
   - the phase 190 seam fixture's `series_end` now follows the real clock;
   - the deep-link kind `not_own_capital` is renamed `unmarked_own` to satisfy the OWN-03 mark-literal census.
