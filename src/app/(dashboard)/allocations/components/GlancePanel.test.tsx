@@ -372,6 +372,12 @@ describe("198-UAT-01: the glance and the missing-data note agree on a rebuilding
       const note = screen.getByTestId("overview-missing-data");
       expect(note.textContent).not.toMatch(/\b(return|risk)\b/i);
       expect(document.body.textContent).not.toMatch(/note below/i);
+      // The glance's Risk group prints Sharpe and Max DD without the history
+      // (C7), so the Risk section may not claim those figures depend on it.
+      const riskLine = document.querySelector("#risk p");
+      expect(riskLine, "the Risk section's not-ready line").not.toBeNull();
+      expect(riskLine!.textContent).not.toMatch(/\b(return|risk)\b/i);
+      expect(riskLine!.textContent).toContain("See the note above.");
       if (NAMES_THE_HIDDEN_HISTORY.has(reason)) {
         expect(note.textContent).toContain(
           "The equity chart and the ratios built from it",

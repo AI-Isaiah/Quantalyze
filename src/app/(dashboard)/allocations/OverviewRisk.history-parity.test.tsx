@@ -94,7 +94,9 @@ function payload(over: Partial<Record<string, unknown>> = {}) {
 
 
 // Typed by hand, never read from the component.
-const RISK_LINE = "Risk figures need the equity history. See the note above.";
+// 198-UAT-01 (D-10): the glance prints Sharpe and Max DD without the history (C7),
+// so the line names the history the section needs and not risk figures.
+const RISK_LINE = "This section needs your book's history. See the note above.";
 // The six widgets in the order the Risk section lists them (planning D-06).
 const RISK_WIDGET_IDS = [
   "var-expected-shortfall",
