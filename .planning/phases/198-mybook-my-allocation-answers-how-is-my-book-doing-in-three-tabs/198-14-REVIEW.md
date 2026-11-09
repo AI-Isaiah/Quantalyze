@@ -117,3 +117,11 @@ _Depth: standard_
 - **Where:** `src/app/(dashboard)/allocations/components/GlancePanel.test.tsx:373` and `:379`.
 - **Evidence:** "your book's returns and risks are not shown" passes the guard. Widening to `returns?` would false-fail on the legitimate "each account's returns and cash flows".
 - **Minimal fix:** assert the claim, not the word: e.g. strip the exact phrase "each account's returns and cash flows" before matching `/\b(returns?|risks?)\b/i`, or match a figure word followed by "not shown|hidden|withheld|appear after" in the same sentence.
+
+## Fixes applied
+
+Round 1 fixer, 2026-11-09. All three MEDIUM findings fixed; no LOW or INFO touched.
+
+- **WR-01** (`5c251b610`): `BOOK_LINE.awaiting_derivation` now reads "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden." It promises no unlock. Four pins updated; the agreement test's containment check is now case-insensitive because the phrase moved mid-sentence.
+- **SFH-01** (`4e7193526`): `GlancePanel` takes `noteBelow` again. Only when `figures.seriesEndDay === null`, not `allKeysStale`, and the missing-data note renders, a dash Return or Risk cell carries sr-only "No live figures yet. See the note below." Never on a cell that prints a value or on a withheld Sharpe. New describe block "198-14 SFH-01" in `GlancePanel.test.tsx` (empty live baseline plus rebuilding reason, all-keys-stale, populated figures, withheld Sharpe, ready book). Neutered three ways (pointer never rendered, pointer on populated cells, pointer under all-keys-stale), each RED by name, each restored byte-equal.
+- **SFH-02** (`3ddc93a0a`): the guard strips "each account's returns and cash flows" and matches `/\b(returns?|risks?)\b/i`. Neutered with plural wording in `derivation_rejected`: RED on the `derivation_rejected` case; restored byte-equal.
