@@ -24,7 +24,7 @@
 - [x] **ROUTE-03**: `/demo` shows no stuck loading notice, no "—" under a headline claim, no empty founder view and no raw ids.
   - *Amended 2026-11-07 (Phase 192 D-11, founder: "retire the whole demo part"; recorded in 192-CONTEXT.md and the ROADMAP):* the public demo is retired, not repaired. ROUTE-03 is met when `/demo` and every link to it are gone, a request for it gets the same answer as an unknown URL, and no public page links to a retired route. The sentence above is kept as lineage.
 - [ ] **ROUTE-04**: From a factsheet, a signed-in user can go back to where they came from and take a next step (request an intro, add to their allocation). A shared factsheet carries a header and a sign-up link.
-- [ ] **ROUTE-05**: An allocator can select strategies in discovery and open Compare from the UI.
+- [x] **ROUTE-05**: An allocator can select strategies in discovery and open Compare from the UI.
 - [ ] **ROUTE-06**: "+ Allocation" on My allocation opens the allocator's flow, not the manager's add-strategy wizard.
 - [ ] **ROUTE-07**: My allocation's first tab answers "how is my book doing?" with the book's return, risk and holdings at a glance, or names exactly what is missing.
 - [ ] **ROUTE-08**: Holdings labels positions correctly: allocated positions are not called "not allocated", and cash is not counted as Spot exposure.
@@ -34,11 +34,11 @@
 
 ### Clarity — screening reads plainly
 
-- [ ] **CLAR-01**: Every discovery column states its period and whether it is annualised; volatility carries no sign; a track-length column exists.
-- [ ] **CLAR-02**: A strategy whose data is stale is flagged in discovery and does not rank as if it were current.
+- [x] **CLAR-01**: Every discovery column states its period and whether it is annualised; volatility carries no sign; a track-length column exists.
+- [x] **CLAR-02**: A strategy whose data is stale is flagged in discovery and does not rank as if it were current.
 - [ ] **CLAR-03**: Specialist terms (Omega, Ulcer, Common-sense ratio, Kolmogorov-Smirnov, Bridge, mandate, TWR and the like) carry a tooltip or a glossary entry.
 - [ ] **CLAR-04**: Each concept has one name across the app (allocation / book / portfolio; watchlist / favorites / star; mandate / preferences / profile).
-- [ ] **CLAR-05**: A listing says when two strategies draw on the same exchange account.
+- [x] **CLAR-05**: A listing says when two strategies draw on the same exchange account.
 - [ ] **CLAR-06**: Factsheet sections are numbered in order, dates use one format, Escape closes the filter drawer, the egress-IP link leads to the IPs (or is removed), and the disclaimer typo is fixed.
 
 ### Lean — less to wade through
@@ -86,18 +86,18 @@ Deferred, tracked, not in this roadmap.
 | ROUTE-02 | Phase 196 | Pending |
 | ROUTE-03 | Phase 192 | Satisfied as amended by D-11 (192-VERIFICATION.md passed, UAT passed 2026-11-07) |
 | ROUTE-04 | Phase 196 | Pending |
-| ROUTE-05 | Phase 197 | Pending |
+| ROUTE-05 | Phase 197 | Complete |
 | ROUTE-06 | Phase 198 | Pending |
 | ROUTE-07 | Phase 198 | Pending |
 | ROUTE-08 | Phase 198 | Pending |
 | ROUTE-09 | Phase 200 | Pending |
 | ROUTE-10 | Phase 200 | Pending |
 | ROUTE-11 | Phase 199 | Pending |
-| CLAR-01 | Phase 197 | Pending |
-| CLAR-02 | Phase 197 | Pending |
+| CLAR-01 | Phase 197 | Complete |
+| CLAR-02 | Phase 197 | Complete |
 | CLAR-03 | Phase 201 | Pending |
 | CLAR-04 | Phase 201 | Pending |
-| CLAR-05 | Phase 197 | Pending |
+| CLAR-05 | Phase 197 | Complete |
 | CLAR-06 | Phase 201 | Pending |
 | LEAN-01 | Phase 199 | Pending |
 | LEAN-02 | Phase 196 | Pending |
