@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: 194
-current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
-status: executing
-stopped_at: Phase 194.1 complete (#1222)
-last_updated: "2026-11-08T19:39:00.173Z"
-last_activity: 2026-11-08
-last_activity_desc: Phase 194.1 D04SWEEP shipped and closed
-state_head: 290d68df5a62a4f1097ec18cd5c96998ff6b8223
+current_phase: "194.2"
+current_phase_name: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed
+status: planning
+stopped_at: Phase 194 closed (browser UAT passed); 198 verification and 194.2 planning run in parallel
+last_updated: "2026-11-09T08:40:16.672Z"
+last_activity: 2026-11-09
+last_activity_desc: Phase 194 FIGURETRUTH closed; its UAT extras booked into 194.2
+state_head: 46ec9945070fc311aaf7b0f07a14472314f2109a
 progress:
   total_phases: 14
-  completed_phases: 6
-  total_plans: 75
-  completed_plans: 75
-  percent: 43
+  completed_phases: 7
+  total_plans: 88
+  completed_plans: 88
+  percent: 50
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 194 (FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something) — EXECUTING
-Plan: 24 of 24 (code merged as #1219; plan 09 PROD recompute done 2026-11-08, 194-RECOMPUTE.md lacking=0)
-Status: Verification human_needed (signed-in browser UAT only)
-Last activity: 2026-11-09 — Phase 198 MYBOOK browser UAT found gap 198-UAT-01 (missing-data note contradicts the glance); gap plan 198-14 planned and checked
-Progress: [████░░░░░░] 43% (6 of 14 phases)
+Phase: parallel — 198 (MYBOOK) gap 198-UAT-01 fixed and shipped (#1233), VERIFICATION human_needed (founder browser re-check of the fixed message); 197 (SCREEN) shipped as #1225; 194.2 (FIGURERESIDUALS) not yet planned
+Plan: 198: 14 of 14 (gap plan 198-14 shipped #1233); 194.2: not planned
+Status: Phase 194 closed 2026-11-09; 198 awaits the founder's browser re-check of the missing-data message (UAT test 3, 375px and 1280px)
+Last activity: 2026-11-09 — Phase 198 gap 198-UAT-01 closed in code and shipped as #1233 (v0.133.30.3); re-verification human_needed
+Progress: [█████░░░░░] 50% (7 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -681,6 +681,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 194.1 inserted after Phase 194: D04SWEEP: the widened short-track rule on every page outside 194 (founder D-10/D-11, 2026-11-07)
 - Phase 203 added (2026-11-07, /gsd-phase add, founder D-17 "book the investigation as a phase"): B3TRUNC, from RESIDCHURN plan 07 (why book b3 carries window_truncated)
 - Phase 194.2 inserted after Phase 194: FIGURERESIDUALS: the six figure-gate residuals 194.1's scope did not cover (founder 2026-11-08)
+- Phase 194.2 edited: edited fields: goal (added the two Phase 194 browser-UAT extras: tearsheet Equity Curve overflow, 193 vs 192 days of record)
 
 ### Decisions
 
@@ -1763,7 +1764,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phase 194.1 complete (#1222)
+**Stopped At:** Phase 194 closed (browser UAT passed); 198 verification and 194.2 planning run in parallel
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z

@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.133.30.3] - 2026-11-09 — Phase 198 MYBOOK gap 198-UAT-01: the note under the glance agrees with the glance
+
+### Fixed
+- **The Overview no longer says book return and risk are hidden while the glance prints them.** Browser UAT on 2026-11-09 found the Book at a glance showing YTD TWR, Sharpe and Max DD while the "What is missing" note directly below said the latest rebuild "did not pass its checks, so book return and risk are not shown". The glance reads the live per-key figures, which the history state never withholds (Phase 198 D-06, research C7); only the equity chart and the factsheet are hidden while the history is withheld. The two book-level lines in `MissingDataMessage.tsx` now say what is actually hidden:
+  - `awaiting_derivation`: "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden."
+  - `derivation_rejected`: "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden."
+  - Each reason keeps its class (the waiting line names the daily recompute, the rejected line names no run), so the Scenario own-book sentence still agrees.
+- **The Overview Risk section no longer says risk figures need the history** under a glance that prints Sharpe and Max DD. While the history is withheld it reads "This section needs your book's history. See the note above."
+- **The glance's screen-reader pointer is true wherever it renders.** The old sr-only "Not shown: see the note below." sat on any dash whenever a note rendered, though no note line explains a printed figure. It is replaced by "No live figures yet. See the note below.", on a Return or Risk dash only when the live series is empty (all three live figures null), not every key is stale (the staleness banner explains that case), and a note renders below. A cell that prints a value never carries it.
+- Found by review (gsd-code-reviewer and silent-failure-hunter, two rounds) and fixed before ship: the waiting line first promised the ratios "after the next recompute", which a short-record book does not get under the 194 D-15 gate (WR-01); removing the pointer outright left a fully dashed glance with no explanation (SFH-01); the agreement test's return/risk guard missed plural wording (SFH-02).
+
+### Tests
+- `GlancePanel.test.tsx` renders the full Overview for all 8 rebuild reasons plus none, with populated live figures, and asserts the glance prints its values while neither the note nor the Risk paragraph names return or risk (plural included). A second block pins where the narrowed pointer may and may not render (empty live series, stale keys, printed values, withheld Sharpe, ready book).
+- `AllocationDashboardV2.rebuilding.test.tsx`, `MissingDataMessage.test.tsx` and `OverviewRisk.history-parity.test.tsx` pin the new sentences.
+- Each new gate was shown to fail: the old sentence, the old Risk line and each pointer defect were put back from a byte backup, the named tests went RED, and the restore was `cmp`-identical.
+
+### Notes
+- Two clauses stay passive ("is recomputed once a day", "so it is not shown") against DESIGN.md's active-voice rule, because comments in `queries.ts`, `EquityHistoryRebuilding.tsx` and the Scenario own-book sentence quote them verbatim.
+- MT5 account-balance rows on Holdings stay typed Spot (founder, 2026-11-09; research assumption A1 confirmed). No code change.
+- The founder's browser re-check of the fixed message on the deployed build is the last step before Phase 198 closes.
+
+## [0.133.30.2] - 2026-11-09 — records: close Phase 194 FIGURETRUTH and widen Phase 194.2
+
+### Notes
+- **Phase 194 is closed.** The signed-in browser UAT ran on quantalyze.xyz at v0.133.30.0 (main `46ec99450`) and passed. `194-UAT.md` records the reading: the tearsheet AUM row is hidden for the founder account, which is correct under D-06; Book equity matches between the glance panel and Holdings, and Scenario's Modelled equity shows the same value; the Gross and Net exposure labels read in place. `194-VERIFICATION.md` is now `status: passed`, with `verified_at_sha` set to the main commit the UAT was read on.
+- **One case was not checked in a browser, and the founder closed the phase anyway (2026-11-09, "Close it").** The tearsheet AUM row in its shown state (an allocator, or the strategy's own manager) could not be seen from the founder account, which is neither. Its gate is covered in code and tests (VERIFICATION truth 3).
+- `phase complete 194` ticked TRUST-04 and TRUST-05, the ROADMAP bullet and the Progress row. Its move of STATE's Current Position to "the next phase" was corrected by hand, because phases run in parallel: the position now names 198 (verification outstanding), 197 (shipped) and 194.2 (not planned).
+- **Phase 194.2 FIGURERESIDUALS takes the two extras the UAT found** (founder routing, booked through `/gsd-phase --edit 194.2`): the tearsheet Equity Curve overflows its card by about 157px at a 1470px viewport, and one strategy's record length reads 193 days on discovery and the tearsheet but 192 on the factsheet.
+
+## [0.133.30.1] - 2026-11-09 — fix: a discovery-ranking test fixture aged past the Phase 197 stale line
+
+### Fixed
+- **`frontend-test (1)` is green again on `main` and on every PR.** Three "phase 190 seam" cases in `src/components/strategy/StrategyTable.stale-analytics.test.tsx` failed from 2026-11-09: a re-running row expected `#1` and read "Not ranked: the data is more than 10 days old.", the warning-tone and computing-row ordering cases followed. The product code is right; the fixture was wrong.
+
+### Root cause
+- The fixture `rerunDbRow` carried a hard-coded `series_end: "2026-10-29"`. Phase 197 made discovery judge a row by `series_end` against the real clock (stale above 7 days for crypto, above 10 for everything else), so the fixed date passed the 10-day line on 2026-11-09 and the row lost its rank. The same file's `analyticsEmbed` already builds `series_end` from `Date.now()`; `rerunDbRow` now does the same (yesterday).
+- **Swept for the same time bomb elsewhere.** The full vitest suite (5584 files, 25172 tests) was run twice locally, once on the real clock and once with the wall clock shifted 60 days forward through a temporary, uncommitted probe in the test setup. Both runs failed the same set: this fixture plus two cases known to fail before this change (`compute.conventions` fixtures B and C, recorded in Phase 194's `deferred-items.md`). No other test depends on an absolute date going stale in the next 60 days.
+
+### Tests
+- The fix can fail: setting the fixture's `series_end` 11 days back from a byte backup turns the same three cases RED with the CI messages; the restore was `cmp`-identical and the file went back to 23/23 green.
+
 ## [0.133.30.0] - 2026-11-09 — Phase 197 SCREEN: discovery reads plainly and a shortlist can be compared
 
 ### Added
