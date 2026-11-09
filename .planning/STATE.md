@@ -6,15 +6,15 @@ current_phase: 194
 current_phase_name: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
 status: executing
 stopped_at: Phase 194.1 complete (#1222)
-last_updated: "2026-11-08T19:39:00.173Z"
-last_activity: 2026-11-08
-last_activity_desc: Phase 194.1 D04SWEEP shipped and closed
+last_updated: "2026-11-09T12:00:00.000Z"
+last_activity: 2026-11-09
+last_activity_desc: Phase 197 SCREEN shipped; verification human_needed
 state_head: 290d68df5a62a4f1097ec18cd5c96998ff6b8223
 progress:
   total_phases: 14
   completed_phases: 6
-  total_plans: 75
-  completed_plans: 75
+  total_plans: 94
+  completed_plans: 94
   percent: 43
 ---
 
@@ -179,7 +179,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 194 (FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something) — EXECUTING
 Plan: 24 of 24 (code merged as #1219; plan 09 PROD recompute done 2026-11-08, 194-RECOMPUTE.md lacking=0)
 Status: Verification human_needed (signed-in browser UAT only)
-Last activity: 2026-11-09 — Phase 198 MYBOOK shipped (#1226, v0.133.29.0); VERIFICATION human_needed (CI seeded e2e passed on the ship head; desktop and mobile visual pass outstanding), so not closed
+Last activity: 2026-11-09 — Phase 197 SCREEN shipped (#1225, v0.133.30.0); VERIFICATION human_needed (browser UAT in 197-UAT.md outstanding), so not closed. Phase 198 MYBOOK shipped (#1226) and is likewise human_needed; phases run in parallel
 Progress: [████░░░░░░] 43% (6 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.

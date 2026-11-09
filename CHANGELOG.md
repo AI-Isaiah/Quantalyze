@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.133.30.2] - 2026-11-09 — records: Phase 197 SCREEN execution, review, security and verification
+
+### Notes
+- **Phase 197 records land on `main`:** the 6 plans and their SUMMARYs, `197-CONTEXT.md`, `197-RESEARCH.md`, `197-PATTERNS.md`, `197-UI-SPEC.md`, `197-VALIDATION.md`, `197-REVIEW.md` (three review and fix rounds), `197-SECURITY.md` (SECURED, 24 registered threats, 0 open), `197-VERIFICATION.md` (`human_needed`: 4/4 success criteria verified, 0 gaps) and `197-UAT.md` (the browser-only items: 375px and 1280px visual check, keyboard walks on `/discovery` and `/compare`, the admin line on a real shared-account pair). The phase is NOT closed, because its verification has not passed.
+- **The debug note `.planning/debug/layout-narrow-probe-stops.md`** records why the seeded layout probes missed the CAGR and Sharpe columns on PR #1225 and the probe fix that shipped with it.
+- ROADMAP ticks all 6 plan rows, records the founder's D-01 narrowing of success criterion 4 (the shared-account notice is admin only), and moves the Progress row to 6/6 In Progress. REQUIREMENTS marks ROUTE-05, CLAR-01, CLAR-02 and CLAR-05 complete. STATE's Last activity records the ship of #1225, and its plan count now includes the Phase 197 and 198 plans (94 of 94).
+
 ## [0.133.30.1] - 2026-11-09 — fix: a discovery-ranking test fixture aged past the Phase 197 stale line
 
 ### Fixed
