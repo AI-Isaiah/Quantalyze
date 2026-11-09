@@ -127,3 +127,11 @@ Browser UAT test 3 in `198-UAT.md` needs a re-run at 375px and 1280px on the dep
 
 - Commits 3c9a1b771, 8bae6f65c and a0e20046c are ancestors of HEAD.
 - All nine modified source and test files exist and carry the expected strings (acceptance greps above).
+
+## Post-review amendments (review round 1, 2026-11-09)
+
+Superseding two statements above, per 198-14-REVIEW.md:
+- WR-01: `awaiting_derivation` now reads "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden." The earlier "appear after the next recompute" promised ratios a short-record book would not get (194 D-15 gate).
+- SFH-01: the glance pointer is NARROWED, not retired. A dash cell carries sr-only "No live figures yet. See the note below." only when the live series is empty (`figures.seriesEndDay === null`, all three live figures null), not all keys are stale, and a missing-data note renders below. A cell that prints a value never carries it, so 198-UAT-01 stays closed.
+- SFH-02: the agreement test's return/risk guard now catches plural wording.
+Round 2 (code reviewer and silent-failure hunter): no MEDIUM+ findings.

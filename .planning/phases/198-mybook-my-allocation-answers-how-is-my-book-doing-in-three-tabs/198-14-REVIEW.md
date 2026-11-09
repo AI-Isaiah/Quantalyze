@@ -125,3 +125,42 @@ Round 1 fixer, 2026-11-09. All three MEDIUM findings fixed; no LOW or INFO touch
 - **WR-01** (`5c251b610`): `BOOK_LINE.awaiting_derivation` now reads "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden." It promises no unlock. Four pins updated; the agreement test's containment check is now case-insensitive because the phrase moved mid-sentence.
 - **SFH-01** (`4e7193526`): `GlancePanel` takes `noteBelow` again. Only when `figures.seriesEndDay === null`, not `allKeysStale`, and the missing-data note renders, a dash Return or Risk cell carries sr-only "No live figures yet. See the note below." Never on a cell that prints a value or on a withheld Sharpe. New describe block "198-14 SFH-01" in `GlancePanel.test.tsx` (empty live baseline plus rebuilding reason, all-keys-stale, populated figures, withheld Sharpe, ready book). Neutered three ways (pointer never rendered, pointer on populated cells, pointer under all-keys-stale), each RED by name, each restored byte-equal.
 - **SFH-02** (`3ddc93a0a`): the guard strips "each account's returns and cash flows" and matches `/\b(returns?|risks?)\b/i`. Neutered with plural wording in `derivation_rejected`: RED on the `derivation_rejected` case; restored byte-equal.
+
+## Round 2
+
+**Reviewed:** 2026-11-09T09:17:22Z, gsd-code-reviewer, standard depth with call-chain reads.
+**Range:** `86e158616..3ddc93a0a -- src`, with the round-1 fixes `5c251b610`, `4e7193526` and `3ddc93a0a` read one at a time. HEAD `ad6008242` changes only this file.
+**Verdict:** no MEDIUM+ findings.
+
+### Round-1 findings, re-checked
+
+- **WR-01: fixed.** `MissingDataMessage.tsx:70-71` now reads "Until the next recompute, the equity chart and the ratios built from it are hidden." A short-record book still has its ratios withheld after the recompute, by the figure gate's own "Withheld until…" text, and the sentence stays true then. "Recomputed once a day" is kept, so the `EquityHistoryRebuilding.tsx` class comment and the `queries.ts` reason doc still hold. All four pins match the shipped string byte for byte.
+- **SFH-01: fixed, and the pointer is true whenever it renders.** Traced end to end:
+  - **What `seriesEndDay === null` implies.** `liveBookFigures` sets `seriesEndDay` from `equity[last].date` (`lib/book-figures.ts:66`). The live baseline has only two builders. `emptyLiveBaselineMetrics` (`queries.ts:4167`) returns `equity: []` with `ytdTwr`, `sharpe` and `maxDd` all null. `liveBaselineMetricsFromPerKeyDailies` (`queries.ts:4235`) returns that same `emptyDefault` on every path that has no curve: no strategies, `n === 0`, or an empty curve, which includes the zero-total-weight exit at `scenario.ts:358`. Every other path's `equity` is the non-empty `equity_curve` map. So an empty series means all three live Return and Risk figures are null, and "No live figures yet" is a true statement.
+  - **Never on a cell that prints a value.** `noFiguresPointer` (`GlancePanel.tsx:109-113`) is called with the same variable each cell prints (`ytd`, `sharpe`, `maxDdShown`), and it requires `value === null`.
+  - **No withheld Sharpe in that state.** With an empty series, `figureRecord` has `spanDays: null` and `crypto: true`. Then `recordClears` returns null, `gateAnnualized` returns `"null"`, and `sharpeWithheld` is false. The Sharpe cell is a bare "—" and carries the pointer, as the test pins.
+  - **"See the note below" always names a real note.** `noteBelow` is `missingLines.length > 0` (`AllocationDashboardV2.tsx:291`), and `MissingDataMessage` returns null exactly when `lines.length === 0` (`MissingDataMessage.tsx:383`). It renders as the glance's next sibling.
+  - **No pointer on stale dashes.** `allKeysStale` dashes carry none (`!allKeysStale`).
+- **SFH-02: fixed.** `namesReturnOrRisk` (`GlancePanel.test.tsx:359-362`) strips only the one legitimate phrase, then matches `/\b(returns?|risks?)\b/i`. A second, figure-claiming "returns" in the same line still matches.
+
+### 198-UAT-01 not reintroduced
+
+- No note line names return or risk. This is pinned on all 9 reasons, on both the note and the `#risk` paragraph.
+- A populated glance renders no pointer. Both `/note below/i` absence checks are on `document.body`: the agreement test and the SFH-01 "prints a value" case.
+- The pointer cannot sit beside a printed figure, because an empty series makes all three Return and Risk figures null together.
+
+### Tests can fail
+
+- I re-ran the six touched files: 235 passed. The full `src/app/(dashboard)/allocations` suite: 182 files, 3183 passed.
+- The SFH-01 positive case pins the exact `—No live figures yet. See the note below.` on all three cells, so it goes red if the pointer is removed. The stale case goes red if `!allKeysStale` is dropped.
+- `AllocationDashboardV2.rebuilding.test.tsx:598` pins the strict cell text.
+- No e2e spec reads the `glance-*` test ids, so the sr-only text breaks no exact-text check outside vitest.
+
+### Checked, not raised (below MEDIUM)
+
+- **Two guards in `noFiguresPointer` cannot change the output.** `!withheld` is unreachable when `noLiveFigures` is true (see above). `value === null` adds nothing to `seriesEndDay === null` on the two server builders. So the "withheld Sharpe" and "prints a value" SFH-01 cases would stay green if either guard were deleted. Both guards are harmless defence. The property they protect holds by construction. LOW, necessity.
+- **The note can explain a different cause than the dashes.** With an empty live series under `awaiting_derivation`, `history_read_failed` or a zero-weight book, the note explains the withheld history. The real cause of the dashes is missing per-key dailies or zero weights. The pointer's own sentence is still true, and these combinations are rare. LOW.
+- **Fully dashed glance with no explanation.** This happens on a ready book with no live series and no note, for example a zero-weight book, and in the stale-while-syncing case (`allKeysStale && hasSyncing` hides the banner). The class existed before this change, and the fixes did not introduce it. LOW.
+- **Repeated pointer.** A screen reader hears the pointer once per dashed cell, three times in all. The pre-plan pointer did the same. LOW.
+
+_Round 2 reviewed: 2026-11-09T09:17:22Z, Reviewer: Claude (gsd-code-reviewer)_
