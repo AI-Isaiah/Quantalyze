@@ -13,8 +13,8 @@ state_head: 46ec9945070fc311aaf7b0f07a14472314f2109a
 progress:
   total_phases: 14
   completed_phases: 7
-  total_plans: 88
-  completed_plans: 88
+  total_plans: 95
+  completed_plans: 95
   percent: 50
 ---
 
@@ -176,10 +176,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 198 (MYBOOK) gap 198-UAT-01 fixed and shipped (#1233), VERIFICATION human_needed (founder browser re-check of the fixed message); 197 (SCREEN) shipped as #1225; 194.2 (FIGURERESIDUALS) not yet planned
+Phase: parallel — 198 (MYBOOK) gap 198-UAT-01 fixed and shipped (#1233), VERIFICATION human_needed (founder browser re-check of the fixed message); 197 (SCREEN) shipped as #1225, VERIFICATION human_needed (browser UAT 2026-11-09 found gaps, closure not started); 194.2 (FIGURERESIDUALS) not yet planned
 Plan: 198: 14 of 14 (gap plan 198-14 shipped #1233); 194.2: not planned
 Status: Phase 194 closed 2026-11-09; 198 awaits the founder's browser re-check of the missing-data message (UAT test 3, 375px and 1280px)
-Last activity: 2026-11-09 — Phase 198 gap 198-UAT-01 closed in code and shipped as #1233 (v0.133.30.3); re-verification human_needed
+Last activity: 2026-11-09 — Phase 198 gap 198-UAT-01 closed in code and shipped as #1233 (v0.133.30.3); re-verification human_needed. Phase 197 records (phase dir, plan ticks, REQUIREMENTS) land with the v0.133.30.5 records PR
 Progress: [█████░░░░░] 50% (7 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.

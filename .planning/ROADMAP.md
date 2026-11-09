@@ -355,7 +355,7 @@ Plans:
 **Goal:** An allocator screening in discovery can read every column without guessing (period, annualisation, track length), sees stale strategies flagged and not ranked as current, learns when two listings draw on one exchange account, and can select strategies and open Compare from the UI.
 **Requirements**: ROUTE-05, CLAR-01, CLAR-02, CLAR-05
 **Depends on:** Phase 194 (columns state the definitions 194 settles, and withheld figures read as withheld), Phase 195 (the do-nothing toggles are already gone)
-**Plans:** 0 plans
+**Plans:** 6/6 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -367,11 +367,24 @@ Plans:
 2. Every discovery column header states its period and whether it is annualised, volatility shows no sign, and a track-length column exists.
 3. A strategy whose data is stale (its newest stored day or last successful fetch is older than a threshold the phase states) is flagged in its row and does not rank as if it were current. The phase names the field it reads, and does not use `strategy_analytics.computed_at` as a proxy for data age: a recompute on old data is not fresh data. A test with a stale fixture goes RED on today's ranking.
 4. A listing says when two strategies draw on the same exchange account, using only data already stored (no new manager-entered data). A strategy whose account is not shared shows no notice.
+   ⭐ **Narrowed 2026-11-08 (founder, Phase 197 D-01):** the notice is shown to admins only; allocators and visitors see none. An unpublished strategy is never named.
 
 UI changes are checked against `DESIGN.md` (Numbers Contract, data density principle, Trust-Tier Badges).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 197-01-PLAN.md — Wave 1: discovery headers state period and annualisation, unsigned volatility, Track column (CLAR-01, D-05)
+- [x] 197-02-PLAN.md — Wave 1: server-only admin-gated shared-account reader, published partners only (CLAR-05, D-01, D-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 197-03-PLAN.md — Wave 2: stale verdict from the newest stored return day; stale rows flagged and sorted below current (CLAR-02, D-03)
+- [x] 197-04-PLAN.md — Wave 2: `/compare` gets "Add strategy" search and Remove; "not available yet" gone (ROUTE-05, D-04)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 197-05-PLAN.md — Wave 3: discovery row selection and sticky "Compare (n)" bar, 2 to 4 (ROUTE-05, D-04)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 197-06-PLAN.md — Wave 4: admin-only shared-account line wired on discovery; full phase gates (CLAR-05, D-01, D-02)
 
 ### Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs
 
@@ -559,7 +572,7 @@ Plans:
 | 194.2. FIGURERESIDUALS (INSERTED) | 0/0 | Not started | - |
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
-| 197. SCREEN | 0/0 | Not started | - |
+| 197. SCREEN | 6/6 | In Progress | - |
 | 198. MYBOOK | 14/14 | In Progress | - |
 | 199. MANAGERHOME | 0/0 | Not started | - |
 | 200. MANAGERKEYS | 0/0 | Not started | - |
