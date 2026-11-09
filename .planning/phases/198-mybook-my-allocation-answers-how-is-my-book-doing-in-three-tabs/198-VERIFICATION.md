@@ -70,7 +70,7 @@ Browser UAT 2026-11-09 found the Overview glance printing YTD TWR, Sharpe and Ma
 
 ### Neuter (the gap test can fail)
 
-Backed up `MissingDataMessage.tsx` to `/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/811b5ebe-bc14-48be-a394-2c28565a5150/scratchpad/MissingDataMessage.tsx.bak`, put the old `derivation_rejected` sentence ("The latest rebuild of your book's history did not pass its checks, so book return and risk are not shown.") back, ran `GlancePanel.test.tsx`: RED by name, 1 failed of 29 ("198-UAT-01 ... reason derivation_rejected: the glance prints its live values and the note names neither return nor risk"), the other 28 passed. Restored with `cp -p`; `cmp` silent (exit 0); `git status` clean. No git checkout, restore or stash used.
+Backed up `MissingDataMessage.tsx` to `<scratchpad>/MissingDataMessage.tsx.bak`, put the old `derivation_rejected` sentence ("The latest rebuild of your book's history did not pass its checks, so book return and risk are not shown.") back, ran `GlancePanel.test.tsx`: RED by name, 1 failed of 29 ("198-UAT-01 ... reason derivation_rejected: the glance prints its live values and the note names neither return nor risk"), the other 28 passed. Restored with `cp -p`; `cmp` silent (exit 0); `git status` clean. No git checkout, restore or stash used.
 
 ### Gate runs in this re-verification
 
