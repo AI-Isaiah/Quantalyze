@@ -82,7 +82,7 @@ Three rounds of phase review (gsd-code-reviewer and silent-failure-hunter) found
   - the retargeted `mt5-badge`, `sfox-badge`, `composite-onboarding` and `sync-analytics-flow`;
   - `axe-app-wide` and `reflow-sweep-authed` (factsheet rows);
   - `svg-chart-parity`, `target-size`, `composite-factsheet-render`, `layout-narrow` and `full-flow`.
-- **SVG goldens may need a re-bake.** The two `full-page-*` goldens now show the new layout, and the `bootstrap-ci-*` goldens may differ because the Point column was dropped. The re-bake is a `bake_svg_goldens` dispatch.
+- **SVG goldens re-baked** in CI's Linux runner (`bake_svg_goldens` dispatch on the ship branch) and reviewed: the two `full-page-*` goldens show the new layout; five per-panel crops (`correlation-strip` desktop, `bootstrap-ci`, `quantile-box-plot`, `end-of-year-bars` and `histogram` at 320 px) moved by one pixel of height with identical chart content.
 
 ### Notes
 - **Founder calls left open, all booked in `TODOS.md`:**
