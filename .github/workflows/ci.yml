@@ -7039,10 +7039,6 @@ jobs:
               e2e/discovery-axe.spec.ts \
               e2e/discovery-hide-examples-default.spec.ts \
               e2e/discovery-prefs-isolation.spec.ts \
-              e2e/strategy-v2-partial-data.spec.ts \
-              e2e/strategy-v2-chart-parity.spec.ts \
-              e2e/strategy-v2-keyboard.spec.ts \
-              e2e/strategy-v2-axe.spec.ts \
               e2e/composer-axe.spec.ts \
               e2e/wizard-axe.spec.ts \
               e2e/wizard-resume.spec.ts \
@@ -7068,6 +7064,11 @@ jobs:
           # in this seeded list (place 1). Its HAS_SEED_ENV skip is place 2.
           # It proves criterion-2 geometry at V390/V640/V960 and is RED at
           # HEAD until the fix plans land. Do not drop it to green the job.
+          # Phase 196 plan 02 (2026-11-09): the four strategy-v2 e2e specs were
+          # deleted from this list and from disk, including the dead chart-parity
+          # spec the next paragraph says to leave in place. Their route now 308s
+          # to the factsheet, so no browser reaches the shell they drove. The
+          # next paragraph is lineage.
           # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
           # e2e/svg-chart-parity.spec.ts (desktop goldens + 320px portrait)
           # is added here so it runs SEEDED. The dead

@@ -98,6 +98,9 @@ describe("recharts accessibilityLayer={false} contract (whole codebase)", () => 
     // charts (src/components/charts/MonthlyReturnsBar.tsx, RiskOfRuin.tsx;
     // never rendered, so no live accessibility surface), dropping the live
     // count to 19 — floor lowered to 18 to stay just below it.
-    expect(files.length).toBeGreaterThanOrEqual(18);
+    // Phase 196 plan 14: deleted the retired v2 shell's panels and the ten
+    // charts only they mounted (all unrendered after the route-tree deletion),
+    // dropping the live count to 15 — floor lowered to 14 to stay just below it.
+    expect(files.length).toBeGreaterThanOrEqual(14);
   });
 });

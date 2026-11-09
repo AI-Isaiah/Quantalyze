@@ -785,7 +785,6 @@ describe("HONEST-08 — the production row, through StrategyTable and StrategyGr
     const { container } = render(
       <StrategyGrid
         strategies={[deadTrackRow(), healthyRow()]}
-        categorySlug="crypto-sma"
       />,
     );
 

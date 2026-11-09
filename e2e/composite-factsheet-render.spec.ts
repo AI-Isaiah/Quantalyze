@@ -57,6 +57,7 @@
  */
 import { test, expect, type Page } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
+import { openAdvanced } from "./helpers/open-advanced";
 import {
   seedCompositeStrategy,
   seedStrategyWithHistory,
@@ -208,6 +209,9 @@ test.describe("Phase 91 — composite factsheet render + axe (QA-02/QA-03)", () 
     await expect(page.locator("#factsheet-main h1")).toHaveCount(1);
     await expect(page.locator("#factsheet-main h1")).toBeVisible();
 
+    // Phase 196 (D-04): open `#factsheet-advanced` so the scan still covers every section the full
+    // factsheet carried, not only the opening view.
+    await openAdvanced(page);
     const results = await buildAxe(page).analyze();
     expect(results.violations).toEqual([]);
   });
@@ -225,6 +229,9 @@ test.describe("Phase 91 — composite factsheet render + axe (QA-02/QA-03)", () 
       .click();
     await expect(page.getByText("BASIS · MARK-TO-MARKET")).toBeVisible();
 
+    // Phase 196 (D-04): open `#factsheet-advanced` so the scan still covers every section the full
+    // factsheet carried, not only the opening view.
+    await openAdvanced(page);
     const results = await buildAxe(page).analyze();
     expect(results.violations).toEqual([]);
   });
@@ -256,6 +263,9 @@ test.describe("Phase 91 — composite factsheet render + axe (QA-02/QA-03)", () 
     await leverageInput.fill("2");
     await expect(page.getByText(/What-if projection at 2× leverage/)).toBeVisible();
 
+    // Phase 196 (D-04): open `#factsheet-advanced` so the scan still covers every section the full
+    // factsheet carried, not only the opening view.
+    await openAdvanced(page);
     const results = await buildAxe(page).analyze();
     expect(results.violations).toEqual([]);
   });

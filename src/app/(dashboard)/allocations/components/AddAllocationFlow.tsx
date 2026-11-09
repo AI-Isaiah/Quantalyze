@@ -45,6 +45,7 @@ import {
   buildAllocationRequest,
   commitSucceeded,
   earliestAllocationDateIso,
+  isNotOwnCapital,
   resolveDeepLink,
   successAnnouncement,
   todayUtcIso,
@@ -149,6 +150,7 @@ type LoadState =
 
 type Notice =
   | { kind: "held"; name: string }
+  | { kind: "unmarked_own"; name: string }
   | { kind: "unavailable" }
   | { kind: "not_loaded" };
 
@@ -208,9 +210,19 @@ function AddAllocationPanel({
 
   // What the async list read needs at settle time, without making the effect
   // refetch whenever the host hands in a new Set or callback identity.
-  const latest = useRef({ deepLink, heldStrategyIds, onInvalidDeepLink });
+  const latest = useRef({
+    deepLink,
+    heldStrategyIds,
+    ownCapitalStrategyIds,
+    onInvalidDeepLink,
+  });
   useEffect(() => {
-    latest.current = { deepLink, heldStrategyIds, onInvalidDeepLink };
+    latest.current = {
+      deepLink,
+      heldStrategyIds,
+      ownCapitalStrategyIds,
+      onInvalidDeepLink,
+    };
   });
   const deepLinkResolvedRef = useRef(false);
 
@@ -230,10 +242,20 @@ function AddAllocationPanel({
         // never trusted: it is checked against the server-produced list.
         if (deepLinkResolvedRef.current) return;
         deepLinkResolvedRef.current = true;
-        const { deepLink: dl, heldStrategyIds: held, onInvalidDeepLink: report } =
-          latest.current;
+        const {
+          deepLink: dl,
+          heldStrategyIds: held,
+          ownCapitalStrategyIds: ownCapital,
+          onInvalidDeepLink: report,
+        } = latest.current;
         if (!dl) return;
-        const resolution = resolveDeepLink(dl.raw, strategies, hasMore, held);
+        const resolution = resolveDeepLink(
+          dl.raw,
+          strategies,
+          hasMore,
+          held,
+          ownCapital,
+        );
         switch (resolution.kind) {
           case "none":
             return;
@@ -243,6 +265,9 @@ function AddAllocationPanel({
             return;
           case "held":
             setNotice({ kind: "held", name: resolution.row.name });
+            return;
+          case "unmarked_own":
+            setNotice({ kind: "unmarked_own", name: resolution.row.name });
             return;
           case "not_loaded":
             setNotice({ kind: "not_loaded" });
@@ -328,14 +353,7 @@ function AddAllocationPanel({
   }
 
   function notOwnCapital(row: StrategyBrowseRow) {
-    return (
-      row.isOwn === true &&
-      // The own-capital set omits archived strategies, so it cannot decide
-      // them; the route's 409 still refuses an unmarked one (review R3-02).
-      row.status !== "archived" &&
-      ownCapitalStrategyIds !== undefined &&
-      !ownCapitalStrategyIds.has(row.id)
-    );
+    return isNotOwnCapital(row, ownCapitalStrategyIds);
   }
 
   function choose(row: StrategyBrowseRow) {
@@ -572,6 +590,8 @@ function AddAllocationPanel({
                     </Link>
                   </>
                 )}
+                {notice.kind === "unmarked_own" &&
+                  `${notice.name}: ${NOT_OWN_CAPITAL_CAPTION}`}
                 {notice.kind === "unavailable" && NOT_AVAILABLE_NOTICE}
                 {notice.kind === "not_loaded" && NOT_LOADED_NOTICE}
               </p>

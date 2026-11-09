@@ -112,10 +112,9 @@ const SRC = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
 
 /**
  * The string literal passed to `.select(` right after each `.from("strategies")`
- * in a route file, plus whether it is the head-count form. Used by the two reads
- * that are NOT exported (the v2 page's Lane A read and the tearsheet's
- * `readReturnsUnit`) and by the landing page's count: the arm REPLAYS the route's
- * own source text as anon, because there is no function to import. Comments
+ * in a route file, plus whether it is the head-count form. Used by the read that
+ * is NOT exported (the v2 page's Lane A read) and by the landing page's count: the
+ * arm REPLAYS the route's own source text as anon, because there is no function to import. Comments
  * between `.from(...)` and `.select(` are skipped; a template or concatenated
  * select is not matched, which the exactly-one assertions turn into a failure
  * instead of a silent pass.
@@ -270,19 +269,7 @@ describe("anon strategies live probe - the real public readers as a signed-out v
 
   // ---- census A: the readers that selected a wildcard (Task 2) ----------------
 
-  it.skipIf(!HAS_ANON_PROBE)(
-    "(d) getPublicStrategyDetail returns the seeded row with no own api_key_id key",
-    async () => {
-      const { getPublicStrategyDetail } = await import("@/lib/queries");
-      const result = await getPublicStrategyDetail(seeded.strategyId!);
-      expect(result, "the public detail reader must return the published row").not.toBeNull();
-      expect(result!.strategy.id).toBe(seeded.strategyId);
-      expect(
-        Object.prototype.hasOwnProperty.call(result!.strategy, "api_key_id"),
-        "the public detail row must not carry api_key_id",
-      ).toBe(false);
-    },
-  );
+  // (d) getPublicStrategyDetail and (g) getStrategyDetailV2 were deleted with their routes (Phase 196 plan 14).
 
   it.skipIf(!HAS_ANON_PROBE)(
     "(e) getFactsheetDetail returns the seeded row with no own api_key_id key",
@@ -318,13 +305,6 @@ describe("anon strategies live probe - the real public readers as a signed-out v
   );
 
   // ---- census B: explicit-column readers; no code change, the arm is the proof --
-
-  it.skipIf(!HAS_ANON_PROBE)("(g) getStrategyDetailV2 returns the seeded strategy", async () => {
-    const { getStrategyDetailV2 } = await import("@/lib/queries");
-    const result = await getStrategyDetailV2(seeded.strategyId!);
-    expect(result, "the v2 detail reader must return the published row").not.toBeNull();
-    expect(result!.strategy.id).toBe(seeded.strategyId);
-  });
 
   it.skipIf(!HAS_ANON_PROBE)("(h) getPercentiles answers with and without a category slug", async () => {
     const { getPercentiles } = await import("@/lib/queries");
@@ -388,27 +368,6 @@ describe("anon strategies live probe - the real public readers as a signed-out v
         .maybeSingle();
       expect(error, `Lane A errored: ${error?.code} ${error?.message}`).toBeNull();
       expect((data as { id?: string } | null)?.id).toBe(seeded.strategyId);
-    },
-  );
-
-  it.skipIf(!HAS_ANON_PROBE)(
-    "(m) the tearsheet's readReturnsUnit select, replayed from source as anon, returns the seeded row",
-    async () => {
-      const reads = strategiesSelectLiterals("../app/factsheet/[id]/tearsheet/page.tsx").filter(
-        (l) => l.literal.includes("strategy_analytics ( data_quality_flags )") && !l.literal.includes("api_keys"),
-      );
-      expect(reads, "exactly one embed-only returns-unit select in the tearsheet").toHaveLength(1);
-      const { data, error } = await anonClient()
-        .from("strategies")
-        .select(reads[0].literal)
-        .eq("status", "published")
-        .eq("id", seeded.strategyId!)
-        .maybeSingle();
-      expect(error, `readReturnsUnit errored: ${error?.code} ${error?.message}`).toBeNull();
-      expect(
-        (data as { strategy_analytics?: unknown } | null)?.strategy_analytics,
-        "the analytics embed must come back for the seeded row",
-      ).toBeTruthy();
     },
   );
 

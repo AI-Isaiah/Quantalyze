@@ -8,7 +8,7 @@
  * Pre-fix the link was `/strategies/${strat.id}` — PLURAL, a route that does
  * not exist (only /strategies/[id]/edit) — so EVERY "View factsheet" click
  * 404'd. The fix links published rows to the singular public factsheet
- * `/strategy/${id}` and shows a muted state otherwise (the factsheet is
+ * `/factsheet/${id}` and shows a muted state otherwise (the factsheet is
  * status='published'-gated; there is no admin view for an unpublished
  * strategy, so a link on a non-published row would also 404).
  */
@@ -23,7 +23,7 @@ const SRC = fs.readFileSync(
 
 describe("/admin/csv-status — View factsheet link (Phase 15 BUG P2)", () => {
   it("links to the singular public factsheet route, not the non-existent plural one", () => {
-    expect(SRC).toContain("href={`/strategy/${strat.id}`}");
+    expect(SRC).toContain('href={buildFactsheetHref(strat.id, { key: "admin" })}');
     // The plural /strategies/[id] route has no page.tsx (only /edit) — guard
     // against the exact regression that shipped.
     expect(SRC).not.toContain("href={`/strategies/${strat.id}`}");
@@ -31,7 +31,7 @@ describe("/admin/csv-status — View factsheet link (Phase 15 BUG P2)", () => {
 
   it("gates the factsheet link on the strategy being published", () => {
     // Mirrors getPublicStrategyDetail's status='published' visibility gate so
-    // the link only renders when /strategy/[id] will actually resolve.
+    // the link only renders when /factsheet/[id] will actually resolve.
     expect(SRC).toContain('strat.status === "published"');
   });
 

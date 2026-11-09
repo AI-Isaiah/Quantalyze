@@ -430,7 +430,7 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     }
 
     const link = row.querySelector("a");
-    expect(link?.getAttribute("href")).toBe(`/factsheet/${ID_SUBJECT}`);
+    expect(link?.getAttribute("href")).toBe(`/factsheet/${ID_SUBJECT}?from=discovery`);
   });
 
   it("shows NO chip for a computed row", () => {

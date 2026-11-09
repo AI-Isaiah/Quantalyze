@@ -118,3 +118,28 @@ describe("[164 SHARE-02] the recipient token page has NO cache reach", () => {
     expect(raw).toContain("buildFactsheetPayloadCached");
   });
 });
+
+describe("[196 OQ-3] the token page reads whether a session exists, and nothing else about it", () => {
+  it("makes exactly one auth.getUser() call", () => {
+    const { stripped } = pageSource();
+    expect(stripped.match(/auth\.getUser\(/g) ?? []).toHaveLength(1);
+  });
+
+  it("reads no profile, role or owner state", () => {
+    const { stripped } = pageSource();
+    expect(stripped).not.toContain("profiles");
+    expect(stripped).not.toContain('"role"');
+  });
+
+  it("never hands the session to the payload builder or the AUM rule", () => {
+    const { stripped } = pageSource();
+    expect(stripped).toMatch(/fetchAndBuildPayload\(match\.strategy_id, withTokenBearer\)/);
+    expect(stripped).toContain("withViewerAum(payload, false)");
+  });
+
+  it("anti-vacuity: the single getUser call is really in the stripped source's helper", () => {
+    const { stripped } = pageSource();
+    expect(stripped).toContain("async function readRecipientSession");
+    expect(stripped).toContain("createClient");
+  });
+});

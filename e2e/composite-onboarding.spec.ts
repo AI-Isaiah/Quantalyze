@@ -275,7 +275,7 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     // discoverability assertion below (proves the id-based lookup surface
     // actually renders a published composite before we assert the failed one
     // is absent). Seeded under its OWN owner: it is only ever hit via the PUBLIC,
-    // owner-agnostic /strategy/[id] lookup (withPublishedOnly), so ownership is
+    // owner-agnostic /factsheet/[id] lookup (withPublishedOnly, lane A), so ownership is
     // irrelevant. (The wizard-walk hang was NOT caused by this control — see the
     // `source: 'legacy'` note in seedCompositeStrategy's `failed` variant: the
     // FAILED composite was a `source='wizard' status='draft'` row that the wizard
@@ -340,44 +340,52 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     await expect(page.getByTestId("wizard-use-this-key")).toHaveCount(0);
 
     // NOT published → NOT publicly discoverable. False-green-proof, id-based,
-    // status-gated (the public detail route filters status='published' via
-    // withPublishedOnly → getPublicStrategyDetail; a draft/failed composite
-    // 404s). Composites carry no category_id, so a discovery CATEGORY-page
-    // absence check could never distinguish status (the composite would be
-    // absent even if published) — a false green. The status-gated public detail
-    // surface is the honest discoverability check.
+    // status-gated (Phase 196 ONESTRATEGYPAGE D-03: the one public detail
+    // surface is /factsheet/[id]; its published lane filters status='published'
+    // via withPublishedOnly, so a draft/failed composite is the not-found page
+    // for everyone but its owner). Composites carry no category_id, so a
+    // discovery CATEGORY-page absence check could never distinguish status (the
+    // composite would be absent even if published) — a false green. The
+    // status-gated public detail surface is the honest discoverability check.
     //
+    // ⚠️ The logged-in allocator OWNS the failed composite, and the factsheet's
+    // owner lane (lane B) deliberately shows an owner their own unpublished
+    // strategy (ROUTE-02). "Publicly discoverable" means what a NON-owner sees,
+    // so both checks below run signed OUT: clearing the context's cookies makes
+    // the same page an anonymous visitor. (The old /strategy/[id] route was
+    // owner-agnostic, which is why this leg never needed to sign out before.)
+    await page.context().clearCookies();
+
     // POSITIVE CONTROL FIRST: a PUBLISHED composite IS reachable (proves the
     // lookup surface renders published composites)…
-    const controlRes = await page.goto(`/strategy/${publishedControl.strategyId}`);
+    const controlRes = await page.goto(`/factsheet/${publishedControl.strategyId}`);
     expect(
       controlRes?.status(),
       "positive control: a PUBLISHED composite must be publicly reachable " +
-        "at /strategy/[id]; if this fails the absence assertion below is a " +
+        "at /factsheet/[id]; if this fails the absence assertion below is a " +
         "false green (the lookup surface itself is broken)",
     ).toBeLessThan(400);
 
     // …THEN the failed composite is ABSENT — absence attributable to the
     // unpublished status, via the SAME id-based lookup.
     //
-    // Status-code note: /strategy/[id] has a loading.tsx, so Next.js opens a
-    // Suspense boundary and flushes the 200 loading shell BEFORE the page's
-    // getPublicStrategyDetail resolves and notFound() throws. The HTTP status is
-    // therefore committed as 200 even though the root not-found UI streams in —
-    // asserting res.status() === 404 is unwinnable on any streamed route. We
-    // assert the honest invariant instead: the rendered page IS the not-found
-    // page (proves the lookup returned nothing) AND the draft's name is absent
+    // Status-code note: /factsheet/[id] reaches the page through a re-export
+    // and its loading.tsx lives under v2/, not on this segment; the HTTP status
+    // of the not-found response is NOT asserted here (unmeasured), because a
+    // streamed route can commit a 200 shell before notFound() throws. We assert
+    // the honest invariant instead: the rendered page IS the not-found page
+    // (proves the lookup returned nothing) AND the draft's name is absent
     // (proves the draft content did not leak).
-    await page.goto(`/strategy/${failed.strategyId}`);
+    await page.goto(`/factsheet/${failed.strategyId}`);
     await expect(
       page.getByRole("heading", { name: /page not found/i }),
       "the #338 failed-member composite must NOT be publicly discoverable — a " +
         "permanent-failed composite must never reach published status; the " +
-        "public detail route must render the not-found page for a draft",
+        "public factsheet must render the not-found page for a draft seen by a non-owner",
     ).toBeVisible({ timeout: 15_000 });
     await expect(
       page.getByText(failedName),
-      "the draft composite's content must NOT leak on its public detail route",
+      "the draft composite's content must NOT leak on its public factsheet",
     ).toHaveCount(0);
   });
 });

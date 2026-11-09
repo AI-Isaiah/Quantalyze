@@ -656,7 +656,6 @@ describe("StrategyGrid mount — the trade claim comes from the cron's record on
     const { container } = render(
       <StrategyGrid
         strategies={[gridRow({ exchanges: ["okx"], tradesFetchedAt: null })]}
-        categorySlug="grid-wiring"
       />,
     );
 
@@ -675,7 +674,6 @@ describe("StrategyGrid mount — the trade claim comes from the cron's record on
         strategies={[
           gridRow({ exchanges: ["okx"], tradesFetchedAt: agoIso(5 * HOUR) }),
         ]}
-        categorySlug="grid-wiring"
       />,
     );
 

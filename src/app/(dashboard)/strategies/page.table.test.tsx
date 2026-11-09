@@ -388,7 +388,7 @@ describe("StrategiesPage — the name opens the factsheet (D-02, P1)", () => {
       for (const id of ids) {
         const link = screen.getByRole("link", { name: `Strategy ${id}` });
         expect(link.getAttribute("href"), `${id}'s name must open its factsheet`).toBe(
-          `/factsheet/${id}`,
+          `/factsheet/${id}?from=strategies`,
         );
       }
       // Non-vacuity: the edit links exist (so "no name link ends in /edit" is

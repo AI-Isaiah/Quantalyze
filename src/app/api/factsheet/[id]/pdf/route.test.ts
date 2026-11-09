@@ -30,6 +30,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
 
 vi.mock("server-only", () => ({}));
+// Sentry reports are an assertion target of the Phase 196 D-08 arms below.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 // Supabase admin — stubbed to a no-data not-found path. Same shape that
 // the route's `.from("strategies").select(...).eq(...).eq(...).single()`
@@ -88,6 +90,11 @@ const STRATEGY_ID = "00000000-0000-0000-0000-000000000001";
 
 function mkParams(): { params: Promise<{ id: string }> } {
   return { params: Promise.resolve({ id: STRATEGY_ID }) };
+}
+
+/** What `page.goto` resolves for a page that answered; the route refuses a missing or >= 400 one. */
+function okResponse(status = 200) {
+  return { status: () => status };
 }
 
 function singleNotFound() {
@@ -269,7 +276,7 @@ describe("GET /api/factsheet/[id]/pdf — URL origin + Cache-Control (Cluster L 
     // Build a fresh puppeteer mock per test so we can spy on page.goto.
     const puppeteer = await import("@/lib/puppeteer");
     vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
-    goto = vi.fn().mockResolvedValue(undefined);
+    goto = vi.fn().mockResolvedValue(okResponse());
     const setDefaultNavigationTimeout = vi.fn();
     const setDefaultTimeout = vi.fn();
     const setViewport = vi.fn().mockResolvedValue(undefined);
@@ -518,7 +525,7 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
 
     const puppeteer = await import("@/lib/puppeteer");
     vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
-    goto = vi.fn().mockResolvedValue(undefined);
+    goto = vi.fn().mockResolvedValue(okResponse());
     const newPage = vi.fn().mockResolvedValue({
       goto,
       setDefaultNavigationTimeout: vi.fn(),
@@ -764,7 +771,7 @@ describe("GET /api/factsheet/[id]/pdf — self-recursion fence (audit-2026-05-07
     vi.mocked(puppeteer.acquirePdfSlot).mockReset();
     vi.mocked(puppeteer.launchBrowser).mockReset();
     vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
-    goto = vi.fn().mockResolvedValue(undefined);
+    goto = vi.fn().mockResolvedValue(okResponse());
     setUserAgent = vi.fn().mockResolvedValue(undefined);
     const newPage = vi.fn().mockResolvedValue({
       goto,
@@ -835,5 +842,310 @@ describe("GET /api/factsheet/[id]/pdf — self-recursion fence (audit-2026-05-07
     const setUaOrder = setUserAgent.mock.invocationCallOrder[0];
     const gotoOrder = goto.mock.invocationCallOrder[0];
     expect(setUaOrder).toBeLessThan(gotoOrder);
+  });
+});
+
+/**
+ * Phase 196 D-08 (T-196-31, T-196-32) — the founder's LP report stays full length.
+ *
+ * WHY THESE ARMS MATTER. The factsheet's opening view is the document and everything else sits
+ * behind the collapsed `details#factsheet-advanced`, whose contents mount only on first open. A
+ * headless render that never opens it would print the opening view alone: the monthly LP report
+ * would silently lose every section it carried before the phase, and nobody would be told. So the
+ * route opens Advanced itself, proves the contents mounted, and REFUSES to return a PDF when they
+ * did not (503 and a Sentry report), rather than shipping a short report that looks whole.
+ *
+ * The mode is not viewer-controllable: no query parameter, header or cookie decides it. The arm
+ * for that sends all three and asserts the same goto URL and the same open step.
+ */
+describe("GET /api/factsheet/[id]/pdf — Advanced is opened server-side (Phase 196 D-08)", () => {
+  let goto: ReturnType<typeof vi.fn>;
+  let evaluate: ReturnType<typeof vi.fn>;
+  let waitForSelector: ReturnType<typeof vi.fn>;
+  let waitForNetworkIdle: ReturnType<typeof vi.fn>;
+  let pdf: ReturnType<typeof vi.fn>;
+  let captureToSentry: ReturnType<typeof vi.fn>;
+  /**
+   * The page the headless browser would hold. The open step's page function is RUN against this
+   * stand-in, so a route that stops setting `open` is caught, not just one that stops calling it.
+   */
+  let details: { open: boolean } | null;
+  /** Whether the page carries the rendered factsheet's `article#factsheet-main`. */
+  let factsheetMain: boolean;
+  /** Whether the page carries the pending render's `data-testid="factsheet-pending"` article. */
+  let factsheetPending: boolean;
+
+  const req = (path = "", headers: Record<string, string> = {}) =>
+    new NextRequest(`https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/pdf${path}`, {
+      method: "GET",
+      headers,
+    });
+  /** The evaluate calls that are the Advanced open step (the page function names the details id). */
+  const openSteps = () =>
+    evaluate.mock.calls.filter(([fn]) => String(fn).includes("factsheet-advanced"));
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
+    vi.mocked(createAdminClient).mockReset();
+    singlePublishedComplete();
+    process.env.INTERNAL_API_TOKEN = "valid-internal-token-abc";
+
+    details = { open: false };
+    factsheetMain = true;
+    factsheetPending = false;
+    const puppeteer = await import("@/lib/puppeteer");
+    captureToSentry = vi.mocked((await import("@/lib/sentry-capture")).captureToSentry);
+    captureToSentry.mockReset();
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    goto = vi.fn().mockResolvedValue(okResponse());
+    evaluate = vi.fn(async (fn: unknown) => {
+      if (!String(fn).includes("factsheet-advanced")) return undefined;
+      vi.stubGlobal("document", {
+        getElementById: (id: string) => {
+          if (id === "factsheet-advanced") return details;
+          if (id === "factsheet-main") return factsheetMain ? {} : null;
+          return null;
+        },
+        querySelector: (selector: string) =>
+          selector === '[data-testid="factsheet-pending"]' && factsheetPending ? {} : null,
+      });
+      try {
+        return (fn as () => unknown)();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+    waitForSelector = vi.fn().mockResolvedValue(undefined);
+    waitForNetworkIdle = vi.fn().mockResolvedValue(undefined);
+    pdf = vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    const newPage = vi.fn().mockResolvedValue({
+      goto,
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      setUserAgent: vi.fn().mockResolvedValue(undefined),
+      evaluate,
+      waitForSelector,
+      waitForNetworkIdle,
+      pdf,
+    });
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
+      newPage,
+      close: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+    vi.restoreAllMocks();
+  });
+
+  it("opens Advanced after goto, waits for its contents and for the network to settle, THEN prints", async () => {
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(200);
+
+    expect(openSteps()).toHaveLength(1);
+    // The page function really set `open`: the contents mount on that toggle.
+    expect(details?.open).toBe(true);
+    expect(waitForSelector).toHaveBeenCalledWith("[data-advanced-contents]", expect.objectContaining({ timeout: expect.any(Number) }));
+    expect(waitForNetworkIdle).toHaveBeenCalledTimes(1);
+    expect(pdf).toHaveBeenCalledTimes(1);
+
+    const openedAt = evaluate.mock.invocationCallOrder[evaluate.mock.calls.findIndex(([fn]) => String(fn).includes("factsheet-advanced"))];
+    expect(goto.mock.invocationCallOrder[0]).toBeLessThan(openedAt);
+    expect(openedAt).toBeLessThan(waitForSelector.mock.invocationCallOrder[0]);
+    expect(waitForSelector.mock.invocationCallOrder[0]).toBeLessThan(waitForNetworkIdle.mock.invocationCallOrder[0]);
+    expect(waitForNetworkIdle.mock.invocationCallOrder[0]).toBeLessThan(pdf.mock.invocationCallOrder[0]);
+  });
+
+  it("Advanced absent on a rendered factsheet (nothing inside had content): no wait, the PDF is produced", async () => {
+    details = null;
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(200);
+    expect(openSteps()).toHaveLength(1);
+    expect(waitForSelector).not.toHaveBeenCalled();
+    expect(waitForNetworkIdle).not.toHaveBeenCalled();
+    expect(pdf).toHaveBeenCalledTimes(1);
+  });
+
+  it("Advanced absent AND no factsheet article on the page (a pending, not-found or error render): 503 like an unmounted Advanced, never a PDF", async () => {
+    details = null;
+    factsheetMain = false;
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(pdf).not.toHaveBeenCalled();
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("factsheet-main") }),
+      expect.objectContaining({ tags: { area: "factsheet-pdf", step: "advanced_open" } }),
+    );
+  });
+
+  it("a pending factsheet (no article, no Advanced, the pending marker present): a non-retryable 409 with no-store, no error-level Sentry event, never a PDF (M5)", async () => {
+    details = null;
+    factsheetMain = false;
+    factsheetPending = true;
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Retry-After")).toBeNull();
+    expect(await res.json()).toEqual({ error: "Factsheet not available yet" });
+    expect(pdf).not.toHaveBeenCalled();
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("a mounted factsheet whose Advanced never mounts stays the retryable 503 with a Sentry report, even if a pending marker were also on the page (M5)", async () => {
+    factsheetPending = true;
+    waitForSelector.mockRejectedValue(new Error("Waiting failed: 10000ms exceeded"));
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("10");
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(pdf).not.toHaveBeenCalled();
+  });
+
+  it.each([404, 500])("the factsheet page answers %i: the route answers its 500 JSON shape with a Sentry report and never prints it", async (status) => {
+    goto.mockResolvedValue(okResponse(status));
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "PDF generation failed" });
+    expect(pdf).not.toHaveBeenCalled();
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+  });
+
+  it("no response from the navigation is refused the same way", async () => {
+    goto.mockResolvedValue(null);
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(500);
+    expect(pdf).not.toHaveBeenCalled();
+  });
+
+  describe("the waits spend the time left before the deadline (WR-03)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(0);
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("a slow goto leaves the Advanced waits only what is left of maxDuration minus the reserve, so the 503 path can run in time", async () => {
+      const { GET, maxDuration } = await import("./route");
+      goto.mockImplementation(async () => {
+        vi.setSystemTime(20_000);
+        return okResponse();
+      });
+      const res = await GET(req(), mkParams());
+      expect(res.status).toBe(200);
+      const deadlineMs = (maxDuration - 3) * 1000;
+      const selectorTimeout = waitForSelector.mock.calls[0][1].timeout as number;
+      const idleTimeout = waitForNetworkIdle.mock.calls[0][0].timeout as number;
+      expect(selectorTimeout).toBe(deadlineMs - 20_000);
+      expect(idleTimeout).toBe(deadlineMs - 20_000);
+      expect(selectorTimeout).toBeLessThan(10_000);
+    });
+
+    it("page.pdf() gets what is left of the deadline as its timeout, and an exhausted budget is 1 ms, never 0 (M5)", async () => {
+      const { GET, maxDuration } = await import("./route");
+      const deadlineMs = (maxDuration - 3) * 1000;
+      waitForNetworkIdle.mockImplementation(async () => {
+        vi.setSystemTime(22_000);
+      });
+      const res = await GET(req(), mkParams());
+      expect(res.status).toBe(200);
+      expect(pdf.mock.calls[0][0].timeout).toBe(deadlineMs - 22_000);
+
+      pdf.mockClear();
+      waitForNetworkIdle.mockImplementation(async () => {
+        vi.setSystemTime(deadlineMs + 1_000);
+      });
+      vi.setSystemTime(0);
+      await GET(req(), mkParams());
+      expect(pdf.mock.calls[0][0].timeout).toBe(1);
+    });
+
+    it("a navigation timeout is capped by the deadline too, and an exhausted budget is 1 ms, never 0 (puppeteer reads 0 as no timeout)", async () => {
+      const { GET, maxDuration } = await import("./route");
+      const deadlineMs = (maxDuration - 3) * 1000;
+      const queueWait = vi.mocked((await import("@/lib/puppeteer")).acquirePdfSlot);
+      queueWait.mockImplementation(async () => {
+        vi.setSystemTime(deadlineMs + 5_000);
+        return () => {};
+      });
+      const res = await GET(req(), mkParams());
+      expect(res.status).toBe(200);
+      expect(goto.mock.calls[0][1].timeout).toBe(1);
+      expect(waitForSelector.mock.calls[0][1].timeout).toBe(1);
+    });
+  });
+
+  it.each([
+    ["the contents never mount (waitForSelector rejects)", "selector"],
+    ["the network never settles (waitForNetworkIdle rejects)", "idle"],
+  ])("Advanced present but %s: 503 with no-store, one Sentry report, and page.pdf is never called", async (_label, which) => {
+    const timeout = new Error("Waiting failed: 10000ms exceeded");
+    if (which === "selector") waitForSelector.mockRejectedValue(timeout);
+    else waitForNetworkIdle.mockRejectedValue(timeout);
+
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Retry-After")).toBe("10");
+    expect(await res.json()).toEqual({ error: "PDF render incomplete, retry shortly" });
+    expect(pdf).not.toHaveBeenCalled();
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry).toHaveBeenCalledWith(
+      timeout,
+      expect.objectContaining({ tags: { area: "factsheet-pdf", step: "advanced_open" } }),
+    );
+  });
+
+  it("the mode is not viewer-controllable: a query string, extra headers and a cookie change neither the goto URL nor the open step", async () => {
+    const { GET } = await import("./route");
+    const plain = await GET(req(), mkParams());
+    const plainGoto = goto.mock.calls[0][0];
+    const plainOpenSteps = openSteps().length;
+    const plainWaits = waitForSelector.mock.calls.length;
+    expect(plain.status).toBe(200);
+
+    goto.mockClear();
+    evaluate.mockClear();
+    waitForSelector.mockClear();
+    const sneaky = await GET(
+      req("?print=all&advanced=0&full=false", {
+        "x-print-all": "0",
+        "x-advanced": "closed",
+        cookie: "factsheet-collapse:advanced=closed; print=all",
+      }),
+      mkParams(),
+    );
+    expect(sneaky.status).toBe(200);
+    expect(goto.mock.calls[0][0]).toBe(plainGoto);
+    expect(goto.mock.calls[0][0]).toBe(`https://quantalyze.xyz/factsheet/${STRATEGY_ID}`);
+    expect(openSteps()).toHaveLength(plainOpenSteps);
+    expect(waitForSelector.mock.calls).toHaveLength(plainWaits);
+  });
+
+  it("the founder-lp-report internal-token path is unchanged: limiter bypassed, Advanced still opened, PDF returned", async () => {
+    const { GET } = await import("./route");
+    const res = await GET(req("", { "x-internal-token": "valid-internal-token-abc" }), mkParams());
+    expect(res.status).toBe(200);
+    expect(checkLimit).not.toHaveBeenCalled();
+    expect(openSteps()).toHaveLength(1);
+    expect(waitForSelector).toHaveBeenCalledTimes(1);
+    expect(pdf).toHaveBeenCalledTimes(1);
   });
 });

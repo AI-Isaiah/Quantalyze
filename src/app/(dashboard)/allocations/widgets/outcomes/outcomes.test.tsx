@@ -397,16 +397,16 @@ describe("OutcomesWidget — Timeline (inline TimelineTable + TimelineRow)", () 
     ).toBeInTheDocument();
   });
 
-  it("Strategy name links to /strategy/[id] (singular — allocator-view route) for both original and replacement columns (resolved from nested match_decision.original_strategy join)", () => {
+  it("Strategy name links to the factsheet with from=allocations for both original and replacement columns (resolved from nested match_decision.original_strategy join)", () => {
     // Regression: UAT-AUDIT-2026-04-27 — links previously pointed at
-    // /strategies/[id] (plural) which only registers /strategies/[id]/edit
-    // for strategy-managers. Allocators got 404 on click. Allocator-view
-    // route is /strategy/[id] (singular) per src/app/strategy/[id]/page.tsx.
+    // /strategies/[id] (plural), which only registers /edit, so allocators got
+    // 404 on click. Phase 196 D-01/D-03: a strategy has one page, the factsheet;
+    // the origin rides along so its back link reads "Back to My allocation".
     renderWidget([makeOutcome({ id: "o1" })]);
     const origLink = screen.getByRole("link", { name: "Legacy Equity LP" });
     const replLink = screen.getByRole("link", { name: "Crypto Momentum LP" });
-    expect(origLink.getAttribute("href")).toBe("/strategy/s-orig");
-    expect(replLink.getAttribute("href")).toBe("/strategy/s-repl");
+    expect(origLink.getAttribute("href")).toBe("/factsheet/s-orig?from=allocations");
+    expect(replLink.getAttribute("href")).toBe("/factsheet/s-repl?from=allocations");
   });
 
   it("Best Delta cell renders em-dash '\u2014' on rejected rows", () => {

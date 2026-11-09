@@ -421,3 +421,21 @@ describe("POST /api/intro — C-0096 contact_requests error envelopes", () => {
     ).toHaveLength(0);
   });
 });
+
+describe("POST /api/intro — the route does not gate on the accredited-investor attestation (Phase 196 R2-02)", () => {
+  // Parity with the pre-phase behaviour: the attestation was enforced in the UI
+  // only (/discovery's layout, and now the factsheet's affordances via
+  // resolveFactsheetViewer). The Bridge's ReplacementCard on /allocations posts
+  // here too and has no attestation gate or prompt, so an approved allocator
+  // without an attestation row must still get through. This harness answers
+  // from(investor_attestations) with a throw, so any attestation read in the
+  // route would refuse the request and fail this arm.
+  it("an approved allocator with no attestation row is not refused", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({ strategy_id: STRAT_ID, source: "bridge", replacement_for: REPLACEMENT_ID }),
+    );
+    expect(res.status).toBe(200);
+    expect(STATE.contactInsertPayload).not.toBeNull();
+  });
+});

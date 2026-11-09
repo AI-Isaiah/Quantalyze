@@ -26,10 +26,13 @@
  *          (`auth.getUser()`), never param-keyed.
  *
  * Plus a lane-ORDER lock: a published id rendered WITH an authed session must
- * record ZERO `auth.getUser()` calls and ZERO `.or` filters. That test is
- * green both before and after Lane B exists — it is here to catch the
- * "hoist auth.getUser() above the published probe" repair, which would put a
- * session probe on every public request.
+ * resolve the published probe BEFORE its first `auth.getUser()` call, call it
+ * exactly once (Phase 196: the viewer chrome reads the session on the published
+ * lane too), record ZERO `.or` filters, invoke the cache once with arguments
+ * that carry no user id, and hand FactsheetView a payload with no viewer. It
+ * catches the "hoist auth.getUser() above the published probe" repair, which
+ * would put a session probe ahead of every public request, and a viewer field
+ * leaking into the shared cache.
  *
  * ⛔ Two harness properties are load-bearing and must not be "simplified":
  *   1. `unstable_cache` is a SPY — `vi.fn((fn) => fn)` — not a bare identity
@@ -207,6 +210,9 @@ const STATE = {
     requestStatusEqs: [] as string[],
     /** SELECT column lists seen on the request client, in call order. */
     requestSelects: [] as string[],
+    /** Request-client reads and session reads in INVOCATION order, for the
+     *  lane-order lock: "strategies" / "strategies:owner" per probe, "getUser". */
+    events: [] as string[],
   },
 };
 
@@ -221,7 +227,7 @@ const getUserSpy = vi.fn();
 function mockRequestClient() {
   return {
     auth: { getUser: getUserSpy },
-    from: () => {
+    from: (table: string) => {
       let sawOr = false;
       const chain = {
         select: (cols: string) => {
@@ -237,12 +243,14 @@ function mockRequestClient() {
           STATE.observed.requestOrFilters.push(filter);
           return chain;
         },
-        maybeSingle: () =>
-          Promise.resolve(
+        maybeSingle: () => {
+          STATE.observed.events.push(sawOr ? `${table}:owner` : table);
+          return Promise.resolve(
             sawOr
               ? { data: STATE.ownerRow, error: STATE.probeError }
               : { data: STATE.publishedRow, error: null },
-          ),
+          );
+        },
       };
       return chain;
     },
@@ -330,7 +338,10 @@ function givenPublished() {
  *  select adds so the page can gate the lane on row status (WR-01). */
 function givenOwnerDraft() {
   STATE.publishedRow = null;
-  STATE.ownerRow = { ...signatureRow("Draft Alpha"), status: "draft" };
+  // `user_id` is the session user: the owner lane is reachable only for a row
+  // the session owns, and Phase 196's viewer resolution compares the two (an
+  // owner needs no profile read, which keeps the request-client read count at 3).
+  STATE.ownerRow = { ...signatureRow("Draft Alpha"), status: "draft", user_id: OWNER_UID };
   STATE.adminRow = adminStrategyRow("draft");
   STATE.sessionUser = { id: OWNER_UID };
 }
@@ -346,11 +357,15 @@ beforeEach(() => {
   STATE.observed.adminOrFilters = [];
   STATE.observed.requestStatusEqs = [];
   STATE.observed.requestSelects = [];
+  STATE.observed.events = [];
 
-  getUserSpy.mockImplementation(async () => ({
-    data: { user: STATE.sessionUser },
-    error: null,
-  }));
+  getUserSpy.mockImplementation(async () => {
+    STATE.observed.events.push("getUser");
+    return {
+      data: { user: STATE.sessionUser },
+      error: null,
+    };
+  });
   vi.mocked(createClient).mockResolvedValue(mockRequestClient() as never);
   vi.mocked(createAdminClient).mockImplementation(() => mockAdmin() as never);
   // Empty map = no PUBLISHED verification signal, which is the truth for a
@@ -678,18 +693,36 @@ describe("Phase 150 — the mark and the rename target ride the OWNER LANE only"
 });
 
 describe("lane order lock — published/cached lane FIRST", () => {
-  it("10. published id rendered WITH an authed session → ZERO auth.getUser calls, ZERO .or filters", async () => {
+  it("10. published id rendered WITH an authed session → the published probe resolves before the first getUser call, getUser is called once, ZERO .or filters, the cache is invoked once with no user id, and the payload carries no viewer", async () => {
     givenPublished();
     STATE.sessionUser = { id: OWNER_UID }; // authed viewer on a PUBLIC page
 
     const jsx = await renderPage();
     expect(findPayload(jsx)).not.toBeNull();
 
+    // Invocation order: the published probe is the first request-client read,
+    // and the session is read only after it (a hoisted getUser would come first).
     expect(
-      getUserSpy,
-      "a public authed view must not pay a session probe (lane order: published FIRST)",
-    ).toHaveBeenCalledTimes(0);
+      STATE.observed.events[0],
+      "the published probe must run before any session read (lane order: published FIRST)",
+    ).toBe("strategies");
+    expect(STATE.observed.events.indexOf("getUser")).toBeGreaterThan(0);
+    // One session read per render, shared by the chrome and the AUM decision.
+    expect(getUserSpy).toHaveBeenCalledTimes(1);
     expect(STATE.observed.requestOrFilters).toEqual([]);
+
+    // The shared cache is invoked once and its key carries nothing of the viewer.
     expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(1);
+    const cacheArgs = JSON.stringify(vi.mocked(unstable_cache).mock.calls[0].slice(1));
+    expect(cacheArgs).not.toContain(OWNER_UID);
+
+    // The payload FactsheetView receives has no viewer, role or owner field, and
+    // FactsheetView itself is handed no viewer prop.
+    const props = findViewProps(jsx)!;
+    expect(Object.keys(props)).not.toContain("viewer");
+    expect(JSON.stringify(props.payload)).not.toContain(OWNER_UID);
+    expect(Object.keys(props.payload as object)).not.toEqual(
+      expect.arrayContaining(["viewer"]),
+    );
   });
 });

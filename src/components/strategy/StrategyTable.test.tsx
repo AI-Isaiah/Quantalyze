@@ -1514,7 +1514,7 @@ describe("StrategyTable — native-unit chip (164.6.6.2.1 D-05)", () => {
     // (The status line below the badge row carries a clock-dependent
     // "Synced Nd ago", so only the two structural rows are pinned.)
     expect((nameCell.firstElementChild as HTMLElement).outerHTML).toBe(
-      '<div class="flex items-center gap-1.5"><a class="font-medium text-text-primary hover:text-accent transition-colors" href="/factsheet/11111111-0000-4000-8000-000000000001"><div class="contents"><span class="whitespace-nowrap">Alpha</span> <span class="whitespace-nowrap">Stellar</span></div></a></div>',
+      '<div class="flex items-center gap-1.5"><a class="font-medium text-text-primary hover:text-accent transition-colors" href="/factsheet/11111111-0000-4000-8000-000000000001?from=discovery&amp;cat=crypto-sma"><div class="contents"><span class="whitespace-nowrap">Alpha</span> <span class="whitespace-nowrap">Stellar</span></div></a></div>',
     );
     expect(badgeRow.outerHTML).toBe(
       '<div class="flex flex-wrap gap-1"><span class="inline-flex items-center rounded-md px-2 py-0.5 text-caption font-medium bg-badge-directional/10 text-badge-directional whitespace-nowrap">Long-Only</span></div>',

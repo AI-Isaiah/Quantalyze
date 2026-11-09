@@ -92,21 +92,21 @@ describe("StrategyGrid — DISCO-04 sparkline color rule on grid card", () => {
   it("renders the card sparkline with var(--color-accent) when final > 0", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
     fixture.analytics.sparkline_returns = [0, 0.05, 0.1];
-    render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    render(<StrategyGrid strategies={[fixture]} />);
     expect(getCardSparklineStroke()).toBe("var(--color-accent)");
   });
 
   it("renders the card sparkline with var(--color-negative) when final < 0", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
     fixture.analytics.sparkline_returns = [0, -0.02, -0.05];
-    render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    render(<StrategyGrid strategies={[fixture]} />);
     expect(getCardSparklineStroke()).toBe("var(--color-negative)");
   });
 
   it("renders the card sparkline with var(--color-chart-benchmark) when final === 0", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
     fixture.analytics.sparkline_returns = [0.01, -0.01, 0];
-    render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    render(<StrategyGrid strategies={[fixture]} />);
     expect(getCardSparklineStroke()).toBe("var(--color-chart-benchmark)");
   });
 });
@@ -115,7 +115,7 @@ describe("StrategyGrid — TYPE-02 tile-name truncation recovery", () => {
   it("recovers the full strategy name via title= on the truncated tile heading (real name, never a fabricated placeholder)", () => {
     const longName = "A Very Long Strategy Name That Truncates On The Tile";
     const fixture = makeStrategy({ id: STRATEGY_ID, name: longName });
-    render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    render(<StrategyGrid strategies={[fixture]} />);
     // The tile heading stays single-line (`truncate min-w-0`); title= recovers
     // the full real name on hover / for assistive tech — never a fabricated
     // stand-in (no-invented-data / STATE-02). Mirrors CompareTable.test.tsx
@@ -148,7 +148,7 @@ describe("StrategyGrid - Verified badge follows the public trust signal (Phase 1
     const row = publicRow("api_verified");
     expect("api_key_id" in row).toBe(false);
     const { container } = render(
-      <StrategyGrid strategies={[row]} categorySlug="crypto-sma" />,
+      <StrategyGrid strategies={[row]} />,
     );
     expect(container.textContent).toContain("Verified");
   });
@@ -160,7 +160,7 @@ describe("StrategyGrid - Verified badge follows the public trust signal (Phase 1
       api_key_id: "key-1",
     });
     const { container } = render(
-      <StrategyGrid strategies={[row]} categorySlug="crypto-sma" />,
+      <StrategyGrid strategies={[row]} />,
     );
     expect(container.textContent).not.toContain("Verified");
   });
@@ -198,7 +198,7 @@ describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERY
 
   it("a card listed as Bybit whose key is on OKX reads OKX and says it is listed as Bybit", () => {
     const { container } = render(
-      <StrategyGrid strategies={[venueCard(["bybit"], ["okx"])]} categorySlug="crypto-sma" />,
+      <StrategyGrid strategies={[venueCard(["bybit"], ["okx"])]} />,
     );
     const badge = badgeOf(container);
     expect(badge.querySelector("span.font-medium")?.textContent).toBe("OKX");
@@ -207,7 +207,7 @@ describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERY
 
   it("a card with no venues keeps its listed exchange and makes no mismatch claim", () => {
     const { container } = render(
-      <StrategyGrid strategies={[venueCard(["bybit"])]} categorySlug="crypto-sma" />,
+      <StrategyGrid strategies={[venueCard(["bybit"])]} />,
     );
     const badge = badgeOf(container);
     expect(badge.querySelector("span.font-medium")?.textContent).toBe("Bybit");
@@ -219,7 +219,6 @@ describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERY
     const { container } = render(
       <StrategyGrid
         strategies={[venueCard(["bybit"], undefined, true)]}
-        categorySlug="crypto-sma"
       />,
     );
     const badge = badgeOf(container);
@@ -238,7 +237,7 @@ describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERY
 
   it("a listed deribit, with no venues, renders Deribit (O-2: display names, not the raw code)", () => {
     const { container } = render(
-      <StrategyGrid strategies={[venueCard(["deribit"])]} categorySlug="crypto-sma" />,
+      <StrategyGrid strategies={[venueCard(["deribit"])]} />,
     );
     expect(badgeOf(container).querySelector("span.font-medium")?.textContent).toBe("Deribit");
   });
@@ -251,7 +250,7 @@ describe("StrategyGrid - footer labels read the table's column map (Phase 197 D-
   // pinned here so a changed map entry fails by name instead of silently moving both views.
   it("labels the two footer figures with their period, and ann. only on the annualized one", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
-    const { container } = render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    const { container } = render(<StrategyGrid strategies={[fixture]} />);
     const labels = Array.from(container.querySelectorAll("span.text-text-muted")).map((n) => n.textContent ?? "");
     expect(labels).toContain("Return \u00b7 full record ");
     expect(labels).toContain("CAGR \u00b7 full record \u00b7 ann. ");
@@ -261,7 +260,7 @@ describe("StrategyGrid - footer labels read the table's column map (Phase 197 D-
     const ret = DISCOVERY_COLUMNS.find((c) => c.key === "cumulative_return")!;
     const cagr = DISCOVERY_COLUMNS.find((c) => c.key === "cagr")!;
     const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
-    const { container } = render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    const { container } = render(<StrategyGrid strategies={[fixture]} />);
     const text = container.textContent ?? "";
     expect(text).toContain(`${ret.label} \u00b7 ${ret.period}`);
     expect(ret.annualized).toBe(false);
@@ -271,7 +270,7 @@ describe("StrategyGrid - footer labels read the table's column map (Phase 197 D-
 
   it("stacks the two footer items at 375px", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
-    const { container } = render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    const { container } = render(<StrategyGrid strategies={[fixture]} />);
     const footer = container.querySelector("div.border-t.border-border.pt-2\\.5");
     expect(footer?.className).toContain("max-[375px]:flex-col");
   });

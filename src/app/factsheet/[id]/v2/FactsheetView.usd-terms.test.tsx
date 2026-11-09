@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent, within } from "@testing-library/react";
+import { render, fireEvent, within, waitFor } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, FactsheetUsdView } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
@@ -110,6 +110,14 @@ function termValue(panel: HTMLElement, label: string): string {
   expect(dt, `Terms row "${label}" did not render`).toBeDefined();
   return (dt!.nextElementSibling as HTMLElement).textContent ?? "";
 }
+/**
+ * Phase 196 (D-04): the Terms panel lives in Advanced's Detailed metrics rail now, which
+ * mounts on first open. Every arm opens Advanced first and keeps its assertions unchanged.
+ */
+async function openAdvanced(container: HTMLElement) {
+  fireEvent.click(container.querySelector("#factsheet-advanced > summary")!);
+  await waitFor(() => expect(container.querySelector("#factsheet-advanced [data-advanced-contents]")).not.toBeNull());
+}
 function toggleUsd(container: HTMLElement) {
   const t = container.querySelector('[data-testid="factsheet-unit-toggle"]') as HTMLElement;
   fireEvent.click(within(t).getByRole("button", { name: "USD" }));
@@ -122,20 +130,22 @@ describe("CR-02 — the Terms panel describes the strategy, not the unit", () =>
     expect(p.usdView!.payload.trustTier).toBeNull();
   });
 
-  it("an API-verified strategy reads 'API-verified' in both views", () => {
+  it("an API-verified strategy reads 'API-verified' in both views", async () => {
     const { container } = render(<FactsheetView payload={pageShapedPayload("api_verified")} />);
+    await openAdvanced(container);
     expect(termValue(termsPanel(container), "Data source")).toBe("API-verified");
     toggleUsd(container);
     expect(termValue(termsPanel(container), "Data source")).toBe("API-verified");
   });
 
-  it("every tier survives the switch unchanged (CSV, self-reported, unverified)", () => {
+  it("every tier survives the switch unchanged (CSV, self-reported, unverified)", async () => {
     for (const [tier, text] of [
       ["csv_uploaded", "CSV-uploaded (verification pending)"],
       ["self_reported", "Self-reported"],
       [null, "—"],
     ] as const) {
       const { container, unmount } = render(<FactsheetView payload={pageShapedPayload(tier)} />);
+      await openAdvanced(container);
       expect(termValue(termsPanel(container), "Data source")).toBe(text);
       toggleUsd(container);
       expect(termValue(termsPanel(container), "Data source")).toBe(text);
@@ -143,8 +153,9 @@ describe("CR-02 — the Terms panel describes the strategy, not the unit", () =>
     }
   });
 
-  it("a live record never gains a backtest clause by switching to USD", () => {
+  it("a live record never gains a backtest clause by switching to USD", async () => {
     const { container } = render(<FactsheetView payload={pageShapedPayload("api_verified")} />);
+    await openAdvanced(container);
     const live = termValue(termsPanel(container), "Live since");
     expect(live).not.toContain("backtest");
     toggleUsd(container);
@@ -153,11 +164,12 @@ describe("CR-02 — the Terms panel describes the strategy, not the unit", () =>
     expect(usdLive).toBe(live);
   });
 
-  it("the Live since row still reports a real backtest gap in BOTH views (the clause is not removed)", () => {
+  it("the Live since row still reports a real backtest gap in BOTH views (the clause is not removed)", async () => {
     // Declared live date two days BEFORE the native record starts: genuinely backtest.
     const base = pageShapedPayload("api_verified");
     const p = { ...base, startDate: "2022-12-25" } as FactsheetPayload;
     const { container } = render(<FactsheetView payload={p} />);
+    await openAdvanced(container);
     expect(termValue(termsPanel(container), "Live since")).toContain("portion before live date is backtest");
     toggleUsd(container);
     const usd = termValue(termsPanel(container), "Live since");

@@ -622,8 +622,6 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
    *   - the four `/admin` text pages — under `/admin` for NAVIGATION reasons
    *     only; RT-W2 (v1.4 Phase 54) set them at rung 1, 1100px.
    *   - the Overview "factsheet warming up" status block (prose).
-   *   - the discovery-detail "factsheet still computing" fallback article,
-   *     which carries the factsheet's own 760px reading measure.
    *   - `DashboardChrome` itself: this IS the owner, and the cap it carries is
    *     the NARROW branch of its own ternary (`isWide ? max-w-full : max-w-7xl`).
    *     Exempting the owner is what makes the rule "sole owner" rather than
@@ -634,6 +632,10 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
    *   - `StrategyV2Shell`: the `/strategy/[id]` document shell — rung 2. That
    *     route is deliberately NOT on the `isWide` list (a document, not a data
    *     surface), so its measure is correct and must not be swept away.
+   *   - `ViewerBar` and `VisitorHeader` (Phase 196): the factsheet's own chrome,
+   *     rendered only on `/factsheet/[id]`, outside `DashboardChrome`. They align
+   *     to the factsheet document shell's 1440px rung (DESIGN.md measure ladder,
+   *     the existing document rung `FactsheetView` uses), so this is no new rung.
    *
    * ⛔ A dense-table page may not join this list. Adding an entry is a design
    * decision that belongs in DESIGN.md's changelog first.
@@ -647,14 +649,11 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
       "src/app/(dashboard)/allocations/AllocationDashboardV2.tsx",
       "max-w-[1100px]",
     ],
-    [
-      "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx",
-      "max-w-[760px]",
-    ],
     ["src/components/layout/DashboardChrome.tsx", "max-w-7xl"],
     ["src/components/legal/LegalFooter.tsx", "max-w-6xl"],
     ["src/components/strategy-v2/PartialDataBanner.tsx", "max-w-[480px]"],
-    ["src/components/strategy-v2/StrategyV2Shell.tsx", "max-w-[1200px]"],
+    ["src/components/factsheet/ViewerBar.tsx", "max-w-[1440px]"],
+    ["src/components/factsheet/VisitorHeader.tsx", "max-w-[1440px]"],
   ]);
 
   /** Every `className="…"` / `className={`…`}` string literal in a source file. */

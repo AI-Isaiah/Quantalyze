@@ -95,6 +95,7 @@ import {
   withheldReason,
 } from "@/lib/figure-gate";
 import { ROLL_WINDOW_1Y_DAYS } from "@/lib/factsheet/rolling";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 import { blendPeriodsPerYear, type SeriesState } from "@/lib/closed-sets";
 import {
@@ -8653,7 +8654,7 @@ function CompositionList({
                       selection — this is an href for an id the viewer's draft
                       already contains, never a disclosure. */}
                   <Link
-                    href={`/factsheet/${a.id}`}
+                    href={buildFactsheetHref(a.id, { key: "allocations" })}
                     className="mt-3 inline-block text-sm text-accent transition-colors hover:text-accent-hover"
                   >
                     View factsheet →

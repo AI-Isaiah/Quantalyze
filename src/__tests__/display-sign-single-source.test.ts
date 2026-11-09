@@ -115,21 +115,11 @@ const CENSUS_FILES = [
   "src/app/factsheet/[id]/v2/HeatmapPanels.tsx",
   "src/app/factsheet/[id]/tearsheet/page.tsx",
   "src/app/api/og/factsheet/[id]/route.tsx",
-  "src/components/strategy-v2/HeadlineMetricsPanel.tsx",
-  "src/components/strategy-v2/TradeAndPositionPanel.tsx",
   // Table F: every other surface
-  "src/components/charts/MonthlyHeatmap.tsx",
-  "src/components/charts/DailyHeatmap.tsx",
-  "src/components/charts/DrawdownChart.tsx",
-  "src/components/charts/EquityCurve.tsx",
   "src/components/charts/ReturnQuantiles.tsx",
-  "src/components/charts/YearlyReturns.tsx",
   "src/components/charts/ReturnHistogram.tsx",
-  "src/components/charts/RollingAlphaBetaChart.tsx",
   "src/components/charts/RollingSortinoChart.tsx",
   "src/components/charts/RollingMetrics.tsx",
-  "src/components/charts/CorrelationWithBenchmark.tsx",
-  "src/components/charts/WorstDrawdowns.tsx",
   "src/app/(dashboard)/allocations/widgets/attribution/AlphaBetaDecomposition.tsx",
   "src/app/(dashboard)/allocations/components/KpiStrip.tsx",
   "src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
@@ -967,18 +957,6 @@ export const ALLOWLIST: Allowlist = {
       reason: "Rolling volatility (tick and tooltip): volatility is non-negative.",
     },
   },
-  "src/components/charts/TurnoverChart.tsx": {
-    R6: {
-      count: 2,
-      reason: "Turnover (tick and tooltip): turnover is non-negative.",
-    },
-  },
-  "src/components/charts/WorstDrawdowns.tsx": {
-    R5: {
-      count: 1,
-      reason: "CELL_DEPTH: `MIN_DEPTH_PCT` 0.005 keeps every printed depth at or beyond 0.50%, so this red is a real drawdown (D-04).",
-    },
-  },
   "src/components/charts/chart-tokens.ts": {
     R5: {
       count: 2,
@@ -1027,12 +1005,6 @@ export const ALLOWLIST: Allowlist = {
     R5: {
       count: 3,
       reason: "The replacement panel's error box (`border-negative/20 bg-negative/5`) and its error line, a sentence.",
-    },
-  },
-  "src/components/strategy-v2/TradeAndPositionPanel.tsx": {
-    R6: {
-      count: 3,
-      reason: "Compact USD for gross volume, mean trade size and turnover (non-negative amounts), and the average trade duration in days (non-negative).",
     },
   },
   "src/components/strategy/ApiKeyForm.tsx": {

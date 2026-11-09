@@ -33,9 +33,16 @@ async function goToStrategyEdit(page: Page, strategyId: string) {
   await page.goto(`/strategies/${strategyId}/edit`);
 }
 
-/** Navigate to the analytics detail page for a strategy. */
+/**
+ * Navigate to the analytics detail page for a strategy.
+ *
+ * Phase 196 ONESTRATEGYPAGE (D-03): the old /discovery/<slug>/<id> detail page
+ * is retired and its URL 308s to /factsheet/<id>?from=discovery&cat=<slug>.
+ * The analytics now live on the factsheet, so go there directly with the
+ * origin the redirect would have carried.
+ */
 async function goToAnalyticsPage(page: Page, slug: string, strategyId: string) {
-  await page.goto(`/discovery/${slug}/${strategyId}`);
+  await page.goto(`/factsheet/${strategyId}?from=discovery&cat=${slug}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -258,102 +265,81 @@ test.describe("Sync & Analytics Flow", () => {
     test("analytics page renders hero metrics (CAGR, Sharpe, Max Drawdown)", async ({ page }) => {
       await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
 
-      // Hero metric cards
-      await expect(page.getByText("CAGR")).toBeVisible();
-      await expect(page.getByText("Sharpe")).toBeVisible();
-      await expect(page.getByText("Max Drawdown")).toBeVisible();
-
-      // Values should be rendered (not just labels)
-      // Metric values use the font-metric class
-      const metricValues = page.locator(".font-metric");
-      await expect(metricValues).not.toHaveCount(0);
+      // Factsheet metrics column rows (MetricsColumn: Returns / Risk sections).
+      await expect(page.getByText("CAGR", { exact: true }).first()).toBeVisible();
+      await expect(page.getByText("Sharpe", { exact: true }).first()).toBeVisible();
+      await expect(page.getByText("Max Drawdown", { exact: true }).first()).toBeVisible();
     });
 
-    test("analytics page renders equity curve chart", async ({ page }) => {
+    test("analytics page renders the performance section with its charts", async ({ page }) => {
       await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
 
-      // Equity curve is rendered inside a Card with a Recharts SVG
-      // Look for the chart container or SVG element
-      const chartContainer = page.locator("svg.recharts-surface").first();
-      await expect(chartContainer).toBeVisible({ timeout: 10000 });
+      // The factsheet's Performance CollapsibleSection (id="factsheet-perf",
+      // defaultOpen) carries the equity chart.
+      await expect(page.locator("#factsheet-perf")).toBeVisible({ timeout: 10000 });
     });
 
-    test("analytics page renders tabbed metric panels", async ({ page }) => {
+    test("analytics page renders the distribution and heatmap sections", async ({ page }) => {
       await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
 
-      // Verify the three tabs are present
-      for (const tab of ["Overview", "Returns", "Risk"]) {
-        await expect(page.getByRole("button", { name: tab })).toBeVisible();
-      }
-
-      // Default tab is Overview — drawdown chart should be visible
-      await expect(page.getByText(/Underwater|Drawdown/i)).toBeVisible();
+      // Monthly returns and the return distribution live in the Heatmaps and
+      // Distribution CollapsibleSections, both defaultOpen.
+      await expect(page.locator("#factsheet-dist")).toBeVisible({ timeout: 10000 });
+      await expect(page.locator("#factsheet-heatmaps")).toBeVisible();
+      await expect(page.getByText("Monthly Returns").first()).toBeVisible();
     });
 
-    test("switching to Returns tab shows monthly returns and distribution charts", async ({ page }) => {
+    test("metric column renders computed values for the risk-adjusted rows", async ({ page }) => {
       await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
 
-      await page.getByRole("button", { name: "Returns" }).click();
-
-      await expect(page.getByText("Monthly Returns")).toBeVisible();
-      await expect(page.getByText("Return Distribution")).toBeVisible();
-      await expect(page.getByText("Yearly Returns")).toBeVisible();
-    });
-
-    test("switching to Risk tab shows rolling metrics and risk of ruin", async ({ page }) => {
-      await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
-
-      await page.getByRole("button", { name: "Risk" }).click();
-
-      await expect(page.getByText("Rolling Sharpe")).toBeVisible();
-      await expect(page.getByText("Risk of Ruin")).toBeVisible();
-    });
-
-    test("metric panel renders accordion sections with computed values", async ({ page }) => {
-      await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
-
-      // Main Metrics accordion should be open by default
-      await expect(page.getByText("Main Metrics")).toBeVisible();
-      await expect(page.getByText("Cumulative Return")).toBeVisible();
-      await expect(page.getByText("Volatility")).toBeVisible();
-      await expect(page.getByText("Sortino")).toBeVisible();
-      await expect(page.getByText("Calmar")).toBeVisible();
-
-      // Returns Metrics accordion should also be open by default
-      await expect(page.getByText("Returns Metrics")).toBeVisible();
+      await expect(page.getByText("Ann. Volatility", { exact: true }).first()).toBeVisible();
+      await expect(page.getByText("Sortino", { exact: true }).first()).toBeVisible();
+      await expect(page.getByText("Calmar", { exact: true }).first()).toBeVisible();
     });
 
     test("compute status banner shows when analytics are not complete", async ({ page }) => {
-      // This test verifies the ComputeStatus component renders for non-complete states.
-      // In a real scenario, a strategy mid-computation would show this banner.
+      // This test verifies the factsheet renders for non-complete states.
+      // In a real scenario, a strategy mid-computation would show a status line.
       await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
 
-      // If computation is complete, the banner should NOT be visible
-      // If pending/computing/failed, the banner SHOULD be visible
+      // If computation is complete, the status line should NOT be visible
+      // If pending/computing/failed, it SHOULD be visible
       // We verify the page loads without error in either case
       await expect(page.locator("body")).toBeVisible();
 
-      // Page should have a breadcrumb indicating we are on the right page
-      await expect(page.getByText("Discovery")).toBeVisible();
+      // The factsheet carries the origin the old discovery link named (D-01);
+      // the "Back to Discovery" label itself is asserted with the viewer bar.
+      await expect(page).toHaveURL(
+        new RegExp(`/factsheet/${TEST_STRATEGY_ID}\\?.*from=discovery`),
+      );
     });
 
-    test("factsheet link is present on analytics page", async ({ page }) => {
-      await goToAnalyticsPage(page, TEST_SLUG, TEST_STRATEGY_ID);
+    test("the old discovery detail link lands on the factsheet with its origin", async ({ page }) => {
+      // Phase 196 D-03: replaces "factsheet link is present on analytics page".
+      // The detail page and the factsheet are one page now, so there is no
+      // link to follow; the old URL itself must arrive here.
+      await page.goto(`/discovery/${TEST_SLUG}/${TEST_STRATEGY_ID}`);
 
-      const factsheetLink = page.getByRole("link", { name: /Factsheet/i });
-      await expect(factsheetLink).toBeVisible();
-      await expect(factsheetLink).toHaveAttribute("target", "_blank");
+      await expect(page).toHaveURL(
+        new RegExp(`/factsheet/${TEST_STRATEGY_ID}\\?.*from=discovery`),
+      );
+      await expect(page).toHaveURL(new RegExp(`cat=${TEST_SLUG}`));
     });
   });
 
   // -------------------------------------------------------------------------
-  // Discovery page — unauthenticated redirect
+  // Retired discovery detail URL — anonymous visitor reaches the factsheet (D-03)
   // -------------------------------------------------------------------------
 
-  test.describe("Discovery pages require authentication", () => {
-    test("analytics detail page redirects unauthenticated users to login", async ({ page }) => {
+  test.describe("Retired discovery detail URL", () => {
+    test("the retired analytics detail URL no longer bounces an anonymous visitor to login", async ({ page }) => {
+      // Phase 196 D-03: /discovery/<slug>/<id> 308s to the public factsheet
+      // (config redirect, before the proxy). An anonymous visitor on an old
+      // link reaches /factsheet/<id> and the factsheet decides visibility; the
+      // login bounce this test used to pin is the #512 defect for this URL.
       await page.goto("/discovery/crypto-sma/some-strategy-id");
-      await expect(page).toHaveURL(/login/);
+      await expect(page).toHaveURL(/\/factsheet\/some-strategy-id/);
+      await expect(page).not.toHaveURL(/login/);
     });
   });
 });

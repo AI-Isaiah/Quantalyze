@@ -179,6 +179,14 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
     expect(screen.getByText(/Quant Bob/)).toBeTruthy(); // s.profiles.display_name
   });
 
+  it("Strategy Review tab's factsheet link carries from=admin so its back link reads Back to Admin (Phase 196 D-01)", async () => {
+    const user = userEvent.setup();
+    renderTabs();
+    await user.click(screen.getByRole("tab", { name: /Strategy Review/ }));
+    const link = screen.getByRole("link", { name: /View factsheet/ });
+    expect(link.getAttribute("href")).toBe("/factsheet/st-2?from=admin");
+  });
+
   it("Allocators tab renders display_name, company and email", async () => {
     const user = userEvent.setup();
     renderTabs();

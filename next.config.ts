@@ -226,6 +226,31 @@ const nextConfig: NextConfig = {
         destination: "/allocations",
         permanent: true,
       },
+      // Phase 196 ONESTRATEGYPAGE (D-03), 2026-11-08: a strategy has one page;
+      // every old detail route 308s to the factsheet, the discovery and browse
+      // ones carrying their origin for the back link (D-01). DB-free: the
+      // destination decides visibility. Lockstep with the manifest
+      // redirectFrom (#512).
+      {
+        source: "/strategy/:id",
+        destination: "/factsheet/:id",
+        permanent: true,
+      },
+      {
+        source: "/strategy/:id/v2",
+        destination: "/factsheet/:id",
+        permanent: true,
+      },
+      {
+        source: "/browse/:slug/:strategyId",
+        destination: "/factsheet/:strategyId?from=browse&cat=:slug",
+        permanent: true,
+      },
+      {
+        source: "/discovery/:slug/:strategyId",
+        destination: "/factsheet/:strategyId?from=discovery&cat=:slug",
+        permanent: true,
+      },
     ];
   },
   async rewrites() {

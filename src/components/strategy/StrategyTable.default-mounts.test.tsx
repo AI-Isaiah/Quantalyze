@@ -115,14 +115,24 @@
  * stale verdict is off (U-04), and its value is byte-identical to its value at the plan's base commit.
  * A hunk there would have been a source defect.
  *
+ * NEXT SURGICAL EDIT 2026-11-09 (Phase 196 plan 06, D-01): ONE class of hunk, the strategy-name
+ * link's href, and nothing else moved. The fixture was NOT regenerated and the test still has no
+ * write or update path: the three strings were edited by hand, anchored on `href="/factsheet/<id>"`,
+ * 3 / 3 / 5 occurrences. discovery gains `?from=discovery` and browse `?from=browse` (the
+ * fixture's category slugs are not discovery categories, so the builder drops `cat`); the owner
+ * mount now passes `origin={{ key: "my-strategies" }}` as its real mount does, so its five rows
+ * gain `?from=my-strategies`.
+ *
  * The clock is frozen (Date only; timers stay real so RTL's async helpers keep
  * working): SyncBadge and the empty-series state derive from `Date.now()`.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactElement } from "react";
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import { StrategyTable } from "./StrategyTable";
+import { StrategyGrid } from "./StrategyGrid";
+import { backTargetFor, parseOrigin } from "@/lib/factsheet/origin";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 import FIXTURE from "./__fixtures__/strategy-table-default-mounts.json";
@@ -319,12 +329,86 @@ describe("StrategyTable default mounts — byte identity with the post-170.2 hea
       <StrategyTable
         strategies={OWNER_ROWS}
         categorySlug="dm-owner"
+        origin={{ key: "my-strategies" }}
         visibility="owner-all-statuses"
         placeholderKeys={[{ id: "pk-1", exchangeLabel: "Binance", keyLabel: "Main key" }]}
         onFinishSetup={() => {}}
         onMarkOwnership={() => {}}
         onRename={() => {}}
       />,
+    );
+  });
+});
+
+// Phase 196 / ROUTE-04 (D-01): the link INTO the factsheet says where it came from, and the
+// back link reads exactly what the table wrote. A real category slug, so `cat` survives.
+describe("StrategyTable and StrategyGrid factsheet links carry their origin (196 plan 06)", () => {
+  const ID = PUBLISHED_ROWS[0].id;
+
+  function rowHref(ui: ReactElement): string | null {
+    const { container, unmount } = render(ui);
+    const href = container.querySelector("tbody tr td a[href^='/factsheet/']")?.getAttribute("href") ?? null;
+    unmount();
+    return href;
+  }
+
+  function cardHref(origin?: Parameters<typeof StrategyGrid>[0]["origin"]): string | null {
+    const { container, unmount } = render(<StrategyGrid strategies={[PUBLISHED_ROWS[0]]} origin={origin} />);
+    const href = container.querySelector("a[href^='/factsheet/']")?.getAttribute("href") ?? null;
+    unmount();
+    return href;
+  }
+
+  it("a default (discovery) mount links to ?from=discovery&cat=<slug> and that reads back as Back to Discovery", () => {
+    const row = rowHref(
+      <StrategyTable strategies={PUBLISHED_ROWS} categorySlug="crypto-sma" userId="u-1" />,
+    );
+    expect(row).toBe(`/factsheet/${ID}?from=discovery&cat=crypto-sma`);
+    const back = backTargetFor(parseOrigin(new URL(row as string, "https://x.test").searchParams));
+    expect(back).toEqual({ label: "Back to Discovery", href: "/discovery/crypto-sma" });
+  });
+
+  it("basePath /browse links to ?from=browse&cat=<slug>", () => {
+    const row = rowHref(
+      <StrategyTable strategies={PUBLISHED_ROWS} categorySlug="crypto-sma" basePath="/browse" />,
+    );
+    expect(row).toBe(`/factsheet/${ID}?from=browse&cat=crypto-sma`);
+  });
+
+  it("an explicit origin prop wins over the basePath default", () => {
+    const row = rowHref(
+      <StrategyTable
+        strategies={PUBLISHED_ROWS}
+        categorySlug="strategies"
+        basePath="/browse"
+        origin={{ key: "strategies" }}
+      />,
+    );
+    expect(row).toBe(`/factsheet/${ID}?from=strategies`);
+  });
+
+  it("the grid card links to the factsheet with the table's origin, never to a retired detail route", () => {
+    expect(cardHref({ key: "discovery", cat: "crypto-sma" })).toBe(
+      `/factsheet/${ID}?from=discovery&cat=crypto-sma`,
+    );
+    expect(cardHref({ key: "browse", cat: "crypto-sma" })).toBe(
+      `/factsheet/${ID}?from=browse&cat=crypto-sma`,
+    );
+    expect(cardHref()).toBe(`/factsheet/${ID}`);
+  });
+
+  it("the table in grid view hands its own origin to the cards", () => {
+    const { container, unmount } = render(
+      <StrategyTable strategies={PUBLISHED_ROWS} categorySlug="crypto-sma" userId="u-1" />,
+    );
+    const toggle = container.querySelector<HTMLButtonElement>("button[aria-label='Grid view']");
+    expect(toggle).not.toBeNull();
+    act(() => toggle!.click());
+    const hrefs = Array.from(container.querySelectorAll("a[href^='/factsheet/']")).map((a) => a.getAttribute("href"));
+    unmount();
+    expect(hrefs.length).toBeGreaterThan(0);
+    expect(hrefs.sort()).toEqual(
+      PUBLISHED_ROWS.map((r) => `/factsheet/${r.id}?from=discovery&cat=crypto-sma`).sort(),
     );
   });
 });

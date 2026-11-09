@@ -676,7 +676,7 @@ describe("CsvSubmitStep — 146.2-08 the echo is readable before it is dismissab
     const link = screen.getByTestId("wizard-csv-echo-view-factsheet");
     // The id off the WIRE, not a fabricated one: linking to the wrong strategy
     // would send the user to check numbers that are not the ones in question.
-    expect(link).toHaveAttribute("href", `/factsheet/${ECHOED_ID}/v2`);
+    expect(link).toHaveAttribute("href", `/factsheet/${ECHOED_ID}?from=my-strategies`);
     // New tab — the wizard is still holding an un-continued response, and a
     // same-tab navigation would discard it to go read the sentence's target.
     expect(link).toHaveAttribute("target", "_blank");

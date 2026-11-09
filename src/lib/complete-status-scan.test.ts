@@ -78,7 +78,6 @@ function collectSourceFiles(dir: string): string[] {
 // call instead (it almost always is for computation-status gates).
 const ALLOWLIST: Record<string, number> = {
   "app/api/verify-strategy/[id]/status/route.ts": 1,
-  "app/strategy/[id]/page.tsx": 1,
   "components/landing/VerificationProgress.tsx": 2,
   "components/landing/VerificationSection.tsx": 1,
   "components/strategy/ApiKeyManager.tsx": 1,

@@ -1,5 +1,6 @@
 import { test, expect } from "./helpers/hydration-guard";
 import { assertTargetSizes } from "./helpers/reflow";
+import { openAdvanced } from "./helpers/open-advanced";
 import {
   seedStrategyWithHistory,
   seedTestAllocator,
@@ -128,6 +129,8 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
           "cannot run chart tap-rect target-size gate",
       );
     }
+    // Phase 196 (D-04): the heatmaps live in `#factsheet-advanced`, whose contents mount on first open.
+    await openAdvanced(page);
     // The calendar wrapper is the coarse tap surface (role=img +
     // pointer-coarse:min-h-[44px]). Scroll it into view, then measure it.
     const heatmap = page
@@ -155,6 +158,8 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
           "cannot run chart tap-rect target-size gate",
       );
     }
+    // Phase 196 (D-04): the streak panel lives in `#factsheet-advanced`, whose contents mount on first open.
+    await openAdvanced(page);
     // The Phase-47-03 per-bar coarse hit-<rect>s live inside the
     // StreakDistribution role=img svg; on a coarse pointer they are
     // display:block. Anchor on the panel (visible), then assert at least one

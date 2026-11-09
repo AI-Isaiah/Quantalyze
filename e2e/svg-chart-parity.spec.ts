@@ -67,6 +67,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect, type Locator } from "./helpers/hydration-guard";
 import { seedStrategyWithHistory } from "./helpers/seed-test-project";
+import { openAdvanced } from "./helpers/open-advanced";
 
 // FLOW-01 place 2 of 2 — the spec's own seed-env self-skip guard. Without the
 // seed env the seed throws / the route renders nothing real, so skipping
@@ -221,6 +222,9 @@ test.describe("Phase 47 — SVG chart parity (desktop goldens) + 320px portrait"
       "#factsheet-main not present — blank/404/login page would false-green",
     ).toBeVisible({ timeout: 15_000 });
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
+    // Phase 196 (D-04): eight of the nine panels live behind the `#factsheet-advanced` disclosure now
+    // (only the master brush is in the opening view). Open it before any locator.
+    await openAdvanced(page);
   }
 
   // DELIVERABLE 1 — DESKTOP goldens (no-recompute proof). Bake FIRST.

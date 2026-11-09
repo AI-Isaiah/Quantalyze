@@ -62,7 +62,12 @@ export function StrategyThesisPanel() {
   );
 }
 
-export function TermsPanel() {
+export function TermsPanel({ variant = "full" }: { variant?: "full" | "document" }) {
+  // Phase 196 (D-04, UI-SPEC "Empty sections"): `"document"` drops the observation start and
+  // end (Start Date and End Date live in the Main metrics table) and the whole Fees &
+  // Subscription block, whose seven rows are all the same placeholder; the offering memorandum
+  // sentence stays. `"full"` (the allocator mounts) is unchanged.
+  const documentVariant = variant === "document";
   const payload = usePayload();
   // 164.6.6.2.1 review CR-02: the data source and the live/backtest framing are
   // facts about the STRATEGY, not about the unit on screen (D-19 keeps the masthead
@@ -123,8 +128,14 @@ export function TermsPanel() {
             )}
           </Term>
         )}
-        <Term label="Observation start">{start}</Term>
-        <Term label="Observation end">{end}</Term>
+        {/* Phase 196 plan 16 (LEAN-02): the tear sheet printed the declared benchmark in its
+            Allocation Terms. A declared value only, shown verbatim: the tear sheet's fallback to
+            "BTC" for an undeclared one stated a value nobody declared, so it is not carried. */}
+        {typeof native.benchmark === "string" && native.benchmark.trim() !== "" && (
+          <Term label="Benchmark">{native.benchmark}</Term>
+        )}
+        {!documentVariant && <Term label="Observation start">{start}</Term>}
+        {!documentVariant && <Term label="Observation end">{end}</Term>}
         {/* Phase 169 D-12: the same record-length statement as the thesis above. */}
         <Term label="Sample size">{formatRecordLength({ n: m.n, years: m.years }).text}</Term>
         <Term label="Risk-free rate">0% (factsheet convention)</Term>
@@ -133,20 +144,24 @@ export function TermsPanel() {
         <Term label="Currency basis">Returns reported in decimal · compounded</Term>
       </dl>
 
-      {/* Fees / commercial terms slot. Each row states that the terms come from
-          the manager on request, rather than fabricating a figure. */}
-      <h4 className="mt-4 mb-2 text-fixed-10 font-semibold uppercase tracking-[0.18em] text-text-muted border-b border-border/60 pb-1">
-        Fees & Subscription
-      </h4>
-      <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-fixed-11">
-        <Term label="Management fee">— on request</Term>
-        <Term label="Performance fee">— on request</Term>
-        <Term label="High-water mark">— on request</Term>
-        <Term label="Lockup">— on request</Term>
-        <Term label="Subscription">— on request</Term>
-        <Term label="Redemption">— on request</Term>
-        <Term label="Notice period">— on request</Term>
-      </dl>
+      {!documentVariant && (
+        <>
+          {/* Fees / commercial terms slot. Each row states that the terms come from
+              the manager on request, rather than fabricating a figure. */}
+          <h4 className="mt-4 mb-2 text-fixed-10 font-semibold uppercase tracking-[0.18em] text-text-muted border-b border-border/60 pb-1">
+            Fees & Subscription
+          </h4>
+          <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-fixed-11">
+            <Term label="Management fee">— on request</Term>
+            <Term label="Performance fee">— on request</Term>
+            <Term label="High-water mark">— on request</Term>
+            <Term label="Lockup">— on request</Term>
+            <Term label="Subscription">— on request</Term>
+            <Term label="Redemption">— on request</Term>
+            <Term label="Notice period">— on request</Term>
+          </dl>
+        </>
+      )}
 
       <p className="mt-2 text-fixed-10 italic text-text-muted">
         Allocators should request the full fund offering memorandum directly from the manager before subscribing.

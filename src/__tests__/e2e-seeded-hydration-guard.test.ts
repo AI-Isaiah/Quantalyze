@@ -33,11 +33,13 @@ const PLAYWRIGHT_MODULE = "@playwright/test";
 /**
  * PIN: the number of distinct specs in the seeded step's `else` arm, measured
  * 2026-10-02 (Phase 169.1.1 plan 03); 26 -> 27 on 2026-11-08 when Phase 198 plan 08
- * added e2e/allocations-add.spec.ts. Update this pin TOGETHER with the CI
+ * added e2e/allocations-add.spec.ts; 27 -> 23 on 2026-11-09 when Phase 196 plan 02
+ * deleted the four strategy-v2 e2e specs (their route now 308s to the
+ * factsheet). Update this pin TOGETHER with the CI
  * list. An empty or shorter parsed list fails, so a parser that stops finding
  * the step can never pass as "every spec is guarded".
  */
-const SEEDED_SPEC_COUNT = 27;
+const SEEDED_SPEC_COUNT = 23;
 
 function readRepoFile(rel: string): string {
   return readFileSync(resolve(REPO_ROOT, rel), "utf-8");

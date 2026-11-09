@@ -19,7 +19,7 @@
  *
  * THE MAP. `EXCLUDED` is a matched, ungated file with the reason it needs no gate. Closed set:
  * `label only`, `static copy`, `no render`, `dead: <why>`, `orphaned: <id>`,
- * `gated upstream: <repo-relative path>`, and the 196 redirect below.
+ * `gated upstream: <repo-relative path>`.
  *
  * NO PENDING MAP (194.1 close, plan 13). A pending-plan map (plan 01) existed only while the site
  * plans landed, naming the plan that would gate each live site. Every site plan has run, so
@@ -31,10 +31,9 @@
  * census pass. The 194.1-touched files that stay in `EXCLUDED` are `no render`: their figures
  * render in a gated site file (asserted: none of them carries a `gated upstream:` reason).
  *
- * THE 196 REDIRECT. `src/app/strategy/[id]/page.tsx` and the v2-only panels are mapped to
- * `redirected by 196 D-03 (founder 2026-11-08)`: 196 replaces them, so 194.1 does not gate
- * them. When 196's merge deletes one of these files its entry turns stale BY NAME here, and
- * the fix is deleting that entry in whichever of the two PRs merges second.
+ * THE 196 REDIRECT, CLOSED (196 plan 14). `src/app/strategy/[id]/page.tsx` and the v2-only panels
+ * were mapped to a `redirected by 196 D-03` reason while 196 replaced them. 196 deleted every
+ * one of those files, so the reason, its constant and its anchor test are gone with them.
  *
  * ANTI-VACUITY. Named anchor files must be in the walked and matched population; every map
  * key must name a file the walk finds and the pattern matches (a stale entry fails); every
@@ -63,8 +62,6 @@ const GATE_MODULES = [
   "./annualized-cell",
 ] as const;
 
-const REDIRECTED = "redirected by 196 D-03 (founder 2026-11-08)";
-
 /** Reasons outside `gated upstream:` (which carries a path and is checked separately). */
 const PLAIN_REASONS: readonly RegExp[] = [
   /^label only$/,
@@ -72,7 +69,6 @@ const PLAIN_REASONS: readonly RegExp[] = [
   /^no render$/,
   /^dead: \S.*$/,
   /^orphaned: \S.*$/,
-  /^redirected by 196 D-03 \(founder 2026-11-08\)$/,
 ];
 const UPSTREAM_REASON = /^gated upstream: (\S.*)$/;
 
@@ -123,13 +119,6 @@ const EXCLUDED: Record<string, string> = {
     "gated upstream: src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
   "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx": "gated upstream: src/app/factsheet/[id]/v2/FactsheetView.tsx",
   "src/app/factsheet/[id]/v2/rolling-window-choice.tsx": "gated upstream: src/app/factsheet/[id]/v2/FactsheetView.tsx",
-  // redirected: 196 replaces these (194.1 CONTEXT, the 2026-11-08 skip of B1, B2 and the v2-only panels).
-  "src/app/strategy/[id]/page.tsx": REDIRECTED,
-  "src/components/strategy-v2/HeadlineMetricsPanel.tsx": REDIRECTED,
-  "src/components/strategy-v2/RollingMetricsPanel.tsx": REDIRECTED,
-  "src/components/strategy-v2/ExposureAndGreeksPanel.tsx": REDIRECTED,
-  "src/components/strategy-v2/BenchmarkGreeksTable.tsx": REDIRECTED,
-  "src/components/strategy-v2/StrategyV2Shell.tsx": REDIRECTED,
 };
 
 /**
@@ -148,7 +137,6 @@ const TOUCHED_BUT_EXCLUDED = [
 
 /** Anchors: each must be in the walked AND matched population. */
 const ANCHORS = [
-  "src/app/browse/[slug]/[strategyId]/page.tsx",
   "src/components/strategy/StrategyTable.tsx",
   "src/components/strategy/HoldingFactsheet.tsx",
   "src/app/api/og/factsheet/[id]/route.tsx",
@@ -156,7 +144,6 @@ const ANCHORS = [
 
 /** Anchors that must also be gated (proves the gate-import detector fires on real files). */
 const GATED_ANCHORS = [
-  "src/app/browse/[slug]/[strategyId]/page.tsx",
   "src/components/strategy/StrategyTable.tsx",
 ] as const;
 
@@ -285,21 +272,6 @@ describe("figure gate census (194.1 plans 01 and 13)", () => {
   it("anti-vacuity: the gated anchors really import a gate module", () => {
     const notGated = GATED_ANCHORS.filter((a) => !pop.gated.has(a));
     expect(notGated, "the gate-import detector missed a file that imports a gate").toEqual([]);
-  });
-
-  it("the six 196-redirected files are EXCLUDED with exactly the redirect reason", () => {
-    const six = [
-      "src/app/strategy/[id]/page.tsx",
-      "src/components/strategy-v2/HeadlineMetricsPanel.tsx",
-      "src/components/strategy-v2/RollingMetricsPanel.tsx",
-      "src/components/strategy-v2/ExposureAndGreeksPanel.tsx",
-      "src/components/strategy-v2/BenchmarkGreeksTable.tsx",
-      "src/components/strategy-v2/StrategyV2Shell.tsx",
-    ];
-    for (const f of six) {
-      expect(EXCLUDED[f], f).toBe("redirected by 196 D-03 (founder 2026-11-08)");
-    }
-    expect(Object.values(EXCLUDED).filter((r) => r === REDIRECTED)).toHaveLength(six.length);
   });
 
   it("no live 194.1 site is satisfied by a gated-upstream entry", () => {

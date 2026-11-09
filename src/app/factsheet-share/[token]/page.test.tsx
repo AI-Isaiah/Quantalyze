@@ -33,7 +33,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
+import { AuthSessionMissingError } from "@supabase/supabase-js";
 
 import { deriveShareToken } from "@/lib/strategy-share-token";
 
@@ -192,6 +193,20 @@ vi.mock("@/lib/supabase/admin", () => ({
   },
 }));
 
+// Phase 196 OQ-3: the request client, read ONLY for whether a session exists.
+// `createClient` is counted so "never called on the limiter / format / 410
+// paths" is a claim about construction, not about queries.
+const createClientMock = vi.hoisted(() => vi.fn());
+const getUserMock = vi.hoisted(() =>
+  vi.fn(async (): Promise<unknown> => ({ data: { user: null }, error: null })),
+);
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => {
+    createClientMock();
+    return { auth: { getUser: () => getUserMock() } };
+  },
+}));
+
 // The payload builder — the SAME one the owner lane calls. Mocked so this file
 // stays a ROUTE test; what it pins is the call SHAPE (which id, which
 // predicate), because the predicate is the only visibility gate the builder has.
@@ -213,17 +228,22 @@ vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
     payload,
     viewerNotice,
     recipientShare,
+    beforeFooterSlot,
   }: {
     payload?: { aum?: unknown };
     viewerNotice?: string;
     recipientShare?: boolean;
+    beforeFooterSlot?: ReactNode;
   }) => (
     <div
       data-testid="factsheet-view"
       data-aum={String(payload?.aum)}
       data-viewer-notice={String(viewerNotice)}
       data-recipient-share={String(recipientShare)}
-    />
+      data-has-slot={String(beforeFooterSlot !== undefined)}
+    >
+      {beforeFooterSlot}
+    </div>
   ),
 }));
 
@@ -349,6 +369,7 @@ beforeEach(() => {
   checkLimitMock.mockResolvedValue({ success: true });
   sharesReadMock.mockResolvedValue({ data: [], error: null });
   buildMock.mockResolvedValue({ strategyId: "stub" } as never);
+  getUserMock.mockResolvedValue({ data: { user: null }, error: null });
   jobsReadMock.mockResolvedValue({ data: [], error: null });
   memberCountValue.value = 1;
   memberCountCalls.length = 0;
@@ -437,6 +458,152 @@ describe("recipient render — a valid token shows the factsheet in recipient mo
       deriveShareToken(STRATEGY_ID, REBORN.nonce, GENERATION),
     );
     expect(html).toContain('data-testid="factsheet-view"');
+  });
+});
+
+describe("Phase 196 ROUTE-04 / ROUTE-02 — the visitor header, and a session changes the chrome only (OQ-3)", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+  });
+
+  it("no session: the visitor header, the factsheet inside one main, and the sign-up line", async () => {
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain("<header");
+    expect(html).toContain("Quantalyze");
+    expect(html).toContain("What is Quantalyze?");
+    expect(html).toContain(">Sign up<");
+    expect(html.match(/<main/g)).toHaveLength(1);
+    // The factsheet view sits INSIDE the main landmark, and the header before it.
+    expect(html.indexOf("<header")).toBeLessThan(html.indexOf("<main"));
+    expect(html.indexOf("<main")).toBeLessThan(html.indexOf('data-testid="factsheet-view"'));
+    expect(html.indexOf('data-testid="factsheet-view"')).toBeLessThan(html.indexOf("</main>"));
+    // The sign-up line is passed through the view's before-footer slot.
+    expect(html).toContain('data-has-slot="true"');
+    expect(html).toContain("to request an introduction to a strategy");
+    expect(html).toContain('data-viewer-notice="shared_privately"');
+    expect(html).toContain('data-recipient-share="true"');
+    expect(html).toContain('data-aum="null"');
+  });
+
+  it("a session wins: no Sign up anywhere, no sign-up line, the header still names Quantalyze", async () => {
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } }, error: null });
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain("What is Quantalyze?");
+    expect(html).not.toContain("Sign up");
+    expect(html).toContain('data-has-slot="false"');
+    expect(html).toContain('data-testid="factsheet-view"');
+  });
+
+  it("a session changes the chrome only: the payload and the AUM rule are identical for both recipients", async () => {
+    buildMock.mockResolvedValue({ strategyId: "stub", aum: 5_000_000, maxCapacity: 9_000_000 } as never);
+    const Page = await loadPage();
+    const find = (node: unknown): Record<string, unknown> | null => {
+      if (node == null || typeof node !== "object") return null;
+      if (Array.isArray(node)) {
+        for (const c of node) {
+          const hit = find(c);
+          if (hit) return hit;
+        }
+        return null;
+      }
+      const el = node as { props?: { payload?: unknown; children?: unknown } } | null;
+      if (el?.props?.payload != null) return el.props.payload as Record<string, unknown>;
+      return find(el?.props?.children ?? null);
+    };
+    const anon = find(await Page({ params: Promise.resolve({ token: VALID_TOKEN }) }));
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } }, error: null });
+    const signed = find(await Page({ params: Promise.resolve({ token: VALID_TOKEN }) }));
+    expect(anon).not.toBeNull();
+    expect(signed).toEqual(anon);
+    // 194 D-22: stripped for both.
+    expect(anon?.aum).toBeNull();
+    expect(signed?.aum).toBeNull();
+  });
+
+  it("getUser rejecting reads as no session (Sign up shown) and never throws", async () => {
+    getUserMock.mockRejectedValue(new Error("auth backend down"));
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain(">Sign up<");
+    expect(html).toContain('data-testid="factsheet-view"');
+  });
+
+  // SF-01: an auth blip must not be silent. The fallback direction is unchanged
+  // (Sign up chrome); the blip is reported, the normal anonymous answer is not.
+  it("reports a getUser error that is not the anonymous answer and still shows Sign up", async () => {
+    captureToSentryMock.mockClear();
+    getUserMock.mockResolvedValue({ data: { user: null }, error: new Error("jwt blip") });
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain(">Sign up<");
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+    expect(captureToSentryMock.mock.calls[0][1].tags.area).toBe("factsheet-share-session");
+  });
+
+  it("reports a getUser rejection", async () => {
+    captureToSentryMock.mockClear();
+    getUserMock.mockRejectedValue(new Error("auth backend down"));
+    await renderPage(VALID_TOKEN);
+    expect(captureToSentryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report the normal anonymous result (AuthSessionMissingError)", async () => {
+    captureToSentryMock.mockClear();
+    getUserMock.mockResolvedValue({ data: { user: null }, error: new AuthSessionMissingError() });
+    await renderPage(VALID_TOKEN);
+    expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("a payload still pending renders the share card inside main, after the visitor header, copy unchanged", async () => {
+    buildMock.mockResolvedValue(null);
+    jobsReadMock.mockResolvedValue({
+      data: [jobRow({ kind: "process_key_long", status: "running" })],
+      error: null,
+    });
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain(KCS11_A_HEADING);
+    expect(html).toContain(KCS11_A_BODY);
+    expect(html).toContain("What is Quantalyze?");
+    expect(html.indexOf("<header")).toBeLessThan(html.indexOf("<main"));
+    expect(html.indexOf("<main")).toBeLessThan(html.indexOf(KCS11_A_HEADING));
+    expect(html.match(/<main/g)).toHaveLength(1);
+  });
+
+  it("the session is read for chrome only: the builder gets the strategy id and the token-bearer predicate, never a user", async () => {
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } }, error: null });
+    await renderPage(VALID_TOKEN);
+    expect(createClientMock).toHaveBeenCalledTimes(1);
+    expect(getUserMock).toHaveBeenCalledTimes(1);
+    expect(buildMock).toHaveBeenCalledTimes(1);
+    expect(buildMock.mock.calls[0]).toHaveLength(2);
+    expect(buildMock.mock.calls[0][0]).toBe(STRATEGY_ID);
+    expect(JSON.stringify(buildMock.mock.calls[0])).not.toContain("u1");
+  });
+
+  it("the session is never read on the rate-limited, malformed or unknown-token paths", async () => {
+    checkLimitMock.mockResolvedValue({ success: false });
+    await renderPage(VALID_TOKEN);
+    expect(createClientMock).not.toHaveBeenCalled();
+
+    checkLimitMock.mockResolvedValue({ success: true });
+    await renderExpectingRedirect("short");
+    expect(createClientMock).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true });
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    await renderExpectingRedirect(UNKNOWN_TOKEN);
+    expect(createClientMock).not.toHaveBeenCalled();
+    expect(getUserMock).not.toHaveBeenCalled();
+  });
+
+  it("T-196-28: next.config sends no-referrer for /factsheet-share/:path*, which the header links rely on", async () => {
+    const { default: nextConfig } = await import("../../../../next.config");
+    const blocks = (await nextConfig.headers!()) as Array<{
+      source: string;
+      headers: Array<{ key: string; value: string }>;
+    }>;
+    const block = blocks.find((b) => b.source === "/factsheet-share/:path*");
+    expect(block, "no headers() entry for the token lane").toBeDefined();
+    expect(block!.headers).toContainEqual({ key: "Referrer-Policy", value: "no-referrer" });
   });
 });
 

@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { usePayload, useXRange } from "./factsheet-context";
 import { useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { ChartHintContext } from "./chart-hint";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { fitTickLabel } from "@/lib/chart-ticks";
 
@@ -42,6 +43,9 @@ const HANDLE_HIT_W = 28;
 const MIN_VISIBLE = 5;
 
 export function MasterBrush() {
+  // Phase 196 (D-04): the brush has no hint of its own; in the document layout it points at the
+  // page's one chart hint. Absent (the full layout) it carries no description, as before.
+  const sharedHintId = useContext(ChartHintContext);
   // F2 (phase 103, MTM-follow): route the sparkline equity, the date axis, the
   // window edge labels AND the emitted xRange indices through the basis view so
   // the brush follows the active basis. Under cash (or an absent MTM bundle)
@@ -245,6 +249,7 @@ export function MasterBrush() {
         style={{ cursor: isDragging ? "grabbing" : "default" }}
         role="img"
         aria-label="Master brush — full timeline equity overview"
+        aria-describedby={sharedHintId ?? undefined}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

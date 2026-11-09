@@ -24,11 +24,12 @@ import {
   type NotBuildableDetail,
   type NotBuildableReason,
 } from "@/lib/factsheet/fetch-and-build-payload";
-import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import type { FactsheetPayload, PeerRanks, TrustTierKind } from "@/lib/factsheet/types";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { OG_CARD_VERSION } from "@/lib/factsheet/og-metrics";
 import { provenanceFingerprint } from "@/lib/factsheet/provenance-fingerprint";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
+import { readPeerRanks, withPeerRanks } from "@/lib/factsheet/peer-ranks";
 import { buildFactsheetJsonLd } from "@/lib/factsheet/json-ld";
 import {
   deriveComputeState,
@@ -56,8 +57,14 @@ import {
   type CompositeHistory,
   type StrategyShape,
 } from "@/lib/strategy-shape";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { isAuthSessionMissingError, type SupabaseClient } from "@supabase/supabase-js";
 import { FactsheetView, OwnerUnpublishedPanel } from "./FactsheetView";
+import type { ReactNode } from "react";
+import { ViewerBar } from "@/components/factsheet/ViewerBar";
+import { SignUpLine, VisitorHeader } from "@/components/factsheet/VisitorHeader";
+import { StrategyNoteCard } from "@/components/notes/StrategyNoteCard";
+import { backTargetFor, parseOrigin } from "@/lib/factsheet/origin";
+import { resolveFactsheetViewer } from "@/lib/factsheet/viewer";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 
@@ -338,7 +345,26 @@ export async function generateMetadata({
   return {
     title: `${name} factsheet`,
     description,
-    robots: "noindex",
+    // Phase 196 D-07 (LEAN-02): only a PUBLISHED factsheet is indexable. `data`
+    // comes from the published-only probe above, so a returned row IS the
+    // published proof; a miss and a probe error both leave `data` unusable and
+    // stay noindex (fail closed). The owner lane and the share-token route never
+    // reach this branch as indexable: the owner's draft misses the probe, and
+    // `/factsheet-share/[token]` carries its own noindex.
+    //
+    // WR-02: the indexable lane also names its one canonical URL, the bare
+    // `/factsheet/<id>`, so the `?from=` / `?cat=` / `?share=1` variants the
+    // redirects and the share link produce, and the `/v2` alias, do not index
+    // as duplicates. No metadataBase is set anywhere, so the URL is absolute on
+    // the origin the build asserts as canonical (`assertCanonicalAppUrl`); the
+    // noindex lanes carry none.
+    ...(data && !error
+      ? {
+          alternates: {
+            canonical: `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/factsheet/${encodeURIComponent(id)}`,
+          },
+        }
+      : { robots: "noindex" as const }),
     openGraph: {
       title: socialTitle,
       description,
@@ -356,10 +382,16 @@ export async function generateMetadata({
 
 export default async function FactsheetV2Page({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  // Optional so a caller that passes only `params` still type-checks. The
+  // route's `from` / `cat` origin pair is read only through the closed-set
+  // `parseOrigin`, never used as a raw value (196 D-01, T-196-open-redirect).
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  const backTarget = backTargetFor(parseOrigin((await searchParams) ?? {}));
   const supabase = await createClient();
 
   // Lightweight signature probe (id + name + computed_at + computation_status) + the public trust
@@ -397,10 +429,38 @@ export default async function FactsheetV2Page({
   // would be served to anonymous readers for the full TTL).
   //
   // ⛔ LANE ORDER IS LOAD-BEARING. The published probe runs FIRST and the
-  // session probe only on its miss, so a public (even authed) view pays ZERO
-  // extra queries. Hoisting `auth.getUser()` above the Promise.all — e.g. to
-  // widen `user`'s scope — reverses that and is forbidden; `ownerUid` below is
-  // the scope bridge that makes the hoist unnecessary.
+  // session probe only on its miss, so a public (even authed) view pays no
+  // session read BEFORE the lane decision. Hoisting the session read above the
+  // Promise.all — e.g. to widen `user`'s scope — reverses that and is
+  // forbidden; `ownerUid` below is the scope bridge that makes the hoist
+  // unnecessary.
+  //
+  // Phase 196 (D-01, D-02): the viewer's chrome needs the session on the
+  // published lane too, so exactly ONE session read now runs per render,
+  // AFTER the lane decision. `sessionUser` carries the answer: the Lane B block
+  // below sets it when the published probe missed, and the published render
+  // reads it once otherwise (`undefined` = not read yet, `null` = no session).
+  // The viewer is a render-prop input only, never a payload field and never a
+  // cache-key member (T-196-10).
+  let sessionUser: { id: string } | null | undefined = undefined;
+  // The published-lane session read, shared by the pending fallback and the
+  // full render so both run it AFTER the lane decision and at most once.
+  const readViewerSession = async (): Promise<{ id: string } | null> => {
+    // SF-01: anonymous is the safe fallback and stays the fallback, but a read
+    // that FAILED (anything but the normal no-session answer) is reported, so an
+    // approved signed-in reader shown the visitor chrome leaves a Sentry signal.
+    try {
+      const { data, error } = await supabase.auth.getUser();
+      if (error && !isAuthSessionMissingError(error)) {
+        captureToSentry(error, { tags: { area: "factsheet-viewer-session", stage: "get-user" } });
+      }
+      return !error && data?.user != null ? { id: data.user.id } : null;
+    } catch (err) {
+      console.error("[factsheet/v2/page] viewer session lookup failed:", err);
+      captureToSentry(err, { tags: { area: "factsheet-viewer-session", stage: "get-user" } });
+      return null;
+    }
+  };
   let signature = signRes.data;
   let lane: "public" | "owner" = "public";
   let ownerUid: string | null = null;
@@ -438,7 +498,17 @@ export default async function FactsheetV2Page({
   if (signRes.error || !signature) {
     const {
       data: { user },
+      error: ownerProbeAuthError,
     } = await supabase.auth.getUser();
+    // SF-01 (round 2): a failed session read is not the normal no-session answer. The
+    // 404 below stays (anonymous is the safe direction), but an owner who gets it on an
+    // auth blip leaves a Sentry signal, as `readViewerSession` does.
+    if (ownerProbeAuthError && !isAuthSessionMissingError(ownerProbeAuthError)) {
+      captureToSentry(ownerProbeAuthError, {
+        tags: { area: "factsheet-viewer-session", stage: "owner-probe-get-user" },
+      });
+    }
+    sessionUser = user;
     if (!user) {
       console.warn("[factsheet/v2/page] signature gate -> notFound", {
         id,
@@ -730,8 +800,38 @@ export default async function FactsheetV2Page({
       topic: "support",
       strategy: signature.id,
     });
+    // Phase 196 (ROUTE-02, D-02): the pending page carries the chrome on both
+    // lanes (WR-01), so a reader whose payload is not built yet still has a way
+    // back and a next step: the viewer bar for a signed-in reader (the owner lane
+    // always holds a session), the visitor header for one with no session. The
+    // published lane reads its session here, after the lane decision.
+    if (sessionUser === undefined) sessionUser = await readViewerSession();
+    const pendingViewer = await resolveFactsheetViewer(
+      supabase as unknown as SupabaseClient,
+      sessionUser,
+      signature.user_id,
+    );
     return (
-      <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
+      <>
+      {pendingViewer.kind === "signed_in" ? (
+        <ViewerBar backTarget={backTarget} viewer={pendingViewer} strategyId={signature.id} />
+      ) : (
+        <VisitorHeader showSignUp />
+      )}
+      {/* Phase 196 (LEAN-02, ROUTE-04): the page renders its own `<main>`. It lived in
+          `v2/layout.tsx` until this phase, but `/factsheet/[id]` re-exports this page
+          without that layout, so the canonical route had no main landmark. The chrome
+          above is a `<header>` banner and stays outside it; the `/v2` alias gets its
+          one main from this element too, so the layout is gone. */}
+      <main>
+      {/* `data-testid="factsheet-pending"` is the marker the LP report PDF route reads to tell a
+          factsheet that is not built yet (a 409 there, retrying cannot help) from an error or
+          not-found render (a 503). It is on no other render, and not on a failed read: that one
+          can clear on retry, so it must reach the PDF route's retryable 503 (R3-01). */}
+      <article
+        data-testid={publicReadFailed ? undefined : "factsheet-pending"}
+        className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12"
+      >
         {/* WR-02: the owner lane's placeholder must carry the visibility
             notice too — a still-computing draft shows its real name and reads
             like a soon-to-be-live factsheet, and the pending state is when an
@@ -804,6 +904,8 @@ export default async function FactsheetV2Page({
           </p>
         )}
       </article>
+      </main>
+      </>
     );
   }
 
@@ -828,25 +930,87 @@ export default async function FactsheetV2Page({
   // tier does not vanish when the viewer toggles to the USD view.
   const payloadWithTrust: FactsheetPayload = withTrustTier(payload, trustTier);
 
+  // Phase 196 plan 16 (LEAN-02): the tear sheet's peer-relative ranks, on the PUBLISHED lane only.
+  // ⛔ Read here, per request, AFTER the cached build and never inside the `unstable_cache`
+  // callback: `getPercentiles` uses the request client and its answer moves with the cohort, so a
+  // cached copy would serve every later reader of this id a stale or another request's cohort.
+  // Started now and awaited after the viewer decisions below so it overlaps them; `readPeerRanks`
+  // never rejects (a failed read is null and reported). The owner lane, the share-token route and
+  // the allocator mounts carry none, and the JSON-LD below is built from `payloadWithTrust`, so it
+  // is unchanged.
+  const peerRanksRead: Promise<PeerRanks | null> =
+    lane === "owner" ? Promise.resolve(null) : readPeerRanks(supabase as unknown as SupabaseClient, id);
+
   // 194 D-22: AUM follows D-06 on the public factsheet. Only a signed-in allocator or the
   // strategy's own manager sees the AUM chip, and the JSON-LD (which a crawler reads
   // anonymously) carries it only for them. Decided per request here, never on the cached
-  // payload. Asked only when the strategy has an AUM at all, so the common no-AUM render pays
-  // nothing; the lookup reuses this request's client and a server-validated `getUser()`, and
-  // fails closed. The owner lane is the owner by construction (`ownerUid`).
+  // payload. The roles lookup is asked only when the strategy has an AUM at all, so the common
+  // no-AUM render pays nothing for it; it reuses this request's client and the one
+  // server-validated `getUser()` below, and fails closed. The owner lane is the owner by construction (`ownerUid`).
+  //
+  // Phase 196: the session is read ONCE per render and shared by the viewer
+  // chrome and this decision. The Lane B block already holds it when the
+  // published probe missed; otherwise it is read here, after the lane decision
+  // and the payload build, so the published-first lane order is untouched.
+  if (sessionUser === undefined) sessionUser = await readViewerSession();
+  const viewer = await resolveFactsheetViewer(
+    supabase as unknown as SupabaseClient,
+    sessionUser,
+    signature.user_id,
+  );
   let showAum = false;
   if (payloadWithTrust.aum != null) {
     if (lane === "owner") {
       showAum = true;
     } else {
-      let viewerId: string | null = null;
-      try {
-        const { data, error } = await supabase.auth.getUser();
-        if (!error && data?.user != null) viewerId = data.user.id;
-      } catch (err) {
-        console.error("[factsheet/v2/page] aum viewer lookup failed:", err);
+      showAum = await canViewAum(supabase, sessionUser?.id ?? null, signature.user_id, "[factsheet/v2/page]");
+    }
+  }
+
+  const payloadForView: FactsheetPayload =
+    lane === "owner" ? payloadWithTrust : withPeerRanks(payloadWithTrust, await peerRanksRead);
+
+  // Phase 196 (D-05, OQ-6): what renders between the document and its footer.
+  // A reader with no session gets the sign-up line. A signed-in viewer on the
+  // published lane gets their OWN note card, read exactly as the retired
+  // /strategy/[id] page read it (same request client, same three filters, RLS on
+  // `user_notes` unchanged). The owner's unpublished lane gets neither.
+  //
+  // ⛔ A failed read OMITS the card. A card seeded with an empty note is one the
+  // viewer can type into and save over the note they already wrote, so a missing
+  // card (recoverable on reload) is the safe failure, never an empty one. Both
+  // values are render props built here, never payload fields (T-196-10).
+  let beforeFooterSlot: ReactNode = undefined;
+  if (viewer.kind === "anon") {
+    beforeFooterSlot = <SignUpLine />;
+  } else if (lane === "public") {
+    try {
+      const { data: noteRow, error: noteError } = await supabase
+        .from("user_notes")
+        .select("content, updated_at")
+        .eq("user_id", viewer.userId)
+        .eq("scope_kind", "strategy")
+        .eq("scope_ref", signature.id)
+        .maybeSingle();
+      if (noteError) {
+        console.error("[factsheet/v2/page] strategy note read failed:", noteError);
+        captureToSentry(noteError, {
+          tags: { route: "factsheet/v2/page", stage: "user-note" },
+        });
+      } else {
+        beforeFooterSlot = (
+          <div className="factsheet-v2-no-print mt-12">
+            <StrategyNoteCard
+              strategyId={signature.id}
+              initialContent={(noteRow?.content as string | undefined) ?? ""}
+              initialLastSavedAt={noteRow?.updated_at ? new Date(noteRow.updated_at as string) : null}
+            />
+          </div>
+        );
       }
-      showAum = await canViewAum(supabase, viewerId, signature.user_id, "[factsheet/v2/page]");
+    } catch (err) {
+      console.error("[factsheet/v2/page] strategy note read threw:", err);
+      captureToSentry(err, { tags: { route: "factsheet/v2/page", stage: "user-note" } });
     }
   }
 
@@ -862,6 +1026,14 @@ export default async function FactsheetV2Page({
   return (
     <>
       <script type="application/ld+json">{jsonLdStr}</script>
+      {/* The chrome is chosen from the session, so a signed-in viewer is never
+          shown "Sign up" (ROUTE-02) and a reader with no session gets no owner
+          or allocator action. Render props only, never the payload. */}
+      {viewer.kind === "signed_in" ? (
+        <ViewerBar backTarget={backTarget} viewer={viewer} strategyId={id} />
+      ) : (
+        <VisitorHeader showSignUp />
+      )}
       {/* The notice is derived from the LANE decision, never from a payload
           field — lane state must not enter the object the shared public cache
           serves (UI-SPEC:112). */}
@@ -876,8 +1048,9 @@ export default async function FactsheetV2Page({
           `Rename…` is absent there with no second predicate to keep in sync
           (150-RESEARCH § Pattern 5). The route enforces the same restriction
           server-side regardless. */}
+      <main>
       <FactsheetView
-        payload={withViewerAum(payloadWithTrust, showAum)}
+        payload={withViewerAum(payloadForView, showAum)}
         // 194 D-22 — a per-request render prop like the lane props below: the cached payload
         // carries `aum` for everyone, and this viewer decision is what shows the chip.
         showAum={showAum}
@@ -891,12 +1064,14 @@ export default async function FactsheetV2Page({
         // every other mount, so the published `?share=1` lane is byte-identical
         // (D-09) and the recipient/scenario mounts are untouched.
         ownerShare={lane === "owner" ? { hasActiveShare } : undefined}
+        beforeFooterSlot={beforeFooterSlot}
         renameTarget={
           lane === "owner"
             ? { id, name: payloadWithTrust.strategyName }
             : undefined
         }
       />
+      </main>
     </>
   );
 }

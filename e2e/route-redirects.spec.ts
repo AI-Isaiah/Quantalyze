@@ -170,3 +170,90 @@ test.describe("selective route moves — anon redirect canary (NAV-01)", () => {
     });
   }
 });
+
+// Phase 196 ONESTRATEGYPAGE (D-03), 2026-11-08 — a strategy has one page, the
+// factsheet. Every old detail route answers one 308 on the FIRST hop (chain not
+// followed), signed in or not, to /factsheet/<id>, never the login form. The
+// discovery and browse redirects carry their origin (from, cat) for the
+// factsheet's back link (D-01); the request's own query string is passed
+// through. The redirect reads no database row: an unpublished or missing id is
+// answered by the factsheet's own not-found, not by this hop.
+test.describe("Phase 196 ONESTRATEGYPAGE (D-03) — retired strategy detail routes", () => {
+  test("/discovery/crypto-sma/x?share=1 308-redirects to the factsheet with its origin and query", async ({
+    request,
+  }) => {
+    const res = await request.get("/discovery/crypto-sma/x?share=1", {
+      maxRedirects: 0,
+    });
+
+    expect(
+      res.status(),
+      `/discovery/crypto-sma/x returned HTTP ${res.status()} — expected a 308 permanent redirect (next.config.ts redirects())`,
+    ).toBe(308);
+
+    const location = res.headers()["location"] ?? "";
+    expect(
+      location,
+      `308 Location was "${location}" — expected /factsheet/x`,
+    ).toContain("/factsheet/x");
+    expect(location, `Location "${location}" lost the origin`).toContain(
+      "from=discovery",
+    );
+    expect(location, `Location "${location}" lost the category`).toContain(
+      "cat=crypto-sma",
+    );
+    expect(
+      location,
+      `Location "${location}" dropped the request's own query (share=1)`,
+    ).toContain("share=1");
+    expect(
+      location,
+      `Location "${location}" — an old shared link must not land on /login (the #512 regression class)`,
+    ).not.toContain("/login");
+  });
+
+  test("/browse/crypto-sma/x 308-redirects to the factsheet with its origin", async ({
+    request,
+  }) => {
+    const res = await request.get("/browse/crypto-sma/x", { maxRedirects: 0 });
+
+    expect(
+      res.status(),
+      `/browse/crypto-sma/x returned HTTP ${res.status()} — expected a 308 permanent redirect`,
+    ).toBe(308);
+
+    const location = res.headers()["location"] ?? "";
+    expect(location, `308 Location was "${location}"`).toContain("/factsheet/x");
+    expect(location, `Location "${location}" lost the origin`).toContain(
+      "from=browse",
+    );
+    expect(location, `Location "${location}" lost the category`).toContain(
+      "cat=crypto-sma",
+    );
+    expect(location, `Location "${location}" must not be /login`).not.toContain(
+      "/login",
+    );
+  });
+
+  for (const path of ["/strategy/x", "/strategy/x/v2"]) {
+    test(`${path} 308-redirects to /factsheet/x (never 307→login)`, async ({
+      request,
+    }) => {
+      const res = await request.get(path, { maxRedirects: 0 });
+
+      expect(
+        res.status(),
+        `${path} returned HTTP ${res.status()} — expected a 308 permanent redirect`,
+      ).toBe(308);
+
+      const location = res.headers()["location"] ?? "";
+      expect(location, `${path} 308 Location was "${location}"`).toContain(
+        "/factsheet/x",
+      );
+      expect(
+        location,
+        `${path} 308 Location was "${location}" — must not land on /login`,
+      ).not.toContain("/login");
+    });
+  }
+});

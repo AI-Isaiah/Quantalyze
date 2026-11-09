@@ -127,28 +127,6 @@ const NEEDLES: readonly { readonly name: string; readonly re: RegExp }[] = [
  */
 const EXEMPT: readonly { readonly file: string; readonly reason: string }[] = [
   {
-    file: "e2e/strategy-v2-keyboard.spec.ts",
-    reason:
-      "A TODO-rewrite skip (PR #108 deferred follow-ups): the spec needs " +
-      "role-based locators and a chart-mount guard before it can run. The CLASS " +
-      "of regression it was written to catch is held meanwhile by " +
-      "tests/visual/chart-accessibility-layer.test.ts, which the spec's own " +
-      "comment names. Un-skipping a spec known to need a rewrite would redden " +
-      "CI on a non-defect, so it stays skipped and stays visible HERE instead.",
-  },
-  {
-    file: "e2e/strategy-v2-chart-parity.spec.ts",
-    reason:
-      "The SAME class as strategy-v2-keyboard above, and found only because " +
-      "this guard scans whole files: a TODO-rewrite skip from the PR #108 " +
-      "deferred follow-ups. Its own comment records that no SVG paths exist for " +
-      "its structural assertions, that goldens were never baselined " +
-      "(e2e/__snapshots__/ has never existed on any branch), and that when a " +
-      "seed env var briefly un-skipped it in CI the spec was red continuously. " +
-      "Converting it to an env gate would therefore re-enable a KNOWN-RED spec " +
-      "rather than recover coverage; it needs the canvas-API rewrite first.",
-  },
-  {
     file: "src/__tests__/audit-coverage.test.ts",
     reason:
       "A DOCUMENTATION skip: the case describes H-0001's intended behaviour " +
@@ -257,6 +235,10 @@ describe("[140.5-06 / SEAMPROSE-04] no spec is silently disabled", () => {
     // The literal is the decision record. Widening the allow-list without
     // touching this number is impossible; widening it WITH this number is a
     // deliberate act that a reviewer sees in the diff.
+    // 2026-11-09 (Phase 196 plan 02): 3 -> 1. The two e2e entries (the
+    // strategy-v2 keyboard and chart-parity specs) were exemptions for specs
+    // that are now DELETED (their route 308s to the factsheet), so the entries
+    // went with them; the guard's scan of the remaining files is unchanged.
     // ⚠️ THIS PIN WAS PLANNED AS 2 AND IS 3, AND THE DIFFERENCE IS RECORDED
     // RATHER THAN ABSORBED. 140.5-06's plan enumerated SIX unconditional skips
     // and froze this length at two on that basis. Scanning whole files instead
@@ -276,7 +258,7 @@ describe("[140.5-06 / SEAMPROSE-04] no spec is silently disabled", () => {
         "Every entry must carry a REASON and be argued in 140.5-06's SUMMARY — " +
         "an allow-list that grows silently turns this row-1 guard into a row-2 " +
         "roster, which is the downgrade this milestone exists to stop.",
-    ).toBe(3);
+    ).toBe(1);
     for (const entry of EXEMPT) {
       expect(entry.reason.length).toBeGreaterThan(80);
     }

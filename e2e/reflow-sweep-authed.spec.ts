@@ -50,7 +50,10 @@
  * vars.E2E_TEST_DB_CONFIGURED == 'true'" is the explicit post-push must_have.
  */
 import { test, expect } from "./helpers/hydration-guard";
-import { seedTestAllocator } from "./helpers/seed-test-project";
+import {
+  seedTestAllocator,
+  seedStrategyWithHistory,
+} from "./helpers/seed-test-project";
 import { assertNoReflow } from "./helpers/reflow";
 
 // FLOW-01 place 2 of 2 — the spec's own seed-env self-skip guard. Without the
@@ -139,9 +142,15 @@ test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — authed", () => {
   // one user sweeps both without redirect. The session cookie carries across
   // page.goto navigations.
   let allocator: Awaited<ReturnType<typeof seedTestAllocator>>;
+  // Phase 196: a published strategy for the factsheet's viewer bar rows below.
+  let factsheetId: string;
 
   test.beforeAll(async () => {
     allocator = await seedTestAllocator({ role: "both" });
+    factsheetId = await seedStrategyWithHistory({
+      days: 365,
+      name: "reflow-sweep factsheet",
+    });
   });
 
   test.beforeEach(async ({ page }) => {
@@ -149,6 +158,22 @@ test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — authed", () => {
   });
 
   for (const v of VIEWPORTS) {
+    // Phase 196 (ROUTE-04): the factsheet's viewer bar (back link plus the
+    // actions the role allows) at the supported widths, anchored on its own
+    // `nav[aria-label="Back"]` so a login redirect or a 404 fails loud. The
+    // measure covers the whole page, not only the bar: a bar that wraps but pushes
+    // the document sideways is the failure this row exists for.
+    test(`${v.id} factsheet viewer bar (/factsheet/[id], signed in) — no horizontal overflow`, async ({ page }) => {
+      await page.setViewportSize({ width: v.width, height: v.height });
+      const res = await page.goto(`/factsheet/${factsheetId}`);
+      if (res && res.status() >= 400) {
+        throw new Error(
+          `/factsheet/${factsheetId} returned HTTP ${res.status()} — cannot run factsheet reflow row`,
+        );
+      }
+      await assertNoReflow(page, 'nav[aria-label="Back"]');
+    });
+
     for (const r of AUTHED_ROUTES) {
       test(`${v.id} ${r.label} — no horizontal overflow`, async ({ page }) => {
         await page.setViewportSize({ width: v.width, height: v.height });
@@ -192,6 +217,52 @@ test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — authed", () => {
       // The honest-empty headline is the EmptyState card's own <h2> — a real
       // honest-empty DOM node, not generic chrome (Pitfall 5).
       await assertNoReflow(page, 'h2:has-text("No positions to analyze yet")');
+    });
+  }
+});
+
+// Phase 196 (LEAN-02, ROUTE-04) — the factsheet's VISITOR header, with no session.
+// A separate describe because the sweep above logs in before every test, and a
+// signed-in page renders the viewer bar instead. The default Playwright context is
+// fresh per test and this block never calls loginViaForm. The anchor is the visitor
+// header's own Sign up link, so a signed-in render (wrong chrome) fails loud.
+test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — factsheet visitor header, no session", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "reflow-sweep-authed (visitor header): seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
+      "skipping prevents a false-green on an empty/404 page (W-02).",
+  );
+
+  let factsheetId: string;
+
+  test.beforeAll(async () => {
+    factsheetId = await seedStrategyWithHistory({
+      days: 365,
+      name: "reflow-sweep factsheet visitor",
+    });
+  });
+
+  for (const v of VIEWPORTS) {
+    test(`${v.id} factsheet visitor header (/factsheet/[id], no session) — no horizontal overflow`, async ({ page }) => {
+      await page.setViewportSize({ width: v.width, height: v.height });
+      const res = await page.goto(`/factsheet/${factsheetId}`);
+      if (res && res.status() >= 400) {
+        throw new Error(
+          `/factsheet/${factsheetId} returned HTTP ${res.status()} with no session`,
+        );
+      }
+      await expect(
+        page.getByRole("banner").getByRole("link", { name: "Sign up" }),
+      ).toBeVisible();
+      await assertNoReflow(page, '[id="factsheet-main"]');
+      const scrollWidth = await page.evaluate(
+        () => document.documentElement.scrollWidth,
+      );
+      expect(
+        scrollWidth,
+        `the visitor header must not push the document past ${v.width}px`,
+      ).toBeLessThanOrEqual(v.width);
     });
   }
 });

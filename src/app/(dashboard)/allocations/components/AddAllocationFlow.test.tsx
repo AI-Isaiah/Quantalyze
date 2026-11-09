@@ -398,6 +398,29 @@ describe("step 1: the ?add= deep link", () => {
     expect(props.onInvalidDeepLink).not.toHaveBeenCalled();
   });
 
+  it("an own strategy not marked own capital lands on the picker with that row's reason, never on the amount step (198-ADD-DEEPLINK-UNMARKED-OWN)", async () => {
+    // ID_B is an own strategy. The own route answers 409 for it every time, so the
+    // link must stop where the picker stops, not after the allocator types an amount.
+    const { props } = setup({
+      deepLink: { raw: ID_B },
+      ownCapitalStrategyIds: new Set<string>(),
+    });
+    const notice = await screen.findByTestId("add-allocation-notice");
+    expect(notice).toHaveTextContent(
+      "Beta Two: Not marked as your own capital. Mark it on My Strategies first.",
+    );
+    expect(screen.getByText("Step 1 of 2 · Strategy")).toBeInTheDocument();
+    expect(screen.queryByText("Step 2 of 2 · Amount and date")).toBeNull();
+    expect(screen.getByTestId(`add-allocation-row-${ID_B}`)).toHaveAttribute("aria-disabled", "true");
+    expect(props.onInvalidDeepLink).not.toHaveBeenCalled();
+  });
+
+  it("an own strategy marked own capital still opens the amount step from the link", async () => {
+    setup({ deepLink: { raw: ID_B }, ownCapitalStrategyIds: new Set([ID_B]) });
+    await screen.findByText("Step 2 of 2 · Amount and date");
+    expect(screen.getByText("Beta Two")).toBeInTheDocument();
+  });
+
   it("a malformed id opens step 1 with the not-available notice and reports it once", async () => {
     const { props } = setup({ deepLink: { raw: "not-a-uuid" } });
     expect(

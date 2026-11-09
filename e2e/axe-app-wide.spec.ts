@@ -2,12 +2,12 @@
  * Phase 48 / A11Y-01 — app-wide axe WCAG-AA matrix (route × viewport).
  *
  * ONE parametrized spec that extends the WCAG-AA axe gate from the 5 focused
- * per-route specs (composer-axe / strategy-v2-axe / discovery-axe / wizard-axe /
+ * per-route specs (composer-axe / discovery-axe / wizard-axe /
  * admin-csv-status-axe — all LEFT IN PLACE) to ALL primary routes scanned at
  * BOTH Desktop (1280×800) and a mobile viewport (375×812, Assumption A3):
  *
  *   PUBLIC (run UNSEEDED, no skip): /, /security, /contact, /for-quants, /browse
- *   AUTHED (HAS_SEED_ENV self-skip): /allocations, /strategy/[id]/v2,
+ *   AUTHED (HAS_SEED_ENV self-skip): /allocations, /factsheet/[id],
  *           /discovery/[slug], /strategies/new/wizard
  *   EMBEDDED-FACTSHEET (HAS_SEED_ENV self-skip, scoped serious+critical):
  *           /allocations?tab=scenario (the composer surface that FOLDS the real
@@ -15,8 +15,8 @@
  *
  * STRICT vs SCOPED (D-Area-3, RESEARCH Assumption A2):
  *   - Standalone routes (public + the authed standalone routes ABOVE, including
- *     standalone /factsheet/[id]/v2 which strategy-v2-axe / the focused specs
- *     already prove green with ALL impacts) stay STRICT:
+ *     standalone /factsheet/[id], strict since Phase 196 replaced the retired
+ *     /strategy/[id]/v2 row; the focused specs already prove it green with ALL impacts) stay STRICT:
  *     expect(results.violations).toEqual([]).
  *   - ONLY the EMBEDDED factsheet on the composer surface uses the scoped
  *     serious+critical filter — the composer page-level <main> legitimately
@@ -41,7 +41,7 @@
  * against the real-test-Supabase rebuild and 500'd the since-retired demo
  * page; and the polluted DB produced spurious wizard axe findings the focused wizard-axe — same surface,
  * same rules — does NOT see). Authed-route a11y stays covered by the focused
- * MA-8 axe specs (discovery-axe / strategy-v2-axe / composer-axe / wizard-axe).
+ * MA-8 axe specs (discovery-axe / composer-axe / wizard-axe).
  * Re-enabling the authed/mobile rows needs a hermetic per-spec seeded DB (TODO),
  * NOT the shared MA-8 invocation. The describes below are retained for that.
  */
@@ -174,28 +174,63 @@ test.describe("axe app-wide (A11Y-01) — authed standalone routes", () => {
       expect(results.violations).toEqual([]);
     });
 
-    test(`zero WCAG-AA violations on /strategy/[id]/v2 @ ${vp.name}`, async ({
+    test(`zero WCAG-AA violations on /factsheet/[id] @ ${vp.name}`, async ({
       page,
     }) => {
       await page.setViewportSize({ width: vp.w, height: vp.h });
       const strategyId = await seedStrategyWithHistory({
         days: 365,
-        name: "axe-app-wide strategy-v2",
+        name: "axe-app-wide factsheet",
       });
       const allocator = await seedTestAllocator();
       await loginViaForm(page, allocator.email, allocator.password);
 
-      const res = await page.goto(`/strategy/${strategyId}/v2?strategy_v2=on`);
+      // Phase 196 ONESTRATEGYPAGE (D-03): /strategy/[id]/v2 is retired (308 to
+      // /factsheet/[id]); the signed-in allocator's view of a strategy is the
+      // factsheet, scanned under the same strict all-impact gate.
+      const res = await page.goto(`/factsheet/${strategyId}`);
       if (res && res.status() >= 400) {
         throw new Error(
-          `/strategy/${strategyId}/v2 returned HTTP ${res.status()}`,
+          `/factsheet/${strategyId} returned HTTP ${res.status()}`,
         );
       }
-      // The eager headline-equity panel proves the v2 route rendered (not a
-      // 404/login). Mirrors strategy-v2-axe's per-panel readiness gate.
+      // The factsheet body mounting proves the route rendered (not a
+      // 404/login); same anchor the embedded-factsheet describe below uses.
+      await expect(page.locator('[id="factsheet-main"]')).toBeVisible({
+        timeout: 15_000,
+      });
+      const results = await buildAxe(page).analyze();
+      expect(results.violations).toEqual([]);
+    });
+
+    // Phase 196 (LEAN-02, ROUTE-04): the same page with NO session. A reader who
+    // follows a 308 from an indexable route lands here signed out, so the visitor
+    // header (a banner beside the page's one <main>) is scanned under the same
+    // strict all-impact gate. Playwright gives each test a fresh context, and this
+    // row never logs in, so no cookie can make it the signed-in render.
+    test(`zero WCAG-AA violations on /factsheet/[id] with no session @ ${vp.name}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: vp.w, height: vp.h });
+      const strategyId = await seedStrategyWithHistory({
+        days: 365,
+        name: "axe-app-wide factsheet anonymous",
+      });
+
+      const res = await page.goto(`/factsheet/${strategyId}`);
+      if (res && res.status() >= 400) {
+        throw new Error(
+          `/factsheet/${strategyId} returned HTTP ${res.status()} with no session`,
+        );
+      }
+      await expect(page.locator('[id="factsheet-main"]')).toBeVisible({
+        timeout: 15_000,
+      });
+      // The visitor header, not the viewer bar: a signed-out row that rendered
+      // the signed-in chrome would be scanning the wrong page.
       await expect(
-        page.locator('section[data-panel="headline-equity"]'),
-      ).toBeVisible({ timeout: 15_000 });
+        page.getByRole("banner").getByRole("link", { name: "Sign up" }),
+      ).toBeVisible();
       const results = await buildAxe(page).analyze();
       expect(results.violations).toEqual([]);
     });

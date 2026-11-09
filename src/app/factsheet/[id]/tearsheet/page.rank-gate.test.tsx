@@ -3,25 +3,33 @@
  * peer-rank badges for the ANNUALISED metrics (CAGR, Sharpe, Sortino, Volatility) carry the
  * `<1y` marker when the strategy's total record cleared D-15's minimum but spans under one
  * year. Max DD is not annualised and never carries it. A record of a year or more carries no
- * marker. The real `PercentileRankBadge` is rendered (page.test.tsx stubs it), so what is
- * asserted is what a reader sees.
+ * marker. The real `PercentileRankBadge` and the real `PeerRanksSection` are rendered, so what
+ * is asserted is what a reader sees.
  *
- * Mocks follow `page.test.tsx` (not edited here: Phase 195 also edits that file).
+ * Phase 196 plan 13: the ranks stay on the print view (no decision removed them) and now gate on
+ * the factsheet payload's `figureRecord`, built here with `figureRecord()` from the same spans and
+ * observation counts the retired span-read stubs used. One record, one verdict: the figures in the
+ * opening view and the ranks beside them cannot disagree about whether the record clears. A
+ * record that could not be read is `figureRecord: null` on the payload, and the section fails
+ * closed exactly as the retired span-read failure did. `FactsheetView` is stubbed: its own tests
+ * prove the opening view renders.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
+vi.mock("next/navigation", () => ({
+  notFound: vi.fn(() => {
+    throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
+  }),
+}));
 vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) =>
     React.createElement("a", { href }, children),
 }));
-vi.mock("@/components/charts/Sparkline", () => ({
-  Sparkline: () => React.createElement("div", { "data-testid": "sparkline" }),
-}));
-vi.mock("@/components/strategy/FreshnessBadge", () => ({
-  FreshnessBadge: () => React.createElement("span"),
+vi.mock("../v2/FactsheetView", () => ({
+  FactsheetView: () => React.createElement("div", { "data-testid": "factsheet-view" }),
 }));
 vi.mock("@/components/ui/PrintButton", () => ({
   PrintButton: () => React.createElement("button", null, "Print"),
@@ -36,110 +44,61 @@ vi.mock("@/lib/queries", () => ({
       status: "published",
       disclosure_tier: "institutional",
       user_id: "u-1",
-      strategy_types: ["Momentum"],
-      markets: ["BTC"],
-      start_date: "2024-01-01",
-      leverage_range: "1x-2x",
-      benchmark: "BTC",
-      aum: 100_000,
       discovery_categories: { slug: "momentum" },
     },
-    analytics: {
-      cagr: 0.25,
-      sharpe: 1.5,
-      sortino: 2.0,
-      max_drawdown: -0.1,
-      volatility: 0.2,
-      calmar: 2.5,
-      six_month_return: 0.1,
-      cumulative_return: 0.3,
-      computed_at: "2024-06-01T00:00:00Z",
-      computation_status: "complete",
-      sparkline_returns: [0.01, 0.02, -0.01, 0.03],
-      monthly_returns: { "2024": { Jan: 0.05, Feb: 0.03 } },
-      metrics_json: { figure_defs_version: 2, var_1d_95: -0.02, cvar: -0.03 },
-    },
-    manager: {
-      display_name: "Jane Doe",
-      company: "Doe Capital",
-      bio: "Bio",
-      years_trading: 12,
-      aum_range: "$10M-$50M",
-      linkedin: "https://linkedin.com/in/jane-doe-test",
-    },
+    analytics: { computation_status: "complete" },
+    manager: null,
     disclosureTier: "institutional",
   }),
   // The rank map the badges read. Five metrics are shown on the tearsheet.
   getPercentiles: vi.fn().mockResolvedValue({
     "s-1": { cagr: 70, sharpe: 80, sortino: 75, max_drawdown: 60, volatility: 55 },
   }),
+  readPublicVerificationSignals: vi.fn().mockResolvedValue(new Map()),
 }));
-
+vi.mock("@/lib/factsheet/fetch-and-build-payload", () => ({ fetchAndBuildPayloadWithReason: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ getUserRolesResult: vi.fn() }));
-vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
-vi.mock("@/lib/supabase/admin", () => {
-  const builder: Record<string, unknown> = {};
-  builder.select = () => builder;
-  builder.eq = () => builder;
-  builder.maybeSingle = async () => ({
-    data: { api_keys: null, strategy_analytics: { trades_fetched_at: null, series_provenance: null } },
-    error: null,
-  });
-  return { createAdminClient: () => ({ from: () => builder }) };
-});
 
 import TearSheetPage from "./page";
 import { createClient } from "@/lib/supabase/server";
-import { getUserRolesResult } from "@/lib/auth";
-import { shortTrackMarkerTitle } from "@/lib/figure-gate";
+import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
+import { figureRecord, shortTrackMarkerTitle } from "@/lib/figure-gate";
+import type { FactsheetPayload } from "@/lib/factsheet/types";
+
+beforeEach(() => {
+  // An anonymous viewer: the ranks are public, so every case is anonymous.
+  vi.mocked(createClient).mockResolvedValue({
+    auth: { getUser: vi.fn().mockResolvedValue({ data: { user: null }, error: null }) },
+    from: vi.fn(),
+  } as unknown as Awaited<ReturnType<typeof createClient>>);
+});
 
 afterEach(cleanup);
 
 /**
- * An anonymous viewer, a USD strategy, and the record the span read returns. The strategy has
- * no `asset_class`, so it is judged as non-crypto: it clears D-15 on its observation count.
+ * The payload the builder hands the page, carrying the record the factsheet judges the figures
+ * on. The strategy has no `asset_class`, so it is judged as non-crypto (252 periods): it clears
+ * D-15 on its observation count. `null` is a record that could not be read.
  */
-function stub(span: {
-  start: string;
-  end: string;
-  observations: number;
-}) {
-  vi.mocked(getUserRolesResult).mockResolvedValue({ ok: true, roles: [] } as never);
-  const from = vi.fn((table: string) => {
-    if (table === "investor_attestations") {
-      const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null });
-      const eq = vi.fn().mockReturnValue({ maybeSingle });
-      return { select: vi.fn().mockReturnValue({ eq }) };
-    }
-    let isSpan = false;
-    const builder = {
-      select: (cols: string) => {
-        isSpan = cols.includes("record_observations");
-        return builder;
-      },
-      eq: () => builder,
-      maybeSingle: async () =>
-        isSpan
-          ? {
-              data: {
-                strategy_analytics: {
-                  series_start: span.start,
-                  series_end: span.end,
-                  headline_since: null,
-                  record_observations: span.observations,
-                },
-              },
-              error: null,
-            }
-          : { data: { strategy_analytics: { data_quality_flags: {} } }, error: null },
-    };
-    return builder;
+function stub(span: { start: string; end: string; observations: number } | null) {
+  const record = span
+    ? figureRecord({
+        seriesStart: span.start,
+        seriesEnd: span.end,
+        observations: span.observations,
+        periodsPerYear: 252,
+      })
+    : null;
+  vi.mocked(fetchAndBuildPayloadWithReason).mockResolvedValue({
+    payload: {
+      strategyId: "s-1",
+      aum: null,
+      maxCapacity: null,
+      figureRecord: record,
+    } as unknown as FactsheetPayload,
+    reason: null,
   });
-  vi.mocked(createClient).mockResolvedValue({
-    auth: { getUser: vi.fn().mockResolvedValue({ data: { user: null }, error: null }) },
-    from,
-  } as unknown as Awaited<ReturnType<typeof createClient>>);
 }
 
 async function renderPage() {
@@ -200,10 +159,9 @@ describe("TearSheet page - a withheld or unreadable record ranks Max DD only (19
     expect(labels()).toEqual(["Max DD"]);
   });
 
-  it("a span read that fails: the figures dash, so the annualised ranks do not render either; Max DD keeps its rank", async () => {
-    stub({ start: "2025-01-01", end: "2026-02-05", observations: 280 });
-    // No request client: the span read cannot be made and the gate fails closed.
-    vi.mocked(createClient).mockResolvedValue(null as never);
+  it("a record that could not be read (figureRecord null): the figures dash, so the annualised ranks do not render either; Max DD keeps its rank", async () => {
+    // No record: the gate fails closed, as the retired span-read failure did.
+    stub(null);
     await renderPage();
     expect(labels()).toEqual(["Max DD"]);
   });

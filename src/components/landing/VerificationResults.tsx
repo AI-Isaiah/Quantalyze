@@ -5,6 +5,7 @@ import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Button } from "@/components/ui/Button";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 
 interface VerificationResultsProps {
   results: {
@@ -100,7 +101,7 @@ export function VerificationResults({
           <p className="mt-1 text-sm text-text-secondary">
             Your verified results have been linked.{" "}
             <Link
-              href={`/strategy/${matchedStrategyId}`}
+              href={buildFactsheetHref(matchedStrategyId)}
               className="font-medium text-accent underline underline-offset-2 hover:text-accent-hover"
             >
               View strategy page

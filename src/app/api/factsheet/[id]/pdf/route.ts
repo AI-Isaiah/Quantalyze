@@ -46,6 +46,18 @@ export const maxDuration = 30;
  */
 export const PDF_RENDERER_USER_AGENT = "Quantalyze-PDF-Renderer/1.0";
 
+/**
+ * Phase 196 D-08 — the render opened Advanced but its contents never mounted. Thrown
+ * so the catch below answers 503 and reports to Sentry instead of returning a PDF that
+ * silently lacks the sections the founder's LP report carried before this phase.
+ */
+class AdvancedOpenError extends Error {
+  constructor(cause: unknown) {
+    super("Advanced did not mount before the render budget ended", { cause });
+    this.name = "AdvancedOpenError";
+  }
+}
+
 // Phase-4 red-team / audit-2026-05-07 — explicit allow-list for the
 // puppeteer goto host. Pre-fix, `appUrl(req)` blindly trusted
 // `req.nextUrl.origin` (derived from the inbound Host header), so any
@@ -205,6 +217,13 @@ export async function GET(
 
   const { id } = await params;
 
+  // Phase 196 WR-03: every wait below spends the time left before this deadline, not a fixed
+  // allowance. The platform kills the function at `maxDuration`; the 3 s reserve is what the
+  // 503 + Sentry path and the browser close need to run before that.
+  const deadline = Date.now() + (maxDuration - 3) * 1000;
+  // Floor of 1 ms: puppeteer reads a timeout of 0 as "no timeout", the opposite of "no time left".
+  const timeLeft = () => Math.max(1, deadline - Date.now());
+
   // Verify strategy exists and is published
   const admin = createAdminClient();
   const { data: strategy, error } = await withPublishedOnly(
@@ -319,10 +338,63 @@ export async function GET(
     // page fetches, which is exactly the scope we want.
     await page.setUserAgent(PDF_RENDERER_USER_AGENT);
 
-    await page.goto(`${targetOrigin}/factsheet/${id}`, {
+    const response = await page.goto(`${targetOrigin}/factsheet/${id}`, {
       waitUntil: "networkidle0",
-      timeout: 25000,
+      timeout: Math.min(25_000, timeLeft()),
     });
+    // Phase 196 SF-02: never print an error page as a cached 200 PDF (same guard as the
+    // sibling tearsheet.pdf route). Throwing lands in the catch below (500 JSON plus Sentry).
+    if (!response || response.status() >= 400) {
+      throw new Error(`factsheet page answered ${response ? response.status() : "no response"}`);
+    }
+
+    // Phase 196 D-08 — the LP report stays FULL LENGTH. The factsheet's opening view is
+    // the document; everything else sits behind the collapsed `details#factsheet-advanced`
+    // and its contents mount only on first open. This route opens it before printing, so
+    // the founder's monthly report carries every section it carried before the phase.
+    //
+    // ⛔ THE MODE IS UNCONDITIONAL. No query parameter, header or cookie is read to decide
+    // it, and the factsheet page has no print-all input of its own: the goto URL above is
+    // built from the id alone, so nothing a viewer sends can turn the mode on or off
+    // (T-196-31). A full report of a published strategy shows nothing the public factsheet
+    // does not.
+    const advanced = await page.evaluate(() => {
+      const el = document.getElementById("factsheet-advanced") as HTMLDetailsElement | null;
+      // Advanced is absent on a rendered factsheet whose rest has no content, and also on a
+      // pending, not-found or error render. Only the article the rendered factsheet owns
+      // tells the two apart (SF-02). A pending render carries its own marker: that one is a
+      // fact about the strategy (not built yet), which retrying shortly cannot change. A failed
+      // read renders the placeholder WITHOUT that marker, so it lands on the retryable 503.
+      if (!el) {
+        if (document.getElementById("factsheet-main")) return "absent";
+        return document.querySelector('[data-testid="factsheet-pending"]') ? "pending" : "no-factsheet";
+      }
+      el.open = true;
+      return "opened";
+    });
+    if (advanced === "pending") {
+      // Non-retryable and not an incident: no error-level Sentry event, nothing cacheable.
+      console.warn("[pdf] Factsheet is not built yet; not rendering a PDF");
+      return NextResponse.json(
+        { error: "Factsheet not available yet" },
+        { status: 409, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    if (advanced === "no-factsheet") {
+      // A 200 that is not the rendered factsheet: refuse it like a short report.
+      throw new AdvancedOpenError(new Error("factsheet article #factsheet-main is not on the page"));
+    }
+    if (advanced === "opened") {
+      try {
+        // The contents mount on the toggle event, then lazy panels fetch: prove both.
+        await page.waitForSelector("[data-advanced-contents]", { timeout: timeLeft() });
+        await page.waitForNetworkIdle({ idleTime: 500, timeout: timeLeft() });
+      } catch (err) {
+        // ⛔ Never fall through to page.pdf(): a short report that looks whole is worse
+        // than a refused one (T-196-32).
+        throw new AdvancedOpenError(err);
+      }
+    }
 
     // Hide the print button before generating PDF
     await page.evaluate(() => {
@@ -332,6 +404,7 @@ export async function GET(
 
     const pdfBuffer = await page.pdf({
       format: "A4",
+      timeout: timeLeft(),
       printBackground: true,
       margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
     });
@@ -365,6 +438,17 @@ export async function GET(
       },
     });
   } catch (err) {
+    if (err instanceof AdvancedOpenError) {
+      console.error("[pdf] Advanced did not mount; refusing to ship a short report:", err.cause);
+      captureToSentry(err.cause ?? err, {
+        tags: { area: "factsheet-pdf", step: "advanced_open" },
+        level: "error",
+      });
+      return NextResponse.json(
+        { error: "PDF render incomplete, retry shortly" },
+        { status: 503, headers: { "Retry-After": "10", "Cache-Control": "no-store" } },
+      );
+    }
     if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
       return NextResponse.json(
         { error: "PDF generation queue full, retry in 10 seconds" },
