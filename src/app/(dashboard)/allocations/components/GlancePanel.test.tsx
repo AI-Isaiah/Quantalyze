@@ -320,3 +320,63 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
     expect(html).not.toMatch(/(^|\s)(sm|md|lg|xl):grid-cols/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gap 198-UAT-01 (D-10, research C7, D-06). Rule 9: in the 2026-11-09 browser
+// UAT the founder read a glance printing YTD TWR, Sharpe and Max DD, and
+// directly under it a note saying those figures were not shown. The glance's
+// figures come from the live per-key baseline, which the history state does not
+// withhold, so a book-level line may only name what the withheld history hides:
+// the equity chart and the ratios built from it. This agreement test renders
+// the full Overview for every rebuild reason with live figures, because a
+// per-component pin cannot see the two surfaces disagree.
+// ---------------------------------------------------------------------------
+
+describe("198-UAT-01: the glance and the missing-data note agree on a rebuilding Overview", () => {
+  afterEach(() => cleanup());
+
+  const REASONS = [
+    "duplicate_account",
+    "key_not_syncing",
+    "shared_account_no_working_key",
+    "history_read_failed",
+    "account_identity_pending",
+    "awaiting_derivation",
+    "derivation_rejected",
+    "shared_account_history_truncated",
+    null,
+  ] as const;
+
+  // The reasons whose book-level line names what the history hides.
+  const NAMES_THE_HIDDEN_HISTORY = new Set<string | null>([
+    "awaiting_derivation",
+    "derivation_rejected",
+    null,
+  ]);
+
+  it.each(REASONS)(
+    "reason %s: the glance prints its live values and the note names neither return nor risk",
+    (reason) => {
+      render(
+        <AllocationDashboardV2
+          {...payload({
+            equityHistoryState: "rebuilding",
+            equityHistoryRebuildReason: reason,
+          })}
+        />,
+      );
+      expect(screen.getByTestId("glance-ytd").textContent).toBe("+4.21%");
+      expect(screen.getByTestId("glance-sharpe").textContent).toBe("1.37");
+      expect(screen.getByTestId("glance-maxdd").textContent).toBe("-6.80%");
+
+      const note = screen.getByTestId("overview-missing-data");
+      expect(note.textContent).not.toMatch(/\b(return|risk)\b/i);
+      expect(document.body.textContent).not.toMatch(/note below/i);
+      if (NAMES_THE_HIDDEN_HISTORY.has(reason)) {
+        expect(note.textContent).toContain(
+          "The equity chart and the ratios built from it",
+        );
+      }
+    },
+  );
+});
