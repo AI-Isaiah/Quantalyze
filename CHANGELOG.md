@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.30.1] - 2026-11-09 — Phase 198 MYBOOK gap 198-UAT-01: the note under the glance agrees with the glance
+## [0.133.30.2] - 2026-11-09 — Phase 198 MYBOOK gap 198-UAT-01: the note under the glance agrees with the glance
 
 ### Fixed
 - **The Overview no longer says book return and risk are hidden while the glance prints them.** Browser UAT on 2026-11-09 found the Book at a glance showing YTD TWR, Sharpe and Max DD while the "What is missing" note directly below said the latest rebuild "did not pass its checks, so book return and risk are not shown". The glance reads the live per-key figures, which the history state never withholds (Phase 198 D-06, research C7); only the equity chart and the factsheet are hidden while the history is withheld. The two book-level lines in `MissingDataMessage.tsx` now say what is actually hidden:
@@ -20,6 +20,18 @@
 - Two clauses stay passive ("is recomputed once a day", "so it is not shown") against DESIGN.md's active-voice rule, because comments in `queries.ts`, `EquityHistoryRebuilding.tsx` and the Scenario own-book sentence quote them verbatim.
 - MT5 account-balance rows on Holdings stay typed Spot (founder, 2026-11-09; research assumption A1 confirmed). No code change.
 - The founder's browser re-check of the fixed message on the deployed build is the last step before Phase 198 closes.
+
+## [0.133.30.1] - 2026-11-09 — fix: a discovery-ranking test fixture aged past the Phase 197 stale line
+
+### Fixed
+- **`frontend-test (1)` is green again on `main` and on every PR.** Three "phase 190 seam" cases in `src/components/strategy/StrategyTable.stale-analytics.test.tsx` failed from 2026-11-09: a re-running row expected `#1` and read "Not ranked: the data is more than 10 days old.", the warning-tone and computing-row ordering cases followed. The product code is right; the fixture was wrong.
+
+### Root cause
+- The fixture `rerunDbRow` carried a hard-coded `series_end: "2026-10-29"`. Phase 197 made discovery judge a row by `series_end` against the real clock (stale above 7 days for crypto, above 10 for everything else), so the fixed date passed the 10-day line on 2026-11-09 and the row lost its rank. The same file's `analyticsEmbed` already builds `series_end` from `Date.now()`; `rerunDbRow` now does the same (yesterday).
+- **Swept for the same time bomb elsewhere.** The full vitest suite (5584 files, 25172 tests) was run twice locally, once on the real clock and once with the wall clock shifted 60 days forward through a temporary, uncommitted probe in the test setup. Both runs failed the same set: this fixture plus two cases known to fail before this change (`compute.conventions` fixtures B and C, recorded in Phase 194's `deferred-items.md`). No other test depends on an absolute date going stale in the next 60 days.
+
+### Tests
+- The fix can fail: setting the fixture's `series_end` 11 days back from a byte backup turns the same three cases RED with the CI messages; the restore was `cmp`-identical and the file went back to 23/23 green.
 
 ## [0.133.30.0] - 2026-11-09 — Phase 197 SCREEN: discovery reads plainly and a shortlist can be compared
 
