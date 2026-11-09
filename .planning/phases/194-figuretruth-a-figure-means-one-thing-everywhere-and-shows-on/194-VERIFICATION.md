@@ -1,9 +1,9 @@
 ---
 phase: 194-figuretruth-a-figure-means-one-thing-everywhere-and-shows-on
 verified: 2026-11-08T12:00:00Z
-status: human_needed
-score: 11/11 must-haves verified in code; PROD after-reading done (plan 194-09, 194-RECOMPUTE.md); browser UAT pending
-verified_at_sha: 77d8a6552c1a9a8dcf39d7b82e915fdaf4e5df19
+status: passed
+score: 11/11 must-haves verified in code; PROD after-reading done (plan 194-09, 194-RECOMPUTE.md); browser UAT passed 2026-11-09 with the shown-AUM case closed by founder decision (194-UAT.md)
+verified_at_sha: 46ec9945070fc311aaf7b0f07a14472314f2109a
 drift_subjects:
   - analytics-service/services/metrics.py
   - src/lib/figure-gate.ts
@@ -41,6 +41,7 @@ human_verification:
   - test: "After deploy and recompute, open S1 on My Strategies/discovery (table and grid view), the factsheet, the tearsheet, Scenario and Holdings in a signed-in browser, plus a short-record strategy and a record of about one year."
     expected: "Same value per name per page; a short total record shows dashes with the reason on table, grid card, factsheet strip and rail (and the benchmark column, D-19); a window under one year (zoom) carries the one muted note and still shows its figures (D-15/D-16); a record of 365 daily returns shows no under-1y note (D-20) and draws its first 1-year rolling point (D-21); the tearsheet AUM row appears only for an allocator or the strategy's own manager; the 'could not be read' reasons never appear on a healthy record."
     why_human: "Visual rendering and PROD data; the repo tests render components against fixtures, not PROD rows. Includes the D-13 muted-note styling and the D-08 equity/exposure labels read in place."
+    result: "passed 2026-11-09, one case unchecked and closed by founder decision. Browser UAT on quantalyze.xyz at v0.133.30.0 (main 46ec99450), founder admin login, read-only (194-UAT.md): tearsheet AUM hidden for the founder account, which is correct under D-06 (no user_app_roles row, owns no published strategy); Book equity agrees between the glance panel and Holdings, and Scenario's Modelled equity (USD) shows the same value; Gross/Net exposure labels and legend read in place. CAN'T CHECK: the AUM shown case (allocator or own manager), because the founder account is neither. Founder decision 2026-11-09: close Phase 194 anyway. Two extras found (tearsheet Equity Curve overflows its card by about 157px at 1470px; record length 193 days on discovery and tearsheet vs 192 on the factsheet) are routed to Phase 194.2 FIGURERESIDUALS."
   - test: "Confirm CI `sql-tests` (and `sql-mutation`) are green on the head SHA with the expected check count, because they execute `supabase/tests/test_get_verified_cohort_rank_gate.sql` and the mutation floors for the migration edited in rounds 2 to 4."
     expected: "Gate arms for D-18 (a short record leaves the Sharpe/Sortino sets, stays in Max DD) and D-20 (the +1 covered-day count) pass and bite."
     why_human: "No database was available to this verification; the SQL gate was checked statically and by the vitest parity pins only. CI is its runner."
@@ -51,7 +52,7 @@ human_verification:
 
 **Phase Goal:** A metric with the same name shows the same value for the same strategy and period on My Strategies, the factsheet, the tearsheet, Scenario and Holdings, and where two figures differ on purpose the label says why. A figure that cannot be meaningful is withheld or plainly qualified, never shown at full confidence.
 **Verified:** 2026-11-08, HEAD `77d8a6552c1a9a8dcf39d7b82e915fdaf4e5df19`, branch feat/194-figuretruth
-**Status:** human_needed
+**Status:** passed (2026-11-09; was human_needed until the browser UAT)
 **Re-verification:** Yes, after six review/fix rounds (64 commits since `35351d233`) and founder decisions D-16 to D-21. The prior report had no `gaps:` section; every truth was re-checked against HEAD, and the new decisions were added as truths.
 
 ## Goal Achievement
@@ -59,6 +60,8 @@ human_verification:
 Verdict: the code goal is achieved for the pages the phase names, and the surface set got wider since the first report. No must-have is FAILED and no blocker was found. Two of the three prior deferrals (StrategyGrid card CAGR, AlphaBetaDecomposition alpha) are now closed in code (commits `b4168cd16` V-a and `63745db78` V-b). The one open code-side deferral is the OG share card (B3), founder-routed to Phase 194.1. Plan 194-09 (PROD recompute) is pending by design, so the PROD after-reading is the human item.
 
 **Update 2026-11-08 (plan 194-09 ran):** the PROD recompute is done. `194-RECOMPUTE.md` records every complete row on the Phase 194 definitions (`lacking=0`, `defs=0 obs=0 roll1y=0`), and S1's four SC-1 differences now agree. The CI item is resolved as well. The signed-in browser UAT is the one human item left, so the status stays `human_needed`.
+
+**Update 2026-11-09 (browser UAT, phase closed):** the signed-in browser UAT ran on quantalyze.xyz at v0.133.30.0 (main `46ec99450`) and passed; `194-UAT.md` has the reading. One case could not be checked: the tearsheet AUM row in its shown state (an allocator, or the strategy's own manager), because the founder account is neither. The founder decided on 2026-11-09 to close the phase anyway. Two extras found during the UAT (the tearsheet Equity Curve overflows its card; 193 vs 192 days of record) are routed to Phase 194.2 FIGURERESIDUALS. Status is now `passed`. `verified_at_sha` moved to `46ec9945070fc311aaf7b0f07a14472314f2109a`, the main commit the closing UAT was read on; the code verification above was issued at `77d8a6552`.
 
 ### Observable Truths
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.133.30.2] - 2026-11-09 — records: close Phase 194 FIGURETRUTH and widen Phase 194.2
+
+### Notes
+- **Phase 194 is closed.** The signed-in browser UAT ran on quantalyze.xyz at v0.133.30.0 (main `46ec99450`) and passed. `194-UAT.md` records the reading: the tearsheet AUM row is hidden for the founder account, which is correct under D-06; Book equity matches between the glance panel and Holdings, and Scenario's Modelled equity shows the same value; the Gross and Net exposure labels read in place. `194-VERIFICATION.md` is now `status: passed`, with `verified_at_sha` set to the main commit the UAT was read on.
+- **One case was not checked in a browser, and the founder closed the phase anyway (2026-11-09, "Close it").** The tearsheet AUM row in its shown state (an allocator, or the strategy's own manager) could not be seen from the founder account, which is neither. Its gate is covered in code and tests (VERIFICATION truth 3).
+- `phase complete 194` ticked TRUST-04 and TRUST-05, the ROADMAP bullet and the Progress row. Its move of STATE's Current Position to "the next phase" was corrected by hand, because phases run in parallel: the position now names 198 (verification outstanding), 197 (shipped) and 194.2 (not planned).
+- **Phase 194.2 FIGURERESIDUALS takes the two extras the UAT found** (founder routing, booked through `/gsd-phase --edit 194.2`): the tearsheet Equity Curve overflows its card by about 157px at a 1470px viewport, and one strategy's record length reads 193 days on discovery and the tearsheet but 192 on the factsheet.
+
 ## [0.133.30.1] - 2026-11-09 — fix: a discovery-ranking test fixture aged past the Phase 197 stale line
 
 ### Fixed
