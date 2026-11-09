@@ -352,6 +352,15 @@ describe("198-UAT-01: the glance and the missing-data note agree on a rebuilding
     null,
   ] as const;
 
+  // 198-14 SFH-02: the claim is "the note says return or risk is missing", so the
+  // check matches the singular and the plural. The one legitimate use of the word
+  // is awaiting_derivation's description of the daily run ("each account's returns
+  // and cash flows"), which is stripped first.
+  const namesReturnOrRisk = (text: string) =>
+    /\b(returns?|risks?)\b/i.test(
+      text.replace("each account's returns and cash flows", ""),
+    );
+
   // The reasons whose book-level line names what the history hides.
   const NAMES_THE_HIDDEN_HISTORY = new Set<string | null>([
     "awaiting_derivation",
@@ -375,13 +384,13 @@ describe("198-UAT-01: the glance and the missing-data note agree on a rebuilding
       expect(screen.getByTestId("glance-maxdd").textContent).toBe("-6.80%");
 
       const note = screen.getByTestId("overview-missing-data");
-      expect(note.textContent).not.toMatch(/\b(return|risk)\b/i);
+      expect(namesReturnOrRisk(note.textContent!)).toBe(false);
       expect(document.body.textContent).not.toMatch(/note below/i);
       // The glance's Risk group prints Sharpe and Max DD without the history
       // (C7), so the Risk section may not claim those figures depend on it.
       const riskLine = document.querySelector("#risk p");
       expect(riskLine, "the Risk section's not-ready line").not.toBeNull();
-      expect(riskLine!.textContent).not.toMatch(/\b(return|risk)\b/i);
+      expect(namesReturnOrRisk(riskLine!.textContent!)).toBe(false);
       expect(riskLine!.textContent).toContain("See the note above.");
       if (NAMES_THE_HIDDEN_HISTORY.has(reason)) {
         expect(note.textContent!.toLowerCase()).toContain(
