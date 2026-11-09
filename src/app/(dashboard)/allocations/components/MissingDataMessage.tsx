@@ -68,7 +68,7 @@ const BOOK_LINE = {
   account_identity_pending:
     "We are confirming which exchange account each key reads. Each daily sync checks it again.",
   awaiting_derivation:
-    "Your book's history is recomputed once a day from each account's returns and cash flows. The equity chart and the ratios built from it appear after the next recompute.",
+    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
   derivation_rejected:
     "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden.",
   shared_account_history_truncated:

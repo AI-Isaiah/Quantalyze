@@ -315,7 +315,7 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
     [
       // 198-UAT-01 (D-10): names what the history hides, never return or risk.
       "awaiting_derivation",
-      "Your book's history is recomputed once a day from each account's returns and cash flows. The equity chart and the ratios built from it appear after the next recompute.",
+      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
     ],
     [
       "derivation_rejected",

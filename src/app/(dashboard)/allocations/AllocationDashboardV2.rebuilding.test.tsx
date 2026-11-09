@@ -92,7 +92,7 @@ const REASON_LINES = [
     // 198-09 (D-01): the Overview says whose history: the book's.
     // 198-UAT-01 (D-10): and names what it hides, never return or risk.
     "awaiting_derivation",
-    "Your book's history is recomputed once a day from each account's returns and cash flows. The equity chart and the ratios built from it appear after the next recompute.",
+    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
   ],
   [
     "derivation_rejected",
@@ -342,7 +342,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     const panel = screen.getByTestId("overview-missing-data");
     // 198-UAT-01 (D-10): names what the history hides, never return or risk.
     expect(panel.textContent).toContain(
-      "Your book's history is recomputed once a day from each account's returns and cash flows. The equity chart and the ratios built from it appear after the next recompute.",
+      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
     );
     expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
     expect(screen.queryByText(/appear once/)).toBeNull();
