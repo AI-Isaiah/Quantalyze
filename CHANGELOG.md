@@ -1,5 +1,99 @@
 # Changelog
 
+## [0.133.31.0] - 2026-11-09 — Phase 196 ONESTRATEGYPAGE: a strategy has one page, the factsheet
+
+### Changed
+- **A strategy has one page, `/factsheet/<id>`.** `/strategy/<id>`, `/strategy/<id>/v2`, `/browse/<slug>/<id>` and `/discovery/<slug>/<id>` are now config-level 308s to it (`next.config.ts`, no database read, so an unpublished and a missing id get the same answer). The browse and discovery redirects carry `from` and `cat`, and the request's own query passes through.
+- **Every in-app strategy link opens the factsheet with its origin.** Table rows, grid cards, Strategies, My Strategies, the wizard, recommendations, admin, outcomes, csv-status, the landing page and every My allocation link (holdings, watchlist, scenario composer, optimizer, with `?from=allocations`) go through `buildFactsheetHref`. The factsheet's back link reads "Back to Discovery", "Back to My allocation" and so on. Origins are an exact allowlist; absolute, protocol-relative, `__proto__`, traversal and array values fall back to a safe default. `src/__tests__/one-strategy-page-links.test.ts` fails CI if an href to a retired route comes back.
+- **The factsheet opens on less.** It shows the KPI strip, the control bar and one equity figure (curve with drawdown) beside one Main metrics table. Every other section sits behind one collapsed "Advanced" disclosure, which mounts on first open, remembers the reader's choice, opens for print and survives a reset. There is one chart hint, at most one small-sample warning and no empty section, and each KPI cell prints the active comparator's value beneath it. The before and after counts are in the phase census.
+- **The viewer chrome follows the session.** A signed-in reader gets a viewer bar: the back link, Request intro or Add to my allocation as the role allows, Edit strategy for the owner, and the reader's note card. A reader with no session gets a visitor header and a sign-up line. The intro and allocate actions need the accredited-investor attestation, as they did on `/discovery`. The shared factsheet (`/factsheet-share/<token>`) carries the visitor header. It reads the session once, after the token match, only to decide whether to show Sign up. That page sends `Referrer-Policy: no-referrer`.
+- **`/browse` knows about the session.** A signed-in reader sees one "Go to Discovery" link instead of Log in and Sign up, and no sign-up prompts.
+- **Request intro reads in sentence case, and a burst of clicks sends one request.** It shows an `aria-busy` checking state and a not-sent failure message.
+- **The published factsheet is indexable (D-07).** `robots` is omitted, and a canonical link to the bare `/factsheet/<id>` is emitted, only when the published-only probe finds the strategy. If the probe errors, the page stays noindex. The owner, unpublished and share-token lanes stay `noindex` and carry no canonical link.
+- **The tear sheet is the factsheet's print view.** `/factsheet/<id>/tearsheet` now uses the published-only payload builder and the discovery page's "Tear Sheet" link becomes "Print view" (D-09). Nothing from the old tear sheet is dropped:
+  - The percentile ranks, contact block, manager identity panel (attestation gate unchanged), Risk Disclosure, freshness and trade-fetch lines and Generated date stay on the tear sheet. The ranks are also added inside Advanced on the factsheet, read per request and never cached.
+  - A declared benchmark gets a Benchmark row under Terms. Only the declared value is shown; the old fallback to "BTC" is not carried. The row also shows on the full-layout mounts (`196-BENCHMARK-ROW-FULL-LAYOUT-01`).
+  - A strategy that is not visible answers 404. A failed read goes to the error boundary. A strategy whose figures are not built yet gets a pending page that says so and links back to the factsheet.
+- **The LP report PDF (`/api/factsheet/<id>/pdf`) opens Advanced on the server and refuses a short report (D-08).** Print-all mode is not reachable from a parameter the viewer controls. The route checks the page status and waits for the factsheet marker, with a budget measured against its deadline:
+  - a factsheet that is not built answers a non-retryable 409;
+  - an error page, a failed read or any other page answers a retryable 503 `no-store`.
+  `tearsheet.pdf` likewise refuses a page without the tear sheet marker with a 503 `no-store`.
+- **`/allocations?add=<id>` for an own strategy that is not marked as own capital shows the picker row's reason** instead of jumping to the amount step (closes `198-ADD-DEEPLINK-UNMARKED-OWN`).
+- **The factsheet renders its own single `<main>` landmark,** and `src/app/factsheet/[id]/v2/layout.tsx` is deleted. The error, loading and not-found boundaries now cover the canonical `/factsheet/<id>` route. The error boundary uses the `retry` prop that Next 16.4.2 passes.
+
+### Removed
+- **D-06 panels.** "Trades & positions" (trade, position, risk-reward and volume figures, Trade mix) and "Exposure & benchmark greeks" (net and gross exposure, turnover, the benchmark greeks table, the 90-day rolling correlation with BTC) were only ever rendered in the retired `/strategy/<id>/v2` shell, and they are gone with it. Bringing them back is booked as `196-V2-PANELS-REVIVAL-01`.
+- **"Book Intro Call" (D-09).** `BookIntroCall` and the `NEXT_PUBLIC_SCHEDULING_URL` line in `.env.example` are removed. If a deployment still sets that variable, nothing reads it now.
+- **Route trees:**
+  - `src/app/strategy/` (both trees);
+  - `/discovery/[slug]/[strategyId]`;
+  - `/browse/[slug]/[strategyId]`.
+- **Components only the retired shell used:**
+  - in `src/components/strategy-v2/`: `StrategyV2Shell` and its panels, `BenchmarkGreeksTable`, `MetricCell`, `format.ts` and `panel7-series` (`SegmentedControl` and `PartialDataBanner` stay);
+  - ten charts: `CorrelationWithBenchmark`, `DailyHeatmap`, `MonthlyHeatmap`, `YearlyReturns`, `WorstDrawdowns`, `EquityCurve`, `DrawdownChart` (the allocations widget of the same name is a different, live file), `NetGrossExposureChart`, `TurnoverChart` and `RollingAlphaBetaChart`.
+- **Libraries and query readers with no remaining caller:**
+  - `useLazyPanelMetrics`, `queries-client`, `benchmark-why`, `drawdown-math`, `factsheet/v2-joint` and `composite-joint`;
+  - `getStrategyDetailV2`, `fetchStrategyLazyMetrics`, `getStrategyDetail` and `getPublicStrategyDetail`. The manager-identity redaction is now pinned on `getFactsheetDetail`.
+- **Tests that only covered the removed code:** four `strategy-v2-*` e2e specs and two `tests/visual/strategy-v2-*` gates. In total, 104 files were deleted.
+- **Census exclusions.** The six figure-gate census rows that pointed at the deleted files, and the constant and pattern that held them, are removed (`194.1-CENSUS-196-STALE-EXCLUSIONS`).
+
+### Fixed
+Three rounds of phase review (gsd-code-reviewer and silent-failure-hunter) found these, and they were fixed before ship:
+- **The intro and allocate buttons require the attestation again (CR-01).** The factsheet had shown them to any approved allocator. `/api/intro` itself keeps its pre-phase behaviour (see Notes).
+- **Pending pages:**
+  - a pending published factsheet keeps its viewer bar or visitor header (WR-01);
+  - a pending tear sheet states why it is not available instead of answering 404 (SF-04).
+- **Failures that used to pass silently are now reported:**
+  - a failed session read is sent to Sentry before the visitor chrome shows (SF-01);
+  - the owner probe's failed `getUser()` is reported (M4);
+  - Request intro no longer stays disabled when the check for an existing request fails (SF-03).
+- **PDF route status answers:**
+  - the PDF routes no longer print an error page or a page that is not a factsheet (WR-03, SF-02, R2-01);
+  - a read failure reaches the retryable 503 instead of the non-retryable 409 (R3-01);
+  - `loading.tsx` stays under `v2/`, so the tear sheet keeps its real HTTP statuses (R2-01).
+- **Dead code:** a 409 branch the server never sends is removed from `RequestIntroButton` (M2).
+
+### Tests
+- New tests:
+  - the factsheet census self-test, its counting rules and three profile fixtures;
+  - the redirect-config unit test, which asserts no `has` or `missing` condition;
+  - the origin allowlist's adversarial arms;
+  - the viewer-chrome, metadata and canonical tests;
+  - a pin that the token lane makes one `getUser` call and no profile read;
+  - the PDF route status tests;
+  - the attestation gate tests.
+  Every data-integrity gate was neutered and shown RED once, then restored from a byte backup.
+- Moved tests:
+  - the tear sheet's rank, stale-analytics, trade-fetch and parity tests moved to the rebuilt page;
+  - the Terms test and the factsheet e2e specs moved to the opening view plus Advanced;
+  - the e2e specs now point at the factsheet and find rows by id prefix.
+- Updated census tests:
+  - `DashboardChrome.test.tsx` allows the viewer bar's and visitor header's widths;
+  - the anon-projection route list drops `src/app/strategy`;
+  - the redirect-origin guard checks its query index before it slices.
+- **Fixtures:**
+  - the phase 190 seam fixture's `series_end` now follows the real clock;
+  - the deep-link kind `not_own_capital` is renamed `unmarked_own` to satisfy the OWN-03 mark-literal census.
+- **Needs CI.** These e2e specs were not run locally because the seeded lane needs CI:
+  - `route-redirects` (four new arms);
+  - the retargeted `mt5-badge`, `sfox-badge`, `composite-onboarding` and `sync-analytics-flow`;
+  - `axe-app-wide` and `reflow-sweep-authed` (factsheet rows);
+  - `svg-chart-parity`, `target-size`, `composite-factsheet-render`, `layout-narrow` and `full-flow`.
+- **SVG goldens may need a re-bake.** The two `full-page-*` goldens now show the new layout, and the `bootstrap-ci-*` goldens may differ because the Point column was dropped. The re-bake is a `bake_svg_goldens` dispatch.
+
+### Notes
+- **Founder calls left open, all booked in `TODOS.md`:**
+  - `196-INTRO-API-ATTESTATION-01`: `/api/intro` does not check the attestation. That is how it behaved before the phase, and enforcing it would block the Bridge's intro.
+  - `196-TEARSHEET-NONTERMINAL-404-01`.
+  - `196-CANONICAL-LINK-01` (closed by WR-02).
+  - `196-ROLLING-REPEATS-01`: with Advanced open, repeated metrics are still above 0.
+- **Review survivors, booked:**
+  - `196-PDF-ROUTE-RETRY-CLASSES-01`: the LP route's 27 s budget is longer than the founder LP cron's 25 s fetch timeout, and `tearsheet.pdf` answers a permanently pending page as retryable.
+  - `196-ORPHANS-01`.
+- **Found outside the phase's diff:** `196-ERROR-BOUNDARY-UNSTABLE-RETRY-01`. The repo's other error boundaries read `unstable_retry`, which Next 16.4.2 does not pass, so their Try again button does nothing.
+- **`195-EXCHANGE-MONITORING-CLAIM` names this phase as owner, but no plan took it.** The tear sheet's Risk Disclosure and the `custody` disclaimer still claim read-only monitoring for every tier. A re-measure note was added, and the item still needs routing.
+- **The production census after-run is pending.** It runs after deploy; the command shape is in the phase census.
+
 ## [0.133.30.2] - 2026-11-09 — records: close Phase 194 FIGURETRUTH and widen Phase 194.2
 
 ### Notes
