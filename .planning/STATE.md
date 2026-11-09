@@ -179,7 +179,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 194 (FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something) — EXECUTING
 Plan: 24 of 24 (code merged as #1219; plan 09 PROD recompute done 2026-11-08, 194-RECOMPUTE.md lacking=0)
 Status: Verification human_needed (signed-in browser UAT only)
-Last activity: 2026-11-09 — Phase 198 MYBOOK shipped (#1226, v0.133.29.0); VERIFICATION human_needed (CI seeded e2e passed on the ship head; desktop and mobile visual pass outstanding), so not closed
+Last activity: 2026-11-09 — Phase 198 MYBOOK browser UAT found gap 198-UAT-01 (missing-data note contradicts the glance); gap plan 198-14 planned and checked
 Progress: [████░░░░░░] 43% (6 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
