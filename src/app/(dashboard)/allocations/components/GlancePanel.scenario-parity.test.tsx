@@ -136,7 +136,6 @@ describe("GlancePanel and Scenario's live strip print one set of strings (198 SC
         liveBaselineMetrics={c.baseline}
         holdingsSummary={[]}
         allKeysStale={c.allKeysStale}
-        noteBelow={c.rebuilding}
       />,
     );
     for (const [key, id] of [

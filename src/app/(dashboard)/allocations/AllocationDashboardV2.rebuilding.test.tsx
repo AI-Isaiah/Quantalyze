@@ -553,7 +553,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
 
   // D-01, the point of the phase: a payload with a keyDataGaps entry names the
   // key, the days and the action. The key is labelled through the one key-label
-  // rule, and the glance's sr-only pointer says where to read it.
+  // rule.
   it("a keyDataGaps entry for K1 prints K1's named line with its range, directly after the glance and before InsightStrip", () => {
     render(
       <AllocationDashboardV2
@@ -588,13 +588,15 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(after(section, insight)).toBe(true);
     expect(glance.nextElementSibling).toBe(section);
 
-    // The glance's pointer is bound to the message existing.
-    expect(glance.textContent).toContain("Not shown: see the note below.");
+    // 198-UAT-01 (D-10): no line of the note explains a glance figure (C7), so
+    // no glance cell points at it.
+    expect(screen.getByTestId("glance-ytd").textContent).toBe("—");
+    expect(glance.textContent).not.toMatch(/note below/i);
     // The Risk section's pointer points at a note that exists.
     expect(screen.getByText(/See the note above\./)).toBeInTheDocument();
   });
 
-  it("a rebuilding book always has a note: every reason prints at least one line, so the glance pointer and the Risk pointer are true", () => {
+  it("every reason prints at least one line, so the Risk pointer is true and the glance points at no note", () => {
     for (const reason of [...REASONS, null]) {
       render(
         <AllocationDashboardV2
@@ -605,9 +607,11 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       );
       const section = screen.getByTestId("overview-missing-data");
       expect(section.querySelectorAll("p").length).toBeGreaterThanOrEqual(2);
-      expect(
-        screen.getByRole("region", { name: "Book at a glance" }).textContent,
-      ).toContain("Not shown: see the note below.");
+      const glanceText = screen.getByRole("region", {
+        name: "Book at a glance",
+      }).textContent;
+      expect(glanceText).not.toMatch(/note below/i);
+      expect(glanceText).not.toMatch(/not shown/i);
       cleanup();
     }
   });

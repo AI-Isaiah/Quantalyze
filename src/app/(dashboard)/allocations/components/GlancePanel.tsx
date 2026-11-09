@@ -26,9 +26,11 @@ import { isImpossibleDrawdown, valueColorClass } from "./KpiStrip";
  * two surfaces print byte-equal strings for one payload.
  *
  * Research C7: Return and Risk do not depend on `equityHistoryState`. A figure that
- * does not exist prints a dash; `noteBelow` only adds the sr-only pointer to the
- * note the Overview renders about missing data. Research C5: Book equity is the sum
- * of the holdings rows, with the count of derivative rows it could not size stated
+ * does not exist prints a bare dash, as Scenario's live strip does. No glance cell
+ * points at the Overview's missing-data message, because none of its lines
+ * explains a glance figure (198-UAT-01, D-10): a withheld Sharpe carries its own
+ * reason through `annualizedCell`. Research C5: Book equity is the sum of the
+ * holdings rows, with the count of derivative rows it could not size stated
  * beneath it.
  *
  * The container-query host sits on its own ancestor (an element never queries its
@@ -41,8 +43,6 @@ interface GlancePanelProps {
   liveBaselineMetrics: Payload["liveBaselineMetrics"] | null | undefined;
   holdingsSummary: Payload["holdingsSummary"];
   allKeysStale: boolean;
-  /** True when the Overview renders a note about missing data below this panel. */
-  noteBelow: boolean;
 }
 
 const CELL = "px-4 py-3 min-w-0";
@@ -89,7 +89,6 @@ export function GlancePanel({
   liveBaselineMetrics,
   holdingsSummary,
   allKeysStale,
-  noteBelow,
 }: GlancePanelProps) {
   const titleId = useId();
   const figures = liveBookFigures(liveBaselineMetrics);
@@ -99,11 +98,6 @@ export function GlancePanel({
   const sharpe = allKeysStale ? null : figures.sharpe;
   const maxDd = allKeysStale ? null : figures.maxDd;
   const maxDdShown = isImpossibleDrawdown(maxDd) ? null : maxDd;
-
-  const notShown = (value: number | null, withheld = false) =>
-    value === null && noteBelow && !withheld ? (
-      <span className="sr-only">Not shown: see the note below.</span>
-    ) : null;
 
   const sharpeWithheld = !allKeysStale && figures.sharpeState === "withheld";
   const sharpeContent: ReactNode = sharpeWithheld
@@ -151,12 +145,7 @@ export function GlancePanel({
             <Cell
               label="YTD TWR"
               testId="glance-ytd"
-              value={
-                <>
-                  {formatPercent(ytd)}
-                  {notShown(ytd)}
-                </>
-              }
+              value={formatPercent(ytd)}
               tone={valueColorClass(ytd, 100)}
             />
           </Group>
@@ -164,23 +153,13 @@ export function GlancePanel({
             <Cell
               label="Sharpe"
               testId="glance-sharpe"
-              value={
-                <>
-                  {sharpeContent}
-                  {notShown(sharpe, sharpeWithheld)}
-                </>
-              }
+              value={sharpeContent}
               tone={valueColorClass(sharpe, 1)}
             />
             <Cell
               label="Max DD 12m"
               testId="glance-maxdd"
-              value={
-                <>
-                  {formatPercent(maxDdShown)}
-                  {notShown(maxDdShown)}
-                </>
-              }
+              value={formatPercent(maxDdShown)}
               tone={valueColorClass(maxDdShown, 100, true)}
             />
           </Group>
