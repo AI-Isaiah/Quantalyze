@@ -26,10 +26,15 @@ import { isImpossibleDrawdown, valueColorClass } from "./KpiStrip";
  * two surfaces print byte-equal strings for one payload.
  *
  * Research C7: Return and Risk do not depend on `equityHistoryState`. A figure that
- * does not exist prints a dash; `noteBelow` only adds the sr-only pointer to the
- * note the Overview renders about missing data. Research C5: Book equity is the sum
- * of the holdings rows, with the count of derivative rows it could not size stated
- * beneath it.
+ * does not exist prints a dash. 198-UAT-01 (D-10): a cell that prints a value
+ * never points at the Overview's missing-data note, because no line of it
+ * explains a printed figure. Only when there is no live series at all (no live
+ * figures, and not the all-keys-stale case the staleness banner explains) and
+ * the note renders below (`noteBelow`), the dash cells carry an sr-only pointer
+ * to it: that note is then the only explanation of the dashes (198-14 SFH-01).
+ * A withheld Sharpe carries its own reason through `annualizedCell` and never the
+ * pointer. Research C5: Book equity is the sum of the holdings rows, with the
+ * count of derivative rows it could not size stated beneath it.
  *
  * The container-query host sits on its own ancestor (an element never queries its
  * own container); the three groups stack below `@lg` of the panel's own width.
@@ -100,9 +105,11 @@ export function GlancePanel({
   const maxDd = allKeysStale ? null : figures.maxDd;
   const maxDdShown = isImpossibleDrawdown(maxDd) ? null : maxDd;
 
-  const notShown = (value: number | null, withheld = false) =>
-    value === null && noteBelow && !withheld ? (
-      <span className="sr-only">Not shown: see the note below.</span>
+  // Only a dash with no live series behind it points at the note below.
+  const noLiveFigures = noteBelow && !allKeysStale && figures.seriesEndDay === null;
+  const noFiguresPointer = (value: number | null, withheld = false) =>
+    value === null && noLiveFigures && !withheld ? (
+      <span className="sr-only">No live figures yet. See the note below.</span>
     ) : null;
 
   const sharpeWithheld = !allKeysStale && figures.sharpeState === "withheld";
@@ -154,7 +161,7 @@ export function GlancePanel({
               value={
                 <>
                   {formatPercent(ytd)}
-                  {notShown(ytd)}
+                  {noFiguresPointer(ytd)}
                 </>
               }
               tone={valueColorClass(ytd, 100)}
@@ -167,7 +174,7 @@ export function GlancePanel({
               value={
                 <>
                   {sharpeContent}
-                  {notShown(sharpe, sharpeWithheld)}
+                  {noFiguresPointer(sharpe, sharpeWithheld)}
                 </>
               }
               tone={valueColorClass(sharpe, 1)}
@@ -178,7 +185,7 @@ export function GlancePanel({
               value={
                 <>
                   {formatPercent(maxDdShown)}
-                  {notShown(maxDdShown)}
+                  {noFiguresPointer(maxDdShown)}
                 </>
               }
               tone={valueColorClass(maxDdShown, 100, true)}

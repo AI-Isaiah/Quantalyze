@@ -280,9 +280,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       )}
       {/* Phase 198 plan 01 (D-06, ROUTE-07): the book at a glance. Figures come
           from the shared book-figures module Scenario's live strip also reads,
-          and do not depend on the history state (research C7). `noteBelow` points
-          assistive tech at the missing-data message, so it is bound to the
-          message rendering and never to the gate alone. */}
+          and do not depend on the history state (research C7). A cell that
+          prints a value never points at the missing-data note (198-UAT-01,
+          D-10). Only when there is no live series and the note renders below
+          does a dash cell carry the sr-only pointer to it (198-14 SFH-01). */}
       <GlancePanel
         liveBaselineMetrics={props.liveBaselineMetrics}
         holdingsSummary={props.holdingsSummary ?? []}
@@ -365,7 +366,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           </div>
         ) : (
           <p className="mt-3 text-sm text-text-secondary">
-            Risk figures need the equity history. See the note above.
+            This section needs your book&apos;s history. See the note above.
           </p>
         )}
       </section>

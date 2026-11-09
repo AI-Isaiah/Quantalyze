@@ -90,12 +90,13 @@ const REASON_LINES = [
   ],
   [
     // 198-09 (D-01): the Overview says whose history: the book's.
+    // 198-UAT-01 (D-10): and names what it hides, never return or risk.
     "awaiting_derivation",
-    "Book return and risk are recomputed once a day from each account's returns and cash flows. They appear after the next recompute.",
+    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
   ],
   [
     "derivation_rejected",
-    "The latest rebuild of your book's history did not pass its checks, so book return and risk are not shown.",
+    "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden.",
   ],
   [
     // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
@@ -130,6 +131,10 @@ const REASONS = REASON_LINES.map(([reason]) => reason);
 
 const HIDDEN_FOR_NOW =
   "The equity chart and the ratios built from it are hidden for now.";
+
+// 198-14 SFH-01: the sr-only pointer a glance dash carries when no live series
+// exists and the missing-data note renders below.
+const NO_LIVE_FIGURES_POINTER = "No live figures yet. See the note below.";
 
 const baseProps = {
   portfolio: {
@@ -339,8 +344,9 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       />,
     );
     const panel = screen.getByTestId("overview-missing-data");
+    // 198-UAT-01 (D-10): names what the history hides, never return or risk.
     expect(panel.textContent).toContain(
-      "Book return and risk are recomputed once a day from each account's returns and cash flows. They appear after the next recompute.",
+      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
     );
     expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
     expect(screen.queryByText(/appear once/)).toBeNull();
@@ -551,7 +557,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
 
   // D-01, the point of the phase: a payload with a keyDataGaps entry names the
   // key, the days and the action. The key is labelled through the one key-label
-  // rule, and the glance's sr-only pointer says where to read it.
+  // rule.
   it("a keyDataGaps entry for K1 prints K1's named line with its range, directly after the glance and before InsightStrip", () => {
     render(
       <AllocationDashboardV2
@@ -586,13 +592,18 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(after(section, insight)).toBe(true);
     expect(glance.nextElementSibling).toBe(section);
 
-    // The glance's pointer is bound to the message existing.
-    expect(glance.textContent).toContain("Not shown: see the note below.");
+    // 198-14 SFH-01: this payload carries no live baseline, so the glance is
+    // all dashes and the note below is the only explanation of them: the dash
+    // cells carry the narrow sr-only pointer to it.
+    expect(screen.getByTestId("glance-ytd").textContent).toBe(
+      `—${NO_LIVE_FIGURES_POINTER}`,
+    );
+    expect(glance.textContent).not.toMatch(/not shown/i);
     // The Risk section's pointer points at a note that exists.
     expect(screen.getByText(/See the note above\./)).toBeInTheDocument();
   });
 
-  it("a rebuilding book always has a note: every reason prints at least one line, so the glance pointer and the Risk pointer are true", () => {
+  it("every reason prints at least one line, so the Risk pointer and the glance's no-live-figures pointer are true", () => {
     for (const reason of [...REASONS, null]) {
       render(
         <AllocationDashboardV2
@@ -603,9 +614,12 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       );
       const section = screen.getByTestId("overview-missing-data");
       expect(section.querySelectorAll("p").length).toBeGreaterThanOrEqual(2);
-      expect(
-        screen.getByRole("region", { name: "Book at a glance" }).textContent,
-      ).toContain("Not shown: see the note below.");
+      const glanceText = screen.getByRole("region", {
+        name: "Book at a glance",
+      }).textContent;
+      // No live baseline here, so each dash cell points at the note that exists.
+      expect(glanceText).toContain(NO_LIVE_FIGURES_POINTER);
+      expect(glanceText).not.toMatch(/not shown/i);
       cleanup();
     }
   });

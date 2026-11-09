@@ -95,7 +95,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 
 - [x] **Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story** - Key storage, encryption, TLS, factsheet access, listing cost and exchange count read the same on the home page, `/security`, `/for-quants` and Terms, each matched to a measurement; no key form for anonymous visitors on the home page; `/demo` looks finished (completed 2026-11-07)
 - [x] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row (completed 2026-11-07)
-- [ ] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified
+- [x] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified (completed 2026-11-09)
 - [x] **Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside FIGURETRUTH** (INSERTED) - Census pages B1-B13, admin included, plus Sharpe deltas and lifts, alpha/TE/IR, peer ranks and rolling charts on those pages (completed 2026-11-08)
 - [ ] **Phase 194.2: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed** (INSERTED) - A record whose dates cannot be read is withheld on every path, including Holdings and book legs; the wizard caveat and zoomed benchmark note follow the page rules; one Sentry report per bad record
 - [x] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed (completed 2026-11-07)
@@ -210,7 +210,7 @@ Plans:
 **Goal:** A metric with the same name shows the same value for the same strategy and period on My Strategies, the factsheet, the tearsheet, Scenario and Holdings, and where two figures differ on purpose the label says why. A figure that cannot be meaningful is withheld or plainly qualified, never shown at full confidence.
 **Requirements**: TRUST-04, TRUST-05
 **Depends on:** Phase 193 (mismatches are re-read on full-history views, so a saved clipped range cannot pass for a definition difference)
-**Plans:** 24/24 plans executed
+**Plans:** 24/24 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -288,7 +288,7 @@ Plans:
 
 ### Phase 194.2: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed (INSERTED)
 
-**Goal:** The six Phase 194 figure-gate residuals booked to 194.1 on 2026-11-08 that 194.1's scope did not cover are closed. (The seventh, the baseline re-dump, lands through the CI redump PR, not a phase.) Each closes on its own TODOS trigger: `194-HOLDINGS-UNREADABLE-FLAG` (the Holdings and book-leg path carries the unreadable flag), `194-MALFORMED-DATES-ABSENT` (every date axis, `shapedRecordScalars` and the SQL cohort twin read a malformed date as unreadable), `194-SCENARIO-INTERIOR-DATES`, `194-WIZARD-HARD04-RAW-GAP` (the wizard reads the D-15 gate), `194-ZOOM-BENCHMARK-COVERAGE` and `194-PERCENTILE-SENTRY-DEDUP`.
+**Goal:** The six Phase 194 figure-gate residuals booked to 194.1 on 2026-11-08 that 194.1's scope did not cover are closed. (The seventh, the baseline re-dump, lands through the CI redump PR, not a phase.) Each closes on its own TODOS trigger: `194-HOLDINGS-UNREADABLE-FLAG` (the Holdings and book-leg path carries the unreadable flag), `194-MALFORMED-DATES-ABSENT` (every date axis, `shapedRecordScalars` and the SQL cohort twin read a malformed date as unreadable), `194-SCENARIO-INTERIOR-DATES`, `194-WIZARD-HARD04-RAW-GAP` (the wizard reads the D-15 gate), `194-ZOOM-BENCHMARK-COVERAGE` and `194-PERCENTILE-SENTRY-DEDUP`. Two more from the Phase 194 browser UAT of 2026-11-09, routed here by the founder: the tearsheet Equity Curve fits its card (at a 1470px viewport its SVG was 620px wide and overflowed the card by about 157px), and one strategy's record length reads the same on every page (discovery and the tearsheet said "annualized from 193 days of record", the factsheet "192 days").
 **Requirements**: TBD
 **Depends on:** Phase 194.1; coordinate with Phase 196, which keeps the factsheet this phase touches
 **Plans:** 0 plans
@@ -391,7 +391,7 @@ Plans:
 **Goal:** An allocator opening My allocation sees the book's return, risk and holdings at a glance (or exactly what is missing), "+ Allocation" opens the allocator's own flow, Holdings labels positions correctly, and the page has at most three tabs with each position listed once and dust hidden.
 **Requirements**: ROUTE-06, ROUTE-07, ROUTE-08, LEAN-06
 **Depends on:** Phase 194 (the book's values agree across Scenario and Holdings), Phase 195 (the Tweaks panel is already gone)
-**Plans:** 13/13 plans executed
+**Plans:** 14/14 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -432,6 +432,9 @@ Plans:
 - D-08: this plan executes only after Phase 194.1 has merged into main and the phase branch is rebased on it. C1-C9 win over 198-UI-SPEC.md.
 - Dust uses strict comparisons: a position worth exactly $50, or exactly 0.1% of Book equity, is not dust.
 - D-08: this plan executes only after Phase 194.1 has merged into main and the phase branch is rebased on it. C1-C9 win over 198-UI-SPEC.md, and each override is named below.
+
+**Gap closure** *(browser UAT 2026-11-09, gap 198-UAT-01)*
+- [x] 198-14-PLAN.md — the note under the glance names what the withheld history hides, never return or risk; no glance pointer; the Risk line agrees (D-10)
 
 Execution starts only after Phase 194.1 merges, rebased on main (D-08).
 
@@ -564,13 +567,13 @@ Plans:
 |-------|----------------|--------|-----------|
 | 192. PUBLICTRUTH | 15/15 | Complete | 2026-11-07 |
 | 193. QUIETVIEW | 7/7 | Complete | 2026-11-07 |
-| 194. FIGURETRUTH | 24/24 | In Progress (browser UAT pending) | - |
+| 194. FIGURETRUTH | 24/24 | Complete    | 2026-11-09 |
 | 194.1. D04SWEEP (INSERTED) | 13/13 | Complete    | 2026-11-08 |
 | 194.2. FIGURERESIDUALS (INSERTED) | 0/0 | Not started | - |
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
 | 197. SCREEN | 6/6 | In Progress | - |
-| 198. MYBOOK | 13/13 | In Progress | - |
+| 198. MYBOOK | 14/14 | In Progress | - |
 | 199. MANAGERHOME | 0/0 | Not started | - |
 | 200. MANAGERKEYS | 0/0 | Not started | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |

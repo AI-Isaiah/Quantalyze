@@ -1,9 +1,14 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 
+// queries.ts is server-only; the SFH-01 test reads its `emptyLiveBaselineMetrics`
+// builder only, so the guard is replaced with an empty module.
+vi.mock("server-only", () => ({}));
+
 import { AllocationDashboardV2 } from "../AllocationDashboardV2";
 import { BOOK_FIGURES_SERIES_CAPTION, liveBookFigures } from "../lib/book-figures";
 import { withheldCellTitle, shortTrackMarkerTitle } from "@/lib/figure-gate";
+import { emptyLiveBaselineMetrics } from "@/lib/queries";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // ---------------------------------------------------------------------------
@@ -318,5 +323,174 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
     expect(html).toContain("@container");
     expect(html).toContain("@lg:grid-cols-3");
     expect(html).not.toMatch(/(^|\s)(sm|md|lg|xl):grid-cols/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gap 198-UAT-01 (D-10, research C7, D-06). Rule 9: in the 2026-11-09 browser
+// UAT the founder read a glance printing YTD TWR, Sharpe and Max DD, and
+// directly under it a note saying those figures were not shown. The glance's
+// figures come from the live per-key baseline, which the history state does not
+// withhold, so a book-level line may only name what the withheld history hides:
+// the equity chart and the ratios built from it. This agreement test renders
+// the full Overview for every rebuild reason with live figures, because a
+// per-component pin cannot see the two surfaces disagree.
+// ---------------------------------------------------------------------------
+
+describe("198-UAT-01: the glance and the missing-data note agree on a rebuilding Overview", () => {
+  afterEach(() => cleanup());
+
+  const REASONS = [
+    "duplicate_account",
+    "key_not_syncing",
+    "shared_account_no_working_key",
+    "history_read_failed",
+    "account_identity_pending",
+    "awaiting_derivation",
+    "derivation_rejected",
+    "shared_account_history_truncated",
+    null,
+  ] as const;
+
+  // 198-14 SFH-02: the claim is "the note says return or risk is missing", so the
+  // check matches the singular and the plural. The one legitimate use of the word
+  // is awaiting_derivation's description of the daily run ("each account's returns
+  // and cash flows"), which is stripped first.
+  const namesReturnOrRisk = (text: string) =>
+    /\b(returns?|risks?)\b/i.test(
+      text.replace("each account's returns and cash flows", ""),
+    );
+
+  // The reasons whose book-level line names what the history hides.
+  const NAMES_THE_HIDDEN_HISTORY = new Set<string | null>([
+    "awaiting_derivation",
+    "derivation_rejected",
+    null,
+  ]);
+
+  it.each(REASONS)(
+    "reason %s: the glance prints its live values and the note names neither return nor risk",
+    (reason) => {
+      render(
+        <AllocationDashboardV2
+          {...payload({
+            equityHistoryState: "rebuilding",
+            equityHistoryRebuildReason: reason,
+          })}
+        />,
+      );
+      expect(screen.getByTestId("glance-ytd").textContent).toBe("+4.21%");
+      expect(screen.getByTestId("glance-sharpe").textContent).toBe("1.37");
+      expect(screen.getByTestId("glance-maxdd").textContent).toBe("-6.80%");
+
+      const note = screen.getByTestId("overview-missing-data");
+      expect(namesReturnOrRisk(note.textContent!)).toBe(false);
+      expect(document.body.textContent).not.toMatch(/note below/i);
+      // The glance's Risk group prints Sharpe and Max DD without the history
+      // (C7), so the Risk section may not claim those figures depend on it.
+      const riskLine = document.querySelector("#risk p");
+      expect(riskLine, "the Risk section's not-ready line").not.toBeNull();
+      expect(namesReturnOrRisk(riskLine!.textContent!)).toBe(false);
+      expect(riskLine!.textContent).toContain("See the note above.");
+      if (NAMES_THE_HIDDEN_HISTORY.has(reason)) {
+        expect(note.textContent!.toLowerCase()).toContain(
+          "the equity chart and the ratios built from it",
+        );
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 198-14 SFH-01. The no-live-series state (key_not_syncing, account_identity_pending,
+// awaiting_derivation, history_read_failed) prints every Return and Risk cell as a
+// dash, and the note below is the only explanation. So that state, and only that
+// state, carries the sr-only pointer. A cell that prints a value never does (the
+// 198-UAT-01 contradiction), and a withheld Sharpe carries its own reason.
+// ---------------------------------------------------------------------------
+
+describe("198-14 SFH-01: the sr-only pointer is narrow", () => {
+  afterEach(() => cleanup());
+
+  const POINTER = "No live figures yet. See the note below.";
+  const CELLS = ["glance-ytd", "glance-sharpe", "glance-maxdd"] as const;
+
+  it("with the empty live baseline and a rebuilding reason, each Return and Risk dash points at the note", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+          liveBaselineMetrics: emptyLiveBaselineMetrics([]),
+        })}
+      />,
+    );
+    expect(screen.getByTestId("overview-missing-data")).toBeInTheDocument();
+    for (const id of CELLS) {
+      const cell = screen.getByTestId(id);
+      expect(cell.textContent, id).toBe(`—${POINTER}`);
+      expect(cell.querySelector(".sr-only")?.textContent, id).toBe(POINTER);
+    }
+    // Holdings cells are not Return or Risk cells and carry no pointer.
+    expect(screen.getByTestId("glance-positions").textContent).not.toContain(
+      POINTER,
+    );
+  });
+
+  it("the all-keys-stale dashes carry no pointer: the staleness banner explains them", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          allKeysStale: true,
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+          liveBaselineMetrics: emptyLiveBaselineMetrics([]),
+        })}
+      />,
+    );
+    for (const id of CELLS) {
+      expect(screen.getByTestId(id).textContent, id).toBe("—");
+    }
+  });
+
+  it("a cell that prints a value never carries the pointer, even with a note below", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+        })}
+      />,
+    );
+    expect(screen.getByTestId("overview-missing-data")).toBeInTheDocument();
+    expect(glance().textContent).not.toContain(POINTER);
+    expect(screen.getByTestId("glance-ytd").textContent).toBe("+4.21%");
+  });
+
+  it("a withheld Sharpe carries its own reason, never the pointer", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: "key_not_syncing",
+          liveBaselineMetrics: baseline(60),
+        })}
+      />,
+    );
+    const cell = screen.getByTestId("glance-sharpe");
+    expect(cell.textContent).not.toContain(POINTER);
+    expect(cell.querySelector(".sr-only")?.textContent).toBe(
+      withheldCellTitle(liveBookFigures(baseline(60) as never).sharpeRecord),
+    );
+  });
+
+  it("a ready book with no live baseline renders no note and no pointer", () => {
+    render(
+      <AllocationDashboardV2
+        {...payload({ liveBaselineMetrics: emptyLiveBaselineMetrics([]) })}
+      />,
+    );
+    expect(screen.queryByTestId("overview-missing-data")).toBeNull();
+    expect(glance().textContent).not.toContain(POINTER);
   });
 });

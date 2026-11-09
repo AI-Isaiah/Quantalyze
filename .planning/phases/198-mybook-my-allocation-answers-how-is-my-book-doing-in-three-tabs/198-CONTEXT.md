@@ -31,6 +31,9 @@ My allocation answers "how is my book doing?": the first tab shows the book's re
 - **D-07 Entry point (2026-11-08):** `/allocations?add=<strategyId>` is locked for Phase 196 to link to. `add` is removed from the URL when the flow opens (196's wording).
 - **D-08 Sequencing (2026-11-08):** all 198 execution follows the 194.1 merge, rebased on main. Research corrections C1–C9 (`198-RESEARCH.md`) take precedence over `198-UI-SPEC.md`.
 
+- **D-09 MT5 account-balance rows stay Spot (founder, 2026-11-09, after browser UAT):** "Keep as Spot". RESEARCH assumption A1 is confirmed: the cash set is the 7-symbol `STABLECOINS` literal, and an MT5 (or sFOX) account-balance row is not cash, so Holdings keeps typing it Spot. No code change.
+- **D-10 Missing-data message vs the glance (gap 198-UAT-01, browser UAT 2026-11-09):** the UAT found the Overview saying "book return and risk are not shown" directly under a glance that prints them. D-06 (figures show whenever they exist, independent of `equityHistoryState`) and research C7 govern: a book-level line says only what the withheld history hides, never that return or risk is not shown, and the glance carries no pointer to a note that does not explain it. Closed by the 198 gap-closure plan.
+
 ### Claude's Discretion
 - Exact panel placement inside Overview/Holdings per DESIGN.md 9-State Matrix; how cash is classified (not as Spot exposure, SC-3 test RED first).
 </decisions>
