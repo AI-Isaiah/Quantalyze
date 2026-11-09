@@ -56,6 +56,11 @@ export type MissingLine = {
  * because none heals it in this release (disconnecting the old key drops its
  * history). Active voice (DESIGN.md Voice).
  *
+ * Gap 198-UAT-01 (D-10): a book-level line names what the withheld history
+ * hides, the equity chart and the ratios built from it, and never names return
+ * or risk, because the glance above prints those from the live per-key figures,
+ * which this history does not gate (C7, D-06).
+ *
  * Keyed by every reason OUTSIDE the `needs_action` class, so moving a reason
  * between classes fails to compile at the call site until its line moves too.
  */
@@ -63,9 +68,9 @@ const BOOK_LINE = {
   account_identity_pending:
     "We are confirming which exchange account each key reads. Each daily sync checks it again.",
   awaiting_derivation:
-    "Book return and risk are recomputed once a day from each account's returns and cash flows. They appear after the next recompute.",
+    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
   derivation_rejected:
-    "The latest rebuild of your book's history did not pass its checks, so book return and risk are not shown.",
+    "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden.",
   shared_account_history_truncated:
     "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown.",
   history_read_failed:
