@@ -313,12 +313,13 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
 
   it.each([
     [
+      // 198-UAT-01 (D-10): names what the history hides, never return or risk.
       "awaiting_derivation",
-      "Book return and risk are recomputed once a day from each account's returns and cash flows. They appear after the next recompute.",
+      "Your book's history is recomputed once a day from each account's returns and cash flows. The equity chart and the ratios built from it appear after the next recompute.",
     ],
     [
       "derivation_rejected",
-      "The latest rebuild of your book's history did not pass its checks, so book return and risk are not shown.",
+      "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden.",
     ],
     [
       "history_read_failed",
@@ -449,8 +450,8 @@ describe("MissingDataMessage: order, shell and the scope rule", () => {
     expect(named).toContain(L1);
     expect(named).toContain(L2);
     expect(named).toContain(L3);
-    // The book-level line is last.
-    expect(out[3]).toContain("Book return and risk are recomputed once a day");
+    // The book-level line is last. 198-UAT-01 (D-10): it names the history, not return or risk.
+    expect(out[3]).toContain("Your book's history is recomputed once a day");
   });
 
   it("the section is labelled by its eyebrow, is not a live region, and wraps long text", () => {
