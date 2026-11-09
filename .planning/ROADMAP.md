@@ -378,7 +378,7 @@ Plans:
 **Goal:** An allocator opening My allocation sees the book's return, risk and holdings at a glance (or exactly what is missing), "+ Allocation" opens the allocator's own flow, Holdings labels positions correctly, and the page has at most three tabs with each position listed once and dust hidden.
 **Requirements**: ROUTE-06, ROUTE-07, ROUTE-08, LEAN-06
 **Depends on:** Phase 194 (the book's values agree across Scenario and Holdings), Phase 195 (the Tweaks panel is already gone)
-**Plans:** 13/13 plans executed
+**Plans:** 14/14 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -419,6 +419,9 @@ Plans:
 - D-08: this plan executes only after Phase 194.1 has merged into main and the phase branch is rebased on it. C1-C9 win over 198-UI-SPEC.md.
 - Dust uses strict comparisons: a position worth exactly $50, or exactly 0.1% of Book equity, is not dust.
 - D-08: this plan executes only after Phase 194.1 has merged into main and the phase branch is rebased on it. C1-C9 win over 198-UI-SPEC.md, and each override is named below.
+
+**Gap closure** *(browser UAT 2026-11-09, gap 198-UAT-01)*
+- [x] 198-14-PLAN.md — the note under the glance names what the withheld history hides, never return or risk; no glance pointer; the Risk line agrees (D-10)
 
 Execution starts only after Phase 194.1 merges, rebased on main (D-08).
 
@@ -557,7 +560,7 @@ Plans:
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
 | 197. SCREEN | 0/0 | Not started | - |
-| 198. MYBOOK | 13/13 | In Progress | - |
+| 198. MYBOOK | 14/14 | In Progress | - |
 | 199. MANAGERHOME | 0/0 | Not started | - |
 | 200. MANAGERKEYS | 0/0 | Not started | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |

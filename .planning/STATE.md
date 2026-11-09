@@ -176,10 +176,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 198 (MYBOOK) VERIFICATION human_needed (desktop and mobile visual pass); 197 (SCREEN) shipped as #1225; 194.2 (FIGURERESIDUALS) not yet planned
-Plan: 198: 13 of 13 (shipped #1226); 194.2: not planned
-Status: Phase 194 closed 2026-11-09 (browser UAT passed; shown-AUM case unchecked, closed by founder decision); 198 awaits its visual pass
-Last activity: 2026-11-09 — Phase 194 FIGURETRUTH closed (VERIFICATION passed, 194-UAT.md); its two UAT extras booked into Phase 194.2
+Phase: parallel — 198 (MYBOOK) gap 198-UAT-01 fixed and shipped (#1233), VERIFICATION human_needed (founder browser re-check of the fixed message); 197 (SCREEN) shipped as #1225; 194.2 (FIGURERESIDUALS) not yet planned
+Plan: 198: 14 of 14 (gap plan 198-14 shipped #1233); 194.2: not planned
+Status: Phase 194 closed 2026-11-09; 198 awaits the founder's browser re-check of the missing-data message (UAT test 3, 375px and 1280px)
+Last activity: 2026-11-09 — Phase 198 gap 198-UAT-01 closed in code and shipped as #1233 (v0.133.30.3); re-verification human_needed
 Progress: [█████░░░░░] 50% (7 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
