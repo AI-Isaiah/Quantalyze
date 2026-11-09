@@ -331,7 +331,7 @@ Plans:
 **Goal:** A strategy has one page, the factsheet. The tearsheet is its print view and every other strategy detail route leads to it. A signed-in user is never shown visitor prompts, an owner can open their own unpublished strategy, a signed-in reader has a way back and a next step, a shared factsheet carries a header and a sign-up link, and the factsheet opens as a summary, one chart and one metrics table with the rest under "Advanced".
 **Requirements**: LEAN-02, ROUTE-02, ROUTE-04, LEAN-05
 **Depends on:** Phase 193, Phase 194, Phase 195
-**Plans:** 0 plans
+**Plans:** 21 plans
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -348,7 +348,40 @@ Plans:
 The layout is checked against `DESIGN.md` (dated-document principle, Numbers Contract, data density principle) before planning, in the phase's UI-SPEC.
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 196-01-PLAN.md — Wave 1: before census of three named strategies, with re-runnable counting rules (SC-5)
+- [x] 196-02-PLAN.md — Wave 1: old strategy routes 308 to the factsheet with their origin, e2e specs moved (D-03, D-01, D-06)
+- [x] 196-03-PLAN.md — Wave 1: origin closed set and the factsheet back link (D-01)
+- [x] 196-04-PLAN.md — Wave 1: Request intro copy and a send path that cannot double-send (D-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 196-05-PLAN.md — Wave 2: viewer bar, visitor header, sign-up line, note card (D-01, D-02, D-05)
+- [x] 196-06-PLAN.md — Wave 2: discovery, strategies and wizard links carry their origin (D-01)
+- [x] 196-09-PLAN.md — Wave 2: the metrics rail splits into the Main metrics table and Detailed metrics (D-04)
+- [x] 196-15-PLAN.md — Wave 2: delete the discovery detail route tree with the unit tests that load it (D-03, D-09)
+- [x] 196-17-PLAN.md — Wave 2: delete the browse detail route tree with the unit tests that load it (D-03)
+- [x] 196-18-PLAN.md — Wave 2: delete the `/strategy/[id]` and `/strategy/[id]/v2` route trees and move the status census (D-03, D-06)
+- [x] 196-20-PLAN.md — Wave 2: My allocation's holdings, watchlist, composer and optimizer links carry their origin (D-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 196-07-PLAN.md — Wave 3: outcomes, admin and recommendation links carry their origin, plus the links guard (D-01, D-03)
+- [x] 196-08-PLAN.md — Wave 3: `/browse` shows no visitor prompt to a signed-in user (ROUTE-02)
+- [x] 196-10-PLAN.md — Wave 3: opening view plus the Advanced disclosure, and the Print view link (D-04, D-09)
+- [x] 196-12-PLAN.md — Wave 3: the shared factsheet gets a header and a sign-up line (D-05)
+- [x] 196-19-PLAN.md — Wave 3: one main landmark beside the chrome, published-only indexing, the axe and reflow rows (D-07)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 196-11-PLAN.md — Wave 4: one chart hint, one small-sample warning, empty sections hidden, fixture census (D-04)
+- [x] 196-13-PLAN.md — Wave 4: the tearsheet becomes the print view and keeps its ranks and contact block, and the LP report PDF stays full length (D-03, D-08, D-09)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 196-16-PLAN.md — Wave 5: the tearsheet's ranks and declared benchmark get a home in Advanced, every tearsheet item's home pinned (D-03, D-04)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 196-14-PLAN.md — Wave 6: delete the retired shell, its two panels and every module and export only they used (D-06)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 196-21-PLAN.md — Wave 7: end-of-phase knip reading, after census, D-06 follow-up, ship notes and full gates (D-06, SC-5)
 
 ### Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared
 
@@ -571,7 +604,7 @@ Plans:
 | 194.1. D04SWEEP (INSERTED) | 13/13 | Complete    | 2026-11-08 |
 | 194.2. FIGURERESIDUALS (INSERTED) | 0/0 | Not started | - |
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
-| 196. ONESTRATEGYPAGE | 0/0 | Not started | - |
+| 196. ONESTRATEGYPAGE | 21/21 | Shipped #1235, verification human_needed | - |
 | 197. SCREEN | 6/6 | In Progress | - |
 | 198. MYBOOK | 14/14 | In Progress | - |
 | 199. MANAGERHOME | 0/0 | Not started | - |
