@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.30.4] - 2026-11-09 — records: Phase 198 MYBOOK gap 198-UAT-01 closed in code
+
+### Notes
+- **Browser UAT recorded** (`198-UAT.md`, 2026-11-09): three tabs, glance, "+ Allocation", Holdings labels, each position once and dust hidden all passed; the missing-data message failed as gap 198-UAT-01 (it said book return and risk were not shown under a glance that printed them).
+- **Founder decision recorded as 198 D-09:** MT5 account-balance rows on Holdings stay typed Spot (research assumption A1 confirmed); no code change. **D-10** records that a book-level line says only what the withheld history hides.
+- **Gap plan 198-14** planned (`/gsd-plan-phase 198 --gaps`, plan checker: no blocker or warning), executed, reviewed in two rounds (three MEDIUM fixed in round 1, none in round 2; `198-14-REVIEW.md`) and shipped as #1233 (v0.133.30.3).
+- **Re-verification** (`198-VERIFICATION.md`): 11/11, gap 198-UAT-01 resolved by 198-14, status `human_needed`. The founder's browser re-check of the fixed message on the deployed build (375px and 1280px) is the last step before Phase 198 closes; `phase complete 198` has not been run.
+- ROADMAP Phase 198 reads 14/14 plans executed; STATE Current Position is hand-edited.
+
 ## [0.133.30.3] - 2026-11-09 — Phase 198 MYBOOK gap 198-UAT-01: the note under the glance agrees with the glance
 
 ### Fixed
