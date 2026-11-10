@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.31.1] - 2026-11-10 — records: Phase 196 ONESTRATEGYPAGE execution, review, security and verification
+
+### Notes
+- **Phase 196 records land.** The phase directory carries the 21 plans and SUMMARYs, the census (before on the public site, after on fixtures), the knip baseline, the three-round review (`196-REVIEW.md`), the security audit (`196-SECURITY.md`: 68 of 68 threats closed, ASVS 1, seven accepted risks) and the verification.
+- **ROADMAP:** the 21 plan rows are listed and ticked, and the Progress row reads 21/21, shipped as #1235. The phase bullet stays open.
+- **Phase 196 is not closed.** VERIFICATION is `human_needed` (3 of 5 success criteria verified, none failed), so `phase complete 196` was not run. Open items:
+  - the production after-run census (SC-5);
+  - the rolling-repeats design call (SC-4, `196-ROLLING-REPEATS-01`);
+  - a live check of the four 308s;
+  - the `/api/intro` attestation scope (`196-INTRO-API-ATTESTATION-01`);
+  - a visual pass against DESIGN.md.
+- **STATE's Current Position was edited by hand** to add 196 beside 197 and 198.
+- **Ship-time finding, kept for the next merge:** a merge of origin/main into the ship branch rewrote VERSION with a trailing newline. That failed the baseline-redump self-test in vitest shard 1 on two heads, and its failure summary did not appear in the CI log. Fixed before merge (#1235).
+
 ## [0.133.31.0] - 2026-11-09 — Phase 196 ONESTRATEGYPAGE: a strategy has one page, the factsheet
 
 ### Changed

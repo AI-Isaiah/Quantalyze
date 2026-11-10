@@ -1,0 +1,207 @@
+# 196 knip baseline
+# Command: npx knip --include files,exports --reporter compact
+# Taken in the plan 196-02 worktree at base 49566dbc00a314300b862d8b1d4b44120c4ed3d7, before any edit (exit 1 = findings present, as at HEAD).
+# Format: file paths and export names only. Unused-file lines under .planning/ (20 archived-milestone scripts) are omitted; they cannot be touched by this phase.
+
+## pre-phase
+Unused files (45)
+scripts/capture-constit-parity-golden.ts: scripts/capture-constit-parity-golden.ts
+scripts/check-baseline-currency.mjs: scripts/check-baseline-currency.mjs
+scripts/drain-test-compute-backlog.ts: scripts/drain-test-compute-backlog.ts
+scripts/live-db-fixture-drift-fixtures/absent-column.green.ts: scripts/live-db-fixture-drift-fixtures/absent-column.green.ts
+scripts/live-db-fixture-drift-fixtures/absent-column.red.ts: scripts/live-db-fixture-drift-fixtures/absent-column.red.ts
+scripts/live-db-fixture-drift-fixtures/absent-table.green.ts: scripts/live-db-fixture-drift-fixtures/absent-table.green.ts
+scripts/live-db-fixture-drift-fixtures/absent-table.red.ts: scripts/live-db-fixture-drift-fixtures/absent-table.red.ts
+scripts/live-db-fixture-drift-fixtures/ambiguous-overload.green.ts: scripts/live-db-fixture-drift-fixtures/ambiguous-overload.green.ts
+scripts/live-db-fixture-drift-fixtures/ambiguous-overload.red.ts: scripts/live-db-fixture-drift-fixtures/ambiguous-overload.red.ts
+scripts/live-db-fixture-drift-fixtures/unexposed-schema.green.ts: scripts/live-db-fixture-drift-fixtures/unexposed-schema.green.ts
+scripts/live-db-fixture-drift-fixtures/unexposed-schema.red.ts: scripts/live-db-fixture-drift-fixtures/unexposed-schema.red.ts
+scripts/local-stack/acl-fidelity.mjs: scripts/local-stack/acl-fidelity.mjs
+scripts/local-stack/nonpublic-objects.mjs: scripts/local-stack/nonpublic-objects.mjs
+scripts/local-stack/sql-corpus-report.mjs: scripts/local-stack/sql-corpus-report.mjs
+scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.green.ts: scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.green.ts
+scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.red.ts: scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.red.ts
+scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.green.ts: scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.green.ts
+scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.red.ts: scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.red.ts
+scripts/verification-drift-report.mjs: scripts/verification-drift-report.mjs
+src/lib/allocation-helpers.ts: src/lib/allocation-helpers.ts
+tests/redis/seam-breaker.redis.test.ts: tests/redis/seam-breaker.redis.test.ts
+vitest.livedb.config.ts: vitest.livedb.config.ts
+vitest.livedb.globalsetup.ts: vitest.livedb.globalsetup.ts
+vitest.local-stack.config.ts: vitest.local-stack.config.ts
+vitest.redis.config.ts: vitest.redis.config.ts
+Unused exports (70)
+e2e/helpers/hydration-guard.ts: HYDRATION_ERROR_PATTERNS
+e2e/helpers/login.ts: LOGIN_REDIRECT_TIMEOUT_MS
+scripts/accounttruth-census.mjs: SQL_TIMEOUT_MS, printSqlText, main
+scripts/live-db-execution-reporter.mjs: DEFAULT_ARTIFACT, default
+scripts/live-db-fixture-drift-census.mjs: FIXTURE_DIR, CLASSES, maskJs, readLiteralArg, readObjectLiteralKeys, parseEntryKey, maskSqlLite, parseCatalogue, parseExposedSchemas, classifySource, parseAllowlist, runCorpus
+scripts/mutation-runner/parse.mjs: PG_CRON_CATALOG_RE
+scripts/prod-prober/arms/cron-obs.mjs: TTL_SQL, CRON_OBS_SQL, REMEDIES, parseCronObsRows, parseIntervalSeconds, parseLedgerFanoutRow, judgeCronObs (CRON_OBS_MOD)
+scripts/prod-prober/arms/mt5.mjs: buildProbeArgv (MT5_MOD)
+scripts/prod-prober/arms/pyapi06.mjs: WRONG_KEY, ABSENT_CODE, REMEDIES
+scripts/prod-prober/seams.mjs: tally, resetTallyForTests
+scripts/sql-body-normalize.mjs: normalizedHash, formatDiffRow
+src/app/(dashboard)/allocations/AllocationContext.tsx: AllocationContext, useAllocationContext
+src/app/(dashboard)/allocations/components/AllocateDialog.tsx: ERROR_NON_POSITIVE, ERROR_ABOVE_CAP
+src/app/(dashboard)/allocations/lib/add-allocation.ts: ALLOCATION_DATE_REQUIRED_MESSAGE
+src/app/(dashboard)/allocations/lib/dust.ts: DUST_ABS_USD, DUST_BOOK_SHARE
+src/app/(dashboard)/allocations/lib/holdings-adapter.ts: FLAG_COMPOSITE_THRESHOLD, WATCH_COMPOSITE_THRESHOLD
+src/app/(dashboard)/allocations/lib/montecarlo-runner.ts: MC_WORKER_TIMEOUT_MS
+src/app/(dashboard)/allocations/lib/scenario-montecarlo.ts: MC_SEED_DEFAULT, MC_QUANTILES_DEFAULT
+src/app/(dashboard)/allocations/lib/scenario-state.ts: SCENARIO_SCHEMA_VERSION_PREV
+src/app/(dashboard)/allocations/widgets/attribution/AlphaBetaDecomposition.tsx: alphaBetaWidgetDataSchema
+src/app/(dashboard)/allocations/widgets/lib/widget-boundary.tsx: WidgetErrorBoundary
+src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx: NARROW_TICK_WIDTH_PX, NARROW_TICK_PITCH_PX, PERIODS, parseISO
+src/app/(dashboard)/allocations/widgets/performance/ScenarioFactsheetChart.tsx: default
+src/app/(dashboard)/compare/lib/holding-compare-adapter.ts: HOLDING_COMPARE_WINDOW_DAYS, HOLDING_COMPARE_PAGE_SIZE, dailyDirectedMarks, adjacentDailyReturns
+src/app/(dashboard)/strategies/new/wizard/steps/CsvValidationEnvelope.producer-specimens.ts: EMPTY_NO_ROWS, PARSE_ERROR_LONG_ROW, PARSE_ERROR_DUPLICATE_HEADER
+src/app/factsheet/[id]/v2/MetricsColumn.tsx: monthRowLabel
+src/app/factsheet/[id]/v2/factsheet-context.tsx: useFactsheet
+src/components/admin/AllocatorMatchQueue.tsx: RECOMPUTE_READ_ONLY_NOTICE
+src/components/error/ErrorEnvelope.tsx: buildDiagBlock
+src/components/portfolio/CorrelationHeatmap.tsx: relativeLuminance, pickTextColor
+src/components/strategy/SelectCheckbox.tsx: SELECT_CAP_TITLE
+src/components/strategy/ShareableLink.tsx: isPublishedStatus
+src/components/strategy/chain-job-state.ts: CHAIN_JOB_READ_BOUND_MS
+src/components/ui/TimeframeSelector.tsx: TIMEFRAMES, TimeframeSelector
+src/lib/admin/usage-metrics.ts: __resetUsageMetricsCacheForTest
+src/lib/analytics-client.ts: ANALYTICS_API_VERSION, CircuitOpenError, computePortfolioAnalytics, __INTERNAL_analyticsRequest
+src/lib/analytics-schemas.ts: GetUserComputeJobsResponseSchema, CsvFinalizeResponseSchema
+src/lib/analytics/usage-events-client.ts: identifyUsageUser
+src/lib/api/simulatorSchema.ts: SimulatorStatusSchema, SimulatorMetricsSchema, PARTIAL_HISTORY_THRESHOLD
+src/lib/api/withAuth.ts: assertProfileApproved
+src/lib/chart-ticks.ts: X_TICK_GAP_PX
+src/lib/composite/keyWindowsSchema.ts: keyWindowSchema
+src/lib/compute-state.ts: IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS, CHAIN_JOB_LIVE_WINDOW_MS
+src/lib/constants.ts: CHART_COLORS
+src/lib/design-tokens/typography.ts: buildClamp
+src/lib/display-labels.ts: holdingSideLabel
+src/lib/diversification.ts: MIN_USABLE, applyLeverage
+src/lib/drain-by-id.ts: DRAIN_PAGE_SIZE
+src/lib/factsheet/allocator.ts: LEG_ASSET_CLASS
+src/lib/factsheet/benchmark-source.ts: BENCHMARK_PAGE_SIZE
+src/lib/factsheet/benchmarks.ts: BENCH_START, BENCH_END
+src/lib/factsheet/composite-read-path.ts: CSV_READ_PAGE_SIZE, CSV_READ_MAX_ROWS, deriveHeadlineCoversFrom, readHeadlineCoversFrom, resolveMetricsConventions, parseDegradedMembers (readPath)
+src/lib/factsheet/peer-cohort.ts: getPeerCohort
+src/lib/factsheet/returns-unit.ts: RETURNS_UNIT_RE
+src/lib/factsheet/trade-fetch-provenance.ts: RECONSTRUCTED_SOURCE
+src/lib/gdpr-export.ts: EXPORT_FETCH_CONCURRENCY, EXPORT_PARENT_ID_CAP
+src/lib/latest-holdings-per-key.ts: cleanPollDay, partialPollDay
+src/lib/portfolio-exposure.ts: computeCoverageGaps
+src/lib/puppeteer.ts: launchPage
+src/lib/scrub-share-path.ts: SHARE_ROUTE_PREFIX, SHARE_PATH_PLACEHOLDER
+src/lib/seam-citations-needle.ts: CITE
+src/lib/storage/cross-tab.ts: setStorageRecoveryFlag
+src/lib/strategy-sources.ts: isStrategySource
+src/lib/sync-progress.ts: MEMBER_PROGRESS_STATUSES
+src/lib/types.ts: castUserId, castApiKeyId, castStrategyId, castPortfolioId, castTenantId, asFraction, asRatio, asScore, asDays, asHours, asSeconds, asUsd, asUsdt, parsePositionRowsWithDiagnostics, FundingFeeRowSchema, parseFundingFeeRowsWithDiagnostics, parseApiKeyRowsWithDiagnostics, signedExposureBase
+src/lib/units.ts: asUsd, asRatio, asFraction, signedExposureBase
+src/lib/utils.ts: SEVERITY_STYLES, DOC_TYPES
+src/lib/widget-state-flag.ts: WIDGET_STATE_V2_URL_OVERRIDE
+src/lib/wizard/localStorage.ts: WIZARD_STEP_KEYS
+src/test/helpers/upstash-breaker.ts: createFakeUpstashStore
+
+## end of phase
+# Taken in the plan 196-21 worktree on the final tree (HEAD f1e488f7c, plan 14 merged), same command and filter as pre-phase. Four new entries, all dispositioned in 196-14-SUMMARY.md (new-entry table): factsheet-census run.ts, TradeFetchUnavailableLine, chart-tokens.ts exports, min-history.ts constants.
+Unused files (46)
+scripts/capture-constit-parity-golden.ts: scripts/capture-constit-parity-golden.ts
+scripts/check-baseline-currency.mjs: scripts/check-baseline-currency.mjs
+scripts/drain-test-compute-backlog.ts: scripts/drain-test-compute-backlog.ts
+scripts/factsheet-census/run.ts: scripts/factsheet-census/run.ts
+scripts/live-db-fixture-drift-fixtures/absent-column.green.ts: scripts/live-db-fixture-drift-fixtures/absent-column.green.ts
+scripts/live-db-fixture-drift-fixtures/absent-column.red.ts: scripts/live-db-fixture-drift-fixtures/absent-column.red.ts
+scripts/live-db-fixture-drift-fixtures/absent-table.green.ts: scripts/live-db-fixture-drift-fixtures/absent-table.green.ts
+scripts/live-db-fixture-drift-fixtures/absent-table.red.ts: scripts/live-db-fixture-drift-fixtures/absent-table.red.ts
+scripts/live-db-fixture-drift-fixtures/ambiguous-overload.green.ts: scripts/live-db-fixture-drift-fixtures/ambiguous-overload.green.ts
+scripts/live-db-fixture-drift-fixtures/ambiguous-overload.red.ts: scripts/live-db-fixture-drift-fixtures/ambiguous-overload.red.ts
+scripts/live-db-fixture-drift-fixtures/unexposed-schema.green.ts: scripts/live-db-fixture-drift-fixtures/unexposed-schema.green.ts
+scripts/live-db-fixture-drift-fixtures/unexposed-schema.red.ts: scripts/live-db-fixture-drift-fixtures/unexposed-schema.red.ts
+scripts/local-stack/acl-fidelity.mjs: scripts/local-stack/acl-fidelity.mjs
+scripts/local-stack/nonpublic-objects.mjs: scripts/local-stack/nonpublic-objects.mjs
+scripts/local-stack/sql-corpus-report.mjs: scripts/local-stack/sql-corpus-report.mjs
+scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.green.ts: scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.green.ts
+scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.red.ts: scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.red.ts
+scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.green.ts: scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.green.ts
+scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.red.ts: scripts/self-referential-oracle-fixtures/SRO-02-mutated-binding.red.ts
+scripts/verification-drift-report.mjs: scripts/verification-drift-report.mjs
+src/lib/allocation-helpers.ts: src/lib/allocation-helpers.ts
+tests/redis/seam-breaker.redis.test.ts: tests/redis/seam-breaker.redis.test.ts
+vitest.livedb.config.ts: vitest.livedb.config.ts
+vitest.livedb.globalsetup.ts: vitest.livedb.globalsetup.ts
+vitest.local-stack.config.ts: vitest.local-stack.config.ts
+vitest.redis.config.ts: vitest.redis.config.ts
+Unused exports (73)
+e2e/helpers/hydration-guard.ts: HYDRATION_ERROR_PATTERNS
+e2e/helpers/login.ts: LOGIN_REDIRECT_TIMEOUT_MS
+scripts/accounttruth-census.mjs: SQL_TIMEOUT_MS, printSqlText, main
+scripts/live-db-execution-reporter.mjs: DEFAULT_ARTIFACT, default
+scripts/live-db-fixture-drift-census.mjs: FIXTURE_DIR, CLASSES, maskJs, readLiteralArg, readObjectLiteralKeys, parseEntryKey, maskSqlLite, parseCatalogue, parseExposedSchemas, classifySource, parseAllowlist, runCorpus
+scripts/mutation-runner/parse.mjs: PG_CRON_CATALOG_RE
+scripts/prod-prober/arms/cron-obs.mjs: TTL_SQL, CRON_OBS_SQL, REMEDIES, parseCronObsRows, parseIntervalSeconds, parseLedgerFanoutRow, judgeCronObs (CRON_OBS_MOD)
+scripts/prod-prober/arms/mt5.mjs: buildProbeArgv (MT5_MOD)
+scripts/prod-prober/arms/pyapi06.mjs: WRONG_KEY, ABSENT_CODE, REMEDIES
+scripts/prod-prober/seams.mjs: tally, resetTallyForTests
+scripts/sql-body-normalize.mjs: normalizedHash, formatDiffRow
+src/app/(dashboard)/allocations/AllocationContext.tsx: AllocationContext, useAllocationContext
+src/app/(dashboard)/allocations/components/AllocateDialog.tsx: ERROR_NON_POSITIVE, ERROR_ABOVE_CAP
+src/app/(dashboard)/allocations/lib/add-allocation.ts: ALLOCATION_DATE_REQUIRED_MESSAGE
+src/app/(dashboard)/allocations/lib/dust.ts: DUST_ABS_USD, DUST_BOOK_SHARE
+src/app/(dashboard)/allocations/lib/holdings-adapter.ts: FLAG_COMPOSITE_THRESHOLD, WATCH_COMPOSITE_THRESHOLD
+src/app/(dashboard)/allocations/lib/montecarlo-runner.ts: MC_WORKER_TIMEOUT_MS
+src/app/(dashboard)/allocations/lib/scenario-montecarlo.ts: MC_SEED_DEFAULT, MC_QUANTILES_DEFAULT
+src/app/(dashboard)/allocations/lib/scenario-state.ts: SCENARIO_SCHEMA_VERSION_PREV
+src/app/(dashboard)/allocations/widgets/attribution/AlphaBetaDecomposition.tsx: alphaBetaWidgetDataSchema
+src/app/(dashboard)/allocations/widgets/lib/widget-boundary.tsx: WidgetErrorBoundary
+src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx: NARROW_TICK_WIDTH_PX, NARROW_TICK_PITCH_PX, PERIODS, parseISO
+src/app/(dashboard)/allocations/widgets/performance/ScenarioFactsheetChart.tsx: default
+src/app/(dashboard)/compare/lib/holding-compare-adapter.ts: HOLDING_COMPARE_WINDOW_DAYS, HOLDING_COMPARE_PAGE_SIZE, dailyDirectedMarks, adjacentDailyReturns
+src/app/(dashboard)/strategies/new/wizard/steps/CsvValidationEnvelope.producer-specimens.ts: EMPTY_NO_ROWS, PARSE_ERROR_LONG_ROW, PARSE_ERROR_DUPLICATE_HEADER
+src/app/factsheet/[id]/trade-fetch-lines.tsx: TradeFetchUnavailableLine
+src/app/factsheet/[id]/v2/MetricsColumn.tsx: monthRowLabel
+src/app/factsheet/[id]/v2/factsheet-context.tsx: useFactsheet
+src/components/admin/AllocatorMatchQueue.tsx: RECOMPUTE_READ_ONLY_NOTICE
+src/components/charts/chart-tokens.ts: CHART_SURFACE, CHART_TRACK, CHART_NEUTRAL, CHART_POSITIVE_100, CHART_POSITIVE_300, CHART_POSITIVE_700, CHART_POSITIVE_800, CHART_NEGATIVE_100, CHART_NEGATIVE_300, CHART_NEGATIVE_700, CHART_NEGATIVE_800, CHART_TEXT_ON_LIGHT_POSITIVE, CHART_TEXT_ON_LIGHT_NEGATIVE
+src/components/error/ErrorEnvelope.tsx: buildDiagBlock
+src/components/portfolio/CorrelationHeatmap.tsx: relativeLuminance, pickTextColor
+src/components/strategy/SelectCheckbox.tsx: SELECT_CAP_TITLE
+src/components/strategy/ShareableLink.tsx: isPublishedStatus
+src/components/strategy/chain-job-state.ts: CHAIN_JOB_READ_BOUND_MS
+src/components/ui/TimeframeSelector.tsx: TIMEFRAMES, TimeframeSelector
+src/lib/admin/usage-metrics.ts: __resetUsageMetricsCacheForTest
+src/lib/analytics-client.ts: ANALYTICS_API_VERSION, CircuitOpenError, computePortfolioAnalytics, __INTERNAL_analyticsRequest
+src/lib/analytics-schemas.ts: GetUserComputeJobsResponseSchema, CsvFinalizeResponseSchema
+src/lib/analytics/usage-events-client.ts: identifyUsageUser
+src/lib/api/simulatorSchema.ts: SimulatorStatusSchema, SimulatorMetricsSchema, PARTIAL_HISTORY_THRESHOLD
+src/lib/api/withAuth.ts: assertProfileApproved
+src/lib/chart-ticks.ts: X_TICK_GAP_PX
+src/lib/composite/keyWindowsSchema.ts: keyWindowSchema
+src/lib/compute-state.ts: IN_FLIGHT_CHAIN_ROW_PREFERENCE_WINDOW_MS, CHAIN_JOB_LIVE_WINDOW_MS
+src/lib/constants.ts: CHART_COLORS
+src/lib/design-tokens/typography.ts: buildClamp
+src/lib/display-labels.ts: holdingSideLabel
+src/lib/diversification.ts: MIN_USABLE, applyLeverage
+src/lib/drain-by-id.ts: DRAIN_PAGE_SIZE
+src/lib/factsheet/allocator.ts: LEG_ASSET_CLASS
+src/lib/factsheet/benchmark-source.ts: BENCHMARK_PAGE_SIZE
+src/lib/factsheet/benchmarks.ts: BENCH_START, BENCH_END
+src/lib/factsheet/composite-read-path.ts: CSV_READ_PAGE_SIZE, CSV_READ_MAX_ROWS, deriveHeadlineCoversFrom, readHeadlineCoversFrom, resolveMetricsConventions, parseDegradedMembers (readPath)
+src/lib/factsheet/peer-cohort.ts: getPeerCohort
+src/lib/factsheet/returns-unit.ts: RETURNS_UNIT_RE
+src/lib/factsheet/trade-fetch-provenance.ts: RECONSTRUCTED_SOURCE
+src/lib/gdpr-export.ts: EXPORT_FETCH_CONCURRENCY, EXPORT_PARENT_ID_CAP
+src/lib/latest-holdings-per-key.ts: cleanPollDay, partialPollDay
+src/lib/min-history.ts: CORRELATION_90D_MIN_DAYS, BENCHMARK_ROLLING_WINDOW_DAYS, WORST_DRAWDOWNS_MIN_DAYS
+src/lib/portfolio-exposure.ts: computeCoverageGaps
+src/lib/puppeteer.ts: launchPage
+src/lib/scrub-share-path.ts: SHARE_ROUTE_PREFIX, SHARE_PATH_PLACEHOLDER
+src/lib/seam-citations-needle.ts: CITE
+src/lib/storage/cross-tab.ts: setStorageRecoveryFlag
+src/lib/strategy-sources.ts: isStrategySource
+src/lib/sync-progress.ts: MEMBER_PROGRESS_STATUSES
+src/lib/types.ts: castUserId, castApiKeyId, castStrategyId, castPortfolioId, castTenantId, asFraction, asRatio, asScore, asDays, asHours, asSeconds, asUsd, asUsdt, parsePositionRowsWithDiagnostics, FundingFeeRowSchema, parseFundingFeeRowsWithDiagnostics, parseApiKeyRowsWithDiagnostics, signedExposureBase
+src/lib/units.ts: asUsd, asRatio, asFraction, signedExposureBase
+src/lib/utils.ts: SEVERITY_STYLES, DOC_TYPES
+src/lib/widget-state-flag.ts: WIDGET_STATE_V2_URL_OVERRIDE
+src/lib/wizard/localStorage.ts: WIZARD_STEP_KEYS
+src/test/helpers/upstash-breaker.ts: createFakeUpstashStore
