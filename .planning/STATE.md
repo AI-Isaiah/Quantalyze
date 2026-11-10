@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: 199
-current_phase_name: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health
+current_phase: 200
+current_phase_name: MANAGERKEYS — keys, names and adding a strategy each have one place
 status: executing
-stopped_at: Phase 194.2 closed; 199 in review; 204 and 205 booked
-last_updated: "2026-11-10T16:39:36.758Z"
+stopped_at: Phase 199 closed; 204 and 205 in review; 200 starting; 206 booked
+last_updated: "2026-11-10T20:33:49.663Z"
 last_activity: 2026-11-10
-last_activity_desc: Phase 194.2 closed; 204 and 205 booked as its follow-ups
-state_head: 1f3256f360a07ca0531886b8a7d09424fc92d315
+last_activity_desc: Phase 199 MANAGERHOME closed; 206 SESSIONLOOP booked as its follow-up
+state_head: 81d48962713d4f723275ab4e76bca8df8862aa39
 progress:
-  total_phases: 16
-  completed_phases: 11
+  total_phases: 17
+  completed_phases: 12
   total_plans: 140
-  completed_plans: 122
-  percent: 69
+  completed_plans: 140
+  percent: 71
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 199 (MANAGERHOME) in review round 3 of 3; 204 (INTROAUTH, security) starting; 205 (ONEVERDICT) booked; 200 waits on 199, 201 on 200
-Plan: 199: 18 of 18; 204: not planned yet; 205: not planned yet
-Status: 194.2 closed (shipped v0.133.32.0, PR #1240, migration applied to TEST then PROD); 199 in review; 204 starting
-Last activity: 2026-11-10 — Phase 194.2 FIGURERESIDUALS closed; 204 and 205 booked as its follow-ups
-Progress: [███████░░░] 69% (11 of 16 phases)
+Phase: parallel — 204 (INTROAUTH, security) and 205 (ONEVERDICT) in review; 200 (MANAGERKEYS) starting; 201 waits on 200; 206 (SESSIONLOOP) booked
+Plan: 204: in review; 205: in review; 200: not planned yet; 206: not planned yet
+Status: 199 closed (shipped v0.133.33.0, PR #1243); 204 and 205 in review; 200 starting
+Last activity: 2026-11-10 — Phase 199 MANAGERHOME closed; 206 SESSIONLOOP booked as its follow-up
+Progress: [███████░░░] 71% (12 of 17 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -684,6 +684,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 194.2 edited: edited fields: goal (added the two Phase 194 browser-UAT extras: tearsheet Equity Curve overflow, 193 vs 192 days of record)
 - Phase 204 added (2026-11-10, /gsd-phase add, founder "Eigene Folgephase"): INTROAUTH, security follow-up of 194.2, runs first; tracked text neutral until the fix is live
 - Phase 205 added (2026-11-10, /gsd-phase add, founder 2026-11-10 routing): ONEVERDICT, 194.2 R3 WR-01..03
+- Phase 206 added (2026-11-10, /gsd-phase add): SESSIONLOOP, 199 R3 WR-01-R3 (proxy signed-in bounce confirms the user with getUser; pre-existing, user-facing)
 
 ### Decisions
 
@@ -1766,7 +1767,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phase 194.2 closed; 199 in review; 204 and 205 booked
+**Stopped At:** Phase 199 closed; 204 and 205 in review; 200 starting; 206 booked
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z

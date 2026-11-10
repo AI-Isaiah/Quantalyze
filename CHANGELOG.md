@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.33.1] - 2026-11-10 — records: close 199 MANAGERHOME
+
+### Changed
+- **The Phase 199 records are on main.** This brings the phase directory (CONTEXT, research, patterns, UI-SPEC, the eighteen plans and summaries, the three review rounds and both fix reports, SECURITY, VALIDATION and VERIFICATION, status passed). `199-VERIFICATION.md` keeps `verified_at_sha` `4e24cfa90` with its `drift_subjects`, and gains a dated note listing the six CI-driven test, contrast and e2e-spec commits that landed after the verification was written (`95b18746e`) and before the squash merge (#1243). None changes a success criterion.
+- **Phase 199 is closed.** `phase complete 199` ticked ROUTE-01, ROUTE-11 and LEAN-01, the ROADMAP bullet and the Progress row (18/18). ROADMAP's Phase 199 section now carries its eighteen plan rows in place of the `TBD` stub, the 2026-11-09 D-05 narrowing of SC-4, and a dated SC-1 deviation note (deviation policy: also in `199-CONTEXT.md`): four error boundaries do not link the role home, because `/home` would redirect back into the surface that crashed. Root, admin and allocations link Discovery; strategies links `/profile`.
+- **Phase 206 SESSIONLOOP is booked** with `/gsd-phase add`, depending on Phase 199. A revoked-but-unexpired session cookie no longer bounces between `/` and `/home` (or `/login?redirect=`): the proxy's signed-in bounce branch confirms the user with `getUser` before redirecting, the same check the pages use, and only that branch changes. Source: 199 review round 3, WR-01-R3 (pre-existing class, user-facing).
+- **`TODOS.md` entry `[199-STALE-NO-DATA-IN-FLIGHT-WORDING]` (LOW, SFH-R2-02).** The "stale, no data yet" note on `/strategies` says "no computation is running" during the short window before the runner marks a job computing.
+
+### Notes
+- STATE's Current Position was corrected by hand after `phase complete` moved it to Phase 200 alone: phases run in parallel, so it names 204 and 205 (in review), 200 (starting), 201 (waits on 200) and 206 (booked). `progress:` reads 12 of 17 phases, 71%.
+- VERSION and package.json 0.133.33.0 → 0.133.33.1. Planning-only change otherwise.
+
 ## [0.133.33.0] - 2026-11-10 — MANAGERHOME: each role lands on its own page, one strategies list with health
 
 Phase 199. After sign-in an allocator lands on `/allocations`, a manager on `/strategies` and an admin on `/admin`. Every strategy owner reads one list at `/strategies` (the old `/my-strategies` page is gone and 308s there), each row carries one Health word, a legend explains Health and every status chip, and the degrade warnings on My allocation, the strategies list, Scenario and the factsheet render from one registry that names the affected days or key and ends on one action.

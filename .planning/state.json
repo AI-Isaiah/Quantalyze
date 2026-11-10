@@ -51,7 +51,7 @@
     {
       "number": "199",
       "name": "MANAGERHOME",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "200",
@@ -72,12 +72,22 @@
       "number": "203",
       "name": "B3TRUNC",
       "status": "complete"
+    },
+    {
+      "number": "204",
+      "name": "INTROAUTH",
+      "status": "pending"
+    },
+    {
+      "number": "205",
+      "name": "ONEVERDICT",
+      "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 199)",
-    "reason": "Phase 10 of 16 — needs a plan"
+    "label": "Advance to the next step (plan phase 200)",
+    "reason": "Phase 11 of 17 — needs a plan"
   },
-  "updated_at": "2026-11-10T16:41:04.325Z"
+  "updated_at": "2026-11-10T20:34:50.809Z"
 }
