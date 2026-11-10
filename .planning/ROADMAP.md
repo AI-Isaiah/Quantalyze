@@ -102,7 +102,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced" (completed 2026-11-10)
 - [x] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named (completed 2026-11-10)
 - [x] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden (completed 2026-11-10)
-- [ ] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step
+- [x] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step (completed 2026-11-10)
 - [ ] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
 - [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
@@ -483,7 +483,7 @@ Execution starts only after Phase 194.1 merges, rebased on main (D-08).
 **Goal:** After sign-in, an allocator, a manager and an admin each land on a page made for their role. A manager has one strategies list (`/strategies` and `/my-strategies` merged) that shows each strategy's health, explains its status chips, and whose degrade warnings name the affected days or key and say what to do.
 **Requirements**: LEAN-01, ROUTE-11, ROUTE-01
 **Depends on:** Phase 194, Phase 198 (an allocator lands on My allocation, which must answer "how is my book doing?" first)
-**Plans:** 0 plans
+**Plans:** 18/18 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -491,15 +491,49 @@ Execution starts only after Phase 194.1 merges, rebased on main (D-08).
 - Not confirmed at HEAD: the wording of each degrade warning (the phase inventories them first).
 
 **Success Criteria** (what must be TRUE):
-1. After sign-in, an allocator lands on My allocation, a manager on their strategies list and an admin on the admin dashboard, and every post-sign-in and "go home" destination listed above reads one role-aware choice.
+1. After sign-in, an allocator lands on My allocation, a manager on their strategies list and an admin on the admin dashboard, and every post-sign-in and "go home" destination listed above reads one role-aware choice. **Deviation recorded 2026-11-10 (review rounds 1-2, WR-01 / WR-01-R2; `199-CONTEXT.md`, deviation policy):** four error boundaries do NOT link the role home, because `/home` redirects straight back into the surface that crashed. The root, admin and allocations boundaries link Discovery ("Go to Discovery", `DISCOVERY_LANDING_ROUTE`); the strategies boundary links `/profile` ("Go to your profile", no role guard), since Discovery is allocator-only. `src/__tests__/role-home-call-sites.test.ts` pins each choice.
 2. A manager has one strategies list: `/strategies` and `/my-strategies` are one page, the other route leads to it, and the sidebar has one entry.
 3. That list shows each strategy's health, and its status chips ("Team review", "Private", "Own capital" and the rest) have a legend.
-4. Every degrade warning names the affected days or key and says what the user can do. A test goes RED on a warning that names neither.
+4. Every degrade warning names the affected days or key and says what the user can do. A test goes RED on a warning that names neither. **Narrowed 2026-11-09 (founder, "Accept + record"; `199-CONTEXT.md` D-05):** `DepartedHistoryNote` and the three Phase-198 book-level lines carry no day range or key id, so they use the count-pinned "whole history" scope plus an action instead; the test stays RED for any other warning that names neither, and for any warning with no action. Naming the departed key is booked in `TODOS.md` by plan 18 as an analytics-service follow-up.
 
 UI changes are checked against `DESIGN.md` (Error Envelope, Voice / microcopy, Trust-Tier Badges).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 199-01-PLAN.md — Role-home decision and safe deep link at sign-in (ROUTE-01)
+- [x] 199-02-PLAN.md — Health derivation as one pure function (ROUTE-11)
+- [x] 199-03-PLAN.md — Degrade-warning registry and its two tests; My allocation dashboard notes (ROUTE-11)
+- [x] 199-04-PLAN.md — Manager guard moves into the strategies sub-route layouts (LEAN-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 199-05-PLAN.md — Missing-data message registered; My allocation warnings inventoried (ROUTE-11)
+- [x] 199-06-PLAN.md — The `/home` role-home route and the constant split (ROUTE-01; after 196)
+- [x] 199-07-PLAN.md — Shared table's manager mode decoupled from allocator furniture (LEAN-01; after 196)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 199-08-PLAN.md — Every other home site uses `/home`, with a census (ROUTE-01; after 196)
+- [x] 199-09-PLAN.md — Strategies index admits every owner, one client host (LEAN-01; after 196)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 199-10-PLAN.md — Everything from both pages, by role (LEAN-01; after 196)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 199-11-PLAN.md — One nav entry and every old link moved to `/strategies` (LEAN-01; after 196)
+- [x] 199-12-PLAN.md — Health column end to end (ROUTE-11; after 196)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 199-13-PLAN.md — Retire `/my-strategies` with a 308 (LEAN-01; after 196)
+- [x] 199-14-PLAN.md — Legend for Health words and every status chip (ROUTE-11; after 196)
+- [x] 199-15-PLAN.md — Scenario and Holdings warnings registered (ROUTE-11; after 196)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 199-16-PLAN.md — Strategies-list warnings and inventory (ROUTE-11; after 196)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 199-17-PLAN.md — End-to-end proof: role landings, 308, reflow and axe (all three; after 196)
+- [x] 199-18-PLAN.md — Factsheet, tearsheet and share-route warnings (ROUTE-11; after 196)
+
+Plans 01-05 can execute now; plans 06-18 execute only after Phase 196 merges into main and this branch is rebased (`executes_after` in each plan).
 
 ### Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place
 
@@ -614,7 +648,7 @@ Plans:
 | 196. ONESTRATEGYPAGE | 21/21 | Complete    | 2026-11-10 |
 | 197. SCREEN | 6/6 | Complete    | 2026-11-10 |
 | 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
-| 199. MANAGERHOME | 0/0 | Not started | - |
+| 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
 | 200. MANAGERKEYS | 0/0 | Not started | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |

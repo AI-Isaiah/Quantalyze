@@ -19,7 +19,7 @@
 
 ### Route — no dead ends
 
-- [ ] **ROUTE-01**: After sign-in, an allocator, a manager and an admin each land on a page made for their role, not on a discovery category.
+- [x] **ROUTE-01**: After sign-in, an allocator, a manager and an admin each land on a page made for their role, not on a discovery category.
 - [x] **ROUTE-02**: A signed-in user is never shown visitor prompts ("Sign up") on `/browse` or `/strategy/<id>`, and an owner can open their own unpublished strategy.
 - [x] **ROUTE-03**: `/demo` shows no stuck loading notice, no "—" under a headline claim, no empty founder view and no raw ids.
   - *Amended 2026-11-07 (Phase 192 D-11, founder: "retire the whole demo part"; recorded in 192-CONTEXT.md and the ROADMAP):* the public demo is retired, not repaired. ROUTE-03 is met when `/demo` and every link to it are gone, a request for it gets the same answer as an unknown URL, and no public page links to a retired route. The sentence above is kept as lineage.
@@ -30,7 +30,7 @@
 - [x] **ROUTE-08**: Holdings labels positions correctly: allocated positions are not called "not allocated", and cash is not counted as Spot exposure.
 - [ ] **ROUTE-09**: A manager can see which strategies each key feeds, and no one-click control re-points a strategy's key without an explicit confirmation.
 - [ ] **ROUTE-10**: A manager renames a strategy in one place and can see which name is public.
-- [ ] **ROUTE-11**: Every degrade warning names the affected days or key and says what the user can do. My Strategies shows each strategy's health, and its status chips have a legend.
+- [x] **ROUTE-11**: Every degrade warning names the affected days or key and says what the user can do. My Strategies shows each strategy's health, and its status chips have a legend.
 
 ### Clarity — screening reads plainly
 
@@ -43,7 +43,7 @@
 
 ### Lean — less to wade through
 
-- [ ] **LEAN-01**: A manager has one strategies list (`/strategies` and `/my-strategies` merged).
+- [x] **LEAN-01**: A manager has one strategies list (`/strategies` and `/my-strategies` merged).
 - [x] **LEAN-02**: A strategy has one page, the factsheet. The tearsheet is its print view and `/strategy/<id>` leads to it.
 - [x] **LEAN-03**: `/portfolios` is removed and Decks is hidden until it works.
 - [ ] **LEAN-04**: Adding a strategy, managing keys and renaming each have one entry point, and the security explanation lives in one place.
@@ -82,7 +82,7 @@ Deferred, tracked, not in this roadmap.
 | TRUST-04 | Phase 194 | Complete |
 | TRUST-05 | Phase 194 | Complete |
 | TRUST-06 | Phase 193 | Complete |
-| ROUTE-01 | Phase 199 | Pending |
+| ROUTE-01 | Phase 199 | Complete |
 | ROUTE-02 | Phase 196 | Complete |
 | ROUTE-03 | Phase 192 | Satisfied as amended by D-11 (192-VERIFICATION.md passed, UAT passed 2026-11-07) |
 | ROUTE-04 | Phase 196 | Complete |
@@ -92,14 +92,14 @@ Deferred, tracked, not in this roadmap.
 | ROUTE-08 | Phase 198 | Complete |
 | ROUTE-09 | Phase 200 | Pending |
 | ROUTE-10 | Phase 200 | Pending |
-| ROUTE-11 | Phase 199 | Pending |
+| ROUTE-11 | Phase 199 | Complete |
 | CLAR-01 | Phase 197 | Complete |
 | CLAR-02 | Phase 197 | Complete |
 | CLAR-03 | Phase 201 | Pending |
 | CLAR-04 | Phase 201 | Pending |
 | CLAR-05 | Phase 197 | Complete |
 | CLAR-06 | Phase 201 | Pending |
-| LEAN-01 | Phase 199 | Pending |
+| LEAN-01 | Phase 199 | Complete |
 | LEAN-02 | Phase 196 | Complete |
 | LEAN-03 | Phase 195 | Complete |
 | LEAN-04 | Phase 200 | Pending |
