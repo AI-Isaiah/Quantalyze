@@ -45,7 +45,12 @@ const STATE = vi.hoisted(() => ({
   insertedRow: null as { id: string } | null,
   // C-0096: hoisted insert-error toggle for the 23505 → 409 path and the
   // generic insert-error → 500 path.
-  insertError: null as { code?: string; message?: string } | null,
+  insertError: null as {
+    code?: string;
+    message?: string;
+    details?: string;
+    hint?: string;
+  } | null,
   contactInsertPayload: null as Record<string, unknown> | null,
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
@@ -59,7 +64,12 @@ const STATE = vi.hoisted(() => ({
   // Default is an attested allocator so every pre-existing arm keeps its path.
   attestation: {
     data: { attested_at: "2026-01-01T00:00:00Z" } as { attested_at: string | null } | null,
-    error: null as { message: string } | null,
+    error: null as {
+      code?: string;
+      message: string;
+      details?: string;
+      hint?: string;
+    } | null,
   },
   checkLimitCalls: 0,
 }));
@@ -435,6 +445,77 @@ describe("POST /api/intro — C-0096 contact_requests error envelopes", () => {
     ).toHaveLength(0);
   });
 
+  it("names and captures a policy refusal (42501) on the insert: 403 insert_policy_refused, never a silent 500", async () => {
+    // WHY: the policy is a further copy of the route's own checks. If the copies
+    // ever disagree, the refusal must be visible and actionable, not an
+    // unexplained generic 500 that nobody records.
+    STATE.insertError = { code: "42501", message: "row-level security refusal" };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe("insert_policy_refused");
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry.mock.calls[0][1].tags).toMatchObject({
+      area: "intro",
+      stage: "insert-policy-refused",
+    });
+
+    await drainAuditMicrotasks();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
+
+  it("captures an unclassified insert error to Sentry while keeping the 500 response", async () => {
+    STATE.insertError = { code: "P0001", message: "internal db error" };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(500);
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry.mock.calls[0][1].tags).toMatchObject({
+      area: "intro",
+      stage: "insert",
+    });
+  });
+
+  it.each([
+    ["policy refusal", { code: "42501", message: "row-level security refusal" }],
+    ["generic insert error", { code: "P0001", message: "internal db error" }],
+  ])(
+    "reports a reduced error for a %s: the code survives, details and hint never leave the app",
+    async (_label, base) => {
+      // WHY: a PostgREST `details` is a failing-row dump and `hint` can echo
+      // values. Row values must not leave the app through error reporting, so
+      // the captured payload may carry the code and message and nothing else.
+      STATE.insertError = {
+        ...base,
+        details: "DETAILS-SENTINEL-row-values",
+        hint: "HINT-SENTINEL-row-values",
+      };
+
+      const { POST } = await import("./route");
+      await POST(makeRequest({ strategy_id: STRAT_ID }));
+      expect(captureToSentry).toHaveBeenCalledTimes(1);
+      const captured = captureToSentry.mock.calls[0][0];
+      const rendered = `${JSON.stringify(captured)} ${String(captured)} ${captured?.message}`;
+      expect(rendered).not.toContain("DETAILS-SENTINEL");
+      expect(rendered).not.toContain("HINT-SENTINEL");
+      expect(rendered).toContain(base.code);
+    },
+  );
+
+  it("does not report a duplicate request (23505) as an error", async () => {
+    STATE.insertError = { code: "23505", message: "duplicate key" };
+
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(409);
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when strategy_id is missing from the body", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeRequest({})); // no strategy_id
@@ -497,6 +578,28 @@ describe("POST /api/intro — the route enforces the accredited-investor attesta
     expect(res.status).toBe(200);
     expect(STATE.contactInsertPayload).not.toBeNull();
     expect(STATE.checkLimitCalls).toBe(1);
+  });
+
+  it("reports a reduced error when the attestation read fails: code kept, details and hint never leave the app", async () => {
+    // WHY: same class as the insert path — row values must not leave the app
+    // through error reporting.
+    STATE.attestation = {
+      data: null,
+      error: {
+        code: "XX000",
+        message: "boom",
+        details: "DETAILS-SENTINEL-row-values",
+        hint: "HINT-SENTINEL-row-values",
+      },
+    };
+    const { POST } = await import("./route");
+    await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    const captured = captureToSentry.mock.calls[0][0];
+    const rendered = `${JSON.stringify(captured)} ${String(captured)} ${captured?.message}`;
+    expect(rendered).not.toContain("DETAILS-SENTINEL");
+    expect(rendered).not.toContain("HINT-SENTINEL");
+    expect(rendered).toContain("XX000");
   });
 
   it("fails closed when the attestation read errors: 500 attestation_check_failed, reported once, nothing inserted, no token spent", async () => {

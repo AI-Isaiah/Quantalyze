@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=27 and ARMS_FLOOR=430 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=28 and ARMS_FLOOR=445 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5082,6 +5082,10 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // `expected 1 to be +0` once ci.yml carried SENTINEL_FLOOR=27, and
     // ci-anti-skip-gate.contract.test.ts re-derives the sentinel-bearing set from the corpus.
     // 405 + 11 = 416 is the table's own sum.
+    // RAISED 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07), 27/430 -> 28/445. test_contact_requests_insert_intro_authz.sql
+    // JOINED (an ordinary sql-tests gate: it runs on a database private to its runner) and declares `ALL 15 ARMS EXECUTED`.
+    // The old pins no longer match once ci.yml carries SENTINEL_FLOOR=28 and ARMS_FLOOR=445, and
+    // ci-anti-skip-gate.contract.test.ts re-derives the sentinel-bearing set from the corpus. 430 + 15 = 445 is the table's own sum.
     // RAISED 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01), 27/426 -> 27/430. The same file goes from
     // `ALL 14 ARMS EXECUTED` to `ALL 18 ARMS EXECUTED` (arms 15 to 18); no file joined. 426 + 4 = 430 is the table's own sum.
     // RAISED 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18), 27/424 -> 27/426. The same file goes from
@@ -5093,7 +5097,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // `expected 1 to be +0` once ci.yml carried ARMS_FLOOR=418. 416 + 2 = 418 is the table's own sum.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=27", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=28", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5104,7 +5108,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=430", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=445", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

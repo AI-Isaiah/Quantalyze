@@ -1111,7 +1111,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, plan 20): `armsSeen` 803 -> 809, the +6 twinned arms 7 to 12 of test_get_verified_cohort_rank_gate.sql (the D-15 cohort record gate). MEASURED: this file's run read `expected 809 to be 803`, and the narrowed runner run on that file printed `arms: 11/11/0`, `biting: 11`.
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): `armsSeen` 809 -> 811, the +2 twinned arms 13 and 14 of test_get_verified_cohort_rank_gate.sql (the min-N floor per rank, and the Max DD decile over the whole cohort). Read off the runner's own `arms:` line.
     // ⭐ CURRENCY 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01): `armsSeen` 811 -> 815, the +4 twinned arms 15 to 18 of test_get_verified_cohort_rank_gate.sql (a malformed first date, last date or headline_since leaves the annualised cohort, and the unreadable arm precedes the observation arm). Arm 12 was rewritten in place, not added. MEASURED by ONE full runner run: `arms: 815/815/0`.
-    expect(armsSeen).toBe(815);
+    // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `armsSeen` 815 -> 830, the 15 twinned arms of the NEW gate test_contact_requests_insert_intro_authz.sql. Read off `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
+    expect(armsSeen).toBe(830);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -2729,7 +2730,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `filesTotal` 109 -> 110; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): `filesTotal` 110 -> 106, the four retired gate files; copied from ONE full lane run (`coverage: files 79/106`, `arms: 791/791/0`, `biting: 791`). MEASURED: this file's run read `expected 106 to be 110`.
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `filesTotal` 106 -> 107, the NEW gate test_compute_job_metadata_merge.sql; the narrowed runner run printed `coverage: files 80/107`. MEASURED: this file's run read `expected 107 to be 106`.
-    expect(corpus.filesTotal).toBe(107);
+    // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `filesTotal` 107 -> 108, the NEW gate test_contact_requests_insert_intro_authz.sql. MEASURED: this file's run read `expected 108 to be 107`; `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
+    expect(corpus.filesTotal).toBe(108);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2819,7 +2821,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `filesAnnotated` 82 -> 83; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): `filesAnnotated` 83 -> 79, the four retired gate files; the by-name list below lost their names.
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `filesAnnotated` 79 -> 80, moving WITH `filesTotal`; the by-name list below gained test_compute_job_metadata_merge.sql.
-    expect(corpus.filesAnnotated).toBe(80);
+    // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `filesAnnotated` 80 -> 81, moving WITH `filesTotal`; the by-name list below gained test_contact_requests_insert_intro_authz.sql. Read off `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
+    expect(corpus.filesAnnotated).toBe(81);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
@@ -2875,6 +2878,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // ⭐ ADDED 2026-11-04 (Phase 191 REFUSALRACE, plan 03): the metadata-merge gate (10 sections, 10 twinned arms) for migration 20261106120000.
       "test_compute_job_metadata_merge.sql",
       "test_compute_jobs_error_kind_copy_parity.sql",
+      // ⭐ ADDED 2026-11-10 (Phase 204 INTROAUTH, plan 02): the intro-authorization gate (15 sections, 15 twinned arms) for migration 20261110150000.
+      "test_contact_requests_insert_intro_authz.sql",
       "test_create_wizard_strategy_for_key.sql",
       // ⭐ ADDED 2026-09-24 (Phase 164.6 review fix round 1) — the FIFTIETH
       // annotated file: anon and a non-admin authenticated user read ZERO
@@ -3390,7 +3395,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `filesTotal` 109 -> 110; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): `filesTotal` 110 -> 106, the four retired gate files; copied from ONE full lane run (`coverage: files 79/106`, `arms: 791/791/0`, `biting: 791`). MEASURED: this file's run read `expected 106 to be 110`.
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `filesTotal` 106 -> 107, the NEW gate test_compute_job_metadata_merge.sql; the narrowed runner run printed `coverage: files 80/107`. MEASURED: this file's run read `expected 107 to be 106`.
-    expect(corpus.filesTotal).toBe(107);
+    // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `filesTotal` 107 -> 108, the NEW gate test_contact_requests_insert_intro_authz.sql; `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
+    expect(corpus.filesTotal).toBe(108);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3435,7 +3441,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): `annotatedFiles` 81 -> 82, moving WITH `filesAnnotated`; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): `annotatedFiles` 82 -> 83, moving WITH `filesAnnotated`; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): 83 -> 79, moving WITH `filesAnnotated`; the by-name list lost the four retired gate files.
-    expect(corpus.annotatedFiles).toHaveLength(80);
+    // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `annotatedFiles` 80 -> 81, moving WITH `filesAnnotated`; `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
+    expect(corpus.annotatedFiles).toHaveLength(81);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

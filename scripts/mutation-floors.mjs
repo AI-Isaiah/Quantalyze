@@ -1339,7 +1339,13 @@
 // exit 0: `scope: FULL 80/80 annotated files`, `lane-concurrency: 4`, `coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`, `lane-invocations: 801 ... plus 80 baseline / 80 restore leg(s)`
 // (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.8s over 801 arm run(s)`,
 // `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_compute_job_metadata_merge.sql: sections 10 / judged 10 / annotated 10 / waived 0 / biting 10`. WAIVED_CEILING stays 0 - no waiver was added.
-export const FILES_FLOOR = 80;
+// RAISED 80 -> 81 2026-11-10 (Phase 204 INTROAUTH plan 02, D-07): +1 file, test_contact_requests_insert_intro_authz.sql (migration 20261110150000, fifteen arms, each
+// with a mutation twin: the intro path's database-side authorization matches /api/intro), so 81 of 108 files. MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`,
+// exit 0: `coverage: files 81/108`, `arms: 0/830/0`, `No static defects`, and by the exit-0 SUBSET run `--subset-from` the one gate path: `scope: SUBSET 1/81 annotated files`,
+// `arms: 15/15/0`, `biting: 15`, `lane-invocations: 15 ... plus 1 baseline / 1 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+// `No defects in the SUBSET`, `exit=0`. Per-file line: `test_contact_requests_insert_intro_authz.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. The FULL local run was
+// NOT run on this host (see the ARMS_FLOOR block below for the reason); CI `sql-mutation` FULL on the PR is the authoritative full run. WAIVED_CEILING stays 0 - no waiver was added.
+export const FILES_FLOOR = 81;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3408,7 +3414,15 @@ export const FILES_FLOOR = 80;
 // 20261110120000, and arm 0 renames the parameter in all three files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`: `scope: FULL 80/80 annotated files`,
 // `arms: 815/815/0`, `biting: 815`, `lane-invocations: 815` (the two independent tallies AGREE). Per-file line: `test_get_verified_cohort_rank_gate.sql: sections 17 / judged 17 / annotated 17 / waived 0 / biting 17`.
 // FILES_FLOOR stays 80 (no file joined) and WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 815;
+// RAISED 815 -> 830 2026-11-10 (Phase 204 INTROAUTH plan 02, D-07): +15 arms, ACL-PUBLIC, ACL-ANON, ACL-AUTH, ACL-SVC, ACL-CALL, POL-ADMIT, POL-BOTH, POL-ADMIN, POL-UNAPPROVED,
+// POL-BOTH-HALF, POL-MANAGER, POL-ADMIN-MANAGER, POL-UNATTESTED, POL-OWNER and POL-ANON of the new gate test_contact_requests_insert_intro_authz.sql (migration 20261110150000), each
+// twinned, so FILES_FLOOR moves 80 -> 81 in the same commit. MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 81/108`,
+// `arms: 0/830/0   (executed/annotated/waived)`, `No static defects`, and by the exit-0 SUBSET run of the one gate file: `arms: 15/15/0`, `biting: 15`, `lane-invocations: 15` (the two
+// independent tallies AGREE), `ARMS_FLOOR (static upper bound): 830 annotated-unwaived >= floor 815` (the floor before this raise). Per-file line: `test_contact_requests_insert_intro_authz.sql:
+// sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. NOT MEASURED by a FULL local run: the host had 7.9 GB free on the data volume against the roughly 15 GB a full run needs,
+// so the FULL run is recorded as not-run and 830 is the static annotated-unwaived count that the parse reading prints, an upper bound on biting; CI `sql-mutation` FULL on the PR
+// head SHA (a floors edit forces FULL) is the run that compares it with a real biting count. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 830;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -23,6 +23,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import {
   INTRO_ATTESTATION_CHECK_FAILED,
   INTRO_ATTESTATION_REQUIRED,
+  INTRO_INSERT_POLICY_REFUSED,
 } from "@/lib/intro/refusal-codes";
 
 /**
@@ -122,9 +123,14 @@ export async function POST(req: NextRequest) {
     .eq("user_id", user.id)
     .maybeSingle();
   if (attestationError) {
-    captureToSentry(attestationError, {
-      tags: { area: "intro", stage: "attestation-read" },
-    });
+    // SEC-01: report code + message only, never the PostgREST `details`/`hint`
+    // (a failing-row dump can carry the requester's values).
+    captureToSentry(
+      new Error(
+        `investor_attestations read failed: ${attestationError.code} ${attestationError.message}`,
+      ),
+      { tags: { area: "intro", stage: "attestation-read" } },
+    );
     return NextResponse.json(
       {
         error: "Could not check attestation",
@@ -204,6 +210,25 @@ export async function POST(req: NextRequest) {
     if (error.code === "23505") {
       return NextResponse.json({ error: "Already requested" }, { status: 409 });
     }
+    // A policy refusal is named and reported so it is visible, not a silent 500.
+    if (error.code === "42501") {
+      // SEC-01: code + message only; `details`/`hint` can carry row values.
+      captureToSentry(
+        new Error(`contact_requests insert refused: ${error.code} ${error.message}`),
+        { tags: { area: "intro", stage: "insert-policy-refused" } },
+      );
+      return NextResponse.json(
+        {
+          error: "Request could not be created",
+          code: INTRO_INSERT_POLICY_REFUSED,
+        },
+        { status: 403 },
+      );
+    }
+    captureToSentry(
+      new Error(`contact_requests insert failed: ${error.code} ${error.message}`),
+      { tags: { area: "intro", stage: "insert" } },
+    );
     return NextResponse.json(
       { error: "Failed to create request" },
       { status: 500 },
