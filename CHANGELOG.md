@@ -32,6 +32,7 @@ Phase 199. After sign-in an allocator lands on `/allocations`, a manager on `/st
 - **`/home` decides admin with the admin guards' `isAdminUser` call**, so `/admin` and `/home` cannot bounce an admin between them (WR-03, SFH-01), and reads it strictly, so a database error throws instead of overriding `is_admin` (SFH-R2-01).
 - **The Stale (no data yet) remedy comes from the row's real compute state**, not a hard-coded `never_started` (SFH-03).
 - **Parity pin 12 drops a self-referential assertion** that could not fail (plan 13 follow-up).
+- **Status and strategy-type chips reach WCAG AA contrast on their own tint** (`Badge`, `OwnershipTag`). The new legend put them on `/strategies`, where the seeded axe run measured Pending review at 1.99:1, Draft at 4.27:1 and Published at 4.38:1. Grey, indigo, violet and pink tones now ink `text-text-secondary`, amber tones `text-warning`, and Published, Completed and Declined keep their ink on a lighter tint; every pair is now at least 4.5:1. DESIGN.md records the change.
 
 ### Security
 - The deep link is sanitised to same-origin paths before use; an off-origin `?redirect=` is ignored (T-199 threat model).
@@ -42,6 +43,7 @@ Phase 199. After sign-in an allocator lands on `/allocations`, a manager on `/st
 - `tests/a11y/chip-contrast.test.ts` now reads the grey chip tones from `StaleSeriesChip.tsx` (`PIPELINE_CHIPS`), where plan 199-14 moved them out of `StrategyTable.tsx`; the Phase 170 contrast pin had gone blind there. Neutering a tone to muted turns it red.
 - New: `e2e/role-home.spec.ts` (a seeded allocator, manager and admin sign in through the real form and land on their exact page; a safe `?redirect=` wins; an off-origin one is ignored), added to the seeded CI list in `.github/workflows/ci.yml`; a `/my-strategies` 308 canary; the owner-list spec retargeted to `/strategies`; reflow and axe rows for the merged list (plan 17).
 - Every post-login wait accepts the role landings through `isPostLoginPath` (plan 17).
+- New: `tests/a11y/badge-contrast.test.ts` reads every tint/ink pair from `Badge.tsx` and `OwnershipTag.tsx` and asserts at least 4.5:1 composited over white; reverting one tone turns it red. The owner-list and N-TABLE e2e specs move their seeded rows off the wizard source, because CD-10 hides a wizard draft from a role-both owner's list.
 - Unit and structural suites: `role-home.test.ts`, `strategy-health.test.ts`, `degrade-warnings.test.tsx`, `degrade-warning-scan.test.ts`, `page.merged.test.tsx`, `StrategiesLegend.test.tsx`, `StrategiesSection.test.tsx`, `StrategyTable.health.test.tsx`, `StrategyTable.owner-list.test.tsx` with owner-list goldens for manager-only, allocator-only and both, `home/page.test.tsx`, `login/page.test.tsx`, `LoginForm.test.tsx`, `role-home-call-sites.test.ts`, `strategies-guard-coverage.test.ts`, `my-strategies-retired.test.ts`, plus RED-first tests for every registry plan.
 
 ### Notes
