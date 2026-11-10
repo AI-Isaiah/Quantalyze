@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.133.31.2] - 2026-11-10 — records: close Phase 198 MYBOOK
+
+### Notes
+- **Phase 198 MYBOOK is closed.** The founder's browser re-check of UAT test 3 passed on production at desktop width: the "What is missing" note now says the equity chart and the ratios built from it are hidden, which agrees with the glance above it, and no glance cell carries a stale screen-reader pointer. The founder accepted the 375px width without a new render, because the gap fix changed copy only inside a block that passed 375px on 2026-11-09.
+- `198-UAT.md` test 3 is a pass (4/4). `198-VERIFICATION.md` is `passed`, with `verified_at_sha` on the main commit the re-check was read on and a dated note on how each human item closed.
+- `phase complete 198` ticked ROUTE-06, ROUTE-07, ROUTE-08 and LEAN-06, the ROADMAP bullet and the Progress row. STATE's Current Position was corrected by hand: phases run in parallel, so it names 196 and 197 (awaiting founder checks), 199 (parked) and 194.2 (not planned) instead of advancing to the next roadmap phase.
+
 ## [0.133.31.1] - 2026-11-10 — records: Phase 196 ONESTRATEGYPAGE execution, review, security and verification
 
 ### Notes

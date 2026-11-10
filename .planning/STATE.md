@@ -5,17 +5,17 @@ milestone_name: UX — trustworthy, navigable, lean
 current_phase: "194.2"
 current_phase_name: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed
 status: planning
-stopped_at: Phase 194 closed (browser UAT passed); 198 verification and 194.2 planning run in parallel
-last_updated: "2026-11-09T08:40:16.672Z"
-last_activity: 2026-11-09
-last_activity_desc: Phase 194 FIGURETRUTH closed; its UAT extras booked into 194.2
-state_head: 46ec9945070fc311aaf7b0f07a14472314f2109a
+stopped_at: Phase 198 closed (browser re-check passed); 196 and 197 await founder checks, 199 parked, 194.2 not planned
+last_updated: "2026-11-10T08:27:16.046Z"
+last_activity: 2026-11-10
+last_activity_desc: Phase 198 MYBOOK closed after the founder browser re-check
+state_head: 32928312e7e73c2a5367a52d7b290c3e8e5dbf36
 progress:
   total_phases: 14
-  completed_phases: 7
-  total_plans: 95
-  completed_plans: 95
-  percent: 50
+  completed_phases: 8
+  total_plans: 116
+  completed_plans: 116
+  percent: 57
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 196 (ONESTRATEGYPAGE) shipped as #1235 (v0.133.31.0), VERIFICATION human_needed (production after-census, rolling-repeats call, live 308 check, intro attestation scope, visual pass); 198 (MYBOOK) gap 198-UAT-01 shipped (#1233), VERIFICATION human_needed; 197 (SCREEN) shipped as #1225, VERIFICATION human_needed; 194.2 (FIGURERESIDUALS) not yet planned
-Plan: 196: 21 of 21; 198: 14 of 14 (gap plan 198-14 shipped #1233); 194.2: not planned
-Status: 196, 197 and 198 await founder checks; 196 is not closed (phase complete not run while VERIFICATION is human_needed)
-Last activity: 2026-11-10 — Phase 196 ONESTRATEGYPAGE shipped as #1235 (v0.133.31.0); records (phase dir, plan ticks) land with the v0.133.31.1 records PR
-Progress: [█████░░░░░] 50% (7 of 14 phases)
+Phase: parallel — 196 (ONESTRATEGYPAGE) shipped #1235, VERIFICATION human_needed (production after-census, rolling-repeats call, intro attestation scope); 197 (SCREEN) shipped #1225, VERIFICATION human_needed (UAT 2026-11-09 gaps, closure not started); 199 (MANAGERHOME) planned, execution parked; 194.2 not planned
+Plan: 196: 21 of 21; 197: 6 of 6; 199: 0 of 18; 194.2: not planned
+Status: 198 closed; 196 and 197 await founder checks
+Last activity: 2026-11-10 — Phase 198 MYBOOK closed (browser re-check passed; records PR v0.133.31.2)
+Progress: [██████░░░░] 57% (8 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1764,7 +1764,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phase 194 closed (browser UAT passed); 198 verification and 194.2 planning run in parallel
+**Stopped At:** Phase 198 closed (browser re-check passed); 196 and 197 await founder checks, 199 parked, 194.2 not planned
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
