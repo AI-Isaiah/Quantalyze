@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.34.0] - 2026-11-10 — INTROAUTH: the intro path's database-side authorization matches /api/intro
+
+Phase 204. The database now enforces the same rule as `/api/intro` on every entry point: only an approved, accredited-investor-attested allocator creates an intro for themselves. The admin match path keeps working through the service role.
+
+### Security
+- **`contact_requests_insert` mirrors the route (`supabase/migrations/20261110150000_intro_path_authz_hardening.sql`, D-01, D-02).** `ALTER POLICY` keeps the name and adds, to `allocator_id = auth.uid()`, an inline check that the caller's profile has role `allocator` or `both` and is approved by the `isProfileApproved` truth table (admin override; `both` needs both statuses verified), plus an `investor_attestations` row with `attested_at` set. No helper function, so no new ACL (D-03).
+- **The 6-arg `send_intro_with_decision` is executable by `service_role` only (D-04).** Client roles lose EXECUTE; the body is unchanged. The only caller, the admin match route, already uses the service-role client, so admin-sent intros stay admin-authorized (D-05).
+- **The migration verifies itself from the catalogue only** (`pg_policies`, `has_function_privilege`, `aclexplode`), so it cannot refuse on the schema-only TEST database (D-06). A manual rollback sits in `supabase/migrations/down/20261110150000-rollback.sql`.
+
+### Changed
+- **`/api/intro` names a policy refusal.** A row-level-security refusal on the insert now returns 403 with code `insert_policy_refused` (`src/lib/intro/refusal-codes.ts`) and is reported to Sentry, instead of an unlogged generic 500 (review SF-01). Other unclassified insert errors are reported too; their 500 is unchanged.
+- **`/api/intro` reports a reduced error to Sentry.** The insert and attestation-read captures send the error code and message only, never the database error's `details` or `hint` (review SEC-01). Other API routes that pass a raw Supabase error to the same helper are recorded for follow-up in the phase records, not changed here.
+
+### Tests
+- **New SQL gate `supabase/tests/test_contact_requests_insert_intro_authz.sql`**: 15 arms (3 admitted callers, 7 refused callers, 5 function-ACL checks), each with a biting mutation twin, an `ALL 15 ARMS EXECUTED` sentinel, and pg-lane fixture `scripts/pg-lane/fixtures/43-fixture-intro-authz-stand-ins.sql`. Three hand-neuters (old policy, old grants, migration left out) each turned it RED.
+- **Censuses moved to the measured corpus**: `FILES_FLOOR` 81 and `ARMS_FLOOR` 830 in `scripts/mutation-floors.mjs`, the anti-skip `SENTINEL_FLOOR` 28 and `ARMS_FLOOR` 445 with a roster row in `ci.yml`, and the pins in `mutation-runner-floors`, `gate-family-meta`, `mutation-annotation-parser`, `lint-sql-gates` and `drift-check-scripts` tests.
+- **Route tests** for the named 403, the generic 500 capture, the unchanged 409, and that no `details` or `hint` reaches the Sentry capture.
+
+### Notes
+- `ARMS_FLOOR` 830 is the static annotated count; the full local mutation run was not made (disk), so CI's FULL `sql-mutation` gives the biting reading. The real-schema `sql-tests` lane also runs in CI only.
+- PROD auto-applies this migration after `apply-test`; migration-reviewer and rls-policy-auditor were clean in all three review rounds.
+
 ## [0.133.33.1] - 2026-11-10 — records: close 199 MANAGERHOME
 
 ### Changed
