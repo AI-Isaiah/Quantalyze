@@ -160,8 +160,9 @@ test.describe("Phase 199 — /strategies owner list (NAV-01, was /my-strategies)
     });
 
     // …and the owner's OWN seeded row renders. The name cell is a link, so
-    // assert it by role + accessible name (exact: the mint is unique).
-    const ownRowLink = page.getByRole("link", { name: draftA.name });
+    // assert it by role + exact accessible name (the row's Edit link is named
+    // "Edit <name>", which a substring match would also hit).
+    const ownRowLink = page.getByRole("link", { name: draftA.name, exact: true });
     await expect(ownRowLink).toBeVisible({ timeout: 15_000 });
 
     // ── Case 2: the OTHER user's seeded strategy is absent — the

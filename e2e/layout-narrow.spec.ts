@@ -1002,7 +1002,7 @@ test.describe("/strategies — N-TABLE", () => {
   );
 
   for (const vp of VIEWPORTS) {
-    test(`${vp.id}: each Sort select is the hit target after the header passes the filter bar`, async ({
+    test(`${vp.id}: the filter bar's search box is the hit target after the header passes the filter bar`, async ({
       page,
     }) => {
       test.setTimeout(120_000);
@@ -1037,11 +1037,15 @@ test.describe("/strategies — N-TABLE", () => {
       // row, or the z-10 sticky name column) is what paints over the z-10
       // filter bar when the table root loses `isolate`. A select probed on
       // a resting page proves nothing, so an unreached state throws.
-      for (const label of ["Sort by", "Sort direction"]) {
+      // Phase 199: /strategies seeds the table's sort (newest first), so the
+      // Sort selects are not rendered there (StrategyFilters `showSort`, 170.7
+      // WR-02). The search box sits in the same sticky filter bar, so it is
+      // the control the z-index probe uses.
+      for (const label of ['input[placeholder="Search strategies..."]']) {
         const reached = await page.locator("#main-content").evaluate(
           (main, selectLabel) => {
             const tableEl = document.querySelector("[data-strategy-table]");
-            const selectEl = document.querySelector(`[aria-label="${selectLabel}"]`);
+            const selectEl = document.querySelector(selectLabel);
             const filterEl = selectEl?.closest(".sticky") ?? null;
             if (!tableEl || !selectEl || !filterEl) {
               return `missing table=${!!tableEl} select=${!!selectEl} filter=${!!filterEl}`;
@@ -1080,7 +1084,7 @@ test.describe("/strategies — N-TABLE", () => {
           reached,
           `${vp.id}: N-TABLE precondition not reached for ${label} — no z-indexed sticky table cell ever sat under its centre`,
         ).toBe("reached");
-        const select = page.getByLabel(label);
+        const select = page.locator(label);
         await expect(select, `${vp.id}: ${label} missing`).toBeVisible();
         await assertNotCovered(page, select, `${vp.id} ${label}`);
       }
