@@ -167,13 +167,26 @@ export async function proxy(request: NextRequest) {
     isFactsheetShareRoute ||
     isResetPasswordRoute;
   if (session && isPublicRoute && !isApiRoute && !isAuthBounceExempt) {
-    const safePath =
-      safeRedirectPath(request.nextUrl.searchParams.get("redirect")) ??
-      ROLE_HOME_ROUTE;
-    const url = request.nextUrl.clone();
-    url.pathname = safePath;
-    url.searchParams.delete("redirect");
-    return NextResponse.redirect(url);
+    // Phase 206 (SESSIONLOOP, WR-01-R3): getSession() above is cookie-only, so a
+    // revoked but unexpired session still looks signed in here. The pages decide
+    // with getUser(), so the bounce confirms the same way. Without that, the
+    // stale cookie loops `/` to `/home` and `/login?redirect=` to a guarded page
+    // and back. A null user or an error falls through so the page renders; the
+    // proxy itself does not clear the cookie or sign the user out (D-02). This
+    // is the only route set that pays the network round trip, and every other
+    // route stays cookie-only (D-03).
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (user) {
+      const safePath =
+        safeRedirectPath(request.nextUrl.searchParams.get("redirect")) ??
+        ROLE_HOME_ROUTE;
+      const url = request.nextUrl.clone();
+      url.pathname = safePath;
+      url.searchParams.delete("redirect");
+      return NextResponse.redirect(url);
+    }
   }
 
   // audit-2026-05-07 C-0144 + C-0150: the previous proxy-level email-only
