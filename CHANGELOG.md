@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.133.35.0] - 2026-11-10 — ONEVERDICT: every figure path follows the record's one readability verdict
+
+Phase 205. Phase 194.2's review left three paths that still tested dates themselves instead of following the record's one readability verdict (`totalRecord.unreadable`): the USD view, the stress-windows block and the api-arm allocator blends. They now all follow it. An unreadable record is withheld the same way on every path, and an unparseable first date no longer reaches the factsheet error page. These are the 194.2-REVIEW-R3 survivors WR-01..03, routed by founder decision 2026-11-10.
+
+### Fixed
+- **A malformed first date no longer breaks the public factsheet (WR-03, D-03).** On the `api` arm (every PROD strategy), first dates such as `""`, `2023-13-01`, `2023-02-32` and `2024-1-5` threw `RangeError` in `alignBlend`, and `/factsheet/<id>` rendered the route error page. An unreadable record now builds a payload with `allocatorPortfolios: null`; the blends are record-derived figures, so they are withheld with the rest. `alignBlend` is unchanged, so a throw on a readable record still signals a code bug.
+- **The USD view and the native view give one verdict for one record (WR-01, D-01).** The USD build no longer re-scans the native dates through `recordSourceDates`, which included absent days the native build drops. It now inherits the native build's verdict (`BuildFactsheetOpts.inheritedUnreadable`). `recordSourceDates` and its `record_source` Sentry axis are removed.
+- **The stress-windows block follows the record verdict (WR-02, D-02).** `deriveSeriesBundle` withholds the block whenever its `figureRecord` is unreadable. This covers the cash, mark-to-market and smoothed bundles, the browser leverage re-derive and the USD view. The first-date check remains only to keep `computeStressWindows` from throwing.
+- **The Scenario factsheet's stress block follows its own record verdict (review WR-02).** An unreadable blend record printed a stress window, and a non-ISO first date threw in the browser. The base view now withholds the block the same way the levered view does.
+- **An unreadable record is reported to Sentry once (review WR-01).** The USD build no longer sends a second `figure-record-unreadable` event when it inherits the native verdict. Before this fix, a malformed first curve point (`recordSeriesStart`) was reported twice.
+
+### Changed
+- **The factsheet payload cache key moves from `factsheet-v2-payload-v22` to `v23`** (D-05), because for the same inputs the stress block, the allocator blends and the USD record now differ. The two cache-key tests were updated with it.
+- **A record unreadable only through its headline date or its end date now also hides its stress windows** (D-02). The panel's sentence, "the record's dates could not be read", is about the record, so it stays true. No copy changed.
+
+### Tests
+- `figure-parity-pages.test.tsx` gained these parity cases through `fetchAndBuildPayload`:
+  - an absent-day bad date, where native and USD agree;
+  - native and USD stress views on an unreadable record;
+  - a bad second point on the api arm;
+  - one report per record, with an interior-date arm and a bad-first-curve-point arm.
+- `StressWindowsPanel.unreadable.test.tsx` gained an interior-date case, a mark-to-market bundle case and a leverage-re-derive case. It also gained five api-arm first-date cases plus a readable control. The 194.2 file pinned only the csv arm.
+- `scenario-factsheet-payload.test.ts` gained a readable control, an interior-date case and a non-ISO-first-date case.
+- `audit-c20.test.ts` gained a `makeReadableReturns` helper. Its `makeReturns(40)` fixture produced impossible dates, which D-03 now withholds.
+- Each new gate was neutered, seen RED, and restored from a byte backup checked with `cmp`.
+
+### Notes
+- Known limits, booked rather than fixed (none user-facing or data-integrity):
+  - A payload with no `figureRecord` at all is read as readable by the stress gate. Only hand-built payloads or stale cache entries reach this, and v23 drains stale entries.
+  - The browser-side Scenario payload sends no Sentry event for an unreadable blend record.
+  - The USD view does not follow the native view's chain-broken headline suffix. That predates this phase.
+- `compute.conventions.test.ts` fixtures B and C fail at the phase base too. This phase does not touch them.
+
 ## [0.133.34.1] - 2026-11-10 — BASELINE: automated re-dump after the PROD apply of 2516d8b1
 
 ### Changed
