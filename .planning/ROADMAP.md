@@ -109,7 +109,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 - [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
 - [x] **Phase 205: ONEVERDICT — every figure path follows the record's one readability verdict** (completed 2026-11-10)
-- [ ] **Phase 206: SESSIONLOOP — a revoked-but-unexpired session cookie no longer bounces between / and /home**
+- [x] **Phase 206: SESSIONLOOP — a revoked-but-unexpired session cookie no longer bounces between / and /home** (completed 2026-11-11)
 
 ### Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story
 
@@ -656,7 +656,7 @@ Plans:
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
 | 204. INTROAUTH | 2/2 | Complete    | 2026-11-10 |
 | 205. ONEVERDICT | 3/3 | Complete    | 2026-11-10 |
-| 206. SESSIONLOOP | 0/0 | Not started | - |
+| 206. SESSIONLOOP | 1/1 | Complete    | 2026-11-11 |
 
 ### Requirement Coverage (v1.21)
 
@@ -707,10 +707,10 @@ Plans:
 **Goal:** A revoked-but-unexpired session cookie no longer bounces between `/` and `/home` (or `/login?redirect=`). The proxy's signed-in bounce branch confirms the user with `getUser` before redirecting, the same check the pages use; only that branch changes. Source: Phase 199 review round 3, WR-01-R3 (pre-existing class, user-facing MEDIUM; `199-REVIEW-R3.md`, routed in `199-VERIFICATION.md`).
 **Requirements**: TBD
 **Depends on:** Phase 199
-**Plans:** 0 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 206 to break down)
+- [x] 206-01-PLAN.md — Wave 1: the proxy's signed-in bounce branch confirms the user with `getUser()` before redirecting; refused-session tests in `src/proxy.test.ts` shown able to fail by neuter→RED→restore (D-01..D-05)
 
 ---
 
