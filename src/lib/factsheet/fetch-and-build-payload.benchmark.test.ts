@@ -101,7 +101,7 @@ import {
   BENCHMARK_READ_FAILED_MESSAGE,
   BENCHMARK_UNAVAILABLE_MESSAGE,
 } from "./fetch-and-build-payload";
-import { buildFactsheetPayload } from "./build-payload";
+import { buildFactsheetPayload, fixtureBenchmarkPrices } from "./build-payload";
 import { alignCoveredReturns, CALENDAR_7D } from "./align";
 import { compute } from "./compute";
 import { BTC_DAILY } from "./benchmarks";
@@ -322,6 +322,55 @@ describe("169.5-01 SC3: the route reads BTC from the database", () => {
     if ("unavailable" in opt) throw new Error("expected prices");
     expect(opt.dropped).toEqual(["2024-01-05"]);
     expect(opt.prices[0].date).toBe("2024-01-01");
+  });
+});
+
+describe("194.2 WR-01: the benchmark bound is taken over READABLE dates only", () => {
+  // `isoMinusOneDay` throws on an unparseable minimum, and a build error here would reach the error
+  // boundary before the build's own unreadable gate withholds the figures.
+  it.each(["", "2024-1-5", "2024-13-01"])(
+    "a malformed earliest date (%j) does not throw: the bound comes from the readable days, and the malformed one stays on the series",
+    async (bad) => {
+      fake.bench.rows = CLOSES;
+      fake.bench.probeRows = [{ date: "2023-01-01" }];
+      const cash: DailyReturn[] = [{ date: bad, value: 0.01 }, ...series(days("2024-01-02", "2024-01-11"))];
+      const opt = await readFactsheetBenchmark(createAdminClient(), cash, undefined);
+      expect("unavailable" in opt).toBe(false);
+      for (const c of reads()) {
+        expect(c.gte).toBe("2024-01-01");
+        expect(c.lte).toBe("2024-01-11");
+      }
+    },
+  );
+
+  it("a malformed LATEST date is never sent to the database as the upper bound", async () => {
+    fake.bench.rows = CLOSES;
+    fake.bench.probeRows = [{ date: "2023-01-01" }];
+    const cash: DailyReturn[] = [...series(days("2024-01-02", "2024-01-11")), { date: "2024-99-99", value: 0.01 }];
+    await readFactsheetBenchmark(createAdminClient(), cash, undefined);
+    expect(reads().length).toBeGreaterThan(0);
+    for (const c of reads()) expect(c.lte).toBe("2024-01-11");
+  });
+
+  it("the browser path's fixture bound (fixtureBenchmarkPrices) skips a malformed earliest date the same way, and is unavailable when none reads", () => {
+    const readable = series(days("2024-01-02", "2024-01-11"));
+    const opt = fixtureBenchmarkPrices([[{ date: "2024-13-01", value: 0.01 }, ...readable]]);
+    expect("unavailable" in opt).toBe(false);
+    expect(fixtureBenchmarkPrices([[{ date: "", value: 0.01 }]])).toEqual({ unavailable: true });
+  });
+
+  it("nothing readable on any axis: the unavailable marker, NO benchmark_prices query, and a log line that names the bad dates", async () => {
+    const cash: DailyReturn[] = [
+      { date: "", value: 0.01 },
+      { date: "2024-13-01", value: 0.02 },
+    ];
+    const opt = await readFactsheetBenchmark(createAdminClient(), cash, undefined, STRATEGY_ID);
+    expect(opt).toEqual({ unavailable: true });
+    expect(fake.bench.calls).toHaveLength(0);
+    expect(console.warn).toHaveBeenCalledWith(
+      BENCHMARK_UNAVAILABLE_MESSAGE,
+      expect.objectContaining({ reason: "unreadable_dates", id: STRATEGY_ID, unreadableDates: ["", "2024-13-01"] }),
+    );
   });
 });
 

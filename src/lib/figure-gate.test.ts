@@ -18,13 +18,16 @@ import {
   VAR_METHOD_LINE,
   figureRecord,
   figureSpan,
+  firstUnreadableDate,
   gateAnnualized,
   gatedValue,
+  isReadableDay,
   notShownLine,
   recordClears,
   recordStartDay,
   shortTrackMarkerTitle,
   shortTrackNote,
+  benchCoverageNote,
   coveredDays,
   spanDays,
   TRACK_MIN_MONTH_DAYS,
@@ -182,6 +185,36 @@ describe("figureSpan and figureRecord", () => {
   });
 });
 
+describe("isReadableDay and firstUnreadableDate (Phase 194.2: one strict day rule)", () => {
+  // WHY: Python `_read_day` and SQL `ledger_refresh_parse_series_date` reject an impossible
+  // calendar day; a TS side that rolled 2026-02-31 into March would show annualised figures on a
+  // record the other two runtimes withhold.
+  it("reads only a real calendar day written yyyy-mm-dd", () => {
+    expect(isReadableDay("2026-02-28")).toBe(true);
+    expect(isReadableDay("2028-02-29")).toBe(true);
+    for (const bad of ["2026-02-31", "2026-02-30", "2026-13-01", "2026-02-28x", "2026-2-28", ""]) {
+      expect(isReadableDay(bad), bad).toBe(false);
+    }
+  });
+
+  it("a record whose series end is an impossible day is unreadable and withheld", () => {
+    const rec = figureRecord({ seriesStart: "2025-01-01", seriesEnd: "2026-02-31", observations: 400, periodsPerYear: 365 });
+    expect(rec.unreadable).toBe(true);
+    expect(gateAnnualized(rec)).toBe("withheld");
+  });
+
+  it("firstUnreadableDate names the first bad date, its axis and its index", () => {
+    expect(firstUnreadableDate(["2026-01-01", "2026-01-02"], ["2026-01-01", "bad"])).toEqual({ axis: 1, index: 1, date: "bad" });
+    expect(firstUnreadableDate(["2026-01-01", "2026-02-31"], ["bad"])).toEqual({ axis: 0, index: 1, date: "2026-02-31" });
+  });
+
+  it("returns null for all-readable axes and for no axes", () => {
+    expect(firstUnreadableDate(["2026-01-01", "2026-01-02"], ["2026-01-03"])).toBeNull();
+    expect(firstUnreadableDate([], [])).toBeNull();
+    expect(firstUnreadableDate()).toBeNull();
+  });
+});
+
 describe("recordStartDay (Phase 197 D-05: the first day the Track title names)", () => {
   // WHY: the Track cell's title prints this day beside the span it explains, so the two must
   // come from one rule. figureSpan calls this function; if they ever diverge the title lies.
@@ -296,6 +329,35 @@ describe("copy (UI-SPEC Copywriting Contract, verbatim)", () => {
       "CAGR, volatility, Sharpe, Sortino and Calmar are annualized from 20 days of the selected range, under one year.",
     );
     expect(withheldReason("record", crypto(1234))).toContain("covers 1,234 days");
+  });
+
+  it("D-05 benchmark coverage note: every UI-SPEC S2 sentence, typed by hand", () => {
+    const span = ["Mar 3, 2026", "Nov 9, 2026"] as const;
+    expect(benchCoverageNote("BTC", ...span, { startsAfter: true, endsBefore: false })).toBe(
+      "BTC compared over Mar 3, 2026 \u2013 Nov 9, 2026 (its data starts after this range).",
+    );
+    expect(benchCoverageNote("BTC", ...span, { startsAfter: false, endsBefore: true })).toBe(
+      "BTC compared over Mar 3, 2026 \u2013 Nov 9, 2026 (its data ends before this range).",
+    );
+    expect(benchCoverageNote("SPX", ...span, { startsAfter: true, endsBefore: true })).toBe(
+      "SPX compared over Mar 3, 2026 \u2013 Nov 9, 2026 (its data starts after and ends before this range).",
+    );
+  });
+
+  it("D-05 one covered day reads 'on {from} only' with the matching parenthetical", () => {
+    expect(benchCoverageNote("BTC", "Mar 3, 2026", "Mar 3, 2026", { startsAfter: true, endsBefore: false })).toBe(
+      "BTC compared on Mar 3, 2026 only (its data starts after this range).",
+    );
+    expect(benchCoverageNote("BTC", "Mar 3, 2026", "Mar 3, 2026", { startsAfter: false, endsBefore: true })).toBe(
+      "BTC compared on Mar 3, 2026 only (its data ends before this range).",
+    );
+    expect(benchCoverageNote("BTC", "Mar 3, 2026", "Mar 3, 2026", { startsAfter: true, endsBefore: true })).toBe(
+      "BTC compared on Mar 3, 2026 only (its data starts after and ends before this range).",
+    );
+  });
+
+  it("D-05 neither side short has nothing to say", () => {
+    expect(benchCoverageNote("BTC", "Mar 3, 2026", "Nov 9, 2026", { startsAfter: false, endsBefore: false })).toBeNull();
   });
 
   it("marker, window titles, method line", () => {

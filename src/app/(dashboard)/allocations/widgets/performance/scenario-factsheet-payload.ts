@@ -69,7 +69,7 @@ import {
   ROLL_WINDOW_30D,
   ROLL_WINDOW_1Y_DAYS,
 } from "@/lib/factsheet/rolling";
-import { coveredDays, figureRecord, gateRollingWindow } from "@/lib/figure-gate";
+import { coveredDays, figureRecord, firstUnreadableDate, gateRollingWindow } from "@/lib/figure-gate";
 import type { FigureRecord } from "@/lib/figure-gate";
 import { streakLengths, streakHistogram } from "@/lib/factsheet/streak";
 import { calmarByYear } from "@/lib/factsheet/calmar-by-year";
@@ -401,12 +401,17 @@ function buildReturnsBody(
   // series run over, their count (the blend's overlap, not a stored count) and the
   // `periodsPerYear` this builder receives (the composer's `blendPeriodsPerYear` of the
   // legs: a blend with one crypto leg is crypto; never re-derived here).
-  const record = figureRecord({
+  const endsRecord = figureRecord({
     seriesStart: datesR[0],
     seriesEnd: datesR[datesR.length - 1],
     observations: rets.length,
     periodsPerYear,
   });
+  // 194.2 (194-SCENARIO-INTERIOR-DATES): the blend's dates are judged on EVERY date, the check the
+  // factsheet builder's cash axis uses, not only the two ends. A malformed interior date makes a
+  // zoom window that starts on it NaN, which the gate reads as unknown and shows. No Sentry report
+  // here: this runs in the browser re-derive on every mount (194 R6 WR-01).
+  const record: FigureRecord = firstUnreadableDate(datesR) ? { ...endsRecord, unreadable: true } : endsRecord;
   // D-11 / D-15: the verdict rides the window it describes, beside the same pick.
   const rollingPick: RollWindowPick = {
     ...rollWindow,

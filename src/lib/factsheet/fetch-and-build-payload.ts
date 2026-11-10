@@ -59,7 +59,7 @@ import {
   readCashConventions,
 } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
-import { curveMethodFromFlags } from "./resolve-series";
+import { curveMethodFromFlags, curveRecordStart } from "./resolve-series";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, FactsheetUsdView, IngestSource } from "./types";
 
@@ -743,7 +743,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v21", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v22", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -936,7 +936,11 @@ async function buildFromResolved(
   const a = analytics as Record<string, unknown> | null | undefined;
   const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
   const recordObservations = numOrNull(a?.record_observations);
-  buildOpts = { ...buildOpts, recordObservations };
+  // 194.2 (D-02): a curve-derived single-key series starts its record at the stored curve's first
+  // point, the date every list, percentile and SQL reader takes. Not the composite arm: its series
+  // is `csv_daily_returns`, which is never inverted from a curve.
+  const recordSeriesStart = isComposite ? null : curveRecordStart(dailyRaw, analytics?.returns_series);
+  buildOpts = { ...buildOpts, recordObservations, ...(recordSeriesStart ? { recordSeriesStart } : {}) };
 
   // Phase 194 (D-01): the stored figures ride beside the stored cash headline,
   // on both arms, and only when that headline was admitted (no stored headline means
@@ -1067,6 +1071,7 @@ async function buildFromResolved(
     dqf,
     strategyArg,
     recordObservations,
+    recordSeriesStart,
   });
   return { ...nativePayload, ...usd };
 }
@@ -1103,8 +1108,10 @@ async function buildUsdView(args: {
   strategyArg: Parameters<typeof buildFactsheetPayload>[0];
   /** CR-01: the stored count describes the record, not its unit, so the USD build gates on it too. */
   recordObservations: number | null;
+  /** 194.2 (D-02): the record's first date is likewise a fact about the record, not its unit. */
+  recordSeriesStart: string | null;
 }): Promise<UsdViewOutcome> {
-  const { supabase, id, unit, analytics, dqf, strategyArg, recordObservations } = args;
+  const { supabase, id, unit, analytics, dqf, strategyArg, recordObservations, recordSeriesStart } = args;
   const read = await readBenchmarkPrices(supabase, "BTC");
   if (!read.ok) {
     const err = read.error as { code?: unknown; message?: unknown } | null;
@@ -1153,6 +1160,9 @@ async function buildUsdView(args: {
     dataQuality: singleKeyDataQuality(dqf),
     returnsUnit: "USD",
     recordObservations,
+    ...(recordSeriesStart ? { recordSeriesStart } : {}),
+    // 194.2 R2: the conversion drops a malformed native date; the record still has it.
+    recordSourceDates: nativeSeries.map((p) => p.date),
     ...(facts.missingSegments.length > 0 ? { missingSegments: facts.missingSegments } : {}),
   };
   usdOpts.benchmarkPrices = await readFactsheetBenchmark(supabase, usdSeries, usdOpts, id);

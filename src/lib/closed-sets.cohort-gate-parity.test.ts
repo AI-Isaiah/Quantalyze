@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isComputedAnalytics } from "./closed-sets";
-import { MIN_ANNUALIZATION_DAYS, MIN_ANNUALIZATION_OBS } from "./figure-gate";
+import { figureRecord, MIN_ANNUALIZATION_DAYS, MIN_ANNUALIZATION_OBS, recordClears } from "./figure-gate";
 import { ANNUALIZED_PERCENTILE_METRICS } from "./percentile-core";
 
 /**
@@ -97,6 +97,58 @@ describe("cohort-rank SQL gate ⇄ isComputedAnalytics parity", () => {
       const occurrences = (needle: string) => sql.split(needle).length - 1;
       expect(occurrences("::int < v_min_obs WHEN")).toBe(2);
       expect(occurrences("END) + 1 < v_min_span_days END, false)")).toBe(2);
+    });
+  });
+
+  // Phase 194.2 / D-01 (194-MALFORMED-DATES-ABSENT, the SQL half): a record date that is PRESENT but
+  // not a real calendar day is UNREADABLE and withholds the figure in TS (`figureRecord`), so the
+  // cohort must leave that strategy out of the annualised peer sets too. Before 20261110120000 a
+  // malformed date fell through to NULL, COALESCE read it as "fine", and the row stayed ranked while
+  // the factsheet withheld it. An ABSENT date is not unreadable and keeps the null rule.
+  describe("D-01 unreadable record dates, SQL == figureRecord", () => {
+    const predicateLines = sql
+      .split("\n")
+      .filter((l) => l.includes("CROSS JOIN LATERAL (SELECT NOT COALESCE("));
+    const DATES = [
+      "a.returns_series->0->>'date'",
+      "a.returns_series->-1->>'date'",
+      "a.data_quality_flags->>'headline_since'",
+    ];
+    // The unreadable term for one date expression, exactly as the migration writes it: shaped like a
+    // day -> the parser must read it (NULL = an impossible day); any other non-empty text -> unreadable.
+    const term = (x: string) =>
+      String.raw`(CASE WHEN (${x}) ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(${x}) IS NULL ELSE (${x}) <> '' END)`;
+
+    it("both cohort queries carry the unreadable term for all three record dates", () => {
+      expect(predicateLines).toHaveLength(2);
+      for (const line of predicateLines) {
+        for (const x of DATES) expect(line, x).toContain(term(x));
+      }
+    });
+
+    it("the unreadable arm leads the CASE, ahead of the record_observations arm", () => {
+      // TS withholds an unreadable record even when a stored count clears, so a non-crypto row with
+      // enough observations and a garbage date must be out. Ordering is the whole rule: with the
+      // observation arm first, that row would be decided by its count and stay in.
+      for (const line of predicateLines) {
+        const lead = line.indexOf("NOT COALESCE(CASE WHEN ((CASE WHEN");
+        const observationArm = line.indexOf("record_observations");
+        const handoff = line.indexOf("THEN true WHEN s.asset_class IS DISTINCT FROM 'crypto'");
+        expect(lead, "the CASE opens with the unreadable arm").toBeGreaterThan(-1);
+        expect(handoff, "the unreadable arm hands over to the observation arm").toBeGreaterThan(lead);
+        expect(handoff).toBeLessThan(observationArm);
+        for (const x of DATES) expect(line.indexOf(term(x)), x).toBeLessThan(handoff);
+      }
+    });
+
+    it("TS agrees on the verdict: a present malformed date withholds, an absent one does not", () => {
+      const base = { seriesEnd: "2026-06-01", observations: 200, periodsPerYear: 252 };
+      // a non-crypto record whose stored count clears is still withheld when a date is unreadable
+      expect(recordClears(figureRecord({ ...base, seriesStart: "garbage" }))).toBe(false);
+      expect(recordClears(figureRecord({ ...base, seriesStart: "2026-01-01", headlineSince: "garbage" }))).toBe(false);
+      // absent (null or empty) is unknown, never unreadable: the count decides
+      expect(recordClears(figureRecord({ ...base, seriesStart: null }))).toBe(true);
+      expect(recordClears(figureRecord({ ...base, seriesStart: "" }))).toBe(true);
     });
   });
 

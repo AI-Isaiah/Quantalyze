@@ -79,9 +79,38 @@ export function coveredDays(first: string, last: string): number {
   return spanDays(first, last) + 1;
 }
 
-/** True for an ISO yyyy-mm-dd string `Date.parse` can read. */
+const READABLE_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True only for a REAL calendar day written exactly `yyyy-mm-dd`. The shape alone, or a bare
+ * `Date.parse`, let an impossible day such as `2026-02-31` roll forward into a real one, so this
+ * also round-trips through `toISOString`. Phase 194.2 (D-01): TS, Python `_read_day`
+ * (analytics-service/services/metrics.py) and SQL `ledger_refresh_parse_series_date` now agree
+ * that an impossible calendar day, or a date with trailing text, is unreadable.
+ */
 export function isReadableDay(d: string): boolean {
-  return Number.isFinite(Date.parse(`${d}T00:00:00Z`));
+  if (!READABLE_DAY.test(d)) return false;
+  const t = Date.parse(`${d}T00:00:00Z`);
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d;
+}
+
+/**
+ * Phase 194.2 (194-MALFORMED-DATES-ABSENT, 194-SCENARIO-INTERIOR-DATES): the FIRST date on any of
+ * the given date axes that `isReadableDay` rejects, or null when every date on every axis reads.
+ * `axis` is the position of the axis as passed, `index` the position inside it. The one
+ * interior-date check: the factsheet builder (cash, mark-to-market, smoothed) and the Scenario
+ * factsheet payload both call it, so no producer keeps its own scan.
+ */
+export function firstUnreadableDate(
+  ...axes: ReadonlyArray<readonly string[]>
+): { axis: number; index: number; date: string } | null {
+  for (let axis = 0; axis < axes.length; axis += 1) {
+    const dates = axes[axis];
+    for (let index = 0; index < dates.length; index += 1) {
+      if (!isReadableDay(dates[index])) return { axis, index, date: dates[index] };
+    }
+  }
+  return null;
 }
 
 /**
@@ -354,6 +383,27 @@ export function shortTrackNote(scope: "record" | "range" | "blend", n: number): 
 /** The `<1y` marker's `title` / sr-only text. */
 export function shortTrackMarkerTitle(n: number): string {
   return `Annualized from ${days(n)} of record, under one year.`;
+}
+
+/**
+ * 194.2 D-05 (194-ZOOM-BENCHMARK-COVERAGE): the one muted sentence naming the span a benchmark
+ * was actually compared over when a selected range is wider than its data. `from` and `through`
+ * arrive ALREADY FORMATTED ("Mar 3, 2026"): the formatter lives in the factsheet rail, which
+ * imports this module, so this module must not import it back. `sides` says which end of the
+ * window the benchmark's data falls short of (judged on the benchmark's own calendar by
+ * `startsAfterCoverage` / `isPastCoverage` in factsheet/align.ts). Neither side short: null,
+ * there is nothing to say. No call site concatenates this sentence, so a test can pin every form.
+ */
+export function benchCoverageNote(
+  benchmarkName: string,
+  from: string,
+  through: string,
+  sides: { startsAfter: boolean; endsBefore: boolean },
+): string | null {
+  if (!sides.startsAfter && !sides.endsBefore) return null;
+  const why = sides.startsAfter && sides.endsBefore ? "starts after and ends before" : sides.startsAfter ? "starts after" : "ends before";
+  const span = from === through ? `on ${from} only` : `over ${from} – ${through}`;
+  return `${benchmarkName} compared ${span} (its data ${why} this range).`;
 }
 
 /** The `title` of a 6 Month / 3 Month cell that is null because the record does not cover the window. */

@@ -19,6 +19,11 @@ import {
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
 import { logAuditEvent } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
+import { captureToSentry } from "@/lib/sentry-capture";
+import {
+  INTRO_ATTESTATION_CHECK_FAILED,
+  INTRO_ATTESTATION_REQUIRED,
+} from "@/lib/intro/refusal-codes";
 
 /**
  * Synchronous snapshot budget: if computePortfolioSnapshot finishes in
@@ -101,6 +106,39 @@ export async function POST(req: NextRequest) {
   if (!profile || (profile.role !== "allocator" && profile.role !== "both")) {
     return NextResponse.json(
       { error: "Only allocators can request introductions" },
+      { status: 403 },
+    );
+  }
+
+  // Phase 194.2 D-03: the accredited-investor attestation is enforced HERE, not
+  // only in the UI. /discovery's layout and the factsheet viewer gate on the
+  // same `investor_attestations` row, but a direct POST bypassed both. It runs
+  // BEFORE the body parse and BEFORE the limiter, so a refused POST spends no
+  // `intro:` rate-limit token and inserts nothing. A failed read fails closed
+  // (500, named code) and is reported; the body carries no user data.
+  const { data: attestation, error: attestationError } = await supabase
+    .from("investor_attestations")
+    .select("attested_at")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (attestationError) {
+    captureToSentry(attestationError, {
+      tags: { area: "intro", stage: "attestation-read" },
+    });
+    return NextResponse.json(
+      {
+        error: "Could not check attestation",
+        code: INTRO_ATTESTATION_CHECK_FAILED,
+      },
+      { status: 500 },
+    );
+  }
+  if (attestation?.attested_at == null) {
+    return NextResponse.json(
+      {
+        error: "Accredited-investor attestation required",
+        code: INTRO_ATTESTATION_REQUIRED,
+      },
       { status: 403 },
     );
   }

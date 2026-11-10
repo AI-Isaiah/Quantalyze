@@ -68,9 +68,10 @@
 -- is a SECURITY DEFINER cross-tenant read over the entire published universe,
 -- and assertions 1 and 4 are its only recurring executed coverage.
 --
--- NOTHING is skipped now. All fourteen assertions (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14)
--- execute on every run (arms 7-14 are the Phase 194 D-15 cohort record gate, see below),
--- and the file ends in an 'ALL 14 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14)'
+-- NOTHING is skipped now. All eighteen assertions (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+-- execute on every run (arms 7-14 are the Phase 194 D-15 cohort record gate and arms 12 and 15-18 its
+-- Phase 194.2 D-01 unreadable-date rule, see below),
+-- and the file ends in an 'ALL 18 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)'
 -- sentinel so that an arm neutered in place — deleted, renumbered or
 -- short-circuited — cannot exit 0 unnoticed. Keep the roster in that notice: as
 -- of 2026-08-25 `sql-tests` in .github/workflows/ci.yml counts its entries and
@@ -106,8 +107,17 @@
 -- 10: the non-crypto boundary (60 observations stays, 59 leaves, the stored count deciding
 -- over the span). 11: the A-194-D15-02 fallback (no stored count -> the span decides).
 -- 12: an impossible calendar date (2026-02-31) in any of the three record dates must not
--- fail the RPC, and the row stays in (the null rule). Each arm carries a RED-UNDER that the
--- runner proved bites its own arm.
+-- fail the RPC, and (Phase 194.2 D-01, 20261110120000) the row LEAVES the annualised cohort,
+-- because a present date that is not a real day is unreadable, as it is in TS figureRecord.
+-- Each arm carries a RED-UNDER that the runner proved bites its own arm.
+-- ⭐ ARMS 15-18 — THE D-01 UNREADABLE-DATE RULE (Phase 194.2 FIGURERESIDUALS, plan 03)
+-- 20261110120000 adds one leading arm to the record predicate: a first returns_series date, a last
+-- one or data_quality_flags.headline_since that is PRESENT but not a real calendar day leaves the
+-- annualised cohort (an ABSENT date keeps the null rule: the row stays). 15: a malformed FIRST date.
+-- 16: a malformed LAST date. 17: a malformed headline_since. 18: the arm precedes the observation
+-- arm, so a non-crypto row whose stored count clears is still out when a record date is unreadable
+-- (TS withholds such a record too). Each carries an anti-vacuity flip (repair only the date and the
+-- row joins). 15 and 16 also hold an ABSENT-date contrast (NULL and empty text stay in).
 -- D-18 (FOUNDER-DECIDED 2026-11-07, review WR-02): a short record leaves the annualised peer sets
 -- (Sharpe, Sortino) ONLY and stays in the Max DD set. Arm 9's oracle is Sharpe and Sortino over the
 -- kept rows and Max DD over every row. 13: the min-N floor applies per rank (a Max DD set of 20 ranks
@@ -131,11 +141,12 @@
 -- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
 -- what the lane applies before this gate.
 -- ⚠️ THE OBJECT UNDER TEST IS THE REAL SECDEF, in its NEWEST definition: the lane
--- applies 20260821120000 and then 20261107140000 (the Phase 194 D-15 re-base, which
--- replaces the whole body), so every mutation below targets 20261107140000. A mutation
--- of 20260821120000 alone would be overwritten by the later CREATE OR REPLACE and could
--- never bite. Arm 0 renames a parameter, which CREATE OR REPLACE refuses over an existing
--- definition (42P13), so it renames in both files. The newest migration SELF-VERIFIES its
+-- applies 20260821120000, then 20261107140000 (the Phase 194 D-15 re-base) and then
+-- 20261110120000 (the Phase 194.2 D-01 re-base, which replaces the whole body), so every
+-- mutation below targets 20261110120000. A mutation of an older file alone would be
+-- overwritten by the later CREATE OR REPLACE and could never bite. Arm 0 renames a
+-- parameter, which CREATE OR REPLACE refuses over an existing definition (42P13), so it
+-- renames in all three files. The newest migration SELF-VERIFIES its
 -- own identity args, its SECDEF flag, its gate occurrence count and its record-predicate
 -- count at apply time. Several twins are therefore LAYERED: the second step removes the
 -- migration's own verification term so the GATE reds rather than the apply — never to
@@ -148,7 +159,7 @@
 -- columns the record predicate reads.
 -- 19-fixture-cohort-rank-metrics.sql adds only sharpe/sortino/max_drawdown,
 -- whose values come entirely from this file's own seeds.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/09-fixture-migration-ledger.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/19-fixture-cohort-rank-metrics.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","scripts/pg-lane/fixtures/42-fixture-strategies-asset-class.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/09-fixture-migration-ledger.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/19-fixture-cohort-rank-metrics.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","scripts/pg-lane/fixtures/42-fixture-strategies-asset-class.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -273,7 +284,7 @@ BEGIN
   --            LAYERED: the migration's own post-verify (a) compares the same
   --            identity-args string, so the third step re-cuts THAT string and
   --            nothing else.
-  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1}]}
   SELECT p.oid INTO v_fn_oid
     FROM pg_proc p
     WHERE p.proname = 'get_verified_cohort_rank'
@@ -307,7 +318,7 @@ BEGIN
   --            caller's own strategies — a wrong ranking, not an error.
   --            LAYERED: the migration's post-verify (b) asserts the flag, so the
   --            second step removes THAT term only.
-  -- RED-UNDER-M: {"arm":"2a","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"LANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog","replace":"LANGUAGE plpgsql\nSET search_path = public, pg_catalog","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF NOT COALESCE(v_secdef, false) THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"2a","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"LANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog","replace":"LANGUAGE plpgsql\nSET search_path = public, pg_catalog","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  IF NOT COALESCE(v_secdef, false) THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   SELECT prosecdef, proconfig INTO v_secdef, v_config
     FROM pg_proc WHERE oid = v_fn_oid;
   IF NOT COALESCE(v_secdef, false) THEN
@@ -373,7 +384,7 @@ BEGIN
   --            presence. min-N would then count rows the percentiles do not.
   --            LAYERED: the migration's post-verify (e) makes the same count, so
   --            the second step removes THAT term only.
-  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  WHERE s.status = 'published'\n    AND a.computation_status IN ('complete', 'complete_with_warnings')\n","replace":"  WHERE s.status = 'published'\n","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_gate_hits < 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  WHERE s.status = 'published'\n    AND a.computation_status IN ('complete', 'complete_with_warnings')\n","replace":"  WHERE s.status = 'published'\n","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  IF v_gate_hits < 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   v_gate_hits := (length(v_def) - length(replace(v_def, v_gate_pred, '')))
                  / length(v_gate_pred);
   IF v_gate_hits < 2 THEN
@@ -388,7 +399,7 @@ BEGIN
   --            only the behavioural delta notices that the cohort went empty.
   --            The header records why that spelling is load-bearing: an earlier
   --            draft keyed on trust_tier IS NOT NULL, a tautology.
-  -- RED-UNDER-M: {"arm":"4a","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"      WHERE v.strategy_id = s.id AND v.status = 'published'","replace":"      WHERE v.strategy_id = s.id AND v.status = 'verified'","occurrences":2}]}
+  -- RED-UNDER-M: {"arm":"4a","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"      WHERE v.strategy_id = s.id AND v.status = 'published'","replace":"      WHERE v.strategy_id = s.id AND v.status = 'verified'","occurrences":2}]}
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid, '00000000-0000-0000-0000-000000000000',
           'test-mig159-cohort-gate@quantalyze.test', now(), now());
@@ -485,7 +496,7 @@ BEGIN
   --            LAYERED: the migration's post-verify (h) demands exactly two copies of the
   --            predicate, so the second step removes THAT term only; it never widens the
   --            mutation.
-  -- RED-UNDER-M: {"arm":"7","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(","replace":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(FALSE AND ","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_rec_hits <> 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"7","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(","replace":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(FALSE AND ","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  IF v_rec_hits <> 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
   v_id := pg_temp.cr_seed(uid, 'a7-crypto-60d', 'crypto', v_d0::text, (v_d0 + 60)::text, NULL, NULL, 1.0);
   v_seeded := v_seeded || v_id;
@@ -510,7 +521,7 @@ BEGIN
   --            exactly 90 days then leaves the cohort. D-15 says a record is long enough AT 90.
   --            (Dropping the D-20 `+ 1` from the span bites this arm too: 90 daily returns would
   --            then read 89 days and leave.)
-  -- RED-UNDER-M: {"arm":"8","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"8","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":" < v_min_span_days END, false)","replace":" <= v_min_span_days END, false)","occurrences":1}]}
   PERFORM pg_temp.cr_retire(v_seeded);
   v_seeded := '{}';
   SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
@@ -550,7 +561,7 @@ BEGIN
   --            query's copy in place. cohort_n stays 20 (the denominator), the short rows join
   --            the Sharpe and Sortino numerators, and both deciles move. The migration's (h)
   --            check is removed by a second step, as in arm 7.
-  -- RED-UNDER-M: {"arm":"9","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(","replace":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(FALSE AND ","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_rec_hits <> 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"9","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(","replace":"  CROSS JOIN LATERAL (SELECT NOT COALESCE(FALSE AND ","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  IF v_rec_hits <> 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   PERFORM pg_temp.cr_retire(v_seeded);
   v_seeded := '{}';
   SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
@@ -577,7 +588,7 @@ BEGIN
   -- RED-UNDER: make the observation bound inclusive, `::int < v_min_obs` becomes
   --            `::int <= v_min_obs` in both queries and in the migration's v_rec_pred copy. A
   --            traditional strategy with exactly 60 observations then leaves the cohort.
-  -- RED-UNDER-M: {"arm":"10","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"10","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"(a.metrics_json->>'record_observations')::int < v_min_obs","replace":"(a.metrics_json->>'record_observations')::int <= v_min_obs","occurrences":1}]}
   PERFORM pg_temp.cr_retire(v_seeded);
   v_seeded := '{}';
   SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
@@ -609,11 +620,12 @@ BEGIN
 
   -- ----- (11) the interim fallback (A-194-D15-02): no count -> the span decides -
   -- D-20: 90 daily returns run from v_d0 to v_d0 + 89, 89 returns end at v_d0 + 88.
-  -- RED-UNDER: restrict the span arm to crypto rows, `WHEN (a.returns_series->0->>'date') ~`
-  --            becomes `WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~` in
-  --            both queries and in the migration's v_rec_pred copy. A non-crypto row without a
+  -- RED-UNDER: restrict the span arm to crypto rows, the span arm's opening `WHEN (first date) ~ ...
+  --            AND (last date) ~` becomes `WHEN s.asset_class = 'crypto' AND (first date) ~ ...`
+  --            in both queries and in the migration's v_rec_pred copy (the match runs on the span
+  --            arm's two-date opening, which the unreadable arm does not contain). A non-crypto row without a
   --            stored count is then never decided, and a traditional 89-day record stays in.
-  -- RED-UNDER-M: {"arm":"11","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"WHEN (a.returns_series->0->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"WHEN (a.returns_series->0->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"WHEN (a.returns_series->0->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"11","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"WHEN (a.returns_series->0->>'date') ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (a.returns_series->-1->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (a.returns_series->-1->>'date') ~","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"WHEN (a.returns_series->0->>'date') ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (a.returns_series->-1->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (a.returns_series->-1->>'date') ~","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"WHEN (a.returns_series->0->>'date') ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (a.returns_series->-1->>'date') ~","replace":"WHEN s.asset_class = 'crypto' AND (a.returns_series->0->>'date') ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (a.returns_series->-1->>'date') ~","occurrences":1}]}
   PERFORM pg_temp.cr_retire(v_seeded);
   v_seeded := '{}';
   SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
@@ -638,19 +650,23 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (11): after lengthening ONLY the 89-day traditional row to 400 days, cohort_n went % -> % (expected +2 in total). The row is excluded by something other than its span.', n_base, n_c;
   END IF;
 
-  -- ----- (12) an impossible calendar date cannot fail the RPC for every caller ---
+  -- ----- (12) an impossible calendar date cannot fail the RPC, and the row leaves the cohort ---
   -- The record dates are parsed with public.ledger_refresh_parse_series_date, which returns
-  -- NULL for 2026-02-31 where a bare ::date raises 22008. A NULL leaves the record
-  -- undeterminable, and an undeterminable record stays in (the null rule). Three rows, one
-  -- impossible date each, so that restoring ANY ONE of the three casts fails the arm:
+  -- NULL for 2026-02-31 where a bare ::date raises 22008. Phase 194.2 D-01 (20261110120000):
+  -- a PRESENT date that is not a real day is UNREADABLE (TS figureRecord and Python _read_day
+  -- say the same), so the row leaves the annualised cohort instead of staying in on the null
+  -- rule; it must still never raise. Three rows, one impossible date each, so that restoring
+  -- ANY ONE of the three casts fails the arm:
   --   A  the FIRST returns_series date      B  the LAST returns_series date
   --   C  data_quality_flags.headline_since  (A and B also carry a valid 200-day partner)
   -- The date is shape-valid, so the migration's regex pre-filter lets it through to the parser.
-  -- RED-UNDER: restore the bare casts the predicate carried before review round 1 of plan 19
-  --            (`(x)::date` for each of the three record dates) in both queries and in the
+  -- The cohort-count half (delta 0, then +3 once the dates are repaired) is pinned by the
+  -- anti-vacuity flip below; the runner mutation exercises the no-RAISE half.
+  -- RED-UNDER: restore the bare casts into the unreadable arm (`(x)::date IS NULL` in place of
+  --            the parser call, for each of the three record dates) in both queries and in the
   --            migration's v_rec_pred copy. The RPC then raises 22008 for every caller the
   --            moment one analytics row holds such a date.
-  -- RED-UNDER-M: {"arm":"12","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date')","replace":"(a.returns_series->-1->>'date')::date","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date')","replace":"(a.returns_series->-1->>'date')::date","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date')","replace":"(a.returns_series->-1->>'date')::date","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date')","replace":"(a.returns_series->0->>'date')::date","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date')","replace":"(a.returns_series->0->>'date')::date","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date')","replace":"(a.returns_series->0->>'date')::date","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since')","replace":"(a.data_quality_flags->>'headline_since')::date","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since')","replace":"(a.data_quality_flags->>'headline_since')::date","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since')","replace":"(a.data_quality_flags->>'headline_since')::date","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"12","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') IS NULL","replace":"(a.returns_series->-1->>'date')::date IS NULL","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') IS NULL","replace":"(a.returns_series->-1->>'date')::date IS NULL","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') IS NULL","replace":"(a.returns_series->-1->>'date')::date IS NULL","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date') IS NULL","replace":"(a.returns_series->0->>'date')::date IS NULL","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date') IS NULL","replace":"(a.returns_series->0->>'date')::date IS NULL","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.returns_series->0->>'date') IS NULL","replace":"(a.returns_series->0->>'date')::date IS NULL","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') IS NULL","replace":"(a.data_quality_flags->>'headline_since')::date IS NULL","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') IS NULL","replace":"(a.data_quality_flags->>'headline_since')::date IS NULL","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') IS NULL","replace":"(a.data_quality_flags->>'headline_since')::date IS NULL","occurrences":1}]}
   PERFORM pg_temp.cr_retire(v_seeded);
   v_seeded := '{}';
   SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
@@ -662,8 +678,19 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'TEST FAILED (12): get_verified_cohort_rank RAISED (SQLSTATE %, %) with an impossible calendar date (2026-02-31) in a returns_series date or in headline_since. One bad analytics row must never fail the cohort RPC for every authenticated caller; the record dates are no longer parsed through ledger_refresh_parse_series_date.', SQLSTATE, SQLERRM;
   END;
-  IF (n_a - n_base) IS DISTINCT FROM 3 THEN
-    RAISE EXCEPTION 'TEST FAILED (12): cohort_n went % -> % after seeding three crypto strategies that each carry one impossible date; expected +3. An undeterminable record stays in the cohort (the null rule), so none of the three may be left out.', n_base, n_a;
+  IF (n_a - n_base) IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (12): cohort_n went % -> % after seeding three crypto strategies that each carry one impossible calendar date (2026-02-31); expected no change. A record date that is present but not a real day is UNREADABLE (D-01: TS figureRecord and Python _read_day withhold it), so none of the three may join the annualised cohort. A +3 means the null rule is still keeping them in.', n_base, n_a;
+  END IF;
+  -- ANTI-VACUITY: each of the three rows was left out BY ITS DATE and nothing else. Repair ONLY the
+  -- dates (a valid 200-day series, no headline_since) and all three must join. Scoped to the ids this
+  -- arm seeded, never table-wide.
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 200)::text),
+         data_quality_flags = NULL
+   WHERE strategy_id = ANY (v_seeded);
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (12): after repairing ONLY the impossible dates of the three crypto rows, cohort_n went % -> % (expected +3 in total). The rows are excluded by something other than their date, so the first half of arm 12 proved nothing about the unreadable rule.', n_base, n_b;
   END IF;
 
   -- ----- (13) the min-N floor applies PER RANK, and a short record is still a Max DD peer (D-18) -----
@@ -677,7 +704,7 @@ BEGIN
   --            becomes `IF v_n < v_min_n`. The Max DD rank is then suppressed by the annualised
   --            cohort of 10 and reads NULL, where a short record in the Max DD set must carry it
   --            to 20.
-  -- RED-UNDER-M: {"arm":"13","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF v_n_all < v_min_n THEN","replace":"  IF v_n < v_min_n THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"13","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  IF v_n_all < v_min_n THEN","replace":"  IF v_n < v_min_n THEN","occurrences":1}]}
   PERFORM pg_temp.cr_retire(v_seeded);
   v_seeded := '{}';
   SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
@@ -716,7 +743,7 @@ BEGIN
   --            counting as hits against the whole-cohort denominator: 4 of 20 = 20% -> 80, not 30.
   --            LAYERED: the migration's (j) check reads the deployed body for the unflagged
   --            form, so the second step removes THAT term only.
-  -- RED-UNDER-M: {"arm":"14","apply":[{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)","replace":"FILTER (WHERE r.rec_ok AND abs(a.max_drawdown) <= p_max_dd) / v_n_all)","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20261107140000_get_verified_cohort_rank_span_gate.sql","find":"  IF position('FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)' IN v_def) = 0 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"14","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)","replace":"FILTER (WHERE r.rec_ok AND abs(a.max_drawdown) <= p_max_dd) / v_n_all)","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"  IF position('FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)' IN v_def) = 0 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   IF r.max_dd_pct IS DISTINCT FROM 30 THEN
     RAISE EXCEPTION 'TEST FAILED (14): max_dd_pct is %, expected 30 computed by hand over all 20 rows (4 kept hits + 10 short hits = 14 of 20 = 70%%, inverted). A short-record strategy must stay in the Max DD set (D-18); an 80 means the ten short rows no longer count as Max DD hits.', r.max_dd_pct;
   END IF;
@@ -734,9 +761,145 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (14): max_dd_pct moved to % after the short rows reached the minimum record, expected 30 unchanged. The Max DD set must be the same whole cohort whatever the record length.', r.max_dd_pct;
   END IF;
 
+  -- ----- (15) a malformed FIRST returns_series date leaves the annualised cohort (D-01) -----
+  -- A crypto row with a 200-day record would clear D-15 on its span, so only its unreadable first date
+  -- can leave it out. 'not-a-date' fails the YYYY-MM-DD shape. An ABSENT first date (NULL, or empty
+  -- text) is not malformed and keeps the null rule: the row stays in.
+  -- RED-UNDER: neutralise the NOT-A-DAY branch of the first-date term in both queries and in the
+  --            migration's v_rec_pred copy (`ELSE (first date) <> ''` becomes `ELSE false`). The
+  --            impossible-day branch stays, so arm 12 still passes and this arm is the first to red.
+  --            The garbage first date then falls through the span arm to NULL, the null rule keeps
+  --            the row in, and cohort_n rises by one where it must not.
+-- RED-UNDER-M: {"arm":"15","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.returns_series->0->>'date') <> '' END)","replace":"ELSE false END)","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.returns_series->0->>'date') <> '' END)","replace":"ELSE false END)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.returns_series->0->>'date') <> '' END)","replace":"ELSE false END)","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_id := pg_temp.cr_seed(uid, 'a15-bad-first', 'crypto', 'not-a-date', (v_d0 + 200)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (15): cohort_n went % -> % after seeding a crypto strategy with a 200-day record whose FIRST returns_series date is not a date; expected no change. A present malformed date is unreadable (D-01), so the row must leave the annualised cohort the way TS figureRecord withholds its figures.', n_base, n_a;
+  END IF;
+  -- ANTI-VACUITY: the row was left out BY ITS FIRST DATE and nothing else. Repair only that date.
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 200)::text)
+   WHERE strategy_id = v_id;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (15): after repairing ONLY the first date of the 200-day crypto row, cohort_n went % -> % (expected +1). The row is excluded by something other than its first date, so the first half of arm 15 proved nothing about the unreadable rule.', n_base, n_b;
+  END IF;
+  -- ABSENT CONTRAST: a NULL first date and an empty one are absent, not malformed. Both rows keep the
+  -- null rule and stay in (the span arm cannot decide, so nothing leaves them out).
+  v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a15-null-first', 'crypto', NULL, (v_d0 + 200)::text, NULL, NULL, 1.0);
+  v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a15-empty-first', 'crypto', '', (v_d0 + 200)::text, NULL, NULL, 1.0);
+  SELECT cohort_n INTO n_c FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_c - n_base) IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (15): cohort_n went % -> % after also seeding two crypto strategies whose first date is ABSENT (NULL, and empty text); expected +3 in total. An absent date is unknown, not malformed, and keeps the null rule: it must not be read as unreadable.', n_base, n_c;
+  END IF;
+
+  -- ----- (16) a malformed LAST returns_series date leaves the annualised cohort (D-01) -----
+  -- RED-UNDER: neutralise the NOT-A-DAY branch of the last-date term in both queries and in the
+  --            migration's v_rec_pred copy (`ELSE (last date) <> ''` becomes `ELSE false`; the
+  --            impossible-day branch stays, so arm 12 still passes). The garbage last date then
+  --            falls through the span arm to NULL and the row stays in.
+  -- RED-UNDER-M: {"arm":"16","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.returns_series->-1->>'date') <> '' END)","replace":"ELSE false END)","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.returns_series->-1->>'date') <> '' END)","replace":"ELSE false END)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.returns_series->-1->>'date') <> '' END)","replace":"ELSE false END)","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_id := pg_temp.cr_seed(uid, 'a16-bad-last', 'crypto', v_d0::text, 'not-a-date', NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (16): cohort_n went % -> % after seeding a crypto strategy whose LAST returns_series date is not a date; expected no change. A present malformed date is unreadable (D-01), so the row must leave the annualised cohort.', n_base, n_a;
+  END IF;
+  -- ANTI-VACUITY: the row was left out BY ITS LAST DATE and nothing else. Repair only that date.
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 200)::text)
+   WHERE strategy_id = v_id;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (16): after repairing ONLY the last date of the crypto row, cohort_n went % -> % (expected +1). The row is excluded by something other than its last date, so the first half of arm 16 proved nothing about the unreadable rule.', n_base, n_b;
+  END IF;
+  -- A date shaped like a day whose month is 13 (2026-13-45) is not a day either: it reaches the parser,
+  -- which reads it as NULL. The row stays out, and the RPC does not raise.
+  v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a16-month-13', 'crypto', v_d0::text, '2026-13-45', NULL, NULL, 1.0);
+  SELECT cohort_n INTO n_c FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_c - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (16): cohort_n is % after also seeding a crypto strategy whose last date is shaped like a day but has month 13 (base %, expected base + 1: the repaired row only). A date the parser cannot read is not a real day and must leave the annualised cohort.', n_c, n_base;
+  END IF;
+  -- A trailing-garbage date (a real day followed by x) is not a day either: the shape test is anchored at both ends.
+  v_id2 := pg_temp.cr_seed(uid, 'a16-trailing-garbage', 'crypto', v_d0::text, (v_d0 + 200)::text || 'x', NULL, NULL, 1.0);
+  v_seeded := v_seeded || v_id2;
+  SELECT cohort_n INTO n_c FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_c - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (16): cohort_n is % after also seeding a crypto strategy whose last date carries trailing text (a real day followed by x) (base %, expected base + 1: the repaired row only). A date with trailing text is not a real day, so the shape test must be anchored at both ends.', n_c, n_base;
+  END IF;
+  -- ABSENT CONTRAST: a NULL last date is absent, not malformed; the row stays in.
+  v_seeded := v_seeded || pg_temp.cr_seed(uid, 'a16-null-last', 'crypto', v_d0::text, NULL, NULL, NULL, 1.0);
+  SELECT cohort_n INTO n_c FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_c - n_base) IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (16): cohort_n went % -> % after also seeding a crypto strategy whose last date is ABSENT (NULL); expected +2 in total (the repaired row and this one). An absent date keeps the null rule and must not be read as unreadable.', n_base, n_c;
+  END IF;
+
+  -- ----- (17) a malformed data_quality_flags.headline_since leaves the annualised cohort (D-01) -----
+  -- headline_since decides a chain-broken row's record start, so a present but unparsable one is as
+  -- unreadable as a malformed series end (an absent one is unknown). 'garbage' is not shaped like a day
+  -- at all: before D-01 the span arm ignored it and measured the record from the first date.
+  -- RED-UNDER: neutralise the NOT-A-DAY branch of the headline_since term in both queries and in the
+  --            migration's v_rec_pred copy (`ELSE (headline_since) <> ''` becomes `ELSE false`; the
+  --            impossible-day branch stays, so arm 12 still passes). The span arm then ignores the
+  --            garbage headline and measures 201 days from the first date, so the row stays in.
+  -- RED-UNDER-M: {"arm":"17","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.data_quality_flags->>'headline_since') <> '' END)","replace":"ELSE false END)","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.data_quality_flags->>'headline_since') <> '' END)","replace":"ELSE false END)","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"ELSE (a.data_quality_flags->>'headline_since') <> '' END)","replace":"ELSE false END)","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_id := pg_temp.cr_seed(uid, 'a17-bad-headline', 'crypto', v_d0::text, (v_d0 + 200)::text, 'garbage', NULL, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (17): cohort_n went % -> % after seeding a crypto strategy with a 201-day record and a headline_since that is not a date; expected no change. A present malformed headline_since is unreadable (D-01), so the row must leave the annualised cohort.', n_base, n_a;
+  END IF;
+  -- ANTI-VACUITY: the row was left out BY ITS HEADLINE and nothing else. Repair only that field.
+  UPDATE strategy_analytics
+     SET data_quality_flags = jsonb_build_object('headline_since', v_d0::text)
+   WHERE strategy_id = v_id;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (17): after repairing ONLY the headline_since of the crypto row, cohort_n went % -> % (expected +1). The row is excluded by something other than its headline_since, so the first half of arm 17 proved nothing about the unreadable rule.', n_base, n_b;
+  END IF;
+
+  -- ----- (18) the unreadable arm PRECEDES the observation arm (D-01) -----
+  -- A non-crypto row with a stored count of 100 (above the 60 minimum) is decided by that count under
+  -- D-15, so it stays in. When one of its record dates is unreadable, TS figureRecord withholds it
+  -- whatever the count (a non-crypto record with a stored count that clears is still withheld), so the
+  -- cohort must leave it out: the unreadable arm has to run BEFORE the observation arm.
+  -- RED-UNDER: restrict the unreadable arm to crypto rows, so the observation arm decides a non-crypto
+  --            row with a clearing count before any date is judged (`CASE WHEN ((` becomes
+  --            `CASE WHEN s.asset_class = 'crypto' AND ((` in both queries and in the migration's
+  --            v_rec_pred copy). The traditional row with 100 observations then stays in.
+  -- RED-UNDER-M: {"arm":"18","apply":[{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"NOT COALESCE(CASE WHEN ((","replace":"NOT COALESCE(CASE WHEN s.asset_class = 'crypto' AND ((","occurrences":3},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"NOT COALESCE(CASE WHEN ((","replace":"NOT COALESCE(CASE WHEN s.asset_class = 'crypto' AND ((","occurrences":2},{"kind":"edit","file":"supabase/migrations/20261110120000_get_verified_cohort_rank_unreadable_dates.sql","find":"NOT COALESCE(CASE WHEN ((","replace":"NOT COALESCE(CASE WHEN s.asset_class = 'crypto' AND ((","occurrences":1}]}
+  PERFORM pg_temp.cr_retire(v_seeded);
+  v_seeded := '{}';
+  SELECT cohort_n INTO n_base FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  v_id := pg_temp.cr_seed(uid, 'a18-trad-count-clears-bad-last', 'traditional', v_d0::text, 'garbage', NULL, 100, 1.0);
+  v_seeded := v_seeded || v_id;
+  SELECT cohort_n INTO n_a FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_a - n_base) IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (18): cohort_n went % -> % after seeding a traditional strategy with record_observations = 100 (clears the 60 minimum) and an unreadable last date; expected no change. An unreadable record is withheld whatever its stored count (D-01), so the unreadable arm must precede the observation arm.', n_base, n_a;
+  END IF;
+  -- ANTI-VACUITY: the row was left out BY ITS LAST DATE and nothing else. Repair only that date and the
+  -- clearing count decides: it joins.
+  UPDATE strategy_analytics
+     SET returns_series = pg_temp.cr_series(v_d0::text, (v_d0 + 30)::text)
+   WHERE strategy_id = v_id;
+  SELECT cohort_n INTO n_b FROM public.get_verified_cohort_rank(1.0, 1.0, 0.1);
+  IF (n_b - n_base) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (18): after repairing ONLY the last date of the traditional row (record_observations = 100, a 31-day span), cohort_n went % -> % (expected +1: the stored count decides over the span). The row is excluded by something other than its last date, so the first half of arm 18 proved nothing about the ordering.', n_base, n_b;
+  END IF;
+
   PERFORM pg_temp.cr_retire(v_seeded);
 
-  RAISE NOTICE 'ALL 14 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14) and passed — the RANK-01 gate appears in % cohort predicates, SECURITY DEFINER + search_path pinned, anon lacks EXECUTE, complete_with_warnings joins the cohort and a failed-with-KPIs row does not (proven causal by the status flip); the D-15 record gate leaves a crypto 60-day row out of both queries, keeps crypto at 90 days and drops it at 89, keeps a traditional strategy at 60 observations and drops it at 59, decides a traditional strategy without a count by its span, ranks only the kept rows, and survives an impossible calendar date in any of the three record dates; D-18: a short record leaves the Sharpe and Sortino peer sets and stays in the Max DD set, the min-N floor applies to each rank on its own population, and cohort_n is the annualised cohort.', v_gate_hits;
+  RAISE NOTICE 'ALL 18 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18) and passed — the RANK-01 gate appears in % cohort predicates, SECURITY DEFINER + search_path pinned, anon lacks EXECUTE, complete_with_warnings joins the cohort and a failed-with-KPIs row does not (proven causal by the status flip); the D-15 record gate leaves a crypto 60-day row out of both queries, keeps crypto at 90 days and drops it at 89, keeps a traditional strategy at 60 observations and drops it at 59, decides a traditional strategy without a count by its span, ranks only the kept rows, and survives an impossible calendar date in any of the three record dates without raising; D-01: a record date that is present but not a real day (a malformed first date, last date or headline_since, an impossible calendar day, or trailing text) leaves the annualised cohort while an absent date stays in, and the unreadable rule precedes the observation arm so a non-crypto row whose stored count clears is still out; D-18: a short record leaves the Sharpe and Sortino peer sets and stays in the Max DD set, the min-N floor applies to each rank on its own population, and cohort_n is the annualised cohort.', v_gate_hits;
 END
 $$;
 

@@ -68,6 +68,7 @@ type BookScalars = {
   figure_span_days?: number | null;
   figure_observations?: number | null;
   figure_crypto?: boolean;
+  figure_unreadable?: boolean;
 };
 
 /**
@@ -85,6 +86,7 @@ export function constituentFigure(
       spanDays: bookStrategy.figure_span_days ?? null,
       observations: bookStrategy.figure_observations ?? null,
       crypto: bookStrategy.figure_crypto ?? false,
+      ...(bookStrategy.figure_unreadable === true ? { unreadable: true as const } : {}),
     };
   } else if (lazyEntry !== undefined && lazyEntry !== "unavailable" && lazyEntry.record !== undefined) {
     record = lazyEntry.record;

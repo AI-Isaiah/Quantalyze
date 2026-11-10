@@ -71,6 +71,7 @@ describe("resolveFactsheetViewer", () => {
       userId: OWNER,
       isOwner: true,
       canAllocate: false,
+      needsAttestation: false,
     });
   });
 
@@ -81,6 +82,7 @@ describe("resolveFactsheetViewer", () => {
       userId: VIEWER,
       isOwner: false,
       canAllocate: true,
+      needsAttestation: false,
     });
     expect(from).toHaveBeenCalledWith("profiles");
     expect(eq).toHaveBeenCalledWith("id", VIEWER);
@@ -143,6 +145,60 @@ describe("resolveFactsheetViewer", () => {
       area: "factsheet-viewer",
       stage: "attestation-read",
     });
+  });
+
+  // 194.2 D-04 / D-07: the unattested allocator is offered the attest step, keyed
+  // on a SUCCESSFUL read finding no usable row, never on `!canAllocate`.
+  it.each([
+    ["no attestation row", { data: null, error: null }],
+    ["a row with a null attested_at", { data: { attested_at: null }, error: null }],
+  ])("an approved allocator with %s needs attestation and still cannot allocate", async (_label, att) => {
+    const { supabase } = client(profile({}), att as ProfileResult);
+    const v = await resolveFactsheetViewer(supabase, { id: VIEWER }, OWNER);
+    expect(v).toEqual({
+      kind: "signed_in",
+      userId: VIEWER,
+      isOwner: false,
+      canAllocate: false,
+      needsAttestation: true,
+    });
+  });
+
+  it("an approved both-role viewer with no attestation row needs attestation", async () => {
+    const { supabase } = client(profile({ role: "both", manager_status: "verified" }), {
+      data: null,
+      error: null,
+    });
+    const v = await resolveFactsheetViewer(supabase, { id: VIEWER }, OWNER);
+    expect(v).toMatchObject({ canAllocate: false, needsAttestation: true });
+  });
+
+  it("an attested allocator can allocate and needs no attestation", async () => {
+    const { supabase } = client(profile({}));
+    const v = await resolveFactsheetViewer(supabase, { id: VIEWER }, OWNER);
+    expect(v).toMatchObject({ canAllocate: true, needsAttestation: false });
+  });
+
+  it.each([
+    ["unapproved allocator", profile({ allocator_status: "newbie" })],
+    ["approved manager", profile({ role: "manager", allocator_status: "newbie", manager_status: "verified" })],
+    ["missing profile row", { data: null, error: null }],
+    ["profile read error", { data: null, error: { message: "boom" } }],
+  ])("%s with no attestation row is never offered the attest step", async (_label, result) => {
+    const { supabase } = client(result as ProfileResult, { data: null, error: null });
+    const v = await resolveFactsheetViewer(supabase, { id: VIEWER }, OWNER);
+    expect(v).toMatchObject({ canAllocate: false, needsAttestation: false });
+  });
+
+  it("an attestation read error or throw is not the needs-attestation state (no prompt that could re-attest an attested user)", async () => {
+    const errored = client(profile({}), { data: null, error: { message: "boom" } });
+    expect(
+      await resolveFactsheetViewer(errored.supabase, { id: VIEWER }, OWNER),
+    ).toMatchObject({ canAllocate: false, needsAttestation: false });
+    const thrown = client(profile({}), new Error("exploded"));
+    expect(
+      await resolveFactsheetViewer(thrown.supabase, { id: VIEWER }, OWNER),
+    ).toMatchObject({ canAllocate: false, needsAttestation: false });
   });
 
   it("a thrown attestation read fails closed and is reported", async () => {

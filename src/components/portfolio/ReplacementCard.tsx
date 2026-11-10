@@ -14,6 +14,12 @@ import {
 } from "@/lib/figure-gate";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { parseLiftState, parseWireFigureRecord } from "@/lib/portfolio-analytics-adapter";
+import { Modal } from "@/components/ui/Modal";
+import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
+import {
+  INTRO_ATTESTATION_CHECK_FAILED,
+  INTRO_ATTESTATION_REQUIRED,
+} from "@/lib/intro/refusal-codes";
 
 const FIT_STYLES: Record<BridgeFitLabel, string> = {
   "Strong fit": "bg-positive/10 text-positive",
@@ -68,7 +74,13 @@ interface ReplacementCardProps {
 // path (no status) and programming errors (e.g. a thrown TypeError) land here
 // too. Collapsing all of these into a bare "Retry Intro" hid which were
 // retryable and which were permanent — and masked client bugs as network blips.
-function humanizeIntroError(status: number | null): string {
+//
+// 194.2 D-03: a 500 whose body names `attestation_check_failed` gets its own copy; the
+// 403 `attestation_required` refusal never reaches here (it opens the attest step instead).
+function humanizeIntroError(status: number | null, code: string | null = null): string {
+  if (code === INTRO_ATTESTATION_CHECK_FAILED) {
+    return "We could not check your attestation. Try again in a minute.";
+  }
   if (status === 429) return "Too many requests — try again in a minute.";
   if (status === 401 || status === 403) return "You don't have permission to request this intro.";
   if (status === 400) return "Couldn't request intro — please reload and retry.";
@@ -83,6 +95,8 @@ function humanizeIntroError(status: number | null): string {
 export function ReplacementCard({ candidate, replacementFor }: ReplacementCardProps) {
   const [introState, setIntroState] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [introError, setIntroError] = useState<string | null>(null);
+  // 194.2 D-04: an unattested allocator gets the attest step in place of a dead button.
+  const [attestOpen, setAttestOpen] = useState(false);
 
   const handleIntro = useCallback(async () => {
     setIntroState("loading");
@@ -104,12 +118,24 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
         return;
       }
       if (!res.ok) {
+        // 194.2 D-03: the route names the attestation refusals with a `code`. Read it
+        // BEFORE the generic 401/403 copy, which stays for every other refusal.
+        const code = await res
+          .json()
+          .then((b: { code?: unknown } | null) => (typeof b?.code === "string" ? b.code : null))
+          .catch(() => null);
+        if (res.status === 403 && code === INTRO_ATTESTATION_REQUIRED) {
+          // Not a failure: open the attest step. The click's action resumes after it.
+          setIntroState("idle");
+          setAttestOpen(true);
+          return;
+        }
         // H-1067: surface WHICH failure happened instead of one opaque retry.
         console.error("[bridge.intro] request failed:", res.status, {
           strategy_id: candidate.strategy_id,
           replacement_for: replacementFor,
         });
-        setIntroError(humanizeIntroError(res.status));
+        setIntroError(humanizeIntroError(res.status, code));
         setIntroState("error");
         return;
       }
@@ -258,6 +284,27 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
           </button>
         </>
       )}
+
+      {/* 194.2 D-04: the attest step. The gate mounts only while open, so each open starts
+          with an unchecked box. Close (x, Escape, "Close without confirming") leaves the card
+          idle with no error line: the POST was refused and nothing was recorded. */}
+      <Modal
+        open={attestOpen}
+        onClose={() => setAttestOpen(false)}
+        title="Attest to request introductions"
+      >
+        {attestOpen && (
+          <AccreditedInvestorGate
+            variant="modal"
+            confirmLabel="Confirm and send intro request"
+            onDismiss={() => setAttestOpen(false)}
+            onAttested={() => {
+              setAttestOpen(false);
+              void handleIntro();
+            }}
+          />
+        )}
+      </Modal>
     </div>
   );
 }

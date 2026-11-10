@@ -558,6 +558,25 @@ describe("ScenarioComposer — book legs read the payload's record scalars (194.
     expect(titlesIn(cagrCell(BOOK_ID))).toEqual([]);
   });
 
+  it("an unreadable book leg is withheld with the dates reason, exactly as a drawer-added leg (194.2 D-01)", () => {
+    // The span and count would CLEAR the gate (400 days of crypto); only the flag withholds.
+    renderBook({
+      figure_span_days: 400,
+      figure_observations: null,
+      figure_crypto: true,
+      figure_unreadable: true,
+    });
+    const reason = "Withheld: the record's dates could not be read.";
+    for (const cell of [cagrCell(BOOK_ID), sharpeCell(BOOK_ID)]) {
+      expect(cell.textContent).toContain("—");
+      expect(cell.textContent).not.toContain("50.0%");
+      expect(cell.textContent).not.toContain("2.10");
+      expect(titlesIn(cell)).toContain(reason);
+      expect(cell.className).toContain("text-text-muted");
+    }
+    expect(noteCount(BOOK_ID)).toBe(0);
+  });
+
   it("a book strategy with no figure scalars (a hand-built payload) shows the figures as today", () => {
     renderBook({});
     expect(cagrCell(BOOK_ID).textContent).toBe("+50.0%");

@@ -691,7 +691,8 @@ const ALL_SECTIONS_PRESENT: AdvancedPresence = {
  *                      `correlationMatrix.labels` (matrix)
  *   - Heatmaps         `monthlyReturns` (monthly grid) or `dailyHeatmap` (calendars)
  *   - Stress Windows   `stressWindows.windows` (the panel's one-line "all outside the record"
- *                      state is a placeholder, so it does not count)
+ *                      state is a placeholder, so it does not count; the withheld line of an
+ *                      unreadable record is a fact about the record, so it does)
  *   - Returns Signatures  `signaturesSectionRenders` (the section's own gate, unchanged)
  *   - Streaks          `streaks.totalWins + totalLosses` (an all-zero streak count draws two
  *                      empty histograms)
@@ -706,7 +707,7 @@ export function advancedSectionContent(view: FactsheetPayload, showSignatures: b
       view.correlations.length > 0 ||
       view.correlationMatrix.labels.length > 0,
     "factsheet-heatmaps": view.monthlyReturns.length > 0 || view.dailyHeatmap.length > 0,
-    "factsheet-stress": view.stressWindows.windows.length > 0,
+    "factsheet-stress": view.stressWindows.windows.length > 0 || view.stressWindows.unreadable === true,
     "factsheet-signatures": showSignatures,
     "factsheet-streak": view.streaks.totalWins + view.streaks.totalLosses > 0,
   };

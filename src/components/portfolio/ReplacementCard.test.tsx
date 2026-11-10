@@ -7,6 +7,22 @@ import { BridgeResponseSchema } from "@/lib/analytics-schemas";
 const { captureToSentryMock } = vi.hoisted(() => ({ captureToSentryMock: vi.fn() }));
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
+// 194.2: the attest step mounts AccreditedInvestorGate, which reads the app router.
+const { refreshMock } = vi.hoisted(() => ({ refreshMock: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: refreshMock }) }));
+
+// jsdom ships HTMLDialogElement without showModal/close; the Modal primitive calls both.
+if (typeof HTMLDialogElement !== "undefined") {
+  HTMLDialogElement.prototype.showModal = function showModal() {
+    this.setAttribute("open", "");
+    (this as unknown as { open: boolean }).open = true;
+  };
+  HTMLDialogElement.prototype.close = function close() {
+    this.removeAttribute("open");
+    (this as unknown as { open: boolean }).open = false;
+  };
+}
+
 /**
  * H-1077 (audit-2026-05-07) — ReplacementCard had zero component tests.
  *
@@ -494,5 +510,104 @@ describe("<ReplacementCard> — 194.1 closed-set read, legacy response, report o
     expect(screen.getByText("Strong fit")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Request Intro" })).toBeInTheDocument();
     expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 194.2 D-03 / D-04 — an unattested allocator who clicks Request Intro is shown the attest step
+ * instead of a dead button, and the click's original action completes in place.
+ *
+ * WHY: Phase 196 round 1 made /api/intro refuse an unattested caller, and the Bridge card had no
+ * way to attest, so its button became a dead end (R2-02). Every expected string is hand-typed.
+ */
+describe("<ReplacementCard> — 194.2 attest step", () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status });
+  const REQUIRED = { error: "Accredited-investor attestation required", code: "attestation_required" };
+
+  beforeEach(() => refreshMock.mockReset());
+
+  function click(name: string) {
+    fireEvent.click(screen.getByRole("button", { name }));
+  }
+
+  it("a 403 attestation_required opens the attest modal with no error line, and confirming re-fires the intro to Intro Requested", async () => {
+    const calls: string[] = [];
+    mockFetch(async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === "/api/attestation") return json(200, { ok: true });
+      return calls.filter((u) => u === "/api/intro").length === 1
+        ? json(403, REQUIRED)
+        : json(200, { success: true });
+    });
+    render(<ReplacementCard candidate={buildCandidate()} replacementFor="old-1" />);
+
+    click("Request Intro");
+
+    expect(
+      await screen.findByRole("heading", { name: "Attest to request introductions" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(
+      screen.getByText(/Before requesting an introduction, please confirm the following:/),
+    ).toBeInTheDocument();
+    // the card went back to idle, not a spinner or Retry
+    expect(screen.getByRole("button", { name: "Request Intro" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    click("Confirm and send intro request");
+
+    await waitFor(() => expect(screen.getByText("Intro Requested")).toBeInTheDocument());
+    expect(calls).toEqual(["/api/intro", "/api/attestation", "/api/intro"]);
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("Close without confirming leaves the card idle with no error line and sends nothing more", async () => {
+    const fetchSpy = vi.fn(async () => json(403, REQUIRED));
+    mockFetch(fetchSpy);
+    render(<ReplacementCard candidate={buildCandidate()} replacementFor="old-1" />);
+
+    click("Request Intro");
+    await screen.findByRole("heading", { name: "Attest to request introductions" });
+    click("Close without confirming");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("checkbox")).toBeNull(),
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "Request Intro" })).toBeEnabled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a 500 attestation_check_failed shows the check-failed copy in the error line and the button reads Retry Intro, with no modal", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () =>
+      json(500, { error: "Could not check attestation", code: "attestation_check_failed" }),
+    );
+    render(<ReplacementCard candidate={buildCandidate()} replacementFor="old-1" />);
+
+    click("Request Intro");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "We could not check your attestation. Try again in a minute.",
+    );
+    expect(screen.getByRole("button", { name: "Retry Intro" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Attest to request introductions" })).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
+  it("a plain 403 (no attestation code) keeps the permission copy and opens no modal", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () => json(403, { error: "Account pending approval" }));
+    render(<ReplacementCard candidate={buildCandidate()} replacementFor="old-1" />);
+
+    click("Request Intro");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You don't have permission to request this intro.",
+    );
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });

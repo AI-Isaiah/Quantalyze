@@ -165,7 +165,7 @@ vi.mock("@/lib/supabase/admin", () => {
 
 import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
 import { withPublishedOrOwner } from "@/lib/visibility";
-import { FIGURE_DEFS_VERSION, gateAnnualized } from "@/lib/figure-gate";
+import { FIGURE_DEFS_VERSION, gateAnnualized, shortTrackMarkerTitle, shortTrackNote } from "@/lib/figure-gate";
 import { formatNumber, formatPercent } from "@/lib/utils";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import TearSheetPage from "@/app/factsheet/[id]/tearsheet/page";
@@ -173,9 +173,11 @@ import { toStrategyRows } from "@/app/(dashboard)/allocations/lib/strategies-row
 import { recordFromScalars, type RecordScalarRow } from "@/lib/figure-record-scalars";
 import { CandidateDetail } from "@/components/admin/CandidateDetail";
 import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { createClient } from "@/lib/supabase/server";
 import { getFactsheetDetail } from "@/lib/queries";
 import { getUserRolesResult } from "@/lib/auth";
+import { rowRecord } from "@/components/strategy/annualized-cell";
 import { RangeEyebrow } from "@/app/factsheet/[id]/v2/MetricsColumn";
 import { FactsheetProvider } from "@/app/factsheet/[id]/v2/factsheet-context";
 import { methodologyLine } from "@/lib/scenario-history";
@@ -447,6 +449,8 @@ function holdingsRow(
   analytics: Row,
   series: { date: string }[],
   observations: number | null,
+  /** The span the PRODUCER emitted, when the case ran it; otherwise the fixture series' own span. */
+  spanDays: number | null = spanOfSeries(series),
 ) {
   const [row] = toStrategyRows({
     strategies: [
@@ -458,7 +462,7 @@ function holdingsRow(
         status: "private",
         capital_ownership: "own_capital",
         mtd: null,
-        figure_span_days: spanOfSeries(series),
+        figure_span_days: spanDays,
         figure_observations: observations,
         figure_crypto: assetClass === "crypto",
         strategy_analytics: { cagr: null, sharpe: analytics.sharpe, volatility: null, max_drawdown: analytics.max_drawdown },
@@ -804,5 +808,393 @@ describe("deliberate differences carry their label (not compared to the stored v
 
   it("a Scenario blend carries its methodology line", () => {
     expect(methodologyLine(120)).toBe("Historical realized · 120 overlapping days · not a forecast.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 194.2 D-01 (194-MALFORMED-DATES-ABSENT): one malformed date, one verdict, on every producer
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THIS EXISTS. The list producers used to read a date through a prefix pattern (`2026-02-28x`
+ * read as `2026-02-28`) or skip a malformed one in an earliest-valid scan, so a strategy the
+ * factsheet withheld printed its annualised figures in a list. The record is now judged on the
+ * date AS STORED. A malformed date must give the same `withheld` verdict through the factsheet
+ * (`fetchAndBuildPayload`), the list shaping (`shapeRowAnalytics` then `rowRecord`, both the
+ * owner's wildcard arm and the anon alias arm) and the percentile read (`getPercentiles`).
+ *
+ * WHAT IS COMPARED, EXACTLY. SQL (`get_verified_cohort_rank`) and the lists judge the FIRST date,
+ * the LAST date and `headline_since`. The factsheet judges those AND every interior date
+ * (addendum disposition 3), so a malformed interior date is a factsheet-only verdict and is NOT
+ * in this table. The factsheet's headline is read from the composite path, which already reads a
+ * malformed `headline_since` as withheld by its own rule (composite-read-path.headline-basis
+ * (d)), so the malformed-headline row is compared on the two list producers and the percentile read.
+ * A malformed FIRST date never reaches the factsheet's gate: `readFactsheetBenchmark`
+ * (`isoMinusOneDay`, benchmark-read.ts) throws a RangeError on it first. That is recorded in the
+ * 194.2-02 SUMMARY as a deferred item and is not asserted here.
+ */
+describe("194.2 parity: a malformed first, last or headline date is withheld on every producer", () => {
+  const LONG = calendarSeries(400);
+  const withDate = (index: number, date: string) =>
+    LONG.map((p, i) => (i === index ? { ...p, date } : p));
+
+  /** The dates a case malforms, one field each; a field a case leaves alone is readable. */
+  const CASES = [
+    { name: "malformed first date", first: "2023-02-28x" },
+    { name: "malformed last date", last: "2026-02-28x" },
+    { name: "malformed headline_since", headline: "garbage" },
+  ] as Array<{ name: string; first?: string; last?: string; headline?: string }>;
+
+  const realQueries = () => vi.importActual<typeof import("@/lib/queries")>("@/lib/queries");
+
+  /** The owner's wildcard row: the series and the flags travel whole, no alias is projected. */
+  const ownerAnalytics = (c: (typeof CASES)[number]) => {
+    const series = LONG.map((p) => ({ date: p.date, value: p.value }));
+    if (c.first) series[0] = { ...series[0], date: c.first };
+    if (c.last) series[series.length - 1] = { ...series[series.length - 1], date: c.last };
+    return {
+      computation_status: "complete",
+      returns_series: series,
+      data_quality_flags: c.headline ? { headline_since: c.headline } : null,
+      metrics_json: { record_observations: 400 },
+    };
+  };
+
+  /** The anon ranked read: the three aliases carry the stored text verbatim. */
+  const aliasAnalytics = (c: (typeof CASES)[number]) => ({
+    computation_status: "complete",
+    series_start: c.first ?? LONG[0].date,
+    series_end: c.last ?? LONG[LONG.length - 1].date,
+    headline_since: c.headline ?? null,
+    record_observations: 400,
+  });
+
+  it("the fixture's readable record is NOT withheld by any producer (control)", async () => {
+    const { shapeRowAnalytics } = await realQueries();
+    const readable = { name: "readable" };
+    for (const a of [ownerAnalytics(readable), aliasAnalytics(readable)]) {
+      const shaped = shapeRowAnalytics(a as never, STRATEGY_ID);
+      expect(gateAnnualized(rowRecord({ asset_class: "crypto", analytics: shaped }))).not.toBe("withheld");
+    }
+    const payload = await factsheetPayload("crypto", markedAnalytics(STORED));
+    expect(gateAnnualized(payload.figureRecord!)).not.toBe("withheld");
+  });
+
+  it.each(CASES)("list shaping, owner wildcard arm ($name): withheld", async (c) => {
+    const { shapeRowAnalytics } = await realQueries();
+    const shaped = shapeRowAnalytics(ownerAnalytics(c) as never, STRATEGY_ID);
+    const record = rowRecord({ asset_class: "crypto", analytics: shaped });
+    expect(record.unreadable).toBe(true);
+    expect(gateAnnualized(record)).toBe("withheld");
+  });
+
+  it.each(CASES)("list shaping, anon alias arm ($name): withheld", async (c) => {
+    const { shapeRowAnalytics } = await realQueries();
+    const shaped = shapeRowAnalytics(aliasAnalytics(c) as never, STRATEGY_ID);
+    expect(gateAnnualized(rowRecord({ asset_class: "crypto", analytics: shaped }))).toBe("withheld");
+  });
+
+  it.each(CASES)("percentile read ($name): the row's annualised ranks are withheld", async (c) => {
+    const { getPercentiles: realGetPercentiles } = await realQueries();
+    const kpis = (n: number) => ({
+      computation_status: "complete",
+      sharpe: n,
+      cagr: n / 10,
+      sortino: n,
+      calmar: n,
+      volatility: 0.1 * n,
+      max_drawdown: -0.1,
+      cumulative_return: 0.1,
+    });
+    const rows = ["A", "B", "C", "D", "E"].map((id, i) => ({
+      id,
+      asset_class: "crypto",
+      strategy_analytics: { ...kpis(i + 1), ...(id === "E" ? aliasAnalytics(c) : aliasAnalytics({ name: "ok" })) },
+    }));
+    const chain: Record<string, unknown> = {};
+    chain.select = () => chain;
+    chain.eq = () => chain;
+    chain.neq = () => chain;
+    chain.then = (resolve: (v: unknown) => unknown) => Promise.resolve({ data: rows, error: null }).then(resolve);
+    vi.mocked(createClient).mockResolvedValueOnce({ from: () => chain } as unknown as Awaited<ReturnType<typeof createClient>>);
+    const map = (await realGetPercentiles())!;
+    expect(map.A.sharpe).toBeDefined();
+    expect(map.E.sharpe).toBeUndefined();
+  });
+
+  it.each(CASES.filter((c) => c.last !== undefined))("factsheet ($name): withheld", async (c) => {
+    const series = withDate(LONG.length - 1, c.last!);
+    const analytics = { ...markedAnalytics(STORED), daily_returns: series };
+    const payload = await factsheetPayload("crypto", analytics);
+    expect(payload.figureRecord?.unreadable).toBe(true);
+    expect(gateAnnualized(payload.figureRecord!)).toBe("withheld");
+  });
+
+  it("a prefix-shaped date is judged as stored: `2026-02-28x` is unreadable, not `2026-02-28`", async () => {
+    const { shapeRowAnalytics } = await realQueries();
+    const shaped = shapeRowAnalytics({ ...aliasAnalytics({ name: "x" }), series_start: "2026-02-28x" } as never, STRATEGY_ID);
+    expect(shaped.series_start).toBe("2026-02-28x");
+    expect(rowRecord({ asset_class: "crypto", analytics: shaped }).unreadable).toBe(true);
+  });
+
+  it("the owner arm keeps a readable series' own series_end byte-for-byte (recency untouched)", async () => {
+    const { shapeRowAnalytics } = await realQueries();
+    const shaped = shapeRowAnalytics(ownerAnalytics({ name: "readable" }) as never, STRATEGY_ID);
+    expect(shaped.series_end).toBe(LONG[LONG.length - 1].date);
+    expect(shaped.series_start).toBe(LONG[0].date);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// 194.2 D-02 (item 8): one curve-derived strategy prints ONE record length on every page
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THIS EXISTS. UAT 2026-11-09 saw one strategy read 193 days of record on one page and 192 on
+ * another (PROD re-measure 2026-11-10: 194 and 193). The cause was NOT `spanDays` against
+ * `coveredDays`: an analytics-service-ingested strategy has `daily_returns` null and its series
+ * lives in `returns_series`, a cumulative curve of N points for N returns. The factsheet inverts
+ * that curve into returns, and the inversion never emits day 0, so the factsheet's record started
+ * at the SECOND curve date and read one day short of every list, percentile and SQL reader, which
+ * take `returns_series->0->>date`. The factsheet now starts the record at the stored curve's first
+ * point (`recordSeriesStart`), and this block feeds ONE curve through each reader.
+ *
+ * THE EXPECTED N IS TYPED BY HAND (194), never derived from the fixture by the code under test:
+ * 2026-04-30 to 2026-11-09 inclusive is 1 (Apr 30) + 31 + 30 + 31 + 31 + 30 + 31 (May to Oct) + 9
+ * (Nov 1 to 9) = 194. A test that computed its own expectation with `coveredDays` over the same
+ * two dates would pass for any consistent off-by-one.
+ *
+ * READERS THAT CANNOT BE REACHED FROM HERE, and why: `percentileRecord` is module-private in
+ * `queries.ts` and returns no span (it only gates the percentile sets). It builds its record with
+ * `figureRecord` from the same three alias scalars `recordFromScalars` reads, so the alias-arm case
+ * below stands for it. The Holdings span IS reached: the Holdings case runs the real producer,
+ * `getOwnCapitalStrategies` (which calls the private `figureRecordScalars`, as does
+ * `getMyAllocationDashboard`, pinned in `queries.my-allocation.test.ts`), over the stored curve,
+ * and feeds the span it emitted to `toStrategyRows`. The producer reads the INVERTED series, whose
+ * first date is the second curve date, so it must start the record at the stored curve's first
+ * point (`curveRecordStart`) like the factsheet does; it read 193 here before that.
+ */
+describe("194.2 D-02 parity: a curve-derived strategy reads one record length on every page", () => {
+  const CURVE_DAYS = 194;
+  const CURVE_FIRST = "2026-04-30";
+  const CURVE_LAST = "2026-11-09";
+  /** The printed sentence for 194 days, spelled out so no formatter derives its own expectation. */
+  const PRINTED_NOTE = "CAGR, volatility, Sharpe, Sortino and Calmar are annualized from 194 days of record, under one year.";
+  const PRINTED_MARKER_TITLE = "Annualized from 194 days of record, under one year.";
+
+  /** The stored curve: one point per return, base 1, a level for every calendar day. */
+  const CURVE_START_MS = Date.parse(`${CURVE_FIRST}T00:00:00Z`);
+  const buildCurve = () => {
+    let level = 1;
+    return Array.from({ length: CURVE_DAYS }, (_, i) => {
+      level *= 1 + returnAt(i) / 10;
+      return { date: isoDay(CURVE_START_MS + i * DAY), value: level };
+    });
+  };
+  const CURVE = buildCurve();
+
+  /** A crypto row ingested by the analytics service: no `daily_returns`, the series is the curve. */
+  const curveAnalytics = (over: Row = {}): Row => ({
+    ...markedAnalytics(STORED),
+    daily_returns: null,
+    returns_series: CURVE,
+    metrics_json: { figure_defs_version: FIGURE_DEFS_VERSION, ...STORED_JSON, record_observations: CURVE_DAYS },
+    ...over,
+  });
+
+  it("the fixture is the PROD shape: 194 points, 2026-04-30 to 2026-11-09, daily_returns null", () => {
+    expect(CURVE).toHaveLength(194);
+    expect(CURVE[0].date).toBe("2026-04-30");
+    expect(CURVE[CURVE.length - 1].date).toBe("2026-11-09");
+    expect(spanOfSeries(CURVE)).toBe(194);
+  });
+
+  it("factsheet (production fetch path): the record is 194 days, and the equity series still starts at the second curve date", async () => {
+    const payload = await factsheetPayload("crypto", curveAnalytics());
+    expect(payload.figureRecord?.spanDays).toBe(194);
+    expect(payload.figureRecord?.unreadable).toBeFalsy();
+    // The series itself is untouched: the day-0 return is unrecoverable from a curve.
+    expect(payload.dates[0]).toBe("2026-05-01");
+    expect(payload.dates).toHaveLength(193);
+    expect(shortTrackNote("record", payload.figureRecord!.spanDays!)).toBe(PRINTED_NOTE);
+  });
+
+  it("tearsheet (print view construction): the payload it hands the factsheet view carries 194", async () => {
+    const { payload } = await renderTearsheet("crypto", curveAnalytics());
+    expect(payload.figureRecord?.spanDays).toBe(194);
+    expect(shortTrackNote("record", payload.figureRecord!.spanDays!)).toBe(PRINTED_NOTE);
+  });
+
+  it("discovery list, owner wildcard arm (shapeRowAnalytics -> rowRecord): 194", async () => {
+    const { shapeRowAnalytics } = await vi.importActual<typeof import("@/lib/queries")>("@/lib/queries");
+    const shaped = shapeRowAnalytics(
+      {
+        computation_status: "complete",
+        returns_series: CURVE,
+        data_quality_flags: null,
+        metrics_json: { record_observations: CURVE_DAYS },
+      } as never,
+      STRATEGY_ID,
+    );
+    const record = rowRecord({ asset_class: "crypto", analytics: shaped });
+    expect(record.spanDays).toBe(194);
+    expect(shortTrackNote("record", record.spanDays!)).toBe(PRINTED_NOTE);
+  });
+
+  it("discovery list, anon alias arm, recordFromScalars and the percentile read's alias scalars: 194", async () => {
+    const { shapeRowAnalytics } = await vi.importActual<typeof import("@/lib/queries")>("@/lib/queries");
+    const aliases = {
+      computation_status: "complete",
+      series_start: CURVE_FIRST,
+      series_end: CURVE_LAST,
+      headline_since: null,
+      record_observations: CURVE_DAYS,
+    };
+    const shaped = shapeRowAnalytics(aliases as never, STRATEGY_ID);
+    expect(rowRecord({ asset_class: "crypto", analytics: shaped }).spanDays).toBe(194);
+    const record = recordFromScalars(recordScalars(curveAnalytics(), CURVE), "crypto");
+    expect(record.spanDays).toBe(194);
+    expect(shortTrackNote("record", record.spanDays!)).toBe(PRINTED_NOTE);
+  });
+
+  it("discovery StrategyTable: the `<1y` marker under the Sharpe reads 194 days of record", () => {
+    renderTable("crypto", curveAnalytics(), CURVE, CURVE_DAYS);
+    const titles = Array.from(document.querySelectorAll("tbody tr [title]")).map((el) => el.getAttribute("title"));
+    expect(titles).toContain(PRINTED_MARKER_TITLE);
+    expect(shortTrackMarkerTitle(194)).toBe(PRINTED_MARKER_TITLE);
+  });
+
+  it("Holdings (the real producer, then toStrategyRows): the stored curve's record is 194 days and reaches the row without withholding", async () => {
+    const { getOwnCapitalStrategies } = await vi.importActual<typeof import("@/lib/queries")>("@/lib/queries");
+    const chain: Record<string, unknown> = {};
+    chain.select = () => chain;
+    chain.eq = () => chain;
+    chain.neq = () => chain;
+    const analytics = curveAnalytics();
+    chain.then = (resolve: (v: unknown) => unknown) =>
+      Promise.resolve({
+        data: [
+          {
+            id: STRATEGY_ID,
+            name: "Parity Fixture",
+            codename: null,
+            disclosure_tier: "exploratory",
+            status: "private",
+            capital_ownership: "own_capital",
+            asset_class: "crypto",
+            strategy_analytics: {
+              daily_returns: analytics.daily_returns,
+              returns_series: analytics.returns_series,
+              data_quality_flags: analytics.data_quality_flags ?? null,
+              record_observations: CURVE_DAYS,
+              cagr: null,
+              sharpe: analytics.sharpe,
+              volatility: null,
+              max_drawdown: analytics.max_drawdown,
+            },
+          },
+        ],
+        error: null,
+      }).then(resolve);
+    vi.mocked(createClient).mockResolvedValueOnce({ from: () => chain } as never);
+    const produced = await getOwnCapitalStrategies(OWNER_ID);
+    expect(produced).toHaveLength(1);
+    // Hand-typed: the curve's first date to its last, inclusive. Not read back from the fixture.
+    expect(produced![0].figure_span_days).toBe(194);
+    const row = holdingsRow("crypto", analytics, CURVE, CURVE_DAYS, produced![0].figure_span_days);
+    expect(row.sharpeState).not.toBe("withheld");
+  });
+
+  it("the factsheet USD view (native-unit strategy) carries the same 194: the record is not its unit", async () => {
+    // A BTC close for the day before the curve and every curve day, so every return is priced.
+    fake.benchmarkRows = Array.from({ length: CURVE_DAYS + 2 }, (_, i) => ({
+      date: isoDay(CURVE_START_MS + (i - 1) * DAY),
+      close_price: 40_000 + i * 10,
+    }));
+    const payload = await factsheetPayload("crypto", curveAnalytics({ data_quality_flags: { native_unit: "BTC" } }));
+    expect(payload.usdViewUnavailable).toBeUndefined();
+    expect(payload.figureRecord?.spanDays).toBe(194);
+    expect(payload.usdView?.payload.figureRecord?.spanDays).toBe(194);
+  });
+
+  it.each([
+    ["an interior", 60, "2026-06-31"],
+    ["the last", CURVE_DAYS - 1, "2026-13-01"],
+  ])(
+    "194.2 R2 WR-01: a malformed date at %s curve point is unreadable on the native AND the USD view (the conversion drops it, the record keeps it)",
+    async (_where, index, badDate) => {
+      // A BTC close for every curve day, so the conversion prices every readable return and the
+      // malformed point is stripped only because it never pairs with a close. The bad dates sit
+      // inside the curve's own year-month range: a 2024 date would sort to index 0 and be read as
+      // the curve's base point, which the inversion never emits.
+      fake.benchmarkRows = Array.from({ length: CURVE_DAYS + 2 }, (_, i) => ({
+        date: isoDay(CURVE_START_MS + (i - 1) * DAY),
+        close_price: 40_000 + i * 10,
+      }));
+      const curve = CURVE.map((p, i) => (i === index ? { ...p, date: badDate } : p));
+      const payload = await factsheetPayload(
+        "crypto",
+        curveAnalytics({ returns_series: curve, data_quality_flags: { native_unit: "BTC" } }),
+      );
+      expect(payload.usdViewUnavailable).toBeUndefined();
+      expect(payload.figureRecord?.unreadable).toBe(true);
+      expect(gateAnnualized(payload.figureRecord!)).toBe("withheld");
+      const usd = payload.usdView?.payload;
+      expect(usd?.figureRecord?.unreadable).toBe(true);
+      expect(gateAnnualized(usd!.figureRecord!)).toBe("withheld");
+    },
+  );
+
+  it("a CSV-derived strategy (daily_returns present) is unchanged: its record is its own series span", async () => {
+    const series = calendarSeries(194);
+    const payload = await factsheetPayload(
+      "crypto",
+      curveAnalytics({ daily_returns: series }),
+    );
+    // daily_returns wins, so the stored curve's first date is NOT the record start: the record is
+    // the series' own first and last dates (2024-01-02 + 193 days), 194 days.
+    expect(payload.dates[0]).toBe(series[0].date);
+    expect(payload.figureRecord?.spanDays).toBe(spanOfSeries(series));
+    expect(payload.figureRecord?.spanDays).toBe(194);
+  });
+
+  it.each(["2023-13-01", "2023-02-32", "", "2023-1-5"])(
+    "194.2 WR-01: an earliest stored date of %s builds a payload with the figures WITHHELD, not an error-boundary throw",
+    async (badDate) => {
+      // CSV-derived (`daily_returns` present): the malformed key sorts FIRST, so it is the minimum
+      // date the benchmark read would have bounded on and `isoMinusOneDay` would have thrown on.
+      const series = [{ date: badDate, value: 0.001 }, ...calendarSeries(194)];
+      const payload = await factsheetPayload("crypto", curveAnalytics({ daily_returns: series }));
+      expect(payload.figureRecord?.unreadable).toBe(true);
+      expect(gateAnnualized(payload.figureRecord!)).toBe("withheld");
+      expect(payload.stressWindows.windows).toEqual([]);
+    },
+  );
+
+  it("194.2 WR-02: a PRESENT non-string first curve date is unreadable on the factsheet too (as the SQL arm reads it), not absent", async () => {
+    const curve = CURVE.map((p, i) => (i === 0 ? { ...p, date: 20260430 } : p));
+    const payload = await factsheetPayload("crypto", curveAnalytics({ returns_series: curve }));
+    expect(payload.figureRecord?.unreadable).toBe(true);
+    expect(gateAnnualized(payload.figureRecord!)).toBe("withheld");
+  });
+
+  it("a malformed FIRST curve point is judged: the record is unreadable and withheld, the verbatim date reached the record", async () => {
+    const curve = CURVE.map((p, i) => (i === 0 ? { ...p, date: "2026-04-30x" } : p));
+    vi.mocked(captureToSentry).mockClear();
+    const payload = await factsheetPayload("crypto", curveAnalytics({ returns_series: curve }));
+    expect(payload.figureRecord?.unreadable).toBe(true);
+    expect(gateAnnualized(payload.figureRecord!)).toBe("withheld");
+    // The inversion drops that date from the series, so the report must name it from the record's
+    // own first date (the `record_start` axis), not leave the cause blank.
+    const reports = vi.mocked(captureToSentry).mock.calls.filter(
+      ([, ctx]) => (ctx as { tags?: { op?: string } } | undefined)?.tags?.op === "buildFactsheetPayload",
+    );
+    expect(reports.length).toBeGreaterThan(0);
+    expect((reports[0][1] as { extra: Record<string, unknown> }).extra).toMatchObject({
+      firstBadAxis: "record_start",
+      firstBadDate: "2026-04-30x",
+      seriesStart: "2026-04-30x",
+    });
   });
 });

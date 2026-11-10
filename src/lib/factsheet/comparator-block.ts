@@ -239,6 +239,10 @@ export function buildComparatorBlock(
     jointWithheld,
     ...(jointAnnualization ? { jointAnnualization } : {}),
     ...(coveredShortSpanDays != null ? { coveredShortSpanDays } : {}),
+    // 194.2 D-05: the covered span's two ends, for the rail's selected-range note.
+    ...(coveredDates.length > 0
+      ? { coveredFrom: coveredDates[0], coveredThrough: coveredDates[coveredDates.length - 1] }
+      : {}),
     ...(coveredSpanUnreadable ? { coveredSpanUnreadable: true as const } : {}),
     ...(flatLeg ? { flatLeg: true as const } : {}),
     cumulative,

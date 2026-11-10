@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.133.32.0] - 2026-11-10 — Phase 194.2 FIGURERESIDUALS
+
+Closes the residuals Phase 194 FIGURETRUTH left open: a malformed record date now reads as unreadable on every surface that prints a figure, a curve-derived record has one length everywhere, a zoomed benchmark says which span it was compared over, and an intro request needs the accredited-investor attestation server-side and in place. Founder decisions D-01..D-07 are in the phase's CONTEXT.
+
+### Security
+- **`/api/intro` enforces the accredited-investor attestation (D-03).** An approved allocator with no usable `investor_attestations` row is refused with 403 `attestation_required` before the body parse and before the rate limiter, so a direct POST no longer bypasses the gate. A read error fails closed with 500 `attestation_check_failed` and a Sentry report. The codes live in the new `src/lib/intro/refusal-codes.ts`.
+
+### Added
+- **Attest in place at every intro entry point (D-04, D-06).** `AccreditedInvestorGate` gains a modal variant that maps the route's refusal codes to named errors. The Bridge `ReplacementCard` on `/allocations` and the factsheet's `RequestIntroButton` show an unattested allocator an attest step, then open the request without leaving the page. The step's lead sentence in the intro modal reads "Before requesting an introduction"; `/discovery` keeps its lawyer-reviewed wording word for word. The viewer model carries `needsAttestation` and `ViewerBar` shows the hint instead of no actions at all. "Add to my allocation" stays hidden until attested (D-07, unchanged behaviour).
+- **The rail names the benchmark's covered span on a zoomed range (D-05).** When the benchmark's data starts after the selected window or ends before it, a muted note such as "BTC compared over Mar 3 – Nov 9 (its data starts after this range)" names the overlap. Figures stay computed on the overlap; nothing is withheld. New `benchCoverageNote` beside `shortTrackNote`, `startsAfterCoverage` in `align.ts` judged on the benchmark's own calendar, and `coveredFrom` / `coveredThrough` on `ComparatorBlock`.
+- **`get_verified_cohort_rank` reads a malformed record date as unreadable** (migration `20261110120000_get_verified_cohort_rank_unreadable_dates.sql`, a full-body re-base of `20261107140000`, with rollback and regenerated function snapshot). A first date, last date or `headline_since` that is present but not a real calendar day leaves the strategy out of the Sharpe/Sortino peer sets, ahead of the observation arm, and never raises. NULL or empty stays on the absent rule. ⚠️ This migration auto-applies to PROD once `apply-test` succeeds; there is no human gate between merge and the PROD apply.
+
+### Fixed
+- **One strict day check across TS, Python and SQL.** `isReadableDay` is the anchored `YYYY-MM-DD` shape plus a calendar round trip, so `2026-02-31` and trailing text read unreadable, as Python `_read_day` and the SQL twin already did. One helper, `firstUnreadableDate`, lets the factsheet record judge every axis (cash, mark-to-market, smoothed, record start, and the native dates behind a USD view) and the Scenario payload judge every blend date, withholding annualised figures on a malformed interior date. The Sentry report names the axis (`firstBadAxis`).
+- **Holdings and the Scenario book-held leg carry the unreadable flag.** `figure_unreadable` on the record scalar, the Holdings type and the book type; an unreadable record is withheld with its reason instead of shown.
+- **List producers keep a malformed date verbatim.** `shapedRecordScalars` and `figureRecordScalars` no longer scan for the earliest valid date, so the list and the factsheet reach the same verdict on the same record, pinned by a factsheet-vs-list parity test. A present non-string date reads unreadable in TS, matching SQL's `->>` text, instead of absent (review WR-02).
+- **One Sentry report per unreadable record per process**, via `reportUnreadableOnce` around both producers, and recorded as sent only after the send returns, so a throwing send no longer mutes the record for the process lifetime (review WR-03).
+- **A curve-derived record starts at the stored curve's first point (D-02).** The curve inversion never emits day 0, so the factsheet read one day short (193 against 194 on PROD). `curveRecordStart` in `resolve-series.ts` is the one helper the factsheet, print view and both Holdings producers use, and the Scenario book-held leg follows (review CR-01).
+- **A malformed earliest date no longer crashes the factsheet or tearsheet build.** The benchmark read bounds its range on readable dates only and returns unavailable when none remain (review WR-01). The stress-windows call site skips the real series on an unreadable first date and returns a distinct `unreadable` form, so the panel says the windows are withheld rather than the false "all outside the observation period" (review round 2 silent-failure finding).
+- **The USD view withholds what the native view withholds** for an unreadable date, by scanning the native series' dates as part of the record (review round 2 WR-01).
+- **The wizard prints one short-record statement (D-01).** Its hard-coded second sentence from the server's raw flag is gone; `figureNote` (194 D-15) is the one statement.
+
+### Changed
+- **Factsheet payload cache key `factsheet-v2-payload-v21` → `v22`**, because record values change (shape does not). No v21 entry outlives the 1 h TTL after deploy.
+
+### Tests
+- `test_get_verified_cohort_rank_gate.sql`: arm 12 rewritten, arms 15–18 added (malformed first date, last date, `headline_since`; the unreadable arm precedes the observation arm), every `RED-UNDER-M` retargeted. Censuses moved together: `ci.yml` sentinel row 14 → 18 and anti-skip `ARMS_FLOOR` 426 → 430, the mutation runner's `ARMS_FLOOR` in `scripts/mutation-floors.mjs`, and the scoped-UPDATE census in `test_sql_gate_scoped_updates.py`. The pg-lane FULL mutation run passed.
+- New RED-capable tests for every fix above: the attestation route arm, the gate's modal variant, the Bridge and factsheet attest flows, stress-windows unreadable, figure-record-unreadable, comparator coverage, the curve-derived parity cases across discovery, factsheet, tearsheet and Holdings, and the cohort-gate TS/SQL parity.
+- `e2e/layout-narrow.spec.ts` pins the print-view equity figure inside its card at 1470px.
+
+### Notes
+- **Records.** Six plans in two waves, three review rounds with a fix record, a migration review (migration-reviewer and rls-policy-auditor both 0 findings at MEDIUM or above), a security audit (20 of 20 threats closed) and a verification judged passed live in the phase directory. 52 commits squash to this one.
+- **Known limits.** The 1470px e2e case has never run; its first execution is in CI's seeded lane. `compute.conventions.test.ts` fixtures B and C fail on a last-digit float in `skew`, identically on the base; no 194.2 change touches `compute.ts`. A `baseline-content-drift` / VAC-04 DRIFT reading on this PR is expected (no allowlist row added).
+- **Routed, not fixed here.** A pre-existing authorization gap on the intro path, outside this phase's route change, goes to a security follow-up phase that runs first after this ship. Review round 3 WR-01..03 (the stress block, the api-arm allocator blends and the USD view each test dates themselves instead of following the record's single verdict) go to a one-verdict follow-up phase.
+
 ## [0.133.31.3] - 2026-11-10 — records: close Phases 196 ONESTRATEGYPAGE and 197 SCREEN
 
 ### Notes

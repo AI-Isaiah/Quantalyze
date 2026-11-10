@@ -141,3 +141,24 @@ export function resolveDailyReturnSeries(
   if (direct.length > 0) return direct;
   return equityCurveToDailyReturns(normalizeCurve(returnsSeriesRaw), method, keepAbsent);
 }
+
+/**
+ * 194.2 (D-02) - the record's first return date for a CURVE-DERIVED series: the stored
+ * `returns_series` curve's FIRST point, verbatim (the first stored element, never an earliest-valid
+ * scan, so a malformed one stays malformed and reads `unreadable`). `equityCurveToDailyReturns`
+ * never emits day 0, so a record started at the resolved series' first date begins one day later
+ * than every list, percentile and SQL reader (`returns_series->0->>date`); this is the date they
+ * read. Null when the series is not curve-derived (`daily_returns` wins whenever it normalizes to
+ * an entry, the same predicate `resolveDailyReturnSeries` applies), or when the first point carries
+ * no date. The ONE helper the factsheet payload and the two Holdings producers (`queries.ts`) share,
+ * so the record start cannot drift between them.
+ */
+export function curveRecordStart(dailyRaw: unknown, returnsSeriesRaw: unknown): string | null {
+  if (normalizeDailyReturns(dailyRaw).length > 0) return null;
+  if (!Array.isArray(returnsSeriesRaw)) return null;
+  const first: unknown = returnsSeriesRaw[0];
+  const date = first !== null && typeof first === "object" ? (first as { date?: unknown }).date : undefined;
+  // WR-02: a present non-string date is kept as text (unreadable), as the SQL `->>` reads it; only
+  // null / undefined / "" are absent.
+  return date == null || date === "" ? null : String(date);
+}

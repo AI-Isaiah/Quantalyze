@@ -28,6 +28,10 @@ const captureToSentry = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry }));
 
+// 194.2: the attest step mounts AccreditedInvestorGate, which reads the app router.
+const refresh = vi.hoisted(() => vi.fn());
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh }) }));
+
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     auth: {
@@ -68,6 +72,7 @@ beforeEach(() => {
   existingError = null;
   getUserThrows = null;
   captureToSentry.mockReset();
+  refresh.mockReset();
   getUserGate = Promise.resolve();
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
@@ -291,5 +296,181 @@ describe("RequestIntroButton — existing request", () => {
     expect(await screen.findByText("Introduction in progress")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Request intro" })).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 194.2 D-03 / D-04 / D-07 — the attest step inside the request.
+ *
+ * WHY: an approved allocator who never attested saw no actions and no hint on the factsheet
+ * (196 round-2 M6), and once /api/intro enforces the attestation a stale page's Send request
+ * would dead-end on a refusal. The attest step is a body swap inside the ONE modal, and what the
+ * user typed must survive it: losing a written message to a legal checkbox is the failure here.
+ * Every expected string is hand-typed.
+ */
+describe("RequestIntroButton — attest step (194.2)", () => {
+  const ATTEST_TITLE = "Attest to request introductions";
+  const REQUIRED = { error: "Accredited-investor attestation required", code: "attestation_required" };
+  const MSG = "Looking for a market-neutral sleeve";
+
+  /** Routes by URL; `introAnswers` is consumed one per /api/intro POST. */
+  function route(introAnswers: Response[], attestation: Response = jsonResponse(200, { ok: true })) {
+    const queue = [...introAnswers];
+    fetchMock.mockImplementation(async (url: string) =>
+      url === "/api/attestation" ? attestation : queue.shift() ?? jsonResponse(200, { success: true }),
+    );
+  }
+  const introCalls = () =>
+    fetchMock.mock.calls.filter(([u]) => u === "/api/intro").map(([, init]) =>
+      JSON.parse((init as RequestInit).body as string),
+    );
+  async function clickRequestIntro() {
+    const trigger = await screen.findByRole("button", { name: "Request intro" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+  }
+  function confirmAttest() {
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm and request intro" }));
+  }
+
+  it("needsAttestation: the click opens the attest step, posts nothing, and shows the in-modal lead", async () => {
+    render(<RequestIntroButton strategyId={STRATEGY_ID} needsAttestation />);
+    await clickRequestIntro();
+
+    expect(await screen.findByRole("heading", { name: ATTEST_TITLE })).toBeInTheDocument();
+    expect(
+      screen.getByText(/Before requesting an introduction, please confirm the following:/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send request" })).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("proactive confirm opens the request form with focus on the message textarea, and still sends nothing to /api/intro", async () => {
+    route([]);
+    render(<RequestIntroButton strategyId={STRATEGY_ID} needsAttestation />);
+    await clickRequestIntro();
+    await screen.findByRole("heading", { name: ATTEST_TITLE });
+
+    confirmAttest();
+
+    expect(await screen.findByRole("heading", { name: "Request an introduction" })).toBeInTheDocument();
+    const textarea = screen.getByPlaceholderText("What are you looking for? (optional)");
+    await waitFor(() => expect(textarea).toHaveFocus());
+    expect(introCalls()).toHaveLength(0);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("heading", { name: ATTEST_TITLE })).toBeNull();
+  });
+
+  it("proactive dismiss closes the dialog and records and sends nothing", async () => {
+    render(<RequestIntroButton strategyId={STRATEGY_ID} needsAttestation />);
+    await clickRequestIntro();
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Close without confirming" }));
+
+    await waitFor(() => expect(dialog).not.toHaveAttribute("open"));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a failed attest POST keeps the attest step open with the mapped copy", async () => {
+    route([], jsonResponse(429, { error: "Rate limit exceeded" }));
+    render(<RequestIntroButton strategyId={STRATEGY_ID} needsAttestation />);
+    await clickRequestIntro();
+    await screen.findByRole("heading", { name: ATTEST_TITLE });
+    confirmAttest();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts. Try again in a minute.",
+    );
+    expect(screen.getByRole("heading", { name: ATTEST_TITLE })).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Rate limit exceeded");
+  });
+
+  it("reactive: a 403 attestation_required swaps the open modal to the attest step with no error line, then confirm re-submits with the typed message and mandate", async () => {
+    route([jsonResponse(403, REQUIRED), jsonResponse(200, { success: true })]);
+    render(<RequestIntroButton strategyId={STRATEGY_ID} />);
+    await clickRequestIntro();
+    fireEvent.change(screen.getByPlaceholderText("What are you looking for? (optional)"), {
+      target: { value: MSG },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Add mandate context/ }));
+    fireEvent.change(screen.getByPlaceholderText(/Mandate details/), {
+      target: { value: "Two-year horizon" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send request" }));
+
+    expect(await screen.findByRole("heading", { name: ATTEST_TITLE })).toBeInTheDocument();
+    // one dialog at a time: the request form is gone while the attest step shows
+    expect(screen.queryByRole("heading", { name: "Request an introduction" })).toBeNull();
+    expect(screen.queryByText(REQUIRED.error)).toBeNull();
+
+    confirmAttest();
+
+    expect(await screen.findByText("Pending review")).toBeInTheDocument();
+    const posts = introCalls();
+    expect(posts).toHaveLength(2);
+    expect(posts[1]).toMatchObject({
+      strategy_id: STRATEGY_ID,
+      message: MSG,
+      mandate_context: { freeform: "Two-year horizon" },
+    });
+  });
+
+  it("reactive dismiss returns to the form with the typed fields intact, no error line, and nothing re-sent", async () => {
+    route([jsonResponse(403, REQUIRED)]);
+    render(<RequestIntroButton strategyId={STRATEGY_ID} />);
+    await clickRequestIntro();
+    fireEvent.change(screen.getByPlaceholderText("What are you looking for? (optional)"), {
+      target: { value: MSG },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send request" }));
+    await screen.findByRole("heading", { name: ATTEST_TITLE });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close without confirming" }));
+
+    expect(await screen.findByRole("heading", { name: "Request an introduction" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("What are you looking for? (optional)")).toHaveValue(MSG);
+    expect(screen.queryByText(NOT_SENT)).toBeNull();
+    expect(screen.queryByText(REQUIRED.error)).toBeNull();
+    expect(introCalls()).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([u]) => u === "/api/attestation")).toBe(false);
+  });
+
+  it("reactive: a failed re-submit lands in the form's error line with the typed message intact", async () => {
+    route([jsonResponse(403, REQUIRED), jsonResponse(500, { error: "Failed to create request" })]);
+    render(<RequestIntroButton strategyId={STRATEGY_ID} />);
+    await clickRequestIntro();
+    fireEvent.change(screen.getByPlaceholderText("What are you looking for? (optional)"), {
+      target: { value: MSG },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send request" }));
+    await screen.findByRole("heading", { name: ATTEST_TITLE });
+    confirmAttest();
+
+    expect(await screen.findByText("Failed to create request")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("What are you looking for? (optional)")).toHaveValue(MSG);
+    expect(screen.getByRole("button", { name: "Send request" })).toBeEnabled();
+  });
+
+  it("a 500 attestation_check_failed shows the check-failed sentence in the form's error line, not raw JSON", async () => {
+    route([
+      jsonResponse(500, { error: "Could not check attestation", code: "attestation_check_failed" }),
+    ]);
+    render(<RequestIntroButton strategyId={STRATEGY_ID} />);
+    await clickRequestIntro();
+    fireEvent.click(screen.getByRole("button", { name: "Send request" }));
+
+    expect(
+      await screen.findByText("We could not check your attestation. Try again in a minute."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Could not check attestation")).toBeNull();
+    expect(screen.queryByRole("heading", { name: ATTEST_TITLE })).toBeNull();
+  });
+
+  it("an attested viewer (no needsAttestation) never sees the attest step on click", async () => {
+    render(<RequestIntroButton strategyId={STRATEGY_ID} />);
+    await clickRequestIntro();
+    expect(await screen.findByRole("heading", { name: "Request an introduction" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: ATTEST_TITLE })).toBeNull();
   });
 });

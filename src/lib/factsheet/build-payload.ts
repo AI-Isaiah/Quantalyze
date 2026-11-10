@@ -5,7 +5,7 @@ import type { CoveredAlignment } from "./align";
 import { compute, cumEq, metricsBasisSeries, worstDrawdowns } from "./compute";
 import { overlayBasisScalars, overlayStoredFigureDefs } from "./basis-metrics";
 import type { StoredFigureDefs } from "./basis-metrics";
-import { coveredDays, figureRecord, gateRollingWindow, isReadableDay } from "@/lib/figure-gate";
+import { coveredDays, figureRecord, firstUnreadableDate, gateRollingWindow, isReadableDay } from "@/lib/figure-gate";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { FigureRecord } from "@/lib/figure-gate";
 import { rollingVol, rollingSharpe, rollingSortino, rollingCalendarStats, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D, ROLL_WINDOW_1Y_DAYS } from "./rolling";
@@ -139,6 +139,24 @@ export type BuildFactsheetOpts = {
    */
   recordObservations?: number | null;
   /**
+   * 194.2 (D-02) - the record's FIRST return date when the series is derived from the stored
+   * `returns_series` curve. The curve inversion (`equityCurveToDailyReturns`) never emits day 0,
+   * so `dates[0]` is the SECOND curve date and the record would read one day short of every
+   * reader that takes `returns_series->0->>date` (lists, percentiles, SQL). Set by the server
+   * builder to the stored first point's date, verbatim; absent for a CSV-derived series, whose
+   * first return IS `dates[0]`. It moves only the record (`payload.figureRecord`), never the
+   * equity or metric series, and is a fact about the record like `recordObservations`, so the
+   * USD view carries it too.
+   */
+  recordSeriesStart?: string | null;
+  /**
+   * 194.2 R2: the dates of the series this one was converted from (the USD view's native
+   * series). The conversion keeps only days that pair with a close, so a malformed native date
+   * never reaches this series, yet it is still a malformed date in the record. Their readability
+   * is the record's, so the unreadable scan covers them as one more axis.
+   */
+  recordSourceDates?: readonly string[];
+  /**
    * 194 R6 WR-01: report an unreadable record to Sentry. Set only by the server builder
    * (fetch-and-build-payload); a client re-derive (AllocationDashboardV2's useMemo) builds the
    * same payload on every mount and must not report.
@@ -195,6 +213,8 @@ export function fixtureBenchmarkPrices(axes: ReadonlyArray<readonly DailyReturn[
   let max: string | null = null;
   for (const axis of axes) {
     for (const r of axis) {
+      // 194.2 WR-01: readable days only; `isoMinusOneDay` throws on an unparseable minimum.
+      if (!isReadableDay(r.date)) continue;
       if (min === null || r.date < min) min = r.date;
       if (max === null || r.date > max) max = r.date;
     }
@@ -629,7 +649,15 @@ export function deriveSeriesBundle(
     // CR-01 (SC3): stress windows take BTC null-honest — a window with an uncovered
     // BTC day gets null bench fields, never a compounded 0% day. Not under D-65.
     // Phase 169.1 (D-34): the strategy leg follows the headline's method.
-    stressWindows: computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets, isArithmetic ? "arithmetic" : "geometric"),
+    // 194.2 WR-01: `computeStressWindows` throws on a non-ISO first date (it guards code bugs, so the
+    // throw stays). A series whose first date is unreadable gets its own empty-series answer (no
+    // windows) instead; the record's unreadable gate (`firstUnreadableDate`) withholds and reports it.
+    // 194.2 R2: that answer is a distinct withheld form, not the empty-series result, which would
+    // count every catalogued window as outside the observation period.
+    stressWindows:
+      dates.length > 0 && !isReadableDay(dates[0])
+        ? { windows: [], benchName: "BTC", totalCatalogued: 0, droppedOutOfRange: 0, droppedPartial: 0, unreadable: true }
+        : computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets, isArithmetic ? "arithmetic" : "geometric"),
     strategyMetrics: bundleMetrics,
     correlations,
     correlationMatrix: { labels: correlationLabels, matrix: correlationMatrix },
@@ -899,8 +927,10 @@ function buildFromBuildableSeries(
   // count (A-194-D15-02): every other page withholds a pre-recompute non-crypto
   // record of 60 to 89 days, so the factsheet must too. Built before the bundles so
   // all three of them (and, in the browser, every re-derive) gate on this one object.
+  // 194.2 (D-02): a curve-derived series starts its record at the stored curve's first point.
+  const recordStart = opts?.recordSeriesStart ?? dates[0];
   const endsRecord = figureRecord({
-    seriesStart: dates[0],
+    seriesStart: recordStart,
     seriesEnd: dates[dates.length - 1],
     headlineSince: suffixStart,
     observations: opts?.recordObservations,
@@ -909,22 +939,42 @@ function buildFromBuildableSeries(
   // 194 R5 WR-03 (D-17): readability is judged over EVERY series date, not only the two ends.
   // A present but malformed interior date makes any zoom window that starts on it NaN, which the
   // gate reads as unknown and shows. Marking the total record unreadable withholds every annualised
-  // figure under the one reason. One pass; a readable series is byte-identical to `endsRecord`.
-  const badDateIndex = dates.findIndex((d) => !isReadableDay(d));
-  const totalRecord: FigureRecord = badDateIndex >= 0 ? { ...endsRecord, unreadable: true } : endsRecord;
+  // figure under the one reason. 194.2 (194-MALFORMED-DATES-ABSENT, R6 WR-02): the scan covers the
+  // cash, mark-to-market and smoothed axes, because every bundle gates on this one record and a
+  // malformed date on the MTM or smoothed axis would otherwise still show annualised figures.
+  // The MTM and smoothed axes are normalised here, once, and the bundle arms below reuse them; an
+  // absent axis, or one under two points (no bundle is built from it), contributes no dates. A
+  // readable record is byte-identical to `endsRecord`.
+  const mtmClipped = opts?.mtmSeries ? normalizeDailyReturns(opts.mtmSeries.dailyReturns) : [];
+  const smoothedClipped = opts?.smoothedSeries ? normalizeDailyReturns(opts.smoothedSeries.dailyReturns) : [];
+  const mtmDates = mtmClipped.length >= 2 ? mtmClipped.map((d) => d.date) : [];
+  const smoothedDates = smoothedClipped.length >= 2 ? smoothedClipped.map((d) => d.date) : [];
+  // 194.2 (D-02): the record's own first date is judged too, as a fourth axis (last, so the
+  // cash / mark-to-market / smoothed axis numbers keep their meaning). The inversion drops that
+  // date from `dates`, so a malformed first curve point would otherwise go unnamed in the report.
+  const firstBad = firstUnreadableDate(
+    dates,
+    mtmDates,
+    smoothedDates,
+    opts?.recordSeriesStart ? [opts.recordSeriesStart] : [],
+    opts?.recordSourceDates ?? [],
+  );
+  const totalRecord: FigureRecord = firstBad ? { ...endsRecord, unreadable: true } : endsRecord;
   // 194 R5 SFH-M3: nothing else tells anyone an unreadable record is withholding its figures.
   // Reported here, once per build, never from a render-time gate.
   if (totalRecord.unreadable && opts?.reportUnreadable) {
+    const firstBadAxis = firstBad ? (["cash", "mark_to_market", "smoothed_mtm", "record_start", "record_source"] as const)[firstBad.axis] : null;
     captureToSentry(new Error("factsheet figure record unreadable: a series date is not a date"), {
       tags: { op: "buildFactsheetPayload", reason: "figure-record-unreadable" },
       level: "error",
       extra: {
         strategyId: strategy.id,
-        seriesStart: dates[0],
+        seriesStart: recordStart,
         seriesEnd: dates[dates.length - 1],
         headlineSince: suffixStart ?? null,
-        firstBadDateIndex: badDateIndex >= 0 ? badDateIndex : null,
-        firstBadDate: badDateIndex >= 0 ? dates[badDateIndex] : null,
+        firstBadAxis,
+        firstBadDateIndex: firstBad ? firstBad.index : null,
+        firstBadDate: firstBad ? firstBad.date : null,
       },
     });
   }
@@ -958,7 +1008,6 @@ function buildFromBuildableSeries(
   // basis-invariant and stay top-level; the client view-merge inherits them.
   let seriesByBasis: FactsheetCommon["seriesByBasis"];
   if (opts?.mtmSeries) {
-    const mtmClipped = normalizeDailyReturns(opts.mtmSeries.dailyReturns);
     if (mtmClipped.length >= 2) {
       seriesByBasis = {
         mark_to_market: deriveSeriesBundle(mtmClipped, {
@@ -983,7 +1032,6 @@ function buildFromBuildableSeries(
   // cash/MTM payload is byte-identical (SC-4). Spreads over any existing MTM bundle so
   // a payload can legitimately carry both mark_to_market and smoothed_mtm.
   if (opts?.smoothedSeries) {
-    const smoothedClipped = normalizeDailyReturns(opts.smoothedSeries.dailyReturns);
     if (smoothedClipped.length >= 2) {
       seriesByBasis = {
         ...seriesByBasis,

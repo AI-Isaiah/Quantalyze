@@ -116,3 +116,54 @@ describe("169.5 review WR-01: past coverage on the comparator's own calendar", (
     for (const w of WINDOWS) expect(b.summary![w], w).toBeNull();
   });
 });
+
+/**
+ * 194.2 D-05 (194-ZOOM-BENCHMARK-COVERAGE). WHY: the rail names the span a benchmark was compared
+ * over on a zoomed range, so the block must carry its first and last covered strategy dates, read
+ * off the SAME `coveredDates` the summary is computed on. The weekday case is the trap: a Saturday
+ * window start against SPX's Monday-first-close is not "starts after".
+ */
+describe("194.2 D-05: coveredFrom / coveredThrough", () => {
+  it("prices starting after the strategy: coveredFrom is the first covered date, coveredThrough the last", () => {
+    const { b } = block(prices("2026-03-01", 200));
+    expect(b.coveredFrom).toBe("2026-03-02");
+    expect(b.coveredThrough).toBe(DATES[DATES.length - 1]);
+  });
+
+  it("full coverage: the span is the strategy's own, and it never moves a figure (summary still present)", () => {
+    const { b } = block(prices("2025-12-31", 202));
+    expect(b.coveredFrom).toBe(DATES[0]);
+    expect(b.coveredThrough).toBe(DATES[DATES.length - 1]);
+    expect(b.summary).not.toBeNull();
+  });
+
+  it("no benchmark day inside the window: both fields are absent, so the rail has no span to name", () => {
+    const { b } = block(prices("2027-01-01", 50));
+    expect("coveredFrom" in b).toBe(false);
+    expect("coveredThrough" in b).toBe(false);
+  });
+
+  it("exactly one covered day: from equals through", () => {
+    const last = DATES[DATES.length - 1];
+    const { b } = block([
+      { date: DATES[DATES.length - 2], close: 100 },
+      { date: last, close: 101 },
+    ]);
+    expect(b.coveredFrom).toBe(last);
+    expect(b.coveredThrough).toBe(last);
+  });
+
+  it("a weekday benchmark against a Saturday window start: first covered is Monday and that is NOT 'starts after'", async () => {
+    const { startsAfterCoverage } = await import("./align");
+    // 2026-02-28 is a Saturday. SPX-shaped closes: weekdays only, from Friday 2026-02-27.
+    const dates = days("2026-02-28", 30);
+    const strat = dates.map((_, i) => ((i % 5) - 2) / 300);
+    const closes = days("2026-02-27", 40)
+      .filter((d) => ![0, 6].includes(new Date(`${d}T00:00:00Z`).getUTCDay()))
+      .map((date, i) => ({ date, close: 100 + i }));
+    const a = alignCoveredReturns(closes, [], dates, CALENDAR_WEEKDAY);
+    const b = buildComparatorBlock("S&P 500", "SPX", a, strat, cumEq(strat), dates, 0.2, 30, 60, 365, 365);
+    expect(b.coveredFrom).toBe("2026-03-02");
+    expect(startsAfterCoverage(b.coveredFrom, dates[0], CALENDAR_WEEKDAY)).toBe(false);
+  });
+});

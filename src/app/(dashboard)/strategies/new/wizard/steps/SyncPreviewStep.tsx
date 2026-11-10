@@ -360,9 +360,6 @@ export interface CompositePreviewData {
   smoothedMtmAvailable: boolean;
   benchmarkUnavailable: boolean;
   benchmarkNote: string | null;
-  // HARD-04 (#67): server-truth sub-90-day annualization-window flag
-  // (data_quality_flags.insufficient_window).
-  insufficientWindow: boolean;
   // HARD-05 (Phase 93): composite members EXCLUDED from the stitch (a ccxt venue
   // not yet reconstructed) — a closed { seq, venue } shape (the server `reason`
   // enum is server-only vocabulary, dropped on parse). Empty => nothing renders.
@@ -1849,9 +1846,10 @@ export function SyncPreviewStep({
                 smoothedMtmAvailable,
                 benchmarkUnavailable: dq.benchmark_unavailable === true,
                 benchmarkNote: dq.benchmark_note ?? null,
-                // HARD-04 (#67): strict server-truth coercion (mirror
-                // benchmark_unavailable) — a malformed value renders nothing.
-                insufficientWindow: dq.insufficient_window === true,
+                // 194.2 D-01 (194-WIZARD-HARD04-RAW-GAP): the raw
+                // `dq.insufficient_window` flag is deliberately NOT read here any more. It is
+                // the server's elapsed-days-under-90 test, not D-15's gate, so it and the
+                // `figureNote` above could disagree; `figureNote` is the one short-record statement.
                 // HARD-05 (Phase 93): strict-coerce the degraded-member records —
                 // ONLY objects with a finite numeric seq + non-empty string venue
                 // survive; malformed jsonb yields [] (renders nothing, T-92-05).
@@ -2781,13 +2779,11 @@ export function SyncPreviewStep({
     const hasGaps = gapSpans.length > 0;
     const hasMtmCaveat = composite.mtmGatedReason != null;
     const hasBenchmarkCaveat = composite.benchmarkUnavailable;
-    const hasInsufficientWindowCaveat = composite.insufficientWindow;
     const hasDegradedMembers = composite.degradedMembers.length > 0;
-    const hasDqCaveat =
-      hasMtmCaveat ||
-      hasBenchmarkCaveat ||
-      hasInsufficientWindowCaveat ||
-      hasDegradedMembers;
+    // 194.2 D-01: the short-record statement is `snapshot.figureNote` (D-15), not a caveat here.
+    // Counting the raw `insufficient_window` flag would also open an EMPTY amber box on a record
+    // whose only caveat was that flag.
+    const hasDqCaveat = hasMtmCaveat || hasBenchmarkCaveat || hasDegradedMembers;
     const hasWarnings = hasGaps || hasDqCaveat;
 
     return (
@@ -2999,12 +2995,6 @@ export function SyncPreviewStep({
                   )}
                   {hasBenchmarkCaveat && (
                     <p>Benchmark overlay unavailable for this period.</p>
-                  )}
-                  {hasInsufficientWindowCaveat && (
-                    <p>
-                      Short track record — annualized metrics are computed on an
-                      insufficient window and may not be meaningful.
-                    </p>
                   )}
                   {hasDegradedMembers && (
                     <p>

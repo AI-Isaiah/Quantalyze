@@ -23,7 +23,19 @@ import { captureToSentry } from "@/lib/sentry-capture";
 
 export type FactsheetViewer =
   | { kind: "anon" }
-  | { kind: "signed_in"; userId: string; isOwner: boolean; canAllocate: boolean };
+  | {
+      kind: "signed_in";
+      userId: string;
+      isOwner: boolean;
+      canAllocate: boolean;
+      /**
+       * Phase 194.2 D-04 / D-07: an approved allocator whose attestation read
+       * SUCCEEDED and found no usable row. The bar shows Request intro with an
+       * attest step for this viewer, and keeps "Add to my allocation" hidden
+       * until they attest. A read error is NOT this state (see below).
+       */
+      needsAttestation: boolean;
+    };
 
 /**
  * `user` is the server-validated result of `auth.getUser()` (null = no
@@ -33,6 +45,12 @@ export type FactsheetViewer =
  * (`canAllocate: false`) and is reported, so a blip can hide an affordance but
  * never grant one. `canAllocate` also needs an `investor_attestations` row with
  * a non-null `attested_at`, the test /discovery's layout applies.
+ *
+ * `needsAttestation` (194.2 D-04) is true ONLY for an approved allocator whose
+ * attestation read succeeded with no row (or a null `attested_at`). A read error
+ * leaves it false: prompting there could ask an attested user to re-attest, and
+ * the upsert would overwrite `attested_at` (UI-SPEC accepted limit). The two
+ * flags are never both true.
  */
 export async function resolveFactsheetViewer(
   supabase: SupabaseClient,
@@ -42,10 +60,17 @@ export async function resolveFactsheetViewer(
   if (!user) return { kind: "anon" };
   const isOwner = ownerId != null && user.id === ownerId;
   if (isOwner) {
-    return { kind: "signed_in", userId: user.id, isOwner: true, canAllocate: false };
+    return {
+      kind: "signed_in",
+      userId: user.id,
+      isOwner: true,
+      canAllocate: false,
+      needsAttestation: false,
+    };
   }
 
   let canAllocate = false;
+  let needsAttestation = false;
   try {
     const { data, error } = await supabase
       .from("profiles")
@@ -76,6 +101,7 @@ export async function resolveFactsheetViewer(
           });
         } else {
           canAllocate = attestation?.attested_at != null;
+          needsAttestation = !canAllocate;
         }
       }
     }
@@ -84,5 +110,11 @@ export async function resolveFactsheetViewer(
       tags: { area: "factsheet-viewer", stage: "profile-read" },
     });
   }
-  return { kind: "signed_in", userId: user.id, isOwner: false, canAllocate };
+  return {
+    kind: "signed_in",
+    userId: user.id,
+    isOwner: false,
+    canAllocate,
+    needsAttestation,
+  };
 }

@@ -5,13 +5,14 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 import type { ComparatorBlock, ComparatorSummary, FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { recordCoversWindow } from "@/lib/factsheet/compute";
-import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
+import { COMPARATOR_CALENDARS, isPastCoverage, startsAfterCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
 import { joinGuardPhrases } from "@/lib/factsheet/headline-basis";
 import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
 import {
   VAR_METHOD_LINE,
+  benchCoverageNote,
   gateAnnualized,
   gatedValue,
   shortTrackNote,
@@ -385,9 +386,11 @@ export function MetricsColumn({
   const benchNote =
     bn != null && gateState !== "withheld" && hb != null && jointCmp.coveredSpanUnreadable
       ? `${bn}: ${withheldReason("record", { ...(figureRec ?? UNKNOWN_RECORD), unreadable: true })}`
-      : bn != null && !selected && gateState !== "withheld" && hb != null && jointCmp.coveredShortSpanDays != null
-        ? `${bn}: ${shortTrackNote("record", jointCmp.coveredShortSpanDays)}`
-        : null;
+      : bn != null && selected && gateState !== "withheld" && hb != null && cmpKey !== "none"
+        ? selectedRangeBenchNote(bn, jointCmp, scope, COMPARATOR_CALENDARS[cmpKey])
+        : bn != null && !selected && gateState !== "withheld" && hb != null && jointCmp.coveredShortSpanDays != null
+          ? `${bn}: ${shortTrackNote("record", jointCmp.coveredShortSpanDays)}`
+          : null;
 
   // Phase 196 (D-04): Style drift is the one Style panel that can render nothing on a
   // non-scenario factsheet; the detailed part reads it here so it can leave the whole section
@@ -966,6 +969,33 @@ function BwRow({ scale, best, worst, dash = false }: { scale: string; best: numb
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
 /** The factsheet's "Mon D, YYYY" date (UTC); "—" for an empty or unparseable input. */
+/**
+ * 194.2 D-05 (194-ZOOM-BENCHMARK-COVERAGE): on a selected range, the one muted sentence naming the
+ * span the benchmark was compared over, when its data starts after the window start or ends before
+ * its end. Each side is judged on the benchmark's OWN calendar (`startsAfterCoverage`,
+ * `isPastCoverage`), so a weekday benchmark against a weekend window edge is not "short". Null when
+ * the benchmark covers the window, when no strategy day in the window has a benchmark return (no
+ * span to name: `isoToMonthDay` would print the dash), or when a covered date is not a date (the
+ * caller's unreadable sentence has already taken precedence by then). The vs-benchmark figures are
+ * untouched: they stay computed on the overlap (D-05 adds no withholding).
+ */
+function selectedRangeBenchNote(
+  benchmarkName: string,
+  block: ComparatorBlock,
+  scope: RangeScope,
+  calendar: WeekdayCalendar,
+): string | null {
+  const { coveredFrom, coveredThrough } = block;
+  if (coveredFrom === undefined || coveredThrough === undefined) return null;
+  const from = isoToMonthDay(coveredFrom);
+  const through = isoToMonthDay(coveredThrough);
+  if (from === "—" || through === "—") return null;
+  return benchCoverageNote(benchmarkName, from, through, {
+    startsAfter: startsAfterCoverage(coveredFrom, scope.start, calendar),
+    endsBefore: comparatorPartialThrough(block.through, scope.end, calendar) !== null,
+  });
+}
+
 /**
  * Phase 169.5 (SFH-M-05) — the comparator's `through` when its prices stop before
  * the strategy's last date (its figures then cover a shorter span), else null. Null
