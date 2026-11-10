@@ -35,7 +35,8 @@ function getContrastRatio(fg: string, bg: string): number {
 
 const CHIP_SOURCES = [
   "src/app/(dashboard)/allocations/components/CoverageStateChip.tsx",
-  "src/components/strategy/StrategyTable.tsx",
+  // Phase 199-14 moved StrategyTable's two grey chip tones into PIPELINE_CHIPS.
+  "src/components/strategy/StaleSeriesChip.tsx",
 ] as const;
 
 function readRepo(path: string): string {

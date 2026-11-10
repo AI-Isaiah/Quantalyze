@@ -39,6 +39,7 @@ Phase 199. After sign-in an allocator lands on `/allocations`, a manager on `/st
 - Security audit: SECURED, 34/34 threats closed.
 
 ### Tests
+- `tests/a11y/chip-contrast.test.ts` now reads the grey chip tones from `StaleSeriesChip.tsx` (`PIPELINE_CHIPS`), where plan 199-14 moved them out of `StrategyTable.tsx`; the Phase 170 contrast pin had gone blind there. Neutering a tone to muted turns it red.
 - New: `e2e/role-home.spec.ts` (a seeded allocator, manager and admin sign in through the real form and land on their exact page; a safe `?redirect=` wins; an off-origin one is ignored), added to the seeded CI list in `.github/workflows/ci.yml`; a `/my-strategies` 308 canary; the owner-list spec retargeted to `/strategies`; reflow and axe rows for the merged list (plan 17).
 - Every post-login wait accepts the role landings through `isPostLoginPath` (plan 17).
 - Unit and structural suites: `role-home.test.ts`, `strategy-health.test.ts`, `degrade-warnings.test.tsx`, `degrade-warning-scan.test.ts`, `page.merged.test.tsx`, `StrategiesLegend.test.tsx`, `StrategiesSection.test.tsx`, `StrategyTable.health.test.tsx`, `StrategyTable.owner-list.test.tsx` with owner-list goldens for manager-only, allocator-only and both, `home/page.test.tsx`, `login/page.test.tsx`, `LoginForm.test.tsx`, `role-home-call-sites.test.ts`, `strategies-guard-coverage.test.ts`, `my-strategies-retired.test.ts`, plus RED-first tests for every registry plan.
