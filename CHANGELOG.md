@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.32.2] - 2026-11-10 — records: close 194.2 FIGURERESIDUALS; book 204 INTROAUTH and 205 ONEVERDICT
+
+### Changed
+- **The Phase 194.2 records are on main.** This brings the phase directory (CONTEXT, research, the six plans and summaries, the review rounds, MIGRATION-REVIEW, SECURITY and VERIFICATION, status passed). ROADMAP ticks 194.2 with its six plan rows and a Complete Progress row, and STATE moves to 11 of 16 phases. 194.2 shipped as v0.133.32.0 (PR #1240); its migration applied to TEST and then PROD, and the baseline re-dump followed as v0.133.32.1 (PR #1241).
+- **Two follow-up phases are booked** with `/gsd-phase add` (founder decision 2026-11-10, "Eigene Folgephase"). Phase 204 INTROAUTH is the security follow-up and runs first: the database side of the intro path enforces what `/api/intro` enforces. Phase 205 ONEVERDICT takes the three warnings that survived 194.2's third review round: the stress block, the api-arm allocator blends and the USD view follow the record's one readability verdict.
+
+### Notes
+- Two 194.2 review files are held back on purpose. They describe a pre-existing intro-path authorization gap in detail, and they publish with Phase 204's records once that fix is live on PROD. Four other 194.2 files carry neutral wording in their place.
+- VERSION and package.json 0.133.32.1 → 0.133.32.2. Planning-only change otherwise.
+
 ## [0.133.32.1] - 2026-11-10 — BASELINE: automated re-dump after the PROD apply of 1f3256f3
 
 ### Changed
