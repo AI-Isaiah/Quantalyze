@@ -61,6 +61,9 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 import AdminPage from "./page";
+import { isAdminUser } from "@/lib/admin";
+import { redirect } from "next/navigation";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
@@ -100,5 +103,15 @@ describe("AdminPage queue reads", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: "Admin dashboard" }),
     ).toBeTruthy();
+  });
+
+  // Phase 199 CD-03 / T-199-28: a non-admin is bounced to the role home, which
+  // never sends them back here (/home and this guard share isAdminUser).
+  it("bounces a non-admin to the role home, not to Discovery", async () => {
+    vi.mocked(isAdminUser).mockResolvedValueOnce(false);
+    vi.mocked(redirect).mockImplementationOnce(((to: string) => {
+      throw new Error(`REDIRECT:${to}`);
+    }) as never);
+    await expect(AdminPage()).rejects.toThrow(`REDIRECT:${ROLE_HOME_ROUTE}`);
   });
 });

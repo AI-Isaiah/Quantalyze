@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments } from "@/lib/degrade-warnings";
 
 // Critical-only ack-able banner. Spec: docs/notes/alert-routing-v1.md.
 
@@ -99,7 +101,10 @@ export function AlertBanner({ portfolioId }: AlertBannerProps) {
         className="hidden md:block mb-2 text-caption text-text-muted"
         role="status"
       >
-        Couldn&apos;t verify critical alerts.
+        <DegradeLine
+          id="allocation.alerts-unverified"
+          segments={degradeSegments("allocation.alerts-unverified", undefined)}
+        />
       </p>
     );
   }

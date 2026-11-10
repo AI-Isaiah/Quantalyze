@@ -13955,3 +13955,13 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Reading.** The `/compare` "Add strategy" search names other managers' rows by codename (`displayStrategyName`), while discovery and `CompareTable` print the raw strategy name, so an allocator who types a name seen in discovery may find nothing (orchestrator resolution 1).
 
 **Owner / Trigger:** unrouted, needs a founder decision on the pseudonymity contract. Closed when one naming rule applies to all three surfaces.
+
+## Phase 199 (MANAGERHOME) — routed items (logged 2026-11-10)
+
+### [199-DEPARTED-HISTORY-NAME-THE-KEY] — the "this curve leaves out a disconnected account's history" note cannot say which key (booked 2026-11-10, Phase 199 plan 18, CD-09, D-05; user-facing)
+
+**Reading.** When an allocator disconnects an exchange key, the My allocation equity curve can leave that key's history out, and a note says so. The note (`DepartedHistoryNote` in `src/app/(dashboard)/allocations/AllocationDashboardV2.tsx`, registry entry `allocation.departed-history`) can only say "at least one disconnected account", with no key and no day, because the stored derive result carries a count of departed keys with no usable history (`departed_history_unavailable_keys`, written by the allocator-equity derive in `analytics-service/services/job_worker.py`) and not their ids. Phase 199 accepted that (CD-09, D-05, founder 2026-11-09): the note is a count-pinned `whole_history` line with the contact-form action, so it is honest but vague. Every other degrade warning now names its key or day.
+
+**What closes it.** The analytics-service derive emits the departed key ids (not only their count) into the derive result; the My allocation read carries them to the note; the note then reads `{key label}: this curve leaves out its history, because the balance that history is measured from is no longer available. Use the contact form to have it checked.` with one line per key, sorted by label, and its registry entry moves from `whole_history` scope to key scope (the `WHOLE_HISTORY_IDS` pin in `src/lib/degrade-warnings.test.tsx` drops from 10 to 9). The Python change is an analytics-service change: mypy strict and pytest from `analytics-service/` belong in its brief.
+
+**Owner / Trigger:** unrouted, needs a phase (it touches the analytics-service derive and the My allocation read). Trigger: the next phase that edits the allocator-equity derive or `DepartedHistoryNote`. Closed when the note names each departed key by its key label.

@@ -5,6 +5,7 @@ import { backTargetFor, parseOrigin } from "@/lib/factsheet/origin";
 import { HoldingsTabPanel } from "../HoldingsTabPanel";
 import { EMPTY_EXPOSURE } from "../lib/exposure-props";
 import { toStrategyRows } from "../lib/strategies-row-adapter";
+import { DEGRADE_WARNINGS, type DegradeEntry } from "@/lib/degrade-warnings";
 import type {
   MyAllocationDashboardPayload,
   OwnCapitalStrategy,
@@ -634,7 +635,7 @@ describe("HoldingsTable — D-15 three empty-state arms, in priority order", () 
     expect(screen.getByText(ARM_2_HEADING)).toBeInTheDocument();
     expect(screen.getByText(ARM_2_BODY)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: ARM_2_LINK });
-    expect(link).toHaveAttribute("href", "/my-strategies");
+    expect(link).toHaveAttribute("href", "/strategies");
     expect(screen.queryByText(ARM_3_HEADING)).not.toBeInTheDocument();
   });
 
@@ -800,3 +801,34 @@ describe("HoldingsTable — a marked strategy whose record dates could not be re
   });
 });
 
+// Phase 199 plan 15 (D-04, ROUTE-11). The strategies read failure is a registered
+// read_failure: its sentence is the registry entry's words, it carries the entry's id
+// on the element the owner reads, and it ends on its action. The marker is what the
+// scan test attributes the render site by, so an edit that turned the note back into
+// an inline string would lose it here.
+describe("HoldingsTable — a failed strategies read renders its registry entry (199-15)", () => {
+  const ID = "allocation.holdings-strategies-read-failed";
+  const SENTENCE =
+    "Strategies temporarily unavailable — some of your strategies may not appear, and allocation actions may be hidden. Refresh to retry.";
+
+  it("carries the entry's id, its words and its shipped action, inside the status region", () => {
+    const { container } = render(
+      <HoldingsTable strategyRows={[]} hasAnyStrategies={false} strategiesReadFailed />,
+    );
+    const line = container.querySelector(`[data-degrade-id="${ID}"]`);
+    expect(line).not.toBeNull();
+    expect(line!.textContent).toBe(SENTENCE);
+    expect(line!.closest('[role="status"]')).not.toBeNull();
+    const entry = DEGRADE_WARNINGS.find((e) => e.id === ID) as DegradeEntry;
+    expect(entry.class).toBe("read_failure");
+    expect(entry.shippedAction).toBe("Refresh to retry.");
+    expect(line!.textContent!.endsWith(entry.shippedAction!)).toBe(true);
+  });
+
+  it("a successful read carries no read-failure marker", () => {
+    const { container } = render(
+      <HoldingsTable strategyRows={[]} hasAnyStrategies={false} strategiesReadFailed={false} />,
+    );
+    expect(container.querySelector(`[data-degrade-id="${ID}"]`)).toBeNull();
+  });
+});

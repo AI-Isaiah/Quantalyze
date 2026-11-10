@@ -85,6 +85,7 @@ import {
   type ComputeState,
 } from "@/lib/compute-state";
 import { SHARE_CARD_COPY } from "@/lib/status-surface-copy";
+import type { DegradeId } from "@/lib/degrade-warnings";
 import { countCompositeMembers } from "@/lib/strategy-shape";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { isAuthSessionMissingError, type SupabaseClient } from "@supabase/supabase-js";
@@ -92,6 +93,12 @@ import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { withViewerAum } from "@/lib/factsheet/viewer-aum";
 import { SignUpLine, VisitorHeader } from "@/components/factsheet/VisitorHeader";
+
+/** The registry entry each arm of the share card is (a literal table, so the degrade scan sees the ids). */
+const SHARE_CARD_ENTRY = {
+  in_progress: "factsheet.share-card-in-progress",
+  not_available: "factsheet.share-card-not-available",
+} as const satisfies Record<keyof typeof SHARE_CARD_COPY, DegradeId>;
 
 // DO NOT cache at the edge. Shared caches are keyed on the URL, not on the
 // token's revocation state, so a cached response could be replayed after a
@@ -430,10 +437,14 @@ export default async function FactsheetSharePage({
       <>
         <VisitorHeader showSignUp={!signedIn} />
         <main className="mx-auto max-w-3xl px-4 py-16">
-          <EmptyStateCard
-            heading={SHARE_CARD_COPY[arm].heading}
-            body={SHARE_CARD_COPY[arm].body}
-          />
+          {/* Phase 199 plan 18 (D-04): the card keeps its shipped JSX; a wrapper carries the
+              registered id of its arm (class recipient: no key, no state). */}
+          <div data-degrade-id={SHARE_CARD_ENTRY[arm]}>
+            <EmptyStateCard
+              heading={SHARE_CARD_COPY[arm].heading}
+              body={SHARE_CARD_COPY[arm].body}
+            />
+          </div>
         </main>
       </>
     );

@@ -20,8 +20,9 @@
  * No client directive: server pages call these functions.
  */
 
-import { EXCHANGE_DISPLAY, EXCHANGES } from "./closed-sets";
-import type { ComputeState, RecipientArm } from "./compute-state";
+import { EXCHANGES } from "./closed-sets";
+import type { ComputeJobRow, ComputeState, RecipientArm } from "./compute-state";
+import { formatCloseDay } from "./factsheet/returns-unit";
 // Type-only (Phase 167.2.1): erased at build, so this copy module pulls in
 // none of the builder's server-side imports.
 import type {
@@ -228,10 +229,65 @@ function stateLineKeyOf(
   }
 }
 
-/** The owner's state line and its tone (UI-SPEC § KCS-09, § Color). */
+/**
+ * Phase 199 plan 18 (D-04, SC-4, UI-SPEC "Factsheet", owner state lines) — the lines that report
+ * a computation that did not complete name the day it was last attempted: the failed arms and the
+ * stalled arm. A queued, retrying or running line is about now, a finished, never-started or
+ * unreadable line is about the build or the read, so none of those takes a day.
+ */
+const DATED_STATE_KEYS: ReadonlySet<StateLineKey> = new Set<StateLineKey>([
+  "stalled",
+  "failed_permanent",
+  "failed_transient",
+  "failed_orphaned",
+  "failed_unknown",
+  "failed_other",
+]);
+
+/** Both shipped openings, `The last computation …` (failed) and `The computation …` (stalled). */
+const DATED_OPENING = /^The (?:last )?computation /;
+
+/** True when `day` renders as a real day: a malformed one is never printed as a guess. */
+function usableDay(day: string | null | undefined): day is string {
+  return typeof day === "string" && formatCloseDay(day) !== "\u2014";
+}
+
+/**
+ * Whether `ownerStateLine(state, build, day)` prints a day: the state is a failed or stalled one
+ * and `day` is a usable ISO day. The page asks this to pick the registry entry that matches the
+ * line it is about to print.
+ */
+export function ownerStateIsDated(
+  state: ComputeState,
+  day?: string | null,
+): boolean {
+  return DATED_STATE_KEYS.has(stateLineKeyOf(state)) && usableDay(day);
+}
+
+/**
+ * The UTC day (`YYYY-MM-DD`) a compute job was last attempted: `claimed_at`, else `created_at`
+ * (UI-SPEC "Row note, the Health detail"). Null for no job, an absent stamp or one that does not
+ * parse, so the caller prints the shipped sentence and never a guessed day.
+ */
+export function lastAttemptDay(
+  job: Pick<ComputeJobRow, "claimed_at" | "created_at"> | null | undefined,
+): string | null {
+  const raw = job?.claimed_at ?? job?.created_at;
+  if (typeof raw !== "string") return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : null;
+}
+
+/**
+ * The owner's state line and its tone (UI-SPEC § KCS-09, § Color). `day` is the last attempt's
+ * ISO day (`lastAttemptDay`): the failed and stalled lines then open `The last computation, on
+ * {day}, …` and keep the rest of their shipped sentence; without a usable day they are the
+ * shipped sentence. The id and the tone never depend on it.
+ */
 export function ownerStateLine(
   state: ComputeState,
   build?: OwnerBuildFacts,
+  day?: string | null,
 ): {
   id: string;
   text: string;
@@ -245,6 +301,16 @@ export function ownerStateLine(
       String(state.memberOf.n),
     ).replace("{m}", String(state.memberOf.m));
     return { id: line.id, text, tone: line.tone };
+  }
+  if (DATED_STATE_KEYS.has(key) && usableDay(day)) {
+    return {
+      id: line.id,
+      text: line.text.replace(
+        DATED_OPENING,
+        `The last computation, on ${formatCloseDay(day)}, `,
+      ),
+      tone: line.tone,
+    };
   }
   return { id: line.id, text: line.text, tone: line.tone };
 }
@@ -654,30 +720,21 @@ export const KEY_STATUS_UNREADABLE_NOTE =
 
 // ── S4 — KCS-06 key-mark caption ──────────────────────────────────────────
 
-function exchangeDisplayName(code: string): string {
-  return Object.hasOwn(EXCHANGE_DISPLAY, code)
-    ? EXCHANGE_DISPLAY[code as keyof typeof EXCHANGE_DISPLAY]
-    : code;
-}
-
 /**
  * The left caption beside a key-level pill on a /strategies row: KCS06-ONE
- * (`Exchange key · {Exchange}`) for one key, KCS06-MANY
- * (`Exchange keys · {Exchange1}, {Exchange2}`) for two or more. Distinct
- * display names from EXCHANGE_DISPLAY in first-seen order; a code with no
- * display name renders as stored.
+ * (`Exchange key · {label}`) for one key, KCS06-MANY
+ * (`Exchange keys · {label A}, {label B}`) for two or more.
+ *
+ * Phase 199 plan 12 (D-03, CD-04): it names KEYS, not exchanges. The labels are
+ * built by the caller with `apiKeyLabelById` (`{Exchange} — {nickname}`, or the
+ * masked id tail when there is no nickname), so two keys of one exchange read
+ * as two keys, and a Key problem names the key to fix. The labels are echoed as
+ * given, in the order given, one per key: nothing is looked up or de-duplicated
+ * here, and a hand-joined exchange and nickname never reaches this function.
  */
-export function untrustedKeyCaption(
-  exchangeCodes: readonly string[],
-  keyCount: number,
-): string {
-  const names: string[] = [];
-  for (const code of exchangeCodes) {
-    const name = exchangeDisplayName(code);
-    if (!names.includes(name)) names.push(name);
-  }
-  const noun = keyCount >= 2 ? "Exchange keys" : "Exchange key";
-  return `${noun} ${MIDDLE_DOT} ${names.join(", ")}`;
+export function untrustedKeyCaption(keyLabels: readonly string[]): string {
+  const noun = keyLabels.length >= 2 ? "Exchange keys" : "Exchange key";
+  return `${noun} ${MIDDLE_DOT} ${keyLabels.join(", ")}`;
 }
 
 // ── Phase 192 PUBLICTRUTH — the shared public sentences ───────────────────

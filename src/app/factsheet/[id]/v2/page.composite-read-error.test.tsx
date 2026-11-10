@@ -292,7 +292,7 @@ describe("169 D-41 — a composite's csv_daily_returns read outage is not cached
       expect(findPayload(failed)).toBeNull();
       const { container } = render(failed as ReactElement);
       expect(container.querySelector("article p:last-child")?.textContent).toBe(
-        "The detailed factsheet for this strategy is not available yet.",
+        "The detailed factsheet for this strategy is not available yet. Check with the person who shared this link before trying again.",
       );
       // Nothing was stored for the run: the outage threw out of the callback.
       expect(cacheStore.size, "the outage was stored as the run's answer").toBe(0);

@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/Badge";
 import { UserRolesPanel } from "@/components/admin/UserRolesPanel";
 import type { AppRole } from "@/lib/auth";
 import { profileRoleLabel, profileStatusLabel } from "@/lib/display-labels";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * Tab title. The display name is read with the service-role client, so the
@@ -66,7 +67,7 @@ export default async function AdminUserDetailPage({
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   const admin = createAdminClient();
 

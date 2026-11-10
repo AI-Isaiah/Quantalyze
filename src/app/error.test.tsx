@@ -14,6 +14,8 @@
 import { render, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import Error from "./error";
+import NotFound from "./not-found";
+import { DISCOVERY_LANDING_ROUTE, ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 const captureExceptionMock = vi.fn();
 
@@ -75,5 +77,32 @@ describe("[OBSERV-04] src/app/error.tsx Sentry capture with correlation_id tag",
     });
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
+  });
+
+  // Phase 199 WR-01: the root boundary catches a /home throw, so its escape link
+  // must not be /home (it would throw again). It leaves to Discovery.
+  it("escape link goes to Discovery, never back into /home, Try again stays first", async () => {
+    const err = Object.assign(new globalThis.Error("boom"), { digest: "d-4" });
+    const { getAllByRole, getByRole } = render(
+      <Error error={err} unstable_retry={vi.fn()} />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const escape = getByRole("link", { name: "Go to Discovery" });
+    expect(escape.getAttribute("href")).toBe(DISCOVERY_LANDING_ROUTE);
+    expect(escape.getAttribute("href")).not.toBe(ROLE_HOME_ROUTE);
+    const buttons = getAllByRole("button");
+    expect(buttons[0].textContent).toBe("Try again");
+  });
+});
+
+// not-found has no test of its own; its single primary home link is pinned here.
+describe("src/app/not-found.tsx home link (Phase 199 CD-01)", () => {
+  it("links home to the role-home route under the shared label", () => {
+    const { getByRole } = render(<NotFound />);
+    const home = getByRole("link", { name: "Go to your home page" });
+    expect(home.getAttribute("href")).toBe(ROLE_HOME_ROUTE);
   });
 });

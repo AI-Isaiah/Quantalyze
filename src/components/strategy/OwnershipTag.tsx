@@ -35,7 +35,11 @@ import {
 const ANATOMY =
   "inline-flex items-center rounded-md px-2 py-0.5 text-caption font-medium";
 
-const LABELS = {
+/**
+ * Exported (Phase 199 plan 14) so the strategies legend renders the labels this
+ * tag prints, from the one map, instead of re-typing them.
+ */
+export const LABELS = {
   [OWN_CAPITAL]: "Own capital",
   [TEAM_REVIEW]: "Team review",
 } as const;

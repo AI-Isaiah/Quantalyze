@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { Fragment, useMemo, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type {
   FailingKeyExit,
@@ -21,6 +21,9 @@ import { MandateTabPanel } from "./MandateTabPanel";
 import { historyGate, resolveNotSyncingKeys } from "./lib/history-gate";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
 import { formatCloseDay } from "@/lib/factsheet/returns-unit";
+import { apiKeyLabelById } from "@/lib/api-key-label";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments } from "@/lib/degrade-warnings";
 import {
   FactsheetProvider,
 } from "@/app/factsheet/[id]/v2/factsheet-context";
@@ -276,7 +279,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           renders the last-known-good numbers behind it; the banner just
           signals the staleness + offers the Connect Exchange path. */}
       {allKeysStale && !hasSyncing && (
-        <StalenessBanner lastSyncAt={lastSyncAt} />
+        <StalenessBanner lastSyncAt={lastSyncAt} apiKeys={apiKeys ?? []} />
       )}
       {/* Phase 198 plan 01 (D-06, ROUTE-07): the book at a glance. Figures come
           from the shared book-figures module Scenario's live strip also reads,
@@ -453,8 +456,25 @@ function FactsheetWarmupNote({ curveDays }: { curveDays: number }) {
  * a key actually syncs successfully) so a one-shot dismiss would let the
  * user re-acquire the wrong mental model on the next page load.
  */
-function StalenessBanner({ lastSyncAt }: { lastSyncAt: string | null }) {
-  const ageCopy = formatRelativeAge(lastSyncAt);
+function StalenessBanner({
+  lastSyncAt,
+  apiKeys,
+}: {
+  lastSyncAt: string | null;
+  apiKeys: NonNullable<MyAllocationDashboardPayload["apiKeys"]>;
+}) {
+  const day = utcDay(lastSyncAt);
+  // Phase 199 plan 03 (D-04, CD-05, SC-4): the banner names the DAY of the newest
+  // sync (UTC, never a relative age, so it reads no client clock) and one action.
+  // With no sync ever there is no day, so it names the owner's active keys by the
+  // one key-label rule, sorted by label.
+  const labels = useMemo(() => {
+    const active = apiKeys.filter((k) => k.is_active);
+    const byId = apiKeyLabelById(active);
+    return active
+      .map((k) => byId.get(k.id) as string)
+      .sort((a, b) => a.localeCompare(b));
+  }, [apiKeys]);
   return (
     <div
       role="status"
@@ -466,16 +486,26 @@ function StalenessBanner({ lastSyncAt }: { lastSyncAt: string | null }) {
         color: "var(--color-text-secondary)",
       }}
     >
-      <span className="font-medium">Analytics may be stale.</span>{" "}
-      <span>
-        {ageCopy
-          ? `Last successful sync was ${ageCopy}.`
-          : "No successful sync recorded yet."}
-        {" "}Use the API keys panel below to reconnect a key, or wait for
-        the next scheduled sync.
-      </span>
+      {day !== null ? (
+        <DegradeLine
+          id="allocation.staleness"
+          segments={degradeSegments("allocation.staleness", { day })}
+        />
+      ) : (
+        <DegradeLine
+          id="allocation.staleness-never"
+          segments={degradeSegments("allocation.staleness-never", { labels })}
+        />
+      )}
     </div>
   );
+}
+
+/** The UTC calendar day (`YYYY-MM-DD`) of an ISO timestamp, or null when absent or unparseable. Reads no clock. */
+function utcDay(iso: string | null): string | null {
+  if (!iso) return null;
+  const ts = Date.parse(iso);
+  return Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : null;
 }
 
 /**
@@ -495,16 +525,12 @@ function DepartedHistoryNote() {
       data-testid="dashboard-departed-history-note"
       className="mb-3 px-1 text-sm text-text-secondary"
     >
-      This curve leaves out the history of at least one disconnected account,
-      because the balance that history is measured from is not available.
+      <DegradeLine
+        id="allocation.departed-history"
+        segments={degradeSegments("allocation.departed-history", undefined)}
+      />
     </p>
   );
-}
-
-/** `A`, `A and B`, `A, B and C`: no serial comma. */
-function joinAnd(parts: readonly string[]): string {
-  if (parts.length <= 1) return parts.join("");
-  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
 /**
@@ -535,35 +561,53 @@ function UnpricedAccountNote({
   const dated = sorted.filter((a) => a.kind === "dated");
   const whole = sorted.filter((a) => a.kind === "whole");
   const history = sorted.filter((a) => a.kind === "history");
-  const byDay = new Map<string, string[]>();
+  // Accounts sharing a day are one group; groups keep the order their first
+  // account appears in. The sentences themselves live in the degrade registry
+  // (Phase 199 plan 03, CD-05), each ending with its one action.
+  const byDay = new Map<string, { day: string; labels: string[] }>();
   for (const a of dated) {
-    const day = formatCloseDay(a.day as string);
-    byDay.set(day, [...(byDay.get(day) ?? []), a.label]);
+    const key = formatCloseDay(a.day as string);
+    const group = byDay.get(key) ?? { day: a.day as string, labels: [] };
+    group.labels.push(a.label);
+    byDay.set(key, group);
   }
-  const sentences: string[] = [];
+  const sentences: ReactNode[] = [];
   if (dated.length > 0) {
-    const clauses = Array.from(byDay, ([day, labels]) => `${joinAnd(labels)} for ${day}`);
-    const days = byDay.size > 1 ? "those days" : "that day";
-    const pronoun = dated.length > 1 ? "they" : "it";
+    const groups = [...byDay.values()];
     sentences.push(
-      `The total leaves out ${clauses.join("; ")}: no BTC close is stored for ${days} yet, so ${pronoun} cannot be priced in USD.`,
+      <DegradeLine
+        key="dated"
+        id="allocation.unpriced-dated"
+        segments={degradeSegments("allocation.unpriced-dated", { groups })}
+      />,
     );
   }
   if (whole.length > 0) {
     // The writer could not date this account (an unreadable row): it is out of the total whole.
     sentences.push(
-      `The total ${dated.length > 0 ? "also leaves" : "leaves"} out ${joinAnd(whole.map((a) => a.label))} entirely: ${whole.length > 1 ? "they" : "it"} cannot be priced in USD right now.`,
+      <DegradeLine
+        key="whole"
+        id="allocation.unpriced-whole"
+        segments={degradeSegments("allocation.unpriced-whole", {
+          labels: whole.map((a) => a.label),
+          also: dated.length > 0,
+        })}
+      />,
     );
   }
   if (history.length > 0) {
     // Interior gaps only: the account IS in the current total, so this is about the curve.
-    const counts = history.map((a) => (a.kind === "history" ? a.holeDays : 0));
-    const clauses = history.map(
-      (a, i) => `${a.label} on ${counts[i]} ${counts[i] === 1 ? "day" : "days"}`,
-    );
-    const many = history.length > 1 || counts.some((n) => n > 1);
     sentences.push(
-      `The equity history leaves out ${joinAnd(clauses)}: no BTC close is stored for ${many ? "those days" : "that day"}, so ${history.length > 1 ? "they" : "it"} could not be priced in USD.`,
+      <DegradeLine
+        key="history"
+        id="allocation.unpriced-history"
+        segments={degradeSegments("allocation.unpriced-history", {
+          items: history.map((a) => ({
+            label: a.label,
+            holeDays: a.kind === "history" ? a.holeDays : 0,
+          })),
+        })}
+      />,
     );
   }
   return (
@@ -572,9 +616,19 @@ function UnpricedAccountNote({
       data-testid="dashboard-unpriced-account-note"
       className="mb-3 px-1 text-sm text-text-secondary"
     >
-      {sentences.join(" ")}
+      {spaced(sentences)}
     </p>
   );
+}
+
+/** The clauses of one note, one space apart. */
+function spaced(clauses: readonly ReactNode[]): ReactNode {
+  return clauses.map((clause, i) => (
+    <Fragment key={i}>
+      {i > 0 && " "}
+      {clause}
+    </Fragment>
+  ));
 }
 
 /**
@@ -589,7 +643,10 @@ function FailingKeyExitNote({ exits }: { exits: ReadonlyArray<FailingKeyExit> })
   );
   // One clause per (reason, day): keys sharing both are joined; a key with no
   // day (it never counted) is stated once for either reason. Dated groups run
-  // sync_failing first, then by day; the undated clause comes last.
+  // sync_failing first, then by day; the undated clause comes last. The sentences
+  // live in the degrade registry (Phase 199 plan 03, CD-05), each ending with the
+  // one action its clause kind calls for. A clause names only the keys in it, so a
+  // dead key never blames another (founder rule).
   const dated = new Map<string, { reason: FailingKeyExit["reason"]; day: string; labels: string[] }>();
   const undated: string[] = [];
   for (const e of sorted) {
@@ -602,25 +659,37 @@ function FailingKeyExitNote({ exits }: { exits: ReadonlyArray<FailingKeyExit> })
     group.labels.push(e.label);
     dated.set(key, group);
   }
-  const sentences: string[] = [];
+  const sentences: ReactNode[] = [];
   const groups = [...dated.values()].sort(
     (a, b) =>
       (a.reason === b.reason ? 0 : a.reason === "sync_failing" ? -1 : 1) ||
       (a.day < b.day ? -1 : a.day > b.day ? 1 : 0),
   );
   for (const g of groups) {
-    const many = g.labels.length > 1;
-    const its = many ? "their" : "its";
-    const day = formatCloseDay(g.day);
+    const args = { labels: g.labels, day: g.day };
     sentences.push(
-      g.reason === "sync_failing"
-        ? `The total counts ${joinAnd(g.labels)} through ${day}: ${its} exchange key is failing to sync, so ${its} capital is no longer counted after that day.`
-        : `The total counts ${joinAnd(g.labels)} through ${day}: the latest read of ${its} exchange history came back incomplete, so the total holds ${its} last complete day.`,
+      g.reason === "sync_failing" ? (
+        <DegradeLine
+          key={`${g.reason}|${g.day}`}
+          id="allocation.failing-key-sync-failing"
+          segments={degradeSegments("allocation.failing-key-sync-failing", args)}
+        />
+      ) : (
+        <DegradeLine
+          key={`${g.reason}|${g.day}`}
+          id="allocation.failing-key-read-incomplete"
+          segments={degradeSegments("allocation.failing-key-read-incomplete", args)}
+        />
+      ),
     );
   }
   if (undated.length > 0) {
     sentences.push(
-      `The total leaves out ${joinAnd(undated)}: ${undated.length > 1 ? "their" : "its"} exchange key has not returned a complete history yet.`,
+      <DegradeLine
+        key="undated"
+        id="allocation.failing-key-undated"
+        segments={degradeSegments("allocation.failing-key-undated", { labels: undated })}
+      />,
     );
   }
   return (
@@ -629,20 +698,7 @@ function FailingKeyExitNote({ exits }: { exits: ReadonlyArray<FailingKeyExit> })
       data-testid="dashboard-failing-key-note"
       className="mb-3 px-1 text-sm text-text-secondary"
     >
-      {sentences.join(" ")}
+      {spaced(sentences)}
     </p>
   );
-}
-
-function formatRelativeAge(iso: string | null): string | null {
-  if (!iso) return null;
-  const ts = new Date(iso).getTime();
-  if (!Number.isFinite(ts)) return null;
-  const diffMs = Date.now() - ts;
-  if (diffMs < 0) return "just now";
-  const hours = Math.floor(diffMs / (60 * 60 * 1000));
-  if (hours < 1) return "less than 1h ago";
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
 }

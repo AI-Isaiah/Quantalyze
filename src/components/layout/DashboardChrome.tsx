@@ -138,10 +138,13 @@ export function DashboardChrome({
   // is a DOCUMENT / edit form, so both stay bounded at `max-w-7xl`. That is why
   // `strategies` is NOT inside the `(\/|$)` alternation above: a prefix match
   // would widen them too.
+  //
+  // ⭐ Phase 199 LEAN-01 — the old `my-strategies` alternative is gone from the
+  // regex. Its page folds into the `/strategies` index, which this exact-match
+  // arm already keeps fluid, so the dense list loses no width.
   const isWide =
-    /^\/(allocations|compare|discovery|admin|my-strategies)(\/|$)/.test(
-      pathname,
-    ) || /^\/strategies$/.test(pathname);
+    /^\/(allocations|compare|discovery|admin)(\/|$)/.test(pathname) ||
+    /^\/strategies$/.test(pathname);
 
   if (isFullBleed) {
     return (

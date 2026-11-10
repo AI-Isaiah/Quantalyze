@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type Locator, type Page } from "./helpers/hydration-guard";
 import { assertNoReflow } from "./helpers/reflow";
+import { isPostLoginPath } from "./helpers/login";
 import { openAdvanced } from "./helpers/open-advanced";
 import {
   assertChildrenInside,
@@ -87,7 +88,7 @@ async function loginViaForm(page: Page, email: string, password: string) {
   await page.fill('input[name="email"], input[placeholder*="email" i]', email);
   await page.fill('input[type="password"]', password);
   await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|allocations|dashboard)/, {
+  await page.waitForURL((url) => isPostLoginPath(url.pathname), {
     timeout: 10_000,
   });
 }
@@ -994,7 +995,7 @@ test.describe("/strategies — MYSTRATTABLE wide", () => {
   }
 });
 
-test.describe("/my-strategies — N-TABLE", () => {
+test.describe("/strategies — N-TABLE", () => {
   test.skip(
     !HAS_SEED_ENV,
     "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
@@ -1015,8 +1016,8 @@ test.describe("/my-strategies — N-TABLE", () => {
         });
       }
       await loginViaForm(page, owner.email, owner.password);
-      // Not the shared "My Strategies" h1 (DEF-149-B).
-      await page.goto("/my-strategies");
+      // Phase 199: the owner list is /strategies now (/my-strategies 308s there).
+      await page.goto("/strategies");
       // Anchor on the table itself: the href anchor resolved to the hidden
       // desktop sidebar link below md (CI run 36764778803, gap 5).
       const table = page.locator("[data-strategy-table]");

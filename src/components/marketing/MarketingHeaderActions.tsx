@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { unstable_rethrow } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 // Byte-identical to the two masthead links this component replaced.
 const SIGN_IN_CLASS =
@@ -58,7 +58,7 @@ export async function MarketingHeaderActions() {
   }
   if (!signedIn) return <SignedOutLinks />;
   return (
-    <Link href={DEFAULT_AUTHENTICATED_ROUTE} className={SIGN_UP_CLASS}>
+    <Link href={ROLE_HOME_ROUTE} className={SIGN_UP_CLASS}>
       Go to app
     </Link>
   );

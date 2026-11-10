@@ -10,6 +10,7 @@ import {
   sessionHeatmap,
   type SessionHeatmapRow,
 } from "@/lib/admin/usage-metrics";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * /admin/usage — allocator usage funnel page.
@@ -43,7 +44,7 @@ export default async function AdminUsagePage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   const admin = createAdminClient();
 

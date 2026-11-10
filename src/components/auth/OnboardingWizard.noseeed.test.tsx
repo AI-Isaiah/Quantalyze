@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { OnboardingWizard } from "./OnboardingWizard";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * Phase 07 Plan 06 Task 2 — OnboardingWizard noseed regression test
@@ -146,5 +147,12 @@ describe("PURGE-05: OnboardingWizard.handleComplete does not seed a portfolio", 
   it("never calls .insert on any table", async () => {
     await renderAndCompleteWizard();
     expect(insertCalls).toEqual([]);
+  });
+
+  // Phase 199 CD-01: after a successful update the wizard pushes the one
+  // role-home route; /home decides allocator, manager or admin server-side.
+  it("pushes the role-home route after a successful update", async () => {
+    await renderAndCompleteWizard();
+    expect(pushMock).toHaveBeenCalledWith(ROLE_HOME_ROUTE);
   });
 });

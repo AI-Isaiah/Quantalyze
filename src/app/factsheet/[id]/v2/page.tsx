@@ -34,14 +34,22 @@ import { buildFactsheetJsonLd } from "@/lib/factsheet/json-ld";
 import {
   deriveComputeState,
   recipientArm,
+  selectFactsheetJob,
   type ComputeState,
 } from "@/lib/compute-state";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import {
+  degradeSegments,
+  ownerStateKind,
+  type DegradeId,
+  type OwnerStateKind,
+} from "@/lib/degrade-warnings";
 import {
   readOwnerComputeJobs,
   readOwnerCompositeHistory,
 } from "@/lib/compute-jobs-read";
 import {
-  KCS10_PUBLIC_SENTENCE,
+  lastAttemptDay,
   ownerRemedy,
   ownerStateLine,
   probeUnreadableShareNote,
@@ -78,6 +86,17 @@ const STATE_LINE_TONE_CLASS = {
   amber: "text-warning",
   red: "text-negative",
 } as const satisfies Record<StateLineTone, string>;
+
+/**
+ * Phase 199 plan 18 (D-04, SC-4) — the registry entry each kind of owner state line is. A literal
+ * table so the degrade scan sees the ids where they render; `satisfies` makes a renamed or removed
+ * entry a compile error here.
+ */
+const OWNER_STATE_ENTRY = {
+  working: "factsheet.owner-state-working",
+  dated: "factsheet.owner-state-dated",
+  undated: "factsheet.owner-state-undated",
+} as const satisfies Record<OwnerStateKind, DegradeId>;
 
 // Pin to dynamic rendering. This route's render output already depends on the
 // per-request authentication state (cookies → supabase.auth.getUser() inside
@@ -789,8 +808,11 @@ export default async function FactsheetV2Page({
       analyticsFailed:
         ownerBuild !== null && ownerBuild.reason !== null && ownerBuild.analyticsFailed === true,
     };
+    // Phase 199 plan 18 (SC-4): a failed or stalled line names the day of the last attempt,
+    // taken from the same factsheet job the state was derived from (`readOwnerPendingStatus`).
     const ownerLine =
-      ownerStatus && ownerStateLine(ownerStatus.state, ownerBuildFacts);
+      ownerStatus &&
+      ownerStateLine(ownerStatus.state, ownerBuildFacts, ownerStatus.jobDay);
     const ownerRemedyLine =
       ownerStatus &&
       ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id, ownerBuildFacts);
@@ -872,7 +894,12 @@ export default async function FactsheetV2Page({
         {ownerLine && ownerRemedyLine ? (
           // KCS-09: one state line and one remedy line, read together. The
           // remedy is an instruction, not an aside, so it is not italic.
-          <section aria-label="Computation status">
+          <section
+            aria-label="Computation status"
+            data-degrade-id={
+              OWNER_STATE_ENTRY[ownerStateKind(ownerStatus!.state, ownerStatus!.jobDay)]
+            }
+          >
             <p
               className={
                 "mt-6 text-fixed-13 " + STATE_LINE_TONE_CLASS[ownerLine.tone]
@@ -900,9 +927,14 @@ export default async function FactsheetV2Page({
           // internal state: a visitor has no developer console, and the gate
           // detail stays in the `console.warn` hint above, which is the
           // developer's channel.
-          <p className="mt-6 text-fixed-13 text-text-secondary">
-            {KCS10_PUBLIC_SENTENCE}
-          </p>
+          // Phase 199 plan 18 (D-04): registered as `factsheet.public-pending` (class recipient):
+          // the shipped sentence, then the one action a visitor has.
+          <DegradeLine
+            id="factsheet.public-pending"
+            element="p"
+            className="mt-6 text-fixed-13 text-text-secondary"
+            segments={degradeSegments("factsheet.public-pending", undefined)}
+          />
         )}
       </article>
       </main>
@@ -1099,7 +1131,12 @@ async function readOwnerPendingStatus(
   supabase: Awaited<ReturnType<typeof createClient>>,
   strategyId: string,
   shapeInputs: { source: string | null; apiKeyId: string | null },
-): Promise<{ state: ComputeState; shape: StrategyShape | "unknown" }> {
+): Promise<{
+  state: ComputeState;
+  shape: StrategyShape | "unknown";
+  /** Phase 199 plan 18: the last attempt's UTC day (`YYYY-MM-DD`), or null when no job could be read. */
+  jobDay: string | null;
+}> {
   let shape: StrategyShape | "unknown" = "unknown";
   try {
     const [jobsRead, memberCount] = await Promise.all([
@@ -1171,7 +1208,7 @@ async function readOwnerPendingStatus(
       captureToSentry(readFailure, {
         tags: { route: "factsheet/v2/page", stage: "compute-state" },
       });
-      return { state: deriveComputeState({ readError: true }), shape };
+      return { state: deriveComputeState({ readError: true }), shape, jobDay: null };
     }
     if (jobsRead.windowFull) {
       // Deterministic, and "reload" cannot fix it, so it is logged and
@@ -1185,22 +1222,28 @@ async function readOwnerPendingStatus(
         { tags: { route: "factsheet/v2/page", stage: "compute-state-window-full" } },
       );
     }
+    // 167.2-REVIEW IN-03: an old stitch answers only while the strategy
+    // has members (or the count could not be read).
+    // 167.2-REVIEW-R2 IN-05: and a zero count drops it only for a proven
+    // single-key strategy (linked key, or no stitch on record).
+    const preferStitch = shouldPreferStitch({
+      apiKeyId: shapeInputs.apiKeyId,
+      memberCount,
+      compositeHistory,
+    });
+    const nowMs = Date.now();
     return {
       state: deriveComputeState({
         rows: jobsRead.rows,
         readExhaustive: jobsRead.readExhaustive,
-        nowMs: Date.now(),
-        // 167.2-REVIEW IN-03: an old stitch answers only while the strategy
-        // has members (or the count could not be read).
-        // 167.2-REVIEW-R2 IN-05: and a zero count drops it only for a proven
-        // single-key strategy (linked key, or no stitch on record).
-        preferStitch: shouldPreferStitch({
-          apiKeyId: shapeInputs.apiKeyId,
-          memberCount,
-          compositeHistory,
-        }),
+        nowMs,
+        preferStitch,
       }),
       shape,
+      // Phase 199 plan 18 (SC-4): the day of the SAME factsheet job the state was derived from
+      // (the selection `deriveComputeState` makes, with the same inputs), as the strategies list
+      // does. Null when there is no such job or its stamp does not parse.
+      jobDay: lastAttemptDay(selectFactsheetJob(jobsRead.rows, { preferStitch, nowMs })),
     };
   } catch (err) {
     console.error("[factsheet/v2/page] compute-state read failed", {
@@ -1211,7 +1254,7 @@ async function readOwnerPendingStatus(
     captureToSentry(err, {
       tags: { route: "factsheet/v2/page", stage: "compute-state" },
     });
-    return { state: deriveComputeState({ readError: true }), shape };
+    return { state: deriveComputeState({ readError: true }), shape, jobDay: null };
   }
 }
 

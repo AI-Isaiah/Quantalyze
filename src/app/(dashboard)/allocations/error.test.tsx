@@ -31,6 +31,7 @@ vi.mock("next/link", () => ({
 }));
 
 import AllocationsError from "./error";
+import { DISCOVERY_LANDING_ROUTE, ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 describe("/allocations/error.tsx — route boundary contract (STATE-02 / ASVS V7)", () => {
   it("Test 1: renders the 'Something went wrong' heading + recovery copy + retry CTA", () => {
@@ -82,5 +83,15 @@ describe("/allocations/error.tsx — route boundary contract (STATE-02 / ASVS V7
 
     expect(errSpy).toHaveBeenCalledWith("[allocations-error]", err);
     errSpy.mockRestore();
+  });
+
+  // Phase 199 WR-01: /home redirects an allocator back to /allocations, the
+  // surface this boundary caught, so the escape link leaves to Discovery.
+  it("escape link targets Discovery, never the role home that redirects back here", () => {
+    render(<AllocationsError error={new Error("boom")} unstable_retry={vi.fn()} />);
+    const escape = screen.getByRole("link", { name: "Go to Discovery" });
+    expect(escape.getAttribute("href")).toBe(DISCOVERY_LANDING_ROUTE);
+    expect(escape.getAttribute("href")).not.toBe(ROLE_HOME_ROUTE);
+    expect(screen.getAllByRole("button")[0].textContent).toBe("Try again");
   });
 });

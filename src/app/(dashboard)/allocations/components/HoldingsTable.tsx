@@ -37,6 +37,8 @@ import type { FlaggedRows } from "../lib/flagged-position-map";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments } from "@/lib/degrade-warnings";
 import {
   HoldingNoteIconButton,
   HoldingNoteRow,
@@ -460,8 +462,10 @@ function StrategyRowsTable({
             aria-live="polite"
             className="rounded-lg border border-border bg-card px-4 py-3 text-small text-text-secondary"
           >
-            Strategies temporarily unavailable — some of your strategies may not
-            appear, and allocation actions may be hidden. Refresh to retry.
+            <DegradeLine
+              id="allocation.holdings-strategies-read-failed"
+              segments={degradeSegments("allocation.holdings-strategies-read-failed", undefined)}
+            />
           </div>
         </div>
       )}
@@ -480,7 +484,7 @@ function StrategyRowsTable({
                 </p>
                 <p className="mt-4">
                   <Link
-                    href="/my-strategies"
+                    href="/strategies"
                     className="text-small font-medium text-accent underline"
                   >
                     Go to My Strategies →

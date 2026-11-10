@@ -94,7 +94,7 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     route: "/",
     class: "public",
     notes:
-      "Landing page. Public via the proxy `path === \"/\"` special-case (the isPublicRoute matcher in proxy.ts), not a PUBLIC_ROUTES array member. Authed users redirect('/discovery/crypto-sma') IN THE PAGE (page.tsx), not the proxy.",
+      "Landing page. Public via the proxy `path === \"/\"` special-case (the isPublicRoute matcher in proxy.ts), not a PUBLIC_ROUTES array member. Authed users redirect(ROLE_HOME_ROUTE) IN THE PAGE (page.tsx), not the proxy; /home then sends them to their role's page.",
   },
 
   // ----- admin (auth + admin-gated) -----
@@ -210,9 +210,10 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   },
   {
     route: "/my-strategies",
-    class: "private",
+    class: "exception",
+    redirectFrom: "/my-strategies",
     notes:
-      "Phase 149 NAV-01 — allocator-only ranking of own strategies at every status; requireRolePage('allocator') + own-only user_id predicate.",
+      "RETIRED 2026-11-10 (Phase 199 D-01, CD-06): config-level 308 to /strategies, query string kept; no backing page. Classified `exception` (not private) because a redirected-away route lives only in next.config, so the Rule-4 page-existence check must skip it (same carve-out as /scenarios). `redirectFrom` is byte-equal to the redirects() source (Rule 3, #512). The destination /strategies stays `private`; no PUBLIC_ROUTES delta.",
   },
   {
     route: "/onboarding",
@@ -261,7 +262,8 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   {
     route: "/strategies",
     class: "private",
-    notes: "Manager/admin strategies list — session-gated.",
+    notes:
+      "The one strategies list every strategy owner reads (manager, allocator, admin); the old /my-strategies redirects here — session-gated.",
   },
   {
     route: "/strategies/:id/edit",
@@ -324,6 +326,12 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     route: "/for-quants",
     class: "public",
     notes: "Public marketing surface — in PUBLIC_ROUTES + bounce-exempt.",
+  },
+  {
+    route: "/home",
+    class: "public",
+    notes:
+      "PUBLIC (Phase 199 CD-07): the one server role-home redirect (src/app/home/page.tsx). In PUBLIC_ROUTES so a signed-out visit reaches the page, which redirects it to / instead of the proxy 307-ing to /login; in proxy isAuthBounceExempt so a signed-in GET is never bounced to itself. The page reads the profile and redirects by roleHomeFor: allocator /allocations, manager /strategies, admin /admin, unapproved /pending-approval.",
   },
   {
     route: "/legal/disclaimer",

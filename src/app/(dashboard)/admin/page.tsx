@@ -12,6 +12,7 @@ import {
   type PendingManagerRow,
 } from "@/components/admin/AdminTabs";
 import { RECORD_SCALAR_ALIASES } from "@/lib/figure-record-scalars";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = { title: "Admin dashboard" };
 
@@ -19,7 +20,7 @@ export default async function AdminPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   const admin = createAdminClient();
 

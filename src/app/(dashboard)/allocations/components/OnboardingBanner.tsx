@@ -51,7 +51,7 @@ export function OnboardingBanner() {
         (WCAG 2.5.8) at every width.
       */}
       <div className="flex flex-wrap items-center gap-4">
-        <div className="flex-1">
+        <div className="flex-1" data-degrade-id="allocation.onboarding">
           {/*
             This heading is <h2>: the page outline on /allocations is
             <h1>My Allocation</h1> at the AllocationsTabs section heading

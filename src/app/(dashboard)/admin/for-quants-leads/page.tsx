@@ -8,6 +8,7 @@ import {
 } from "@/lib/for-quants-leads-admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ForQuantsLeadsTable } from "@/components/admin/ForQuantsLeadsTable";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
   title: "Request-a-call leads",
@@ -24,7 +25,7 @@ export default async function ForQuantsLeadsPage({
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   const { show } = await searchParams;
   const showAll = show === "all";

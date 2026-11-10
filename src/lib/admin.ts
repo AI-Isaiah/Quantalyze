@@ -164,6 +164,7 @@ function reportNonRlsError(
 async function hasAdminRoleRow(
   supabase: SupabaseClient,
   userId: string,
+  strict = false,
 ): Promise<boolean> {
   const { data, error } = await supabase
     .from("user_app_roles")
@@ -187,6 +188,7 @@ async function hasAdminRoleRow(
       code: error.code ?? null,
       message: error.message,
     });
+    if (strict) throw error;
     return false;
   }
   return Array.isArray(data) && data.length > 0;
@@ -203,6 +205,7 @@ async function hasAdminRoleRow(
 async function hasIsAdminFlag(
   supabase: SupabaseClient,
   userId: string,
+  strict = false,
 ): Promise<boolean> {
   const { data, error } = await supabase
     .from("profiles")
@@ -225,6 +228,7 @@ async function hasIsAdminFlag(
       code: error.code ?? null,
       message: error.message,
     });
+    if (strict) throw error;
     return false;
   }
   if (!data) return false;
@@ -276,18 +280,25 @@ function logEnvEmailFallbackMatch(user: {
  * role specifically, so the route wrapper and direct `isAdminUser`
  * callers share ONE decision.
  *
- * Returns Promise<boolean> — never throws to the caller. A failed DB
- * read on one signal does NOT short-circuit the other; the caller still
- * gets the OR of whatever signals succeeded.
+ * Returns Promise<boolean> — never throws to the caller by default. A
+ * failed DB read on one signal does NOT short-circuit the other; the
+ * caller still gets the OR of whatever signals succeeded.
+ *
+ * `{ strict: true }` is for a caller that must not mistake a database
+ * error for "not admin" (`/home`, which would otherwise route a real
+ * admin to a non-admin home): a non-RLS read error is reported as usual
+ * and then thrown. RLS rejections and a missing profile row still answer
+ * false. Every other caller keeps the fail-closed default.
  */
 export async function isAdminUser(
   supabase: SupabaseClient,
   user: { id: string; email?: string | null } | null | undefined,
+  options: { strict?: boolean } = {},
 ): Promise<boolean> {
   if (!user) return false;
 
   // Signal 1 (PRIMARY): profiles.is_admin — aligned with DB-side RLS.
-  if (await hasIsAdminFlag(supabase, user.id)) {
+  if (await hasIsAdminFlag(supabase, user.id, options.strict)) {
     return true;
   }
 
@@ -296,7 +307,7 @@ export async function isAdminUser(
   // user_app_roles without a corresponding profiles flip still grants
   // admin here so the code gate stays at least as permissive as the
   // join-table substrate.
-  if (await hasAdminRoleRow(supabase, user.id)) {
+  if (await hasAdminRoleRow(supabase, user.id, options.strict)) {
     return true;
   }
 

@@ -740,6 +740,8 @@ describe("KCS-11 — the pending card promises nothing when no job will finish t
     const out = await renderPage(VALID_TOKEN);
     expect(out).toContain(KCS11_B_HEADING);
     expect(out).toContain(KCS11_B_BODY);
+    expect(out).toContain('data-degrade-id="factsheet.share-card-not-available"');
+    expect(out).not.toContain("factsheet.share-card-in-progress");
     expect(out).not.toContain("ready yet");
     expect(out).not.toContain("being prepared");
     for (const word of NEVER_ON_THE_CARD) {
@@ -861,6 +863,9 @@ describe("KCS-11 — every derived state lands on exactly one arm", () => {
     expect(out).toContain(KCS11_A_HEADING);
     expect(out).toContain(KCS11_A_BODY);
     expect(out).not.toContain(KCS11_B_HEADING);
+    // 199-18 (D-04): the card is registered, by arm, and names no owner key.
+    expect(out).toContain('data-degrade-id="factsheet.share-card-in-progress"');
+    expect(out).not.toContain("factsheet.share-card-not-available");
   });
 
   // Arm (b): nothing will finish the factsheet on its own, so nothing is

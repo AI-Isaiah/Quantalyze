@@ -844,7 +844,7 @@ export function CsvSubmitStep({
                 now, described but not rendered. */}
             <div className="mt-3">
               <Link
-                href={buildFactsheetHref(echoNotice.strategyId, { key: "my-strategies" })}
+                href={buildFactsheetHref(echoNotice.strategyId, { key: "strategies" })}
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="wizard-csv-echo-view-factsheet"

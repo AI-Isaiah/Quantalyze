@@ -28,6 +28,7 @@ vi.mock("next/link", () => ({
 }));
 
 import CompareError from "./error";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 describe("compare/error.tsx — STATE-01 boundary contract", () => {
   it("Test 1: renders the 'Something went wrong' heading + recovery body copy", () => {
@@ -78,5 +79,14 @@ describe("compare/error.tsx — STATE-01 boundary contract", () => {
 
     expect(errSpy).toHaveBeenCalledWith("[compare-error]", err);
     errSpy.mockRestore();
+  });
+
+  // Phase 199 CD-01 / UI-SPEC: the home link reaches the one role-home route
+  // under the one label; Try again stays first.
+  it("home link targets the role-home route with the shared label", () => {
+    render(<CompareError error={new Error("boom")} unstable_retry={vi.fn()} />);
+    const home = screen.getByRole("link", { name: "Go to your home page" });
+    expect(home.getAttribute("href")).toBe(ROLE_HOME_ROUTE);
+    expect(screen.getAllByRole("button")[0].textContent).toBe("Try again");
   });
 });

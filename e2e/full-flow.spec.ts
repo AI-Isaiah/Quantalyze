@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Locator } from "./helpers/hydration-guard";
+import { isPostLoginPath } from "./helpers/login";
 
 /**
  * Audit 2026-05-07 C-0309: credentials are read from env vars at test
@@ -206,8 +207,10 @@ test.describe("Authenticated flows", () => {
     );
     await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
-    // Wait for redirect to discovery
-    await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
+    // Wait for the role landing (Phase 199: not Discovery for every role).
+    await page.waitForURL((url) => isPostLoginPath(url.pathname), {
+      timeout: 10000,
+    });
   });
 
   test("strategy discovery loads with data", async ({ page }) => {
@@ -279,7 +282,9 @@ test.describe("Admin flows", () => {
     );
     await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
-    await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
+    await page.waitForURL((url) => isPostLoginPath(url.pathname), {
+      timeout: 10000,
+    });
   });
 
   test("admin dashboard loads", async ({ page }) => {
@@ -289,7 +294,8 @@ test.describe("Admin flows", () => {
       .locator("text=Admin dashboard")
       .isVisible()
       .catch(() => false);
-    const isRedirected = page.url().includes("/discovery");
+    // Phase 199: a non-admin is sent to its role home (via /home), not Discovery.
+    const isRedirected = !new URL(page.url()).pathname.startsWith("/admin");
     expect(isAdmin || isRedirected).toBeTruthy();
   });
 });

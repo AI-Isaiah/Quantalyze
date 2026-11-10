@@ -159,7 +159,7 @@ describe("Overview Risk section — the 2026-10-03 case (D-04, D-07, D-09)", () 
     expect(panels).toHaveLength(1);
     // 198-UAT-01 (D-10): names what the history hides, never return or risk.
     expect(panels[0].textContent).toContain(
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
+      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
     );
     const risk = riskSection();
     expect(risk).not.toBeNull();

@@ -46,8 +46,8 @@ import { SyncPreviewStep } from "./SyncPreviewStep";
 const LINK_TESTID = "wizard-view-full-factsheet";
 const LINK_TEXT = "View full factsheet →";
 const LINK_CAPTION = "Visible only to you until the strategy is published.";
-const SINGLE_KEY_HREF = "/factsheet/strat-1?from=my-strategies";
-const COMPOSITE_HREF = "/factsheet/composite-strat-1?from=my-strategies";
+const SINGLE_KEY_HREF = "/factsheet/strat-1?from=strategies";
+const COMPOSITE_HREF = "/factsheet/composite-strat-1?from=strategies";
 const REL = "noopener noreferrer";
 const TARGET = "_blank";
 
@@ -388,7 +388,7 @@ describe("[148-05 / OWN-04] SyncPreviewStep — 'View full factsheet' link at bo
     resetClientFactory();
   });
 
-  it("single-key passed: renders an anchor to /factsheet/{strategyId}?from=my-strategies in a new tab", async () => {
+  it("single-key passed: renders an anchor to /factsheet/{strategyId}?from=strategies in a new tab", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(null, { status: 200 }),
     );

@@ -264,7 +264,7 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
       expect(findPayload(failed)).toBeNull();
       const { container } = render(failed as ReactElement);
       expect(container.querySelector("article p:last-child")?.textContent).toBe(
-        "The detailed factsheet for this strategy is not available yet.",
+        "The detailed factsheet for this strategy is not available yet. Check with the person who shared this link before trying again.",
       );
       // Captured once, by the resolve stage that saw it; the page adds none.
       expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);

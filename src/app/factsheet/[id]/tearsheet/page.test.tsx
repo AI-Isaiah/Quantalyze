@@ -355,7 +355,11 @@ describe("TearSheet page - a published strategy that is not built yet is not a 4
       await renderPage();
       expect(notFound).not.toHaveBeenCalled();
       expect(screen.getByTestId("tearsheet-pending")).toBeTruthy();
-      expect(screen.getByText(KCS10_PUBLIC_SENTENCE)).toBeTruthy();
+      // 199-18: the shipped sentence, then the one action a visitor has (factsheet.public-pending).
+      const pending = screen.getByText(
+        `${KCS10_PUBLIC_SENTENCE} Check with the person who shared this link before trying again.`,
+      );
+      expect(pending.getAttribute("data-degrade-id")).toBe("factsheet.public-pending");
       expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("STRAT-001");
       expect(screen.getByRole("link", { name: "Back to factsheet" }).getAttribute("href")).toBe("/factsheet/s-1");
       expect(recorded.views).toHaveLength(0);

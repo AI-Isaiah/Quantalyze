@@ -478,6 +478,11 @@ vi.mock("@/lib/diversification", async (importOriginal) => {
 
 import { ScenarioComposer } from "./ScenarioComposer";
 import { MissingDataMessage, missingDataLines } from "./MissingDataMessage";
+import {
+  degradePlainText,
+  degradeSegments,
+  type DegradeId,
+} from "@/lib/degrade-warnings";
 // Real (un-mocked) — used to build a valid current-schema draft so the
 // onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
 import {
@@ -2944,6 +2949,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(
       screen.getByText(/Per-source modeling needs per-key history\./i),
     ).toBeInTheDocument();
+    // 199-15 (D-04, UI-SPEC): the body is the registry line. The payload carries no
+    // apiKeys row for the eligible key, so no label resolves and the line reads about
+    // the connected keys (a key id is never printed in a label's place).
+    expect(fallback.textContent).toContain(
+      "Your connected keys have no per-key return series yet, so this projection blends your whole book. Per-source toggles appear after their next sync.",
+    );
+    expect(fallback.querySelector('[data-degrade-id="scenario.per-source-fallback"]')).not.toBeNull();
   });
 
   it("ENGINE-03 gate=false book holder → 'From my book' segment is ABSENT and an arrow-key cannot enter book mode", () => {
@@ -6097,6 +6109,41 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     ).toBeInTheDocument();
     // Honest absence — NOT an error. No role="alert" inside the fallback.
     expect(fallback.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  // Phase 199 plan 15 (D-04, UI-SPEC "Scenario per-source fallback"): the fallback
+  // names the keys that have no per-key series, then says the projection blends the
+  // whole book, then names the wait. It renders from the registry entry
+  // `scenario.per-source-fallback`, so the key labels are the ones the Data-sources
+  // rows used (`{Exchange} — {nickname}`), and the shipped "One or more connected
+  // keys" wording is gone.
+  it("the per-source fallback names the eligible keys that have no per-key series and ends on the named wait (199-15)", () => {
+    renderPerKey(makePerKeyPayload({ perKeyDailiesGateSatisfied: false }));
+    const fallback = screen.getByTestId("scenario-constituent-fallback");
+    const line = fallback.querySelector('[data-degrade-id="scenario.per-source-fallback"]');
+    expect(line).not.toBeNull();
+    // Key A has a nickname; key B has none, so its label carries the masked id tail.
+    expect(line!.textContent).toBe(
+      "Binance — Main desk and OKX — ••••ey-B have no per-key return series yet, so this projection blends your whole book. Per-source toggles appear after their next sync.",
+    );
+    expect(fallback.textContent).not.toContain("One or more connected keys");
+  });
+
+  it("the per-source fallback names only the keys that lack a series, not the contributing ones (199-15)", () => {
+    // Key A contributes, key B does not: the book gate is then satisfied (SOME
+    // semantics) and the fallback does not render at all, so only the keys without a
+    // series can be named when it does. Zero contributing is the only way in.
+    renderPerKey(
+      makePerKeyPayload({
+        perKeyDailiesGateSatisfied: false,
+        eligibleApiKeyIds: ["key-A"],
+      }),
+    );
+    const line = screen
+      .getByTestId("scenario-constituent-fallback")
+      .querySelector('[data-degrade-id="scenario.per-source-fallback"]');
+    expect(line!.textContent).toContain("Binance — Main desk has no per-key return series yet");
+    expect(line!.textContent).not.toContain("OKX");
   });
 
   // -------------------------------------------------------------------------
@@ -18667,8 +18714,16 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
 // absences in case 1 are the gate, not a too-short series.
 // ---------------------------------------------------------------------------
 describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while rebuilding", () => {
-  const OWN_BOOK_REBUILDING_COPY =
-    "Your book's own history is being rebuilt, so the comparison with your current book is not shown.";
+  // Phase 199 plan 15 (D-04): the Scenario's own-book sentence is the registry line
+  // the Overview's MissingDataMessage prints for the same reason, not a string of its
+  // own. Both literals are written out here (not read from the registry) so a registry
+  // edit that moves both surfaces together still fails this file.
+  //   - the default fixture carries no reason, so it reads the unknown-reason line;
+  //   - `producerRebuildingPayload` names `awaiting_derivation`.
+  const OWN_BOOK_UNKNOWN_REASON_COPY =
+    "The equity chart and the ratios built from it are hidden for your whole history for now. Use the contact form to have it checked.";
+  const OWN_BOOK_AWAITING_COPY =
+    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.";
   const THREE_POINT_CURVE = [
     { date: "2026-01-01", value: 100_000 },
     { date: "2026-01-02", value: 101_000 },
@@ -18716,7 +18771,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
 
     const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
     expect(notes).toHaveLength(1);
-    expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+    expect(notes[0].textContent).toBe(OWN_BOOK_UNKNOWN_REASON_COPY);
 
     // Blank slate has no own book to compare against, so the sentence would
     // explain an absence the user chose; it does not render there.
@@ -18847,7 +18902,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       );
       const notes = screen.getAllByTestId("scenario-ownbook-rebuilding");
       expect(notes).toHaveLength(1);
-      expect(notes[0].textContent).toBe(OWN_BOOK_REBUILDING_COPY);
+      expect(notes[0].textContent).toBe(OWN_BOOK_AWAITING_COPY);
       expect(lastChart().scenarioOwnBookDelta).toBeUndefined();
       expectLiveBookKpis(payload);
     },
@@ -18945,67 +19000,68 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     },
   );
 
-  // Review C3 SFH-C3-01: the Scenario sentence says WHY the comparison is
-  // withheld, and it must give the same kind of answer the Overview gives for
-  // the same payload. A failed read said "being rebuilt" here while the
-  // Overview said to reload, so the allocator waited on a rebuild that was not
-  // running. Four classes: a wait ("being rebuilt"), a read that failed
-  // (reload), a key the owner must fix (the Exchanges page), and a hold that
-  // no wait heals (review C3 round 2 WR-02 / SFH-C3R2-03).
+  // Review C3 SFH-C3-01, as rewritten by Phase 199 plan 15 (D-04): the Scenario
+  // sentence says WHY the comparison is withheld, and it is the SAME registry entry
+  // the Overview's message prints for the same reason: same id, same words. Before
+  // this plan the Scenario kept four class-keyed strings of its own, so an edit to
+  // the Overview's line could leave the Scenario telling a different story.
   //
-  // The class per reason is written out here, NOT read from the component's
-  // classifier, so a reason moved to the wrong class fails this arm instead of
-  // moving both surfaces together. The type check below forces a reason added
-  // to `EquityHistoryRebuildReason` into this table.
-  //
-  // Review C3 round 2 WR-02: a reason is a wait ("rebuilding") only when the
-  // Overview's own line for it names the daily run that retries it
-  // (account_identity_pending: "Each daily sync checks it again";
-  // awaiting_derivation: "recomputed ... once a day"). derivation_rejected
-  // ("did not pass its checks, so it is not shown") and
-  // shared_account_history_truncated ("we cannot join its history ... to the
-  // new key's, so your history is not shown") name no such run, so they are "held_back".
-  const REASON_CLASSES = [
-    ["duplicate_account", "needs_action"],
-    ["key_not_syncing", "needs_action"],
-    ["shared_account_no_working_key", "needs_action"],
-    ["history_read_failed", "read_failed"],
-    ["awaiting_derivation", "rebuilding"],
-    ["account_identity_pending", "rebuilding"],
-    ["derivation_rejected", "held_back"],
-    ["shared_account_history_truncated", "held_back"],
+  // The id per reason is written out here, NOT read from the component's table, so a
+  // reason moved to the wrong entry fails this arm instead of moving both surfaces
+  // together. The class stays in the row because the link and reload checks below
+  // still follow the class (Review C3 round 2 WR-02: only a `rebuilding` reason
+  // names a daily run). The type check forces a reason added to
+  // `EquityHistoryRebuildReason` into this table.
+  const REASON_LINES = [
+    ["duplicate_account", "needs_action", "allocation.book.duplicate-account"],
+    ["key_not_syncing", "needs_action", "allocation.book.key-not-syncing"],
+    [
+      "shared_account_no_working_key",
+      "needs_action",
+      "allocation.book.shared-account-no-working-key",
+    ],
+    ["history_read_failed", "read_failed", "allocation.book.history-read-failed"],
+    ["awaiting_derivation", "rebuilding", "allocation.book.awaiting-derivation"],
+    ["account_identity_pending", "rebuilding", "allocation.book.identity-pending"],
+    ["derivation_rejected", "held_back", "allocation.book.derivation-rejected"],
+    [
+      "shared_account_history_truncated",
+      "held_back",
+      "allocation.book.shared-account-history-truncated",
+    ],
   ] as const satisfies ReadonlyArray<
     readonly [
       EquityHistoryRebuildReason,
       "needs_action" | "read_failed" | "rebuilding" | "held_back",
+      DegradeId,
     ]
   >;
   type UnlistedReason = Exclude<
     EquityHistoryRebuildReason,
-    (typeof REASON_CLASSES)[number][0]
+    (typeof REASON_LINES)[number][0]
   >;
   // Compile-time only: `true` is not assignable when a reason is unlisted.
   const everyReasonListed: [UnlistedReason] extends [never] ? true : false = true;
   void everyReasonListed;
 
-  const SCENARIO_LINE_BY_CLASS = {
-    rebuilding: OWN_BOOK_REBUILDING_COPY,
-    read_failed:
-      "We could not load your book's history just now, so the comparison with your current book is not shown; reload the page to try again.",
-    needs_action:
-      "Your book's own history is on hold until you update your keys on the Exchanges page, so the comparison with your current book is not shown.",
-    held_back:
-      "We are holding back your book's own history, so the comparison with your current book is not shown.",
-  } as const;
-  // Phase 198 plan 10 (D-01): the Overview's old class headings are retired
-  // with the generic panel, so there is no heading table here. Parity with the
-  // Overview message is by class, through the Exchanges link and the reload
-  // sentence.
+  const registryText = (id: DegradeId) =>
+    degradePlainText(degradeSegments(id, undefined as never));
+
   const EXCHANGES_HREF = "/profile?tab=exchanges";
 
-  it.each(REASON_CLASSES)(
-    "rebuilding reason %s: the Scenario gives the %s line, the same class the Overview message gives (SFH-C3-01)",
-    (reason, reasonClass) => {
+  /** The one registered line inside a surface: its marker id and its words. */
+  const degradeLineOf = (surface: HTMLElement) => {
+    const lines = surface.querySelectorAll("[data-degrade-id]");
+    expect(lines).toHaveLength(1);
+    return {
+      id: lines[0].getAttribute("data-degrade-id"),
+      text: lines[0].textContent,
+    };
+  };
+
+  it.each(REASON_LINES)(
+    "rebuilding reason %s (%s): the Scenario renders the Overview's registry line %s, same id and same words (D-04, SFH-C3-01)",
+    (reason, reasonClass, id) => {
       // The producer's shape for a non-ready book: no curve, no returns.
       const payload = makePayload({
         equityHistoryState: "rebuilding",
@@ -19033,7 +19089,16 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       );
       const scenario = screen.getByTestId("scenario-ownbook-rebuilding");
       const overview = screen.getByTestId("overview-missing-data");
-      expect(scenario.textContent).toBe(SCENARIO_LINE_BY_CLASS[reasonClass]);
+
+      // The same entry on both surfaces: one id, one set of words.
+      const onScenario = degradeLineOf(scenario);
+      const onOverview = degradeLineOf(overview);
+      expect(onScenario.id).toBe(id);
+      expect(onOverview.id).toBe(id);
+      expect(onScenario.text).toBe(onOverview.text);
+      expect(onScenario.text).toBe(registryText(id));
+      // The sentence is the entry and nothing else: no string of the Scenario's own.
+      expect(scenario.textContent).toBe(onScenario.text);
       // Neither surface promises "appear once" (D-15).
       expect(scenario.textContent).not.toMatch(/appear once/);
 
@@ -19052,31 +19117,72 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       expect(saysReload(scenario)).toBe(readFailed);
       expect(saysReload(overview)).toBe(readFailed);
 
-      // Review C3 round 2 WR-02: the Scenario says "being rebuilt" exactly
-      // when the Overview's own reason line names the daily run that retries
-      // it. The message names no run for a held-back reason, so the match
-      // comes from the reason line alone.
+      // Review C3 round 2 WR-02: only a `rebuilding` reason names the daily run
+      // that retries it, on either surface.
       const rebuilding = reasonClass === "rebuilding";
-      expect(/being rebuilt/.test(scenario.textContent ?? "")).toBe(rebuilding);
+      expect(/\bdaily\b|once a day/i.test(scenario.textContent ?? "")).toBe(rebuilding);
       expect(/\bdaily\b|once a day/i.test(overview.textContent ?? "")).toBe(rebuilding);
-
-      // A held-back reason says so on the Scenario, and only a `rebuilding`
-      // class says "being rebuilt" (170.6.2 D-04).
-      const heldBack = reasonClass === "held_back";
-      expect(/holding back/.test(scenario.textContent ?? "")).toBe(heldBack);
     },
   );
 
+  // By design the Scenario reads the reason's BOOK-LEVEL line. When the Overview
+  // can name the key (a labelled gap in the owner-only `keyDataGaps`, or a resolved
+  // `notSyncingKeys`), it prints that key's own line instead; the Scenario payload
+  // reaches neither input here, so it keeps the unnamed line for the same reason.
+  // The two never claim a different cause (the reason and its class are shared);
+  // the Overview just names which key. Pinned so the divergence stays by design.
+  it("an Overview that names the key prints the key's own registry line; the Scenario keeps the reason's book-level line", () => {
+    const payload = makePayload({
+      equityHistoryState: "rebuilding",
+      equityHistoryRebuildReason: "key_not_syncing",
+      equityDailyPoints: [],
+      equityDailyReturns: [],
+    });
+    const apiKeys = [{ id: "key-gap-1", exchange: "binance", label: "Main" }];
+    render(
+      <>
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />
+        <MissingDataMessage
+          lines={missingDataLines({
+            gaps: [
+              {
+                apiKeyIds: ["key-gap-1"],
+                cause: "not_syncing",
+                firstMissingDay: null,
+                ranges: null,
+              },
+            ],
+            apiKeys,
+            rebuilding: true,
+            reason: "key_not_syncing",
+            notSyncingKeys: apiKeys,
+          })}
+        />
+      </>,
+    );
+    expect(degradeLineOf(screen.getByTestId("scenario-ownbook-rebuilding")).id).toBe(
+      "allocation.book.key-not-syncing",
+    );
+    expect(degradeLineOf(screen.getByTestId("overview-missing-data")).id).toBe(
+      "allocation.key-gap.not-syncing",
+    );
+  });
+
   // Fail-closed: no reason, or a reason this build does not know (a stale
-  // client, a reason added later, a prototype key), keeps the generic wait
-  // line rather than claiming a failed read or a key to fix.
+  // client, a reason added later, a prototype key), reads the unknown-reason
+  // line, the one the Overview message prints for it, rather than claiming a
+  // failed read or a key to fix.
   it.each([
     ["null", null],
     ["missing", undefined],
     ["a reason this build does not know", "some_later_reason"],
     ["a prototype key", "constructor"],
   ] as const)(
-    "rebuilding with reason %s: the Scenario keeps the generic rebuilding line (SFH-C3-01, fail-closed)",
+    "rebuilding with reason %s: the Scenario reads the unknown-reason line, as the Overview does (SFH-C3-01, fail-closed)",
     (_label, reason) => {
       const payload = makePayload({
         equityHistoryState: "rebuilding",
@@ -19089,15 +19195,28 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
         expect("equityHistoryRebuildReason" in payload).toBe(false);
       }
       render(
-        <ScenarioComposer
-          payload={payload}
-          allocatorId={ALLOCATOR_A}
-          allocatorMandate={null}
-        />,
+        <>
+          <ScenarioComposer
+            payload={payload}
+            allocatorId={ALLOCATOR_A}
+            allocatorMandate={null}
+          />
+          <MissingDataMessage
+            lines={missingDataLines({
+              gaps: [],
+              apiKeys: [],
+              rebuilding: true,
+              reason: reason as never,
+              notSyncingKeys: null,
+            })}
+          />
+        </>,
       );
-      expect(screen.getByTestId("scenario-ownbook-rebuilding").textContent).toBe(
-        OWN_BOOK_REBUILDING_COPY,
-      );
+      const scenario = screen.getByTestId("scenario-ownbook-rebuilding");
+      const onScenario = degradeLineOf(scenario);
+      expect(onScenario.id).toBe("allocation.book.unknown-reason");
+      expect(onScenario.text).toBe(OWN_BOOK_UNKNOWN_REASON_COPY);
+      expect(degradeLineOf(screen.getByTestId("overview-missing-data"))).toEqual(onScenario);
     },
   );
 
@@ -19129,7 +19248,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
         const generic = screen.getByTestId("overview-missing-data");
         const genericText = generic.textContent;
         const genericLines = generic.querySelectorAll("p").length;
-        expect(genericText).toContain("hidden for now");
+        expect(genericText).toContain("hidden for your whole history for now");
         unmount();
 
         render(message(reason as never));

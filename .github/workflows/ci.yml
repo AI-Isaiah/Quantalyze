@@ -7065,8 +7065,12 @@ jobs:
               e2e/full-flow.spec.ts \
               e2e/csv-upload-flow.spec.ts \
               e2e/my-strategies.spec.ts \
+              e2e/role-home.spec.ts \
               --timeout 60000
           fi
+          # Phase 199 plan 17 (ROUTE-01): e2e/role-home.spec.ts is in this list
+          # (place 1); its HAS_SEED_ENV skip is place 2. It signs a seeded allocator,
+          # manager and admin in through the real form and asserts the exact landing.
           # Phase 170 T0 / FLOW-01 (2026-09-27): e2e/layout-narrow.spec.ts is
           # in this seeded list (place 1). Its HAS_SEED_ENV skip is place 2.
           # It proves criterion-2 geometry at V390/V640/V960 and is RED at

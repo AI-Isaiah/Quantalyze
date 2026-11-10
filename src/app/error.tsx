@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
+import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * Root error boundary. Catches errors in page.tsx and nested layouts
@@ -54,7 +55,8 @@ export default function Error({
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
           <Button onClick={() => unstable_retry()}>Try again</Button>
-          <Link href="/discovery/crypto-sma">
+          {/* Leaves the failing surface: the role home would redirect back into it (199 WR-01). */}
+          <Link href={DISCOVERY_LANDING_ROUTE}>
             <Button variant="ghost">Go to Discovery</Button>
           </Link>
         </div>

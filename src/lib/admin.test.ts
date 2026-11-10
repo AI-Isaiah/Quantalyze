@@ -190,6 +190,38 @@ describe("isAdminUser — C-0144 + C-0150 single-source-of-truth contract", () =
     spy.mockRestore();
   });
 
+  it("strict: a non-RLS error on the profiles.is_admin read is thrown, not read as 'not admin'", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dbError = { code: "57014", message: "statement timeout" };
+    profilesIsAdminQueryMock.mockResolvedValueOnce({ data: null, error: dbError });
+    await expect(
+      isAdminUser(makeSupabase(), USER, { strict: true }),
+    ).rejects.toBe(dbError);
+    spy.mockRestore();
+  });
+
+  it("strict: a non-RLS error on the user_app_roles read is thrown too", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dbError = { code: "57014", message: "statement timeout" };
+    userRolesQueryMock.mockResolvedValueOnce({ data: null, error: dbError });
+    await expect(
+      isAdminUser(makeSupabase(), USER, { strict: true }),
+    ).rejects.toBe(dbError);
+    spy.mockRestore();
+  });
+
+  it("strict: RLS rejections and a missing profile row still answer false", async () => {
+    profilesIsAdminQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "PGRST116", message: "no rows" },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "42501", message: "denied" },
+    });
+    expect(await isAdminUser(makeSupabase(), USER, { strict: true })).toBe(false);
+  });
+
   it("returns false when profile row simply does not exist (PGRST116)", async () => {
     profilesIsAdminQueryMock.mockResolvedValueOnce({
       data: null,

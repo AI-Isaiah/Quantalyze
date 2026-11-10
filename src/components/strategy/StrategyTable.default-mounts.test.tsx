@@ -6,7 +6,7 @@
  * WHY THIS FILE EXISTS. 170.7 teaches the shared table a manager mode through
  * one optional prop. The table is mounted by three pages that are NOT the
  * manager page: /discovery (signed-in allocator: star column, percentiles),
- * /browse (anonymous: no userId) and /my-strategies (the owner mount:
+ * /browse (anonymous: no userId) and the owner list (the owner mount, /my-strategies at capture:
  * `visibility="owner-all-statuses"`, placeholder rows, ownership and rename
  * callbacks). One of them is anonymous. A class or cell that changes on any of
  * the three because of a manager-mode edit is a public-surface regression, and
@@ -120,11 +120,26 @@
  * write or update path: the three strings were edited by hand, anchored on `href="/factsheet/<id>"`,
  * 3 / 3 / 5 occurrences. discovery gains `?from=discovery` and browse `?from=browse` (the
  * fixture's category slugs are not discovery categories, so the builder drops `cat`); the owner
- * mount now passes `origin={{ key: "my-strategies" }}` as its real mount does, so its five rows
- * gain `?from=my-strategies`.
+ * mount now passes the my-strategies origin as its real mount does, so its five rows
+ * gain that origin's `?from=` value.
+ *
+ * NEXT SURGICAL EDIT 2026-11-10 (Phase 199 plan 10, D-02): ONE class of hunk, the strategy-name
+ * link's `?from=` value, and nothing else moved. The owner mount is now the merged `/strategies`
+ * page's (`StrategiesSection` mounts it with `origin={{ key: "strategies" }}`), so the entry is
+ * renamed `myStrategiesOwner` -> `strategiesOwner` and its five rows read `?from=strategies`. Edited by
+ * hand, anchored on the my-strategies origin's `?from=` value, 5 occurrences. The fixture was NOT regenerated and the
+ * test still has no write or update path. The discovery and browse strings did not move.
  *
  * The clock is frozen (Date only; timers stay real so RTL's async helpers keep
  * working): SyncBadge and the empty-series state derive from `Date.now()`.
+ *
+ * NEXT SURGICAL EDIT 2026-11-10 (Phase 199 plan 11, LEAN-01): ONE class of hunk, the strategy-name
+ * link's `?from=` value, and nothing else moved. This time it is the OWNER-LIST fixture,
+ * `strategy-table-owner-list-mounts.json` (plan 07's three mounts), whose mount now passes the
+ * `strategies` origin because the my-strategies origin was folded into it. Edited by hand, anchored
+ * on `href="/factsheet/<id>`, 9 occurrences (3 per mount, the three mounts x the first three owner
+ * rows), each now reading `?from=strategies`. The fixture was NOT regenerated and the test still has
+ * no write or update path. `strategy-table-default-mounts.json` did not move.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -136,6 +151,7 @@ import { backTargetFor, parseOrigin } from "@/lib/factsheet/origin";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 import FIXTURE from "./__fixtures__/strategy-table-default-mounts.json";
+import OWNER_LIST_FIXTURE from "./__fixtures__/strategy-table-owner-list-mounts.json";
 
 type Row = Strategy & {
   analytics: StrategyAnalytics;
@@ -323,13 +339,13 @@ describe("StrategyTable default mounts — byte identity with the post-170.2 hea
     );
   });
 
-  it("the /my-strategies owner mount (owner-all-statuses, placeholder, callbacks) is unchanged", () => {
+  it("the merged /strategies owner mount (owner-all-statuses, placeholder, callbacks) is unchanged", () => {
     checkMount(
-      "myStrategiesOwner",
+      "strategiesOwner",
       <StrategyTable
         strategies={OWNER_ROWS}
         categorySlug="dm-owner"
-        origin={{ key: "my-strategies" }}
+        origin={{ key: "strategies" }}
         visibility="owner-all-statuses"
         placeholderKeys={[{ id: "pk-1", exchangeLabel: "Binance", keyLabel: "Main key" }]}
         onFinishSetup={() => {}}
@@ -409,6 +425,97 @@ describe("StrategyTable and StrategyGrid factsheet links carry their origin (196
     expect(hrefs.length).toBeGreaterThan(0);
     expect(hrefs.sort()).toEqual(
       PUBLISHED_ROWS.map((r) => `/factsheet/${r.id}?from=discovery&cat=crypto-sma`).sort(),
+    );
+  });
+});
+
+// Phase 199 / Plan 07 (D-02): the three OWNER-LIST mounts, pinned beside the three public ones.
+//
+// WHY A SECOND FIXTURE FILE. `strategy-table-default-mounts.json` has no write path and is edited
+// only by hand-classified hunks; the owner-list mode did not exist when it was captured, so its
+// three goldens live in `strategy-table-owner-list-mounts.json` and the first fixture is untouched.
+// THIS BLOCK HAS NO WRITE OR UPDATE PATH either: a diff means the owner-list mode changed, and the
+// fix is the source or a hand-classified fixture hunk, never a regenerated file.
+//
+// The three mounts differ only in which furniture the server hands the table (`managerRows`
+// entries and `allocatorFurniture`): manager only (Edit and the actions slot, no allocator
+// controls even with the callbacks passed), allocator only (a note-only entry, the tag, Mark,
+// Rename and Simulate Impact), and both (one row carries the union). They use the first three
+// owner rows: published with a mark, draft, private.
+//
+// 2026-11-10 Phase 199 plan 12 (D-03): ONE hand-classified hunk per mount, nothing regenerated. The Health
+// column joined the owner list, so each mount gained (a) the Health `<th>` directly after the Status
+// `<th>`, (b) one Health `<td>` before each of its three Created cells (these entries pass no `health`,
+// so each prints the muted em dash), and (c) the note rows' `colspan` 15 to 16 (allocatorOnly 3, both 1).
+describe("StrategyTable owner-list mounts (199 plan 07, D-02)", () => {
+  const LIST_ROWS = OWNER_ROWS.slice(0, 3);
+  const managerEntries = Object.fromEntries(
+    LIST_ROWS.map((r) => [
+      r.id,
+      {
+        editHref: `/strategies/${r.id}/edit`,
+        actions: <span data-testid={`slot-${r.id}`}>actions</span>,
+      },
+    ]),
+  );
+  const noteEntries = Object.fromEntries(
+    LIST_ROWS.map((r) => [r.id, { note: <span>note {r.name}</span> }]),
+  );
+  const bothEntries = Object.fromEntries(
+    LIST_ROWS.map((r, i) => [
+      r.id,
+      { ...managerEntries[r.id], ...(i === 0 ? noteEntries[r.id] : {}) },
+    ]),
+  );
+
+  function checkListMount(key: keyof typeof OWNER_LIST_FIXTURE, ui: ReactElement): void {
+    const html = mountHtml(ui);
+    expect(html.length).toBeGreaterThan(1000);
+    expect(html).toBe(OWNER_LIST_FIXTURE[key]);
+  }
+
+  const common = {
+    strategies: LIST_ROWS,
+    categorySlug: "dm-owner-list",
+    origin: { key: "strategies" } as const,
+    visibility: "owner-all-statuses" as const,
+  };
+
+  it("manager only: Edit and the actions slot, no allocator furniture even with callbacks", () => {
+    checkListMount(
+      "managerOnly",
+      <StrategyTable
+        {...common}
+        managerRows={managerEntries}
+        onMarkOwnership={() => {}}
+        onRename={() => {}}
+      />,
+    );
+  });
+
+  it("allocator only: tag, Mark, Rename and Simulate Impact, no Edit and no slot", () => {
+    checkListMount(
+      "allocatorOnly",
+      <StrategyTable
+        {...common}
+        managerRows={noteEntries}
+        allocatorFurniture
+        onMarkOwnership={() => {}}
+        onRename={() => {}}
+      />,
+    );
+  });
+
+  it("both: one row carries the union in one Actions cell", () => {
+    checkListMount(
+      "both",
+      <StrategyTable
+        {...common}
+        managerRows={bothEntries}
+        allocatorFurniture
+        onMarkOwnership={() => {}}
+        onRename={() => {}}
+      />,
     );
   });
 });

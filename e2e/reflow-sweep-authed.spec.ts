@@ -53,7 +53,10 @@ import { test, expect } from "./helpers/hydration-guard";
 import {
   seedTestAllocator,
   seedStrategyWithHistory,
+  cleanupStrategiesByNamePrefix,
 } from "./helpers/seed-test-project";
+import { getCleanupAdmin } from "./helpers/cleanup-test-project";
+import { isPostLoginPath } from "./helpers/login";
 import { assertNoReflow } from "./helpers/reflow";
 
 // FLOW-01 place 2 of 2 — the spec's own seed-env self-skip guard. Without the
@@ -73,7 +76,7 @@ async function loginViaForm(
   await page.fill('input[name="email"], input[placeholder*="email" i]', email);
   await page.fill('input[type="password"]', password);
   await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|allocations|dashboard)/, {
+  await page.waitForURL((url) => isPostLoginPath(url.pathname), {
     timeout: 10000,
   });
 }
@@ -217,6 +220,72 @@ test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — authed", () => {
       // The honest-empty headline is the EmptyState card's own <h2> — a real
       // honest-empty DOM node, not generic chrome (Pitfall 5).
       await assertNoReflow(page, 'h2:has-text("No positions to analyze yet")');
+    });
+  }
+});
+
+// Phase 199 (LEAN-01, ROUTE-11) — the merged /strategies list and its legend at the
+// supported widths. A separate describe, with its own seeded `both` account, so the
+// strategy and key it owns cannot change what the sweep above sees on the wizard and
+// allocation routes (an owned strategy changes those pages' resume and empty states).
+//
+// The row is anchored on the legend heading, which renders only when the list has
+// rows, so a login redirect, an empty state or a 404 fails loud. The strategy name
+// and the placeholder key's label are deliberately long (spaces, so they CAN wrap):
+// the legend's definitions and the long text must wrap inside their cells, and
+// assertNoReflow measures both scrollers. 320px is not a supported width here (the
+// founder decision above the VIEWPORTS const); the three supported widths are.
+test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — /strategies merged list + legend", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "reflow-sweep-authed (/strategies): seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
+      "skipping prevents a false-green on an empty/404/login page (W-02).",
+  );
+
+  // Per worker, so one worker's afterAll cannot delete another's rows.
+  const NAME_PREFIX = `reflow-strategies-${process.env.TEST_PARALLEL_INDEX ?? 0}-`;
+  const LONG_TEXT =
+    "a deliberately long label that has to wrap onto several lines at narrow widths without pushing the page sideways";
+  let owner: Awaited<ReturnType<typeof seedTestAllocator>>;
+
+  test.beforeAll(async () => {
+    owner = await seedTestAllocator({ role: "both" });
+    await seedStrategyWithHistory({
+      days: 60,
+      name: `${NAME_PREFIX}${LONG_TEXT}`,
+      ownerUserId: owner.userId,
+    });
+    // An active key that feeds no strategy is a placeholder row, which prints the
+    // key's label. Same placeholder-ciphertext idiom as seedWizardDraft.
+    const { error } = await getCleanupAdmin().from("api_keys").insert({
+      user_id: owner.userId,
+      exchange: "binance",
+      label: `${NAME_PREFIX}${LONG_TEXT}`,
+      api_key_encrypted: "e2e-placeholder-ciphertext",
+      is_active: true,
+    });
+    if (error) {
+      throw new Error(`reflow /strategies bare key seed failed: ${error.message}`);
+    }
+  });
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await loginViaForm(page, owner.email, owner.password);
+  });
+
+  for (const v of VIEWPORTS) {
+    test(`${v.id} /strategies merged list + legend — no horizontal overflow`, async ({ page }) => {
+      await page.setViewportSize({ width: v.width, height: v.height });
+      const res = await page.goto("/strategies");
+      if (res && res.status() >= 400) {
+        throw new Error(`/strategies returned HTTP ${res.status()} — cannot run the list reflow row`);
+      }
+      await assertNoReflow(page, "#strategies-legend-heading");
     });
   }
 });

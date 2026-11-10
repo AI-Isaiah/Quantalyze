@@ -49,7 +49,9 @@ export function EmptyState({ hasSyncing, hasConnectedKeys }: EmptyStateProps) {
   if (hasSyncing) {
     return (
       <InfoBanner>
-        Syncing your first positions — this usually takes under a minute.
+        <span data-degrade-id="allocation.first-sync">
+          Syncing your first positions — this usually takes under a minute.
+        </span>
       </InfoBanner>
     );
   }

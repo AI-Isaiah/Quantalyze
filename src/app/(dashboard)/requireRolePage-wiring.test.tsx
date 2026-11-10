@@ -17,12 +17,12 @@
  *
  * Neuter-proof: the assertion pins `call[2]` (the 3rd positional arg of
  * `requireRolePage(supabase, user, need)`) to the exact literal for each
- * surface. Swap `"manager"`→`"allocator"` in strategies/layout.tsx (or vice
+ * surface. Swap `"manager"`→`"allocator"` in strategies/new/layout.tsx (or vice
  * versa on any allocator surface) and that surface's case fails. Drop the guard
  * entirely and the `rejects.toThrow(sentinel)` + `toHaveBeenCalledTimes(1)`
  * assertions fail (the body would run instead).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // server-only throws under vitest; several of these surfaces transitively import
 // it (via @/lib/queries → @/lib/supabase/admin). No-op it.
@@ -34,12 +34,37 @@ const GUARD_SENTINEL = "REQUIRE_ROLE_PAGE_INVOKED";
 // surface's body (and its data fetching / render) never executes — the wiring is
 // all this test cares about.
 const requireRoleSpy = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/auth/requireRolePage", () => ({
-  requireRolePage: (...args: unknown[]) => {
+
+// Phase 199 plan 04 — the two new segment-guard layouts (strategies/new,
+// strategies/[id]) are also driven through the REAL guard, so the allocator /
+// both / read-error outcomes are proven at the layout and not only the `need`
+// literal. `harness.real` switches the mock between "spy and halt" (every
+// wiring case) and "delegate to the real requireRolePage" (the outcome cases);
+// `harness.profile` is the profiles row the real guard would read.
+const harness = vi.hoisted(() => ({
+  real: false,
+  profile: { data: null, error: null } as {
+    data: { role: string } | null;
+    error: { code: string; message: string } | null;
+  },
+}));
+vi.mock("@/lib/auth/requireRolePage", async () => ({
+  requireRolePage: async (...args: unknown[]) => {
     requireRoleSpy(...args);
+    if (harness.real) {
+      const actual = await vi.importActual<
+        typeof import("@/lib/auth/requireRolePage")
+      >("@/lib/auth/requireRolePage");
+      return (actual.requireRolePage as (...a: unknown[]) => Promise<void>)(
+        ...args,
+      );
+    }
     throw new Error(GUARD_SENTINEL);
   },
 }));
+
+// The real guard reports a DB error to Sentry; keep that off the network.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 // redirect() must never fire on these cases (the user exists and the guard
 // throws first) — spy it so an accidental pre-guard redirect is observable.
@@ -61,9 +86,17 @@ vi.mock("@/lib/supabase/server", () => ({
         error: null,
       })),
     },
-    // Not reached: the guard throws before any surface queries a table.
+    // Spy mode: not reached, the guard throws before any surface queries a
+    // table. Real mode: serves the profiles row the guard selects `role` from.
     from: vi.fn(() => {
-      throw new Error("no table query should run before the role guard");
+      if (!harness.real) {
+        throw new Error("no table query should run before the role guard");
+      }
+      return {
+        select: () => ({
+          eq: () => ({ maybeSingle: async () => harness.profile }),
+        }),
+      };
     }),
   })),
 }));
@@ -74,18 +107,32 @@ type Surface = {
   invoke: () => Promise<unknown>;
 };
 
-// The 7 guarded surfaces + their hard-coded `need`. Each `invoke` dynamically
+// The guarded surfaces + their hard-coded `need` (strategies/layout is not one: see the negative case below). Each `invoke` dynamically
 // imports the module (so vi.mock hoisting applies) and calls its default export.
 // Layouts take `{ children }`; pages take no args (or an unused searchParams).
 const SURFACES: Surface[] = [
   {
-    label: "strategies/layout",
+    // Phase 199 plan 04 (D-01, CD-10) — the sub-routes carry their own manager
+    // guard so the index can widen alone: /strategies/new + /strategies/new/wizard.
+    label: "strategies/new/layout",
     need: "manager",
     invoke: async () => {
-      const mod = await import("./strategies/layout");
+      const mod = await import("./strategies/new/layout");
       return (mod.default as (p: { children: React.ReactNode }) => unknown)({
         children: null,
       });
+    },
+  },
+  {
+    // Phase 199 plan 04 (D-01) — /strategies/[id]/edit.
+    label: "strategies/[id]/layout",
+    need: "manager",
+    invoke: async () => {
+      const mod = await import("./strategies/[id]/layout");
+      return (mod.default as (p: { children: React.ReactNode }) => unknown)({
+        children: null,
+        params: Promise.resolve({ id: "wiring-test-strategy" }),
+      } as { children: React.ReactNode });
     },
   },
   {
@@ -119,17 +166,6 @@ const SURFACES: Surface[] = [
     need: "allocator",
     invoke: async () => {
       const mod = await import("./allocations/page");
-      return (mod.default as () => unknown)();
-    },
-  },
-  {
-    // Phase 149 NAV-01 — the owner ranking. Without this entry a dropped or
-    // swapped `need` on the newest allocator surface would ship green, and the
-    // page renders one owner's private + draft rows.
-    label: "my-strategies/page",
-    need: "allocator",
-    invoke: async () => {
-      const mod = await import("./my-strategies/page");
       return (mod.default as () => unknown)();
     },
   },
@@ -175,4 +211,121 @@ describe("requireRolePage call-site wiring (F-TESTGAP G1)", () => {
       expect(redirectSpy).not.toHaveBeenCalled();
     },
   );
+});
+
+// Phase 199 plan 09 (D-01, T-199-29) — the NEGATIVE case. `strategies/layout`
+// guards nothing any more: the /strategies index admits allocators, managers and
+// `both`, and the sub-routes are guarded by their own layouts (cases above). A
+// restored `requireRolePage` call here would bounce an allocator off the index
+// and, in spy mode, would throw the sentinel; the supabase double also throws on
+// any table read, so a role lookup in this layout is observable too.
+describe("strategies/layout is a negative case: no guard, no redirect, no role read (199-09)", () => {
+  beforeEach(() => {
+    requireRoleSpy.mockClear();
+    redirectSpy.mockClear();
+  });
+
+  it("renders its children without calling requireRolePage or redirecting", async () => {
+    const mod = await import("./strategies/layout");
+    const out = (await (
+      mod.default as (p: { children: React.ReactNode }) => Promise<unknown>
+    )({ children: "CHILDREN" })) as { props: { children: string } };
+    expect(out.props.children).toBe("CHILDREN");
+    expect(requireRoleSpy).not.toHaveBeenCalled();
+    expect(redirectSpy).not.toHaveBeenCalled();
+  });
+
+  it("still sends a signed-out visitor to /login (the session check stays)", async () => {
+    const server = await import("@/lib/supabase/server");
+    vi.mocked(server.createClient).mockResolvedValueOnce({
+      auth: { getUser: async () => ({ data: { user: null }, error: null }) },
+    } as unknown as Awaited<ReturnType<typeof server.createClient>>);
+    redirectSpy.mockImplementationOnce((href: string) => {
+      throw new Error(`NEXT_REDIRECT:${href}`);
+    });
+    const mod = await import("./strategies/layout");
+    await expect(
+      (mod.default as (p: { children: React.ReactNode }) => Promise<unknown>)({
+        children: null,
+      }),
+    ).rejects.toThrow("NEXT_REDIRECT:/login?redirect=/strategies");
+    expect(requireRoleSpy).not.toHaveBeenCalled();
+  });
+});
+
+// Phase 199 plan 04 (D-01, CD-10, T-199-12) — OUTCOMES of the new segment
+// guards, through the real requireRolePage. The wiring cases above pin the
+// `need` literal; these prove what a visitor actually gets: an allocator is
+// bounced to /allocations, a `both` owner and a manager render, and a profile
+// read error throws instead of bouncing or rendering (a Postgres hiccup is not a
+// demotion). redirect() is made to throw NEXT_REDIRECT here, as in Next 16.
+const NEW_GUARD_LAYOUTS: Array<{
+  label: string;
+  invoke: () => Promise<unknown>;
+}> = [
+  {
+    label: "strategies/new/layout",
+    invoke: async () => {
+      const mod = await import("./strategies/new/layout");
+      return (
+        mod.default as (p: { children: React.ReactNode }) => Promise<unknown>
+      )({ children: "CHILDREN" });
+    },
+  },
+  {
+    label: "strategies/[id]/layout",
+    invoke: async () => {
+      const mod = await import("./strategies/[id]/layout");
+      return (
+        mod.default as (p: { children: React.ReactNode }) => Promise<unknown>
+      )({ children: "CHILDREN" });
+    },
+  },
+];
+
+describe("new strategies segment guards - real guard outcomes (199-04)", () => {
+  beforeEach(() => {
+    requireRoleSpy.mockClear();
+    redirectSpy.mockReset();
+    redirectSpy.mockImplementation((href: string) => {
+      throw new Error(`NEXT_REDIRECT:${href}`);
+    });
+    harness.real = true;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    harness.real = false;
+    harness.profile = { data: null, error: null };
+    vi.restoreAllMocks();
+  });
+
+  describe.each(NEW_GUARD_LAYOUTS)("$label", ({ invoke }) => {
+    it("bounces an allocator to /allocations (never renders children)", async () => {
+      harness.profile = { data: { role: "allocator" }, error: null };
+      await expect(invoke()).rejects.toThrow("NEXT_REDIRECT:/allocations");
+    });
+
+    it("renders children for a manager", async () => {
+      harness.profile = { data: { role: "manager" }, error: null };
+      const out = (await invoke()) as { props: { children: string } };
+      expect(out.props.children).toBe("CHILDREN");
+      expect(redirectSpy).not.toHaveBeenCalled();
+    });
+
+    it("renders children for role 'both'", async () => {
+      harness.profile = { data: { role: "both" }, error: null };
+      const out = (await invoke()) as { props: { children: string } };
+      expect(out.props.children).toBe("CHILDREN");
+      expect(redirectSpy).not.toHaveBeenCalled();
+    });
+
+    it("throws on a profile read error and never redirects", async () => {
+      harness.profile = {
+        data: null,
+        error: { code: "XX000", message: "db down" },
+      };
+      await expect(invoke()).rejects.toMatchObject({ code: "XX000" });
+      expect(redirectSpy).not.toHaveBeenCalled();
+    });
+  });
 });

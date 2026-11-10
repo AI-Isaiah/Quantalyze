@@ -593,7 +593,7 @@ function ViewFullFactsheetLink({ strategyId }: { strategyId: string }) {
   return (
     <div className="mt-3">
       <Link
-        href={buildFactsheetHref(strategyId, { key: "my-strategies" })}
+        href={buildFactsheetHref(strategyId, { key: "strategies" })}
         target="_blank"
         rel="noopener noreferrer"
         data-testid="wizard-view-full-factsheet"

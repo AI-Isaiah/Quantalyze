@@ -61,6 +61,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
+import { degradePlainText } from "@/lib/degrade-warnings";
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -184,7 +185,11 @@ function findPayload(node: unknown): FactsheetPayload | null {
   return findPayload(el.props?.children ?? null);
 }
 
-/** Depth-first collection of every string in an RSC element tree. */
+/**
+ * Depth-first collection of every string in an RSC element tree. 199-18: a registered line is a
+ * `DegradeLine` element whose words ride its `segments` prop, not its children, so those are read
+ * the way a reader sees them (`degradePlainText`).
+ */
 function collectText(node: unknown, out: string[] = []): string[] {
   if (node == null) return out;
   if (typeof node === "string") {
@@ -196,7 +201,10 @@ function collectText(node: unknown, out: string[] = []): string[] {
     return out;
   }
   if (typeof node === "object") {
-    const el = node as { props?: { children?: unknown } };
+    const el = node as { props?: { children?: unknown; segments?: unknown } };
+    if (Array.isArray(el.props?.segments)) {
+      out.push(degradePlainText(el.props.segments as Parameters<typeof degradePlainText>[0]));
+    }
     collectText(el.props?.children ?? null, out);
   }
   return out;

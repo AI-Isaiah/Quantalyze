@@ -202,6 +202,19 @@ const nextConfig: NextConfig = {
         destination: "/allocations?tab=scenario",
         permanent: true,
       },
+      // Phase 199 MANAGERHOME (D-01, CD-06), 2026-11-10: every strategy owner
+      // reads ONE list, `/strategies`, so the allocator-only `/my-strategies`
+      // page is deleted and its old URL 308s there. The query string is passed
+      // through to the destination by Next. Unconditional on purpose (no
+      // has/missing): the destination and the proxy decide who may read it.
+      // A 308 is cached by browsers, so reverting this rule does not reach
+      // visitors who already followed it; the founder accepted that in D-01.
+      // Lockstep with the manifest redirectFrom (#512).
+      {
+        source: "/my-strategies",
+        destination: "/strategies",
+        permanent: true,
+      },
       // Phase 195 TRIM (D-03), 2026-11-07: the portfolio report API is retired;
       // an old link lands on the named retired page. Lockstep with the manifest
       // redirectFrom (#512).

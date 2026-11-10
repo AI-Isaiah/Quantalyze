@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * Route-level error boundary for /compare (STATE-01 / ASVS V7 / T-52-09).
@@ -42,8 +43,8 @@ export default function CompareError({
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
           <Button onClick={() => unstable_retry()}>Try again</Button>
-          <Link href="/discovery/crypto-sma">
-            <Button variant="ghost">Go to Discovery</Button>
+          <Link href={ROLE_HOME_ROUTE}>
+            <Button variant="ghost">Go to your home page</Button>
           </Link>
         </div>
       </div>

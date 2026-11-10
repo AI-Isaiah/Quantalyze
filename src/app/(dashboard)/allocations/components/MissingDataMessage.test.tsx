@@ -9,6 +9,7 @@ import {
 import type { KeyDataGap } from "../lib/key-data-gaps";
 import type { EquityHistoryRebuildReason } from "@/lib/queries";
 import * as rebuildClassModule from "./EquityHistoryRebuilding";
+import { ACTION_SENTENCES, WHOLE_HISTORY_IDS } from "@/lib/degrade-warnings";
 
 // ---------------------------------------------------------------------------
 // Phase 198 plan 09 (D-01, ROUTE-07). The Overview's missing-data message names
@@ -85,6 +86,11 @@ function linesText(
 }
 
 afterEach(() => cleanup());
+
+// 199-05 (D-05, CD-14 OQ-2): the D-10 sentence that carries the book-wide scope. Typed
+// by hand, as every expected sentence here is.
+const HISTORY_HIDDEN =
+  "The equity chart and the ratios built from it are hidden for your whole history. ";
 
 const EXCHANGES_ACTION = "Reconnect the key on the Exchanges page or wait for the next sync.";
 
@@ -233,6 +239,40 @@ describe("MissingDataMessage: one line per key, named, dated and actionable (D-0
   });
 });
 
+describe("MissingDataMessage: every gap line is rendered from a registry entry (199-05, D-04)", () => {
+  it.each([
+    ["not_syncing", "allocation.key-gap.not-syncing"],
+    ["sync_failing", "allocation.key-gap.sync-failing"],
+    ["read_incomplete", "allocation.key-gap.read-incomplete"],
+    ["duplicate_account", "allocation.key-gap.duplicate-account"],
+    ["shared_account_failing", "allocation.key-gap.shared-account-failing"],
+    ["identity_pending", "allocation.key-gap.identity-pending"],
+  ] as const)("%s carries data-degrade-id %s and the line's whole text", (cause, id) => {
+    const { container } = render(
+      <MissingDataMessage
+        lines={lines([gap(cause, [K1.id], { firstMissingDay: "2026-10-03", ranges: RANGE })], {
+          rebuilding: false,
+        })}
+      />,
+    );
+    const marked = container.querySelectorAll(`[data-degrade-id="${id}"]`);
+    expect(marked).toHaveLength(1);
+    // The marker wraps the whole line, so the registry text IS the sentence a reader sees.
+    const p = container.querySelectorAll("section p")[1];
+    expect(marked[0].textContent).toBe(p.textContent);
+    expect(marked[0].textContent).toContain(L1);
+  });
+
+  it("the one-named-key not-syncing fallback carries its own id", () => {
+    const { container } = render(
+      <MissingDataMessage
+        lines={lines([], { reason: "key_not_syncing", notSyncingKeys: [K1] })}
+      />,
+    );
+    expect(container.querySelectorAll('[data-degrade-id="allocation.key-gap.not-syncing-one-key"]')).toHaveLength(1);
+  });
+});
+
 describe("MissingDataMessage: the key-label rule and the owner-only rule (T-198-17)", () => {
   it("every named key reads through apiKeyLabelById: exchange display name, em dash, nickname or masked tail", () => {
     // A hand-built `${exchange} ${nickname}` would print `okx Spare` and `binance Main`.
@@ -260,7 +300,7 @@ describe("MissingDataMessage: the key-label rule and the owner-only rule (T-198-
   it("an unlabelled gap leaves the reason's shipped unnamed sentence to cover the book", () => {
     const g = gap("not_syncing", ["foreign-key-id-77"], { firstMissingDay: "2026-10-03", ranges: RANGE });
     expect(linesText([g], { reason: "key_not_syncing" })).toEqual([
-      "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+      `${HISTORY_HIDDEN}One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.`,
     ]);
   });
 
@@ -291,35 +331,38 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
   });
 
   it.each([
+    // 199-05 (OQ-2): the unnamed fallbacks keep every shipped word and gain the scope
+    // sentence in front (see HISTORY_HIDDEN).
     [
       "key_not_syncing",
-      "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+      `${HISTORY_HIDDEN}One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.`,
     ],
     [
       "duplicate_account",
-      "Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.",
+      `${HISTORY_HIDDEN}Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.`,
     ],
     [
       "shared_account_no_working_key",
-      "The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.",
+      `${HISTORY_HIDDEN}The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.`,
     ],
     [
       "account_identity_pending",
-      "We are confirming which exchange account each key reads. Each daily sync checks it again.",
+      `${HISTORY_HIDDEN}We are confirming which exchange account each key reads. Each daily sync checks it again.`,
     ],
-  ] as const)("%s with no gap line: the shipped unnamed sentence", (reason, sentence) => {
+  ] as const)("%s with no gap line: the shipped unnamed sentence under its scope sentence", (reason, sentence) => {
     expect(linesText([], { reason })).toEqual([sentence]);
   });
 
   it.each([
     [
       // 198-UAT-01 (D-10): names what the history hides, never return or risk.
+      // 199-05 (OQ-2): the shipped D-10 wording plus `for your whole history` and one action.
       "awaiting_derivation",
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
+      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
     ],
     [
       "derivation_rejected",
-      "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden.",
+      "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
     ],
     [
       "history_read_failed",
@@ -327,7 +370,7 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
     ],
     [
       "shared_account_history_truncated",
-      "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown.",
+      "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
     ],
   ] as const)("book-level %s: its one line", (reason, sentence) => {
     expect(linesText([], { reason })).toEqual([sentence]);
@@ -358,7 +401,7 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
     "a rebuilding book with reason %s: exactly one shipped line and no error",
     (reason) => {
       expect(linesText([], { reason: reason as Reason })).toEqual([
-        "The equity chart and the ratios built from it are hidden for now.",
+        "The equity chart and the ratios built from it are hidden for your whole history for now. Use the contact form to have it checked.",
       ]);
     },
   );
@@ -379,7 +422,7 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
     expect(other).toHaveLength(2);
     expect(other[0]).toContain(L3);
     expect(other[1]).toBe(
-      "Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.",
+      `${HISTORY_HIDDEN}Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.`,
     );
   });
 
@@ -430,6 +473,42 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
     expect(linesText([], { rebuilding: false, reason: "key_not_syncing" })).toEqual([]);
     cleanup();
     expect(linesText([], { rebuilding: false, reason: null })).toEqual([]);
+  });
+});
+
+describe("MissingDataMessage: book-wide lines state their whole-history scope, one action, and never return or risk (D-10, R-03)", () => {
+  // Phase 198 D-10: a book-level line names the equity chart and the ratios built from
+  // it. GlancePanel prints those two figures from live per-key figures this history does
+  // not gate, so a line naming either would be false. Whole-word: "returns" passes.
+  const FORBIDDEN = /\b(return|risk)\b/i;
+  const CASES: Array<[string, Reason, typeof API_KEYS | null]> = [
+    ["awaiting_derivation", "awaiting_derivation", null],
+    ["derivation_rejected", "derivation_rejected", null],
+    ["shared_account_history_truncated", "shared_account_history_truncated", null],
+    ["account_identity_pending", "account_identity_pending", null],
+    ["duplicate_account", "duplicate_account", null],
+    ["key_not_syncing, keys unknown", "key_not_syncing", null],
+    ["key_not_syncing, two keys", "key_not_syncing", [K1, K3]],
+    ["shared_account_no_working_key", "shared_account_no_working_key", null],
+    ["no known reason", null, null],
+  ];
+
+  it.each(CASES)("%s: the rendered line has the scope phrase, ends on one action, and names neither return nor risk", (_name, reason, notSyncingKeys) => {
+    const { container } = render(
+      <MissingDataMessage lines={lines([], { reason, notSyncingKeys })} />,
+    );
+    const wholeHistory = Array.from(container.querySelectorAll("[data-degrade-id]")).filter((el) =>
+      (WHOLE_HISTORY_IDS as readonly string[]).includes(el.getAttribute("data-degrade-id") ?? ""),
+    );
+    // Not vacuous: the case must have produced exactly one whole-history line.
+    expect(wholeHistory).toHaveLength(1);
+    const text = wholeHistory[0].textContent ?? "";
+    expect(text).toContain("for your whole history");
+    expect(text).not.toMatch(FORBIDDEN);
+    expect(
+      Object.values(ACTION_SENTENCES).some((a) => text.endsWith(a.sentence)),
+      `ends on a vocabulary action: ${text}`,
+    ).toBe(true);
   });
 });
 

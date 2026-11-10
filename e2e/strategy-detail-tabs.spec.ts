@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { isPostLoginPath } from "./helpers/login";
 
 /**
  * E2E coverage for the Sprint 4 five-tab layout on the strategy detail page.
@@ -43,7 +44,9 @@ test.describe("Strategy Detail Tabs", () => {
     );
     await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
-    await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
+    await page.waitForURL((url) => isPostLoginPath(url.pathname), {
+      timeout: 10000,
+    });
 
     // Navigate to discovery and click into the first strategy
     await page.goto("/discovery/crypto-sma");

@@ -66,37 +66,41 @@ vi.mock("@/lib/factsheet/allocator-portfolio-payload", () => ({
     buildPayloadSpy(...args),
 }));
 
+// 199-05 (D-05, OQ-2): the book-wide scope sentence, typed by hand.
+const HISTORY_HIDDEN =
+  "The equity chart and the ratios built from it are hidden for your whole history. ";
+
 // The one authored line per rebuild reason, over the closed set of
 // `EquityHistoryRebuildReason`. Shared by the per-reason arm and the D-15
 // reason-and-count arm below, so the two cannot drift apart.
 const REASON_LINES = [
   [
     "duplicate_account",
-    "Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.",
+    `${HISTORY_HIDDEN}Two of your keys read the same exchange account. Disconnect one of them on the Exchanges page and the history rebuilds.`,
   ],
   [
     // Review C2 WR-02: the line no longer promises the NEXT sync succeeds.
     // The stamper runs after every successful poll, and that is all the
     // line claims.
     "account_identity_pending",
-    "We are confirming which exchange account each key reads. Each daily sync checks it again.",
+    `${HISTORY_HIDDEN}We are confirming which exchange account each key reads. Each daily sync checks it again.`,
   ],
   [
     // Review C2 round 2 IN-04: with no key list to name from (a payload
     // without the ids), the line stays true for any number of keys.
     // 170.6.2 D-02: "One of your keys", not "A key".
     "key_not_syncing",
-    "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    `${HISTORY_HIDDEN}One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.`,
   ],
   [
     // 198-09 (D-01): the Overview says whose history: the book's.
     // 198-UAT-01 (D-10): and names what it hides, never return or risk.
     "awaiting_derivation",
-    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
+    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
   ],
   [
     "derivation_rejected",
-    "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden.",
+    "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
   ],
   [
     // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
@@ -107,12 +111,12 @@ const REASON_LINES = [
     // Review C2 round 3 R3-WR-03: the cause and the unlock, never "did not
     // pass its checks". No account and no number (T-167.1.2-22a).
     "shared_account_no_working_key",
-    "The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.",
+    `${HISTORY_HIDDEN}The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.`,
   ],
   [
     // 170.6.2 D-03: no "yet", it implies a heal that never ships.
     "shared_account_history_truncated",
-    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown.",
+    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
   ],
 ] as const satisfies ReadonlyArray<
   readonly [NonNullable<MyAllocationDashboardPayload["equityHistoryRebuildReason"]>, string]
@@ -130,7 +134,7 @@ const RETIRED_HEADINGS = [
 const REASONS = REASON_LINES.map(([reason]) => reason);
 
 const HIDDEN_FOR_NOW =
-  "The equity chart and the ratios built from it are hidden for now.";
+  "The equity chart and the ratios built from it are hidden for your whole history for now. Use the contact form to have it checked.";
 
 // 198-14 SFH-01: the sr-only pointer a glance dash carries when no live series
 // exists and the missing-data note renders below.
@@ -346,7 +350,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     const panel = screen.getByTestId("overview-missing-data");
     // 198-UAT-01 (D-10): names what the history hides, never return or risk.
     expect(panel.textContent).toContain(
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
+      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
     );
     expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
     expect(screen.queryByText(/appear once/)).toBeNull();

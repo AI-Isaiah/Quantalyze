@@ -140,20 +140,16 @@ function buildNavSections(
       { label: "Recommendations", href: "/recommendations", icon: RecommendIcon },
       { label: "Compare", href: "/compare", icon: CompareIcon },
     );
-    // Phase 149 NAV-01 — the read half of the workspace. Until now the
-    // allocator side was WRITE-ONLY: you could add a strategy and then never
-    // see it again unless it got published, which is the gap the founder
-    // pointed at. /my-strategies ranks every own row at every non-archived
-    // status. It sits directly ABOVE "Add a Strategy" so read-your-strategies
-    // reads beside the write CTA, and INSIDE showsAllocatorWorkspace so it
-    // never leaks to a manager-only session (T-110-16 info-disclosure — the
-    // page's own requireRolePage('allocator') guard is the backstop, not the
-    // only gate). BarChartIcon is shared with the manager "Strategies" entry
-    // DELIBERATELY: different branch, different label, and no account sees
-    // both glyphs in the same section.
+    // Phase 199 LEAN-01 / D-01 — the ONE Strategies entry. Phase 149 gave the
+    // allocator a separate "My Strategies" entry for the read half of the
+    // workspace; Phase 199 folded that page into /strategies, so the allocator
+    // now points at the one list too. It sits directly ABOVE "Add a Strategy" so
+    // read-your-strategies reads beside the write CTA. The manager branch below
+    // pushes the same entry only when this workspace is not shown, so a
+    // role='both' account sees exactly one.
     workspaceItems.push({
-      label: "My Strategies",
-      href: "/my-strategies",
+      label: "Strategies",
+      href: "/strategies",
       icon: BarChartIcon,
     });
     // Phase 110 CONTRIB-01 (ROLE-02 scoped exception) — the allocator brings a
@@ -178,13 +174,15 @@ function buildNavSections(
   // "My Allocation" — so the allocator now has ONE discoverable entry point
   // (/allocations, above). The phase-32 frozen-spine guard pins this: no
   // Sandbox-route reference may reappear in this file.
-  if (showsManagerWorkspace) {
+  if (showsManagerWorkspace && !showsAllocatorWorkspace) {
     // Phase 109 review correction: the retired portfolio surface was NOT a
     // manager surface — it was an allocator feature (14 allocator owners / 0
     // manager owners in prod). It was mis-placed here and mis-classified as
     // sell-side in ROLE-02. Managers get only Strategies. That surface was
     // never a primary nav item (v0.4.0 pivot) and is now gone (Phase 195 D-01),
     // so it is absent from every workspace.
+    // Phase 199 D-01: skipped when the allocator branch above already pushed
+    // the one Strategies entry (role='both'), so no role sees two.
     workspaceItems.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
     );

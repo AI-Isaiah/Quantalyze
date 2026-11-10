@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 import { withPublishedOnly } from "@/lib/visibility";
 import { EXCHANGES } from "@/lib/constants";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -72,7 +72,7 @@ export default async function Home() {
   } = await supabase.auth.getUser();
 
   if (user) {
-    redirect(DEFAULT_AUTHENTICATED_ROUTE);
+    redirect(ROLE_HOME_ROUTE);
   }
 
   const stats = await getSocialProofStats();

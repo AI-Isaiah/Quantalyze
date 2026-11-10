@@ -16,6 +16,26 @@ export const DATA_STATE_CHIP =
   "inline-flex items-center rounded-sm px-2 py-0.5 text-fixed-11 font-medium uppercase tracking-wide";
 
 /**
+ * Phase 199 plan 14 (D-03) - the three PIPELINE chips an owner row can carry, as the one
+ * home of their label and tone. `StrategyTable` (a client module, whose non-component
+ * exports a server component cannot read) renders them on the rows, and the strategies
+ * legend (a server component) renders the same chips from here, so the legend can never
+ * show a chip the rows do not print. Class strings are the ones the table used inline,
+ * moved unchanged. The label is the DOM text; CSS uppercases it.
+ */
+export const PIPELINE_CHIPS = {
+  /** A computation is queued or running and no figures exist yet (amber: the system recovers on its own). */
+  syncing: {
+    label: "Syncing",
+    tone: "text-warning bg-warning-bg border border-warning-border",
+  },
+  /** No figures and nothing running: a muted, honest steady state. */
+  no_data: { label: "No data", tone: "text-text-secondary bg-track" },
+  /** A connected key with no strategy yet (the placeholder row). */
+  no_strategy_yet: { label: "No strategy yet", tone: "text-text-secondary bg-track" },
+} as const;
+
+/**
  * Phase 197 / CLAR-02 (D-03, UI-SPEC U-03, U-08) - the amber chip on a row whose newest
  * return day is older than its threshold, or unreadable.
  *

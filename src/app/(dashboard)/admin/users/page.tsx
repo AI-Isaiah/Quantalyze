@@ -8,6 +8,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { appRoleLabel, profileRoleLabel } from "@/lib/display-labels";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
   title: "Users",
@@ -28,7 +29,7 @@ export default async function AdminUsersPage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   const admin = createAdminClient();
 

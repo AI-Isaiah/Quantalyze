@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { createClient } from "@/lib/supabase/server";
+import { roleSurfaceHome } from "@/lib/routing/role-home";
 
 /**
  * Phase 109 ROLE-04 — shared server-side page guard on `profiles.role`.
@@ -19,7 +20,7 @@ import type { createClient } from "@/lib/supabase/server";
  *     own surface.
  *   - missing-profile    → console.error + Sentry soft signal (level "warning")
  *     + THROW. Should be impossible for a valid session; NEVER redirects.
- *   - wrong-role         → `redirect(homeHref)` to the visitor's ACTUAL role
+ *   - wrong-role         → `redirect(roleSurfaceHome(role))` to the visitor's ACTUAL role
  *     home. This is the ONLY branch that redirects.
  *
  * Role model — this guard targets `profiles.role` (`allocator`|`manager`|`both`),
@@ -31,11 +32,12 @@ import type { createClient } from "@/lib/supabase/server";
  * no marketplace surface here; staff retain access via the `role='both'`
  * backfill.
  *
- * Loop-freedom (RESEARCH.md redirect matrix): `homeHref` is derived INTERNALLY
- * from the user's actual role (never a caller-passed target that could point at
- * an unowned route). `both` owns both surfaces and is never redirected. Any
- * unknown/malformed role is denied-by-default (owns=false, mirroring
- * approval.ts) and sent to `/pending-approval` — a terminal, unguarded route
+ * Loop-freedom (RESEARCH.md redirect matrix): the redirect target is derived INTERNALLY
+ * from the user's actual role via `roleSurfaceHome` (src/lib/routing/role-home.ts),
+ * never a caller-passed target that could point at an unowned route. `both`
+ * owns both surfaces and is never redirected. Any unknown/malformed role is
+ * denied-by-default (owns=false, mirroring approval.ts) and sent to
+ * `/pending-approval` — a terminal, unguarded route
  * that structurally cannot loop between the two surface homes.
  *
  * CRITICAL — `redirect()` throws NEXT_REDIRECT (Next 16, redirect.md:50-52) and
@@ -107,13 +109,6 @@ export async function requireRolePage(
   // Home target derived from the ACTUAL role, never the `need` — internal
   // derivation makes loop-freedom provable in this one file. Unknown/malformed
   // role → terminal /pending-approval (cannot loop between the surface homes).
-  const homeHref =
-    role === "manager"
-      ? "/strategies"
-      : role === "allocator"
-        ? "/allocations"
-        : "/pending-approval";
-
   // OUTSIDE any try/catch (Pitfall 2): redirect() throws NEXT_REDIRECT.
-  if (!owns) redirect(homeHref);
+  if (!owns) redirect(roleSurfaceHome(role));
 }

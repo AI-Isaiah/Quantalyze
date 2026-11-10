@@ -43,6 +43,7 @@ import {
   cleanupTestStrategy,
 } from "./helpers/cleanup-test-project";
 import { SELECTORS, type E2EPage } from "./helpers/discovery-selectors";
+import { isPostLoginPath } from "./helpers/login";
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
@@ -60,7 +61,9 @@ async function loginViaForm(
   await page.fill(SELECTORS.loginEmail, email);
   await page.fill(SELECTORS.loginPassword, password);
   await page.click(SELECTORS.loginSubmit);
-  await page.waitForURL(/\/(discovery|strategies|dashboard)/, {
+  // Phase 199: an allocator lands on /allocations, not Discovery; the specs below
+  // navigate to Discovery themselves.
+  await page.waitForURL((url) => isPostLoginPath(url.pathname), {
     timeout: 15000,
   });
 }

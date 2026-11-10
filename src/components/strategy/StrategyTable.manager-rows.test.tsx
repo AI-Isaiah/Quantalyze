@@ -170,6 +170,8 @@ const MANAGER_HEADERS = [
   "Rank",
   "Strategy",
   "Status",
+  // Phase 199 plan 12 (D-03): Health, a plain header directly after Status.
+  "Health",
   "Created",
   // Phase 197 D-05: Track joins, and every metric header's accessible name states its period and
   // annualisation (the sort button's aria-label; the two sparkline headers carry their own).
@@ -267,8 +269,9 @@ describe("StrategyTable managerRows — header order (D-01)", () => {
       />,
     );
     // 2026-10-10 (170.7 plan 03, D-09): the manager list is now Status AND
-    // Created wider than the owner mount, so the absent-prop count is two less.
-    expect(headers()).toHaveLength(MANAGER_HEADERS.length - 2);
+    // Created wider than the owner mount; 199-12 (D-03) adds Health, so the
+    // absent-prop count is three less.
+    expect(headers()).toHaveLength(MANAGER_HEADERS.length - 3);
     expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
     expect(screen.queryByRole("columnheader", { name: "Created" })).toBeNull();
   });
@@ -763,11 +766,11 @@ function createdButton(): HTMLElement {
 describe("StrategyTable managerRows — Created cell (D-09)", () => {
   it("each row's cell right after Status reads that row's UTC day, YYYY-MM-DD", () => {
     renderManager({ rows: DATE_ROWS });
-    // 0 rank, 1 Strategy, 2 Status, 3 Created. The newest row is 23:30 at -05:00,
+    // 0 rank, 1 Strategy, 2 Status, 3 Health (199-12), 4 Created. The newest row is 23:30 at -05:00,
     // i.e. already the NEXT UTC day: a string slice would print 2026-10-09.
-    expect(cells(dataRow(NAME_NEW))[3].textContent?.trim()).toBe("2026-10-10");
-    expect(cells(dataRow(NAME_MID))[3].textContent?.trim()).toBe("2026-06-01");
-    expect(cells(dataRow(NAME_OLD))[3].textContent?.trim()).toBe("2025-02-03");
+    expect(cells(dataRow(NAME_NEW))[4].textContent?.trim()).toBe("2026-10-10");
+    expect(cells(dataRow(NAME_MID))[4].textContent?.trim()).toBe("2026-06-01");
+    expect(cells(dataRow(NAME_OLD))[4].textContent?.trim()).toBe("2025-02-03");
   });
 
   it("a malformed created_at prints an em dash, never Invalid Date", () => {
@@ -775,12 +778,12 @@ describe("StrategyTable managerRows — Created cell (D-09)", () => {
       makeStrategy({ id: ID_NEW, name: NAME_NEW, created_at: "not a date" }),
     ];
     renderManager({ rows });
-    expect(cells(dataRow(NAME_NEW))[3].textContent?.trim()).toBe("\u2014");
+    expect(cells(dataRow(NAME_NEW))[4].textContent?.trim()).toBe("\u2014");
   });
 
   it("is Geist Mono tabular figures, not horizontally pinned", () => {
     renderManager({ rows: DATE_ROWS });
-    const td = cells(dataRow(NAME_MID))[3];
+    const td = cells(dataRow(NAME_MID))[4];
     expect(td.className).toContain("font-metric");
     expect(td.className).toContain("tabular-nums");
     expect(td.className).toContain("whitespace-nowrap");
@@ -931,7 +934,7 @@ describe("StrategyTable managerRows — Created counted in every row kind (D-09)
     });
     const placeholder = screen.getByText("Finish setup \u2192").closest("tr") as HTMLElement;
     expect(colSpanTotal(placeholder)).toBe(headers().length);
-    expect(cells(placeholder)[3].textContent?.trim()).toBe("\u2014");
+    expect(cells(placeholder)[4].textContent?.trim()).toBe("\u2014");
   });
 });
 

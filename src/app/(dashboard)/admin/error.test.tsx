@@ -27,6 +27,7 @@ vi.mock("next/link", () => ({
 }));
 
 import AdminError from "./error";
+import { DISCOVERY_LANDING_ROUTE, ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 afterEach(() => cleanup());
 
@@ -76,5 +77,15 @@ describe("(dashboard)/admin/error.tsx — digest-only boundary", () => {
     render(<AdminError error={err} unstable_retry={vi.fn()} />);
     expect(spy).toHaveBeenCalledWith("[admin-error]", err);
     spy.mockRestore();
+  });
+
+  // Phase 199 WR-01: /home redirects an admin back to /admin, the surface this
+  // boundary caught, so the escape link leaves to Discovery; Try again stays first.
+  it("escape link targets Discovery, never the role home that redirects back here", () => {
+    render(<AdminError error={new Error("boom")} unstable_retry={vi.fn()} />);
+    const escape = screen.getByRole("link", { name: "Go to Discovery" });
+    expect(escape.getAttribute("href")).toBe(DISCOVERY_LANDING_ROUTE);
+    expect(escape.getAttribute("href")).not.toBe(ROLE_HOME_ROUTE);
+    expect(screen.getAllByRole("button")[0].textContent).toBe("Try again");
   });
 });

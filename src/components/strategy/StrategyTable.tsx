@@ -39,7 +39,7 @@ import { rowRecord, annualizedCell } from "./annualized-cell";
 import { DISCOVERY_COLUMNS } from "./discovery-columns";
 import { SyncBadge } from "./SyncBadge";
 import { SharedAccountNote } from "./SharedAccountNote";
-import { DATA_STATE_CHIP, StaleSeriesChip, notRankedReason } from "./StaleSeriesChip";
+import { DATA_STATE_CHIP, PIPELINE_CHIPS, StaleSeriesChip, notRankedReason } from "./StaleSeriesChip";
 import { StarToggle } from "./StarToggle";
 import { SelectCheckbox } from "./SelectCheckbox";
 import { COMPARE_MAX_ITEMS, compareHref } from "@/lib/compare-href";
@@ -48,11 +48,13 @@ import { EmptyWatchlist } from "./EmptyWatchlist";
 import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
 import { OwnershipTag } from "./OwnershipTag";
+import { VerifiedCheck } from "./VerifiedCheck";
 import { ReturnsUnitChip } from "./ReturnsUnitChip";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { signTone, drawdownTone } from "@/lib/factsheet/display-sign";
 import { formatPercent, formatNumber, formatCurrency, formatIsoDay } from "@/lib/utils";
 import { isComputedAnalytics, deriveEmptySeriesState } from "@/lib/closed-sets";
+import { rowChipStatus } from "@/lib/strategy-health";
 import { listSeriesVerdict, type ListSeriesVerdictResult } from "@/lib/freshness";
 import { gateAnnualized, gatedValue, notShownLine, recordStartDay, trackMonths } from "@/lib/figure-gate";
 import { compareWithMissingLast, isMissingFigure, rangeMatches } from "@/lib/list-figures";
@@ -283,11 +285,8 @@ function drawdownColor(value: number | null | undefined): string {
 // `=== false`, never truthiness: an OMITTED optional field means "no signal —
 // trust the raw status" (W-C); only the explicit absent-row `false` coerces.
 // The owner path always carries it.
-function rowChipStatus(s: StrategyWithAnalytics): string | null {
-  return s.analyticsPresent === false
-    ? null
-    : s.analytics.computation_status ?? null;
-}
+// Plan 199-07: the function itself now lives in `@/lib/strategy-health` (imported
+// above), so the owner list's health word and this table read the one body.
 
 // STALE-01 — may this row occupy a POSITION in the ranking, i.e. carry a `#n`?
 //
@@ -456,7 +455,8 @@ interface StrategyTableProps {
    * Strategy and swaps the Actions cell for an Edit link plus this row's
    * `actions` slot; it drops the in-name status badge and the ownership tag
    * (Status has its own column now) and renders no Simulate Impact, Mark
-   * ownership or Rename control (a manager's page has no allocator portfolio).
+   * ownership or Rename control (a manager's page has no allocator portfolio)
+   * unless `allocatorFurniture` is also set (199, D-02).
    *
    * ABSENT means byte-identical output. /discovery, /browse and /my-strategies
    * never pass it, and `StrategyTable.default-mounts.test.tsx` pins all three
@@ -472,8 +472,33 @@ interface StrategyTableProps {
    */
   managerRows?: Record<
     string,
-    { editHref: string; actions: ReactNode; note?: ReactNode }
+    {
+      editHref?: string;
+      actions?: ReactNode;
+      note?: ReactNode;
+      /**
+       * Phase 199 / D-03 — the row's Health, decided on the SERVER by
+       * `strategyHealthOf` (server clock, the row's own asset class) and
+       * reduced to what the cell prints: `healthWord(h)` and `HEALTH_TONE[h.kind]`.
+       * Strings only, so it serializes across the RSC boundary and the client
+       * never recomputes a freshness verdict. Absent prints the em dash.
+       */
+      health?: { word: string; tone: string };
+    }
   >;
+  /**
+   * Phase 199 / D-02 — the allocator half of the owner-list furniture. `managerRows` is the
+   * owner-list switch (Status and Created columns, no in-name status badge, the note row,
+   * `showExamples`); this prop re-enables the controls that need an allocator portfolio inside
+   * that mode: the ownership tag, Mark ownership or Change mark, Rename and Simulate Impact.
+   * Edit and the actions slot are decided per ROW by the server (an entry's `editHref` and
+   * `actions`), so one row can carry manager furniture, allocator furniture or both.
+   *
+   * ABSENT (false) means the manager-only reading shipped in 170.7: none of the allocator
+   * controls render, even when `onMarkOwnership` or `onRename` are passed. Without `managerRows`
+   * it changes nothing (the plain owner mount already shows them).
+   */
+  allocatorFurniture?: boolean;
   /**
    * Phase 170.7 / D-09 — seeds the TABLE sort only (the column-header sort).
    * ABSENT means Sharpe descending, so Discovery, Browse and /my-strategies
@@ -646,6 +671,7 @@ export function StrategyTable({
   percentiles,
   visibility = "published-only",
   managerRows,
+  allocatorFurniture = false,
   initialSort,
   placeholderKeys,
   onFinishSetup,
@@ -1275,13 +1301,13 @@ export function StrategyTable({
   // Strategy + Return% + CAGR + Sharpe + Max DD (5), then Volatility + 6 Month
   // + AUM + Return spark + Underwater spark (5), Track (1, Phase 197 D-05), and Actions (1) = 13; +1
   // leading star column when userId is present, and +2 (Status and Created)
-  // when managerRows is set (170.7 / D-01, D-09).
+  // when managerRows is set (170.7 / D-01, D-09), +1 more for Health (199-12, D-03).
   // 2026-10-13 Phase 170.6.1 D-01: one fewer column than before, because the
   // per-row disclosure column is gone (13 -> 12, star 14 -> 13). Phase 197 D-05 adds Track
   // (12 -> 13, star 13 -> 14).
   const showStarColumn = userId !== undefined;
   // Phase 197 / ROUTE-05: +1 leading select column when `selectable`.
-  const emptyRowColSpan = (showStarColumn ? 14 : 13) + (managerRows ? 2 : 0) + (selectable ? 1 : 0);
+  const emptyRowColSpan = (showStarColumn ? 14 : 13) + (managerRows ? 3 : 0) + (selectable ? 1 : 0);
 
   const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
 
@@ -1543,6 +1569,19 @@ export function StrategyTable({
                               Status
                             </th>
                           )}
+                          {/* Phase 199 / D-03 — the Health column, directly after
+                              Status and before Created. A plain header like
+                              Status: not sortable (no button, no aria-sort),
+                              vertically sticky at z-20, never horizontally
+                              pinned. */}
+                          {i === 0 && managerRows && (
+                            <th
+                              scope="col"
+                              className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}
+                            >
+                              Health
+                            </th>
+                          )}
                           {/* 170.7 / D-09 — the manager Created column, right
                               after Status. Built like a COLUMNS header (same
                               aria-sort derivation, same sort button and
@@ -1669,10 +1708,18 @@ export function StrategyTable({
                     // than the write gate produces a control that 404s.
                     const isRenameable =
                       s.status === "private" || s.status === "draft";
+                    // Phase 199 / D-02 — in owner-list mode (`managerRows` set) the
+                    // allocator controls need `allocatorFurniture`, so a manager-only
+                    // list never shows a control that needs an allocator portfolio,
+                    // whatever callbacks the mount passes (T-199-11). The `mr-3`
+                    // belongs to the inline mount only: the owner-list cell is a flex
+                    // row whose own gap spaces the controls.
+                    const allocatorControls = !managerRows || allocatorFurniture;
                     const ownerRowActions =
-                      onMarkOwnership || (onRename && isRenameable) ? (
+                      allocatorControls &&
+                      (onMarkOwnership || (onRename && isRenameable)) ? (
                         <span
-                          className={`inline-flex items-center gap-3 ${s.status === "published" ? "mr-3" : ""}`}
+                          className={`inline-flex items-center gap-3 ${s.status === "published" && !managerRows ? "mr-3" : ""}`}
                         >
                           {onMarkOwnership && (
                             <button
@@ -1699,6 +1746,18 @@ export function StrategyTable({
                             </button>
                           )}
                         </span>
+                      ) : null;
+                    // Simulate Impact, built once and placed by the Actions cell. The
+                    // publication guard sits directly before the mount (pin 7 of
+                    // phase-149-my-strategies-parity.test.ts reads it from here), and
+                    // owner-list mode adds the allocator gate (199 / D-02).
+                    const simulateImpact =
+                      s.status === "published" && allocatorControls ? (
+                        <SimulateImpactButton
+                          candidateStrategyId={s.id}
+                          candidateName={s.name}
+                          portfolioId={portfolioId}
+                        />
                       ) : null;
                     // 170.7 / D-06 — a note follows the data row only when this
                     // strategy has one. The data row then hands its bottom
@@ -1805,11 +1864,7 @@ export function StrategyTable({
                                 an unpublished draft, so dropping the key half
                                 would take the check off an owner's drafts. */}
                             {(s.trust_tier === "api_verified" || s.api_key_id) && (
-                              <span title="Verified via exchange API" className="text-accent">
-                                <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
-                                  <path d="M8 0a8 8 0 110 16A8 8 0 018 0zm3.78 5.22a.75.75 0 00-1.06 0L7 8.94 5.28 7.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l4.25-4.25a.75.75 0 000-1.06z" />
-                                </svg>
-                              </span>
+                              <VerifiedCheck />
                             )}
                             {/* Phase 149 Delta 3 — the owner's own non-published
                                 rows say so, muted (absence of publication is a
@@ -1844,7 +1899,7 @@ export function StrategyTable({
                                 renders nothing — OwnershipTag returns null, and
                                 absence is honest. */}
                             {visibility === "owner-all-statuses" &&
-                              !managerRows && (
+                              (!managerRows || allocatorFurniture) && (
                               <OwnershipTag mark={s.capital_ownership} />
                             )}
                           </div>
@@ -1969,13 +2024,13 @@ export function StrategyTable({
                                 <span
                                   title="First metrics arrive in ~10–15 min"
                                   aria-label="Syncing — first metrics arrive in ~10–15 min"
-                                  className={`${DATA_STATE_CHIP} text-warning bg-warning-bg border border-warning-border`}
+                                  className={`${DATA_STATE_CHIP} ${PIPELINE_CHIPS.syncing.tone}`}
                                 >
-                                  Syncing
+                                  {PIPELINE_CHIPS.syncing.label}
                                 </span>
                               ) : (
-                                <span className={`${DATA_STATE_CHIP} text-text-secondary bg-track`}>
-                                  No data
+                                <span className={`${DATA_STATE_CHIP} ${PIPELINE_CHIPS.no_data.tone}`}>
+                                  {PIPELINE_CHIPS.no_data.label}
                                 </span>
                               ))}
                           </div>
@@ -1996,6 +2051,25 @@ export function StrategyTable({
                         {managerRows && (
                           <td className="px-4 py-3 whitespace-nowrap group-hover:bg-page/50 transition-colors">
                             <Badge type="status" label={s.status} />
+                          </td>
+                        )}
+                        {/* Phase 199 / D-03 — the Health cell. The server decided
+                            the word and its tone; this only prints them. One
+                            line (whitespace-nowrap): `Stale (no data since
+                            Oct 31, 2026)` is long, and the table scrolls. A row
+                            the page passed no health for prints the em dash,
+                            never a guessed word. */}
+                        {managerRows && (
+                          <td className="px-4 py-3 whitespace-nowrap group-hover:bg-page/50 transition-colors">
+                            {managerRows[s.id]?.health ? (
+                              <span
+                                className={`whitespace-nowrap text-caption font-semibold ${managerRows[s.id].health?.tone}`}
+                              >
+                                {managerRows[s.id].health?.word}
+                              </span>
+                            ) : (
+                              <span className="text-text-muted">{"\u2014"}</span>
+                            )}
                           </td>
                         )}
                         {/* 170.7 / D-09 — the manager Created cell, right after
@@ -2074,20 +2148,22 @@ export function StrategyTable({
                             the visibility default already guarantees every row
                             is published. */}
                         <td className="pl-4 pr-8 py-3 text-right group-hover:bg-page/50 transition-colors">
-                          {/* Phase 170.7 / D-01 — manager mode: Edit, then this
-                              row's server-built slot, on ONE line (a wrapped
-                              Actions cell doubles the row height and breaks
-                              the --row-h rhythm). No Mark ownership, Rename or
-                              Simulate Impact: a manager's page has no allocator
-                              portfolio, and a control that cannot work is worse
-                              than none. The Edit link renders only for an id
-                              with an entry, so a missing id shows an empty cell,
-                              never another row's slot. */}
+                          {/* Phase 170.7 / D-01, 199 / D-02 — owner-list mode: Edit,
+                              this row's server-built slot, Mark ownership or
+                              Change mark, Rename, then Simulate Impact, on ONE
+                              line (a wrapped Actions cell doubles the row height
+                              and breaks the --row-h rhythm). Each piece renders
+                              only when its furniture is on: Edit and the slot
+                              when the entry carries them, the allocator controls
+                              only under `allocatorFurniture`, because a manager's
+                              page has no allocator portfolio and a control that
+                              cannot work is worse than none. A missing id shows
+                              an empty cell, never another row's slot. */}
                           {managerRows ? (
                             <div className="flex flex-nowrap items-center justify-end gap-3 whitespace-nowrap">
-                              {managerRows[s.id] && (
+                              {managerRows[s.id]?.editHref && (
                                 <Link
-                                  href={managerRows[s.id].editHref}
+                                  href={managerRows[s.id].editHref as string}
                                   aria-label={`Edit ${s.name}`}
                                   className={`${GHOST_ROW_ACTION} inline-flex items-center pointer-coarse:min-h-[44px]`}
                                 >
@@ -2095,17 +2171,13 @@ export function StrategyTable({
                                 </Link>
                               )}
                               {managerRows[s.id]?.actions}
+                              {ownerRowActions}
+                              {simulateImpact}
                             </div>
                           ) : (
                             ownerRowActions
                           )}
-                          {s.status === "published" && !managerRows && (
-                            <SimulateImpactButton
-                              candidateStrategyId={s.id}
-                              candidateName={s.name}
-                              portfolioId={portfolioId}
-                            />
-                          )}
+                          {!managerRows && simulateImpact}
                         </td>
                       </tr>
                       {hasNote && (
@@ -2201,14 +2273,21 @@ export function StrategyTable({
                             </span>
                           </div>
                           <div className="flex items-center gap-2 mt-1">
-                            <span className={`${DATA_STATE_CHIP} text-text-secondary bg-track`}>
-                              No strategy yet
+                            <span className={`${DATA_STATE_CHIP} ${PIPELINE_CHIPS.no_strategy_yet.tone}`}>
+                              {PIPELINE_CHIPS.no_strategy_yet.label}
                             </span>
                           </div>
                         </td>
                         {/* 170.7 / D-01 — keeps the placeholder td count equal to
                             the th count when the manager Status column shows.
                             No strategy exists, so no status: an honest em dash. */}
+                        {managerRows && (
+                          <td className="px-4 py-3">
+                            <span className="text-text-muted">—</span>
+                          </td>
+                        )}
+                        {/* Phase 199 / D-03 — and the Health cell: no strategy,
+                            nothing to judge. */}
                         {managerRows && (
                           <td className="px-4 py-3">
                             <span className="text-text-muted">—</span>
