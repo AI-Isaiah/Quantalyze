@@ -183,29 +183,32 @@ does not cover it (booked: `196-STYLE-DRIFT-CENSUS-BLIND-01`).
 
 ### Production after-run
 
-**Pending until the phase deploys.** Phase 196 was built with no production access, and the named
-strategies on production still run the pre-phase layout. Run it on the deployed phase, then record the
-table here with the date and the same definitions. Same three profiles by display name as the Before
-table (B: Momentum Sphinx; C: Fibonacci Ghost; A has no matching published strategy, so it stays on the
-fixture row), measured anonymous, Chromium 1440 x 900, Advanced closed then open, scrolled twice before
-each count. The command, with the ids supplied from the environment (never written here):
+**Measured 2026-11-10** on https://quantalyze.xyz at main `9bc83f89` (v0.133.31.2), anonymous Chromium,
+same definitions as above, with `scripts/factsheet-census/run.ts --mode after` and `--print`, ids from the
+environment. B is Momentum Sphinx, C is Fibonacci Ghost (the run was invoked with letters A and B; they
+are relabelled here to this file's profiles).
 
-```
-CENSUS_BASE_URL=https://quantalyze.xyz CENSUS_STRATEGIES='B:<ids from env>,C:<ids from env>' \
-  npx tsx scripts/factsheet-census/run.ts --mode after
-```
+| profile | display name | state | sections | charts | brush | repeated | warnings | hints | on request |
+|---|---|---|---|---|---|---|---|---|---|
+| B | Momentum Sphinx | Advanced closed | 4 | 2 | 1 | 0 | 1 | 1 | 0 |
+| B | Momentum Sphinx | Advanced open | 14 | 37 | 1 | 2 (sharpe, sortino) | 1 | 1 | 0 |
+| C | Fibonacci Ghost | Advanced closed | 4 | 2 | 1 | 0 | 1 | 1 | 0 |
+| C | Fibonacci Ghost | Advanced open | 14 | 30 | 1 | 2 (sharpe, sortino) | 1 | 1 | 0 |
+| B | Momentum Sphinx | print media | 3 | 2 | 1 | 0 | 1 | 0 | 0 |
+| C | Fibonacci Ghost | print media | 3 | 2 | 1 | 0 | 1 | 0 | 0 |
 
-The print snapshot (a print-media render of each strategy's tearsheet) and the share-link render counts are
-part of that same pending run:
+Every warning is `strip-figure-gate-note x1`. **Target met** with Advanced closed and in print. The open-state
+repeats are the rolling rows, exempt by founder decision D-13 (2026-11-10, "Opening view only"), which
+closes `196-ROLLING-REPEATS-01`.
 
-```
-... npx tsx scripts/factsheet-census/run.ts --mode after --print
-CENSUS_SHARE_URL=<from env> ... npx tsx scripts/factsheet-census/run.ts --share
-```
+⚠️ **Runner caveat, measured.** `run.ts` reuses one browser context across strategies, and the Advanced
+disclosure persists per viewer by design (`factsheet:advanced-open`). The second strategy therefore loaded
+with Advanced already open, and the runner printed its two rows with the state labels swapped
+("closed" 14/30, "open" 4/2). The table above carries them under the true state. A fresh context per
+strategy would remove the swap; not fixed (tooling, LOW).
 
-Expected from the fixtures, not a measurement: the closed state lands on 4 sections and 2 charts, one hint,
-at most one warning and no "— on request" row; repeated metrics in the open state will report the rolling
-labels until `196-ROLLING-REPEATS-01` is decided.
+**Not run:** the share-link pass (`--share`) needs a share link created on production, which this
+read-only measurement did not do.
 
 ### Gate run
 

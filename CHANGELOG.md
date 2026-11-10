@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.31.3] - 2026-11-10 — records: close Phases 196 ONESTRATEGYPAGE and 197 SCREEN
+
+### Notes
+- **Phase 196 ONESTRATEGYPAGE is closed.** Its five human items ran on production at main `9bc83f89`. The four old strategy URLs 308 to `/factsheet/<id>` with `from`/`cat` kept; unpublished and unknown ids 404 (the tearsheet included, no streamed 200). The production census meets the target with Advanced closed and in print for Momentum Sphinx and Fibonacci Ghost (4 sections, 2 charts, 0 repeated metrics, 1 warning, 1 hint); the table is in `196-CENSUS.md` with a measured runner caveat (one browser context across strategies swaps the second strategy's state labels, because Advanced persists per viewer). The share-link pass was not run. Visual pass at 1440 and 390 CSS px: no overflow; print has no control bar and no Advanced.
+- **Founder decisions recorded (deviation policy: 196 CONTEXT and ROADMAP).** D-13 "Opening view only": SC-4's "no metric shown twice" applies to the opening view; the rolling-window rows under Advanced are different statistics. This closes `196-ROLLING-REPEATS-01`. D-14 "Enforce in /api/intro" with an attest step on every intro entry point, routed to Phase 194.2 (`196-INTRO-API-ATTESTATION-01` now owned there).
+- **Phase 197 SCREEN is closed.** `197-UAT.md` 5/5 on production: discovery and `/browse` layout at 375 and about 1456 CSS px, the keyboard walks on `/discovery` and `/compare`, and the admin shared-account line (absent for visitors). The four-strategy cap was not reachable with three published strategies and is covered by `StrategyTable.selection.test.tsx`. `e2e` and `e2e-seeded` were green on the merge commit.
+- **New routed defect.** `197-STRATEGY-NAME-PSEUDONYM-01`: compare's "Add strategy", the tearsheet manager card and `<title>` use "Strategy #<id>" while every other surface prints the real name, so searching a name seen on discovery finds nothing. Founder: "Real name everywhere", added to Phase 201 PLAINWORDS's goal.
+- `phase complete` ran for 196 and 197 (ROUTE-02, ROUTE-04, LEAN-02, LEAN-05 ticked); STATE's Current Position corrected by hand for the parallel phases (194.2 and 199 in flight).
+
 ## [0.133.31.2] - 2026-11-10 — records: close Phase 198 MYBOOK
 
 ### Notes

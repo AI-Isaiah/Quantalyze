@@ -5,17 +5,17 @@ milestone_name: UX — trustworthy, navigable, lean
 current_phase: "194.2"
 current_phase_name: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed
 status: planning
-stopped_at: Phase 198 closed (browser re-check passed); 196 and 197 await founder checks, 199 parked, 194.2 not planned
-last_updated: "2026-11-10T08:27:16.046Z"
+stopped_at: Phases 196 and 197 closed (production UAT 2026-11-10); 194.2 and 199 running in parallel
+last_updated: "2026-11-10T10:51:20.922Z"
 last_activity: 2026-11-10
-last_activity_desc: Phase 198 MYBOOK closed after the founder browser re-check
-state_head: 32928312e7e73c2a5367a52d7b290c3e8e5dbf36
+last_activity_desc: Phases 196 and 197 closed after the 2026-11-10 production UAT
+state_head: 9bc83f894fa4a249ea3582fb26282c86d86797b3
 progress:
   total_phases: 14
-  completed_phases: 8
+  completed_phases: 10
   total_plans: 116
   completed_plans: 116
-  percent: 57
+  percent: 71
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 196 (ONESTRATEGYPAGE) shipped #1235, VERIFICATION human_needed (production after-census, rolling-repeats call, intro attestation scope); 197 (SCREEN) shipped #1225, VERIFICATION human_needed (UAT 2026-11-09 gaps, closure not started); 199 (MANAGERHOME) planned, execution parked; 194.2 not planned
-Plan: 196: 21 of 21; 197: 6 of 6; 199: 0 of 18; 194.2: not planned
-Status: 198 closed; 196 and 197 await founder checks
-Last activity: 2026-11-10 — Phase 198 MYBOOK closed (browser re-check passed; records PR v0.133.31.2)
-Progress: [██████░░░░] 57% (8 of 14 phases)
+Phase: parallel — 194.2 (FIGURERESIDUALS) context gathered 2026-11-10 (D-01..D-05), planning and execution started; 199 (MANAGERHOME) execution resumed 2026-11-10; 200 and 201 not started (200 waits on 199, 201 on 200)
+Plan: 194.2: not planned yet; 199: 0 of 18
+Status: 196 and 197 closed; 194.2 and 199 in flight
+Last activity: 2026-11-10 — Phases 196 ONESTRATEGYPAGE and 197 SCREEN closed (production UAT; records PR v0.133.31.3)
+Progress: [███████░░░] 71% (10 of 14 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1764,7 +1764,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phase 198 closed (browser re-check passed); 196 and 197 await founder checks, 199 parked, 194.2 not planned
+**Stopped At:** Phases 196 and 197 closed (production UAT 2026-11-10); 194.2 and 199 running in parallel
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z

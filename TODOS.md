@@ -1506,11 +1506,21 @@ Beta, alpha, information ratio and Treynor still appear on the factsheet through
 
 **What closing it means.** Both panels live inside the factsheet's Advanced disclosure under the document layout, each with a say-why line for an absent series, behind the same figure gates as the rest of the page, and with tests (including the record-gate and unit arms). The panel hooks, readers and charts were deleted in Phase 196 plan 14 and must be rebuilt or restored from history; the original files are in the git history before the plan 14 commits. The 13 chart-token exports and three minimum-history constants plan 14 left behind (see `196-ORPHANS-01`) are the ones those panels read.
 
+### 197-STRATEGY-NAME-PSEUDONYM-01 — one strategy reads under two names: compare search and the tearsheet use "Strategy #<id>", every other surface the real name (booked 2026-11-10, Phase 197 UAT test 3 and Phase 196 UAT item 5, user-facing)
+
+**Reading (production, 2026-11-10).** Discovery, the compare column headers, anonymous `/browse/<cat>` and the factsheet heading print "Fibonacci Ghost". `/api/strategies/browse` (the source of compare's "Add strategy"), the tearsheet manager card and the tearsheet `<title>` print "Strategy #8581f739" (`displayStrategyName`, audit C-0112). Typing "Fib" in "Add strategy" returns "No published strategy matches". The name is already public on anonymous `/browse`, so the pseudonym hides nothing there.
+
+**Owner:** Phase 201 PLAINWORDS ("one name per concept"). Founder 2026-11-10: "Real name everywhere": the strategy's real name on every surface; the manager's identity stays pseudonymous until an intro.
+
+**Trigger / closed when.** Phase 201 plans it; closed when the browse route, the tearsheet card and title print the same name as discovery for a published strategy, and a test searching a discovery-visible name in "Add strategy" goes RED if the pseudonym returns.
+
 ### 196-ROLLING-REPEATS-01 — with Advanced open, the rolling tables repeat Sharpe, Sortino and Volatility, so SC-5's "0 repeated metrics" is met only with Advanced closed (booked 2026-11-09, Phase 196 plans 09 and 11, open item 1)
 
 **Why it is open.** The census counts a label once per table. "Rolling Metrics (6mo)" and, on a record of a year or more, "Rolling Metrics (1y)" both list Volatility, Sharpe and Sortino, and the strip carries Sharpe and Sortino. Measured on the fixtures at the end of Phase 196 (Advanced open, jsdom): fixture A repeats `sharpe`, `sortino`, `volatility`; fixtures B and C repeat `sharpe`, `sortino`. Advanced closed is 0 on all three. The UI-SPEC target is 0 in both states. The plan and UI-SPEC keep Rolling Metrics in the detailed part, so no plan relabelled, merged or exempted them; this is a design call, not decided.
 
 **Owner:** unrouted, founder or planner call. Options named so far: relabel the rolling rows, merge the two tables, or exempt rolling rows in the counter.
+
+**✅ CLOSED 2026-11-10 by founder decision ("Opening view only", 196 CONTEXT D-13).** Rolling-window rows are different statistics; SC-4's "no metric twice" applies to the opening view, and the production census meets it there (`196-CENSUS.md`, Production after-run). `ROLLING_REPEATS_OPEN_ITEM` stays as the record of the exempt open-state repeats.
 
 **Trigger.** The next phase that edits `MetricsColumn.tsx` or `RollingMetricsPanel`, or the production census after-run reporting `repeated > 0` with Advanced open.
 
@@ -1610,7 +1620,7 @@ Stale mentions, comment-only or in generated maps: `.planning/codebase/STACK.md`
 
 **Why it is open.** Before Phase 196 the only "Request intro" button lived behind `/discovery`'s attestation gate. Phase 196 put it on the factsheet, so review round 1 (CR-01, HIGH) restored the gate in `resolveFactsheetViewer`: an approved allocator without an `investor_attestations` row sees neither Request intro nor Add to my allocation. Round 1 also enforced the attestation in `/api/intro`, but that blocked the Bridge's ReplacementCard intro on `/allocations`, which has no attestation prompt (R2-02), so round 2 reverted the route to its pre-phase state. The route therefore still accepts an unattested approved allocator who posts directly, exactly as before the phase. An unattested allocator who lands on a factsheet sees no actions and no hint to attest (round-2 silent-failure M6); `/discovery` would show them the gate.
 
-**Owner:** unrouted, founder call (compliance scope).
+**Owner:** Phase 194.2 FIGURERESIDUALS (founder 2026-11-10: "Enforce in /api/intro", then "Here, with an attest prompt"; 194.2 CONTEXT D-03, D-04; 196 CONTEXT D-14).
 
 **Trigger.** A decision on whether attestation gates every intro, or the next change to `/api/intro` or the Bridge.
 

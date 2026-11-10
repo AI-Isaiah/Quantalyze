@@ -43,6 +43,9 @@ A strategy has one page, the factsheet (`/factsheet/[id]`). The tearsheet is its
 
 ### Claude's Discretion
 - How the origin is carried (query param vs. other), redirect implementation (middleware vs. route-level), exact header layout per DESIGN.md, the before/after census method for SC-5 (three named strategies; names must not be PROD ids in tracked text).
+- **D-13 (founder, 2026-11-10, UAT): "no metric shown twice" applies to the opening view.** Founder pick: "Opening view only". The rolling-window Sharpe, Sortino and Volatility rows under Advanced are different statistics from the headline figures, so a repeat with Advanced open is not a defect. SC-4 is narrowed to the closed (opening) view. Recorded here and in the ROADMAP Phase 196 success criterion 4 (deviation policy). Closes `TODOS.md` `196-ROLLING-REPEATS-01`.
+- **D-14 (founder, 2026-11-10, UAT): `/api/intro` enforces the attestation.** Founder pick: "Enforce in /api/intro", then "Here, with an attest prompt": every intro entry point (factsheet, Bridge ReplacementCard) shows an unattested allocator an attest step. Routed to Phase 194.2 FIGURERESIDUALS (its D-03, D-04); `196-INTRO-API-ATTESTATION-01` is owned there.
+
 </decisions>
 
 <canonical_refs>

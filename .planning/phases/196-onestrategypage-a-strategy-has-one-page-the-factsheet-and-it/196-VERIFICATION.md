@@ -1,9 +1,9 @@
 ---
 phase: 196-onestrategypage
 verified: 2026-11-09T12:10:00Z
-status: human_needed
-score: 3/5 must-haves verified
-verified_at_sha: 21107f35490cb624cd15175ab46f410dfac76e57
+status: passed
+score: 5/5 must-haves verified (3 in code; SC-4 and SC-5 closed by the 2026-11-10 production UAT and founder decision D-13)
+verified_at_sha: 9bc83f894fa4a249ea3582fb26282c86d86797b3
 drift_subjects:
   - next.config.ts
   - src/lib/routing/route-contract-manifest.ts
@@ -47,9 +47,11 @@ human_verification:
 
 # Phase 196: ONESTRATEGYPAGE Verification Report
 
+> **Update 2026-11-10: human items closed, status passed.** Measured on production (https://quantalyze.xyz, main `9bc83f89`). (1) Production census: met with Advanced closed and in print for Momentum Sphinx and Fibonacci Ghost; table and runner caveat in `196-CENSUS.md` "Production after-run"; share-link pass not run. (2) Rolling repeats: founder decision D-13 "Opening view only", SC-4 narrowed to the opening view (CONTEXT and ROADMAP). (3) Live statuses: `/strategy/<id>`, `/strategy/<id>/v2`, `/browse/<cat>/<id>`, `/discovery/<cat>/<id>` each 308 to `/factsheet/<id>` with `from`/`cat` kept; unpublished factsheet 404; unpublished and unknown tearsheet 404 (no streamed 200); published 200. (4) Intro attestation: founder decision D-14 "Enforce in /api/intro" with an attest step on every entry point, routed to Phase 194.2. (5) Visual at 1440 and 390 CSS px: opening view reads as a short document, visitor header and sign-up line above the footer, Advanced closed, no horizontal overflow at 390; print view has no ControlBar and no Advanced. Found and routed, not phase-196 defects: the tearsheet manager card and `<title>` use the "Strategy #<id>" pseudonym (founder: "Real name everywhere", Phase 201); chart controls (log/linear/export) still print (LOW, not booked). `verified_at_sha` moved to the main commit the UAT was read on; the code verification was issued at `21107f35`.
+
 **Phase Goal:** A strategy has one page, the factsheet. The tearsheet is its print view and every other strategy detail route leads to it. A signed-in user is never shown visitor prompts, an owner can open their own unpublished strategy, a signed-in reader has a way back and a next step, a shared factsheet carries a header and a sign-up link, and the factsheet opens as a summary, one chart and one metrics table with the rest under "Advanced".
 **Verified:** 2026-11-09 at 21107f354
-**Status:** human_needed
+**Status:** passed (human items closed 2026-11-10, see above)
 **Re-verification:** No, initial verification
 
 All evidence below was read from the codebase at HEAD of the phase branch, not from SUMMARY claims. Requirements covered: LEAN-02, ROUTE-02, ROUTE-04, LEAN-05.
