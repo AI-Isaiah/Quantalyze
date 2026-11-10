@@ -107,7 +107,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
-- [ ] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro**
+- [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
 - [ ] **Phase 205: ONEVERDICT — every figure path follows the record's one readability verdict**
 - [ ] **Phase 206: SESSIONLOOP — a revoked-but-unexpired session cookie no longer bounces between / and /home**
 
@@ -654,7 +654,7 @@ Plans:
 | 201. PLAINWORDS | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
-| 204. INTROAUTH | 0/0 | Not started | - |
+| 204. INTROAUTH | 2/2 | Complete    | 2026-11-10 |
 | 205. ONEVERDICT | 0/0 | Not started | - |
 | 206. SESSIONLOOP | 0/0 | Not started | - |
 
@@ -682,10 +682,12 @@ Plans:
 **Goal:** The database side of the intro path enforces what `/api/intro` enforces: only an approved, attested allocator can create an intro, on every entry point, not only through the route. Security phase, runs first after 194.2 (founder 2026-11-10, "Eigene Folgephase"). Pre-existing, found by the 194.2 reviews and security audit. ⚠️ Public repo: tracked text stays neutral until the fix is live on PROD; the 194.2 review files holding the detail (REVIEW-R2, REVIEW-FIX) are published with this phase's records, not before. Needs migration-reviewer and rls-policy-auditor clean before merge (PROD migrations auto-apply after apply-test).
 **Requirements**: TBD
 **Depends on:** Phase 194.2
-**Plans:** 0 plans
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 204 to break down)
+- [x] 204-01-PLAN.md — Wave 1: the migration (ALTER POLICY `contact_requests_insert` WITH CHECK matching /api/intro, REVOKE client EXECUTE on the 6-arg `send_intro_with_decision`) with its rollback, the pg-lane stand-in fixture and the 15-arm SQL gate, shown able to fail (D-01..D-08)
+- [x] 204-02-PLAN.md — Wave 2: every corpus census the new gate file moves, set to measured values (D-07, D-08)
+
 
 ### Phase 205: ONEVERDICT — every figure path follows the record's one readability verdict
 
