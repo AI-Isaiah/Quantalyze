@@ -743,7 +743,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v22", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v23", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -1072,6 +1072,7 @@ async function buildFromResolved(
     strategyArg,
     recordObservations,
     recordSeriesStart,
+    nativeUnreadable: nativePayload.figureRecord?.unreadable === true,
   });
   return { ...nativePayload, ...usd };
 }
@@ -1110,8 +1111,10 @@ async function buildUsdView(args: {
   recordObservations: number | null;
   /** 194.2 (D-02): the record's first date is likewise a fact about the record, not its unit. */
   recordSeriesStart: string | null;
+  /** 205 D-01: the native build's record verdict; the record is not its unit, so the USD view inherits it. */
+  nativeUnreadable: boolean;
 }): Promise<UsdViewOutcome> {
-  const { supabase, id, unit, analytics, dqf, strategyArg, recordObservations, recordSeriesStart } = args;
+  const { supabase, id, unit, analytics, dqf, strategyArg, recordObservations, recordSeriesStart, nativeUnreadable } = args;
   const read = await readBenchmarkPrices(supabase, "BTC");
   if (!read.ok) {
     const err = read.error as { code?: unknown; message?: unknown } | null;
@@ -1161,8 +1164,8 @@ async function buildUsdView(args: {
     returnsUnit: "USD",
     recordObservations,
     ...(recordSeriesStart ? { recordSeriesStart } : {}),
-    // 194.2 R2: the conversion drops a malformed native date; the record still has it.
-    recordSourceDates: nativeSeries.map((p) => p.date),
+    // 205 D-01: the conversion drops a native date; the record's verdict is the native build's, not a re-scan.
+    ...(nativeUnreadable ? { inheritedUnreadable: true } : {}),
     ...(facts.missingSegments.length > 0 ? { missingSegments: facts.missingSegments } : {}),
   };
   usdOpts.benchmarkPrices = await readFactsheetBenchmark(supabase, usdSeries, usdOpts, id);

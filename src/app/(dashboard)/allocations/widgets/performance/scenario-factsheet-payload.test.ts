@@ -760,3 +760,44 @@ describe("buildScenarioFactsheetPayload: a malformed interior date withholds the
     );
   });
 });
+
+// Phase 205 WR-02: the stress block follows the blend's own record verdict. Before, an unreadable
+// blend withheld its annualised figures yet still printed a stress window, and a non-ISO first date
+// threw `stress-windows: dates must be ISO (YYYY-MM-DD)` out of `computeStressWindows`, in the browser.
+describe("buildScenarioFactsheetPayload: the stress block follows the record verdict (205 WR-02)", () => {
+  const DAY_MS = 86_400_000;
+  const blend300: DailyPoint[] = Array.from({ length: 300 }, (_, i) => ({
+    date: new Date(Date.parse("2020-01-02T00:00:00Z") + i * DAY_MS).toISOString().slice(0, 10),
+    value: 0.0011 + Math.sin(i * 0.37) * 0.011,
+  }));
+  const WITHHELD = {
+    windows: [],
+    benchName: "",
+    totalCatalogued: 0,
+    droppedOutOfRange: 0,
+    droppedPartial: 0,
+    unreadable: true,
+  };
+
+  it("control: a readable blend still prints a stress window", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: blend300, periodsPerYear: 365 });
+    expect(p.stressWindows.windows.length).toBeGreaterThan(0);
+    expect("unreadable" in p.stressWindows).toBe(false);
+  });
+
+  it("a malformed interior date withholds the stress block with the record", () => {
+    const bad = blend300.map((p, i) => (i === 90 ? { ...p, date: "2020-03-31x" } : p));
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: bad, periodsPerYear: 365 });
+    expect(p.figureRecord!.unreadable).toBe(true);
+    expect(p.stressWindows).toEqual(WITHHELD);
+  });
+
+  it("a non-ISO first date withholds the stress block and does not throw", () => {
+    const bad = blend300.map((p, i) => (i === 0 ? { ...p, date: "2020-1-1" } : p));
+    let p: ReturnType<typeof buildScenarioFactsheetPayload> | undefined;
+    expect(() => {
+      p = buildScenarioFactsheetPayload({ portfolioDaily: bad, periodsPerYear: 365 });
+    }).not.toThrow();
+    expect(p!.stressWindows).toEqual(WITHHELD);
+  });
+});

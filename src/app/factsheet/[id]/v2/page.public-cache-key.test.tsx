@@ -287,7 +287,7 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
     // No stamp and no provenance on the row: both members read the literal "none".
     // 166.3.1 D-05: the row's status is the last member.
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v22", STRATEGY_ID, T0, "none", "none", "complete"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v23", STRATEGY_ID, T0, "none", "none", "complete"]]);
   });
 });
 
@@ -357,7 +357,7 @@ describe("167.1.2.2.2 plan 10 - a tick or a provenance write that leaves compute
     expect(cacheKeys).toHaveLength(1);
     const [version, id, computed, stamp, fingerprint, status] = cacheKeys[0] as string[];
     expect([version, id, computed, stamp, status]).toEqual([
-      "factsheet-v2-payload-v22",
+      "factsheet-v2-payload-v23",
       STRATEGY_ID,
       T0,
       FETCH_1,
@@ -378,7 +378,7 @@ describe("166.3.1 D-05 - the key's last member is the row's computation_status",
       {},
       null,
     );
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v22", STRATEGY_ID, T0, "none", "none", "none"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v23", STRATEGY_ID, T0, "none", "none", "none"]]);
   });
 });
 
