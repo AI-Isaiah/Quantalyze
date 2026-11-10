@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.133.35.1] - 2026-11-10 — records: close 204 INTROAUTH and 205 ONEVERDICT
+
+Phase 204 shipped as v0.133.34.0 (PR #1245, merge `2516d8b13`), and its migration `20261110150000` is live on PROD. That is why the phase records and the held 194.2 review files are published now. Phase 205 shipped as v0.133.35.0 (PR #1247, merge `2e99da257`).
+
+### Added
+- **Phase 204 records** under `.planning/phases/204-introauth-…/`: CONTEXT, RESEARCH, PATTERNS, VALIDATION, both PLANs and SUMMARYs, all three review rounds, SECURITY (SECURED, 11/11 threats closed) and VERIFICATION.
+- **The two 194.2 review files kept back until the fix was live:** `194.2-REVIEW-R2.md` and `194.2-REVIEW-FIX.md`, in the 194.2 phase directory. A local home path in REVIEW-FIX now reads `/Users/<user>/`.
+- **Phase 205 records** under `.planning/phases/205-oneverdict-…/`: CONTEXT, RESEARCH, PATTERNS, VALIDATION, three PLANs and SUMMARYs, two review rounds, SECURITY and VERIFICATION (passed).
+- **`TODOS.md` `[204-SENTRY-RAW-SUPABASE-ERRORS]`** (MEDIUM, security and data-integrity): other API routes pass a raw Supabase error to `captureToSentry`, so `details` and `hint` may reach Sentry. The entry lists the candidate routes and proposes fixing it once, at the capture boundary.
+- **`TODOS.md`: the three LOW survivors of Phase 205.**
+  - `[205-STRESS-GATE-ABSENT-RECORD-READABLE]`: the stress gate reads a missing `figureRecord` as readable.
+  - `[205-SCENARIO-BLEND-UNREADABLE-NO-SENTRY]`: the client scenario payload sends no Sentry event for an unreadable blend.
+  - `[205-USD-VIEW-CHAIN-BROKEN-SUFFIX]`: the USD view drops the native view's `headlineCoversFrom` suffix. This predates 205.
+
+### Changed
+- **`204-VERIFICATION.md` is `passed`.** Its three human-needed items are met:
+  - CI `sql-tests` and FULL `sql-mutation` passed on PR #1245;
+  - migration-reviewer and rls-policy-auditor were clean in every round;
+  - `apply-test` and the PROD apply succeeded and were confirmed read-only on PROD.
+
+  `verified_at_sha` and `drift_subjects` are unchanged.
+- **ROADMAP:** Phases 204 and 205 are ticked, with Progress rows 2/2 and 3/3 Complete. Their TBD stubs are replaced by the ticked plan rows.
+- **STATE:** 14 of 17 phases complete (82%), with `progress:` re-derived. The current position is 200 executing, 206 executing, and 201 waiting on 200.
+
 ## [0.133.35.0] - 2026-11-10 — ONEVERDICT: every figure path follows the record's one readability verdict
 
 Phase 205. Phase 194.2's review left three paths that still tested dates themselves instead of following the record's one readability verdict (`totalRecord.unreadable`): the USD view, the stress-windows block and the api-arm allocator blends. They now all follow it. An unreadable record is withheld the same way on every path, and an unparseable first date no longer reaches the factsheet error page. These are the 194.2-REVIEW-R3 survivors WR-01..03, routed by founder decision 2026-11-10.

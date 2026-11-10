@@ -76,11 +76,16 @@
     {
       "number": "204",
       "name": "INTROAUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "205",
       "name": "ONEVERDICT",
+      "status": "complete"
+    },
+    {
+      "number": "206",
+      "name": "SESSIONLOOP",
       "status": "pending"
     }
   ],
@@ -89,5 +94,5 @@
     "label": "Advance to the next step (plan phase 200)",
     "reason": "Phase 11 of 17 — needs a plan"
   },
-  "updated_at": "2026-11-10T20:34:50.809Z"
+  "updated_at": "2026-11-10T21:54:41.948Z"
 }
