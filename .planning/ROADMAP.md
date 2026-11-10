@@ -101,7 +101,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed (completed 2026-11-07)
 - [ ] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced"
 - [ ] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named
-- [ ] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden
+- [x] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden (completed 2026-11-10)
 - [ ] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step
 - [ ] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
 - [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
@@ -424,7 +424,7 @@ Plans:
 **Goal:** An allocator opening My allocation sees the book's return, risk and holdings at a glance (or exactly what is missing), "+ Allocation" opens the allocator's own flow, Holdings labels positions correctly, and the page has at most three tabs with each position listed once and dust hidden.
 **Requirements**: ROUTE-06, ROUTE-07, ROUTE-08, LEAN-06
 **Depends on:** Phase 194 (the book's values agree across Scenario and Holdings), Phase 195 (the Tweaks panel is already gone)
-**Plans:** 14/14 plans executed
+**Plans:** 14/14 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -606,7 +606,7 @@ Plans:
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 21/21 | Shipped #1235, verification human_needed | - |
 | 197. SCREEN | 6/6 | In Progress | - |
-| 198. MYBOOK | 14/14 | In Progress | - |
+| 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
 | 199. MANAGERHOME | 0/0 | Not started | - |
 | 200. MANAGERKEYS | 0/0 | Not started | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |

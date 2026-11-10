@@ -1,9 +1,9 @@
 ---
 phase: 198-mybook
 verified: 2026-11-09T00:00:00Z
-status: human_needed
-score: 11/11 must-haves verified (10 original truths regression-checked; gap 198-UAT-01 closed in code); browser re-check outstanding
-verified_at_sha: c71cbcc221977d479886d15b50a363119a57b64a
+status: passed
+score: 11/11 must-haves verified (10 original truths regression-checked; gap 198-UAT-01 closed in code); browser re-check passed 2026-11-10
+verified_at_sha: 32928312e7e73c2a5367a52d7b290c3e8e5dbf36
 re_verification: true
 drift_subjects:
   - src/app/(dashboard)/allocations/AllocationsTabs.tsx
@@ -52,9 +52,11 @@ human_verification:
 
 # Phase 198: MYBOOK Verification Report
 
+> **Update 2026-11-10 — human items closed, status passed.** (1) UAT test 3 re-run on production at 1470px passed (198-UAT.md test 3); 375px accepted by the founder without a new render (copy-only change in a block that passed 375px on 2026-11-09). (2) Seeded e2e `e2e/allocations-add.spec.ts` ran in CI's `e2e-seeded` job, green on main after #1233, #1236 and #1235. (3) Visual pass at desktop: Overview order glance, missing-data note, Risk, Mandate as in the UI-SPEC; the slide-over on every tab was not re-walked (tests 1 and 2 passed it on 2026-11-09). `verified_at_sha` moved to the main commit the re-check was read on; the code verification was issued at `c71cbcc2`.
+
 **Phase Goal:** An allocator opening My allocation sees the book's return, risk and holdings at a glance (or exactly what is missing), "+ Allocation" opens the allocator's own flow, Holdings labels positions correctly, and the page has at most three tabs with each position listed once and dust hidden.
 **Verified:** 2026-11-09 at `c71cbcc221977d479886d15b50a363119a57b64a` (worktree `quantalyze-198-gaps`, branch `phase-198-gaps`)
-**Status:** human_needed
+**Status:** passed (human items closed 2026-11-10, see below)
 **Re-verification:** Yes, after gap closure (plan 198-14, gap 198-UAT-01). Original truths first verified at `87878904ed3bb27d8c350cec7d9e73d5585b9250`.
 
 ## Re-verification: gap 198-UAT-01 (CLOSED in code)

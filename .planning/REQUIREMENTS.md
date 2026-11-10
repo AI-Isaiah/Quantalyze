@@ -25,9 +25,9 @@
   - *Amended 2026-11-07 (Phase 192 D-11, founder: "retire the whole demo part"; recorded in 192-CONTEXT.md and the ROADMAP):* the public demo is retired, not repaired. ROUTE-03 is met when `/demo` and every link to it are gone, a request for it gets the same answer as an unknown URL, and no public page links to a retired route. The sentence above is kept as lineage.
 - [ ] **ROUTE-04**: From a factsheet, a signed-in user can go back to where they came from and take a next step (request an intro, add to their allocation). A shared factsheet carries a header and a sign-up link.
 - [x] **ROUTE-05**: An allocator can select strategies in discovery and open Compare from the UI.
-- [ ] **ROUTE-06**: "+ Allocation" on My allocation opens the allocator's flow, not the manager's add-strategy wizard.
-- [ ] **ROUTE-07**: My allocation's first tab answers "how is my book doing?" with the book's return, risk and holdings at a glance, or names exactly what is missing.
-- [ ] **ROUTE-08**: Holdings labels positions correctly: allocated positions are not called "not allocated", and cash is not counted as Spot exposure.
+- [x] **ROUTE-06**: "+ Allocation" on My allocation opens the allocator's flow, not the manager's add-strategy wizard.
+- [x] **ROUTE-07**: My allocation's first tab answers "how is my book doing?" with the book's return, risk and holdings at a glance, or names exactly what is missing.
+- [x] **ROUTE-08**: Holdings labels positions correctly: allocated positions are not called "not allocated", and cash is not counted as Spot exposure.
 - [ ] **ROUTE-09**: A manager can see which strategies each key feeds, and no one-click control re-points a strategy's key without an explicit confirmation.
 - [ ] **ROUTE-10**: A manager renames a strategy in one place and can see which name is public.
 - [ ] **ROUTE-11**: Every degrade warning names the affected days or key and says what the user can do. My Strategies shows each strategy's health, and its status chips have a legend.
@@ -48,7 +48,7 @@
 - [x] **LEAN-03**: `/portfolios` is removed and Decks is hidden until it works.
 - [ ] **LEAN-04**: Adding a strategy, managing keys and renaming each have one entry point, and the security explanation lives in one place.
 - [ ] **LEAN-05**: The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice, the keyboard hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
-- [ ] **LEAN-06**: My allocation has at most three tabs, lists positions once, and hides dust rows by default.
+- [x] **LEAN-06**: My allocation has at most three tabs, lists positions once, and hides dust rows by default.
 - [x] **LEAN-07**: User-visible leftovers are gone: the "Tweaks / Design variations" panel, the dark-mode option, toggles that do nothing useful, the single-card `/browse`, and duplicated disclaimers.
 
 ### Residual — carried from v1.20
@@ -87,9 +87,9 @@ Deferred, tracked, not in this roadmap.
 | ROUTE-03 | Phase 192 | Satisfied as amended by D-11 (192-VERIFICATION.md passed, UAT passed 2026-11-07) |
 | ROUTE-04 | Phase 196 | Pending |
 | ROUTE-05 | Phase 197 | Complete |
-| ROUTE-06 | Phase 198 | Pending |
-| ROUTE-07 | Phase 198 | Pending |
-| ROUTE-08 | Phase 198 | Pending |
+| ROUTE-06 | Phase 198 | Complete |
+| ROUTE-07 | Phase 198 | Complete |
+| ROUTE-08 | Phase 198 | Complete |
 | ROUTE-09 | Phase 200 | Pending |
 | ROUTE-10 | Phase 200 | Pending |
 | ROUTE-11 | Phase 199 | Pending |
@@ -104,7 +104,7 @@ Deferred, tracked, not in this roadmap.
 | LEAN-03 | Phase 195 | Complete |
 | LEAN-04 | Phase 200 | Pending |
 | LEAN-05 | Phase 196 | Pending |
-| LEAN-06 | Phase 198 | Pending |
+| LEAN-06 | Phase 198 | Complete |
 | LEAN-07 | Phase 195 | Complete |
 | RESID-01 | Phase 202 | Complete |
 | RESID-02 | Phase 202, Phase 203 | Complete |
