@@ -49,8 +49,9 @@ const INK = {
   // unlocks the money action. In-family precedent: Badge's `intro_made` ink.
   [OWN_CAPITAL]: "bg-accent/10 text-accent",
   // The default, and a neutral fact — never red, never amber, never "less
-  // than". Same muted ink Badge uses for `private` / `archived`.
-  [TEAM_REVIEW]: "bg-badge-other/10 text-text-muted",
+  // than". Same neutral ink Badge uses for `private` / `archived` (secondary,
+  // not muted: muted is 4.21:1 on this tint, below AA).
+  [TEAM_REVIEW]: "bg-badge-other/10 text-text-secondary",
 } as const;
 
 export function OwnershipTag({

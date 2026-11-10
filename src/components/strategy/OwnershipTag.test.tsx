@@ -43,7 +43,7 @@ describe("OwnershipTag", () => {
       expect(tag).toHaveClass(cls);
     }
     expect(tag).toHaveClass("bg-badge-other/10");
-    expect(tag).toHaveClass("text-text-muted");
+    expect(tag).toHaveClass("text-text-secondary");
     // Semantic-color gate: absence of allocatability is not an error state.
     expect(tag.className).not.toMatch(/negative|warning|amber/);
     expect(container.textContent).toBe("Team review");

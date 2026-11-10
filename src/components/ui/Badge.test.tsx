@@ -30,7 +30,7 @@ describe("Badge — strategy status domain", () => {
     const badge = screen.getByText("Private");
     expect(badge).toBeInTheDocument();
     expect(badge.className).toContain("bg-badge-other/10");
-    expect(badge.className).toContain("text-text-muted");
+    expect(badge.className).toContain("text-text-secondary");
     // The defect: falling through to `statusMap.draft` paints draft ink.
     expect(badge.className).not.toContain("text-badge-other");
     // Neutral owner-chosen state — never an alarm color (DESIGN.md).
@@ -41,7 +41,7 @@ describe("Badge — strategy status domain", () => {
     render(<Badge type="status" label="draft" />);
 
     const badge = screen.getByText("Draft");
-    expect(badge.className).toContain("text-badge-other");
+    expect(badge.className).toContain("text-text-secondary");
   });
 
   it("published → 'Published' with positive ink", () => {
@@ -56,14 +56,14 @@ describe("Badge — strategy status domain", () => {
 
     const badge = screen.getByText("Archived");
     expect(badge.className).toContain("bg-badge-other/10");
-    expect(badge.className).toContain("text-text-muted");
+    expect(badge.className).toContain("text-text-secondary");
   });
 
   it("an unknown status keeps draft styling but reads 'Unknown status', never the raw key", () => {
     render(<Badge type="status" label="bogus_status" />);
 
     const badge = screen.getByText("Unknown status");
-    expect(badge.className).toContain("text-badge-other");
+    expect(badge.className).toContain("text-text-secondary");
     expect(screen.queryByText("bogus_status")).toBeNull();
   });
 
@@ -89,11 +89,11 @@ describe("Badge — strategy status domain", () => {
 });
 
 describe("Badge — contact_request status domain (untouched)", () => {
-  it("pending → 'Pending' with the market-neutral tokens", () => {
+  it("pending → 'Pending' with the amber tint and warning ink", () => {
     render(<Badge type="status" label="pending" />);
 
     const badge = screen.getByText("Pending");
-    expect(badge.className).toContain("text-badge-market-neutral");
+    expect(badge.className).toContain("text-warning");
   });
 
   it("declined → 'Declined' with negative tokens", () => {
