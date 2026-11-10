@@ -1198,3 +1198,171 @@ describe("194.2 D-02 parity: a curve-derived strategy reads one record length on
     });
   });
 });
+
+// 205: shared by the D-01 and D-02 parity describes (2024 curve, its BTC closes, a BTC-native row).
+const CURVE_N = 400;
+const CURVE_START = "2024-01-02";
+const CURVE_START_MS_2024 = Date.parse(`${CURVE_START}T00:00:00Z`);
+
+/** `n` consecutive calendar days from `startIso`, one stored point per return, geometric levels. */
+const curve2024 = (startIso: string, n: number): { date: string; value: number | null }[] => {
+  const startMs = Date.parse(`${startIso}T00:00:00Z`);
+  let level = 1;
+  return Array.from({ length: n }, (_, i) => {
+    level *= 1 + returnAt(i) / 10;
+    return { date: isoDay(startMs + i * DAY), value: level as number | null };
+  });
+};
+
+/** A BTC close for the day before the curve and for every day through two days past its end. */
+const closes2024 = (startMs: number, n: number) =>
+  Array.from({ length: n + 2 }, (_, i) => ({ date: isoDay(startMs + (i - 1) * DAY), close_price: 40_000 + i * 10 }));
+
+/** A BTC-native crypto row ingested by the analytics service: no `daily_returns`, the series is the curve. */
+const btcNativeAnalytics = (
+  curve: { date: string; value: number | null }[],
+  dataQualityFlags: Row["data_quality_flags"] = { native_unit: "BTC" },
+): Row => ({
+  ...markedAnalytics(STORED),
+  daily_returns: null,
+  returns_series: curve,
+  data_quality_flags: dataQualityFlags,
+  metrics_json: { figure_defs_version: FIGURE_DEFS_VERSION, ...STORED_JSON, record_observations: CURVE_N },
+});
+
+/**
+ * 205 D-01 (194.2-REVIEW-R3 WR-01): the USD view's record verdict is the NATIVE build's, threaded in
+ * and OR'd into the USD record, never a second scan of a second date list. 194.2 R2 scanned the
+ * native series read with its absent days KEPT, so a bad date on a day the native build drops (an
+ * absent day: a `null` curve value) withheld the USD view while the native view read fine, and a
+ * viewer who toggled BTC to USD watched figures disappear. One record, one verdict.
+ *
+ * The curve here starts in 2024 and the bad date is a 2024 date inside the curve's own range: a bad
+ * date from another year sorts to index 0 and is read as the curve's base point (Pitfall 4).
+ */
+describe("205 D-01 parity: a bad date on an absent day does not flip the USD view's record verdict", () => {
+  it.each([["2024-07-3"], ["2024-07-31x"]])(
+    "an interior absent-day curve point dated %s reads readable on the native AND the USD view",
+    async (bad) => {
+      fake.benchmarkRows = closes2024(CURVE_START_MS_2024, CURVE_N);
+      const curve = curve2024(CURVE_START, CURVE_N).map((p, i) => (i === 200 ? { date: bad, value: null } : p));
+      const payload = await factsheetPayload("crypto", btcNativeAnalytics(curve));
+      expect(payload.usdViewUnavailable).toBeUndefined();
+      expect(payload.ingestSource).toBe("api");
+      expect(payload.figureRecord?.unreadable).toBeFalsy();
+      // At HEAD the USD view re-scanned the kept-absent native dates and read this true.
+      expect(payload.usdView?.payload.figureRecord?.unreadable).toBeFalsy();
+    },
+  );
+
+  // One record, one report: the native build judges a bad date and reports it; the USD view only
+  // INHERITS that verdict, so it sends no second event. Both arms are pinned: an interior bad date,
+  // and a bad FIRST curve point, which reaches the USD build verbatim through `recordSeriesStart`
+  // (the native record's first date, not a date the USD build converted), so it is the inherited
+  // verdict too (205 WR-01).
+  it.each([
+    ["an interior bad date", 60, "2026-06-31", "cash", "2026-06-31"],
+    // "2026-04-3" sorts before the real first day "2026-04-30", so it stays the curve's first point.
+    ["a bad first curve point", 0, "2026-04-3", "record_start", "2026-04-3"],
+  ])("%s is reported to Sentry exactly once, by the native build; the USD view stays unreadable", async (_label, at, bad, axis, badDate) => {
+    const days = 194;
+    const startMs = Date.parse("2026-04-30T00:00:00Z");
+    let level = 1;
+    const curve = Array.from({ length: days }, (_, i) => {
+      level *= 1 + returnAt(i) / 10;
+      return { date: i === at ? bad : isoDay(startMs + i * DAY), value: level as number | null };
+    });
+    fake.benchmarkRows = closes2024(startMs, days);
+    vi.mocked(captureToSentry).mockClear();
+    const payload = await factsheetPayload("crypto", {
+      ...btcNativeAnalytics(curve),
+      metrics_json: { figure_defs_version: FIGURE_DEFS_VERSION, ...STORED_JSON, record_observations: days },
+    });
+    expect(payload.usdViewUnavailable).toBeUndefined();
+    expect(payload.figureRecord?.unreadable).toBe(true);
+    expect(payload.usdView?.payload.figureRecord?.unreadable).toBe(true);
+    const reports = vi
+      .mocked(captureToSentry)
+      .mock.calls.filter(([, ctx]) => (ctx as { tags?: { reason?: string } } | undefined)?.tags?.reason === "figure-record-unreadable");
+    expect(reports).toHaveLength(1);
+    expect((reports[0][1] as { extra: Record<string, unknown> }).extra).toMatchObject({
+      firstBadAxis: axis,
+      firstBadDate: badDate,
+    });
+  });
+});
+
+/**
+ * 205 D-02 (194.2-REVIEW-R3 WR-02): the native and USD views carry the SAME stress block for an
+ * unreadable record. The converter never emits the native series' day 0, so the USD build cannot see
+ * the native first date, and at HEAD its own `dates[0]` test read a readable date and printed a
+ * window under a withheld native view. Only the record's verdict can make the two views agree, for a
+ * bad date near the start and for one in the interior alike.
+ */
+describe("205 D-02 parity: native and USD views agree on the withheld stress form", () => {
+  const N = 300;
+  const START = "2024-02-28";
+  const startMs = Date.parse(`${START}T00:00:00Z`);
+
+  it.each([
+    // 2024-02-29 is element 1; 2024-02-30 sorts just after it, so the date is bad and the order holds.
+    ["a bad second curve date", 1, "2024-02-30"],
+    // 2024-06-30 is element 123; 2024-06-31 sorts between it and 2024-07-01.
+    ["a bad interior curve date", 123, "2024-06-31"],
+  ])("%s withholds the stress windows on the native AND the USD view", async (_label, at, bad) => {
+    fake.benchmarkRows = closes2024(startMs, N);
+    const curve = curve2024(START, N).map((p, i) => (i === at ? { ...p, date: bad } : p));
+    const payload = await factsheetPayload("crypto", {
+      ...btcNativeAnalytics(curve),
+      metrics_json: { figure_defs_version: FIGURE_DEFS_VERSION, ...STORED_JSON, record_observations: N },
+    });
+    expect(payload.usdViewUnavailable).toBeUndefined();
+    expect(payload.ingestSource).toBe("api");
+    expect(payload.figureRecord?.unreadable).toBe(true);
+    expect(payload.stressWindows.unreadable).toBe(true);
+    expect(payload.stressWindows.windows).toEqual([]);
+    expect(payload.usdView?.payload.figureRecord?.unreadable).toBe(true);
+    expect(payload.usdView?.payload.stressWindows.unreadable).toBe(true);
+    expect(payload.usdView?.payload.stressWindows.windows).toEqual([]);
+  });
+});
+
+/**
+ * 205 D-03 (194.2-REVIEW-R3 WR-03): on the api arm, every PROD strategy, an unparseable date in the
+ * second sorted curve position used to throw out of `alignBlend` and render the route error page for
+ * every visitor, with and without a BTC native unit. The record verdict now withholds the blends (and
+ * every other figure) instead, so the fetch path resolves a withheld payload.
+ *
+ * `"2024-01-1"` sorts between `2024-01-09` and `2024-01-10`, so it is the second curve point and the
+ * native series' first date once the inversion drops day 0.
+ */
+describe("205 D-03 parity: an unreadable api-arm curve returns a withheld payload, not an error page", () => {
+  const N = 300;
+  const START = "2024-01-09";
+  const startMs = Date.parse(`${START}T00:00:00Z`);
+
+  it.each([
+    ["no native unit", null],
+    ["a BTC native unit", { native_unit: "BTC" }],
+  ])("a curve whose second date is \"2024-01-1\" resolves withheld with %s", async (_label, flags) => {
+    fake.benchmarkRows = closes2024(startMs, N);
+    const curve = curve2024(START, N).map((p, i) => (i === 1 ? { ...p, date: "2024-01-1" } : p));
+    expect(curve[1].date).toBe("2024-01-1");
+    const payload = await factsheetPayload("crypto", {
+      ...btcNativeAnalytics(curve, flags),
+      metrics_json: { figure_defs_version: FIGURE_DEFS_VERSION, ...STORED_JSON, record_observations: N },
+    });
+    expect(payload.ingestSource).toBe("api");
+    if (payload.ingestSource !== "api") throw new Error("expected the api arm");
+    expect(payload.figureRecord?.unreadable).toBe(true);
+    expect(payload.allocatorPortfolios).toBeNull();
+    expect(payload.stressWindows.unreadable).toBe(true);
+    if (flags) {
+      expect(payload.usdViewUnavailable).toBeUndefined();
+      const usd = payload.usdView?.payload;
+      expect(usd?.figureRecord?.unreadable).toBe(true);
+      if (usd?.ingestSource !== "api") throw new Error("expected the USD view on the api arm");
+      expect(usd.allocatorPortfolios).toBeNull();
+    }
+  });
+});

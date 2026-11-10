@@ -16,6 +16,18 @@ function makeReturns(n = 40): Array<{ date: string; value: number }> {
   }));
 }
 
+/**
+ * 205 D-03: `makeReturns(n > 31)` dates impossible days (`2024-01-32`...), and an api-arm record with
+ * impossible dates is unreadable, so it now withholds its allocator blends. The present-and-non-null
+ * api control needs a record whose dates all exist.
+ */
+function makeReadableReturns(n = 40): Array<{ date: string; value: number }> {
+  return Array.from({ length: n }, (_, i) => ({
+    date: new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10),
+    value: (Math.sin(i / 5) * 0.003) + 0.0001,
+  }));
+}
+
 /** Strategy stub with required fields only. */
 function makeStrategy(overrides: Partial<Parameters<typeof buildFactsheetPayload>[0]> = {}) {
   return {
@@ -433,7 +445,7 @@ describe("RED-TEAM-M2/M3 + B6: synthesized panels absent from csv payloads", () 
   it("api strategy: all four synthesized fields are present and non-null", () => {
     const payload = buildFactsheetPayload(
       makeStrategy({ ingestSource: "api" }),
-      makeReturns(),
+      makeReadableReturns(),
     );
     expect(payload).not.toBeNull();
     const p = payload!;

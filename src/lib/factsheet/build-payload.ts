@@ -150,12 +150,13 @@ export type BuildFactsheetOpts = {
    */
   recordSeriesStart?: string | null;
   /**
-   * 194.2 R2: the dates of the series this one was converted from (the USD view's native
-   * series). The conversion keeps only days that pair with a close, so a malformed native date
-   * never reaches this series, yet it is still a malformed date in the record. Their readability
-   * is the record's, so the unreadable scan covers them as one more axis.
+   * 205 D-01: the NATIVE build's record verdict, for the USD view. The record is a fact about the
+   * record, not its unit, so the USD build OR's the native `figureRecord.unreadable` into its own
+   * record and never re-scans a second date list (194.2 R2's source-dates axis scanned the
+   * absent-days-kept native series and withheld the USD view on a date the native build never
+   * judged). Set only by `buildUsdView`.
    */
-  recordSourceDates?: readonly string[];
+  inheritedUnreadable?: boolean;
   /**
    * 194 R6 WR-01: report an unreadable record to Sentry. Set only by the server builder
    * (fetch-and-build-payload); a client re-derive (AllocationDashboardV2's useMemo) builds the
@@ -654,8 +655,13 @@ export function deriveSeriesBundle(
     // windows) instead; the record's unreadable gate (`firstUnreadableDate`) withholds and reports it.
     // 194.2 R2: that answer is a distinct withheld form, not the empty-series result, which would
     // count every catalogued window as outside the observation period.
+    // 205 D-02: the record's verdict is the user-facing predicate (the cash, MTM and smoothed bundles
+    // all pass `totalRecord`; the browser leverage re-derive passes `view.figureRecord`), because the
+    // withheld line is a claim about the record. The `dates[0]` half stays only so `computeStressWindows`,
+    // which throws on a non-ISO first date to flag code bugs, is never called with one when the record
+    // is unknown (`null`).
     stressWindows:
-      dates.length > 0 && !isReadableDay(dates[0])
+      args.figureRecord?.unreadable === true || (dates.length > 0 && !isReadableDay(dates[0]))
         ? { windows: [], benchName: "BTC", totalCatalogued: 0, droppedOutOfRange: 0, droppedPartial: 0, unreadable: true }
         : computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets, isArithmetic ? "arithmetic" : "geometric"),
     strategyMetrics: bundleMetrics,
@@ -957,13 +963,18 @@ function buildFromBuildableSeries(
     mtmDates,
     smoothedDates,
     opts?.recordSeriesStart ? [opts.recordSeriesStart] : [],
-    opts?.recordSourceDates ?? [],
   );
-  const totalRecord: FigureRecord = firstBad ? { ...endsRecord, unreadable: true } : endsRecord;
+  // 205 D-01: the USD view's verdict is the native build's, OR'd in, never a second scan.
+  const totalRecord: FigureRecord =
+    firstBad || opts?.inheritedUnreadable ? { ...endsRecord, unreadable: true } : endsRecord;
   // 194 R5 SFH-M3: nothing else tells anyone an unreadable record is withholding its figures.
   // Reported here, once per build, never from a render-time gate.
-  if (totalRecord.unreadable && opts?.reportUnreadable) {
-    const firstBadAxis = firstBad ? (["cash", "mark_to_market", "smoothed_mtm", "record_start", "record_source"] as const)[firstBad.axis] : null;
+  // 205 D-01: the report follows the build's OWN scan (`firstBad`, or an unreadable `headlineSince`
+  // through `endsRecord`), not `totalRecord`, so an inherited verdict is reported once, by the
+  // native build, and the USD build sends no second event for it. `recordSeriesStart` is the native
+  // record's first date copied verbatim, so a bad one is the inherited verdict too (205 WR-01).
+  if ((firstBad || endsRecord.unreadable) && opts?.reportUnreadable && !opts?.inheritedUnreadable) {
+    const firstBadAxis = firstBad ? (["cash", "mark_to_market", "smoothed_mtm", "record_start"] as const)[firstBad.axis] : null;
     captureToSentry(new Error("factsheet figure record unreadable: a series date is not a date"), {
       tags: { op: "buildFactsheetPayload", reason: "figure-record-unreadable" },
       level: "error",
@@ -1208,7 +1219,13 @@ function buildFromBuildableSeries(
             max_dd: peer.max_dd,
           }
         : null,
-      allocatorPortfolios: [
+      // 205 D-03 (194.2-REVIEW-R3 WR-03): the blends are record-derived figures, so an unreadable
+      // record withholds them like every other figure (null; nothing renders this field, so no
+      // false "no data" claim appears). `alignBlend` is reached only through `portfolioFigures`
+      // inside this array literal, so an unreadable record never reaches its date math. No guard
+      // goes into `alignBlend` or `isoDayBefore`: a throw there on a READABLE record is a code-bug
+      // signal and must stay loud.
+      allocatorPortfolios: totalRecord.unreadable ? null : [
         {
           key: "sixty_forty",
           name: "60/40 Stocks/Bonds",

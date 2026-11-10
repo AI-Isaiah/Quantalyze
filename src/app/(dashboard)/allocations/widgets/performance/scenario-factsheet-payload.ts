@@ -480,7 +480,12 @@ function buildReturnsBody(
     // D-4 / Pitfall 5: the blend has no separate benchmark daily series, so pass
     // the strat's own returns as benchRet + an empty benchName (honest — the
     // window's bench column mirrors the strategy). markets=[] → full catalogue.
-    stressWindows: computeStressWindows(datesR, rets, rets, "", []),
+    // 205 WR-02: follows the blend's own record verdict, as `deriveSeriesBundle` does. `record` is
+    // judged on EVERY date (a non-ISO first date included), so it also keeps `computeStressWindows`
+    // from throwing on one.
+    stressWindows: record.unreadable
+      ? { windows: [], benchName: "", totalCatalogued: 0, droppedOutOfRange: 0, droppedPartial: 0, unreadable: true }
+      : computeStressWindows(datesR, rets, rets, "", []),
     quantiles: quantileSummary(rets),
   };
 }
