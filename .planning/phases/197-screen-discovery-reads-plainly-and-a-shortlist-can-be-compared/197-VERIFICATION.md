@@ -1,9 +1,9 @@
 ---
 phase: 197-screen-discovery-reads-plainly-and-a-shortlist-can-be-compared
 verified: 2026-11-08T22:00:00Z
-status: human_needed
+status: passed
 score: 4/4 roadmap success criteria verified (5/5 locked decisions D-01..D-05 delivered); 0 gaps
-verified_at_sha: 49d90ef5b5ae82e41f322548d60d57dc11ebbe07
+verified_at_sha: 9bc83f894fa4a249ea3582fb26282c86d86797b3
 behavior_unverified: 0
 overrides_applied: 0
 drift_subjects:
@@ -44,7 +44,9 @@ human_verification:
 
 **Phase Goal:** An allocator screening in discovery can read every column without guessing (period, annualisation, track length), sees stale strategies flagged and not ranked as current, learns when two listings draw on one exchange account, and can select strategies and open Compare from the UI.
 **Verified:** 2026-11-08 at `49d90ef5b5ae82e41f322548d60d57dc11ebbe07` (`feat/197-screen`)
-**Status:** human_needed (every automated check passes; the remaining items need a browser or CI)
+**Status:** passed (human items closed 2026-11-10 by production UAT, see `197-UAT.md`; the code verification was issued at `49d90ef5`)
+
+> **Update 2026-11-10.** All five human items ran on production at main `9bc83f89` and passed (`197-UAT.md`, 5/5). One cross-surface defect surfaced in test 3 and is routed, not a 197 gap: "Add strategy" searches the browse route, which returns other owners' strategies as "Strategy #<id>", so a name shown on discovery ("Fib") finds nothing. Founder: "Real name everywhere", Phase 201 PLAINWORDS (`TODOS.md` `197-STRATEGY-NAME-PSEUDONYM-01`).
 **Re-verification:** No, initial verification
 
 ## Goal Achievement

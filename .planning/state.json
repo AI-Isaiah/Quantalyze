@@ -36,12 +36,12 @@
     {
       "number": "196",
       "name": "ONESTRATEGYPAGE",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "197",
       "name": "SCREEN",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "198",
@@ -79,5 +79,5 @@
     "label": "Advance to the next step (plan phase 194.2)",
     "reason": "Phase 5 of 14 — needs a plan"
   },
-  "updated_at": "2026-11-10T08:27:16.075Z"
+  "updated_at": "2026-11-10T10:51:20.954Z"
 }

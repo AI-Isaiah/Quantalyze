@@ -99,8 +99,8 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside FIGURETRUTH** (INSERTED) - Census pages B1-B13, admin included, plus Sharpe deltas and lifts, alpha/TE/IR, peer ranks and rolling charts on those pages (completed 2026-11-08)
 - [ ] **Phase 194.2: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed** (INSERTED) - A record whose dates cannot be read is withheld on every path, including Holdings and book legs; the wizard caveat and zoomed benchmark note follow the page rules; one Sentry report per bad record
 - [x] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed (completed 2026-11-07)
-- [ ] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced"
-- [ ] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named
+- [x] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced" (completed 2026-11-10)
+- [x] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named (completed 2026-11-10)
 - [x] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden (completed 2026-11-10)
 - [ ] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step
 - [ ] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
@@ -331,7 +331,7 @@ Plans:
 **Goal:** A strategy has one page, the factsheet. The tearsheet is its print view and every other strategy detail route leads to it. A signed-in user is never shown visitor prompts, an owner can open their own unpublished strategy, a signed-in reader has a way back and a next step, a shared factsheet carries a header and a sign-up link, and the factsheet opens as a summary, one chart and one metrics table with the rest under "Advanced".
 **Requirements**: LEAN-02, ROUTE-02, ROUTE-04, LEAN-05
 **Depends on:** Phase 193, Phase 194, Phase 195
-**Plans:** 21 plans
+**Plans:** 21/21 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -342,7 +342,7 @@ Plans:
 1. Every strategy detail route listed above leads to the factsheet, the tearsheet is the factsheet's print view, and existing links and shared URLs keep working.
 2. A signed-in user sees no "Sign up" prompt on `/browse` pages or on a strategy's page. An owner can open their own unpublished strategy, and after the owner has viewed it an anonymous request still gets not-found.
 3. From a factsheet, a signed-in user can go back to the page they came from and take a next step (request an intro, add the strategy to their allocation) without editing a URL. A shared factsheet carries a header and a sign-up link.
-4. The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice, the chart hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
+4. The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice in that opening view (narrowed by founder decision D-13, 2026-11-10: rolling-window rows under Advanced are different statistics), the chart hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
 5. A before/after count of sections, charts, repeated metrics and warnings on three named strategies is recorded, and the print and shared views follow the new layout.
 
 The layout is checked against `DESIGN.md` (dated-document principle, Numbers Contract, data density principle) before planning, in the phase's UI-SPEC.
@@ -388,7 +388,7 @@ Plans:
 **Goal:** An allocator screening in discovery can read every column without guessing (period, annualisation, track length), sees stale strategies flagged and not ranked as current, learns when two listings draw on one exchange account, and can select strategies and open Compare from the UI.
 **Requirements**: ROUTE-05, CLAR-01, CLAR-02, CLAR-05
 **Depends on:** Phase 194 (columns state the definitions 194 settles, and withheld figures read as withheld), Phase 195 (the do-nothing toggles are already gone)
-**Plans:** 6/6 plans executed
+**Plans:** 6/6 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -519,7 +519,7 @@ Plans:
 
 ### Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed
 
-**Goal:** Specialist terms are explained where they appear, each concept has one name across the app, and the small inconsistencies are fixed: factsheet sections numbered in order, one date format, Escape closes the filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer typo is gone.
+**Goal:** Specialist terms are explained where they appear, each concept has one name across the app, and the small inconsistencies are fixed: factsheet sections numbered in order, one date format, Escape closes the filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer typo is gone. Added 2026-11-10 (founder, Phase 196/197 UAT, "Real name everywhere"): a strategy reads under its real name on every surface, including the browse route behind compare's "Add strategy" and the tearsheet card and title (`TODOS.md` `197-STRATEGY-NAME-PSEUDONYM-01`).
 **Requirements**: CLAR-03, CLAR-04, CLAR-06
 **Depends on:** Phase 196, Phase 197, Phase 198, Phase 200 (renames, tooltips and numbering apply to the surfaces those phases leave)
 **Plans:** 0 plans
@@ -604,8 +604,8 @@ Plans:
 | 194.1. D04SWEEP (INSERTED) | 13/13 | Complete    | 2026-11-08 |
 | 194.2. FIGURERESIDUALS (INSERTED) | 0/0 | Not started | - |
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
-| 196. ONESTRATEGYPAGE | 21/21 | Shipped #1235, verification human_needed | - |
-| 197. SCREEN | 6/6 | In Progress | - |
+| 196. ONESTRATEGYPAGE | 21/21 | Complete    | 2026-11-10 |
+| 197. SCREEN | 6/6 | Complete    | 2026-11-10 |
 | 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
 | 199. MANAGERHOME | 0/0 | Not started | - |
 | 200. MANAGERKEYS | 0/0 | Not started | - |

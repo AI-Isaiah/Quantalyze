@@ -20,10 +20,10 @@
 ### Route — no dead ends
 
 - [ ] **ROUTE-01**: After sign-in, an allocator, a manager and an admin each land on a page made for their role, not on a discovery category.
-- [ ] **ROUTE-02**: A signed-in user is never shown visitor prompts ("Sign up") on `/browse` or `/strategy/<id>`, and an owner can open their own unpublished strategy.
+- [x] **ROUTE-02**: A signed-in user is never shown visitor prompts ("Sign up") on `/browse` or `/strategy/<id>`, and an owner can open their own unpublished strategy.
 - [x] **ROUTE-03**: `/demo` shows no stuck loading notice, no "—" under a headline claim, no empty founder view and no raw ids.
   - *Amended 2026-11-07 (Phase 192 D-11, founder: "retire the whole demo part"; recorded in 192-CONTEXT.md and the ROADMAP):* the public demo is retired, not repaired. ROUTE-03 is met when `/demo` and every link to it are gone, a request for it gets the same answer as an unknown URL, and no public page links to a retired route. The sentence above is kept as lineage.
-- [ ] **ROUTE-04**: From a factsheet, a signed-in user can go back to where they came from and take a next step (request an intro, add to their allocation). A shared factsheet carries a header and a sign-up link.
+- [x] **ROUTE-04**: From a factsheet, a signed-in user can go back to where they came from and take a next step (request an intro, add to their allocation). A shared factsheet carries a header and a sign-up link.
 - [x] **ROUTE-05**: An allocator can select strategies in discovery and open Compare from the UI.
 - [x] **ROUTE-06**: "+ Allocation" on My allocation opens the allocator's flow, not the manager's add-strategy wizard.
 - [x] **ROUTE-07**: My allocation's first tab answers "how is my book doing?" with the book's return, risk and holdings at a glance, or names exactly what is missing.
@@ -44,10 +44,10 @@
 ### Lean — less to wade through
 
 - [ ] **LEAN-01**: A manager has one strategies list (`/strategies` and `/my-strategies` merged).
-- [ ] **LEAN-02**: A strategy has one page, the factsheet. The tearsheet is its print view and `/strategy/<id>` leads to it.
+- [x] **LEAN-02**: A strategy has one page, the factsheet. The tearsheet is its print view and `/strategy/<id>` leads to it.
 - [x] **LEAN-03**: `/portfolios` is removed and Decks is hidden until it works.
 - [ ] **LEAN-04**: Adding a strategy, managing keys and renaming each have one entry point, and the security explanation lives in one place.
-- [ ] **LEAN-05**: The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice, the keyboard hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
+- [x] **LEAN-05**: The factsheet opens as a summary, one chart and one metrics table, with the rest under "Advanced". No metric is shown twice, the keyboard hint appears once, there is one small-sample warning, and empty sections and "— on request" rows are hidden.
 - [x] **LEAN-06**: My allocation has at most three tabs, lists positions once, and hides dust rows by default.
 - [x] **LEAN-07**: User-visible leftovers are gone: the "Tweaks / Design variations" panel, the dark-mode option, toggles that do nothing useful, the single-card `/browse`, and duplicated disclaimers.
 
@@ -83,9 +83,9 @@ Deferred, tracked, not in this roadmap.
 | TRUST-05 | Phase 194 | Complete |
 | TRUST-06 | Phase 193 | Complete |
 | ROUTE-01 | Phase 199 | Pending |
-| ROUTE-02 | Phase 196 | Pending |
+| ROUTE-02 | Phase 196 | Complete |
 | ROUTE-03 | Phase 192 | Satisfied as amended by D-11 (192-VERIFICATION.md passed, UAT passed 2026-11-07) |
-| ROUTE-04 | Phase 196 | Pending |
+| ROUTE-04 | Phase 196 | Complete |
 | ROUTE-05 | Phase 197 | Complete |
 | ROUTE-06 | Phase 198 | Complete |
 | ROUTE-07 | Phase 198 | Complete |
@@ -100,10 +100,10 @@ Deferred, tracked, not in this roadmap.
 | CLAR-05 | Phase 197 | Complete |
 | CLAR-06 | Phase 201 | Pending |
 | LEAN-01 | Phase 199 | Pending |
-| LEAN-02 | Phase 196 | Pending |
+| LEAN-02 | Phase 196 | Complete |
 | LEAN-03 | Phase 195 | Complete |
 | LEAN-04 | Phase 200 | Pending |
-| LEAN-05 | Phase 196 | Pending |
+| LEAN-05 | Phase 196 | Complete |
 | LEAN-06 | Phase 198 | Complete |
 | LEAN-07 | Phase 195 | Complete |
 | RESID-01 | Phase 202 | Complete |
