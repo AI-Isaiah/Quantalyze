@@ -5,17 +5,17 @@ milestone_name: UX — trustworthy, navigable, lean
 current_phase: 200
 current_phase_name: MANAGERKEYS — keys, names and adding a strategy each have one place
 status: executing
-stopped_at: Phases 204 and 205 closed; 200 executing; 206 executing; 201 waits on 200
-last_updated: "2026-11-10T21:54:41.917Z"
-last_activity: 2026-11-10
-last_activity_desc: Phases 204 INTROAUTH (v0.133.34.0, live on PROD) and 205 ONEVERDICT (v0.133.35.0) closed
-state_head: 626d9007a8fc2ab3ba93c67d60a385421861c616
+stopped_at: Phase 206 closed; 200 executing; 201 waits on 200
+last_updated: "2026-11-10T22:35:54.371Z"
+last_activity: 2026-11-11
+last_activity_desc: Phase 206 SESSIONLOOP (v0.133.36.0, PR #1249) closed
+state_head: 6f3a99f5988dad02c803f5c2a77c847508d0ff97
 progress:
   total_phases: 17
-  completed_phases: 14
-  total_plans: 145
-  completed_plans: 145
-  percent: 82
+  completed_phases: 15
+  total_plans: 146
+  completed_plans: 146
+  percent: 88
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 200 (MANAGERKEYS) executing; 206 (SESSIONLOOP) executing; 201 waits on 200
-Plan: 200: executing; 206: executing; 201: not planned yet
-Status: 204 closed (v0.133.34.0, PR #1245, live on PROD); 205 closed (v0.133.35.0, PR #1247); 200 and 206 executing
-Last activity: 2026-11-10 — Phases 204 INTROAUTH and 205 ONEVERDICT closed
-Progress: [████████░░] 82% (14 of 17 phases)
+Phase: parallel — 200 (MANAGERKEYS) executing; 201 waits on 200
+Plan: 200: executing; 201: not planned yet
+Status: 206 closed (v0.133.36.0, PR #1249); 200 executing
+Last activity: 2026-11-11 — Phase 206 SESSIONLOOP closed
+Progress: [█████████░] 88% (15 of 17 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1767,7 +1767,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phases 204 and 205 closed; 200 executing; 206 executing; 201 waits on 200
+**Stopped At:** Phase 206 closed; 200 executing; 201 waits on 200
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
