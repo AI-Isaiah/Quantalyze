@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { isPostLoginPath } from "./helpers/login";
 
 /**
  * E2E coverage for Sprint 1 Task 1.2 — /strategies/new/wizard.
@@ -48,7 +49,7 @@ async function login(page: import("@playwright/test").Page) {
   );
   await page.fill('input[type="password"]', E2E_PASSWORD!);
   await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|allocations)/, {
+  await page.waitForURL((url) => isPostLoginPath(url.pathname), {
     timeout: 10_000,
   });
 }
@@ -170,7 +171,7 @@ test.describe("/strategies/new/wizard", () => {
     );
     await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
-    await page.waitForURL(/\/(discovery|strategies|allocations)/, {
+    await page.waitForURL((url) => isPostLoginPath(url.pathname), {
       timeout: 10_000,
     });
     await page.goto("/strategies/new/wizard");

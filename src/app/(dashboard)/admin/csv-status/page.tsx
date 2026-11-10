@@ -8,6 +8,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { TrustTierLabel, type TrustTier } from "@/components/strategy/TrustTierLabel";
 import { verificationStatusLabel } from "@/lib/display-labels";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
   title: "CSV submissions",
@@ -34,7 +35,7 @@ export default async function CsvStatusPage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   // Service-role client for cross-user reads (bypasses RLS).
   const admin = createAdminClient();

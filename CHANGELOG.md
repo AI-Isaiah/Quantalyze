@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.133.33.0] - 2026-11-10 — MANAGERHOME: each role lands on its own page, one strategies list with health
+
+Phase 199. After sign-in an allocator lands on `/allocations`, a manager on `/strategies` and an admin on `/admin`. Every strategy owner reads one list at `/strategies` (the old `/my-strategies` page is gone and 308s there), each row carries one Health word, a legend explains Health and every status chip, and the degrade warnings on My allocation, the strategies list, Scenario and the factsheet render from one registry that names the affected days or key and ends on one action.
+
+### Added
+- **One role-home rule (`src/lib/routing/role-home.ts`).** `roleSurfaceHome` is shared by the proxy, `requireRolePage` and a new `/home` page that redirects each role to its own surface. The default route splits into a role home and a Discovery landing (`DISCOVERY_LANDING_ROUTE`), so Discovery links keep pointing at Discovery (plans 01, 06).
+- **Safe deep link at sign-in.** `LoginForm` and the login page honour a same-origin `?redirect=` and ignore an off-origin one; with none, the user lands on their role home. An approved user on `/pending-approval` is sent to their own home (plan 01).
+- **Health column on `/strategies` (`src/lib/strategy-health.ts`).** One word per row, computed on the server from existing signals only: Healthy, Key problem, Analytics failed, Updating, Stale (no data since <date>). Staleness reuses Phase 197's list verdict ladder, 7 days crypto and 10 days traditional/MT5 (D-06). The row note carries the detail: an Analytics failed note names the failed day and the viewer's action, and Stale and Key problem details are shown by role with each key named once. The key line names the key (plans 02, 12, 16).
+- **`StrategiesLegend` below the table.** It explains the Health words, with thresholds read from the constants, and every status chip. A test fails on a rendered label with no legend entry (plan 14).
+- **Degrade-warning registry (`src/lib/degrade-warnings.ts`, `src/components/degrade/DegradeLine.tsx`).** Every degrade warning on the four surfaces is a registered entry with a class, its words, its scope (a day range, a key, or the count-pinned `whole_history` scope for the D-05 exemptions) and one shipped action, and renders with a `data-degrade-id` marker. `src/__tests__/degrade-warning-scan.test.ts` walks My allocation, the strategies list, Scenario and the factsheet and fails on a warning that is neither registered nor ledgered (plans 03, 05, 15, 16, 18).
+- **Own manager guard layouts for `/strategies/new` and `/strategies/[id]`.** `src/__tests__/strategies-guard-coverage.test.ts` fails when a non-index strategies page lacks its own guard layout (plan 04).
+- **`TODOS.md` entry `[199-DEPARTED-HISTORY-NAME-THE-KEY]`**: the departed-history note cannot name the key until the derive emits key ids (plan 18, D-05).
+
+### Changed
+- **`/strategies` admits every owner (D-01).** Allocators, managers and `both` all reach it, with table furniture by role; only the index guard widened. One client host mounts the strategies table for every role (plans 07, 09).
+- **The merged list keeps everything from both pages (D-02).** The Phase 149 `#`/`Pnn` ranking and its note, allocator rows, the placeholder row per key with no strategy, drafts, banners, pending intros and the empty states by role; `both` sees the union (plan 10).
+- **One "Strategies" nav entry per role.** The allocator's separate "My Strategies" entry and its width arm are gone; every old link and factsheet origin points at `/strategies` (plan 11).
+- **Role home everywhere a visitor is bounced.** Sign-in, the bounce for a signed-in visitor and the header land on the role home; the root error page, the `/admin` guard and the twelve other admin guards bounce to it; the remaining error boundaries say "Go to your home page"; onboarding pushes the role home. `src/__tests__/role-home-call-sites.test.ts` pins every site (plans 06, 08).
+- **My allocation warnings read from the registry.** `StalenessBanner` names its day and one action; the failing-key, unpriced-account, Phase 198 per-key and book-wide missing-data lines end on their action, with the book-wide lines stating their whole-history scope; `DepartedHistoryNote` is a count-pinned whole-history entry; every remaining allocations warning is registered or ledgered (plans 03, 05).
+- **Scenario and Holdings warnings read from the registry.** Scenario's own-book sentence and per-source fallback render from entries; the Holdings strategies read failure is the registered `allocation.holdings-strategies-read-failed` entry, and the allocations scan has no deferral left (plan 15).
+- **Factsheet warnings by audience.** The degraded-members line names an action for the owner and no key for a recipient; owner state lines carry their day; recipient notices are registered (plan 18).
+
+### Removed
+- **`/my-strategies`.** The page and its test are deleted; `next.config.ts` 308s `/my-strategies` to `/strategies` with the query preserved, in lockstep with the route manifest. A 308 is cached by browsers, which the founder accepted in D-01. `src/__tests__/my-strategies-retired.test.ts` fails on any new production link to the old path (plan 13).
+
+### Fixed
+- **Error-boundary escape links leave the failing surface** (review WR-01, WR-01-R2). See the SC-1 deviation under Notes.
+- **`/home` throws on a missing profile row** instead of sending the user to `/pending-approval` (SFH-02).
+- **A successful jobs read with no job on record** no longer shows the unreadable-read line and a reload instruction (WR-02).
+- **`/home` decides admin with the admin guards' `isAdminUser` call**, so `/admin` and `/home` cannot bounce an admin between them (WR-03, SFH-01), and reads it strictly, so a database error throws instead of overriding `is_admin` (SFH-R2-01).
+- **The Stale (no data yet) remedy comes from the row's real compute state**, not a hard-coded `never_started` (SFH-03).
+- **Parity pin 12 drops a self-referential assertion** that could not fail (plan 13 follow-up).
+- **Status and strategy-type chips reach WCAG AA contrast on their own tint** (`Badge`, `OwnershipTag`). The new legend put them on `/strategies`, where the seeded axe run measured Pending review at 1.99:1, Draft at 4.27:1 and Published at 4.38:1. Grey, indigo, violet and pink tones now ink `text-text-secondary`, amber tones `text-warning`, and Published, Completed and Declined keep their ink on a lighter tint; every pair is now at least 4.5:1. The key-sync pill's warning and negative tints ("Key revoked" measured 4.13:1) are lighter for the same reason. DESIGN.md records the change.
+
+### Security
+- The deep link is sanitised to same-origin paths before use; an off-origin `?redirect=` is ignored (T-199 threat model).
+- The strategies sub-routes keep a manager-only guard of their own after the index widened to allocators, pinned by the structural coverage test.
+- Security audit: SECURED, 34/34 threats closed.
+
+### Tests
+- `tests/a11y/chip-contrast.test.ts` now reads the grey chip tones from `StaleSeriesChip.tsx` (`PIPELINE_CHIPS`), where plan 199-14 moved them out of `StrategyTable.tsx`; the Phase 170 contrast pin had gone blind there. Neutering a tone to muted turns it red.
+- New: `e2e/role-home.spec.ts` (a seeded allocator, manager and admin sign in through the real form and land on their exact page; a safe `?redirect=` wins; an off-origin one is ignored), added to the seeded CI list in `.github/workflows/ci.yml`; a `/my-strategies` 308 canary; the owner-list spec retargeted to `/strategies`; reflow and axe rows for the merged list (plan 17).
+- Every post-login wait accepts the role landings through `isPostLoginPath` (plan 17).
+- New: `tests/a11y/badge-contrast.test.ts` reads every tint/ink pair from `Badge.tsx`, `OwnershipTag.tsx` and the key-sync pill map and asserts at least 4.5:1 composited over white; reverting one tone turns it red. The owner-list and N-TABLE e2e specs move their seeded rows off the wizard source, because CD-10 hides a wizard draft from a role-both owner's list. The N-TABLE overlap probe uses the filter bar's search box, since `/strategies` seeds its sort and renders no Sort selects, and the owner-list spec matches its row link exactly so the row's Edit link does not also match.
+- The `[167-06]` manager key-card test now expects the lighter revoked-pill tint (`bg-negative/4`). It still expected the old `bg-negative/10`, which the contrast fix above replaced. If the pill map goes back to `/10`, the test turns red.
+- Unit and structural suites: `role-home.test.ts`, `strategy-health.test.ts`, `degrade-warnings.test.tsx`, `degrade-warning-scan.test.ts`, `page.merged.test.tsx`, `StrategiesLegend.test.tsx`, `StrategiesSection.test.tsx`, `StrategyTable.health.test.tsx`, `StrategyTable.owner-list.test.tsx` with owner-list goldens for manager-only, allocator-only and both, `home/page.test.tsx`, `login/page.test.tsx`, `LoginForm.test.tsx`, `role-home-call-sites.test.ts`, `strategies-guard-coverage.test.ts`, `my-strategies-retired.test.ts`, plus RED-first tests for every registry plan.
+
+### Notes
+- **Review trail.** Three rounds of code review plus a silent-failure hunt. Round 1 found WR-01..03 and SFH-01..03, all fixed in two topics (routing and guards; strategies-page remedies). Round 2 found WR-01-R2 (a regression from the WR-01 fix) and SFH-R2-01, both fixed. Round 3 found one MEDIUM of a pre-existing class, routed (below). Verification passed at 4/4 success criteria, SC-1 with the deviation below.
+- **SC-1 deviation (review-driven, recorded in CONTEXT).** Four error boundaries do not link the role home, because `/home` would redirect straight back into the surface that crashed. The root, admin and allocations boundaries link "Go to Discovery"; the strategies boundary links "Go to your profile" (`/profile`, no role guard), because Discovery is allocator-only.
+- **Routed, not fixed here:**
+  - WR-01-R3 (MEDIUM, pre-existing class): the proxy decides signed-in from `getSession` (cookie only) while `/home` and the page guards use `getUser`, so a revoked-but-unexpired cookie can loop `/` and `/home`, and `/login?redirect=` and `/discovery`. The `/discovery` shape existed at the phase base; this phase added the `/home` shape. Routed to a follow-up phase.
+  - SFH-R2-02 (LOW): the stale-no-data wording says "no computation is running" for a queued, retrying or running job.
+  - R-05 (residual, D-06): a non-crypto row 8 to 10 days old reads Healthy on the list (7d/10d ladder) and stale on its factsheet chip (3d/7d ladder). Routed to Phase 201.
+- **D-05 narrows SC-4.** `DepartedHistoryNote` and the three Phase 198 book-level lines use the count-pinned whole-history scope plus an action instead of naming days or a key, because their payloads carry none today.
+- **Checked in CI, not locally:** `e2e/role-home.spec.ts` against a seeded stack; the axe-app-wide, layout-narrow and reflow-sweep-authed specs on the merged `/strategies`. A visual read of the Health column, the legend and the row notes against DESIGN.md is the founder's.
+- No migration, no analytics-service change, no factsheet cache-key bump.
+- The phase branch carried 147 commits (125 non-merge, 22 merges, one of them an `origin/main` merge), squashed here; planning-only commits (context, research, plans, summaries, tracking, review, verification and security records) stay on the phase branch.
 ## [0.133.32.2] - 2026-11-10 — records: close 194.2 FIGURERESIDUALS; book 204 INTROAUTH and 205 ONEVERDICT
 
 ### Changed

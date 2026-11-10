@@ -69,7 +69,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import Link from "next/link";
 import {
@@ -192,11 +191,7 @@ import {
   type SolveLeverageResult,
 } from "../lib/solve-leverage";
 import { KpiStrip } from "./KpiStrip";
-import {
-  equityHistoryRebuildClass,
-  ExchangesPageLink,
-  type EquityHistoryRebuildClass,
-} from "./EquityHistoryRebuilding";
+import { isKnownRebuildReason } from "./EquityHistoryRebuilding";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
 // DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
@@ -237,7 +232,12 @@ import {
 } from "../lib/scenario-benchmark";
 import { MonteCarloSection } from "./MonteCarloSection";
 import { WeightOptimizerSection } from "./WeightOptimizerSection";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type {
+  EquityHistoryRebuildReason,
+  MyAllocationDashboardPayload,
+} from "@/lib/queries";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments, type DegradeId } from "@/lib/degrade-warnings";
 import {
   apiKeyLabelById as buildApiKeyLabelById,
   dataSourceLabel,
@@ -923,44 +923,53 @@ function pruneLeverageToDraftRefs(
 // ---------------------------------------------------------------------------
 
 /**
- * Review C3 SFH-C3-01. The Scenario's one sentence about the withheld own-book
- * comparison, keyed by the class the Overview's `equityHistoryRebuildClass`
- * gives the same reason. A failed read says to reload, a key the owner must
- * fix names the Exchanges page, and only a real wait says "being rebuilt".
- * Review C3 round 2 WR-02: a hold that no wait heals (`held_back`) says the
- * history is held back, the meaning of the Overview's "so it is not shown"
- * lines, and names no wait. The Overview panel carries the per-reason detail.
- * No sentence promises a date or a day count.
+ * Review C3 SFH-C3-01, as moved by Phase 199 plan 15 (D-04). The Scenario's one
+ * sentence about the withheld own-book comparison is the registry line the
+ * Overview's `MissingDataMessage` prints for the same reason: same id, same words,
+ * rendered through `DegradeLine`. The Scenario used to keep four class-keyed strings
+ * of its own, so an edit to the Overview's line could leave the two surfaces telling
+ * different stories about one withheld history.
+ *
+ * Each id is the entry `MissingDataMessage`'s `BOOK_LINE`, `NeedsActionLine` and
+ * unknown-reason line name for that reason, and each is written as a literal here
+ * because that is how the scan test attributes a render site to its entry.
+ * `satisfies Record<EquityHistoryRebuildReason, …>` fails to compile when a reason
+ * is added without a line. A reason this build does not know (null, absent, a stale
+ * client, a prototype key) reads the unknown-reason line, as the Overview's message
+ * does (`isKnownRebuildReason` is the one guard both read through).
+ *
+ * By design the Scenario reads the reason's BOOK-LEVEL line. Where the Overview can
+ * name the key (a labelled gap in `keyDataGaps`, or a resolved `notSyncingKeys`) it
+ * prints that key's own line instead; the Scenario payload reaches neither input, so
+ * it keeps the unnamed line for the same reason. For `key_not_syncing` that is the
+ * singular line, which is true for any count of at least one. Same reason, same
+ * class, never a different cause.
  */
-const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
-  rebuilding: (
-    <>
-      Your book&apos;s own history is being rebuilt, so the comparison with
-      your current book is not shown.
-    </>
-  ),
-  read_failed: (
-    <>
-      We could not load your book&apos;s history just now, so the comparison
-      with your current book is not shown; reload the page to try again.
-    </>
-  ),
-  // "update your keys", not "fix a key": for duplicate_account the owner
-  // disconnects one of two working keys, and nothing is broken to fix.
-  needs_action: (
-    <>
-      Your book&apos;s own history is on hold until you update your keys on
-      the <ExchangesPageLink />, so the comparison with your current book is
-      not shown.
-    </>
-  ),
-  held_back: (
-    <>
-      We are holding back your book&apos;s own history, so the comparison with
-      your current book is not shown.
-    </>
-  ),
-};
+const OWN_BOOK_LINE_ID = {
+  duplicate_account: "allocation.book.duplicate-account",
+  key_not_syncing: "allocation.book.key-not-syncing",
+  shared_account_no_working_key: "allocation.book.shared-account-no-working-key",
+  history_read_failed: "allocation.book.history-read-failed",
+  account_identity_pending: "allocation.book.identity-pending",
+  awaiting_derivation: "allocation.book.awaiting-derivation",
+  derivation_rejected: "allocation.book.derivation-rejected",
+  shared_account_history_truncated: "allocation.book.shared-account-history-truncated",
+} as const satisfies Record<EquityHistoryRebuildReason, DegradeId>;
+
+/** A rebuilding book with no known reason: the registry's sentence, never a guessed cause. */
+const OWN_BOOK_UNKNOWN_REASON_ID = "allocation.book.unknown-reason" as const satisfies DegradeId;
+
+/** The own-book sentence for one rebuild reason, rendered from its registry entry (none takes an argument). */
+function OwnBookRebuildingLine({
+  reason,
+}: {
+  reason: EquityHistoryRebuildReason | null | undefined;
+}) {
+  const id: DegradeId = isKnownRebuildReason(reason)
+    ? OWN_BOOK_LINE_ID[reason]
+    : OWN_BOOK_UNKNOWN_REASON_ID;
+  return <DegradeLine id={id} segments={degradeSegments(id, undefined as never)} />;
+}
 
 /** A stable empty own-book return series (a fresh `[]` would defeat the memo). */
 const NO_OWN_BOOK_RETURNS: MyAllocationDashboardPayload["equityDailyReturns"] = [];
@@ -992,8 +1001,8 @@ export function ScenarioComposer({
     allKeysStale,
     // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
     equityHistoryState,
-    // Review C3 SFH-C3-01: why the history is withheld, classed by the
-    // Overview's own table so both surfaces give the same kind of answer.
+    // Review C3 SFH-C3-01: why the history is withheld; read through the same
+    // registry entries as the Overview's message (199-15, D-04).
     equityHistoryRebuildReason = null,
     // Phase 167.1.2 plan 11 (D-06): the book's persisted flow-neutral returns,
     // the ONE source of the own-book delta below. A payload without the field
@@ -3276,6 +3285,22 @@ export function ScenarioComposer({
     !payload.perKeyDailiesGateSatisfied &&
     !(payload.bookEntryGateSatisfied ?? false) &&
     (payload.eligibleApiKeyIds ?? []).length > 0;
+
+  // Phase 199 plan 15 (D-04): the fallback names the keys it is about, those the
+  // payload marks eligible that have no per-key series (not in
+  // `contributingApiKeyIds`), labelled as the Data-sources rows label them. An
+  // eligible id the owner's own key list does not carry names nothing (a raw key
+  // id never prints), so the registry line then reads about the connected keys.
+  const perSourceFallbackLabels = useMemo(() => {
+    const eligible = new Set(payload.eligibleApiKeyIds ?? []);
+    const contributing = new Set(payload.contributingApiKeyIds ?? []);
+    const withoutSeries = (payload.apiKeys ?? []).filter(
+      (k) => eligible.has(k.id) && !contributing.has(k.id),
+    );
+    return [...buildApiKeyLabelById(withoutSeries).values()].sort((a, b) =>
+      a.localeCompare(b),
+    );
+  }, [payload.apiKeys, payload.eligibleApiKeyIds, payload.contributingApiKeyIds]);
 
   // The connected exchange keys eligible for per-source toggling — payload
   // apiKeys filtered to the SSR-computed eligible-key id set (SoT mirror; the
@@ -5767,9 +5792,12 @@ export function ScenarioComposer({
             <span className="font-semibold text-text-primary">
               Per-source modeling needs per-key history.
             </span>{" "}
-            One or more connected keys don&apos;t have a per-key return series
-            yet, so this projection blends your whole book. Per-source toggles
-            appear once every key has its own history.
+            <DegradeLine
+              id="scenario.per-source-fallback"
+              segments={degradeSegments("scenario.per-source-fallback", {
+                labels: perSourceFallbackLabels,
+              })}
+            />
           </InfoBanner>
         </div>
       )}
@@ -5789,6 +5817,7 @@ export function ScenarioComposer({
           role="status"
           aria-live="polite"
           data-testid="scenario-empty-intersection-banner"
+          data-degrade-id="scenario.empty-intersection"
           className="mt-6 rounded-md border border-warning-border bg-warning-bg px-4 py-3"
         >
           <p className="text-fixed-13 font-medium text-warning">
@@ -6129,16 +6158,15 @@ export function ScenarioComposer({
             no own-book line is drawn and there is no comparison to disclose.
             That is D-15's blank-mode exception, and the Overview may still
             show its rebuilding panel for the same book.
-            Review C3 SFH-C3-01: the sentence is picked by the class the
-            Overview gives the same reason (`equityHistoryRebuildClass`). */}
+            Review C3 SFH-C3-01, Phase 199 plan 15 (D-04): the sentence is the
+            registry line the Overview's missing-data message prints for the
+            same reason (`OwnBookRebuildingLine`), not a string of this file's. */}
         {isOwnBookRebuilding && !isBlankMode && (
           <p
             data-testid="scenario-ownbook-rebuilding"
             className="mt-2 text-fixed-11 text-text-muted"
           >
-            {OWN_BOOK_REBUILDING_LINE[
-              equityHistoryRebuildClass(equityHistoryRebuildReason)
-            ]}
+            <OwnBookRebuildingLine reason={equityHistoryRebuildReason} />
           </p>
         )}
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
@@ -6658,6 +6686,7 @@ export function ScenarioComposer({
           role="status"
           aria-live="polite"
           data-testid="scenario-loading-returns"
+          data-degrade-id="scenario.loading-returns"
           className="mt-4 rounded-md border border-border bg-surface-subtle px-3 py-2 text-xs text-text-muted"
         >
           Loading returns… {loadingReturnsAddedNames.join(", ")} not yet in the
@@ -6753,6 +6782,7 @@ export function ScenarioComposer({
       {autoExcluded.length > 0 && (
         <section
           data-testid="scenario-auto-excluded-group"
+          data-degrade-id="scenario.auto-excluded"
           aria-labelledby="scenario-auto-excluded-heading"
           className="mt-4 rounded-md border border-warning-border bg-warning-bg p-4"
         >
@@ -8675,6 +8705,7 @@ function CompositionList({
                   role="status"
                   aria-live="polite"
                   data-testid="scenario-series-state-note"
+                  data-degrade-id="scenario.series-syncing"
                   className="text-fixed-11 font-medium text-warning"
                 >
                   First metrics arrive in ~10–15 min — not in the blend yet

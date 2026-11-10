@@ -10,7 +10,7 @@
  * card page this phase replaced.
  *
  *   P1 (D-02)  every status's name links to /factsheet/<id>, never to /edit
- *   P2 (D-01)  Status and Created right after Strategy, Actions last, and the
+ *   P2 (D-01)  Status, Health (199-12) and Created right after Strategy, Actions last, and the
  *              Actions cell holds Edit, then the private-link control, then
  *              the lifecycle actions, in that DOM order
  *   P3 (D-03)  no analytics, or a failed run (even one with stored figures),
@@ -34,6 +34,17 @@ import { Badge } from "@/components/ui/Badge";
 import { formatIsoDay } from "@/lib/utils";
 
 vi.mock("server-only", () => ({}));
+// Phase 199 plan 10 (D-02, CD-12): the page now ranks the owner's rows and
+// attaches the public trust tier. Both reads go through the shared queries
+// module, which these suites' Supabase doubles do not model (a published
+// universe, the trust-signal RPC), so the two are answered here: no comparison
+// set, no signals. Role is manager in every case below, so the allocator-only
+// reads never run.
+vi.mock("@/lib/queries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/queries")>()),
+  getOwnRowPercentiles: vi.fn(async () => null),
+  readPublicVerificationSignals: vi.fn(async () => new Map()),
+}));
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 // Forwards every prop (aria-label included): the table's name and Edit links
@@ -149,6 +160,9 @@ vi.mock("next/navigation", () => ({
     redirectMock(path);
     throw new Error(`__REDIRECT__:${path}`);
   },
+  // Phase 199 plan 09: the page now renders StrategiesSection (a client host that
+  // calls useRouter for its post-wizard refresh), so the mock must carry one.
+  useRouter: () => ({ refresh: () => {} }),
 }));
 
 type AnalyticsEmbed = Record<string, unknown> | Record<string, unknown>[] | null;
@@ -200,6 +214,16 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: async () => ({ data: [], error: null }),
     from: (table: string) => {
+      // Phase 199 plan 09 (D-02): the page reads the viewer's role from `profiles`.
+      // This suite is the manager's page, so the branch answers manager.
+      if (table === "profiles") {
+        const p = {
+          select: () => p,
+          eq: () => p,
+          maybeSingle: async () => ({ data: { role: "manager" }, error: null }),
+        };
+        return p;
+      }
       if (
         table !== "strategies" &&
         table !== "contact_requests" &&
@@ -416,7 +440,9 @@ describe("StrategiesPage — Status, Created and Actions (D-01, D-09, P2)", () =
       const strategyIdx = names.indexOf("Strategy");
       expect(strategyIdx).toBeGreaterThanOrEqual(0);
       expect(names[strategyIdx + 1]).toBe("Status");
-      expect(names[strategyIdx + 2]).toBe("Created");
+      // Phase 199 plan 12 (D-03): Health directly after Status, before Created.
+      expect(names[strategyIdx + 2]).toBe("Health");
+      expect(names[strategyIdx + 3]).toBe("Created");
       expect(names[names.length - 1]).toBe("Actions");
       // Discovery's metric columns are still there.
       for (const metric of [H_RETURN, H_CAGR, H_SHARPE, H_MAX_DD]) {
@@ -572,14 +598,19 @@ describe("StrategiesPage — the note row (D-06, D-08, P6)", () => {
       expect(tokens).not.toContain("text-negative");
       expect(tokens).not.toContain("bg-negative/5");
 
-      // D-06 order: review feedback first, then the share note.
+      // D-06 order: review feedback first, then (199-16) the Health detail this
+      // uncomputed row carries (Stale, no data yet), then the share note.
       const footer = note!.querySelector('[data-testid="strategy-row-footer"]')!;
       const children = Array.from(footer.children);
       expect(children[0]).toBe(line);
-      expect(children.length).toBeGreaterThan(1);
+      expect(children.length).toBe(3);
       expect(
-        (children[1] as HTMLElement).getAttribute("data-testid"),
-        "the share note follows the feedback",
+        (children[1] as HTMLElement).getAttribute("data-degrade-id"),
+        "the Health detail follows the feedback",
+      ).toBe("strategies.stale-no-data");
+      expect(
+        (children[2] as HTMLElement).getAttribute("data-testid"),
+        "the share note follows the Health detail",
       ).toBe("strategy-row-share-note");
 
       // A strategy with nothing to say has no note row at all.

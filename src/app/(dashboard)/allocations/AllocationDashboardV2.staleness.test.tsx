@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
@@ -108,34 +108,78 @@ const baseProps = {
   positionsBySource: { spot: [], derivative: [] },
 } as unknown as MyAllocationDashboardPayload;
 
+const EXPECTED_ACTION =
+  "Reconnect a key on the Exchanges page, or wait for the next sync.";
+
 describe("AllocationDashboardV2 — NEW-C09-04 staleness banner", () => {
-  // Pin "now" so relative-age copy is deterministic across runs.
-  const FROZEN_NOW = new Date("2026-05-28T12:00:00Z").getTime();
+  // Phase 199 plan 03 (D-04, CD-05, SC-4): the banner names the DAY of the newest
+  // sync, never a relative age, and one action. The clock is pinned only to prove
+  // the copy does not read it: two different "now"s give the same words.
+  const NOW_A = new Date("2026-05-28T12:00:00Z").getTime();
+  const NOW_B = new Date("2026-09-01T12:00:00Z").getTime();
 
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.setSystemTime(FROZEN_NOW);
+    vi.setSystemTime(NOW_A);
   });
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("renders banner with relative-age copy when allKeysStale=true AND not syncing", () => {
+  it("names the day of the newest sync and one action when allKeysStale=true AND not syncing", () => {
     render(
       <AllocationDashboardV2
         {...baseProps}
         allKeysStale
         hasSyncing={false}
-        // 3d ago in absolute terms — the banner should say "3d ago".
         lastSyncAt="2026-05-25T12:00:00Z"
       />,
     );
     const banner = screen.getByTestId("dashboard-staleness-banner");
-    expect(banner.textContent).toContain("Analytics may be stale");
-    expect(banner.textContent).toContain("3d ago");
+    expect(banner.textContent).toBe(
+      `Analytics may be stale: no exchange key has synced since May 25, 2026. ${EXPECTED_ACTION}`,
+    );
+    // The registry id marks the render site (the scan test attributes it by this).
+    expect(banner.querySelector('[data-degrade-id="allocation.staleness"]')).not.toBeNull();
+    expect(banner.querySelector("a")?.getAttribute("href")).toBe("/profile?tab=exchanges");
   });
 
-  it("renders 'No successful sync recorded yet' when lastSyncAt is null", () => {
+  it("never prints a relative age, whatever the clock says", () => {
+    const text = () => {
+      cleanup();
+      render(
+        <AllocationDashboardV2
+          {...baseProps}
+          allKeysStale
+          hasSyncing={false}
+          lastSyncAt="2026-05-25T12:00:00Z"
+        />,
+      );
+      return screen.getByTestId("dashboard-staleness-banner").textContent;
+    };
+    const first = text();
+    vi.setSystemTime(NOW_B);
+    const second = text();
+    expect(second).toBe(first);
+    expect(first).not.toMatch(/\bago\b|Last successful sync was/);
+  });
+
+  it("keeps its test id, its status role and its amber shell", () => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        allKeysStale
+        hasSyncing={false}
+        lastSyncAt="2026-05-25T12:00:00Z"
+      />,
+    );
+    const banner = screen.getByTestId("dashboard-staleness-banner");
+    expect(banner.getAttribute("role")).toBe("status");
+    expect(banner.getAttribute("style")).toContain("var(--color-warning-bg)");
+    expect(banner.getAttribute("style")).toContain("var(--color-warning-border)");
+  });
+
+  it("with no sync ever, names the key that has not completed one", () => {
     render(
       <AllocationDashboardV2
         {...baseProps}
@@ -145,7 +189,44 @@ describe("AllocationDashboardV2 — NEW-C09-04 staleness banner", () => {
       />,
     );
     const banner = screen.getByTestId("dashboard-staleness-banner");
-    expect(banner.textContent).toContain("No successful sync recorded yet");
+    expect(banner.textContent).toBe(
+      `Analytics may be stale: Binance — Test Key has not completed a sync yet. ${EXPECTED_ACTION}`,
+    );
+    expect(banner.querySelector('[data-degrade-id="allocation.staleness-never"]')).not.toBeNull();
+    expect(banner.textContent).not.toContain("No successful sync recorded yet");
+  });
+
+  it("with several keys that never synced, names each sorted by label, and leaves an inactive key out", () => {
+    const key = (id: string, exchange: string, label: string, active = true) => ({
+      id,
+      exchange,
+      is_active: active,
+      sync_status: "complete",
+      last_sync_at: null,
+      sync_error: null,
+      disconnected_at: null,
+      label,
+    });
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        apiKeys={
+          [
+            key("k2", "okx", "Zed"),
+            key("k1", "binance", "Alpha"),
+            key("k3", "bybit", "Retired", false),
+          ] as never
+        }
+        allKeysStale
+        hasSyncing={false}
+        lastSyncAt={null}
+      />,
+    );
+    const text = screen.getByTestId("dashboard-staleness-banner").textContent;
+    expect(text).toBe(
+      `Analytics may be stale: Binance — Alpha and OKX — Zed have not completed a sync yet. ${EXPECTED_ACTION}`,
+    );
+    expect(text).not.toContain("Retired");
   });
 
   it("suppresses banner when allKeysStale=true AND hasSyncing=true (avoid double-message)", () => {

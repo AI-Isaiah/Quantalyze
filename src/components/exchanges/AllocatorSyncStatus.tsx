@@ -32,6 +32,12 @@ import { PILL_STYLES } from "./allocator-sync-pill-styles";
  * `role="status" aria-live="polite"`. The pill itself has no aria-live so
  * neutral idle→syncing→complete transitions produce zero SR chatter
  * (helper line is empty for neutral states).
+ *
+ * Static pill mode (Phase 199 plan 14, `pillOnly`): the strategies legend explains
+ * the key pills with the REAL pill, and a legend must never announce. In that mode
+ * the component returns the bare pill: no helper line, so no `role="status"` and no
+ * `aria-live`, and a distinct test id so a page that mounts both the rows' pills and
+ * the legend's can still tell them apart.
  */
 export interface AllocatorSyncStatusProps {
   /**
@@ -78,6 +84,11 @@ export interface AllocatorSyncStatusProps {
    * "Sync request failed — click Sync now to retry" via the aria-live line.
    */
   helperOverride?: string | null;
+  /**
+   * Render the pill alone, with no helper line and so no live region (the legend's
+   * mount). Every other prop still picks the pill's label and colour.
+   */
+  pillOnly?: boolean;
 }
 
 // The LOCKED pill colour map lives in `./allocator-sync-pill-styles` (a plain
@@ -208,6 +219,7 @@ export function AllocatorSyncStatus({
   retryAtSeconds,
   queuedNextAttemptAt,
   helperOverride,
+  pillOnly = false,
 }: AllocatorSyncStatusProps) {
   // Forward-compat fallback: unknown / null / 'computing' → neutral idle pill.
   // The 066 migration adds `revoked` + `rate_limited`; the allocator worker
@@ -303,15 +315,20 @@ export function AllocatorSyncStatus({
     }
   }
 
+  const pill = (
+    <span
+      data-testid={pillOnly ? "allocator-sync-pill-static" : "allocator-sync-pill"}
+      data-sync-status={normalized}
+      className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium transition-colors duration-150 ease-out ${styles.bg} ${styles.text}${styles.border ? ` border ${styles.border}` : ""}`}
+    >
+      {pillLabel}
+    </span>
+  );
+  if (pillOnly) return pill;
+
   return (
     <div className="flex flex-col items-end">
-      <span
-        data-testid="allocator-sync-pill"
-        data-sync-status={normalized}
-        className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium transition-colors duration-150 ease-out ${styles.bg} ${styles.text}${styles.border ? ` border ${styles.border}` : ""}`}
-      >
-        {pillLabel}
-      </span>
+      {pill}
       <div
         role="status"
         aria-live="polite"

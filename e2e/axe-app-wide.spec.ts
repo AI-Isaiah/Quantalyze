@@ -47,10 +47,12 @@
  */
 import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
+import { isPostLoginPath } from "./helpers/login";
 import {
   seedTestAllocator,
   seedStrategyWithHistory,
   seedBridgeCandidate,
+  cleanupStrategiesByNamePrefix,
 } from "./helpers/seed-test-project";
 // VERIFY-02 hermetic teardown — the crypto-sma discovery seed below is the ONE
 // cross-spec-dangerous row (discovery-hide-examples-default.spec.ts asserts the
@@ -84,7 +86,7 @@ async function loginViaForm(
   await page.fill('input[name="email"], input[placeholder*="email" i]', email);
   await page.fill('input[type="password"]', password);
   await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|allocations|dashboard)/, {
+  await page.waitForURL((url) => isPostLoginPath(url.pathname), {
     timeout: 10_000,
   });
 }
@@ -301,6 +303,94 @@ test.describe("axe app-wide (A11Y-01) — authed standalone routes", () => {
       const results = await buildAxe(page).analyze();
       expect(results.violations).toEqual([]);
     });
+  }
+});
+
+// --- /strategies merged list, per role (SEEDED, STRICT, all impacts) ---
+// Phase 199 (LEAN-01, ROUTE-11): /strategies is the one list every strategy owner
+// reads, so it is scanned as an allocator, a manager and a `both` account. Each
+// account owns ONE non-Healthy row (a published strategy whose newest return is
+// ~200 days old reads `Stale`, and a Stale row carries a registered Health detail
+// line, `data-degrade-id="strategies.stale"`) so the scan covers the line's DOM,
+// not just a clean table. A role that sees placeholder rows (allocator, both) also
+// owns one active key with no strategy. The Health detail assertion makes a seed
+// that stopped producing a Stale row fail by name instead of scanning a page
+// without the markup under test.
+const STRATEGIES_AXE_ROLES: {
+  role: "allocator" | "manager" | "both";
+  seesPlaceholders: boolean;
+}[] = [
+  { role: "allocator", seesPlaceholders: true },
+  { role: "manager", seesPlaceholders: false },
+  { role: "both", seesPlaceholders: true },
+];
+
+test.describe("axe app-wide (A11Y-01) — /strategies merged list per role", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "axe app-wide (/strategies per role): seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
+      "Skipping prevents false-green on empty/404/login pages (W-02). " +
+      "Runs in the seeded MA-8 CI job once the env is present.",
+  );
+
+  // Per worker, so one worker's afterAll cannot delete another's rows.
+  const NAME_PREFIX = `axe-strategies-${process.env.TEST_PARALLEL_INDEX ?? 0}-`;
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+  });
+
+  for (const r of STRATEGIES_AXE_ROLES) {
+    for (const vp of VIEWPORTS) {
+      test(`zero WCAG-AA violations on /strategies as ${r.role} @ ${vp.name}`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width: vp.w, height: vp.h });
+        const owner = await seedTestAllocator({ role: r.role });
+        await seedStrategyWithHistory({
+          days: 60,
+          name: `${NAME_PREFIX}${r.role}-stale-${Math.random().toString(36).slice(2, 8)}`,
+          ownerUserId: owner.userId,
+          anchorMs: Date.now() - 200 * 86_400_000,
+        });
+        const keyLabel = `${NAME_PREFIX}${r.role}-bare-key-${Math.random().toString(36).slice(2, 8)}`;
+        if (r.seesPlaceholders) {
+          // An active key that feeds no strategy is a placeholder row. Same
+          // placeholder-ciphertext idiom as seedWizardDraft; no real credential.
+          const { error } = await getCleanupAdmin().from("api_keys").insert({
+            user_id: owner.userId,
+            exchange: "binance",
+            label: keyLabel,
+            api_key_encrypted: "e2e-placeholder-ciphertext",
+            is_active: true,
+          });
+          if (error) {
+            throw new Error(`axe /strategies (${r.role}) bare key seed failed: ${error.message}`);
+          }
+        }
+        await loginViaForm(page, owner.email, owner.password);
+
+        const res = await page.goto("/strategies");
+        if (res && res.status() >= 400) {
+          throw new Error(`/strategies returned HTTP ${res.status()}`);
+        }
+        // Anti-false-green: the list rendered (not a login redirect or an empty
+        // state), the Stale row's registered detail line is on screen, and a
+        // placeholder row is present where this role sees them.
+        await expect(page.locator("[data-strategy-table]")).toBeVisible({
+          timeout: 15_000,
+        });
+        await expect(
+          page.locator('[data-degrade-id="strategies.stale"]').first(),
+        ).toBeVisible({ timeout: 15_000 });
+        if (r.seesPlaceholders) {
+          await expect(page.getByText(keyLabel)).toBeVisible({ timeout: 15_000 });
+        }
+        const results = await buildAxe(page).analyze();
+        expect(results.violations).toEqual([]);
+      });
+    }
   }
 });
 

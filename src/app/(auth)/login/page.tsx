@@ -3,6 +3,7 @@ import { LoginForm } from "@/components/auth/LoginForm";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import { safeRedirectPath } from "@/lib/routing/role-home";
 
 export const metadata: Metadata = {
   title: "Sign in",
@@ -11,16 +12,24 @@ export const metadata: Metadata = {
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ code?: string; redirect?: string }>;
+  searchParams: Promise<{
+    code?: string;
+    redirect?: string | string[];
+    next?: string | string[];
+  }>;
 }) {
   const params = await searchParams;
+  // CD-02 / CD-13: one sanitiser for the deep link. `redirect` wins over `next`;
+  // anything that is not a same-origin /lowercase path becomes null.
+  const redirectTo =
+    safeRedirectPath(params.redirect) ?? safeRedirectPath(params.next);
 
   // If Supabase sent a confirmation code, exchange it for a session
   if (params.code) {
     const supabase = await createClient();
     const { error } = await supabase.auth.exchangeCodeForSession(params.code);
     if (!error) {
-      redirect(params.redirect || "/onboarding");
+      redirect(redirectTo ?? "/onboarding");
     }
     // If exchange fails, fall through to show login form
   }
@@ -33,7 +42,7 @@ export default async function LoginPage({
           Sign in to your account
         </p>
       </div>
-      <LoginForm />
+      <LoginForm redirectTo={redirectTo} />
       <p className="mt-6 text-center text-sm text-text-muted">
         Don&apos;t have an account?{" "}
         <Link

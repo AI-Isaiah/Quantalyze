@@ -47,8 +47,9 @@ export default function StrategiesError({
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
           <Button onClick={() => unstable_retry()}>Try again</Button>
-          <Link href="/strategies/new">
-            <Button variant="ghost">Add a strategy</Button>
+          {/* Leaves the failing surface for a page every approved role can open. The role home redirects back into /strategies, and Discovery is allocator-only: requireRolePage bounces a manager straight back here (199 WR-01-R2). */}
+          <Link href="/profile">
+            <Button variant="ghost">Go to your profile</Button>
           </Link>
         </div>
       </div>

@@ -11,7 +11,8 @@ import { PrintButton } from "@/components/ui/PrintButton";
 import { createClient } from "@/lib/supabase/server";
 import { canViewAum, withViewerAum } from "@/lib/factsheet/viewer-aum";
 import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
-import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments } from "@/lib/degrade-warnings";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import type { TrustTierKind } from "@/lib/factsheet/types";
@@ -202,7 +203,15 @@ export default async function TearSheetPage({
     return (
       <main className="mx-auto max-w-2xl px-6 py-16" data-testid="tearsheet-pending">
         <h1 className="font-serif text-fixed-28 leading-tight text-text-primary">{displayName}</h1>
-        <p className="mt-6 text-fixed-13 text-text-secondary">{KCS10_PUBLIC_SENTENCE}</p>
+        {/* Phase 199 plan 18 (D-04): the factsheet's own public pending sentence, registered
+            (`factsheet.public-pending`, class recipient): the shipped KCS10 wording, then the one
+            action a visitor has. */}
+        <DegradeLine
+          id="factsheet.public-pending"
+          element="p"
+          className="mt-6 text-fixed-13 text-text-secondary"
+          segments={degradeSegments("factsheet.public-pending", undefined)}
+        />
         <Link
           href={buildFactsheetHref(id)}
           className={buttonClassName({ variant: "secondary", size: "md", className: "mt-6" })}

@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { MatchQueueIndex } from "@/components/admin/MatchQueueIndex";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
   title: "Match queue",
@@ -15,7 +16,7 @@ export default async function MatchQueuePage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   return (
     <>

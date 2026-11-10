@@ -54,6 +54,7 @@ export function BlendHeader({ metrics, unionSpan }: BlendHeaderProps) {
       role="status"
       aria-live="polite"
       data-testid="scenario-blend-header"
+      data-degrade-id="scenario.blend-header"
       className="text-fixed-13 font-medium text-text-secondary"
     >
       {n === 0 ? (

@@ -2108,7 +2108,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       exchange: "binance",
       label: "Manager Binance",
       pillText: "Key revoked",
-      pillClasses: ["bg-negative/10", "text-negative"],
+      pillClasses: ["bg-negative/4", "text-negative"],
       helperText: REVOKED_HELPER_TEXT,
       remedy: "Delete",
     },

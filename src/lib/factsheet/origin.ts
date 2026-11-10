@@ -11,7 +11,7 @@
  * from client components, and the page calls `parseOrigin` on the server.
  */
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * The one source of back-link labels and fixed hrefs. Labels mirror the
@@ -22,13 +22,22 @@ export const FACTSHEET_ORIGINS = {
   discovery: { label: "Back to Discovery", href: null },
   browse: { label: "Back to Browse", href: null },
   allocations: { label: "Back to My allocation", href: "/allocations" },
-  "my-strategies": { label: "Back to My Strategies", href: "/my-strategies" },
   strategies: { label: "Back to Strategies", href: "/strategies" },
   recommendations: { label: "Back to Recommendations", href: "/recommendations" },
   admin: { label: "Back to Admin", href: "/admin" },
 } as const;
 
 export type FactsheetOriginKey = keyof typeof FACTSHEET_ORIGINS;
+
+/**
+ * `from` values older links still carry, mapped to the origin that replaced
+ * them (Phase 199 LEAN-01: the my-strategies page folded into /strategies).
+ * READ by `parseOrigin`, never emitted: `FactsheetOriginKey` does not include
+ * these, so `buildFactsheetHref` cannot produce one.
+ */
+const LEGACY_ORIGIN_KEYS: Readonly<Record<string, FactsheetOriginKey>> = {
+  "my-strategies": "strategies",
+};
 export type FactsheetCategorySlug = (typeof DISCOVERY_CATEGORIES)[number]["slug"];
 
 export type FactsheetOrigin = {
@@ -49,6 +58,11 @@ function isCategoryOrigin(key: FactsheetOriginKey): boolean {
  */
 function isOriginKey(value: string): value is FactsheetOriginKey {
   return Object.prototype.hasOwnProperty.call(FACTSHEET_ORIGINS, value);
+}
+
+/** Exact own-property membership in the legacy map (same prototype-chain care as `isOriginKey`). */
+function isLegacyOriginKey(value: string): boolean {
+  return Object.prototype.hasOwnProperty.call(LEGACY_ORIGIN_KEYS, value);
 }
 
 function asCategorySlug(value: string): FactsheetCategorySlug | null {
@@ -82,8 +96,10 @@ function readSingle(
 export function parseOrigin(
   searchParams: SearchParamsRecord | URLSearchParams,
 ): FactsheetOrigin | null {
-  const from = readSingle(searchParams, "from");
-  if (from === undefined || !isOriginKey(from)) return null;
+  const raw = readSingle(searchParams, "from");
+  if (raw === undefined) return null;
+  const from = isLegacyOriginKey(raw) ? LEGACY_ORIGIN_KEYS[raw] : raw;
+  if (!isOriginKey(from)) return null;
   if (!isCategoryOrigin(from)) return { key: from };
   const rawCat = readSingle(searchParams, "cat");
   const cat = rawCat === undefined ? null : asCategorySlug(rawCat);
@@ -100,7 +116,7 @@ export function backTargetFor(origin: FactsheetOrigin | null): BackTarget | null
   if (origin.cat) return { label, href: `/${origin.key}/${origin.cat}` };
   return {
     label,
-    href: origin.key === "discovery" ? DEFAULT_AUTHENTICATED_ROUTE : "/browse",
+    href: origin.key === "discovery" ? DISCOVERY_LANDING_ROUTE : "/browse",
   };
 }
 

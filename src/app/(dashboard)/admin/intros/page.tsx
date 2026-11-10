@@ -10,6 +10,7 @@ import { introSnapshotStatusLabel, introSourceLabel } from "@/lib/display-labels
 import { PortfolioSnapshotSchema, type PortfolioSnapshotJSON } from "@/lib/intro/snapshot";
 import { gateAnnualized, gatedValue, type FigureRecord } from "@/lib/figure-gate";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
   title: "Intro requests",
@@ -107,7 +108,7 @@ export default async function AdminIntrosPage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   const admin = createAdminClient();
 

@@ -104,18 +104,36 @@ describe("/pending-approval names no address (D-01)", () => {
   });
 });
 
-describe("/pending-approval routing is unchanged", () => {
-  it("still redirects an approved profile into the platform (the copy's claim)", async () => {
-    profileRow = {
-      role: "allocator",
-      allocator_status: "verified",
-      manager_status: null,
-      is_admin: false,
-      display_name: "Jane",
-    };
+describe("/pending-approval routing (Phase 199 CD-01: an approved user goes to their own home)", () => {
+  const approved = {
+    allocator_status: "verified",
+    manager_status: "verified",
+    is_admin: false,
+    display_name: "Jane",
+  };
+
+  it.each([
+    ["allocator", "/allocations", { role: "allocator" }],
+    ["manager", "/strategies", { role: "manager" }],
+    ["both", "/allocations", { role: "both" }],
+    ["admin", "/admin", { role: "allocator", is_admin: true }],
+  ])("sends an approved, onboarded %s to %s", async (_label, home, overrides) => {
+    profileRow = { ...approved, ...overrides };
     await expect(PendingApprovalPage()).rejects.toThrow(
-      "NEXT_REDIRECT:/discovery/crypto-sma",
+      `NEXT_REDIRECT:${home}`,
     );
+  });
+
+  it("sends an approved user without a display name to /onboarding", async () => {
+    profileRow = { ...approved, role: "allocator", display_name: null };
+    await expect(PendingApprovalPage()).rejects.toThrow(
+      "NEXT_REDIRECT:/onboarding",
+    );
+  });
+
+  it("renders the review page for an unapproved profile", async () => {
+    await renderPending();
+    expect(redirectMock).not.toHaveBeenCalled();
   });
 
   it("sends a signed-out visitor to /login", async () => {

@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
 import {
   FACTSHEET_ORIGINS,
   backTargetFor,
@@ -31,7 +31,6 @@ describe("origin tracer", () => {
 describe("closed map: every key resolves to its label and fixed href", () => {
   it.each([
     ["allocations", "Back to My allocation", "/allocations"],
-    ["my-strategies", "Back to My Strategies", "/my-strategies"],
     ["strategies", "Back to Strategies", "/strategies"],
     ["recommendations", "Back to Recommendations", "/recommendations"],
     ["admin", "Back to Admin", "/admin"],
@@ -56,17 +55,16 @@ describe("closed map: every key resolves to its label and fixed href", () => {
   it("from=discovery with an unknown cat falls back to the default route", () => {
     expect(
       backTargetFor(parseOrigin({ from: "discovery", cat: "not-a-slug" })),
-    ).toEqual({ label: "Back to Discovery", href: DEFAULT_AUTHENTICATED_ROUTE });
+    ).toEqual({ label: "Back to Discovery", href: DISCOVERY_LANDING_ROUTE });
   });
 
-  it("exposes exactly the seven documented origins", () => {
+  it("exposes exactly the six documented origins (the my-strategies origin is folded into strategies)", () => {
     expect(Object.keys(FACTSHEET_ORIGINS).sort()).toEqual(
       [
         "admin",
         "allocations",
         "browse",
         "discovery",
-        "my-strategies",
         "recommendations",
         "strategies",
       ].sort(),
@@ -76,6 +74,32 @@ describe("closed map: every key resolves to its label and fixed href", () => {
   it("no origin yields no target", () => {
     expect(backTargetFor(null)).toBeNull();
     expect(parseOrigin({})).toBeNull();
+  });
+});
+
+describe("legacy from value: an old link still lands on the one list (Phase 199 LEAN-01)", () => {
+  // Phase 199 folded the my-strategies origin into strategies. Links already in
+  // the wild (bookmarks, emails, a cached page) still carry the old `from`
+  // value, so it is READ and mapped, never emitted.
+  it("a legacy from=my-strategies reads as the strategies origin (Back to Strategies -> /strategies)", () => {
+    const legacy = { from: "my-strategies" };
+    expect(parseOrigin(legacy)).toEqual({ key: "strategies" });
+    expect(parseOrigin(new URLSearchParams(legacy))).toEqual({ key: "strategies" });
+    expect(backTargetFor(parseOrigin(legacy))).toEqual({
+      label: "Back to Strategies",
+      href: "/strategies",
+    });
+  });
+
+  it("the legacy value is never emitted: a parsed legacy origin builds the strategies href", () => {
+    const parsed = parseOrigin({ from: "my-strategies" });
+    expect(buildFactsheetHref("abc", parsed)).toBe("/factsheet/abc?from=strategies");
+  });
+
+  it("the legacy map is exact-match: near-misses are no origin", () => {
+    for (const from of ["my-strategies ", "MY-STRATEGIES", "my-strategies/x", "my_strategies"]) {
+      expect(parseOrigin({ from })).toBeNull();
+    }
   });
 });
 
@@ -114,7 +138,7 @@ describe("hostile cat values never reach an href", () => {
     (cat) => {
       const origin = parseOrigin({ from: "discovery", cat });
       expect(origin).toEqual({ key: "discovery" });
-      expect(backTargetFor(origin)?.href).toBe(DEFAULT_AUTHENTICATED_ROUTE);
+      expect(backTargetFor(origin)?.href).toBe(DISCOVERY_LANDING_ROUTE);
     },
   );
 
@@ -168,7 +192,6 @@ describe("buildFactsheetHref", () => {
     { key: "discovery" },
     { key: "browse" },
     { key: "allocations" },
-    { key: "my-strategies" },
     { key: "strategies" },
     { key: "recommendations" },
     { key: "admin" },

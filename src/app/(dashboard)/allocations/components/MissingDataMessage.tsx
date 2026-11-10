@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 import type { EquityHistoryRebuildReason } from "@/lib/queries";
 import { apiKeyLabelById } from "@/lib/api-key-label";
-import { formatCloseDay, formatUnpricedDays } from "@/lib/factsheet/returns-unit";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments, type DegradeId, type GapCoverage } from "@/lib/degrade-warnings";
 import type { DayRange, KeyDataGap, KeyDataGapCause } from "../lib/key-data-gaps";
 import {
-  ExchangesPageLink,
   isKnownRebuildReason,
   isNeedsActionReason,
   type NeedsActionReason,
@@ -42,9 +42,10 @@ export type MissingLine = {
 };
 
 /**
- * Every book-level sentence, once. Each is worded for the book ("your book's
- * history"), and each is the one home of its sentence: the old panel's
- * `REASON_LINE` table is gone (Phase 198 plan 10, D-01).
+ * Every book-level sentence's registry id, once. Phase 199 plan 05 moved the words
+ * into `src/lib/degrade-warnings.ts` (each is the one home of its sentence there;
+ * the old panel's `REASON_LINE` table went in Phase 198 plan 10, D-01), so this
+ * table now names which entry tells which reason.
  *
  * Review C2 WR-02: every line states only what a running job does. The pending
  * line says each sync checks again, because the stamper can come back with no
@@ -52,37 +53,40 @@ export type MissingLine = {
  * failed, is not a wait on the daily recompute, so neither line names one
  * (a pre-v2 row IS such a wait and reads `awaiting_derivation`). Review C2
  * round 3 R3-WR-03: the writer could not join an older key's history to the
- * newer key's on one account, so the whole book is hidden; no action is named
- * because none heals it in this release (disconnecting the old key drops its
- * history). Active voice (DESIGN.md Voice).
+ * newer key's on one account, so the whole book is hidden. Its shipped sentence
+ * names no action, and the registry entry adds A-CONTACT-CHECK, which asks for
+ * a check and does not claim to heal the history (nothing here heals it, and
+ * disconnecting the old key drops its history). Active voice (DESIGN.md Voice).
  *
  * Gap 198-UAT-01 (D-10): a book-level line names what the withheld history
  * hides, the equity chart and the ratios built from it, and never names return
  * or risk, because the glance above prints those from the live per-key figures,
- * which this history does not gate (C7, D-06).
+ * which this history does not gate (C7, D-06). Phase 199 plan 05 (D-05, OQ-2)
+ * keeps that wording word for word and adds `for your whole history` and one
+ * action; the registry test and this file's test fail on a book-level line
+ * naming return or risk.
  *
  * Keyed by every reason OUTSIDE the `needs_action` class, so moving a reason
  * between classes fails to compile at the call site until its line moves too.
  */
 const BOOK_LINE = {
-  account_identity_pending:
-    "We are confirming which exchange account each key reads. Each daily sync checks it again.",
-  awaiting_derivation:
-    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden.",
-  derivation_rejected:
-    "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden.",
-  shared_account_history_truncated:
-    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown.",
-  history_read_failed:
-    "We could not load your book's history just now. Reload the page to try again.",
+  account_identity_pending: "allocation.book.identity-pending",
+  awaiting_derivation: "allocation.book.awaiting-derivation",
+  derivation_rejected: "allocation.book.derivation-rejected",
+  shared_account_history_truncated: "allocation.book.shared-account-history-truncated",
+  history_read_failed: "allocation.book.history-read-failed",
 } as const satisfies Record<
   Exclude<EquityHistoryRebuildReason, NeedsActionReason>,
-  string
+  DegradeId
 >;
 
-/** A rebuilding book with no known reason: the shipped sentence, never a guessed cause. */
-const UNKNOWN_REASON_LINE =
-  "The equity chart and the ratios built from it are hidden for now.";
+/** A rebuilding book with no known reason: the registry's sentence, never a guessed cause. */
+const UNKNOWN_REASON_LINE = "allocation.book.unknown-reason" as const satisfies DegradeId;
+
+/** One book-level line, rendered from its registry entry. None takes an argument. */
+function BookLine({ id }: { id: DegradeId }) {
+  return <DegradeLine id={id} segments={degradeSegments(id, undefined as never)} />;
+}
 
 /** The gap cause each needs-action or pending reason is told by. */
 const CAUSE_BY_REASON = {
@@ -154,64 +158,70 @@ export function namedExitKeyIds(
   return ids;
 }
 
-/** `A`, `A and B`, `A, B and C`: no serial comma. Each label is its own bold span. */
-function Labels({ labels }: { labels: readonly string[] }): ReactNode {
-  return labels.map((label, i) => (
-    <span key={`${i}:${label}`}>
-      {i === 0 ? "" : i === labels.length - 1 ? " and " : ", "}
-      <span className="font-semibold text-text-primary">{label}</span>
-    </span>
-  ));
-}
-
-/** `no data for {range}`, `no data since {day}`, or `no complete history yet`. */
-function coverage(gap: KeyDataGap, completeWord: "data" | "complete data"): string {
+/**
+ * What the gap says about when: the expanded days, only the first missing day, or
+ * nothing known. The words ("no data for", "no data since", "no complete history
+ * yet") live in the registry's `coverageText`, not here.
+ */
+function gapCoverage(gap: KeyDataGap): GapCoverage {
   const days = expandDays(gap.ranges);
-  if (days !== null) return `no ${completeWord} for ${formatUnpricedDays(days)}`;
+  if (days !== null) return { days };
   if (gap.firstMissingDay !== null && isDay(gap.firstMissingDay)) {
-    return `no data since ${formatCloseDay(gap.firstMissingDay)}`;
+    return { since: gap.firstMissingDay };
   }
-  return "no complete history yet";
+  return null;
 }
 
+/**
+ * One line per affected key, rendered from its registry entry (Phase 199 plan 05,
+ * D-04): the sentence is the entry's text, the marker is `data-degrade-id`. Each
+ * id is written as a literal at its render site, which is how the scan test
+ * attributes it. The words are the Phase 198 D-01 words, unchanged.
+ */
 function GapLine({ gap, labels }: Resolved): ReactNode {
-  const names = <Labels labels={labels} />;
+  const coverage = gapCoverage(gap);
   switch (gap.cause) {
     case "not_syncing":
+      return (
+        <DegradeLine
+          id="allocation.key-gap.not-syncing"
+          segments={degradeSegments("allocation.key-gap.not-syncing", { labels, coverage })}
+        />
+      );
     case "sync_failing":
       return (
-        <>
-          {names}: {coverage(gap, "data")}. Reconnect the key on the{" "}
-          <ExchangesPageLink /> or wait for the next sync.
-        </>
+        <DegradeLine
+          id="allocation.key-gap.sync-failing"
+          segments={degradeSegments("allocation.key-gap.sync-failing", { labels, coverage })}
+        />
       );
     case "read_incomplete":
       return (
-        <>
-          {names}: {coverage(gap, "complete data")}. Wait for the next sync, or
-          reconnect the key on the <ExchangesPageLink /> if this persists.
-        </>
+        <DegradeLine
+          id="allocation.key-gap.read-incomplete"
+          segments={degradeSegments("allocation.key-gap.read-incomplete", { labels, coverage })}
+        />
       );
     case "duplicate_account":
       return (
-        <>
-          {names} read the same exchange account. Disconnect one of them on the{" "}
-          <ExchangesPageLink /> and the history rebuilds.
-        </>
+        <DegradeLine
+          id="allocation.key-gap.duplicate-account"
+          segments={degradeSegments("allocation.key-gap.duplicate-account", { labels })}
+        />
       );
     case "shared_account_failing":
       return (
-        <>
-          {names}: {coverage(gap, "data")}. Fix or reconnect one of these keys on
-          the <ExchangesPageLink />.
-        </>
+        <DegradeLine
+          id="allocation.key-gap.shared-account-failing"
+          segments={degradeSegments("allocation.key-gap.shared-account-failing", { labels, coverage })}
+        />
       );
     case "identity_pending":
       return (
-        <>
-          {names}: we are confirming which exchange account this key reads. Each
-          daily sync checks it again.
-        </>
+        <DegradeLine
+          id="allocation.key-gap.identity-pending"
+          segments={degradeSegments("allocation.key-gap.identity-pending", { labels })}
+        />
       );
     default: {
       const unhandled: never = gap.cause;
@@ -234,26 +244,18 @@ function NotSyncingLine({ keys }: { keys: readonly NotSyncingKey[] | null }) {
     // Phase 198 plan 09: the one key-label rule, not a hand-built label.
     const name = apiKeyLabelById([keys[0]]).get(keys[0].id);
     return (
-      <>
-        One of your keys, {name}, is not syncing, so we cannot confirm which
-        exchange account it reads. Check it on the <ExchangesPageLink />.
-      </>
+      <DegradeLine
+        id="allocation.key-gap.not-syncing-one-key"
+        segments={degradeSegments("allocation.key-gap.not-syncing-one-key", {
+          label: name ?? "",
+        })}
+      />
     );
   }
   if (keys !== null && keys.length > 1) {
-    return (
-      <>
-        Some of your keys are not syncing, so we cannot confirm which exchange
-        accounts they read. Check them on the <ExchangesPageLink />.
-      </>
-    );
+    return <BookLine id="allocation.book.keys-not-syncing" />;
   }
-  return (
-    <>
-      One of your keys is not syncing, so we cannot confirm which exchange
-      account it reads. Check it on the <ExchangesPageLink />.
-    </>
-  );
+  return <BookLine id="allocation.book.key-not-syncing" />;
 }
 
 /**
@@ -270,25 +272,14 @@ function NeedsActionLine({
 }) {
   switch (reason) {
     case "duplicate_account":
-      return (
-        <>
-          Two of your keys read the same exchange account. Disconnect one of
-          them on the <ExchangesPageLink /> and the history rebuilds.
-        </>
-      );
+      return <BookLine id="allocation.book.duplicate-account" />;
     case "key_not_syncing":
       return <NotSyncingLine keys={notSyncingKeys} />;
     case "shared_account_no_working_key":
       // Review C2 round 3 R3-WR-03: the payload does not say which account,
       // so the line names none (T-167.1.2-22a) and points at the one place
       // the owner can fix a key.
-      return (
-        <>
-          The keys that read one of your exchange accounts are all failing to
-          sync, so that account&apos;s history stops. Fix or reconnect one of
-          them on the <ExchangesPageLink />.
-        </>
-      );
+      return <BookLine id="allocation.book.shared-account-no-working-key" />;
     default: {
       const unhandled: never = reason;
       return unhandled;
@@ -358,7 +349,11 @@ export function missingDataLines({
   if (rebuilding) {
     if (!isKnownRebuildReason(reason)) {
       if (keyLines.length === 0) {
-        bookLines.push({ id: "book:unknown", sortLabel: null, content: UNKNOWN_REASON_LINE });
+        bookLines.push({
+          id: "book:unknown",
+          sortLabel: null,
+          content: <BookLine id={UNKNOWN_REASON_LINE} />,
+        });
       }
     } else if (isNeedsActionReason(reason)) {
       if (!causesPrinted.has(CAUSE_BY_REASON[reason])) {
@@ -370,10 +365,18 @@ export function missingDataLines({
       }
     } else if (reason === "account_identity_pending") {
       if (!causesPrinted.has(CAUSE_BY_REASON[reason])) {
-        bookLines.push({ id: `book:${reason}`, sortLabel: null, content: BOOK_LINE[reason] });
+        bookLines.push({
+          id: `book:${reason}`,
+          sortLabel: null,
+          content: <BookLine id={BOOK_LINE[reason]} />,
+        });
       }
     } else {
-      bookLines.push({ id: `book:${reason}`, sortLabel: null, content: BOOK_LINE[reason] });
+      bookLines.push({
+        id: `book:${reason}`,
+        sortLabel: null,
+        content: <BookLine id={BOOK_LINE[reason]} />,
+      });
     }
   }
   return [...keyLines, ...bookLines];

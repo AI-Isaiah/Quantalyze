@@ -8,7 +8,7 @@ import { render, screen } from "@testing-library/react";
 import React from "react";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 import { MarketingHeaderActions } from "./MarketingHeaderActions";
 
 const SIGN_IN_CLASS =
@@ -88,8 +88,8 @@ describe("MarketingHeaderActions", () => {
     const links = screen.getAllByRole("link");
     expect(links).toHaveLength(1);
     expect(links[0]).toHaveAccessibleName("Go to app");
-    expect(DEFAULT_AUTHENTICATED_ROUTE).toBe("/discovery/crypto-sma");
-    expect(links[0]).toHaveAttribute("href", DEFAULT_AUTHENTICATED_ROUTE);
+    expect(ROLE_HOME_ROUTE).toBe("/home");
+    expect(links[0]).toHaveAttribute("href", ROLE_HOME_ROUTE);
     expect(links[0].getAttribute("class")).toBe(SIGN_UP_CLASS);
     expect(screen.queryByRole("link", { name: "Sign in" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Sign up" })).toBeNull();

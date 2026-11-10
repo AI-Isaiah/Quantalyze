@@ -28,7 +28,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { flushWizardStateSaves } from "@/lib/wizard/localStorage";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
-import { MyStrategiesSection } from "@/app/(dashboard)/my-strategies/MyStrategiesSection";
+import { StrategiesSection } from "@/app/(dashboard)/strategies/StrategiesSection";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -419,8 +419,10 @@ describe("[162-06 / D-162-3] Continue with this key — the two live populations
 describe("[162-06 backstop] the summary shows the CLICKED row's key, for each of two bare keys", () => {
   const renderSection = () =>
     render(
-      <MyStrategiesSection
+      <StrategiesSection
         strategies={[]}
+        origin={{ key: "strategies" }}
+        allocatorFurniture
         placeholderKeys={[KEY_A, KEY_B]}
         portfolioId={null}
         percentiles={null}

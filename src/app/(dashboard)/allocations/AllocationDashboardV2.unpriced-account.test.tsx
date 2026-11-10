@@ -107,8 +107,11 @@ const H = (label: string, holeDays: number): Account => ({
 });
 
 const TID = "dashboard-unpriced-account-note";
-const TAIL_ONE = "no BTC close is stored for that day yet, so it cannot be priced in USD.";
-const TAIL_MANY = "no BTC close is stored for that day yet, so they cannot be priced in USD.";
+// Phase 199 plan 03 (CD-05): dated and history sentences end with A-WAIT-CLOSE, whole ones with A-CONTACT-CHECK.
+const WAIT_CLOSE = " It is priced once that day's BTC close is stored.";
+const CONTACT_CHECK = " Use the contact form to have it checked.";
+const TAIL_ONE = `no BTC close is stored for that day yet, so it cannot be priced in USD.${WAIT_CLOSE}`;
+const TAIL_MANY = `no BTC close is stored for that day yet, so they cannot be priced in USD.${WAIT_CLOSE}`;
 
 function renderWith(
   accounts: Account[] | undefined,
@@ -160,7 +163,7 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
     renderWith([A("Alpha", "2026-10-06"), A("Mid", "2026-10-08"), A("Zed", "2026-10-08")]);
     expect(screen.getByTestId(TID).textContent).toBe(
       "The total leaves out Alpha for Oct 6, 2026; Mid and Zed for Oct 8, 2026: " +
-        "no BTC close is stored for those days yet, so they cannot be priced in USD.",
+        "no BTC close is stored for those days yet, so they cannot be priced in USD." + WAIT_CLOSE,
     );
   });
 
@@ -169,14 +172,14 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
     it("one account: says it is out of the total, right now, with no date and no 'yet'", () => {
       renderWith([W("BTC desk")]);
       expect(screen.getByTestId(TID).textContent).toBe(
-        "The total leaves out BTC desk entirely: it cannot be priced in USD right now.",
+        "The total leaves out BTC desk entirely: it cannot be priced in USD right now." + CONTACT_CHECK,
       );
     });
 
     it("several: joined by ' and ', plural, sorted by label", () => {
       renderWith([W("Zed"), W("Alpha"), W("Mid")]);
       expect(screen.getByTestId(TID).textContent).toBe(
-        "The total leaves out Alpha, Mid and Zed entirely: they cannot be priced in USD right now.",
+        "The total leaves out Alpha, Mid and Zed entirely: they cannot be priced in USD right now." + CONTACT_CHECK,
       );
     });
 
@@ -184,7 +187,7 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
       renderWith([W("Alpha"), A("Mid"), A("Zed")]);
       expect(screen.getByTestId(TID).textContent).toBe(
         `The total leaves out Mid and Zed for Oct 8, 2026: ${TAIL_MANY} ` +
-          "The total also leaves out Alpha entirely: it cannot be priced in USD right now.",
+          "The total also leaves out Alpha entirely: it cannot be priced in USD right now." + CONTACT_CHECK,
       );
     });
   });
@@ -194,7 +197,7 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
       renderWith([H("BTC desk", 2)]);
       const text = screen.getByTestId(TID).textContent;
       expect(text).toBe(
-        "The equity history leaves out BTC desk on 2 days: no BTC close is stored for those days, so it could not be priced in USD.",
+        "The equity history leaves out BTC desk on 2 days: no BTC close is stored for those days, so it could not be priced in USD." + WAIT_CLOSE,
       );
       // The account IS in the headline total: the sentence must not say otherwise.
       expect(text).not.toMatch(/The total/);
@@ -204,14 +207,14 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
     it("one day: singular", () => {
       renderWith([H("BTC desk", 1)]);
       expect(screen.getByTestId(TID).textContent).toBe(
-        "The equity history leaves out BTC desk on 1 day: no BTC close is stored for that day, so it could not be priced in USD.",
+        "The equity history leaves out BTC desk on 1 day: no BTC close is stored for that day, so it could not be priced in USD." + WAIT_CLOSE,
       );
     });
 
     it("several accounts: each with its own count, plural tail", () => {
       renderWith([H("Zed", 3), H("Alpha", 1)]);
       expect(screen.getByTestId(TID).textContent).toBe(
-        "The equity history leaves out Alpha on 1 day and Zed on 3 days: no BTC close is stored for those days, so they could not be priced in USD.",
+        "The equity history leaves out Alpha on 1 day and Zed on 3 days: no BTC close is stored for those days, so they could not be priced in USD." + WAIT_CLOSE,
       );
     });
 
@@ -219,10 +222,25 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
       renderWith([H("Alpha", 2), A("Mid"), W("Zed")]);
       expect(screen.getByTestId(TID).textContent).toBe(
         `The total leaves out Mid for Oct 8, 2026: ${TAIL_ONE} ` +
-          "The total also leaves out Zed entirely: it cannot be priced in USD right now. " +
-          "The equity history leaves out Alpha on 2 days: no BTC close is stored for those days, so it could not be priced in USD.",
+          "The total also leaves out Zed entirely: it cannot be priced in USD right now." + CONTACT_CHECK + " " +
+          "The equity history leaves out Alpha on 2 days: no BTC close is stored for those days, so it could not be priced in USD." + WAIT_CLOSE,
       );
     });
+  });
+
+  it("each sentence kind carries its own registry id; the whole sentence's action is the contact-form link", () => {
+    renderWith([H("Alpha", 2), A("Mid"), W("Zed")]);
+    const note = screen.getByTestId(TID);
+    expect(
+      Array.from(note.querySelectorAll("[data-degrade-id]")).map((n) => n.getAttribute("data-degrade-id")),
+    ).toEqual([
+      "allocation.unpriced-dated",
+      "allocation.unpriced-whole",
+      "allocation.unpriced-history",
+    ]);
+    const link = note.querySelector("a");
+    expect(link?.textContent).toBe("contact form");
+    expect(link?.getAttribute("href")).toContain("topic=support");
   });
 
   it("is absent when nothing is omitted, when the prop is absent, and while the history is rebuilding", () => {

@@ -66,6 +66,9 @@ export function ProvenanceNote({
       role="status"
       aria-live="polite"
       data-testid={testId}
+      // Marker for the default window note only: a caller that passes its own `message`
+      // (the membership variant) is a different warning and is registered by its owner.
+      data-degrade-id={message === undefined ? "scenario.provenance" : undefined}
       className="mt-6 flex items-start justify-between gap-3 rounded-md border border-border bg-surface-subtle px-4 py-3"
     >
       <p className="text-fixed-13 leading-relaxed text-text-secondary">

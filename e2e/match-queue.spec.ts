@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { SELECTORS, type E2EPage } from "./helpers/discovery-selectors";
+import { isPostLoginPath } from "./helpers/login";
 
 // Match Queue E2E tests (Phase 4 Task 14 from the perfect-match plan).
 //
@@ -42,7 +43,10 @@ async function login(page: E2EPage) {
   await page.fill(SELECTORS.loginEmail, ADMIN_EMAIL!);
   await page.fill(SELECTORS.loginPassword, ADMIN_PASSWORD!);
   await page.click(SELECTORS.loginSubmit);
-  await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
+  // Phase 199: the admin account lands on /admin.
+  await page.waitForURL((url) => isPostLoginPath(url.pathname), {
+    timeout: 10000,
+  });
 }
 
 test.describe("Match Queue — admin gate", () => {

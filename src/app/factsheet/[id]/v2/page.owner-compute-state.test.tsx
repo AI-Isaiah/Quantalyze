@@ -78,6 +78,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveComputeState } from "@/lib/compute-state";
+import { degradePlainText, degradeSegments } from "@/lib/degrade-warnings";
 import { withPublishedOnly } from "@/lib/visibility";
 import {
   fetchAndBuildPayloadWithReason,
@@ -97,8 +98,10 @@ const NOW_MS = Date.parse(NOW_ISO);
 const minutesAgo = (m: number) => new Date(NOW_MS - m * 60_000).toISOString();
 
 // Locked copy, typed as literals (UI-SPEC § KCS-09).
+// 199-18 (SC-4): the failed and stalled lines name the day of the last attempt. Every fixture job
+// below is minutes before NOW_ISO, so its day is Sep 24, 2026 (UTC).
 const FAIL_PERMANENT =
-  "The last computation stopped on a problem that retrying alone will not resolve.";
+  "The last computation, on Sep 24, 2026, stopped on a problem that retrying alone will not resolve.";
 const CONTACT_PERMANENT = "Use the contact form to have it resolved.";
 const RELOAD = "Reload this page to see the latest status.";
 const CONTACT_CHECK = "Use the contact form to have it checked.";
@@ -106,7 +109,7 @@ const RETRY_READ = "Reload this page to try again.";
 const UNREADABLE_LINE =
   "We could not read this strategy's computation status.";
 const FAIL_TRANSIENT =
-  "The last computation stopped after its automatic retries ran out.";
+  "The last computation, on Sep 24, 2026, stopped after its automatic retries ran out.";
 const SHAPE_SINGLE =
   "Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.";
 const SHAPE_UNLINKED =
@@ -495,7 +498,7 @@ const STATE_ROWS: ReadonlyArray<{
     id: "KCS09-STALLED (stitch heartbeat older than 12 minutes)",
     rows: [stitchRunning(["successful", "in_process", "waiting"], 13)],
     memberCount: 3,
-    line: "The computation for this composite strategy stopped reporting progress more than 12 minutes ago.",
+    line: "The last computation, on Sep 24, 2026, for this composite strategy stopped reporting progress more than 12 minutes ago.",
     tone: "text-warning",
     remedy: SHAPE_COMPOSITE,
   },
@@ -516,21 +519,21 @@ const STATE_ROWS: ReadonlyArray<{
   {
     id: "KCS09-FAIL-ORPHANED",
     rows: [chainJob("process_key_long", "failed_final", "orphaned")],
-    line: "The last computation stopped before it finished because the process running it went away.",
+    line: "The last computation, on Sep 24, 2026, stopped before it finished because the process running it went away.",
     tone: "text-warning",
     remedy: SHAPE_SINGLE,
   },
   {
     id: "KCS09-FAIL-UNKNOWN",
     rows: [chainJob("compute_analytics_from_csv", "failed_final", "unknown")],
-    line: "The last computation stopped, and the service could not tell why.",
+    line: "The last computation, on Sep 24, 2026, stopped, and the service could not tell why.",
     tone: "text-warning",
     remedy: SHAPE_SINGLE,
   },
   {
     id: "KCS09-FAIL-OTHER (error_kind null)",
     rows: [chainJob("compute_analytics_from_csv", "failed_final", null)],
-    line: "The last computation did not finish.",
+    line: "The last computation, on Sep 24, 2026, did not finish.",
     tone: "text-warning",
     remedy: SHAPE_SINGLE,
   },
@@ -882,8 +885,10 @@ const MINT_B =
   "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
 const MINT_UNREADABLE =
   "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
+// 199-18 (UI-SPEC "Factsheet" row 3): the shipped KCS10 sentence, unchanged, then the one action a
+// visitor has (registered as factsheet.public-pending).
 const PUBLIC_SENTENCE =
-  "The detailed factsheet for this strategy is not available yet.";
+  "The detailed factsheet for this strategy is not available yet. Check with the person who shared this link before trying again.";
 // Phase 167.2.1 CONTEXT D-02, typed as literals. Reworded by 167.2.1-REVIEW
 // CR-01 and IN-02 (2026-09-26): the reason is stated from the stored results.
 const UNBUILDABLE_SHORT =
@@ -1316,6 +1321,7 @@ describe("KCS-10 (S8) — the public pending placeholder says one neutral senten
     expect(after).toHaveLength(1);
     expect(after[0].tagName).toBe("P");
     expect(after[0].textContent).toBe(PUBLIC_SENTENCE);
+    expect(after[0].getAttribute("data-degrade-id")).toBe("factsheet.public-pending");
     expect(after[0].className).toBe("mt-6 text-fixed-13 text-text-secondary");
     expect(article.querySelector(".italic")).toBeNull();
     expect(article.querySelector('[role="note"]')).toBeNull();
@@ -1400,3 +1406,103 @@ function findViewPayload(node: unknown): unknown {
   if (el.props?.payload != null) return el.props.payload;
   return findViewPayload(el.props?.children ?? null);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 199 plan 18 (D-04, SC-4): the state line is registered. The section carries the id of the
+// registry entry that matches the line printed, and the words on screen (state line, then the
+// remedy) are the registry entry's words, so the registry cannot drift from the page.
+// ---------------------------------------------------------------------------
+describe("199-18 — the owner state section carries its registered id, and its words are the registry's", () => {
+  const markerOf = (section: Element | null) => section?.getAttribute("data-degrade-id") ?? null;
+  const printed = (stateLine: Element | null, remedyLine: Element | null) =>
+    `${stateLine!.textContent} ${remedyLine!.textContent}`;
+
+  it("a failed computation with a readable day: the dated entry, and the printed words ARE its words", async () => {
+    givenOwnerPendingDraft();
+    givenJobs(TRIGGER_ROWS);
+    const { section, stateLine, remedyLine } = await renderOwnerPending();
+    expect(markerOf(section)).toBe("factsheet.owner-state-dated");
+    expect(printed(stateLine, remedyLine)).toBe(
+      degradePlainText(
+        degradeSegments("factsheet.owner-state-dated", {
+          state: { state: "failed", errorKind: "permanent" },
+          day: "2026-09-24",
+          action: "A-CONTACT-RESOLVE",
+        }),
+      ),
+    );
+  });
+
+  it("a stalled composite: the dated entry, ending on the composite remedy's registered words", async () => {
+    givenOwnerPendingDraft();
+    STATE.memberCountResult = { count: 3, error: null };
+    givenJobs([stitchRunning(["successful", "in_process", "waiting"], 13)]);
+    const { section, stateLine, remedyLine } = await renderOwnerPending();
+    expect(markerOf(section)).toBe("factsheet.owner-state-dated");
+    expect(printed(stateLine, remedyLine)).toBe(
+      degradePlainText(
+        degradeSegments("factsheet.owner-state-dated", {
+          state: { state: "stalled" },
+          day: "2026-09-24",
+          action: "A-COMPOSITE-CONTACT",
+        }),
+      ),
+    );
+  });
+
+  it("a failed computation whose job stamp does not parse: the shipped sentence with no day, and the undated entry", async () => {
+    givenOwnerPendingDraft();
+    givenJobs([
+      job({ kind: "derive_broker_dailies", status: "failed_final", error_kind: "permanent", created_at: "garbage" }),
+    ]);
+    const { section, stateLine, remedyLine } = await renderOwnerPending();
+    expect(markerOf(section)).toBe("factsheet.owner-state-undated");
+    expect(stateLine!.textContent).toBe("The last computation stopped on a problem that retrying alone will not resolve.");
+    expect(stateLine!.textContent).not.toContain(", on ");
+    expect(printed(stateLine, remedyLine)).toBe(
+      degradePlainText(
+        degradeSegments("factsheet.owner-state-undated", {
+          state: { state: "failed", errorKind: "permanent" },
+          action: "A-CONTACT-RESOLVE",
+        }),
+      ),
+    );
+  });
+
+  it("a job read that fails: the unreadable line, undated, with the read-again remedy", async () => {
+    givenOwnerPendingDraft();
+    STATE.rpcResult = { data: null, error: { message: "boom", code: "XX000" } };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { section, stateLine, remedyLine } = await renderOwnerPending();
+      expect(markerOf(section)).toBe("factsheet.owner-state-undated");
+      expect(printed(stateLine, remedyLine)).toBe(
+        degradePlainText(
+          degradeSegments("factsheet.owner-state-undated", { state: { state: "unreadable" }, action: "A-RELOAD" }),
+        ),
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("a queued, retrying or running line is in progress, marked as such and dateless", async () => {
+    givenOwnerPendingDraft();
+    givenJobs([chainJob("process_key_long", "running")]);
+    const running = await renderOwnerPending();
+    expect(markerOf(running.section)).toBe("factsheet.owner-state-working");
+    expect(running.stateLine!.textContent).not.toContain(", on ");
+  });
+
+  it("a finished computation (the build could not be made): the undated entry and the contact-check remedy", async () => {
+    givenOwnerPendingDraft();
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+    const { section, stateLine, remedyLine } = await renderOwnerPending();
+    expect(markerOf(section)).toBe("factsheet.owner-state-undated");
+    expect(printed(stateLine, remedyLine)).toBe(
+      degradePlainText(
+        degradeSegments("factsheet.owner-state-undated", { state: { state: "finished" }, action: "A-CONTACT-CHECK" }),
+      ),
+    );
+  });
+});

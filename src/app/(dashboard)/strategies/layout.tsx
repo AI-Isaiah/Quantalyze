@@ -1,34 +1,33 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { requireRolePage } from "@/lib/auth/requireRolePage";
 
-// Pin to dynamic rendering — the role guard must run on every request. A
-// future caching PR that introduced `revalidate > 0` here would be a
-// fail-open vulnerability (a cached "manager" render served to a wrong-role
-// visitor). force-dynamic prevents that. Mirrors discovery/layout.tsx.
+// Pin to dynamic rendering. This layout no longer guards a role, but the page
+// under it reads the viewer's role and builds role furniture on every request:
+// a cached render would serve one viewer's controls (a manager's Edit link) to
+// another. force-dynamic prevents that. Mirrors discovery/layout.tsx.
 export const dynamic = "force-dynamic";
 
 /**
- * Phase 109 ROLE-04 — manager segment layout for the whole /strategies/* subtree.
+ * Phase 199 D-01 (LEAN-01) - session check for the whole /strategies/* subtree.
  *
- * A `layout.tsx` is the outermost component in its route segment: it wraps
- * `page.js` AND every descendant segment's page (Next 16 docs,
- * layout.md — "layout.js is the outermost component in a route segment.
- * It wraps template.js, error.js, loading.js, not-found.js, and page.js";
- * layouts-and-pages.md — `children` is populated with the route segments the
- * layout is wrapping). A sibling `page.tsx` guard does NOT cover nested routes,
- * so this layout — not a per-index-page guard — is the single guard site for
- * the sell-side subtree: strategies (index) + new + new/wizard + [id]/edit.
+ * Until Phase 199 this layout was the single manager guard for the subtree
+ * (Phase 109 ROLE-04). D-01 opens the /strategies INDEX to every strategy owner
+ * (allocators, managers and `both`), so this layout calls no `requireRolePage`
+ * and redirects no role. It keeps only the session check.
  *
- * The role guard is at the top level, OUTSIDE any try/catch: requireRolePage's
- * wrong-role redirect() throws NEXT_REDIRECT (redirect.md) and a wrapping catch
- * would swallow it (fail-open). Wrong-role visitors are bounced to their own
- * role home; role='both' owns both surfaces and is never redirected.
+ * The sell-side sub-routes stay manager-only through two guard layouts of
+ * their own, which Next 16 wraps around every descendant page (layout.md:
+ * "layout.js is the outermost component in a route segment. It wraps
+ * template.js, error.js, loading.js, not-found.js, and page.js"):
+ *   - `strategies/new/layout.tsx`   -> /strategies/new and /strategies/new/wizard
+ *   - `strategies/[id]/layout.tsx`  -> /strategies/[id]/edit
+ * `src/__tests__/strategies-guard-coverage.test.ts` fails when a non-index
+ * strategies page has no such guard of its own, and also fails when this layout
+ * or the index page calls `requireRolePage` (T-199-29).
  *
- * Phase-110 seam (CONTRIB): Phase 110 will intentionally admit allocators to
- * the contribution wizard at /strategies/new/wizard. That exception must be
- * carved there (relax this layout or intercept at new/wizard) — NOT weakened
- * here. Guarding the whole subtree manager-only is correct for the 109 close.
+ * The index page reads `profiles.role` itself and decides its furniture per role;
+ * its DB-error discipline mirrors `requireRolePage` (a read error throws, a role
+ * is never guessed).
  */
 export default async function StrategiesLayout({
   children,
@@ -43,8 +42,6 @@ export default async function StrategiesLayout({
   if (!user) {
     redirect("/login?redirect=/strategies");
   }
-
-  await requireRolePage(supabase, user, "manager");
 
   return <>{children}</>;
 }

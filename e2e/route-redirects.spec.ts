@@ -73,6 +73,36 @@ test.describe("selective route moves — anon redirect canary (NAV-01)", () => {
     ).not.toContain("/login");
   });
 
+  // Phase 199 MANAGERHOME (D-01, CD-06) - `/my-strategies` is deleted and 308s to the
+  // one strategies list. First hop only, chain not followed: following it would end
+  // at /login for an anonymous visitor (the proxy gating /strategies), which is the
+  // destination's own auth and not this move. The query rides along, and the old
+  // link must never be answered by the auth form (the #512 class).
+  test("/my-strategies?x=1 308-redirects to /strategies and keeps the query (never 307→login)", async ({
+    request,
+  }) => {
+    const res = await request.get("/my-strategies?x=1", { maxRedirects: 0 });
+
+    expect(
+      res.status(),
+      `/my-strategies?x=1 returned HTTP ${res.status()} - expected a 308 permanent redirect (next.config.ts redirects())`,
+    ).toBe(308);
+
+    const location = res.headers()["location"] ?? "";
+    expect(
+      location,
+      `/my-strategies?x=1 308 Location was "${location}" - expected /strategies`,
+    ).toContain("/strategies");
+    expect(
+      location,
+      `/my-strategies?x=1 308 Location was "${location}" - the query string was dropped`,
+    ).toContain("x=1");
+    expect(
+      location,
+      `/my-strategies?x=1 308 Location was "${location}" - the move must land on /strategies, NOT /login (the #512 regression class)`,
+    ).not.toContain("/login");
+  });
+
   // Phase 195 TRIM (D-03), 2026-11-07 — the portfolio report is retired. An old
   // link by EITHER URL must end on the named retired page, never a login wall,
   // a 404, or a JSON/PDF error.

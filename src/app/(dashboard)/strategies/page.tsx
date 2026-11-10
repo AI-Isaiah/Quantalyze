@@ -4,38 +4,52 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StrategyActions } from "@/components/strategy/StrategyActions";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
-import { StrategyTable } from "@/components/strategy/StrategyTable";
+import { StrategiesSection } from "./StrategiesSection";
+import { StrategiesLegend } from "./StrategiesLegend";
+import { StrategiesEmptyState } from "./StrategiesEmptyState";
+import { kSentence, mapCopy, NULL_COPY } from "./comparison-note";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 // Server component: import the predicate from the NON-client module. Importing
 // it from ShareableLink.tsx compiles but throws at request time.
 import { isPublishedStatus, shareAffordanceMode } from "@/lib/share-affordance";
 // Same rule for the Phase 167.2 predicates and copy: every module CALLED here
 // carries no client directive. AllocatorSyncStatus is only RENDERED.
-import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import { EXCHANGE_DISPLAY, isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 import {
   deriveComputeState,
   recipientArm,
+  selectFactsheetJob,
+  type ComputeJobRow,
   type ComputeState,
   type RecipientArm,
 } from "@/lib/compute-state";
 import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
 import {
   compositeHistoryOf,
+  resolveStrategyShape,
   shouldPreferStitch,
+  type CompositeHistory,
   type CompositeMemberCount,
+  type StrategyShape,
 } from "@/lib/strategy-shape";
 import { captureToSentry } from "@/lib/sentry-capture";
 // Phase 170.7 (D-01, D-03): the owner list is read through the SAME explicit
 // ranking allowlist Discovery uses and shaped by the SAME shaper, so a strategy
 // with no analytics (or a failed run) reads a dash and never a number.
-import { CATEGORY_RANKING_ANALYTICS_COLUMNS, shapeRowAnalytics } from "@/lib/queries";
+import {
+  CATEGORY_RANKING_ANALYTICS_COLUMNS,
+  getOwnRowPercentiles,
+  getRealPortfolio,
+  getStrategylessActiveKeys,
+  readPublicVerificationSignals,
+  shapeRowAnalytics,
+} from "@/lib/queries";
 import { extractAnalytics } from "@/lib/utils";
 import type { Strategy } from "@/lib/types";
 import {
-  KEY_STATUS_UNREADABLE_NOTE,
+  ownerRemedy,
   probeUnreadableShareNote,
   recipientShareNoteFor,
-  STRATEGIES_LIST_UNREADABLE,
   unbuildableNoteKindOf,
   untrustedKeyCaption,
 } from "@/lib/status-surface-copy";
@@ -51,20 +65,38 @@ import Link from "next/link";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { redirect } from "next/navigation";
+import { roleSurfaceHome } from "@/lib/routing/role-home";
+import { apiKeyLabelById } from "@/lib/api-key-label";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import {
+  degradeSegments,
+  viewerRemedyAction,
+  type StaleAction,
+} from "@/lib/degrade-warnings";
+import {
+  HEALTH_TONE,
+  healthWord,
+  rowChipStatus,
+  strategyHealthOf,
+  type StrategyHealth,
+} from "@/lib/strategy-health";
 import type { ReactNode } from "react";
 import type { Metadata } from "next";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
  * Phase 167.2 / KCS-06 — the key-status projection this page reads. An
- * ALLOWLIST of the five columns the pill needs: `api_keys` is column-granted,
- * and the encrypted columns must never ride a wide select.
+ * ALLOWLIST of the six columns the pill and its caption need: `api_keys` is
+ * column-granted, and the encrypted columns must never ride a wide select.
+ * Phase 199 plan 12 (T-199-18) adds `label` only (the key's nickname, in
+ * `API_KEY_USER_COLUMNS_ARR`), so the caption can name the key.
  */
-const KEY_STATUS_COLUMNS = "id, exchange, sync_status, sync_error, last_sync_at";
+const KEY_STATUS_COLUMNS = "id, exchange, label, sync_status, sync_error, last_sync_at";
 
 interface KeyStatusRow {
   id: string;
   exchange: string;
+  label: string;
   sync_status: string | null;
   sync_error: string | null;
   last_sync_at: string | null;
@@ -99,13 +131,15 @@ interface UntrustedKeyLine {
  * KCS-06 — the S4 lines for one row: its feeding keys that are untrusted
  * (`isUntrustedKeySyncStatus`, never a local equality), grouped by status in
  * first-seen order over `feedingKeyIds`. The pill's error, time and exchange
- * come from the first key seen in that status; the caption names every
- * distinct exchange in it. A key id with no row read (not the owner's, or the
- * read failed) contributes nothing: no guessed pill.
+ * come from the first key seen in that status; the caption names every key in
+ * it by its `keyLabels` entry (Phase 199 plan 12: built once per page by
+ * `apiKeyLabelById`, never joined by hand). A key id with no row read (not the
+ * owner's, or the read failed) contributes nothing: no guessed pill.
  */
 function untrustedKeyLines(
   feedingKeyIds: readonly string[],
   keysById: ReadonlyMap<string, KeyStatusRow>,
+  keyLabels: ReadonlyMap<string, string>,
 ): UntrustedKeyLine[] {
   const groups = new Map<string, KeyStatusRow[]>();
   for (const id of feedingKeyIds) {
@@ -117,9 +151,10 @@ function untrustedKeyLines(
   }
   return [...groups].map(([status, keys]) => ({
     status,
+    // `keyLabels` is built over the same rows as `keysById`, so a read key
+    // always has a label; the fallback is the masked-tail shape, never a raw id.
     caption: untrustedKeyCaption(
-      keys.map((k) => k.exchange),
-      keys.length,
+      keys.map((k) => keyLabels.get(k.id) ?? `${k.exchange} \u2014 \u2022\u2022\u2022\u2022`),
     ),
     first: keys[0],
   }));
@@ -150,7 +185,33 @@ function computationStatusOf(embed: unknown): string | null {
  * three-valued and `failed`, `stalled`, `finished` and `never_started` all map
  * to `not_available`, so a note that depends on "the jobs FINISHED" must read
  * `state.state`, never the arm.
+ *
+ * Phase 199 plan 16 (D-03): also returns what the Analytics failed detail needs
+ * from the SAME read, so a row never reads its jobs twice: the day of the factsheet
+ * job the state was derived from (`jobDayOf`) and the composite history (the
+ * input of the row's shape, so a remedy never names a control the shape lacks).
+ * A failed read has neither (`jobDay` null, history `unreadable`).
  */
+interface ArmFacts {
+  arm: RecipientArm;
+  state: ComputeState | null;
+  /** The last computation's UTC day (`YYYY-MM-DD`), or null when it could not be read. */
+  jobDay: string | null;
+  compositeHistory: CompositeHistory;
+}
+
+/**
+ * The UTC day of a compute job: `claimed_at`, else `created_at` (UI-SPEC "Row note, the
+ * Health detail"). Null for no job, an absent timestamp or one that does not parse, so
+ * the caller prints the unreadable sentence and never a guessed day.
+ */
+function jobDayOf(job: ComputeJobRow | null | undefined): string | null {
+  const raw = job?.claimed_at ?? job?.created_at;
+  if (typeof raw !== "string") return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : null;
+}
+
 async function readRecipientArm(
   supabase: Awaited<ReturnType<typeof createClient>>,
   strategyId: string,
@@ -159,7 +220,7 @@ async function readRecipientArm(
   // for a proven single-key strategy (a linked key, or no stitch in the rows
   // read below), because RLS can fabricate a zero count.
   stitchInputs: { memberCount: CompositeMemberCount; apiKeyId: string | null },
-): Promise<{ arm: RecipientArm; state: ComputeState }> {
+): Promise<ArmFacts> {
   // 167.2-REVIEW-SFH M-5: the shared bounded read, which re-asks once at the
   // RPC's cap when the first window is full of non-chain rows. A throw is
   // folded into the same failed-read arm.
@@ -191,7 +252,12 @@ async function readRecipientArm(
       tags: { route: "strategies/page", stage: "compute-state" },
     });
     const state = deriveComputeState({ readError: true });
-    return { arm: recipientArm(state), state };
+    return {
+      arm: recipientArm(state),
+      state,
+      jobDay: null,
+      compositeHistory: "unreadable",
+    };
   }
   if (read.windowFull) {
     // Deterministic, and a reload cannot fix it, so it is logged and captured
@@ -205,16 +271,19 @@ async function readRecipientArm(
       { tags: { route: "strategies/page", stage: "compute-state-window-full" } },
     );
   }
+  const nowMs = Date.now();
+  const compositeHistory = compositeHistoryOf(read);
+  const preferStitch = shouldPreferStitch({ ...stitchInputs, compositeHistory });
   const state = deriveComputeState({
     rows: read.rows,
     readExhaustive: read.readExhaustive,
-    nowMs: Date.now(),
-    preferStitch: shouldPreferStitch({
-      ...stitchInputs,
-      compositeHistory: compositeHistoryOf(read),
-    }),
+    nowMs,
+    preferStitch,
   });
-  return { arm: recipientArm(state), state };
+  // The same selection `deriveComputeState` made, so the day is the day of the job
+  // the state describes.
+  const jobDay = jobDayOf(selectFactsheetJob(read.rows, { preferStitch, nowMs }));
+  return { arm: recipientArm(state), state, jobDay, compositeHistory };
 }
 
 /**
@@ -397,6 +466,54 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // Phase 199 D-01 / D-02 (LEAN-01): the index admits every strategy owner, so
+  // the layout no longer guards a role and THIS page reads it, to decide which
+  // furniture each row carries. The failure discipline mirrors
+  // `requireRolePage`'s (T-199-15): a DB error is logged, captured and THROWN
+  // to error.tsx, never turned into a guessed role (a guessed role is a guessed
+  // set of controls); a missing profile row throws too; an unknown role is
+  // denied by default and sent where the guard would have sent it. Nothing
+  // below this block reads for a viewer whose role is not known.
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (profileError) {
+    console.error("[strategies/page] profile lookup failed", {
+      user_id: user.id,
+      code: profileError.code,
+      message: profileError.message,
+    });
+    captureToSentry(profileError, {
+      tags: { route: "strategies/page", stage: "role" },
+      extra: { user_id: user.id, message: profileError.message ?? "" },
+      level: "error",
+    });
+    throw profileError;
+  }
+  if (!profile) {
+    const missing = new Error("Profile row missing for auth user");
+    console.error("[strategies/page] profile row missing for auth user", {
+      user_id: user.id,
+    });
+    captureToSentry(missing, {
+      tags: { route: "strategies/page", stage: "role-missing" },
+      extra: { user_id: user.id },
+      level: "warning",
+    });
+    throw missing;
+  }
+  const role = profile.role;
+  // `redirect()` throws NEXT_REDIRECT, so it sits at the top level, outside any
+  // try/catch (redirect.md).
+  if (role !== "manager" && role !== "allocator" && role !== "both") {
+    redirect(roleSurfaceHome(role));
+  }
+  // D-02: `both` is each role at once, never a third mode.
+  const isManager = role === "manager" || role === "both";
+  const isAllocator = role === "allocator" || role === "both";
+
   // Filter out wizard drafts — they belong to the wizard flow and
   // have their own Resume banner at /strategies/new/wizard. Including
   // them here would render a confusing "edit" link pointing at the
@@ -404,18 +521,25 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // See migration 031: `source` discriminates wizard drafts from
   // legacy / admin_import drafts. The PostgREST `.or()` filter below
   // keeps legacy drafts visible while hiding wizard-in-progress rows.
+  // Phase 199 plan 10 (CD-10): that filter is the MANAGER's. `/strategies/new/wizard`
+  // stays manager-guarded (the Phase 110 exception is the overlay, not the route),
+  // so for an allocator-only viewer the banner's target would only bounce them,
+  // and hiding the draft would drop a row /my-strategies always showed. An
+  // allocator-only viewer therefore keeps a wizard draft as a Draft row with no
+  // banner; manager and `both` keep the filter and the banner.
   // Phase 170.7 (D-01, D-03): `*` plus the explicit ranking allowlist. Never
   // `strategy_analytics (*)` (the owner-only exemption inside `getMyStrategies`,
   // RANK-02), and never `getMyStrategies` itself: it drops archived rows and
   // does not hide wizard drafts. The owner scope below is the page's own, with
   // RLS (`strategies_read`, `analytics_read`) as the backstop. `computation_status`
   // is in the allowlist, so the KCS-12 reads below keep their input.
-  const { data: listData, error: strategiesError } = await supabase
+  const ownerList = supabase
     .from("strategies")
     .select(`*, strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`)
-    .eq("user_id", user.id)
-    .or("source.neq.wizard,status.neq.draft")
-    .order("created_at", { ascending: false });
+    .eq("user_id", user.id);
+  const { data: listData, error: strategiesError } = await (
+    isManager ? ownerList.or("source.neq.wizard,status.neq.draft") : ownerList
+  ).order("created_at", { ascending: false });
   // The cast is type-only: the `->-1->>` alias in the allowlist defeats
   // postgrest-js's select parser (RESEARCH Pitfall 4). `null` stays `null`, so
   // the unreadable arm below still sees a missing rows array.
@@ -448,15 +572,19 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // This second query surfaces a Resume banner without re-rendering the
   // hidden row inline — preserving the StrategyForm-routing safety
   // invariant while closing the dogfood UX gap (2026-05-21).
-  const { data: wizardDraft } = await supabase
-    .from("strategies")
-    .select("id, name, created_at, review_note")
-    .eq("user_id", user.id)
-    .eq("source", "wizard")
-    .eq("status", "draft")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Manager and `both` only (CD-10): an allocator-only viewer has no banner, so
+  // the read is not made at all rather than made and thrown away.
+  const { data: wizardDraft } = isManager
+    ? await supabase
+        .from("strategies")
+        .select("id, name, created_at, review_note")
+        .eq("user_id", user.id)
+        .eq("source", "wizard")
+        .eq("status", "draft")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+    : { data: null };
 
   // M-0255: a rejected wizard draft is the SAME hidden row (source='wizard',
   // status='draft') but with review_note set by the admin reject path. The
@@ -511,7 +639,9 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
     }
   }
 
-  const { data: introRequests } = strategyIds.length > 0
+  // D-02: introductions are a manager surface. An allocator's page makes no
+  // `contact_requests` read at all (not a read thrown away), and `both` reads.
+  const { data: introRequests } = isManager && strategyIds.length > 0
     ? await supabase
         .from("contact_requests")
         .select("id, status, message, created_at, strategy_id, founder_notes, profiles!contact_requests_allocator_id_fkey(display_name, company), strategies!contact_requests_strategy_id_fkey(id, name, codename, disclosure_tier)")
@@ -530,7 +660,8 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // alone (truthful, partial). A failed key read renders NO mark at all (an
   // error is not "healthy", but it is not a known-bad key either, so no pill
   // is guessed) and is logged. Since 167.2-REVIEW-SFH H-3 either failure is
-  // also captured and renders the page-level KEY_STATUS_UNREADABLE_NOTE, so
+  // also captured and renders the page-level key-status line (registry id
+  // `strategies.key-status-unreadable`), so
   // the absence of a pill stops reading as "healthy" during an outage.
   // 167.2-REVIEW-SFH H-3: on this page the healthy state is the ABSENCE of a
   // pill, so a failed key-status or member read would render every row as
@@ -593,6 +724,8 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
       for (const key of (keyRows ?? []) as KeyStatusRow[]) keysById.set(key.id, key);
     }
   }
+  // Phase 199 plan 12 (D-03): the ONE key-label rule, over the owner's own keys.
+  const keyLabels = apiKeyLabelById([...keysById.values()]);
 
   // Phase 167.2 / KCS-12 — beside each share control, what a recipient of that
   // link sees right now, for every row WITHOUT a buildable factsheet. "Has a
@@ -609,10 +742,19 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // The recipient arm, and the note an uncomputed row has always shown. One
   // function, so the uncomputed path and the probe's fallbacks read the arm
   // the same way.
-  const armOf = async (
+  // IN-03: a failed member read keeps stitch preference.
+  const memberCountOf = (strategyId: string): CompositeMemberCount =>
+    membersReadFailed
+      ? { ok: false, message: "strategy_keys member read failed" }
+      : { ok: true, count: membersByStrategy.get(strategyId)?.length ?? 0 };
+  // Phase 199 plan 16: one read per row. The share note and the Analytics failed
+  // detail both ask for the same row's jobs, so the first answer is kept and the
+  // second asker gets the same promise.
+  const armReads = new Map<string, Promise<ArmFacts>>();
+  const armOf = (
     s: NonNullable<typeof strategies>[number],
     mode: ReturnType<typeof shareAffordanceMode>,
-  ): Promise<{ arm: RecipientArm; state: ComputeState | null }> =>
+  ): Promise<ArmFacts> => {
     // 167.2-REVIEW IN-04: a published row's note is the public line whatever
     // the arm (`recipientShareNote` / `recipientShareNoteFor` ignore it for
     // "public-url"), so its jobs are not read: that was one RPC per row whose
@@ -620,19 +762,25 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
     // passed for it is the one that claims least; it is never rendered.
     // 170.1 D-08: its `state` is null for the same reason, so a published row
     // can never take the finished-not-built kind.
-    mode === "public-url"
-      ? { arm: "not_available", state: null }
-      : readRecipientArm(
-          supabase,
-          s.id,
-          // IN-03: a failed member read keeps stitch preference.
-          {
-            memberCount: membersReadFailed
-              ? { ok: false, message: "strategy_keys member read failed" }
-              : { ok: true, count: membersByStrategy.get(s.id)?.length ?? 0 },
-            apiKeyId: s.api_key_id ?? null,
-          },
-        );
+    // Phase 199 plan 16: a published row that is Analytics failed reads its jobs
+    // for its detail's day, outside this function (`failedFactsOf`, below).
+    if (mode === "public-url") {
+      return Promise.resolve({
+        arm: "not_available",
+        state: null,
+        jobDay: null,
+        compositeHistory: "unreadable",
+      });
+    }
+    const known = armReads.get(s.id);
+    if (known) return known;
+    const read = readRecipientArm(supabase, s.id, {
+      memberCount: memberCountOf(s.id),
+      apiKeyId: s.api_key_id ?? null,
+    });
+    armReads.set(s.id, read);
+    return read;
+  };
   // 164.6.6.3.3 D-08: `kind` is `analytics_failed` for a row whose analytics
   // FAILED, else null (`recipientShareNoteFor` with no kind is exactly
   // `recipientShareNote`). A running recompute keeps KCS12-MINT-A.
@@ -781,15 +929,292 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   captureProbeOutcomes(probeOutcomes);
   captureProbeThrows(probeThrows);
 
+  // Phase 199 plan 10 (D-02): the allocator half of /my-strategies, for allocator
+  // and `both`: one placeholder row per active key that has produced no strategy,
+  // and the viewer's real portfolio (what Simulate Impact scores against). A
+  // manager-only page makes neither read. Both take the session user's id and
+  // nothing else (T-199-30; RLS is the backstop).
+  // ⛔ T-199-25, error ≠ empty (149 WR-01, the `getMyWatchlist` idiom):
+  // `getStrategylessActiveKeys` returns `null` on a transient DB failure, and a
+  // null is NEVER read as "no keys". It prints its own line below, and the page
+  // never takes the empty state while it stands. `getRealPortfolio` already
+  // THROWS on a read error (to error.tsx) and returns null only for "this viewer
+  // has no portfolio row", which is a real answer and not a failure.
+  const [bareKeys, portfolio] = isAllocator
+    ? await Promise.all([getStrategylessActiveKeys(user.id), getRealPortfolio(user.id)])
+    : [[], null];
+  const placeholderKeysUnreadable = bareKeys === null;
+  // Delta 5 — formatted SERVER-side so the client table never owns exchange
+  // naming (and so an unmapped code can never reach the DOM as `undefined`).
+  // 162-06 / HONEST-06 — `exchange` (the venue ID) rides ALONGSIDE the formatted
+  // label: the wizard needs the id, the row shows only the label.
+  const placeholderRows = (bareKeys ?? []).map((k) => ({
+    id: k.id,
+    exchange: k.exchange,
+    exchangeLabel: EXCHANGE_DISPLAY[k.exchange],
+    keyLabel: k.label,
+  }));
+
   // Phase 170.7 (D-03): every row is shaped by the one analytics shaper. A
   // missing `strategy_analytics` row, and a run that did not finish (`failed`,
   // `pending`, `computing`), come out as the empty shape with their real status,
   // so the table prints a dash, never a 0 and never a failed run's stored
   // figures. No `?? 0` anywhere on this path.
-  const rows = (strategies ?? []).map((s) => {
+  const shapedRows = (strategies ?? []).map((s) => {
     const a = extractAnalytics(s.strategy_analytics);
     return { ...s, analytics: shapeRowAnalytics(a, s.id), analyticsPresent: a !== null };
   });
+
+  // Phase 199 plan 10 (D-02, CD-12): the Phase 149 ranking and the public trust
+  // tier, for every role. Two independent reads, so they run together.
+  //  - `trust_tier` comes from the published-gated signal reader, the one
+  //    `getMyStrategies` shapes its rows with. Without it a published composite
+  //    (no `api_key_id`) loses the verified check the table draws from
+  //    `trust_tier === "api_verified" || api_key_id`. The reader fails soft (an
+  //    absent signal reads `null`: no check, never an invented one).
+  //  - The ranking is asked about the NON-ARCHIVED rows only (CD-12): an archived
+  //    row stays on the list but is no subject of the ranking, so it carries no
+  //    `Pnn`. This is the W-4 rule `getMyStrategies` always applied. A null (no
+  //    comparison set yet, or a failed read) renders the threshold copy, as it
+  //    did on /my-strategies. N for the copy is `own.populationSize`, the number
+  //    of strategies that ENTERED the ranking; never build a per-metric N.
+  //    Own rows are scored self-inclusively against the published universe and
+  //    never join it, so no row here can move a public rank.
+  const rankable = shapedRows.filter((s) => s.status !== "archived");
+  const [signals, own] = await Promise.all([
+    readPublicVerificationSignals(strategyIds),
+    rankable.length > 0 ? getOwnRowPercentiles(rankable) : Promise.resolve(null),
+  ]);
+  const rows = shapedRows.map((s) => ({
+    ...s,
+    trust_tier: (signals.get(s.id)?.trust_tier ?? null) as Strategy["trust_tier"],
+  }));
+
+  // Phase 199 plan 12 (D-03, SC-3, R-05): each row's Health, decided HERE on the
+  // server by the one pure function, with the server clock (`healthNowMs`, read
+  // once per request so every row is judged against the same instant) and the
+  // row's own `asset_class` (the Phase 197 list verdict's 7-or-10-day ladder).
+  // The client only prints the word it is handed. A feeding key whose row was
+  // not read (the read failed, or it is not the owner's) contributes no status;
+  // `keyStatusUnreadable` is what keeps that absence from reading as Healthy.
+  // Phase 199 plan 16: decided before the notes, because a row's note carries its
+  // Health detail and the detail is chosen by the Health kind.
+  // eslint-disable-next-line react-hooks/purity -- an async server page runs once per request, not per re-render: the clock is read once and passed down
+  const healthNowMs = Date.now();
+  const healthOfRow = (s: (typeof rows)[number]): StrategyHealth =>
+    strategyHealthOf({
+      status: s.status,
+      createdAt: s.created_at,
+      chipStatus: rowChipStatus(s),
+      analyticsUpdating: s.analytics.analytics_updating === true,
+      seriesEnd: s.analytics.series_end,
+      assetClass: s.asset_class,
+      feedingKeySyncStatuses: (feedingKeyIdsByStrategy.get(s.id) ?? []).map(
+        (id) => keysById.get(id)?.sync_status,
+      ),
+      keyStatusUnreadable,
+      nowMs: healthNowMs,
+    });
+  const healthByRow = new Map(rows.map((s) => [s.id, healthOfRow(s)] as const));
+  const healthOf = (s: (typeof rows)[number]): { word: string; tone: string } => {
+    const health = healthByRow.get(s.id) ?? healthOfRow(s);
+    return { word: healthWord(health), tone: HEALTH_TONE[health.kind] };
+  };
+
+  // Phase 199 plan 16 (D-03, CD-05): what an Analytics failed row's detail needs from
+  // its compute jobs: the state (for `ownerRemedy`), the last computation's day and the
+  // composite history (for the shape). EVERY failed row is read, and (SFH-03: the Stale
+  // (no data yet) remedy comes from the real state too) every Stale (no data yet) row, and only
+  // those. An unpublished row reuses the read its share note already made (`armOf` keeps one per
+  // row); a published row's share note skips the read (IN-04), so it gets one of its own
+  // here. A failed read has no day and renders the unreadable sentence; it is never
+  // read as "no failure".
+  const failedFactsOf = async (
+    s: (typeof rows)[number],
+  ): Promise<{
+    state: ComputeState | null;
+    jobDay: string | null;
+    compositeHistory: CompositeHistory;
+  }> => {
+    const mode = shareAffordanceMode(isPublishedStatus(s.status));
+    if (mode !== "public-url") {
+      const { state, jobDay, compositeHistory } = await armOf(s, mode);
+      return { state, jobDay, compositeHistory };
+    }
+    let read: Awaited<ReturnType<typeof readOwnerComputeJobs>>;
+    try {
+      read = await readOwnerComputeJobs(supabase as unknown as SupabaseClient, s.id);
+    } catch (err) {
+      read = {
+        ok: false,
+        code: undefined,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (!read.ok) {
+      console.error("[strategies/page] analytics-failed day read failed", {
+        id: s.id,
+        code: read.code,
+        message: read.message,
+      });
+      captureToSentry(new Error(read.message), {
+        tags: { route: "strategies/page", stage: "analytics-failed-day" },
+      });
+      return {
+        state: deriveComputeState({ readError: true }),
+        jobDay: null,
+        compositeHistory: "unreadable",
+      };
+    }
+    // The request's one clock (`healthNowMs`), as the Health judgement uses.
+    const nowMs = healthNowMs;
+    const compositeHistory = compositeHistoryOf(read);
+    const preferStitch = shouldPreferStitch({
+      memberCount: memberCountOf(s.id),
+      apiKeyId: s.api_key_id ?? null,
+      compositeHistory,
+    });
+    return {
+      state: deriveComputeState({
+        rows: read.rows,
+        readExhaustive: read.readExhaustive,
+        nowMs,
+        preferStitch,
+      }),
+      jobDay: jobDayOf(selectFactsheetJob(read.rows, { preferStitch, nowMs })),
+      compositeHistory,
+    };
+  };
+  const failedFacts = new Map(
+    await Promise.all(
+      rows
+        .filter((s) => {
+          const kind = healthByRow.get(s.id)?.kind;
+          return kind === "analytics_failed" || kind === "stale_no_data";
+        })
+        .map(async (s) => [s.id, await failedFactsOf(s)] as const),
+    ),
+  );
+  // The row's shape, for the remedy: `resolveStrategyShape`'s own rule over the page's
+  // member read and, where a row's jobs were read, its composite history.
+  const shapeOf = (
+    s: { id: string; source: string; api_key_id?: string | null },
+    compositeHistory?: CompositeHistory,
+  ): StrategyShape | "unknown" =>
+    resolveStrategyShape({
+      source: s.source,
+      apiKeyId: s.api_key_id,
+      memberCount: memberCountOf(s.id),
+      compositeHistory,
+    });
+  const DETAIL_CLASS = "text-caption font-normal text-text-muted";
+  // The row's Health detail (UI-SPEC "Row note, the Health detail"), one registered
+  // line, or null for a row whose Health needs none here.
+  const healthDetailFor = (s: OwnerListRow): ReactNode => {
+    const health = healthByRow.get(s.id);
+    if (health?.kind === "stale" && health.staleSince) {
+      // CD-11: a CSV strategy's remedy is its upload, but that route is manager-guarded, so
+      // an allocator-only viewer is pointed at the contact form; an API or composite
+      // strategy's is the edit page (manager, both) or the Exchanges page (allocator only).
+      const action: StaleAction =
+        shapeOf(s) === "csv"
+          ? isManager
+            ? "A-CSV"
+            : "A-CONTACT-CHECK"
+          : isManager
+            ? "A-EDIT"
+            : "A-EXCHANGES-KEY";
+      return (
+        <DegradeLine
+          id="strategies.stale"
+          element="p"
+          className={DETAIL_CLASS}
+          segments={degradeSegments("strategies.stale", {
+            day: health.staleSince,
+            action,
+            strategyId: s.id,
+          })}
+        />
+      );
+    }
+    if (health?.kind === "stale_no_data") {
+      // The remedy for the row's REAL compute state (SFH-03: a failed or stalled job under a
+      // pending or missing analytics row is not "never started"): `ownerRemedy`'s own for a
+      // manager, the allocator-only substitute otherwise. A failed jobs read is the
+      // unreadable line, never a guessed state.
+      const facts = failedFacts.get(s.id);
+      const state: ComputeState = facts?.state ?? { state: "unreadable" };
+      if (!facts || state.state === "unreadable") {
+        return (
+          <DegradeLine
+            id="strategies.compute-status-unreadable"
+            element="p"
+            className={DETAIL_CLASS}
+            segments={degradeSegments("strategies.compute-status-unreadable", undefined)}
+          />
+        );
+      }
+      const shape = shapeOf(s, facts.compositeHistory);
+      const remedy = ownerRemedy(state, shape, s.id);
+      return (
+        <DegradeLine
+          id="strategies.stale-no-data"
+          element="p"
+          className={DETAIL_CLASS}
+          segments={degradeSegments("strategies.stale-no-data", {
+            action: viewerRemedyAction({ remedy, managerSurface: isManager, shape }),
+            strategyId: s.id,
+          })}
+        />
+      );
+    }
+    if (health?.kind !== "analytics_failed") return null;
+    const facts = failedFacts.get(s.id);
+    // Only a failed read is the unreadable line (`deriveComputeState({ readError: true })`).
+    // A read that worked and found no job (done jobs are purged after ~30 days) has no day
+    // to print, but it is not unreadable and a reload cannot add a job (WR-02).
+    const state: ComputeState = facts?.state ?? { state: "unreadable" };
+    if (!facts || state.state === "unreadable") {
+      return (
+        <DegradeLine
+          id="strategies.compute-status-unreadable"
+          element="p"
+          className={DETAIL_CLASS}
+          segments={degradeSegments("strategies.compute-status-unreadable", undefined)}
+        />
+      );
+    }
+    const shape = shapeOf(s, facts.compositeHistory);
+    const remedy = ownerRemedy(state, shape, s.id, {
+      buildUnreadable: false,
+      analyticsFailed: true,
+    });
+    if (facts.jobDay === null) {
+      return (
+        <DegradeLine
+          id="strategies.analytics-failed-undated"
+          element="p"
+          className={DETAIL_CLASS}
+          segments={degradeSegments("strategies.analytics-failed-undated", {
+            action: viewerRemedyAction({ remedy, managerSurface: isManager, shape }),
+            strategyId: s.id,
+          })}
+        />
+      );
+    }
+    return (
+      <DegradeLine
+        id="strategies.analytics-failed"
+        element="p"
+        className={DETAIL_CLASS}
+        segments={degradeSegments("strategies.analytics-failed", {
+          day: facts.jobDay,
+          action: viewerRemedyAction({ remedy, managerSurface: isManager, shape }),
+          strategyId: s.id,
+        })}
+      />
+    );
+  };
 
   // Phase 167.2 / KCS-06 (S4) + KCS-12 (S5), and the 170.7 review feedback —
   // one strategy's note: what the table renders in the full-width row under it.
@@ -799,7 +1224,8 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // Fragment, in the order D-06 fixes: review feedback, then one line per
   // DISTINCT untrusted key status (the key card's own pill and helper, mounted
   // as the key card mounts it; the caption names a key and the pill names its
-  // state, no claim about the strategy's numbers), then the share note.
+  // state, no claim about the strategy's numbers), then (Phase 199 plan 16) the
+  // Health detail, then the share note.
   // `undefined` when the strategy has none of them, so no empty row renders.
   // Each mount keeps its own helper live region; on this static server render
   // they never change, so they announce nothing.
@@ -807,10 +1233,12 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
     const keyLines = untrustedKeyLines(
       feedingKeyIdsByStrategy.get(s.id) ?? [],
       keysById,
+      keyLabels,
     );
     const shareNote = shareNotes.get(s.id);
+    const healthDetail = healthDetailFor(s);
     const showFeedback = Boolean(s.review_note) && s.status === "draft";
-    if (!showFeedback && keyLines.length === 0 && !shareNote) return undefined;
+    if (!showFeedback && keyLines.length === 0 && !healthDetail && !shareNote) return undefined;
     return (
       <>
         {showFeedback && (
@@ -824,6 +1252,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
           <div
             key={line.status}
             data-testid="strategy-row-key-mark"
+            data-degrade-id="strategies.key-problem"
             className="flex items-start justify-between gap-3"
           >
             <p className="text-caption font-normal text-text-muted">{line.caption}</p>
@@ -836,10 +1265,14 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
             />
           </div>
         ))}
+        {/* Phase 199 plan 16 — the Health detail: after review feedback and the key
+            lines, before the share note. */}
+        {healthDetail}
         {/* KCS-12 (S5) — after any S4 lines; plain text, no role. */}
         {shareNote && (
           <p
             data-testid="strategy-row-share-note"
+            data-degrade-id="strategies.share-note"
             className="text-caption font-normal text-text-muted"
           >
             {/* AD-05: the note's "contact form" phrase links the support topic
@@ -859,12 +1292,16 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // only (never a token, nonce or generation), so they serialize across the
   // RSC boundary. The elements are rendered once, in the table's one Actions
   // cell: a second mount would be a second dialog and a second `shareLive`.
+  // Phase 199 D-02 (T-199-14): the note is every role's; the Edit target and the
+  // actions are built ONLY when the viewer is a manager (or `both`), so an
+  // allocator's payload carries no manager control at all.
   const managerRows = Object.fromEntries(
     rows.map((s) => [
       s.id,
       {
-        editHref: `/strategies/${s.id}/edit`,
-        actions: (
+        health: healthOf(s),
+        editHref: isManager ? `/strategies/${s.id}/edit` : undefined,
+        actions: isManager ? (
           <>
             {/* Phase 164 (SHARE-04) — the status gate is GONE, and its
                 removal is the point, not a side effect. Hiding the control
@@ -889,20 +1326,31 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
               hasData={!!s.api_key_id}
             />
           </>
-        ),
+        ) : undefined,
         note: noteFor(s),
       },
     ]),
   );
+
+  // The note: the ranking sentence while there are rows, the K sentence while
+  // there are placeholders. The two branches flip with the ranking's own
+  // threshold, so the page never shows a Pnn while claiming there is no
+  // comparison set, or the reverse.
+  const hasRows = rows.length > 0 || placeholderRows.length > 0;
+  const noteParts: string[] = [];
+  if (rows.length > 0) noteParts.push(own ? mapCopy(own.populationSize) : NULL_COPY);
+  if (placeholderRows.length > 0) noteParts.push(kSentence(placeholderRows.length));
 
   return (
     <>
       <PageHeader
         title="Strategies"
         actions={
-          <Link href="/strategies/new">
-            <Button>New Strategy</Button>
-          </Link>
+          isManager ? (
+            <Link href="/strategies/new">
+              <Button>New Strategy</Button>
+            </Link>
+          ) : undefined
         }
       />
 
@@ -924,11 +1372,11 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
         </p>
       )}
 
-      {introRequests && introRequests.length > 0 && (
+      {isManager && introRequests && introRequests.length > 0 && (
         <PendingIntros requests={introRequests as Parameters<typeof PendingIntros>[0]["requests"]} />
       )}
 
-      {wizardDraft && (
+      {isManager && wizardDraft && (
         <Card
           data-testid="wizard-draft-resume-banner"
           data-rejected={wizardDraftRejected ? "true" : "false"}
@@ -979,32 +1427,64 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
         </Card>
       )}
 
+      {/* UI-SPEC read-failure order: the list read's own card replaces the table
+          below; this line is the placeholder-key read's. One muted line, above
+          the note, and it stands whether or not any row loaded (T-199-25). */}
+      {placeholderKeysUnreadable && (
+        <p
+          data-testid="strategies-placeholder-keys-unreadable"
+          className="mb-4 text-sm text-text-secondary"
+        >
+          <DegradeLine
+            id="strategies.placeholder-keys-unreadable"
+            segments={degradeSegments("strategies.placeholder-keys-unreadable", undefined)}
+          />
+        </p>
+      )}
+
       {strategiesUnreadable ? (
         // H-1 (UI-SPEC KCS-LIST-UNREADABLE): muted, not red. Nothing is known
         // to be wrong with the strategies, only with this read of them.
         <Card className="text-center py-12" data-testid="strategies-list-unreadable">
-          <p className="text-text-muted">{STRATEGIES_LIST_UNREADABLE}</p>
+          <DegradeLine
+            id="strategies.list-unreadable"
+            element="p"
+            className="text-text-muted"
+            segments={degradeSegments("strategies.list-unreadable", undefined)}
+          />
         </Card>
-      ) : (!strategies || strategies.length === 0) ? (
-        <Card className="text-center py-12">
-          {wizardDraft ? (
-            <>
-              <p className="text-text-muted mb-4">
-                No published strategies yet — but you have a draft in progress.
-              </p>
-              <Link href="/strategies/new/wizard">
-                <Button>Resume your draft</Button>
-              </Link>
-            </>
-          ) : (
-            <>
-              <p className="text-text-muted mb-4">No strategies yet.</p>
-              <Link href="/strategies/new">
-                <Button>Create your first strategy</Button>
-              </Link>
-            </>
-          )}
-        </Card>
+      ) : !hasRows ? (
+        // Phase 199 plan 10 (D-02): the empty state is the role's own. It is an
+        // ACCOUNT-STATE claim ("you have nothing"), so a failed placeholder-key
+        // read (T-199-25) renders neither it nor a table: the line above is the
+        // whole degraded surface.
+        placeholderKeysUnreadable ? null : isManager ? (
+          // Phase 199 plan 16 (D-04): one registry id for the manager's empty card, in
+          // both its variants (a draft in progress, or nothing at all).
+          <Card className="text-center py-12" data-degrade-id="strategies.empty">
+            {wizardDraft ? (
+              <>
+                <p className="text-text-muted mb-4">
+                  No published strategies yet — but you have a draft in progress.
+                </p>
+                <Link href="/strategies/new/wizard">
+                  <Button>Resume your draft</Button>
+                </Link>
+              </>
+            ) : (
+              <>
+                <p className="text-text-muted mb-4">No strategies yet.</p>
+                <Link href="/strategies/new">
+                  <Button>Create your first strategy</Button>
+                </Link>
+              </>
+            )}
+          </Card>
+        ) : (
+          // Allocator only: a CLIENT ACTION that opens the wizard overlay, never a
+          // link into the manager-guarded /strategies subtree.
+          <StrategiesEmptyState />
+        )
       ) : (
         <div className="space-y-3">
           {/* H-3 (UI-SPEC KCS-KEYSTATUS-UNREADABLE): one muted line, once per
@@ -1014,22 +1494,45 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
               data-testid="strategies-key-status-unreadable"
               className="text-xs text-text-muted"
             >
-              {KEY_STATUS_UNREADABLE_NOTE}
+              <DegradeLine
+                id="strategies.key-status-unreadable"
+                segments={degradeSegments("strategies.key-status-unreadable", undefined)}
+              />
             </p>
           )}
-          <StrategyTable
+          {/* Phase 199 plan 10 (D-02): the Phase 149 note, for every role. It
+              explains the `#` every viewer sees. */}
+          <p
+            data-testid="comparison-set-note"
+            className="mb-6 text-small text-text-secondary"
+          >
+            {noteParts.join(" ")}
+          </p>
+          {/* Phase 199 (D-02): one client host for every role. The page builds the
+              role's furniture on the server (`managerRows`) and the host mints
+              the Mark and Rename callbacks only under `allocatorFurniture`. The
+              origin is the page's own (R-04): rows link `?from=strategies`.
+              A prefs-SCOPE key, not a discovery category, is derived from it. No
+              `userId` is passed, so the table persists no sort or density here
+              and `initialSort` is not overwritten by a hydrated preference. */}
+          <StrategiesSection
             strategies={rows}
-            // A prefs-SCOPE key, not a discovery category. No `userId` is
-            // passed, so the table persists no sort or density here and
-            // `initialSort` is not overwritten by a hydrated preference.
-            categorySlug="strategies"
             origin={{ key: "strategies" }}
-            visibility="owner-all-statuses"
+            placeholderKeys={placeholderRows}
+            portfolioId={portfolio?.id ?? null}
+            percentiles={own?.ownMap ?? null}
             managerRows={managerRows}
+            allocatorFurniture={isAllocator}
             initialSort={{ key: "created_at", dir: "desc" }}
           />
         </div>
       )}
+
+      {/* Phase 199 plan 14 (D-03, SC-3): the legend explains every Health word
+          and chip the table can print. It carries its own mt-6, sits outside
+          the table's `space-y-3` stack, and renders only where there IS a table:
+          an empty or unreadable page has nothing to explain. */}
+      {!strategiesUnreadable && hasRows && <StrategiesLegend />}
     </>
   );
 }

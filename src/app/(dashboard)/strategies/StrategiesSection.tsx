@@ -3,6 +3,15 @@
 /**
  * Phase 149 / NAV-01 — the client host for the owner ranking.
  *
+ * Phase 199 plan 09 (LEAN-01, D-02): moved from my-strategies/MyStrategiesSection.tsx.
+ * It is now the ONE client host for every strategy owner's list: the merged
+ * /strategies page mounts it for allocator, manager and `both`, and the old
+ * /my-strategies page still mounts it until plan 199-13 retires that page. The
+ * server decides each role's furniture and hands it down as data
+ * (`managerRows`, `allocatorFurniture`); the Mark/Rename callbacks are minted
+ * here ONLY when `allocatorFurniture` is on, so a manager-only list never
+ * carries a control that needs an allocator portfolio.
+ *
  * Two things need a client boundary and nothing else does: the wizard
  * overlay's open/closed state, and the `onFinishSetup` callback the Delta-5
  * placeholder rows fire (a function prop is non-serializable across the
@@ -16,7 +25,7 @@
  * own; the overlay renders `null` while closed and portals to document.body.
  */
 
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { useRouter } from "next/navigation";
 import { ContributionWizardOverlay } from "@/app/(dashboard)/allocations/components/ContributionWizardOverlay";
 import {
@@ -26,6 +35,7 @@ import {
 import { MarkOwnershipDialog } from "@/components/strategy/MarkOwnershipDialog";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
+import type { FactsheetOrigin } from "@/lib/factsheet/origin";
 import type { PercentileMap, RankedStrategyRow } from "@/lib/queries";
 import type { SupportedExchange } from "@/lib/utils";
 import type { PreselectedKey } from "@/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep";
@@ -44,7 +54,7 @@ export type OwnerPlaceholderKeyRow = PlaceholderKeyRow & {
   exchange: SupportedExchange;
 };
 
-interface MyStrategiesSectionProps {
+interface StrategiesSectionProps {
   /**
    * The owner's rows at every non-archived status. Typed as
    * `RankedStrategyRow[]` — NOT the looser shared row type — because
@@ -55,24 +65,50 @@ interface MyStrategiesSectionProps {
    * public callers that have no such distinction to make.
    */
   strategies: RankedStrategyRow[];
-  /** Server-formatted (EXCHANGE_DISPLAY already applied) bare-key rows. */
-  placeholderKeys: OwnerPlaceholderKeyRow[];
-  portfolioId: string | null;
+  /**
+   * R-04 (REVIEWS, T-199-33): where a row's factsheet link says it came from.
+   * REQUIRED and set by each page, never hard-coded here: the merged /strategies
+   * page passes the strategies origin (its rows link `?from=strategies`) and
+   * the old /my-strategies page passes the my-strategies origin until plan
+   * 199-13 retires it. It also names the prefs-SCOPE key below.
+   */
+  origin: FactsheetOrigin;
+  /** Server-formatted (EXCHANGE_DISPLAY already applied) bare-key rows. Absent: none. */
+  placeholderKeys?: OwnerPlaceholderKeyRow[];
+  portfolioId?: string | null;
   /**
    * The OWN-scored map from `getOwnRowPercentiles().ownMap` — never the
    * published map. Only own rows render here, and their Pnn must come from the
    * scorer helper that ranks them against the published population without
    * joining it.
    */
-  percentiles: PercentileMap | null;
+  percentiles?: PercentileMap | null;
+  /**
+   * Phase 170.7 / D-01 — the owner-list switch and each row's server-built Edit
+   * target, actions slot and note (see StrategyTable's `managerRows`). Absent:
+   * the plain owner mount /my-strategies has always been.
+   */
+  managerRows?: ComponentProps<typeof StrategyTable>["managerRows"];
+  /**
+   * Phase 199 / D-02 — the allocator half of the furniture: the ownership tag,
+   * Mark ownership, Rename and Simulate Impact. Also the switch for the Mark and
+   * Rename callbacks below, so they exist only when this is true.
+   */
+  allocatorFurniture?: boolean;
+  /** Seeds the table sort only (StrategyTable's `initialSort`). */
+  initialSort?: ComponentProps<typeof StrategyTable>["initialSort"];
 }
 
-export function MyStrategiesSection({
+export function StrategiesSection({
   strategies,
-  placeholderKeys,
-  portfolioId,
-  percentiles,
-}: MyStrategiesSectionProps) {
+  origin,
+  placeholderKeys = [],
+  portfolioId = null,
+  percentiles = null,
+  managerRows,
+  allocatorFurniture = false,
+  initialSort,
+}: StrategiesSectionProps) {
   const [wizardOpen, setWizardOpen] = useState(false);
   // 162-06 / HONEST-06 — WHICH key the owner clicked, or null for every other
   // way into this overlay. Held as the resolved triple rather than a bare id so
@@ -105,11 +141,17 @@ export function MyStrategiesSection({
         // useDiscoveryPrefs namespaces localStorage by (userId, categorySlug),
         // and this surface needs its own scope so its sort/density choices do
         // not overwrite a real category's saved prefs.
-        categorySlug="my-strategies"
-        origin={{ key: "my-strategies" }}
+        // Phase 199: it is the page's own origin key ("strategies" on the merged
+        // page, "my-strategies" on the old one), so each page keeps the scope it
+        // always had and a third host cannot collide with either.
+        categorySlug={origin.key}
+        origin={origin}
         portfolioId={portfolioId}
         percentiles={percentiles ?? undefined}
         visibility="owner-all-statuses"
+        managerRows={managerRows}
+        allocatorFurniture={allocatorFurniture}
+        initialSort={initialSort}
         placeholderKeys={placeholderKeys}
         // 162-06 / HONEST-06 — resolve the clicked id against the SAME array
         // that rendered the row, so the summary can only ever show labels this
@@ -130,14 +172,24 @@ export function MyStrategiesSection({
           );
           setWizardOpen(true);
         }}
-        onMarkOwnership={(s) =>
-          setMarkTarget({
-            id: s.id,
-            name: s.name,
-            mark: s.capital_ownership ?? null,
-          })
+        // D-02: wired ONLY for the allocator furniture. A manager-only page passes
+        // neither, so Mark ownership and Rename are absent from it by the props,
+        // and the table's own `allocatorFurniture` gate is the second lock.
+        onMarkOwnership={
+          allocatorFurniture
+            ? (s) =>
+                setMarkTarget({
+                  id: s.id,
+                  name: s.name,
+                  mark: s.capital_ownership ?? null,
+                })
+            : undefined
         }
-        onRename={(s) => setRenameTarget({ id: s.id, name: s.name })}
+        onRename={
+          allocatorFurniture
+            ? (s) => setRenameTarget({ id: s.id, name: s.name })
+            : undefined
+        }
       />
       {/* Mounted only while a row is selected, and KEYED by that row's id, so
           each open starts from that row's own current mark/name rather than

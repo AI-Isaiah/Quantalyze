@@ -6,8 +6,10 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
+import { safeRedirectPath } from "@/lib/routing/role-home";
 
-export function LoginForm() {
+export function LoginForm({ redirectTo }: { redirectTo?: string | null } = {}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +33,9 @@ export function LoginForm() {
       return;
     }
 
-    router.push("/discovery/crypto-sma");
+    // CD-02 / CD-13: a deep link wins, re-checked here so a hostile prop never
+    // navigates; otherwise the one shared home constant.
+    router.push(safeRedirectPath(redirectTo) ?? ROLE_HOME_ROUTE);
     router.refresh();
   }
 

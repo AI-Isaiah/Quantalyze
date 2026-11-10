@@ -92,8 +92,11 @@ const baseProps = {
   hasSyncing: false,
 } as unknown as MyAllocationDashboardPayload;
 
+// Phase 199 plan 03 (CD-09, D-05): the payload carries no key id, so the note names
+// no key. It is a count-pinned whole_history entry: it states its scope ("whole
+// history") and ends with one action (A-CONTACT-CHECK, the contact-form link).
 const LINE =
-  "This curve leaves out the history of at least one disconnected account, because the balance that history is measured from is not available.";
+  "Across your whole history, this curve leaves out at least one disconnected account, because the balance its history is measured from is not available. Use the contact form to have it checked.";
 
 describe("AllocationDashboardV2: departed history left out of a ready curve (SFH-C4-04)", () => {
   it("says so on a ready curve when the payload flag is raised", () => {
@@ -104,7 +107,27 @@ describe("AllocationDashboardV2: departed history left out of a ready curve (SFH
         departedHistoryUnavailable
       />,
     );
-    expect(screen.getByTestId("dashboard-departed-history-note").textContent).toBe(LINE);
+    const note = screen.getByTestId("dashboard-departed-history-note");
+    expect(note.textContent).toBe(LINE);
+    expect(note.querySelector('[data-degrade-id="allocation.departed-history"]')).not.toBeNull();
+    // The contact phrase is the link, and only that phrase.
+    const link = note.querySelector("a");
+    expect(link?.textContent).toBe("contact form");
+    expect(link?.getAttribute("href")).toContain("topic=support");
+  });
+
+  it("names no key, even when the owner has a labelled key on the book", () => {
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityHistoryState="ready"
+        departedHistoryUnavailable
+      />,
+    );
+    // baseProps carries the key "OKX Key"; the payload does not say which account
+    // was left out, so the note must not guess one (CD-09).
+    const text = screen.getByTestId("dashboard-departed-history-note").textContent ?? "";
+    expect(text).not.toMatch(/OKX|Key/);
   });
 
   it("says nothing when the flag is not raised", () => {

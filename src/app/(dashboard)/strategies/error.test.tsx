@@ -77,4 +77,18 @@ describe("strategies error.tsx — STATE-05 / T-53-01 boundary contract", () => 
     expect(spy).toHaveBeenCalledWith("[strategies-error]", err);
     spy.mockRestore();
   });
+
+  // Phase 199 WR-01 / WR-01-R2 / D-01: /strategies admits allocators, and
+  // /strategies/new is manager-only (an allocator is silently bounced).
+  // Discovery is allocator-only, so a manager sent there is bounced straight
+  // back to the page that crashed. The escape must open for every approved
+  // role, outside any role surface (that census lives in
+  // role-home-call-sites.test.ts).
+  it("escape link goes to /profile, not the manager-only /strategies/new or the allocator-only Discovery", () => {
+    render(<StrategiesError error={new Error("boom")} unstable_retry={vi.fn()} />);
+    const escape = screen.getByRole("link", { name: "Go to your profile" });
+    expect(escape.getAttribute("href")).toBe("/profile");
+    expect(screen.queryByRole("link", { name: /add a strategy/i })).toBeNull();
+    expect(screen.queryByRole("link", { name: /discovery/i })).toBeNull();
+  });
 });

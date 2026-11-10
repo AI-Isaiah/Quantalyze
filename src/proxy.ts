@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
+import { safeRedirectPath } from "@/lib/routing/role-home";
 // audit-2026-05-07 C-0144 + C-0150: `isAdmin(email)` is no longer used by
 // the proxy gate (see admin-route block below). Page-level `isAdminUser` is
 // the authoritative check.
@@ -15,7 +16,7 @@ import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 // would be bounced to the dashboard mid-reset. /forgot-password is NOT
 // bounce-exempt: an already-authed user landing there bounces to the dashboard,
 // matching /login + /signup.
-const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/api/og/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/factsheet-share", "/api/benchmark/btc", "/legal", "/for-quants", "/api/for-quants-lead", "/security", "/contact"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/api/og/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/factsheet-share", "/api/benchmark/btc", "/legal", "/for-quants", "/api/for-quants-lead", "/security", "/contact", "/home"];
 // 51-REVIEW (red-team): /api/health is a documented public liveness probe, but
 // it was NOT in PUBLIC_ROUTES — the proxy session gate runs BEFORE the route
 // handler, so an unauthenticated uptime/ops probe got 307→login instead of
@@ -115,6 +116,12 @@ export async function proxy(request: NextRequest) {
   // form" pointer lands here, signed in or not, so an authed user must stay.
   const isContactRoute =
     path === "/contact" || path.startsWith("/contact/");
+  // Phase 199 (CD-07) — /home is the one server role-home redirect. It is public
+  // so a signed-out visit reaches the page (which sends it to /) instead of a
+  // proxy 307 to /login, and bounce-exempt so a signed-in GET stays on /home
+  // for the page to redirect by role. Without the exemption the bounce below
+  // would send /home to its own fallback and loop.
+  const isHomeRoute = path === "/home" || path.startsWith("/home/");
   const isFactsheetRoute =
     path === "/factsheet" || path.startsWith("/factsheet/");
   const isStrategyRoute =
@@ -150,6 +157,7 @@ export async function proxy(request: NextRequest) {
     isForQuantsRoute ||
     isSecurityRoute ||
     isContactRoute ||
+    isHomeRoute ||
     isFactsheetRoute ||
     isStrategyRoute ||
     isBrowseRoute ||
@@ -159,8 +167,9 @@ export async function proxy(request: NextRequest) {
     isFactsheetShareRoute ||
     isResetPasswordRoute;
   if (session && isPublicRoute && !isApiRoute && !isAuthBounceExempt) {
-    const redirect = request.nextUrl.searchParams.get("redirect");
-    const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;
+    const safePath =
+      safeRedirectPath(request.nextUrl.searchParams.get("redirect")) ??
+      ROLE_HOME_ROUTE;
     const url = request.nextUrl.clone();
     url.pathname = safePath;
     url.searchParams.delete("redirect");

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isProfileApproved } from "@/lib/approval";
+import { roleHomeFor } from "@/lib/routing/role-home";
 import { SignOutButton } from "@/components/auth/SignOutButton";
 import { contactHref } from "@/lib/contact";
 
@@ -32,7 +33,7 @@ import { contactHref } from "@/lib/contact";
  * onward. That single-frame flash isn't a security issue but it's
  * confusing UX. We pick the destination based on `display_name`: a
  * present display_name signals onboarding completed → bounce to the
- * default authenticated route; otherwise hand off to /onboarding to
+ * role's own home (roleHomeFor); otherwise hand off to /onboarding to
  * finish the wizard.
  *
  * Lives under (auth) so the dashboard chrome (sidebar, top nav) does NOT
@@ -63,11 +64,11 @@ export default async function PendingApprovalPage() {
     .maybeSingle();
 
   if (isProfileApproved(profile)) {
-    // Approved + onboarded → straight to the default dashboard home.
+    // Approved + onboarded → the role's own home (CD-01, roleHomeFor).
     // Approved-but-no-display-name signals an incomplete onboarding,
     // so we still hand off to the wizard there.
     const onboarded = Boolean(profile?.display_name);
-    redirect(onboarded ? "/discovery/crypto-sma" : "/onboarding");
+    redirect(onboarded ? roleHomeFor(profile) : "/onboarding");
   }
 
   return (

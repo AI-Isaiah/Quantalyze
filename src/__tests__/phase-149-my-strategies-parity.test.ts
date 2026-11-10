@@ -58,7 +58,8 @@ import { describe, expect, it } from "vitest";
  *      lock, as re-read by the 2026-08-05 scorer ruling) and its comment-stripped
  *      body contains EXACTLY TWO `withPublishedOnly(` occurrences — an occurrence
  *      COUNT, not a presence check — and never `user_id`.
- *   6. `my-strategies/page.tsx` calls `getOwnRowPercentiles(` and its
+ *   6. `strategies/page.tsx` (the one owner list since Phase 199 retired
+ *      `/my-strategies`) calls `getOwnRowPercentiles(` and its
  *      comment-stripped source contains NO `getPercentiles(` token: the
  *      published-universe query runs ONCE per owner request, inside the helper
  *      (the I-2 single-fetch ruling). `getPercentiles` stays the
@@ -77,13 +78,13 @@ import { describe, expect, it } from "vitest";
  *      comment-stripped `queries.ts` contains NO inversion arm — the
  *      `100 - percentile` step lives in `percentile-core.ts` and nowhere else.
  *  10. REPO WALK: exactly ONE production file passes
- *      `visibility="owner-all-statuses"`, and its path is the my-strategies
- *      surface. No second widening consumer.
+ *      `visibility="owner-all-statuses"`, and its path is the strategies
+ *      section both owner roles mount. No second widening consumer.
  *  11. REPO WALK: exactly ONE production file exports `StrategyTable` and
  *      exactly ONE exports `scoreAgainstPopulation` — SC-3's literal "no second
  *      ranking implementation", plus its scoring twin.
  *  12. Anti-vacuity: every extractor really found a body, the strippers really
- *      stripped, and the walk really found the my-strategies file. An empty
+ *      stripped, and the walk really found the owner surface. An empty
  *      offender list means clean, not blind.
  *
  *  A missing pinned source (rename/move) is a FAILURE, not a skip (Rule 12): the
@@ -91,9 +92,10 @@ import { describe, expect, it } from "vitest";
  *
  * Comment hygiene: every scan strips comments BEFORE matching, and that is
  * load-bearing here, not decorative — THREE times over:
- *   - `my-strategies/page.tsx` names `getPercentiles` FOUR times in `//` prose
- *     (it documents the single-fetch ruling it implements), so pin 6's negative
- *     would self-invalidate on an unstripped read.
+ *   - the owner page documented the single-fetch ruling in `//` prose that
+ *     named `getPercentiles` (the retired `my-strategies/page.tsx` did so FOUR
+ *     times), so pin 6's negative would self-invalidate on an unstripped read;
+ *     pin 12 proves the stripper on a synthetic comment.
  *   - `StrategyTable.tsx`'s prop documentation names `owner-all-statuses` and
  *     spells out `status === "published"`, so pins 1/7 must not be able to pass
  *     on prose alone.
@@ -271,8 +273,12 @@ const PERCENTILE_CORE = "src/lib/percentile-core.ts";
 /** The two PUBLIC category pages whose behaviour must be provably unchanged. */
 const DISCOVERY_PAGE = "src/app/(dashboard)/discovery/[slug]/page.tsx";
 const BROWSE_PAGE = "src/app/browse/[slug]/page.tsx";
-/** The owner surface. */
-const MY_STRATEGIES_PAGE = "src/app/(dashboard)/my-strategies/page.tsx";
+/**
+ * The owner surface: the one `/strategies` page every strategy owner reads.
+ * Phase 199 (D-01, LEAN-01) deleted `my-strategies/page.tsx`; its old path is a
+ * config 308 (see `my-strategies-retired.test.ts`).
+ */
+const STRATEGIES_PAGE = "src/app/(dashboard)/strategies/page.tsx";
 
 /** Read a pinned source fail-loud (missing file → explicit failure, never a skip). */
 function readSource(relPath: string): string {
@@ -382,7 +388,7 @@ function countOccurrences(src: string, token: string): number {
 /** Comment-stripped sources, read once. */
 const strategyTableSrc = stripComments(readSource(STRATEGY_TABLE));
 const queriesSrc = stripComments(readSource(QUERIES));
-const myStrategiesPageSrc = stripComments(readSource(MY_STRATEGIES_PAGE));
+const strategiesPageSrc = stripComments(readSource(STRATEGIES_PAGE));
 
 // The literal derivation whose deletion re-opens the grid dead end (M9's site).
 const EFFECTIVE_VIEW_MODE_DERIVATION =
@@ -562,14 +568,14 @@ describe("NAV-01 — the server predicates each stay exactly as narrow as their 
 // ─────────────────────────────────────────────────────────────────────────
 
 describe("NAV-01 — one published-universe fetch, one scoring formula", () => {
-  it("pin 6 — /my-strategies scores its own rows through getOwnRowPercentiles and makes NO second published-universe fetch", () => {
-    expect(myStrategiesPageSrc).toContain("getOwnRowPercentiles(");
+  it("pin 6 — /strategies scores its own rows through getOwnRowPercentiles and makes NO second published-universe fetch", () => {
+    expect(strategiesPageSrc).toContain("getOwnRowPercentiles(");
     // I-2 single-fetch ruling: the published universe is read ONCE per owner
     // request, inside the helper, and N for the comparison-set copy comes from
     // that same read. A re-introduced getPercentiles() call would be a second
     // full-table scan on every page load AND a second N that can disagree with
     // the map actually rendered.
-    expect(myStrategiesPageSrc).not.toContain("getPercentiles(");
+    expect(strategiesPageSrc).not.toContain("getPercentiles(");
   });
 
   it("pin 9 — both percentile callers delegate to scoreAgainstPopulation, and queries.ts carries no second inversion arm", () => {
@@ -622,7 +628,7 @@ describe("NAV-01 — repo-wide: one widening consumer, one ranking implementatio
     return found;
   }
 
-  it("pin 10 — exactly TWO production files widen the shared table to owner-all-statuses: the my-strategies section and the manager /strategies page", () => {
+  it("pin 10 — exactly ONE production file widens the shared table to owner-all-statuses: StrategiesSection, the one client host both owner pages mount", () => {
     // A repo-wide walk, not an allowlist: a brand-new file the gate author
     // never hand-picked is caught. The failure this forbids: a second surface
     // opting into the owner recipe without the owner-scoped SERVER query that
@@ -630,23 +636,33 @@ describe("NAV-01 — repo-wide: one widening consumer, one ranking implementatio
     // re-narrowing an already-narrowed set.
     //
     // 2026-10-10 Phase 170.7 (MYSTRATTABLE, T-170.7-05): the manager's own
-    // `/strategies` page is now the SECOND owner surface (it moved from a card
-    // list onto this table). The pin is rewritten to name exactly the two
-    // consumers, not loosened to "at least one" or "any path": a third file
-    // still fails it, and so does either of the two disappearing. Both reads
-    // are owner-scoped on the server; `/strategies` is pinned to
-    // `.eq("user_id", user.id)` below and again in its own page.table.test.tsx.
+    // `/strategies` page became a SECOND owner surface and this pin named two
+    // files. Phase 199 plan 09 (LEAN-01) folds both owner pages onto ONE client
+    // host, `strategies/StrategiesSection.tsx` (moved from
+    // my-strategies/MyStrategiesSection.tsx), which hard-codes the widening
+    // prop; the merged `/strategies` page and the old `/my-strategies` page
+    // both mount it. The pin is rewritten to name exactly that one consumer, not
+    // loosened: a second file still fails it, and so does the section
+    // disappearing. Both pages' reads stay owner-scoped on the SERVER, and
+    // `/strategies` is pinned to `.eq("user_id", user.id)` below (the widened
+    // index reads only the viewer's own rows, T-199-13) and again in its own
+    // page.table.test.tsx.
     const consumers = wideningConsumers().sort();
     expect(consumers).toEqual([
-      "src/app/(dashboard)/my-strategies/MyStrategiesSection.tsx",
-      "src/app/(dashboard)/strategies/page.tsx",
+      "src/app/(dashboard)/strategies/StrategiesSection.tsx",
     ]);
-    // WR-03: the substring appears twice in that page (the list read and the
-    // wizard-draft lookup), so a bare `toContain` survives losing the LIST
-    // read's filter. Anchor it to the list select's own chain.
-    expect(stripComments(readSource(consumers[1]))).toMatch(
+    // WR-03: the owner-scoped LIST READ is no longer in the consumer, it is in
+    // the `/strategies` page that mounts it, so anchor to that page's list
+    // select's own chain. (The substring `.eq("user_id", user.id)` appears twice
+    // in that page — the list read and the wizard-draft lookup — so a bare
+    // `toContain` survives losing the LIST read's filter.)
+    const stripped = stripComments(readSource(STRATEGIES_PAGE));
+    expect(stripped).toMatch(
       /\.select\(`\*, strategy_analytics \(\$\{CATEGORY_RANKING_ANALYTICS_COLUMNS\}\)`\)\s*\.eq\("user_id", user\.id\)/,
     );
+    // The page mounts the one host, and does not widen the table itself.
+    expect(stripped).toContain("<StrategiesSection");
+    expect(stripped).not.toContain(WIDENING_PROP);
   });
 
   it("pin 11 — exactly ONE production file exports StrategyTable and exactly ONE exports the scoring core", () => {
@@ -665,13 +681,13 @@ describe("NAV-01 — repo-wide: one widening consumer, one ranking implementatio
     expect(files.length).toBeGreaterThan(100);
     expect(wideningConsumers().length).toBeGreaterThan(0);
 
-    // 2. stripComments is LOAD-BEARING, not decorative: my-strategies/page.tsx
-    //    names getPercentiles in `//` prose (it documents the single-fetch
-    //    ruling it implements). Un-stripped, pin 6's negative would be red on a
-    //    healthy tree.
-    const pageRaw = readSource(MY_STRATEGIES_PAGE);
-    expect(pageRaw).toContain("getPercentiles");
-    expect(stripComments(pageRaw)).not.toContain("getPercentiles(");
+    // 2. stripComments is LOAD-BEARING, not decorative: the owner page's prose
+    //    documents the single-fetch ruling and may name getPercentiles in a `//`
+    //    comment. Un-stripped, pin 6's negative would be red on a healthy tree.
+    //    The live page no longer names it, so prove the stripper on a synthetic
+    //    comment instead (it can fail: a no-op stripper keeps the token).
+    const syntheticRaw = "// getPercentiles( is NOT called here\nconst x = 1;\n";
+    expect(stripComments(syntheticRaw)).not.toContain("getPercentiles(");
 
     // 3. The owner arm really is still in the STRIPPED component source — its
     //    total absence would mean the owner recipe was deleted, which must not

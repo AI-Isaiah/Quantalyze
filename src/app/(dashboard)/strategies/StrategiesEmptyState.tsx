@@ -4,6 +4,11 @@
  * Phase 149 / NAV-01 — the page-level empty state (zero strategies AND zero
  * bare keys).
  *
+ * Phase 199 plan 10 (D-02): moved here from my-strategies/MyStrategiesEmptyState.tsx.
+ * On the merged /strategies page it is the allocator-ONLY empty state; a manager
+ * (and `both`) keeps the manager card, whose CTA opens the manager-guarded
+ * wizard route, which an allocator-only viewer could not use.
+ *
  * The inherited in-table "No strategies match your filters." message
  * (StrategyTable) is a FILTER message and is the wrong claim for a genuinely
  * empty account, so the page swaps the whole table out for this panel.
@@ -28,12 +33,15 @@ import { useRouter } from "next/navigation";
 import { ContributionWizardOverlay } from "@/app/(dashboard)/allocations/components/ContributionWizardOverlay";
 import { Button } from "@/components/ui/Button";
 
-export function MyStrategiesEmptyState() {
+export function StrategiesEmptyState() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const router = useRouter();
 
   return (
-    <div className="border border-border bg-surface rounded-lg px-6 py-8">
+    <div
+      data-degrade-id="strategies.empty-allocator"
+      className="border border-border bg-surface rounded-lg px-6 py-8"
+    >
       <p className="text-body font-medium text-text-primary">
         No strategies yet.
       </p>

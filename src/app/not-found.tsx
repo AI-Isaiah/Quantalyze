@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export default function NotFound() {
   return (
@@ -13,8 +14,8 @@ export default function NotFound() {
           The page you&apos;re looking for doesn&apos;t exist or has been moved.
         </p>
         <div className="mt-6">
-          <Link href="/discovery/crypto-sma">
-            <Button>Go to Discovery</Button>
+          <Link href={ROLE_HOME_ROUTE}>
+            <Button>Go to your home page</Button>
           </Link>
         </div>
       </div>

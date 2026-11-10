@@ -16,9 +16,9 @@ import { Sidebar } from "./Sidebar";
  * dead-end. Scenarios stays a tab (its top-level route is a redirect-stub).
  * Decks left the nav in Phase 195 (D-04): hidden until it works.
  *
- *   Allocator view: My allocation + Recommendations + Compare.
- *     (Discovery + Account handle the rest. No Strategies, no Portfolios,
- *     no Scenarios top-level entry.)
+ *   Allocator view: My allocation + Recommendations + Compare + Strategies.
+ *     (Discovery + Account handle the rest. No Portfolios, no Scenarios
+ *     top-level entry. Strategies joined in Phase 199 D-01.)
  *
  *   Manager / crypto-team view: Strategies. (Portfolios was reclassified in
  *     the Phase 109 review as an allocator deep-link surface — 14 allocator
@@ -74,11 +74,11 @@ describe("Sidebar workspace — allocator view", () => {
     expect(link).toHaveAttribute("href", "/recommendations");
   });
 
-  it("does NOT render 'Strategies' in the allocator workspace", () => {
+  it("renders exactly one 'Strategies' entry in the allocator workspace (Phase 199 D-01)", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    // "Strategies" is the manager/crypto-team surface, not an allocator one.
-    // The allocator browses published strategies via the Discovery group.
-    expect(screen.queryByText("Strategies")).toBeNull();
+    // Phase 199 folded the allocator's My Strategies page into /strategies, so
+    // the allocator now has the one Strategies entry too.
+    expect(screen.getAllByText("Strategies")).toHaveLength(1);
   });
 
   it("does NOT render 'Test Portfolios' or 'Portfolios' in the allocator workspace", () => {
@@ -213,15 +213,16 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
     expect(screen.queryByText("Portfolios")).toBeNull();
   });
 
-  it("admin + allocator sees the allocator workspace + Admin, NOT the manager surface", () => {
-    // isAllocator lights My allocation; the manager surface requires isManager,
-    // which is unset here, so Strategies/Portfolios must be absent (ROLE-02).
+  it("admin + allocator sees the allocator workspace + Admin, with the one Strategies entry", () => {
+    // isAllocator lights My allocation and (Phase 199 D-01) the one Strategies
+    // entry; the manager workspace requires isManager, which is unset here, so
+    // Portfolios stays absent (ROLE-02).
     render(
       <Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />,
     );
     expect(screen.getByText("My allocation")).toBeInTheDocument();
     expect(screen.getByText("ADMIN")).toBeInTheDocument();
-    expect(screen.queryByText("Strategies")).toBeNull();
+    expect(screen.getAllByText("Strategies")).toHaveLength(1);
     expect(screen.queryByText("Portfolios")).toBeNull();
   });
 
@@ -257,34 +258,63 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
 });
 
 /**
- * Phase 149 / NAV-01 — the "My Strategies" workspace entry (UI-SPEC Delta 1).
+ * Phase 199 LEAN-01 / D-01 — ONE Strategies entry per role, and it opens the one
+ * list at /strategies. Phase 149 gave the allocator a separate "My Strategies"
+ * entry that opened /my-strategies; Phase 199 folds that page into /strategies,
+ * so no nav item may link the old path and no role may see two entries.
  *
  * ⚠️ Every selector here is scoped by HREF, never by bare text (Pitfall 10):
- * the manager branch carries a "Strategies" entry and
  * `(dashboard)/strategies/page.tsx` renders an `<h1>My Strategies</h1>`, so a
- * `getByText("My Strategies")` would be ambiguous for a `role='both'` account
- * the moment these surfaces are rendered together.
+ * bare-text lookup would be ambiguous for a `role='both'` account the moment
+ * these surfaces are rendered together. Both variants mount the same
+ * `buildNavSections`, so the desktop rail and the mobile drawer are both pinned.
  */
-describe("Sidebar workspace — My Strategies entry (Phase 149 NAV-01)", () => {
-  it("renders an <a> to /my-strategies for an allocator, between Compare and Add a Strategy", () => {
+describe("Sidebar workspace — one Strategies entry per role (Phase 199 D-01)", () => {
+  const ROLES = [
+    { label: "allocator", props: { isAllocator: true }, expected: 1 },
+    { label: "manager", props: { isManager: true }, expected: 1 },
+    { label: "both", props: { isAllocator: true, isManager: true }, expected: 1 },
+    { label: "admin-only", props: { isAdmin: true }, expected: 0 },
+  ] as const;
+  const VARIANTS = ["desktop", "drawer"] as const;
+
+  for (const variant of VARIANTS) {
+    for (const { label, props, expected } of ROLES) {
+      it(`${variant}: ${label} sees ${expected} a[href="/strategies"] and none to /my-strategies`, () => {
+        const { container } = render(
+          <Sidebar populatedSlugs={[]} variant={variant} {...props} />,
+        );
+        expect(container.querySelectorAll('a[href="/strategies"]')).toHaveLength(
+          expected,
+        );
+        expect(container.querySelector('a[href="/my-strategies"]')).toBeNull();
+      });
+    }
+  }
+
+  it("the Strategies entry is a <Link> labelled Strategies, never a <button> (an action item would navigate nowhere)", () => {
     const { container } = render(
       <Sidebar populatedSlugs={[]} isAllocator={true} />,
     );
-
-    const entry = container.querySelector('a[href="/my-strategies"]');
+    const entry = container.querySelector('a[href="/strategies"]');
     expect(entry).not.toBeNull();
-    // This is a PAGE, not an overlay action — so a <Link>, not the
-    // `action: "add-strategy"` <button> shape its neighbour uses.
     expect(entry!.tagName).toBe("A");
-    expect(entry!.textContent).toContain("My Strategies");
+    expect(entry!.textContent?.trim()).toBe("Strategies");
+    const buttons = Array.from(container.querySelectorAll("button"));
+    expect(
+      buttons.filter((b) => b.textContent?.trim() === "Strategies"),
+    ).toEqual([]);
+  });
 
-    // UI-SPEC Delta 1 position: after the Recommendations/Compare block,
-    // directly above the write CTA the founder pointed at (which stays last).
-    // Decks is hidden (Phase 195 D-04), so Compare is the anchor now.
+  it("allocator order: Strategies sits after Compare and directly above the Add a Strategy CTA", () => {
+    const { container } = render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} />,
+    );
+    const entry = container.querySelector('a[href="/strategies"]');
     const compare = container.querySelector('a[href="/compare"]');
+    expect(entry).not.toBeNull();
     expect(compare).not.toBeNull();
     const addStrategy = screen.getByRole("button", { name: "Add a Strategy" });
-
     expect(
       compare!.compareDocumentPosition(entry!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
@@ -295,25 +325,14 @@ describe("Sidebar workspace — My Strategies entry (Phase 149 NAV-01)", () => {
     ).toBeTruthy();
   });
 
-  it("does NOT leak the entry to a manager-only session (T-110-16 role-leak pin)", () => {
-    // The page itself is requireRolePage('allocator')-guarded, but a visible
-    // nav entry that redirect-bounces is its own information disclosure: it
-    // tells a manager the surface exists. The push lives INSIDE
-    // showsAllocatorWorkspace so it cannot render here at all.
-    const { container } = render(
-      <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
-    );
-    expect(container.querySelector('a[href="/my-strategies"]')).toBeNull();
-  });
-
-  it("never renders the entry as a <button> (an action item would navigate nowhere)", () => {
-    const { container } = render(
-      <Sidebar populatedSlugs={[]} isAllocator={true} />,
-    );
-    const buttons = Array.from(container.querySelectorAll("button"));
-    expect(
-      buttons.filter((b) => b.textContent?.trim() === "My Strategies"),
-    ).toEqual([]);
+  it("role='both' lists the allocator set with a single Strategies and no second one", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} isManager={true} />);
+    const nav = screen.getByRole("navigation", { name: /primary/i });
+    const labels = within(nav)
+      .getAllByRole("link")
+      .map((a) => a.textContent?.trim() ?? "");
+    expect(labels.filter((t) => t === "Strategies")).toHaveLength(1);
+    expect(labels.some((t) => t === "My Strategies")).toBe(false);
   });
 });
 
@@ -343,7 +362,7 @@ describe("Sidebar workspace — Decks hidden, no portfolios link (Phase 195 D-04
     });
   }
 
-  it("lists the allocator workspace as My allocation, Recommendations, Compare, My Strategies, Add a Strategy", () => {
+  it("lists the allocator workspace as My allocation, Recommendations, Compare, Strategies, Add a Strategy", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     const nav = screen.getByRole("navigation", { name: /primary|main|sidebar/i });
     const labels = within(nav)
@@ -353,7 +372,7 @@ describe("Sidebar workspace — Decks hidden, no portfolios link (Phase 195 D-04
       "My allocation",
       "Recommendations",
       "Compare",
-      "My Strategies",
+      "Strategies",
     ];
     const indexes = workspace.map((l) => labels.findIndex((t) => t.includes(l)));
     expect(indexes.every((i) => i >= 0)).toBe(true);
@@ -706,13 +725,13 @@ describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () =
     expect(screen.queryByText("My allocation")).toBeNull();
   });
 
-  it("an allocator DOES see 'My allocation' but NOT the manager-only entries", () => {
+  it("an allocator DOES see 'My allocation' and the one Strategies entry, but not Portfolios", () => {
     render(
       <Sidebar populatedSlugs={[]} isAllocator={true} isManager={false} />,
     );
     expect(screen.getByText("My allocation")).toBeInTheDocument();
-    // The manager surface must NOT leak to a pure allocator.
-    expect(screen.queryByText("Strategies")).toBeNull();
+    // Phase 199 D-01: Strategies is every workspace role's entry, once.
+    expect(screen.getAllByText("Strategies")).toHaveLength(1);
     expect(screen.queryByText("Portfolios")).toBeNull();
   });
 });

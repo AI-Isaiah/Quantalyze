@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * Dashboard-level error boundary. Catches errors in any dashboard page
@@ -37,8 +38,8 @@ export default function DashboardError({
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
           <Button onClick={() => unstable_retry()}>Try again</Button>
-          <Link href="/discovery/crypto-sma">
-            <Button variant="ghost">Go to Discovery</Button>
+          <Link href={ROLE_HOME_ROUTE}>
+            <Button variant="ghost">Go to your home page</Button>
           </Link>
         </div>
       </div>

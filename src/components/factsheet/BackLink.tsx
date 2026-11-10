@@ -16,7 +16,7 @@
  */
 import { useSyncExternalStore, type MouseEvent } from "react";
 import Link from "next/link";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
 import type { BackTarget } from "@/lib/factsheet/origin";
 
 const LINK_CLASS =
@@ -68,7 +68,7 @@ export function BackLink({ target }: { target: BackTarget | null }) {
 
   return (
     <Link
-      href={DEFAULT_AUTHENTICATED_ROUTE}
+      href={DISCOVERY_LANDING_ROUTE}
       onClick={onClick}
       className={LINK_CLASS}
     >

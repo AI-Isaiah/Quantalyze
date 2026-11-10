@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { DeletionRequestActions } from "@/components/admin/DeletionRequestActions";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
   title: "Deletion requests",
@@ -50,7 +51,7 @@ export default async function AdminDeletionRequestsPage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   // C-0006: Read `data_deletion_requests` via the user-scoped client.
   // The `deletion_admin_all` RLS policy (migration 20260408113028) gates

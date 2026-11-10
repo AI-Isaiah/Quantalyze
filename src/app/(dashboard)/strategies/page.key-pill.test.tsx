@@ -22,6 +22,17 @@ import React from "react";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
 vi.mock("server-only", () => ({}));
+// Phase 199 plan 10 (D-02, CD-12): the page now ranks the owner's rows and
+// attaches the public trust tier. Both reads go through the shared queries
+// module, which these suites' Supabase doubles do not model (a published
+// universe, the trust-signal RPC), so the two are answered here: no comparison
+// set, no signals. Role is manager in every case below, so the allocator-only
+// reads never run.
+vi.mock("@/lib/queries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/queries")>()),
+  getOwnRowPercentiles: vi.fn(async () => null),
+  readPublicVerificationSignals: vi.fn(async () => new Map()),
+}));
 // 167.2 review-fix: the page captures its read failures to Sentry.
 const captureToSentryMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
@@ -70,7 +81,14 @@ interface PillProps {
  */
 const pillProps = vi.hoisted(() => [] as PillProps[]);
 vi.mock("@/components/exchanges/AllocatorSyncStatus", () => ({
-  AllocatorSyncStatus: (props: PillProps) => {
+  AllocatorSyncStatus: (props: PillProps & { pillOnly?: boolean }) => {
+    // Phase 199 plan 14: the legend under the table mounts the pill in its
+    // pill-only mode. That mount is the LEGEND's, not a row's, so it is neither
+    // recorded as "what a row was told" nor given the row pill's test id (the
+    // real component makes the same distinction).
+    if (props.pillOnly) {
+      return React.createElement("span", { "data-testid": "legend-pill" });
+    }
     pillProps.push({
       subject: props.subject,
       syncStatus: props.syncStatus,
@@ -92,6 +110,9 @@ vi.mock("next/navigation", () => ({
     redirectMock(path);
     throw new Error(`__REDIRECT__:${path}`);
   },
+  // Phase 199 plan 09: the page now renders StrategiesSection (a client host that
+  // calls useRouter for its post-wizard refresh), so the mock must carry one.
+  useRouter: () => ({ refresh: () => {} }),
 }));
 
 interface MockStrategyRow {
@@ -132,6 +153,8 @@ interface MockKeyRow {
   sync_status: string | null;
   sync_error: string | null;
   last_sync_at: string | null;
+  /** The key's nickname (`api_keys.label`), which names the key on the caption. */
+  label: string;
 }
 
 interface MockMemberRow {
@@ -323,6 +346,16 @@ vi.mock("@/lib/supabase/server", () => ({
       return { data: rows.slice(0, args.p_limit ?? rows.length), error: null };
     },
     from: (table: string) => {
+      // Phase 199 plan 09 (D-02): the page reads the viewer's role from `profiles`.
+      // This suite is the manager's page, so the branch answers manager.
+      if (table === "profiles") {
+        const p = {
+          select: () => p,
+          eq: () => p,
+          maybeSingle: async () => ({ data: { role: "manager" }, error: null }),
+        };
+        return p;
+      }
       let result: ReadResult;
       if (table === "strategies") {
         result = state.strategiesError
@@ -416,6 +449,7 @@ function key(
     sync_status,
     sync_error: null,
     last_sync_at: null,
+    label: "Main",
     ...overrides,
   };
 }
@@ -511,7 +545,7 @@ describe("StrategiesPage — KCS-06 the key mark (S4)", () => {
 
     // Exactly the caption the UI-SPEC locks (KCS06-ONE), U+00B7 included.
     expect(markLines(container)).toEqual([
-      { caption: "Exchange key · Bybit", status: "sign_in_failed" },
+      { caption: "Exchange key · Bybit \u2014 Main", status: "sign_in_failed" },
     ]);
     // Mounted exactly as the key card mounts it: the stored status, error,
     // time and exchange code, not a paraphrase.
@@ -555,7 +589,7 @@ describe("StrategiesPage — KCS-06 the key mark (S4)", () => {
     );
   });
 
-  it("reads api_keys through the five-column allowlist, never a wide select", async () => {
+  it("reads api_keys through the six-column allowlist (label added, no encrypted column), never a wide select", async () => {
     state.strategies = [row("s-1", { api_key_id: "k-1" })];
     state.keys = [key("k-1", "bybit", "complete")];
 
@@ -566,7 +600,7 @@ describe("StrategiesPage — KCS-06 the key mark (S4)", () => {
       {
         table: "api_keys",
         op: "select",
-        args: ["id, exchange, sync_status, sync_error, last_sync_at"],
+        args: ["id, exchange, label, sync_status, sync_error, last_sync_at"],
       },
     ]);
   });
@@ -595,7 +629,7 @@ describe("StrategiesPage — KCS-06 composite members are feeding keys", () => {
     const container = await renderPage();
 
     expect(markLines(container)).toEqual([
-      { caption: "Exchange key \u00b7 OKX", status: "revoked" },
+      { caption: "Exchange key \u00b7 OKX \u2014 Main", status: "revoked" },
     ]);
   });
 
@@ -610,21 +644,21 @@ describe("StrategiesPage — KCS-06 composite members are feeding keys", () => {
     ];
     state.keys = [
       key("k-okx", "okx", "revoked"),
-      key("k-bybit", "bybit", "sign_in_failed", { sync_error: "first seen" }),
-      key("k-bybit-2", "bybit", "sign_in_failed", { sync_error: "second seen" }),
+      key("k-bybit", "bybit", "sign_in_failed", { sync_error: "first seen", label: "Desk A" }),
+      key("k-bybit-2", "bybit", "sign_in_failed", { sync_error: "second seen", label: "Desk B" }),
     ];
 
     const container = await renderPage();
 
     expect(markLines(container)).toEqual([
-      { caption: "Exchange keys \u00b7 Bybit", status: "sign_in_failed" },
-      { caption: "Exchange key \u00b7 OKX", status: "revoked" },
+      { caption: "Exchange keys \u00b7 Bybit \u2014 Desk A, Bybit \u2014 Desk B", status: "sign_in_failed" },
+      { caption: "Exchange key \u00b7 OKX \u2014 Main", status: "revoked" },
     ]);
     // The pill's detail comes from the FIRST key seen in that status.
     expect(pillProps.map((p) => p.syncError)).toEqual(["first seen", null]);
   });
 
-  it("SAME-STATUS-MANY: several keys in one status make one KCS06-MANY line naming each exchange once", async () => {
+  it("SAME-STATUS-MANY: several keys in one status make one KCS06-MANY line naming each KEY by its label, in seq order", async () => {
     state.strategies = [row("c-1")];
     state.members = [
       member("c-1", "k-1", 1),
@@ -632,15 +666,15 @@ describe("StrategiesPage — KCS-06 composite members are feeding keys", () => {
       member("c-1", "k-3", 3),
     ];
     state.keys = [
-      key("k-1", "bybit", "sign_in_failed"),
-      key("k-2", "bybit", "sign_in_failed"),
-      key("k-3", "okx", "sign_in_failed"),
+      key("k-1", "bybit", "sign_in_failed", { label: "Desk A" }),
+      key("k-2", "bybit", "sign_in_failed", { label: "Desk B" }),
+      key("k-3", "okx", "sign_in_failed", { label: "Options" }),
     ];
 
     const container = await renderPage();
 
     expect(markLines(container)).toEqual([
-      { caption: "Exchange keys \u00b7 Bybit, OKX", status: "sign_in_failed" },
+      { caption: "Exchange keys \u00b7 Bybit \u2014 Desk A, Bybit \u2014 Desk B, OKX \u2014 Options", status: "sign_in_failed" },
     ]);
   });
 
@@ -653,10 +687,31 @@ describe("StrategiesPage — KCS-06 composite members are feeding keys", () => {
 
     // Counted twice it would read "Exchange keys" (plural) about one key.
     expect(markLines(container)).toEqual([
-      { caption: "Exchange key \u00b7 Bybit", status: "sign_in_failed" },
+      { caption: "Exchange key \u00b7 Bybit \u2014 Main", status: "sign_in_failed" },
     ]);
     const keyIn = state.calls.find((c) => c.table === "api_keys" && c.op === "in");
     expect(keyIn?.args).toEqual(["id", ["k-1"]]);
+  });
+
+  it("KEY-NAMED: two keys of ONE exchange are told apart by their nicknames, and a key with no nickname reads its masked tail, never its raw id", async () => {
+    state.strategies = [row("s-1", { api_key_id: "key-aaaa1111" })];
+    state.members = [member("s-1", "key-bbbb2222", 1)];
+    state.keys = [
+      key("key-aaaa1111", "bybit", "sign_in_failed", { label: "Desk A" }),
+      key("key-bbbb2222", "bybit", "sign_in_failed", { label: "" }),
+    ];
+
+    const container = await renderPage();
+
+    // Built by `apiKeyLabelById`: `{Exchange} \u2014 {nickname}`, or the masked
+    // `\u2022\u2022\u2022\u2022` + last four of the id when there is no nickname.
+    expect(markLines(container)).toEqual([
+      {
+        caption: "Exchange keys \u00b7 Bybit \u2014 Desk A, Bybit \u2014 \u2022\u2022\u2022\u20222222",
+        status: "sign_in_failed",
+      },
+    ]);
+    expect(container.textContent).not.toContain("key-bbbb2222");
   });
 
   it("MEMBERS-READ-ERROR: a failed member read still judges api_key_id (truthful, partial) and is logged", async () => {
@@ -667,7 +722,7 @@ describe("StrategiesPage — KCS-06 composite members are feeding keys", () => {
     const container = await renderPage();
 
     expect(markLines(container)).toEqual([
-      { caption: "Exchange key \u00b7 Bybit", status: "sign_in_failed" },
+      { caption: "Exchange key \u00b7 Bybit \u2014 Main", status: "sign_in_failed" },
     ]);
     expect(consoleError).toHaveBeenCalledWith(
       "[strategies/page] strategy_keys read failed",
@@ -1310,14 +1365,20 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(state.adminStrategyReads).toEqual([]);
   });
 
-  it("B24 ANALYTICS-FAILED public URL: a published row whose analytics failed says its public link opens a page without the numbers, and reads no jobs", async () => {
+  it("B24 ANALYTICS-FAILED public URL: a published row whose analytics failed says its public link opens a page without the numbers, whatever its jobs read says", async () => {
     state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "failed" } })];
     state.jobsError = { message: "synthetic rpc failure" };
 
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_ANALYTICS_FAILED);
-    expect(state.rpcCalls).toEqual([]);
+    // 199-16 (D-03): the share NOTE still does not read the row's jobs (IN-04), but an
+    // Analytics failed row's Health detail names the failed day, so this row makes the
+    // ONE read of its own, and a failed read prints the unreadable sentence beside the note.
+    expect(state.rpcCalls).toHaveLength(1);
+    expect(
+      container.querySelector('[data-degrade-id="strategies.compute-status-unreadable"]'),
+    ).not.toBeNull();
   });
 
   it("B24 ANALYTICS-FAILED while a recompute runs keeps MINT-A: the recipient sees 'being prepared'", async () => {
@@ -1672,15 +1733,20 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       "strategy-row-key-mark",
       "strategy-row-share-note",
     ]);
-    expect([...bands[1].children].map((c) => c.getAttribute("data-testid"))).toEqual([
-      "strategy-row-share-note",
-    ]);
+    // 199-16 (D-03): an Analytics failed row's note carries its Health detail before the
+    // share note. These jobs read answers no job (a read that WORKED), so there is no day to
+    // name and the detail is the undated failure line, not the unreadable sentence (199 review WR-02).
+    expect(
+      [...bands[1].children].map(
+        (c) => c.getAttribute("data-testid") ?? c.getAttribute("data-degrade-id"),
+      ),
+    ).toEqual(["strategies.analytics-failed-undated", "strategy-row-share-note"]);
     // 2026-10-10 Phase 170.7 (UI-SPEC Typography): every note-row line is
     // `text-caption` weight 400 (it was `text-xs` on the card), so the share
     // note's class string moved with the note's new home.
-    expect(bands[1].querySelector("p")?.className).toBe(
-      "text-caption font-normal text-text-muted",
-    );
+    expect(
+      bands[1].querySelector('[data-testid="strategy-row-share-note"]')?.className,
+    ).toBe("text-caption font-normal text-text-muted");
   });
 
   const cron = (n: number) =>

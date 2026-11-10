@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { config, proxy } from "./proxy";
 import { NextRequest } from "next/server";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 /**
  * Unit tests for the proxy middleware matcher config.
@@ -229,6 +230,9 @@ describe("proxy public-route gating (anonymous session)", () => {
       // link" affordance instead of bouncing.
       "/forgot-password",
       "/reset-password",
+      // Phase 199 (CD-07): the role-home redirect page. A signed-out visit must
+      // reach it (it sends the visitor to /) rather than 307 to /login.
+      "/home",
       "/legal/disclaimer",
       "/browse",
       "/browse/crypto-sma",
@@ -387,6 +391,10 @@ describe("proxy public-route gating (anonymous session)", () => {
       // dashboard. (/forgot-password is NOT exempt — see the dedicated test
       // below — so an authed user there bounces away, matching /login.)
       "/reset-password",
+      // Phase 199 (CD-07): /home is where a signed-in user is SENT. If the
+      // bounce below applied to it, /home would redirect to its own fallback
+      // and loop; the page itself redirects by role.
+      "/home",
     ])(
       "%s with session does NOT redirect to dashboard",
       async (path) => {
@@ -424,9 +432,45 @@ describe("proxy public-route gating (anonymous session)", () => {
       expect(res.status).toBe(307);
       const location = res.headers.get("location");
       expect(location).not.toBeNull();
-      // Default authenticated route per src/proxy.ts.
-      expect(new URL(location!).pathname).toBe("/discovery/crypto-sma");
+      // Phase 199 (CD-07): the signed-in bounce falls back to the role-home
+      // route, which /home then resolves by role. Pinned as a literal so a
+      // retargeted constant cannot pass by comparing against itself.
+      expect(new URL(location!).pathname).toBe("/home");
     });
+
+    // Phase 199 (CD-02, CD-13): the signed-in bounce follows a safe `redirect`
+    // and never an off-origin one. The proxy shares safeRedirectPath with the
+    // login page and LoginForm; these pin the one rule through that refactor.
+    it("authenticated user on /login?redirect=/compare lands on /compare", async () => {
+      const req = new NextRequest(
+        "https://example.com/login?redirect=/compare",
+        { method: "GET" },
+      );
+      const res = await proxy(req);
+      expect(res.status).toBe(307);
+      const location = new URL(res.headers.get("location")!);
+      expect(location.origin).toBe("https://example.com");
+      expect(location.pathname).toBe("/compare");
+    });
+
+    it.each([
+      ["protocol-relative host", "//evil.example"],
+      ["absolute URL", "https://evil.example"],
+      ["backslash host", "/\\evil"],
+    ])(
+      "authenticated user on /login with a hostile redirect (%s) goes to the default route, never off-origin",
+      async (_label, hostile) => {
+        const req = new NextRequest(
+          `https://example.com/login?redirect=${encodeURIComponent(hostile)}`,
+          { method: "GET" },
+        );
+        const res = await proxy(req);
+        expect(res.status).toBe(307);
+        const location = new URL(res.headers.get("location")!);
+        expect(location.origin).toBe("https://example.com");
+        expect(location.pathname).toBe(ROLE_HOME_ROUTE);
+      },
+    );
 
     it("authenticated user on /forgot-password DOES redirect away (not bounce-exempt)", async () => {
       // 51-REVIEW: /forgot-password is public (anon must reach it) but NOT
@@ -441,7 +485,7 @@ describe("proxy public-route gating (anonymous session)", () => {
       expect(res.status).toBe(307);
       const location = res.headers.get("location");
       expect(location).not.toBeNull();
-      expect(new URL(location!).pathname).toBe("/discovery/crypto-sma");
+      expect(new URL(location!).pathname).toBe("/home");
     });
   });
 });

@@ -5,6 +5,7 @@ import { isAdminUser } from "@/lib/admin";
 import { isValidPartnerTag } from "@/lib/partner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { MatchEvalDashboard } from "@/components/admin/MatchEvalDashboard";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
   title: "Match engine eval",
@@ -20,7 +21,7 @@ export default async function MatchEvalPage({
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   // Validate partner_tag server-side — if it's malformed, drop it rather
   // than passing an invalid value through to the dashboard fetch.

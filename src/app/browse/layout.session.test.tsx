@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AuthSessionMissingError } from "@supabase/supabase-js";
-import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
+import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
 
 vi.mock("server-only", () => ({}));
 
@@ -56,14 +56,14 @@ describe("/browse header with a session (ROUTE-02)", () => {
   it("falls back to the default authenticated route on /browse", async () => {
     getUser.mockResolvedValue(SESSION);
     const html = await render("/browse");
-    expect(html).toContain(`href="${DEFAULT_AUTHENTICATED_ROUTE}"`);
+    expect(html).toContain(`href="${DISCOVERY_LANDING_ROUTE}"`);
     expect(html).toContain("Go to Discovery");
   });
 
   it("falls back to the default route for a slug that is not a category", async () => {
     getUser.mockResolvedValue(SESSION);
     const html = await render("/browse/not-a-category");
-    expect(html).toContain(`href="${DEFAULT_AUTHENTICATED_ROUTE}"`);
+    expect(html).toContain(`href="${DISCOVERY_LANDING_ROUTE}"`);
     expect(html).not.toContain("/discovery/not-a-category");
   });
 });

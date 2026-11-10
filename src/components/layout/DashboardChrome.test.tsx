@@ -464,18 +464,12 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
   // Founder chose Option B: dense tables go FLUID (no px cap at all), prose and
   // forms keep a bounded measure. Any fixed px cap dead-spaces once the viewport
   // exceeds it, and zooming out is exactly how a viewport exceeds it.
-  it("widens the My Strategies LIST (/my-strategies) — the founder-reported surface", () => {
-    const container = contentContainerFor("/my-strategies");
-    expect(container).toHaveClass("max-w-full");
-    expect(container).not.toHaveClass("max-w-7xl");
-  });
-
   it("gives dense tables NO px cap at all — a ceiling is what strands content on zoom-out", () => {
     // ⛔ The point of Option B is the ABSENCE of a numeric ceiling, not a larger
     // one. `toHaveClass("max-w-full")` alone would still pass if someone
     // reinstated a px cap alongside it, so this rejects the arbitrary-value form
     // outright — it fails for max-w-[1920px] and for any successor number.
-    const container = contentContainerFor("/my-strategies");
+    const container = contentContainerFor("/strategies");
     // ⚠️ Assert the container EXISTS before filtering it. Without this, a null
     // container would make `?? []` yield an empty list and the row would pass
     // vacuously — an emptiness assertion is only meaningful once you have
@@ -521,13 +515,6 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
     // Regex boundary for the anchored arm: `$` after `strategies`, so a
     // lookalike sibling stays on the bounded measure.
     const container = contentContainerFor("/strategiesx");
-    expect(container).toHaveClass("max-w-7xl");
-    expect(container).not.toHaveClass("max-w-full");
-  });
-
-  it("does NOT widen a route that merely starts with the prefix string (/my-strategiesx)", () => {
-    // Regex boundary for the new allow-list member, mirroring /discoveryx.
-    const container = contentContainerFor("/my-strategiesx");
     expect(container).toHaveClass("max-w-7xl");
     expect(container).not.toHaveClass("max-w-full");
   });
@@ -579,7 +566,7 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
 // shape WR-06 is about.
 // ═══════════════════════════════════════════════════════════════════════════
 describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid shell", () => {
-  // The first six mirror `DashboardChrome`'s own `isWide` allow-list, kept
+  // The first four mirror `DashboardChrome`'s own `isWide` allow-list, kept
   // beside it in the same file so the sweep and the predicate cannot drift
   // apart unnoticed. `src/components` is added because shells live there too.
   const SCANNED_TREES = [
@@ -587,7 +574,6 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
     "src/app/(dashboard)/compare",
     "src/app/(dashboard)/discovery",
     "src/app/(dashboard)/admin",
-    "src/app/(dashboard)/my-strategies",
     "src/components",
   ];
 

@@ -23,6 +23,17 @@ import React from "react";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
 vi.mock("server-only", () => ({}));
+// Phase 199 plan 10 (D-02, CD-12): the page now ranks the owner's rows and
+// attaches the public trust tier. Both reads go through the shared queries
+// module, which these suites' Supabase doubles do not model (a published
+// universe, the trust-signal RPC), so the two are answered here: no comparison
+// set, no signals. Role is manager in every case below, so the allocator-only
+// reads never run.
+vi.mock("@/lib/queries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/queries")>()),
+  getOwnRowPercentiles: vi.fn(async () => null),
+  readPublicVerificationSignals: vi.fn(async () => new Map()),
+}));
 
 // Stub next/link to a plain anchor (server-component compat under RTL).
 vi.mock("next/link", () => ({
@@ -110,6 +121,9 @@ vi.mock("next/navigation", () => ({
     redirectMock(path);
     throw new Error(`__REDIRECT__:${path}`);
   },
+  // Phase 199 plan 09: the page now renders StrategiesSection (a client host that
+  // calls useRouter for its post-wizard refresh), so the mock must carry one.
+  useRouter: () => ({ refresh: () => {} }),
 }));
 
 interface MockStrategyRow {
@@ -166,6 +180,16 @@ vi.mock("@/lib/supabase/server", () => ({
     // DELIBERATELY, answering empty; any other table still throws.
     rpc: async () => ({ data: [], error: null }),
     from: (table: string) => {
+      // Phase 199 plan 09 (D-02): the page reads the viewer's role from `profiles`.
+      // This suite is the manager's page, so the branch answers manager.
+      if (table === "profiles") {
+        const p = {
+          select: () => p,
+          eq: () => p,
+          maybeSingle: async () => ({ data: { role: "manager" }, error: null }),
+        };
+        return p;
+      }
       if (
         table !== "strategies" &&
         table !== "contact_requests" &&

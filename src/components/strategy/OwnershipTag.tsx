@@ -35,7 +35,11 @@ import {
 const ANATOMY =
   "inline-flex items-center rounded-md px-2 py-0.5 text-caption font-medium";
 
-const LABELS = {
+/**
+ * Exported (Phase 199 plan 14) so the strategies legend renders the labels this
+ * tag prints, from the one map, instead of re-typing them.
+ */
+export const LABELS = {
   [OWN_CAPITAL]: "Own capital",
   [TEAM_REVIEW]: "Team review",
 } as const;
@@ -45,8 +49,9 @@ const INK = {
   // unlocks the money action. In-family precedent: Badge's `intro_made` ink.
   [OWN_CAPITAL]: "bg-accent/10 text-accent",
   // The default, and a neutral fact — never red, never amber, never "less
-  // than". Same muted ink Badge uses for `private` / `archived`.
-  [TEAM_REVIEW]: "bg-badge-other/10 text-text-muted",
+  // than". Same neutral ink Badge uses for `private` / `archived` (secondary,
+  // not muted: muted is 4.21:1 on this tint, below AA).
+  [TEAM_REVIEW]: "bg-badge-other/10 text-text-secondary",
 } as const;
 
 export function OwnershipTag({

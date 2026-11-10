@@ -278,7 +278,7 @@ describe("StrategyTable Delta 3 — SC-4b status marker", () => {
 
     const marker = within(rowFor(NAME_PRIVATE)).getByText("Private");
     expect(marker).toBeInTheDocument();
-    expect(marker.className).toContain("text-text-muted");
+    expect(marker.className).toContain("text-text-secondary");
     // Absence of publication is a FACT, not an error (DESIGN.md semantic-color
     // gate + 149-UI-SPEC Delta 3): never red, never amber.
     expect(marker.className).not.toContain("text-negative");

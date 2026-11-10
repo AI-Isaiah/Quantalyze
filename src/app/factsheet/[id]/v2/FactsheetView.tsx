@@ -161,6 +161,8 @@ import {
   withheldReason,
 } from "@/lib/figure-gate";
 import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments } from "@/lib/degrade-warnings";
 
 /**
  * Editorial layout — refined-minimalism inside the institutional/utilitarian
@@ -488,6 +490,14 @@ export function FactsheetBody({
   printView = false,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
   const isDocument = layout === "document";
+  // Phase 199 plan 18 (T-199-22): whose view this is, for the one line that would name an owner's
+  // key. The owner view is the owner lane (`ownerShare` is its presence predicate, below) and the
+  // two allocator mounts, which call this body with the default "full" layout over the allocator's
+  // OWN data. Every other mount (the public factsheet, the tearsheet, the share-link recipient)
+  // passes layout="document" with no `ownerShare`, so the answer fails CLOSED to the recipient
+  // wording: a mount that decides nothing never names a key. Derived from render props the lane
+  // already decides, never from the payload (T-150-27).
+  const ownerView = !recipientShare && (ownerShare !== undefined || layout === "full");
   const { colorblind } = useDisplay();
   // Phase 164 / SHARE-04 — the live-link fact, held HERE because two children on
   // opposite sides of the tree read it (the notice above the masthead, the share
@@ -549,7 +559,11 @@ export function FactsheetBody({
           />
         )}
         {topSlot}
-        <KpiStrip scenarioMode={scenarioMode} comparatorLine={isDocument} />
+        <KpiStrip
+          scenarioMode={scenarioMode}
+          comparatorLine={isDocument}
+          degradedMembersOwnerView={ownerView}
+        />
         {isDocument ? (
           <ChartHintContext.Provider value={CHART_HINT_ID}>
             {!printView && (
@@ -1661,6 +1675,7 @@ function FactsheetHeader({
             {payload.analyticsUpdating === true && (
               <p
                 data-testid="factsheet-analytics-updating"
+                data-degrade-id="factsheet.analytics-updating"
                 className="mt-1 text-caption text-text-muted"
               >
                 {ANALYTICS_UPDATING_LINE}
@@ -2076,8 +2091,12 @@ function CapacityChip({
 function KpiStrip({
   scenarioMode = false,
   comparatorLine = false,
+  degradedMembersOwnerView = false,
 }: {
   scenarioMode?: boolean;
+  /** Phase 199 plan 18: the viewer is the owner of this data (see `FactsheetBody`'s `ownerView`).
+   *  Only then does the degraded-members line name its member keys; absent it names none. */
+  degradedMembersOwnerView?: boolean;
   /** Phase 196 (OQ-2, D-04), document layout only: under each of the seven headline cells, one
    *  muted line with the active comparator's value for the same figure. The Main metrics table
    *  no longer repeats the headline rows' comparator column beside them, so the strip keeps the
@@ -2556,18 +2575,29 @@ function KpiStrip({
           is NOT in the track record. Reuses the identical NEW-C20-08 amber caveat
           pattern; strict-coerced to [] upstream so junk never renders. */}
       {(payload.dataQuality?.degradedMembers?.length ?? 0) > 0 && (
-        <p
-          className="px-3 sm:px-4 py-2 text-micro font-mono"
-          style={{
-            borderTop: "1px solid var(--color-border)",
-            color: "var(--color-warning, #B45309)",
-          }}
-        >
-          ⚠ {payload.dataQuality!.degradedMembers!
-            .map((d) => `Key ${d.seq} (${venueDisplayName(d.venue)})`)
-            .join(", ")}{" "}
-          could not be included — {payload.dataQuality!.degradedMembers!.length > 1 ? "their" : "its"} data is excluded from this track record.
-        </p>
+        // Phase 199 plan 18 (D-04): registered, rendered through DegradeLine. The OWNER view keeps
+        // the member names and gains the contact form; any other viewer reads a line that names no
+        // key, venue or count (T-199-22), with the one action a reader has.
+        degradedMembersOwnerView ? (
+          <DegradeLine
+            id="factsheet.degraded-members"
+            element="p"
+            className="px-3 sm:px-4 py-2 text-micro font-mono border-t border-border text-warning"
+            segments={degradeSegments("factsheet.degraded-members", {
+              labels: payload.dataQuality!.degradedMembers!.map(
+                (d) => `Key ${d.seq} (${venueDisplayName(d.venue)})`,
+              ),
+              strategyId: scenarioMode ? undefined : payload.strategyId,
+            })}
+          />
+        ) : (
+          <DegradeLine
+            id="factsheet.degraded-members-recipient"
+            element="p"
+            className="px-3 sm:px-4 py-2 text-micro font-mono border-t border-border text-warning"
+            segments={degradeSegments("factsheet.degraded-members-recipient", undefined)}
+          />
+        )
       )}
       </section>
     </>
@@ -3114,7 +3144,14 @@ function ControlBar({
             ]}
           />
           {usdReasonCopy && (
-            <p className={`text-caption ${usdUnavailableReason === "price_read_failed" ? "text-warning" : "text-text-muted"}`}>
+            <p
+              data-degrade-id={
+                usdUnavailableReason === "price_read_failed"
+                  ? "factsheet.usd-view-read-failed"
+                  : "factsheet.usd-view-no-priced-day"
+              }
+              className={`text-caption ${usdUnavailableReason === "price_read_failed" ? "text-warning" : "text-text-muted"}`}
+            >
               {usdReasonCopy}
             </p>
           )}

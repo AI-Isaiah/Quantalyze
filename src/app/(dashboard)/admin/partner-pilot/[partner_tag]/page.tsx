@@ -12,6 +12,7 @@ import { Badge, statusLabelMap } from "@/components/ui/Badge";
 import { disclosureTierLabel, labelOf } from "@/lib/display-labels";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import type { Profile, Strategy, Role } from "@/lib/types";
+import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 // /admin/partner-pilot/[partner_tag] — T-1.3 from the cap-intro demo sprint.
 // Filtered view of the profiles / strategies / contact_requests tagged with a
@@ -65,7 +66,7 @@ export default async function PartnerPilotPage({
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  if (!(await isAdminUser(supabase, user))) redirect("/discovery/crypto-sma");
+  if (!(await isAdminUser(supabase, user))) redirect(ROLE_HOME_ROUTE);
 
   const admin = createAdminClient();
 

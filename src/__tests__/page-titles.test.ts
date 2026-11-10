@@ -18,8 +18,9 @@
  *   3. every `page.tsx` under (dashboard) and (auth) is titled, by an export in
  *      its own file or in a `layout.tsx` in its own directory, except the two
  *      redirect-only pages that render no document of their own;
- *   4. /strategies and /my-strategies carry different PageHeader titles
- *      (D-06: the manager list is "Strategies", the owner list "My Strategies");
+ *   4. /strategies carries a literal PageHeader title and /my-strategies has no
+ *      page of its own (Phase 199 D-01: it 308s to the one list; D-06 had kept
+ *      the two titles distinct while both pages existed);
  *   5. the matchers can fail: synthetic offenders are flagged, so a scanner
  *      that stopped matching cannot leave this census green.
  *
@@ -498,13 +499,16 @@ describe("page-title census — the title contract across src/app", () => {
     }
   });
 
-  it("4. /strategies and /my-strategies carry different PageHeader titles", () => {
+  it("4. /strategies has a literal PageHeader title and /my-strategies has no page (Phase 199 D-01)", () => {
     const headerTitle = (rel: string) =>
       /<PageHeader\b[\s\S]*?\btitle="([^"]*)"/.exec(code(read(rel)))?.[1];
     const strategies = headerTitle("src/app/(dashboard)/strategies/page.tsx");
-    const mine = headerTitle("src/app/(dashboard)/my-strategies/page.tsx");
     expect(strategies, "/strategies has no literal PageHeader title").toBeTruthy();
-    expect(mine, "/my-strategies has no literal PageHeader title").toBeTruthy();
-    expect(strategies).not.toBe(mine);
+    // The retired route renders nothing: a page file here would shadow the
+    // config redirect's intent and re-open a second strategies list.
+    expect(
+      existsSync(join(REPO_ROOT, "src/app/(dashboard)/my-strategies/page.tsx")),
+      "/my-strategies must stay a config redirect with no page.tsx (Phase 199 D-01)",
+    ).toBe(false);
   });
 });

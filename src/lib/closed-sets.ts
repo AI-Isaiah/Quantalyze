@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Strategy } from "./types";
 
 // ============================================================================
 // B8 — Closed-Set Discipline registry
@@ -909,6 +910,28 @@ export function deriveEmptySeriesState(
   // the UI renders a MUTED "No data" for it, never a red error chip.
   return "empty";
 }
+
+// --- Strategy status (Phase 199 plan 14, D-03) -------------------------------
+// Every `strategies.status` value the owner list can render, as a RUNTIME tuple.
+// `Strategy["status"]` is a compile-time union only, so a legend that must
+// explain every status chip cannot iterate it. The `satisfies` clause rejects a
+// value the union does not have; the completeness type below rejects a union
+// member this tuple lacks. Adding a status therefore fails the type check here
+// first, then the legend's `Record<StrategyStatus, string>` until it is defined.
+// The order is the legend's (UI-SPEC), not the lifecycle's.
+export const STRATEGY_STATUSES = [
+  "published",
+  "pending_review",
+  "draft",
+  "private",
+  "archived",
+] as const satisfies readonly Strategy["status"][];
+export type StrategyStatus = (typeof STRATEGY_STATUSES)[number];
+type MissingStrategyStatus = Exclude<Strategy["status"], StrategyStatus>;
+/** `true` while the tuple lists every `Strategy["status"]`; a missing member names itself in the error. */
+export const STRATEGY_STATUSES_COMPLETE: [MissingStrategyStatus] extends [never]
+  ? true
+  : { missing: MissingStrategyStatus } = true;
 
 // --- Untrusted key sync_status (Phase 167 CREDTRUST / D-16) ----------------
 // THE ONE DEFINITION of "this key's data is not to be trusted as current".

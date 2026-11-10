@@ -8,7 +8,9 @@ import {
   KEY_STORAGE_LINK,
   KEY_STORAGE_SENTENCE,
   LISTING_COST_SENTENCE,
+  lastAttemptDay,
   ownerRemedy,
+  ownerStateIsDated,
   ownerStateLine,
   probeUnreadableShareNote,
   recipientShareNote,
@@ -628,23 +630,30 @@ describe("S9 — KCS-11 share page arms", () => {
 });
 
 describe("S4 — KCS-06 key-mark captions", () => {
-  it("KCS06-ONE: one key", () => {
-    expect(untrustedKeyCaption(["bybit"], 1)).toBe("Exchange key · Bybit");
+  // 199-12 (D-03): the caption names KEYS (labels from `apiKeyLabelById`), not
+  // exchanges, so two keys of one exchange read as two keys.
+  it("KCS06-ONE: one key, named by its label", () => {
+    expect(untrustedKeyCaption(["Bybit — Main"])).toBe("Exchange key · Bybit — Main");
   });
 
-  it("KCS06-MANY: distinct display names in first-seen order", () => {
-    expect(untrustedKeyCaption(["bybit", "okx", "bybit"], 3)).toBe("Exchange keys · Bybit, OKX");
-    expect(untrustedKeyCaption(["bybit"], 2)).toBe("Exchange keys · Bybit");
+  it("KCS06-MANY: two or more keys, each named once, in the order given", () => {
+    expect(untrustedKeyCaption(["Bybit — Desk A", "OKX — Main"])).toBe(
+      "Exchange keys · Bybit — Desk A, OKX — Main",
+    );
+    // Two keys of ONE exchange stay two names (the old caption collapsed them to "Bybit").
+    expect(untrustedKeyCaption(["Bybit — Desk A", "Bybit — Desk B"])).toBe(
+      "Exchange keys · Bybit — Desk A, Bybit — Desk B",
+    );
   });
 
   it("KCS06 captions carry U+00B7", () => {
-    expect(untrustedKeyCaption(["okx"], 1)).toContain("·");
-    expect(untrustedKeyCaption(["okx"], 1).codePointAt("Exchange key ".length)).toBe(0xb7);
+    expect(untrustedKeyCaption(["OKX — Main"])).toContain("·");
+    expect(untrustedKeyCaption(["OKX — Main"]).codePointAt("Exchange key ".length)).toBe(0xb7);
   });
 
-  it("a code absent from EXCHANGE_DISPLAY renders as stored", () => {
-    expect(untrustedKeyCaption(["future_venue"], 1)).toBe("Exchange key · future_venue");
-    expect(untrustedKeyCaption(["constructor"], 1)).toBe("Exchange key · constructor");
+  it("a label is echoed as given, never looked up or altered", () => {
+    expect(untrustedKeyCaption(["future_venue — Main"])).toBe("Exchange key · future_venue — Main");
+    expect(untrustedKeyCaption(["constructor"])).toBe("Exchange key · constructor");
   });
 });
 
@@ -886,5 +895,71 @@ describe("192 PUBLICTRUTH shared sentences", () => {
     }).format(["Binance", "OKX", "Bybit", "Deribit"]);
     expect(EXCHANGE_LIST).toBe(expected);
     expect(EXCHANGE_LIST).toBe("Binance, OKX, Bybit, or Deribit");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 199 plan 18 (D-04, SC-4, UI-SPEC "Factsheet" row 2): the failed and stalled owner state
+// lines name the day of the last attempt. Expected strings are typed as literals here, never
+// imported, so a reword of the prefix moves a user-visible sentence and turns this file RED.
+// ---------------------------------------------------------------------------
+describe("199-18 — the failed and stalled owner state lines carry the last attempt's day", () => {
+  const DAY = "2026-10-03";
+  const dated: Array<[string, ComputeState, string, "amber" | "red"]> = [
+    ["KCS09-STALLED", { state: "stalled" }, "The last computation, on Oct 3, 2026, for this composite strategy stopped reporting progress more than 12 minutes ago.", "amber"],
+    ["KCS09-FAIL-PERMANENT", { state: "failed", errorKind: "permanent" }, "The last computation, on Oct 3, 2026, stopped on a problem that retrying alone will not resolve.", "red"],
+    ["KCS09-FAIL-TRANSIENT", { state: "failed", errorKind: "transient" }, "The last computation, on Oct 3, 2026, stopped after its automatic retries ran out.", "amber"],
+    ["KCS09-FAIL-ORPHANED", { state: "failed", errorKind: "orphaned" }, "The last computation, on Oct 3, 2026, stopped before it finished because the process running it went away.", "amber"],
+    ["KCS09-FAIL-UNKNOWN", { state: "failed", errorKind: "unknown" }, "The last computation, on Oct 3, 2026, stopped, and the service could not tell why.", "amber"],
+    ["KCS09-FAIL-OTHER", { state: "failed", errorKind: null }, "The last computation, on Oct 3, 2026, did not finish.", "amber"],
+  ];
+
+  it.each(dated)("%s with a day: the dated sentence, the same id and the same tone", (id, state, text, tone) => {
+    expect(ownerStateLine(state, undefined, DAY)).toEqual({ id, text, tone });
+    expect(ownerStateIsDated(state, DAY)).toBe(true);
+  });
+
+  it.each(dated)("%s without a usable day keeps the shipped sentence", (id, state) => {
+    for (const day of [undefined, null, "", "not-a-day", "2026-13-45"]) {
+      expect(ownerStateLine(state, undefined, day), `${id} with day ${String(day)}`).toEqual(ownerStateLine(state));
+      expect(ownerStateIsDated(state, day), `${id} with day ${String(day)}`).toBe(false);
+    }
+    expect(ownerStateLine(state).text).not.toContain(", on ");
+  });
+
+  it("every other state ignores the day: a queued, running, finished, never-started or unreadable line is the shipped line", () => {
+    const others: ComputeState[] = [
+      { state: "queued" },
+      { state: "retrying" },
+      { state: "running", phase: "fetch" },
+      { state: "running", phase: "compute", memberOf: { n: 1, m: 2 } },
+      { state: "finished" },
+      { state: "never_started" },
+      { state: "unreadable" },
+    ];
+    for (const state of others) {
+      expect(ownerStateLine(state, undefined, DAY)).toEqual(ownerStateLine(state));
+      expect(ownerStateIsDated(state, DAY)).toBe(false);
+    }
+    // finished keeps its build facts too: a day never turns a finished line into a dated one.
+    expect(ownerStateLine({ state: "finished" }, { buildUnreadable: false, analyticsFailed: true }, DAY)).toEqual(
+      ownerStateLine({ state: "finished" }, { buildUnreadable: false, analyticsFailed: true }),
+    );
+  });
+
+  it("the remedy takes no day: a dated line keeps the shipped remedy (the plan: remedy unchanged)", () => {
+    expect(rendered(ownerRemedy({ state: "failed", errorKind: "permanent" }, "single", SID))).toBe(
+      "Use the contact form to have it resolved.",
+    );
+  });
+
+  it("lastAttemptDay: claimed_at wins, created_at is the fallback, and no job or an unparseable stamp is null (never a guessed day)", () => {
+    expect(lastAttemptDay({ claimed_at: "2026-10-03T23:59:59.000Z", created_at: "2026-10-01T00:00:00.000Z" })).toBe("2026-10-03");
+    expect(lastAttemptDay({ claimed_at: null, created_at: "2026-10-04T00:00:01.000Z" })).toBe("2026-10-04");
+    expect(lastAttemptDay({ created_at: "2026-10-05T12:00:00.000Z" })).toBe("2026-10-05");
+    expect(lastAttemptDay(null)).toBeNull();
+    expect(lastAttemptDay(undefined)).toBeNull();
+    expect(lastAttemptDay({ claimed_at: null, created_at: "garbage" })).toBeNull();
+    expect(lastAttemptDay({})).toBeNull();
   });
 });

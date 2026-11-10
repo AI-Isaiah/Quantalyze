@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type Locator, type Page } from "./helpers/hydration-guard";
 import { assertNoReflow } from "./helpers/reflow";
+import { isPostLoginPath } from "./helpers/login";
 import { openAdvanced } from "./helpers/open-advanced";
 import {
   assertChildrenInside,
@@ -87,7 +88,7 @@ async function loginViaForm(page: Page, email: string, password: string) {
   await page.fill('input[name="email"], input[placeholder*="email" i]', email);
   await page.fill('input[type="password"]', password);
   await page.click('button:has-text("Sign in")');
-  await page.waitForURL(/\/(discovery|strategies|allocations|dashboard)/, {
+  await page.waitForURL((url) => isPostLoginPath(url.pathname), {
     timeout: 10_000,
   });
 }
@@ -994,29 +995,38 @@ test.describe("/strategies — MYSTRATTABLE wide", () => {
   }
 });
 
-test.describe("/my-strategies — N-TABLE", () => {
+test.describe("/strategies — N-TABLE", () => {
   test.skip(
     !HAS_SEED_ENV,
     "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
   );
 
   for (const vp of VIEWPORTS) {
-    test(`${vp.id}: each Sort select is the hit target after the header passes the filter bar`, async ({
+    test(`${vp.id}: the filter bar's search box is the hit target after the header passes the filter bar`, async ({
       page,
     }) => {
       test.setTimeout(120_000);
       await page.setViewportSize({ width: vp.width, height: vp.height });
       const owner = await seedTestAllocator({ role: "both" });
-      // Enough owned rows that the table header can pass the filter bar.
+      // Enough owned rows that the table header can pass the filter bar. A
+      // wizard-source draft is hidden from a role "both" owner's list (199
+      // CD-10), so each row is moved off the wizard source; the name is
+      // unchanged, so the NAME_PREFIX cleanup still matches.
       for (let i = 0; i < 12; i++) {
-        await seedWizardDraft({
+        const draft = await seedWizardDraft({
           ownerUserId: owner.userId,
           namePrefix: `${NAME_PREFIX} table-${i}-`,
         });
+        await setSeededStrategyNameAndTags({
+          strategyId: draft.strategyId,
+          name: draft.name,
+          strategyTypes: ["spot"],
+          status: "draft",
+        });
       }
       await loginViaForm(page, owner.email, owner.password);
-      // Not the shared "My Strategies" h1 (DEF-149-B).
-      await page.goto("/my-strategies");
+      // Phase 199: the owner list is /strategies now (/my-strategies 308s there).
+      await page.goto("/strategies");
       // Anchor on the table itself: the href anchor resolved to the hidden
       // desktop sidebar link below md (CI run 36764778803, gap 5).
       const table = page.locator("[data-strategy-table]");
@@ -1027,11 +1037,15 @@ test.describe("/my-strategies — N-TABLE", () => {
       // row, or the z-10 sticky name column) is what paints over the z-10
       // filter bar when the table root loses `isolate`. A select probed on
       // a resting page proves nothing, so an unreached state throws.
-      for (const label of ["Sort by", "Sort direction"]) {
+      // Phase 199: /strategies seeds the table's sort (newest first), so the
+      // Sort selects are not rendered there (StrategyFilters `showSort`, 170.7
+      // WR-02). The search box sits in the same sticky filter bar, so it is
+      // the control the z-index probe uses.
+      for (const label of ['input[placeholder="Search strategies..."]']) {
         const reached = await page.locator("#main-content").evaluate(
           (main, selectLabel) => {
             const tableEl = document.querySelector("[data-strategy-table]");
-            const selectEl = document.querySelector(`[aria-label="${selectLabel}"]`);
+            const selectEl = document.querySelector(selectLabel);
             const filterEl = selectEl?.closest(".sticky") ?? null;
             if (!tableEl || !selectEl || !filterEl) {
               return `missing table=${!!tableEl} select=${!!selectEl} filter=${!!filterEl}`;
@@ -1070,7 +1084,7 @@ test.describe("/my-strategies — N-TABLE", () => {
           reached,
           `${vp.id}: N-TABLE precondition not reached for ${label} — no z-indexed sticky table cell ever sat under its centre`,
         ).toBe("reached");
-        const select = page.getByLabel(label);
+        const select = page.locator(label);
         await expect(select, `${vp.id}: ${label} missing`).toBeVisible();
         await assertNotCovered(page, select, `${vp.id} ${label}`);
       }

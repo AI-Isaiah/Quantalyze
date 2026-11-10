@@ -78,6 +78,7 @@ export function DefaultChangeNote({
       role="status"
       aria-live="polite"
       data-testid="scenario-default-change-note"
+      data-degrade-id="scenario.default-change"
       className="mt-6 flex items-start justify-between gap-3 rounded-md border border-border bg-surface-subtle px-4 py-3"
     >
       <p className="text-fixed-13 leading-relaxed text-text-secondary">
