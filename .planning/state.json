@@ -81,7 +81,7 @@
     {
       "number": "205",
       "name": "ONEVERDICT",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "206",
@@ -94,5 +94,5 @@
     "label": "Advance to the next step (plan phase 200)",
     "reason": "Phase 11 of 17 — needs a plan"
   },
-  "updated_at": "2026-11-10T21:27:35.646Z"
+  "updated_at": "2026-11-10T21:54:41.948Z"
 }

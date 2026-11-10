@@ -108,7 +108,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 - [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
-- [ ] **Phase 205: ONEVERDICT — every figure path follows the record's one readability verdict**
+- [x] **Phase 205: ONEVERDICT — every figure path follows the record's one readability verdict** (completed 2026-11-10)
 - [ ] **Phase 206: SESSIONLOOP — a revoked-but-unexpired session cookie no longer bounces between / and /home**
 
 ### Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story
@@ -655,7 +655,7 @@ Plans:
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
 | 204. INTROAUTH | 2/2 | Complete    | 2026-11-10 |
-| 205. ONEVERDICT | 0/0 | Not started | - |
+| 205. ONEVERDICT | 3/3 | Complete    | 2026-11-10 |
 | 206. SESSIONLOOP | 0/0 | Not started | - |
 
 ### Requirement Coverage (v1.21)
@@ -694,10 +694,13 @@ Plans:
 **Goal:** The stress-windows block, the api-arm allocator blends and the USD view each follow the record's one readability verdict (`totalRecord.unreadable`) instead of testing dates themselves, so an unreadable record is withheld the same way on every path and an unparseable first date never reaches an error page. Survivors of 194.2's three review rounds (194.2-REVIEW-R3.md WR-01..03), routed by founder decision 2026-11-10.
 **Requirements**: TBD
 **Depends on:** Phase 194.2
-**Plans:** 0 plans
+**Plans:** 3/3 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 205 to break down)
+- [x] 205-01-PLAN.md — D-01: the USD view inherits the native record verdict (tracer; replaces `recordSourceDates`, one Sentry report per record)
+- [x] 205-02-PLAN.md — D-02: the stress block follows the record verdict on every bundle, the leverage re-derive and the USD view
+- [x] 205-03-PLAN.md — D-03 + D-05: the api arm withholds the allocator blends on an unreadable record (no error page); payload cache key v22 to v23
+
 
 ### Phase 206: SESSIONLOOP — a revoked-but-unexpired session cookie no longer bounces between / and /home
 

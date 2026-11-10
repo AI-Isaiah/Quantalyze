@@ -9269,6 +9269,14 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ---
 
+## Phase 205 (ONEVERDICT) — review survivors, LOW (logged 2026-11-10)
+
+- [ ] **[205-STRESS-GATE-ABSENT-RECORD-READABLE]** (logged 2026-11-10, Phase 205 review survivor; LOW; owner: unassigned) **The stress gate treats a payload with no `figureRecord` as readable.** `src/lib/factsheet/build-payload.ts:664` tests `args.figureRecord?.unreadable === true`, so an absent record reads as readable and only the first-date check guards it. Every current caller passes a record, so nothing is wrong today. A future caller that omits the record would get the stress block on an unjudged series. **Fix:** treat an absent record as not judged and withhold, or require the record in the type.
+
+- [ ] **[205-SCENARIO-BLEND-UNREADABLE-NO-SENTRY]** (logged 2026-11-10, Phase 205 review survivor; LOW; owner: unassigned) **The client `buildScenarioFactsheetPayload` sends no Sentry event for an unreadable blend record.** In `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts`, an unreadable blend is withheld correctly on screen but leaves no signal, so a recurring malformed input on the scenario path is invisible. **Fix:** report it once per record through the client capture path, the way the server arms report an unreadable record.
+
+- [ ] **[205-USD-VIEW-CHAIN-BROKEN-SUFFIX]** (logged 2026-11-10, Phase 205 review survivor; LOW; predates 205; owner: unassigned) **The USD view ignores the native view's chain-broken headline suffix (`headlineCoversFrom`).** The native factsheet headline names the day its figures cover from when the chain is broken (`src/app/factsheet/[id]/v2/MetricsColumn.tsx`, `src/app/factsheet/[id]/v2/page.tsx`). The USD view of the same record drops that suffix, so its headline reads as covering the whole record. **Fix:** carry `headlineCoversFrom` into the USD payload the way the record verdict now is (205 D-01).
+
 ## Phase 167 (CREDTRUST) — post-merge checks (logged 2026-09-22)
 
 - [ ] **`[167-POSTMERGE-CHECKS]` the four 167 checks that are post-merge or founder-only by
