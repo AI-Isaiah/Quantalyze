@@ -339,7 +339,17 @@ describe("proxy public-route gating (anonymous session)", () => {
     // The session branch needs a session object — re-mock just for this
     // sub-block. The existing top-level mock returns `session: null`; here
     // we install a session with an authenticated user.
+    //
+    // Phase 206 (SESSIONLOOP, D-05): the shared `getUser` spy defaults to "the
+    // auth server accepts the session", so every bounce test below keeps its
+    // meaning. The Phase 206 describe overrides it per case.
+    const getUser = vi.fn();
     beforeEach(async () => {
+      getUser.mockReset();
+      getUser.mockResolvedValue({
+        data: { user: { id: "u1", email: "alice@example.com" } },
+        error: null,
+      });
       const { createServerClient } = await import("@supabase/ssr");
       vi.mocked(createServerClient).mockImplementation(
         () =>
@@ -352,6 +362,7 @@ describe("proxy public-route gating (anonymous session)", () => {
                   },
                 },
               }),
+              getUser,
             },
           }) as unknown as ReturnType<typeof createServerClient>,
       );
@@ -486,6 +497,93 @@ describe("proxy public-route gating (anonymous session)", () => {
       const location = res.headers.get("location");
       expect(location).not.toBeNull();
       expect(new URL(location!).pathname).toBe("/home");
+    });
+
+    // Phase 206 (SESSIONLOOP, WR-01-R3). getSession() in the proxy reads only the
+    // cookie, while the pages decide with getUser(). A revoked but unexpired
+    // session, or an unreachable auth server, makes the two disagree. If the
+    // proxy bounced on the cookie alone, `/` would go to `/home` and back to `/`,
+    // and `/login?redirect=` would go to a guarded page and back, until the
+    // browser gives up with too many redirects.
+    describe("Phase 206 SESSIONLOOP: a session cookie the auth server refuses is not bounced", () => {
+      const REFUSED_PATHS: readonly string[] = [
+        "/",
+        "/login",
+        "/login?redirect=/discovery/crypto-sma",
+        "/signup",
+        "/forgot-password",
+      ];
+      const REFUSED_OUTCOMES: ReadonlyArray<readonly [string, unknown]> = [
+        ["null user, no error", { data: { user: null }, error: null }],
+        [
+          "null user with an auth error (revoked session or unreachable auth server)",
+          {
+            data: { user: null },
+            error: {
+              name: "AuthSessionMissingError",
+              message: "Auth session missing!",
+            },
+          },
+        ],
+      ];
+      const REFUSED_CASES: ReadonlyArray<readonly [string, string, unknown]> =
+        REFUSED_OUTCOMES.flatMap(([label, result]) =>
+          REFUSED_PATHS.map((path) => [label, path, result] as const),
+        );
+
+      it.each(REFUSED_CASES)(
+        "%s on %s: renders the page, no redirect",
+        async (_label, path, result) => {
+          getUser.mockResolvedValue(result);
+          const req = new NextRequest(`https://example.com${path}`, {
+            method: "GET",
+          });
+          const res = await proxy(req);
+          expect(res.status).toBe(200);
+          expect(res.headers.get("location")).toBeNull();
+          expect(getUser).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it("confirmed user on / is bounced to the role home", async () => {
+        const req = new NextRequest("https://example.com/", { method: "GET" });
+        const res = await proxy(req);
+        expect(res.status).toBe(307);
+        // Literal, never the constant: a retargeted constant must not pass by
+        // comparing against itself.
+        expect(new URL(res.headers.get("location")!).pathname).toBe("/home");
+        expect(getUser).toHaveBeenCalledTimes(1);
+      });
+
+      it("confirmed user on /login?redirect=/discovery/crypto-sma lands on that page with the redirect param dropped", async () => {
+        const req = new NextRequest(
+          "https://example.com/login?redirect=/discovery/crypto-sma",
+          { method: "GET" },
+        );
+        const res = await proxy(req);
+        expect(res.status).toBe(307);
+        const location = new URL(res.headers.get("location")!);
+        expect(location.origin).toBe("https://example.com");
+        expect(location.pathname).toBe("/discovery/crypto-sma");
+        expect(location.searchParams.has("redirect")).toBe(false);
+        expect(getUser).toHaveBeenCalledTimes(1);
+      });
+
+      // D-03: the auth round trip is paid only on the four bounced routes.
+      // Signed-out requests are pinned by the anonymous describes, whose mocks
+      // carry no getUser, so any call there throws.
+      it.each(["/home", "/for-quants", "/factsheet/abc-123", "/reset-password", "/demo"])(
+        "%s with a session never asks the auth server (D-03)",
+        async (path) => {
+          const req = new NextRequest(`https://example.com${path}`, {
+            method: "GET",
+          });
+          const res = await proxy(req);
+          expect(res.status).toBe(200);
+          expect(res.headers.get("location")).toBeNull();
+          expect(getUser).not.toHaveBeenCalled();
+        },
+      );
     });
   });
 });

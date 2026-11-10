@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.133.36.0] - 2026-11-11 — SESSIONLOOP: a revoked-but-unexpired session cookie no longer bounces between / and /home
+
+Phase 206. Source: Phase 199 review round 3, WR-01-R3. The bug was there before Phase 199; that phase added a second way to hit it.
+
+### Fixed
+- **A stale session cookie no longer causes a redirect loop.** The proxy decided "signed in" from `getSession()`, which reads only the cookie. The pages decide from `getUser()`, which asks the auth server. When a session was revoked server-side (a global sign-out, an admin ban or delete) but its access token had not expired yet, the two disagreed. The browser then bounced `/` ↔ `/home` and `/login?redirect=` ↔ a guarded page until it stopped with too many redirects.
+  - The proxy's signed-in bounce branch (`src/proxy.ts`) now calls `getUser()` and redirects only when a user comes back. A null user or an error falls through, so `/`, `/login`, `/signup` or `/forgot-password` renders.
+  - Only that branch changed. Every other route still decides from the cookie alone, so the extra auth call happens only on those four routes, for visitors who hold a session cookie. The `safeRedirectPath ?? ROLE_HOME_ROUTE` bounce target is unchanged.
+  - The proxy adds no cookie clearing, sign-out or logging (decisions D-02 and D-04 in the phase CONTEXT).
+
+### Tests
+- **`src/proxy.test.ts`, 113 → 130 cases:**
+  - 10 refused-session cases: 5 paths (`/`, `/login`, `/login?redirect=/discovery/crypto-sma`, `/signup`, `/forgot-password`), each with a null user and with a null user plus an auth error. Each must render with no `location` header.
+  - 2 cases where a confirmed user is still bounced.
+  - 5 checks that `getUser` is never called on routes outside the branch.
+- **The tests were shown able to fail:**
+  - Forcing the check true, which is the old behaviour, turns exactly the 10 refused cases red.
+  - Calling `getUser` on every request with a session turns the scope checks red.
+  - Each neuter was restored from a byte backup, and the sha256 matched afterwards.
+
+### Notes
+- **Phase checks:** review was clean on the first round (gsd-code-reviewer and silent-failure-hunter, no MEDIUM or higher). The verifier passed it 4/4, and the security audit was SECURED with 7/7 threats closed.
+- **Known limits below MEDIUM, recorded and not fixed:**
+  - Refresh cookies written during a confirmed redirect are dropped. This was already true before this change, because `getSession()` refreshes before the branch.
+  - `getUser()` has no timeout, so on those four routes a cookie holder waits while the auth server is slow. The destination pages already make the same call.
+  - A crafted unexpired cookie costs the auth server one call per hit on those four routes. Private routes already have the same exposure through the page-level `getUser()`.
+  - The test labelled "unreachable auth server" uses `AuthSessionMissingError`, not `AuthRetryableFetchError`. Both give a null user, which is all the branch reads.
+  - Not checked live: whether auth-js clears the stale cookie on `session_not_found`. The unit tests cover the redirect decision only.
+
 ## [0.133.35.1] - 2026-11-10 — records: close 204 INTROAUTH and 205 ONEVERDICT
 
 Phase 204 shipped as v0.133.34.0 (PR #1245, merge `2516d8b13`), and its migration `20261110150000` is live on PROD. That is why the phase records and the held 194.2 review files are published now. Phase 205 shipped as v0.133.35.0 (PR #1247, merge `2e99da257`).
