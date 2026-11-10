@@ -64,7 +64,7 @@ describe("WithdrawalWarningStrip (S5 / D-08)", () => {
     render(<WithdrawalWarningStrip />);
     expect(
       screen.getByText(
-        /Read-only is enforced server-side at validation — Trade\/Withdraw scopes are rejected before encryption\./,
+        /Read-only is enforced server-side at validation — keys with Trade\/Withdraw scopes are rejected\./,
       ),
     ).toBeInTheDocument();
   });

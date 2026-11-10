@@ -2,10 +2,12 @@ import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { StrategyForm } from "@/components/strategy/StrategyForm";
+import { StrategyNameBlock } from "@/components/strategy/StrategyNameBlock";
 import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
 import { CsvStrategyEditNote } from "@/components/strategy/CsvStrategyEditNote";
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import type { Strategy } from "@/lib/types";
+import { publicNamePreview } from "@/lib/strategy-display";
 import {
   readCompositeMemberKeyIds,
   resolveStrategyShape,
@@ -163,6 +165,14 @@ export default async function EditStrategyPage({
       <PageHeader title={`Edit: ${strategy.name}`} />
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2">
+          {/* Phase 200 / D-09: the one rename place. The preview is computed
+              here, server-side, by the same helper the factsheet title uses. */}
+          <StrategyNameBlock
+            strategyId={strategy.id}
+            name={strategy.name}
+            status={strategy.status}
+            preview={publicNamePreview(strategy)}
+          />
           <StrategyForm strategy={strategy} mode="edit" />
         </div>
         <div className="space-y-6">
@@ -189,8 +199,8 @@ export default async function EditStrategyPage({
             <>
               <ApiKeyManager
                 strategyId={strategy.id}
+                strategyName={strategy.name}
                 currentKeyId={strategy.api_key_id ?? null}
-                defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()}
                 keyShape={keyShape}
                 compositeMemberKeyIds={compositeMemberKeyIds}
               />

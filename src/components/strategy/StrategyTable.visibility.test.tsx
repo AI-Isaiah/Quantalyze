@@ -523,20 +523,19 @@ describe("StrategyTable visibility — Phase 150: the owner row actions are prop
     expect(screen.queryByRole("button", { name: RENAME })).toBeNull();
   });
 
-  it("an UNMARKED private row offers `Mark ownership…` and `Rename…`", () => {
+  it("an UNMARKED private row offers `Mark ownership…` and no `Rename…` (Phase 200 D-09)", () => {
     render(
       <StrategyTable
         strategies={[privateRow()]}
         categorySlug="vis-spec"
         visibility="owner-all-statuses"
         onMarkOwnership={() => {}}
-        onRename={() => {}}
       />,
     );
 
     const row = rowFor(NAME_PRIVATE);
     expect(within(row).getByRole("button", { name: MARK })).toBeInTheDocument();
-    expect(within(row).getByRole("button", { name: RENAME })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: RENAME })).toBeNull();
     expect(within(row).queryByRole("button", { name: CHANGE })).toBeNull();
   });
 
@@ -554,7 +553,6 @@ describe("StrategyTable visibility — Phase 150: the owner row actions are prop
         categorySlug="vis-spec"
         visibility="owner-all-statuses"
         onMarkOwnership={() => {}}
-        onRename={() => {}}
       />,
     );
 
@@ -563,22 +561,33 @@ describe("StrategyTable visibility — Phase 150: the owner row actions are prop
     expect(within(row).queryByRole("button", { name: MARK })).toBeNull();
   });
 
-  it("D-17 — a PUBLISHED own row keeps the mark action but the rename affordance is ABSENT, not disabled", () => {
+  it("D-09 — no row of any status renders `Rename…`, even for a caller still passing the removed `onRename`", () => {
+    // The edit page is the one rename place. The removed prop is passed through an
+    // untyped spread on purpose: a stale caller (or a revert of the removal) that
+    // still hands the table a rename callback must not bring the control back, on
+    // the private and draft rows that used to carry it or on a published one.
+    const staleRenameProps: Record<string, unknown> = { onRename: () => {} };
     render(
       <StrategyTable
-        strategies={[publishedRow()]}
+        strategies={[
+          privateRow(),
+          makeStrategy({ id: ID_DRAFT, name: NAME_DRAFT, status: "draft" }),
+          publishedRow(),
+        ]}
         categorySlug="vis-spec"
         visibility="owner-all-statuses"
         onMarkOwnership={() => {}}
-        onRename={() => {}}
+        {...staleRenameProps}
       />,
     );
 
-    const row = rowFor(NAME_PUBLISHED);
-    expect(within(row).getByRole("button", { name: MARK })).toBeInTheDocument();
-    // ABSENT is the contract: a disabled rename would promise a remedy that
-    // does not exist (published rename is deferred), and the route answers 404.
-    expect(within(row).queryByRole("button", { name: RENAME })).toBeNull();
+    for (const name of [NAME_PRIVATE, NAME_DRAFT, NAME_PUBLISHED]) {
+      const row = rowFor(name);
+      // Non-vacuity: the rest of the owner cluster really rendered on this row.
+      expect(within(row).getByRole("button", { name: MARK })).toBeInTheDocument();
+      expect(within(row).queryByRole("button", { name: RENAME })).toBeNull();
+    }
+    expect(screen.queryByText(RENAME)).toBeNull();
   });
 
   /**
@@ -613,18 +622,14 @@ describe("StrategyTable visibility — Phase 150: the owner row actions are prop
         categorySlug="vis-spec"
         visibility="owner-all-statuses"
         onMarkOwnership={() => {}}
-        onRename={() => {}}
       />,
     );
 
     const row = rowFor(NAME_PRIVATE);
-    const actions = [
-      within(row).getByRole("button", { name: MARK }),
-      within(row).getByRole("button", { name: RENAME }),
-    ];
-    // Non-vacuity: both actions really rendered, so the loop below is not
+    const actions = [within(row).getByRole("button", { name: MARK })];
+    // Non-vacuity: the action really rendered, so the loop below is not
     // asserting over an empty set.
-    expect(actions).toHaveLength(2);
+    expect(actions).toHaveLength(1);
 
     for (const action of actions) {
       for (const token of RING_TOKENS) {

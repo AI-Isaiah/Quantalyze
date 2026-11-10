@@ -113,7 +113,7 @@ const FAIL_TRANSIENT =
 const SHAPE_SINGLE =
   "Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.";
 const SHAPE_UNLINKED =
-  "Link a key with Use & Sync on this strategy's edit page to start a new computation. Use the contact form if it does not complete.";
+  "Link a key with Change key… on this strategy's edit page (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.";
 const SHAPE_COMPOSITE =
   "A composite strategy has no self-serve re-run. Use the contact form to start a new computation.";
 const SHAPE_CSV =
@@ -634,7 +634,7 @@ describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
     expect(STATE.observed.requestTables).toContain("strategy_keys");
   });
 
-  it("KCS21-UNLINKED: no key linked -> Use & Sync on the edit page, linked", async () => {
+  it("KCS21-UNLINKED: no key linked -> Change key… on the edit page, linked", async () => {
     givenOwnerPendingDraft({ source: "api", api_key_id: null });
     givenJobs(failedTransient);
     STATE.memberCountResult = { count: 0, error: null };
@@ -708,7 +708,7 @@ describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
 });
 
 describe("167.2-REVIEW-R2 CR-01 — the owner factsheet's history read widens on its own rule", () => {
-  it("R2-CR01-UNLINKED-150-ROWS: zero members, no key, a chain row in the newest 100 of 150 rows and no stitch -> the remedy is Use & Sync, after one re-ask at the cap", async () => {
+  it("R2-CR01-UNLINKED-150-ROWS: zero members, no key, a chain row in the newest 100 of 150 rows and no stitch -> the remedy is Change key…, after one re-ask at the cap", async () => {
     givenOwnerPendingDraft({ source: "api", api_key_id: null });
     STATE.memberCountResult = { count: 0, error: null };
     givenJobs([

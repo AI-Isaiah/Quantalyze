@@ -1347,8 +1347,10 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
         title="Strategies"
         actions={
           isManager ? (
-            <Link href="/strategies/new">
-              <Button>New Strategy</Button>
+            // Phase 200 D-12: the manager's ONE entry point to add a strategy,
+            // straight to the wizard (`/strategies/new` is only a redirect now).
+            <Link href="/strategies/new/wizard">
+              <Button>Add a strategy</Button>
             </Link>
           ) : undefined
         }
@@ -1472,12 +1474,11 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
                 </Link>
               </>
             ) : (
-              <>
-                <p className="text-text-muted mb-4">No strategies yet.</p>
-                <Link href="/strategies/new">
-                  <Button>Create your first strategy</Button>
-                </Link>
-              </>
+              // D-12 / LEAN-04: no second create control. The header's
+              // `Add a strategy` is the one entry point.
+              <p className="text-text-muted">
+                No strategies yet. Use Add a strategy above to start one.
+              </p>
             )}
           </Card>
         ) : (

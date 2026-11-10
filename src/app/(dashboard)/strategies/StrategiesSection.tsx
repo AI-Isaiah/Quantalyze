@@ -8,7 +8,7 @@
  * /strategies page mounts it for allocator, manager and `both`, and the old
  * /my-strategies page still mounts it until plan 199-13 retires that page. The
  * server decides each role's furniture and hands it down as data
- * (`managerRows`, `allocatorFurniture`); the Mark/Rename callbacks are minted
+ * (`managerRows`, `allocatorFurniture`); the Mark callback is minted
  * here ONLY when `allocatorFurniture` is on, so a manager-only list never
  * carries a control that needs an allocator portfolio.
  *
@@ -33,7 +33,6 @@ import {
   type PlaceholderKeyRow,
 } from "@/components/strategy/StrategyTable";
 import { MarkOwnershipDialog } from "@/components/strategy/MarkOwnershipDialog";
-import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
 import type { FactsheetOrigin } from "@/lib/factsheet/origin";
 import type { PercentileMap, RankedStrategyRow } from "@/lib/queries";
@@ -91,8 +90,8 @@ interface StrategiesSectionProps {
   managerRows?: ComponentProps<typeof StrategyTable>["managerRows"];
   /**
    * Phase 199 / D-02 — the allocator half of the furniture: the ownership tag,
-   * Mark ownership, Rename and Simulate Impact. Also the switch for the Mark and
-   * Rename callbacks below, so they exist only when this is true.
+   * Mark ownership and Simulate Impact. Also the switch for the Mark callback
+   * below, so it exists only when this is true.
    */
   allocatorFurniture?: boolean;
   /** Seeds the table sort only (StrategyTable's `initialSort`). */
@@ -126,10 +125,6 @@ export function StrategiesSection({
     id: string;
     name: string;
     mark: CapitalOwnership | null;
-  } | null>(null);
-  const [renameTarget, setRenameTarget] = useState<{
-    id: string;
-    name: string;
   } | null>(null);
   const router = useRouter();
 
@@ -173,7 +168,7 @@ export function StrategiesSection({
           setWizardOpen(true);
         }}
         // D-02: wired ONLY for the allocator furniture. A manager-only page passes
-        // neither, so Mark ownership and Rename are absent from it by the props,
+        // no callback, so Mark ownership is absent from it by the props,
         // and the table's own `allocatorFurniture` gate is the second lock.
         onMarkOwnership={
           allocatorFurniture
@@ -185,14 +180,9 @@ export function StrategiesSection({
                 })
             : undefined
         }
-        onRename={
-          allocatorFurniture
-            ? (s) => setRenameTarget({ id: s.id, name: s.name })
-            : undefined
-        }
       />
       {/* Mounted only while a row is selected, and KEYED by that row's id, so
-          each open starts from that row's own current mark/name rather than
+          each open starts from that row's own current mark rather than
           inheriting the previously opened row's answer. */}
       {markTarget && (
         <MarkOwnershipDialog
@@ -202,15 +192,6 @@ export function StrategiesSection({
           strategyId={markTarget.id}
           strategyName={markTarget.name}
           currentMark={markTarget.mark}
-        />
-      )}
-      {renameTarget && (
-        <RenameStrategyDialog
-          key={renameTarget.id}
-          open
-          onClose={() => setRenameTarget(null)}
-          strategyId={renameTarget.id}
-          currentName={renameTarget.name}
         />
       )}
       {/* 162-06 / D-162-3 — "Finish setup" opens the wizard ON the key that was

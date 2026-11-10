@@ -48,6 +48,7 @@ import { venueSecretIsVerbatim } from "@/lib/closed-sets";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { venueLabel } from "@/lib/display-labels";
+import { KEY_STORAGE_LINK, KEY_STORAGE_SENTENCE } from "@/lib/status-surface-copy";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -219,18 +220,19 @@ const SFOX_REJECT_ATOM_NOTE =
   " sFOX exposes no per-key scope endpoint — sFOX keys are used read-only by our adapter (no order or withdraw path exists), so mint a READ-ONLY token.";
 
 // Replicated verbatim from ConnectKeyStep (step-level permission block).
-const TRUST_ATOMS: { title: string; body: string }[] = [
+const TRUST_ATOMS: {
+  title: string;
+  body: string;
+  link?: { href: string; label: string };
+}[] = [
   {
     title: "What we store",
-    body: "Your API key and secret are encrypted with AES-256-GCM envelope encryption before they ever hit the database. The KEK lives in Supabase Vault.",
+    body: KEY_STORAGE_SENTENCE,
+    link: KEY_STORAGE_LINK,
   },
   {
     title: "What we reject",
     body: "Any key with trading or withdrawal scopes is rejected before we store it. Only Read permissions are allowed, enforced at the database level.",
-  },
-  {
-    title: "Who can decrypt",
-    body: "Only the Railway analytics service can decrypt the stored ciphertext to fetch your trade history. The web tier has no decryption path.",
   },
   {
     title: "Security contact",
@@ -2046,6 +2048,18 @@ export function MultiKeyConnectStep({
                   href={contactHref({ topic: "security" })}
                   newTab
                 />
+                {atom.link && (
+                  <>
+                    {" "}
+                    <Link
+                      href={atom.link.href}
+                      className="text-accent underline underline-offset-4"
+                    >
+                      {atom.link.label}
+                    </Link>
+                    .
+                  </>
+                )}
               </dd>
             </div>
           ))}

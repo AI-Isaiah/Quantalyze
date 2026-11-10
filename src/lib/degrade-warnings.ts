@@ -215,7 +215,7 @@ export const ACTION_SENTENCES = {
   },
   "A-LINK-KEY-EDIT": {
     sentence:
-      "Link a key with Use & Sync on this strategy's edit page to start a new computation. Use the contact form if it does not complete.",
+      "Link a key with Change key… on this strategy's edit page (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.",
     link: "edit",
     phrase: "edit page",
   },

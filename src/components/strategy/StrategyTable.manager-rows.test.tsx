@@ -14,7 +14,7 @@
  *   2. NO DOUBLE STATUS. The in-name status badge and the ownership tag are
  *      owner-mount furniture; in manager mode Status is its own column.
  *   3. NO CONTROL THAT CANNOT WORK. A manager's page has no allocator
- *      portfolio; Simulate Impact, Mark ownership and Rename do not belong
+ *      portfolio; Simulate Impact and Mark ownership do not belong
  *      in its Actions cell.
  *   4. td count equals th count in EVERY row kind (data, empty-state,
  *      placeholder), or the columns silently misalign.
@@ -342,6 +342,7 @@ describe("StrategyTable managerRows — Actions cell (D-01)", () => {
       extra: {
         portfolioId: "pf-1",
         onMarkOwnership: () => {},
+        // Phase 200 D-09 removed `onRename`; a stale caller still passing it renders nothing.
         onRename: () => {},
       },
     });
@@ -357,11 +358,13 @@ describe("StrategyTable managerRows — Actions cell (D-01)", () => {
         visibility="owner-all-statuses"
         portfolioId="pf-1"
         onMarkOwnership={() => {}}
-        onRename={() => {}}
+        {...({ onRename: () => {} } as Record<string, unknown>)}
       />,
     );
     expect(screen.queryAllByTestId("simulate-probe").length).toBeGreaterThan(0);
     expect(screen.queryAllByText(/Mark ownership|Change mark/).length).toBeGreaterThan(0);
+    // ...and even without managerRows no Rename… renders (D-09), stale prop or not.
+    expect(screen.queryByText(/Rename/)).toBeNull();
   });
 
   it("a row id with no managerRows entry renders an empty Actions cell and no Edit link, never another row's slot", () => {

@@ -306,7 +306,7 @@ describe("Sidebar workspace — one Strategies entry per role (Phase 199 D-01)",
     ).toEqual([]);
   });
 
-  it("allocator order: Strategies sits after Compare and directly above the Add a Strategy CTA", () => {
+  it("allocator order: Strategies sits after Compare and directly above the Add a strategy CTA", () => {
     const { container } = render(
       <Sidebar populatedSlugs={[]} isAllocator={true} />,
     );
@@ -314,7 +314,7 @@ describe("Sidebar workspace — one Strategies entry per role (Phase 199 D-01)",
     const compare = container.querySelector('a[href="/compare"]');
     expect(entry).not.toBeNull();
     expect(compare).not.toBeNull();
-    const addStrategy = screen.getByRole("button", { name: "Add a Strategy" });
+    const addStrategy = screen.getByRole("button", { name: "Add a strategy" });
     expect(
       compare!.compareDocumentPosition(entry!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
@@ -362,7 +362,7 @@ describe("Sidebar workspace — Decks hidden, no portfolios link (Phase 195 D-04
     });
   }
 
-  it("lists the allocator workspace as My allocation, Recommendations, Compare, Strategies, Add a Strategy", () => {
+  it("lists the allocator workspace as My allocation, Recommendations, Compare, Strategies, Add a strategy", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     const nav = screen.getByRole("navigation", { name: /primary|main|sidebar/i });
     const labels = within(nav)
@@ -738,7 +738,7 @@ describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () =
 
 /**
  * Phase 110 CONTRIB-01 (ROLE-02 scoped exception) — the allocator-scoped
- * "Add a Strategy" client-action nav entry. It opens the
+ * "Add a strategy" client-action nav entry. It opens the
  * ContributionWizardOverlay via `onNavAction` — NO href, NO navigation (the
  * wizard route lives under the Phase-109 manager-guarded /strategies subtree, so
  * routing an allocator there would redirect-bounce them). These pin:
@@ -748,10 +748,10 @@ describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () =
  *   - the dispatch payload,
  *   - and that the existing href nav items are untouched.
  */
-describe("Sidebar 'Add a Strategy' action entry (CONTRIB-01)", () => {
-  it("renders 'Add a Strategy' as a <button> (no href) in the allocator workspace", () => {
+describe("Sidebar 'Add a strategy' action entry (CONTRIB-01)", () => {
+  it("renders 'Add a strategy' as a <button> (no href) in the allocator workspace", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const el = screen.getByText("Add a Strategy");
+    const el = screen.getByText("Add a strategy");
     const button = el.closest("button");
     expect(button).not.toBeNull();
     expect(button).toHaveAttribute("type", "button");
@@ -768,7 +768,7 @@ describe("Sidebar 'Add a Strategy' action entry (CONTRIB-01)", () => {
         onNavAction={onNavAction}
       />,
     );
-    fireEvent.click(screen.getByText("Add a Strategy"));
+    fireEvent.click(screen.getByText("Add a strategy"));
     expect(onNavAction).toHaveBeenCalledTimes(1);
     expect(onNavAction).toHaveBeenCalledWith("add-strategy");
   });
@@ -777,19 +777,19 @@ describe("Sidebar 'Add a Strategy' action entry (CONTRIB-01)", () => {
     render(
       <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
     );
-    expect(screen.queryByText("Add a Strategy")).toBeNull();
+    expect(screen.queryByText("Add a strategy")).toBeNull();
   });
 
   it("is ABSENT for a bare is_admin user (ops-overlay, no allocator role)", () => {
     render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
-    expect(screen.queryByText("Add a Strategy")).toBeNull();
+    expect(screen.queryByText("Add a strategy")).toBeNull();
   });
 
   it("is PRESENT for a role='both' user (isAllocator && isManager)", () => {
     render(
       <Sidebar populatedSlugs={[]} isAllocator={true} isManager={true} />,
     );
-    expect(screen.getByText("Add a Strategy")).toBeInTheDocument();
+    expect(screen.getByText("Add a strategy")).toBeInTheDocument();
   });
 
   it("does NOT break the href items — 'My allocation' is still a link", () => {

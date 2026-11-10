@@ -5,7 +5,7 @@ import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { withPublishedOnly, withPublishedOrOwner } from "@/lib/visibility";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { displayStrategyName } from "@/lib/strategy-display";
+import { displayStrategyName, publicNamePreview } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { canViewAum, withViewerAum } from "@/lib/factsheet/viewer-aum";
@@ -337,12 +337,14 @@ export async function generateMetadata({
   // exploratory-tier names to "Strategy #<hex>", which is correct for
   // Match Queue surfaces but wrong here — and it diverges from the H1
   // the user already sees on the page.
-  const name = data?.name ?? data?.codename ?? (data ? displayStrategyName({
+  // Phase 200 / D-11: the rename place states this same name, so both read
+  // `publicNamePreview(...).factsheet` rather than two copies of the chain.
+  const name = data ? publicNamePreview({
     id: data.id,
     name: data.name,
     codename: data.codename,
     disclosure_tier: data.disclosure_tier as DisclosureTier | null,
-  }) : "Strategy");
+  }).factsheet : "Strategy";
   const description = (data?.description ?? "Institutional strategy factsheet on Quantalyze.").slice(0, 200);
   const socialTitle = `${name} — Quantalyze Factsheet`;
   // Dynamic OG image — uses the strategy-id-derived endpoint so social shares
@@ -1071,17 +1073,14 @@ export default async function FactsheetV2Page({
       {/* The notice is derived from the LANE decision, never from a payload
           field — lane state must not enter the object the shared public cache
           serves (UI-SPEC:112). */}
-      {/* Phase 150 / OWN-03 + OWN-05 — two more lane-derived render props,
-          threaded exactly like `viewerNotice` above and for the same reason:
-          they must not enter the object the shared public cache serves.
+      {/* Phase 150 / OWN-03 — another lane-derived render prop, threaded exactly
+          like `viewerNotice` above and for the same reason: it must not enter
+          the object the shared public cache serves.
 
-          `lane === "owner"` IS the D-17 gate, for free. That lane is reachable
-          only when the published probe MISSED and the owner-inclusive probe hit
-          with a non-published status — i.e. the row is unpublished AND owned by
-          this session. A published own strategy resolves on the public lane, so
-          `Rename…` is absent there with no second predicate to keep in sync
-          (150-RESEARCH § Pattern 5). The route enforces the same restriction
-          server-side regardless. */}
+          `lane === "owner"` is reachable only when the published probe MISSED and
+          the owner-inclusive probe hit with a non-published status — i.e. the row
+          is unpublished AND owned by this session. (Phase 200 D-09: the factsheet
+          no longer offers `Rename…`; the edit page is the one rename place.) */}
       <main>
       <FactsheetView
         payload={withViewerAum(payloadForView, showAum)}
@@ -1090,20 +1089,15 @@ export default async function FactsheetV2Page({
         showAum={showAum}
         viewerNotice={lane === "owner" ? "owner_unpublished" : undefined}
         ownershipMark={lane === "owner" ? ownershipMark : undefined}
-        // Phase 164 / SHARE-04 — a THIRD lane-derived render prop under the same
-        // rule as the two above. Its PRESENCE is the "this row is unpublished and
+        // Phase 164 / SHARE-04 — a lane-derived render prop under the same
+        // rule as the ones above. Its PRESENCE is the "this row is unpublished and
         // the session owns it" half of the share predicate (the owner lane is
-        // reachable only in that state — the same free gate `renameTarget` uses),
+        // reachable only in that state),
         // and `hasActiveShare` is the "a link is live right now" half. Absent on
         // every other mount, so the published `?share=1` lane is byte-identical
         // (D-09) and the recipient/scenario mounts are untouched.
         ownerShare={lane === "owner" ? { hasActiveShare } : undefined}
         beforeFooterSlot={beforeFooterSlot}
-        renameTarget={
-          lane === "owner"
-            ? { id, name: payloadWithTrust.strategyName }
-            : undefined
-        }
       />
       </main>
     </>

@@ -42,6 +42,13 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
+// The API keys panel mounts AllocatorExchangeManager, which builds a Supabase
+// browser client on render. The panel's contents are not under test here (the
+// manager has its own suites); the client only has to exist.
+vi.mock("@/lib/supabase/client", () => ({
+  createClient: () => ({ from: vi.fn(), rpc: vi.fn(), channel: vi.fn(), removeChannel: vi.fn() }),
+}));
+
 // AuditLogSubsection's fetch is stubbed so the tab-render test doesn't
 // trigger an actual network request when the security tab mounts.
 const mockFetch = vi.fn();
@@ -113,10 +120,10 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
     expect(screen.queryByRole("heading", { name: "Audit log" })).toBeNull();
   });
 
-  it("Test 5 — Security tab appears AFTER Exchanges and BEFORE Organizations in tab order", () => {
+  it("Test 5 — Security tab appears AFTER API keys and BEFORE Organizations in tab order", () => {
     render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
     const buttons = screen.getAllByRole("tab").map((b) => b.textContent);
-    const exchangesIdx = buttons.indexOf("Exchanges");
+    const exchangesIdx = buttons.indexOf("API keys");
     const securityIdx = buttons.indexOf("Security");
     const organizationsIdx = buttons.indexOf("Organizations");
     expect(exchangesIdx).toBeGreaterThanOrEqual(0);
@@ -228,5 +235,67 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
     expect(
       screen.getByRole("heading", { name: "Audit log" }),
     ).toBeInTheDocument();
+  });
+});
+
+// Phase 200 D-06 / LEAN-04: the one key manager is the `exchanges` tab, renamed
+// `API keys` and shown to every role that can hold keys. A manager has no
+// allocator-only tabs, but the keys tab and the Profile order are pinned per
+// role so a future gate cannot quietly take the manager's key controls away.
+describe("ProfileTabs — API keys tab for every role (200-07, D-06)", () => {
+  const MANAGER_PROFILE = { ...PROFILE_FIXTURE, role: "manager" } as unknown as Profile;
+  const BOTH_PROFILE = { ...PROFILE_FIXTURE, role: "both" } as unknown as Profile;
+  const exchanges = { initialKeys: [], activePortfolio: null, hasHoldings: null, role: "manager" as const };
+  const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);
+
+  it("ORDER-MANAGER — a manager sees Personal Info, API keys, Organizations, Account (no allocator-only tabs)", () => {
+    render(<ProfileTabs profile={MANAGER_PROFILE} isAllocator={false} exchanges={exchanges} />);
+    expect(tabNames()).toEqual(["Personal Info", "API keys", "Organizations", "Account"]);
+  });
+
+  it("ORDER-ALLOCATOR — an allocator sees Personal Info, Mandate, API keys, Security, Organizations, Account", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    expect(tabNames()).toEqual([
+      "Personal Info",
+      "Mandate",
+      "API keys",
+      "Security",
+      "Organizations",
+      "Account",
+    ]);
+  });
+
+  it("ORDER-BOTH — a both-role user sees the allocator order", () => {
+    render(<ProfileTabs profile={BOTH_PROFILE} isAllocator={true} />);
+    expect(tabNames()).toEqual([
+      "Personal Info",
+      "Mandate",
+      "API keys",
+      "Security",
+      "Organizations",
+      "Account",
+    ]);
+  });
+
+  it("MANAGER-DEEP-LINK — /profile?tab=exchanges selects API keys for a manager and its panel is that tab's", () => {
+    searchParamsState.tab = "exchanges";
+    render(<ProfileTabs profile={MANAGER_PROFILE} isAllocator={false} exchanges={exchanges} />);
+    // Plan 08's `Add or remove keys` link and 8 inbound links land here: the
+    // default tab would be "Personal Info".
+    const selected = screen.getByRole("tab", { selected: true });
+    expect(selected).toHaveTextContent("API keys");
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toHaveAttribute("aria-labelledby", selected.id);
+  });
+
+  it("MANAGER-STILL-GATED — a manager with ?tab=mandate or ?tab=security still lands on Personal Info", () => {
+    for (const tab of ["mandate", "security"]) {
+      searchParamsState.tab = tab;
+      const { unmount } = render(
+        <ProfileTabs profile={MANAGER_PROFILE} isAllocator={false} exchanges={exchanges} />,
+      );
+      expect(screen.getByRole("tab", { selected: true })).toHaveTextContent("Personal Info");
+      unmount();
+    }
   });
 });

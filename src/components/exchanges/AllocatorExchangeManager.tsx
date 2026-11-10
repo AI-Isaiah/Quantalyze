@@ -28,8 +28,16 @@
  *     client-only fields (queued_next_attempt_at, helper_override).
  */
 
-import { useState, useTransition, useEffect, type ReactNode } from "react";
+import {
+  useState,
+  useTransition,
+  useEffect,
+  useRef,
+  useCallback,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -52,11 +60,14 @@ import {
 // through the ONE money module in whole dollars (DESIGN.md Currency row).
 import { formatUsd } from "@/lib/dollar-validation";
 import { venueLabel } from "@/lib/display-labels";
+import type { Role } from "@/lib/types";
+import type { KeyFeed } from "@/lib/key-feeds";
 import {
   formatCloseDay,
   nativeAmount,
   parseReturnsUnit,
 } from "@/lib/factsheet/returns-unit";
+import { KEY_STORAGE_LINK, KEY_STORAGE_SENTENCE } from "@/lib/status-surface-copy";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 
 interface ExchangeConnection {
@@ -175,6 +186,9 @@ interface Props {
   // flat book when the count simply errored. Show a neutral "connected"
   // subtitle instead (mirror of the H-0499 no-affirmative-on-error rule).
   hasHoldings: boolean | null;
+  // Phase 200 D-06: the profile's role. Omitted means an allocator, which is
+  // what this manager was before it became the one key manager for every role.
+  role?: Role;
 }
 
 // Exchange tag: 3-letter code, tier-colored. No emoji in the UI per
@@ -370,8 +384,235 @@ const HISTORY_RECOMPUTE_NOTICE =
   "Your equity history is recomputed with this change within a few minutes.";
 const HISTORY_RECOMPOSE_FALLBACK =
   "Your history is being recomputed right now. Try again in a few minutes.";
-const DELETE_REMOVES_HISTORY =
-  "Deleting also removes this account's history. Disconnect instead to keep it.";
+// The first sentence stands alone for a manager, who is not offered Disconnect
+// (an allocator-book concept), so "Disconnect instead" would point at nothing.
+const DELETE_REMOVES_HISTORY_HEAD = "Deleting also removes this account's history.";
+const DELETE_REMOVES_HISTORY = `${DELETE_REMOVES_HISTORY_HEAD} Disconnect instead to keep it.`;
+
+// Phase 200 D-01 (ROUTE-09, T-200-15): what a key card and its Disconnect /
+// Delete confirm say about the strategies the key feeds. The strings are the
+// ones `ApiKeyManager` (plan 01) renders on the edit page. A read that FAILED
+// is never "feeds nothing": a person deciding whether to remove a key is never
+// told it is unused when the app simply could not look. D-02: no allocator-book
+// usage is added here.
+const FEEDS_NONE_COPY = "Feeds no strategy.";
+// delete_allocator_api_key refuses (23503, the allocator_holdings FK) a delete that
+// does not cascade holdings. A manager never cascades: the cascade also deletes the
+// derived allocator history (equity curve, key inputs) the manager role cannot see.
+const MANAGER_KEY_HAS_HOLDINGS_ERROR =
+  "This key still has allocator holdings tied to it, so it cannot be deleted from a manager account.";
+// An owner's Delete key that sent no cascade and was refused by the same FK: holdings
+// appeared after the confirm read its count (the box that deletes them is offered once
+// the count is read again).
+const OWNER_KEY_HAS_HOLDINGS_ERROR =
+  "This key still has allocator holdings tied to it. Tick the box to delete them too, or Disconnect to keep them.";
+const CASCADE_REMOVES_DERIVED_HISTORY =
+  "If this is your last key, your allocator equity history built from it (the equity curve and its inputs) is deleted too.";
+const HOLDINGS_UNCHECKED_COPY = "Could not check this key's holdings.";
+const FEEDS_UNCHECKED_COPY = "Could not check which strategies this key feeds.";
+const FEEDS_UNREADABLE_NAME = "a strategy we could not read";
+// Same bound as ApiKeyManager's reads of these two routes.
+const FEEDS_READ_BOUND_MS = 15_000;
+
+type FeedsState =
+  | { status: "loading" }
+  | { status: "failed" }
+  | { status: "ok"; feeds: Record<string, KeyFeed[]> };
+
+/** A `KeyFeed` as the browser accepts it; anything else makes the read fail. */
+function parseKeyFeed(value: unknown): KeyFeed | null {
+  if (value === null || typeof value !== "object") return null;
+  const f = value as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === "string" ? v : v === null ? null : undefined);
+  const strategy_id = text(f.strategy_id);
+  const name = text(f.name);
+  const status = text(f.status);
+  if (strategy_id === undefined || name === undefined || status === undefined) return null;
+  if (f.kind !== "single" && f.kind !== "composite") return null;
+  return { strategy_id, name, status, kind: f.kind };
+}
+
+/**
+ * One bounded GET that never throws. Answers the parsed JSON body, or a
+ * `failure` string (a non-2xx answer, a rejected fetch, the bound, a body that
+ * is not JSON). The abort also stops a body that never finishes.
+ */
+async function readJson(url: string): Promise<{ body: unknown } | { failure: string }> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), FEEDS_READ_BOUND_MS);
+  try {
+    const res = await fetch(url, { cache: "no-store", signal: abort.signal });
+    if (!res.ok) return { failure: `answered HTTP ${res.status}` };
+    return { body: (await res.json()) as unknown };
+  } catch (err) {
+    return { failure: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * One read of `GET /api/keys/feeds`, which answers every key the caller owns
+ * in one call (a per-key read would spend the route's per-minute limiter on a
+ * long list). Never throws: any failure answers "failed" and logs the reason
+ * only, no key id and no strategy id.
+ */
+async function readKeyFeeds(): Promise<FeedsState> {
+  const answer = await readJson("/api/keys/feeds");
+  let failure: string;
+  if ("failure" in answer) {
+    failure = `the feeds read ${answer.failure}`;
+  } else {
+    const raw =
+      answer.body !== null && typeof answer.body === "object"
+        ? (answer.body as { feeds?: unknown }).feeds
+        : undefined;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      failure = "the feeds answer carried no feeds map";
+    } else {
+      const feeds: Record<string, KeyFeed[]> = {};
+      let malformed = false;
+      for (const [keyId, list] of Object.entries(raw as Record<string, unknown>)) {
+        const parsed = Array.isArray(list) ? list.map(parseKeyFeed) : null;
+        if (parsed === null || parsed.includes(null)) {
+          malformed = true;
+          break;
+        }
+        feeds[keyId] = parsed as KeyFeed[];
+      }
+      if (!malformed) return { status: "ok", feeds };
+      failure = "the feeds answer carried a malformed entry";
+    }
+  }
+  console.error("[AllocatorExchangeManager] the key feeds read failed; the cards say they could not check:", failure);
+  return { status: "failed" };
+}
+
+/**
+ * The `feeds` of `GET /api/keys/[id]/memberships` (the ownership-checked read
+ * the Disconnect / Delete confirm uses), or "unreadable": a non-2xx answer, a
+ * non-JSON body, a missing or malformed `feeds`, a rejected fetch or the bound.
+ * Never throws.
+ */
+async function readKeyFeedsForConfirm(keyId: string): Promise<KeyFeed[] | "unreadable"> {
+  const answer = await readJson(`/api/keys/${encodeURIComponent(keyId)}/memberships`);
+  let failure: string;
+  if ("failure" in answer) {
+    failure = `the membership read ${answer.failure}`;
+  } else {
+    const list =
+      answer.body !== null && typeof answer.body === "object"
+        ? (answer.body as { feeds?: unknown }).feeds
+        : undefined;
+    const parsed = Array.isArray(list) ? list.map(parseKeyFeed) : null;
+    if (parsed !== null && !parsed.includes(null)) return parsed as KeyFeed[];
+    failure = "the membership answer carried no well-formed feeds array";
+  }
+  console.error("[AllocatorExchangeManager] feeds read before a disconnect failed; the confirm says it could not check:", failure);
+  return "unreadable";
+}
+
+/**
+ * Where a fed strategy's link goes. A manager (or both) edits it; an allocator
+ * has no edit route (it is manager-guarded), and the factsheet serves its owner
+ * at any status. A strategy with no id (a composite row the route redacted)
+ * has no link.
+ */
+function feedHref(role: Role, feed: KeyFeed): string | null {
+  if (feed.strategy_id === null) return null;
+  return role === "allocator"
+    ? `/factsheet/${feed.strategy_id}`
+    : `/strategies/${feed.strategy_id}/edit`;
+}
+
+/** The feeds line under a key card. Renders nothing while the read is open. */
+function KeyFeedsLine({
+  keyId,
+  state,
+  role,
+  onRetry,
+}: {
+  keyId: string;
+  state: FeedsState;
+  role: Role;
+  onRetry: () => void;
+}) {
+  if (state.status === "loading") return null;
+  // A key id missing from an OK map is "could not check", never "feeds nothing":
+  // the route answers every owned key, so a miss means the answer is not about it.
+  const feeds = state.status === "ok" ? state.feeds[keyId] : undefined;
+  const testId = `allocator-key-feeds-${keyId}`;
+  if (!feeds) {
+    return (
+      <p data-testid={testId} className="mt-0.5 text-xs text-warning">
+        {FEEDS_UNCHECKED_COPY}{" "}
+        <button type="button" onClick={onRetry} className="underline underline-offset-4">
+          Retry
+        </button>
+      </p>
+    );
+  }
+  if (feeds.length === 0) {
+    return (
+      <p data-testid={testId} className="mt-0.5 text-xs text-text-muted">
+        {FEEDS_NONE_COPY}
+      </p>
+    );
+  }
+  return (
+    <p data-testid={testId} className="mt-0.5 text-xs text-text-muted">
+      Feeds:{" "}
+      {feeds.map((feed, i) => {
+        const href = feedHref(role, feed);
+        return (
+          <span key={`${feed.kind}-${feed.strategy_id ?? "unreadable"}-${i}`}>
+            {i > 0 && ", "}
+            {href === null ? (
+              FEEDS_UNREADABLE_NAME
+            ) : (
+              <Link href={href} className="text-accent underline underline-offset-4">
+                {feed.name ?? "Unnamed strategy"}
+              </Link>
+            )}
+          </span>
+        );
+      })}
+    </p>
+  );
+}
+
+type DeleteFeedsState =
+  | { state: "checking" }
+  | { state: "unchecked" }
+  | { state: "ok"; feeds: KeyFeed[] };
+
+/**
+ * What the Disconnect / Delete confirm says about the fed strategies. The two
+ * actions differ, so the wording follows the action: a Disconnect keeps the key
+ * and its links (neutral naming), a hard delete (the cascade box ticked) removes
+ * the key, so a single-key strategy loses its key and a composite loses this
+ * member. A failed read says it could not check.
+ */
+function deleteFeedsNote(check: DeleteFeedsState, hardDelete: boolean): { text: string; tone: "muted" | "warning" } {
+  if (check.state === "checking") {
+    return { text: "Checking which strategies this key feeds…", tone: "muted" };
+  }
+  if (check.state === "unchecked") {
+    return { text: FEEDS_UNCHECKED_COPY, tone: "warning" };
+  }
+  if (check.feeds.length === 0) {
+    return { text: "This key feeds no strategy.", tone: "muted" };
+  }
+  const nameOf = (f: KeyFeed) =>
+    f.name !== null && f.name.trim() !== "" ? f.name : FEEDS_UNREADABLE_NAME;
+  if (!hardDelete) {
+    return { text: `This key feeds: ${check.feeds.map(nameOf).join(", ")}.`, tone: "muted" };
+  }
+  const losses = check.feeds
+    .map((f) => `${nameOf(f)} ${f.kind === "single" ? "loses its key" : "loses this member"}`)
+    .join("; ");
+  return { text: `Deleting this key: ${losses}.`, tone: "warning" };
+}
 
 /**
  * set_departed_key_history_inclusion's refusals, mapped BY SQLSTATE and never by
@@ -521,8 +762,21 @@ function normalizeInitialKey(
   };
 }
 
-export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
+export function AllocatorExchangeManager({
+  initialKeys,
+  hasHoldings,
+  role = "allocator",
+}: Props) {
   const router = useRouter();
+  // Phase 200 D-06: the allocator book (holdings sync, the Active Allocation claim,
+  // the departed-history control) is for allocator and both. Neither
+  // /api/allocator/holdings/sync nor request_allocator_holdings_sync checks role,
+  // only key ownership, so for a manager every call to it is kept out here.
+  const isAllocatorRole = role === "allocator" || role === "both";
+  // A key a strategy may use is hard-deleted from here (the edit page's Delete is
+  // going): manager and both. `manager` is not offered Disconnect.
+  const canHardDeleteKey = role === "manager" || role === "both";
+  const managerOnly = role === "manager";
   const [keys, setKeys] = useState<ExchangeConnection[]>(() =>
     initialKeys.map((k) => normalizeInitialKey(k)),
   );
@@ -532,10 +786,16 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  // Which button is in flight, so only that one says what it is doing.
+  const [deletingHard, setDeletingHard] = useState(false);
   const [deleteHoldingsCount, setDeleteHoldingsCount] = useState<number | null>(
     null,
   );
   const [cascadeHoldings, setCascadeHoldings] = useState(false);
+  // The holdings count read FAILED: the count is unknown, which is not zero. A
+  // late answer for another key is dropped by the sequence.
+  const [holdingsUnreadable, setHoldingsUnreadable] = useState(false);
+  const holdingsSeqRef = useRef(0);
   // Phase 164.5.3 / MT5CREDS Plan 05 — the id of the MT5 key whose password
   // is being corrected. Shared dialog with ApiKeyManager (cross-directory
   // import is fine — the dialog belongs to neither card exclusively).
@@ -556,6 +816,43 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   const [historyNotice, setHistoryNotice] = useState<
     Record<string, { kind: "status" | "retry" | "alert"; text: string }>
   >({});
+
+  // Phase 200 D-01: which strategies each key feeds, from ONE read of
+  // `GET /api/keys/feeds`. Read on mount and again only after a completed add or
+  // delete, never from the key-list refresh or the sync poll, so the route's
+  // limiter is not spent by polling. ORDERED: an answer older than the newest
+  // read, or one landing after an unmount, is dropped.
+  const [feedsState, setFeedsState] = useState<FeedsState>({ status: "loading" });
+  const feedsSeqRef = useRef(0);
+  const loadFeeds = useCallback(async () => {
+    const seq = ++feedsSeqRef.current;
+    const next = await readKeyFeeds();
+    if (seq === feedsSeqRef.current) setFeedsState(next);
+  }, []);
+  // After a key change the old map may be wrong (a new key has no entry, a
+  // deleted key's strategies changed), so the lines go quiet until the new
+  // answer lands rather than show a map that may be wrong.
+  const refreshFeeds = useCallback(() => {
+    setFeedsState({ status: "loading" });
+    void loadFeeds();
+  }, [loadFeeds]);
+  useEffect(() => {
+    void loadFeeds();
+    return () => {
+      feedsSeqRef.current += 1;
+    };
+  }, [loadFeeds]);
+  // The confirm's own read of what the key being removed feeds. `null` while no
+  // confirm is open. The sequence drops an answer for a confirm that has since
+  // been closed or reopened on another key.
+  const [deleteFeeds, setDeleteFeeds] = useState<DeleteFeedsState | null>(null);
+  const deleteFeedsSeqRef = useRef(0);
+  const forgetDeleteFeeds = () => {
+    deleteFeedsSeqRef.current += 1;
+    holdingsSeqRef.current += 1;
+    setHoldingsUnreadable(false);
+    setDeleteFeeds(null);
+  };
 
   const supabase = createClient();
 
@@ -578,7 +875,10 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     anchored: anchorById[k.id] === undefined || anchorById[k.id].state === "anchored",
   }));
   const historyKeysById = new Map(historyKeys.map((k) => [k.id, k]));
-  const departedIds = new Set(historyKeys.filter(isDepartedKey).map((k) => k.id));
+  // A manager has no allocator book, so no key is read for departed history.
+  const departedIds = new Set(
+    isAllocatorRole ? historyKeys.filter(isDepartedKey).map((k) => k.id) : [],
+  );
   const identity = accountIdentityTokens(historyKeys);
   // The keys a departed key's decision reads: itself and every key on the same
   // known account (a live key there bounds it, and so does a later departed one).
@@ -714,6 +1014,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   }
 
   function renderDepartedHistory(keyId: string) {
+    if (!isAllocatorRole) return null;
     const input = historyKeysById.get(keyId);
     if (!input || !isDepartedKey(input)) return null;
     const ids = historyInputIds(keyId);
@@ -787,36 +1088,78 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     setCascadeHoldings(false);
     setDeleteHoldingsCount(null);
     setConfirmDeleteId(keyId);
+    await runDeleteChecks(keyId);
+  }
+
+  // The confirm's two reads (what the key feeds, how many holdings it has). Also
+  // what the confirm's Retry re-runs after either could not be answered.
+  async function runDeleteChecks(keyId: string) {
+    // Phase 200 D-01 (T-200-15): name what this key feeds before the owner
+    // confirms. Started before the holdings read; both buttons are held while it
+    // is open (at most FEEDS_READ_BOUND_MS). A failure warns on Disconnect (it is
+    // reversible: the key and its holdings stay) and holds only the irreversible
+    // Delete key, with Retry offered (R2-03).
+    const seq = ++deleteFeedsSeqRef.current;
+    setDeleteFeeds({ state: "checking" });
+    void readKeyFeedsForConfirm(keyId).then((answer) => {
+      if (deleteFeedsSeqRef.current !== seq) return;
+      setDeleteFeeds(
+        answer === "unreadable" ? { state: "unchecked" } : { state: "ok", feeds: answer },
+      );
+    });
     // Fetch holdings count so the modal can prompt before submit. RLS
-    // grants owners SELECT on allocator_holdings (migration 066 STEP 3).
+    // grants owners SELECT on allocator_holdings (migration 066 STEP 3). A failed
+    // read leaves the count unknown (null), never 0: 0 reads "no holdings" and
+    // offers Delete key. The sequence drops an answer for a confirm since closed.
+    const holdingsSeq = ++holdingsSeqRef.current;
+    setHoldingsUnreadable(false);
+    // Retry re-enters here with the last answer still on screen: reset it, so a
+    // failed re-read shows "could not check" and holds Delete key (SFH2-1).
+    setDeleteHoldingsCount(null);
     const { count, error } = await supabase
       .from("allocator_holdings")
       .select("*", { count: "exact", head: true })
       .eq("api_key_id", keyId);
+    if (holdingsSeqRef.current !== holdingsSeq) return;
     if (error) {
-      setDeleteError(`Could not check holdings: ${error.message}`);
-      setDeleteHoldingsCount(0);
+      setHoldingsUnreadable(true);
       return;
     }
     setDeleteHoldingsCount(count ?? 0);
   }
 
-  async function handleDeleteKey(keyId: string) {
+  async function handleDeleteKey(keyId: string, hardDelete: boolean) {
     setDeleteLoading(true);
+    setDeletingHard(hardDelete);
     setDeleteError(null);
 
     // Split by user intent: "delete N holdings" checkbox gates hard-delete.
     // Unchecked → migration 075 soft-disconnect (key + holdings preserved,
     // worker crons skip, UI renders Reconnect).
     // Checked → migration 069 cascade-delete (key + holdings wiped).
-    if (cascadeHoldings) {
-      const { error } = await supabase.rpc("delete_allocator_api_key", {
-        p_api_key_id: keyId,
-        p_cascade_holdings: true,
-      });
+    // Phase 200 D-06: `Delete key` (manager, both) removes the row with no holdings
+    // to cascade (`p_cascade_holdings: false`; a key that has holdings is deleted
+    // through the box above instead).
+    if (cascadeHoldings || hardDelete) {
+      const { error } = await supabase.rpc(
+        "delete_allocator_api_key",
+        cascadeHoldings
+          ? { p_api_key_id: keyId, p_cascade_holdings: true }
+          : { p_api_key_id: keyId, p_cascade_holdings: false },
+      );
       setDeleteLoading(false);
       if (error) {
-        setDeleteError("Could not disconnect this key. Please try again.");
+        setDeleteError(
+          hardDelete
+            ? error.code === "23503"
+              ? managerOnly
+                ? MANAGER_KEY_HAS_HOLDINGS_ERROR
+                : OWNER_KEY_HAS_HOLDINGS_ERROR
+              : "Could not delete this key. Please try again."
+            : "Could not disconnect this key. Please try again.",
+        );
+        // The stale count (0) is what hid the box: read it again so the box appears.
+        if (hardDelete && error.code === "23503" && !managerOnly) void runDeleteChecks(keyId);
         return;
       }
       setKeys((prev) => prev.filter((k) => k.id !== keyId));
@@ -854,9 +1197,13 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
       );
     }
 
+    // Phase 200 D-01: a completed Disconnect or delete changes what the key's
+    // strategies hold, so the map is read again.
+    refreshFeeds();
     setConfirmDeleteId(null);
     setDeleteHoldingsCount(null);
     setCascadeHoldings(false);
+    forgetDeleteFeeds();
     startTransition(() => router.refresh());
   }
 
@@ -956,6 +1303,17 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               : k,
           ),
         );
+        return;
+      }
+
+      // Phase 200 D-06: a manager has no allocator book, so no holdings sync is
+      // asked for. The reconnect RPC left the key `idle` on the server; say the
+      // same here, or the optimistic `syncing` would stay until the next poll.
+      if (!isAllocatorRole) {
+        setKeys((prev) =>
+          prev.map((k) => (k.id === keyId ? { ...k, sync_status: "idle" } : k)),
+        );
+        startTransition(() => router.refresh());
         return;
       }
 
@@ -1081,6 +1439,9 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   }, [router, startTransition]);
 
   async function handleSync(apiKeyId: string) {
+    // Phase 200 D-06: never reachable from a manager's card (no Sync now button),
+    // and refused here too, because the route would enqueue the poll for any owner.
+    if (!isAllocatorRole) return;
     // D-10 optimistic syncing: pill flips immediately so the click feels
     // responsive. Clear prior helper_override / queued_next_attempt_at so a
     // fresh click restarts the UX cleanly.
@@ -1248,26 +1609,62 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
       // row even if router.refresh() resolves before the replica propagates it.
       const newRow: ExchangeConnection = {
         ...normalizeInitialKey(inserted as InitialKey),
-        sync_status: "syncing",
+        // A manager's add asks for no holdings sync, so the row is not `syncing`.
+        ...(isAllocatorRole ? { sync_status: "syncing" } : {}),
         pending_insert: true,
       };
       setKeys((prev) => [newRow, ...prev]);
       setShowForm(false);
+      // Phase 200 D-01: the new key has no entry in the feeds map yet.
+      refreshFeeds();
       setFormLoading(false);
 
-      // D-09 / INGEST-07 / f4: AWAIT the POST. On non-2xx / network error,
-      // revert pill to 'idle' and surface "Sync request failed" via the
-      // row's aria-live helper line. No more fire-and-forget.
-      try {
-        const syncRes = await fetch("/api/allocator/holdings/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ api_key_id: inserted.id }),
-        });
-        const syncJson = (await syncRes.json().catch(() => null)) ?? {};
-        if (syncRes.status === 409) {
-          markRefusedAsDisconnected(inserted.id, syncJson, null);
-        } else if (!syncRes.ok) {
+      // Phase 200 D-06: a manager's add enqueues no allocator holdings poll.
+      if (isAllocatorRole) {
+        // D-09 / INGEST-07 / f4: AWAIT the POST. On non-2xx / network error,
+        // revert pill to 'idle' and surface "Sync request failed" via the
+        // row's aria-live helper line. No more fire-and-forget.
+        try {
+          const syncRes = await fetch("/api/allocator/holdings/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key_id: inserted.id }),
+          });
+          const syncJson = (await syncRes.json().catch(() => null)) ?? {};
+          if (syncRes.status === 409) {
+            markRefusedAsDisconnected(inserted.id, syncJson, null);
+          } else if (!syncRes.ok) {
+            setKeys((prev) =>
+              prev.map((k) =>
+                k.id === inserted.id
+                  ? {
+                      ...k,
+                      sync_status: "idle",
+                      helper_override: SYNC_FAILED_HELPER,
+                    }
+                  : k,
+              ),
+            );
+          } else if (
+            syncJson.already_inflight &&
+            typeof syncJson.next_attempt_at === "string"
+          ) {
+            // f8: first-run landed in already_inflight due to per-exchange
+            // circuit-breaker contagion. Surface the Queued helper.
+            setKeys((prev) =>
+              prev.map((k) =>
+                k.id === inserted.id
+                  ? {
+                      ...k,
+                      sync_status: "syncing",
+                      queued_next_attempt_at: syncJson.next_attempt_at,
+                    }
+                  : k,
+              ),
+            );
+          }
+          // 200 { ok, job_id } — row already syncing; next poll tick advances.
+        } catch {
           setKeys((prev) =>
             prev.map((k) =>
               k.id === inserted.id
@@ -1279,37 +1676,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                 : k,
             ),
           );
-        } else if (
-          syncJson.already_inflight &&
-          typeof syncJson.next_attempt_at === "string"
-        ) {
-          // f8: first-run landed in already_inflight due to per-exchange
-          // circuit-breaker contagion. Surface the Queued helper.
-          setKeys((prev) =>
-            prev.map((k) =>
-              k.id === inserted.id
-                ? {
-                    ...k,
-                    sync_status: "syncing",
-                    queued_next_attempt_at: syncJson.next_attempt_at,
-                  }
-                : k,
-            ),
-          );
         }
-        // 200 { ok, job_id } — row already syncing; next poll tick advances.
-      } catch {
-        setKeys((prev) =>
-          prev.map((k) =>
-            k.id === inserted.id
-              ? {
-                  ...k,
-                  sync_status: "idle",
-                  helper_override: SYNC_FAILED_HELPER,
-                }
-              : k,
-          ),
-        );
       }
 
       // Pull server truth so sync_status transitions (syncing → complete)
@@ -1355,10 +1722,13 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // inactive) nothing reads the account, so the line asserts nothing about
   // syncing or positions; allocator_holdings outlives its keys, so a true
   // hasHoldings there would read "auto-synced" over a frozen book.
+  // Phase 200 D-06: a manager has no book, so the line states only the count.
   const connectedSubtitle =
     connectedCount === 0
       ? "0 connected"
-      : hasHoldings === true
+      : !isAllocatorRole
+        ? `${connectedCount} connected`
+        : hasHoldings === true
         ? `${connectedCount} connected · Active Allocation auto-synced`
         : hasHoldings === null
           ? `${connectedCount} connected`
@@ -1386,13 +1756,20 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
         {activeKeys.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border bg-bg-secondary p-8 text-center">
             <p className="text-sm text-text-secondary">
-              Upload a read-only API key from Binance, OKX, Bybit, or
-              Deribit to start tracking your positions automatically.
+              {isAllocatorRole
+                ? "Upload a read-only API key from Binance, OKX, Bybit, or Deribit to start tracking your positions automatically."
+                : "Upload a read-only API key from Binance, OKX, Bybit, or Deribit to connect a strategy to it."}
             </p>
             <p className="mt-2 text-xs text-text-muted">
-              Keys are validated against the exchange and encrypted with a
-              per-user KEK before storage. Trading and withdrawal keys are
-              rejected.
+              Keys are validated against the exchange. Trading and withdrawal
+              keys are rejected. {KEY_STORAGE_SENTENCE}{" "}
+              <Link
+                href={KEY_STORAGE_LINK.href}
+                className="text-accent underline underline-offset-4"
+              >
+                {KEY_STORAGE_LINK.label}
+              </Link>
+              .
             </p>
           </div>
         ) : (
@@ -1463,6 +1840,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                         {shareNote}
                       </p>
                     ) : null}
+                    <KeyFeedsLine keyId={key.id} state={feedsState} role={role} onRetry={refreshFeeds} />
                     {renderDepartedHistory(key.id)}
                   </div>
                   <div className="text-right">
@@ -1474,7 +1852,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     </p>
                   </div>
                   <AllocatorSyncStatus
-                    subject="holdings"
+                    subject={isAllocatorRole ? "holdings" : "strategy-key"}
                     syncStatus={key.sync_status}
                     syncError={key.sync_error}
                     lastSyncAt={key.last_sync_at}
@@ -1487,19 +1865,21 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     helperOverride={key.helper_override}
                   />
                   <div className="flex flex-wrap gap-2 basis-full sm:basis-auto sm:ml-auto">
-                    <Button
-                      variant="primary"
-                      disabled={key.sync_status === "syncing"}
-                      aria-label={`Sync ${venueLabel(key.exchange)} now`}
-                      title={
-                        key.sync_status === "syncing"
-                          ? "Sync in progress"
-                          : undefined
-                      }
-                      onClick={() => handleSync(key.id)}
-                    >
-                      Sync now
-                    </Button>
+                    {isAllocatorRole ? (
+                      <Button
+                        variant="primary"
+                        disabled={key.sync_status === "syncing"}
+                        aria-label={`Sync ${venueLabel(key.exchange)} now`}
+                        title={
+                          key.sync_status === "syncing"
+                            ? "Sync in progress"
+                            : undefined
+                        }
+                        onClick={() => handleSync(key.id)}
+                      >
+                        Sync now
+                      </Button>
+                    ) : null}
                     {key.exchange === "mt5" && (
                       <Button
                         variant="secondary"
@@ -1511,10 +1891,10 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     )}
                     <Button
                       variant="secondary"
-                      aria-label={`Disconnect ${venueLabel(key.exchange)} key`}
+                      aria-label={`${managerOnly ? "Delete" : "Disconnect"} ${venueLabel(key.exchange)} key`}
                       onClick={() => openDeleteConfirm(key.id)}
                     >
-                      Disconnect
+                      {managerOnly ? "Delete key" : "Disconnect"}
                     </Button>
                   </div>
                 </div>
@@ -1582,6 +1962,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                         MT5 account {key.venue_account_id ?? "—"}
                       </p>
                     )}
+                    <KeyFeedsLine keyId={key.id} state={feedsState} role={role} onRetry={refreshFeeds} />
                     {renderDepartedHistory(key.id)}
                   </div>
                   <div className="text-right">
@@ -1640,21 +2021,32 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
             </li>
             <li>
               Upload it here. Quantalyze validates the key against the
-              exchange, confirms it&apos;s read-only, and encrypts it
-              with a per-user KEK before storing.
+              exchange and confirms it&apos;s read-only.{" "}
+              {KEY_STORAGE_SENTENCE}{" "}
+              <Link
+                href={KEY_STORAGE_LINK.href}
+                className="text-accent underline underline-offset-4"
+              >
+                {KEY_STORAGE_LINK.label}
+              </Link>
+              .
             </li>
-            <li>
-              Our analytics service reads your positions and trade history
-              on a daily schedule. It groups related trades into strategy
-              positions and writes them into your Active Allocation
-              portfolio.
-            </li>
-            <li>
-              Deposits and withdrawals on the exchange become{" "}
-              <code>allocation_events</code> with{" "}
-              <code>source=&apos;auto&apos;</code>. Your invest/divest
-              lifecycle is captured with zero manual entry.
-            </li>
+            {isAllocatorRole ? (
+              <>
+                <li>
+                  Our analytics service reads your positions and trade history
+                  on a daily schedule. It groups related trades into strategy
+                  positions and writes them into your Active Allocation
+                  portfolio.
+                </li>
+                <li>
+                  Deposits and withdrawals on the exchange become{" "}
+                  <code>allocation_events</code> with{" "}
+                  <code>source=&apos;auto&apos;</code>. Your invest/divest
+                  lifecycle is captured with zero manual entry.
+                </li>
+              </>
+            ) : null}
           </ol>
         </div>
       </Card>
@@ -1687,6 +2079,14 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
           ? keys.find((k) => k.id === confirmDeleteId)
           : null;
         const confirmVenue = confirmRow ? venueLabel(confirmRow.exchange) : "";
+        // Phase 200 D-06: `Delete key` is offered once the holdings read says there
+        // are none to cascade. A manager has nothing else to choose: no Disconnect.
+        const offersDeleteKey = canHardDeleteKey && deleteHoldingsCount === 0;
+        // Both buttons are held while the feeds read is open. When it failed, only
+        // the irreversible Delete key stays held: a key is never deleted without
+        // knowing what it feeds. Disconnect is reversible (Reconnect), so it warns only.
+        const feedsOpen = deleteFeeds?.state === "checking";
+        const feedsUnknownOrOpen = feedsOpen || deleteFeeds?.state === "unchecked";
         return (
           <Modal
             open={!!confirmDeleteId}
@@ -1696,19 +2096,81 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               setDeleteError(null);
               setDeleteHoldingsCount(null);
               setCascadeHoldings(false);
+              forgetDeleteFeeds();
             }}
-            title={`Disconnect ${confirmVenue}?`}
+            title={`${managerOnly ? "Delete" : "Disconnect"} ${confirmVenue}?`}
           >
             <p className="text-sm text-text-secondary">
-              We&apos;ll stop syncing this key. Your historical holdings stay
-              available for audit and are reflected in past performance.
+              {managerOnly
+                ? "This removes the key from your account. A strategy that uses it can no longer read its exchange."
+                : "We'll stop syncing this key. Your historical holdings stay available for audit and are reflected in past performance."}
             </p>
 
+            {deleteFeeds
+              ? (() => {
+                  // A manager's only action is a delete, so the loss wording always applies.
+                  const note = deleteFeedsNote(deleteFeeds, cascadeHoldings || managerOnly);
+                  // `both` is offered Disconnect and Delete key: the plain line is for
+                  // Disconnect, and what a delete would cost is named beside it.
+                  const loss =
+                    offersDeleteKey && !managerOnly && deleteFeeds.state === "ok" && deleteFeeds.feeds.length > 0
+                      ? deleteFeedsNote(deleteFeeds, true)
+                      : null;
+                  return (
+                    <>
+                      <p
+                        data-testid="allocator-delete-feeds"
+                        className={`mt-3 text-xs ${note.tone === "warning" ? "text-warning" : "text-text-muted"}`}
+                      >
+                        {note.text}
+                      </p>
+                      {loss ? (
+                        <p
+                          data-testid="allocator-delete-feeds-loss"
+                          className="mt-1 text-xs text-warning"
+                        >
+                          {loss.text}
+                        </p>
+                      ) : null}
+                    </>
+                  );
+                })()
+              : null}
+
             {deleteHoldingsCount === null ? (
-              <p className="mt-3 text-xs text-text-muted">Checking holdings…</p>
+              holdingsUnreadable ? (
+                <p
+                  data-testid="allocator-delete-holdings-unchecked"
+                  className="mt-3 text-xs text-warning"
+                >
+                  {HOLDINGS_UNCHECKED_COPY}
+                </p>
+              ) : (
+                <p className="mt-3 text-xs text-text-muted">Checking holdings…</p>
+              )
             ) : deleteHoldingsCount === 0 ? (
-              <p className="mt-3 text-xs text-text-muted">
-                No historical holdings are tied to this key.
+              <>
+                {managerOnly ? null : (
+                  <p className="mt-3 text-xs text-text-muted">
+                    No historical holdings are tied to this key.
+                  </p>
+                )}
+                {/* Plan 10: Delete key calls delete_allocator_api_key, which hard-deletes
+                    the api_keys row, and csv_daily_returns_api_key_id_fkey cascades, so
+                    the key's daily returns go with it. Said before the owner chooses it. */}
+                {offersDeleteKey ? (
+                  <p className="mt-3 text-fixed-11 text-warning">
+                    {managerOnly ? DELETE_REMOVES_HISTORY_HEAD : DELETE_REMOVES_HISTORY}
+                  </p>
+                ) : null}
+              </>
+            ) : managerOnly ? (
+              // A manager never cascades: Delete key sends p_cascade_holdings:false and the
+              // RPC refuses a key that still has holdings (said again if the owner tries).
+              <p data-testid="allocator-delete-manager-holdings" className="mt-3 text-xs text-warning">
+                This key has {deleteHoldingsCount} historical holding
+                {deleteHoldingsCount === 1 ? "" : "s"} from an allocator role, so it cannot be
+                deleted from a manager account.
               </p>
             ) : (
               <div className="mt-3">
@@ -1739,12 +2201,31 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     csv_daily_returns_api_key_id_fkey is ON DELETE CASCADE, so
                     the key's daily returns (its history) go with it. */}
                 {cascadeHoldings ? (
-                  <p className="ml-6 mt-1 text-fixed-11 text-warning">
-                    {DELETE_REMOVES_HISTORY}
-                  </p>
+                  <>
+                    <p className="ml-6 mt-1 text-fixed-11 text-warning">{DELETE_REMOVES_HISTORY}</p>
+                    <p
+                      data-testid="allocator-cascade-derived-history"
+                      className="ml-6 mt-1 text-fixed-11 text-warning"
+                    >
+                      {CASCADE_REMOVES_DERIVED_HISTORY}
+                    </p>
+                  </>
                 ) : null}
               </div>
             )}
+
+            {deleteFeeds?.state === "unchecked" || holdingsUnreadable ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="mt-2"
+                data-testid="allocator-delete-retry"
+                disabled={deleteLoading}
+                onClick={() => confirmDeleteId && void runDeleteChecks(confirmDeleteId)}
+              >
+                Retry
+              </Button>
+            ) : null}
 
             {deleteError ? (
               <p
@@ -1764,19 +2245,43 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   setDeleteError(null);
                   setDeleteHoldingsCount(null);
                   setCascadeHoldings(false);
+                  forgetDeleteFeeds();
                 }}
               >
                 Cancel
               </Button>
-              <Button
-                variant="danger"
-                disabled={deleteLoading || deleteHoldingsCount === null}
-                onClick={() =>
-                  confirmDeleteId && handleDeleteKey(confirmDeleteId)
-                }
-              >
-                {deleteLoading ? "Disconnecting…" : "Disconnect"}
-              </Button>
+              {managerOnly ? null : (
+                <Button
+                  variant={offersDeleteKey ? "secondary" : "danger"}
+                  disabled={
+                    deleteLoading ||
+                    deleteHoldingsCount === null ||
+                    feedsOpen ||
+                    // D-R1 / R3-01: with the cascade box ticked, Disconnect is the irreversible delete.
+                    (cascadeHoldings && deleteFeeds?.state === "unchecked")
+                  }
+                  onClick={() =>
+                    confirmDeleteId && handleDeleteKey(confirmDeleteId, false)
+                  }
+                >
+                  {deleteLoading && !deletingHard ? "Disconnecting…" : "Disconnect"}
+                </Button>
+              )}
+              {canHardDeleteKey && (offersDeleteKey || managerOnly) ? (
+                <Button
+                  variant="danger"
+                  disabled={
+                    deleteLoading ||
+                    deleteHoldingsCount === null ||
+                    feedsUnknownOrOpen
+                  }
+                  onClick={() =>
+                    confirmDeleteId && handleDeleteKey(confirmDeleteId, true)
+                  }
+                >
+                  {deleteLoading && deletingHard ? "Deleting…" : "Delete key"}
+                </Button>
+              ) : null}
             </div>
           </Modal>
         );

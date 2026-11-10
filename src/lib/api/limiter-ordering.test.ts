@@ -180,6 +180,13 @@ const NO_INPUT = new Set([
   // BEFORE checkLimit, so a malformed id never burns a token. Same NO_INPUT
   // shape as the returns/sync-progress/share siblings above.
   "keys/[id]/memberships/route.ts",
+  // Phase 200 D-01 (plan 01, 2026-11-10) — the batched feeds GET. withAuth +
+  // per-user userActionLimiter (`key-feeds:<user.id>`), and NO input at all:
+  // it takes no id and no body from the caller (it enumerates the caller's own
+  // keys), so there is nothing to validate ahead of checkLimit and the
+  // burn-a-token-on-bad-input bug cannot occur. Same NO_INPUT shape as the
+  // membership sibling above.
+  "keys/feeds/route.ts",
   // Phase 169.2 / D-20 — the daily BTC benchmark refresh cron. CRON_SECRET
   // Bearer gate, then adminActionLimiter under one fixed identifier
   // (`benchmark-refresh:cron`), and NO request body: the handler reads only

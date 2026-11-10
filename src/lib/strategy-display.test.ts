@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { displayStrategyName } from "./strategy-display";
+import { displayStrategyName, publicNamePreview } from "./strategy-display";
 
 describe("displayStrategyName", () => {
   it("returns codename when set (regardless of tier)", () => {
@@ -73,6 +73,69 @@ describe("displayStrategyName", () => {
         codename: null,
         disclosure_tier: null,
       }),
+    ).toBe("Strategy #abcdef12");
+  });
+});
+
+// Phase 200 / D-11 — what the rename place tells a manager the public sees.
+// The oracle is typed here as literals; the factsheet title and the preview
+// share one helper, so these cases pin the helper's three real-world shapes.
+describe("publicNamePreview", () => {
+  it("codename Orion: the factsheet shows the row's name, discovery shows the codename", () => {
+    expect(
+      publicNamePreview({
+        id: "abcdef1234567890",
+        name: "Helios alpha sleeve",
+        codename: "Orion",
+        disclosure_tier: "exploratory",
+      }),
+    ).toEqual({ factsheet: "Helios alpha sleeve", discovery: "Orion" });
+  });
+
+  it("institutional row without a codename: both surfaces show the name", () => {
+    expect(
+      publicNamePreview({
+        id: "abcdef1234567890",
+        name: "Stellar Neutral Alpha",
+        codename: null,
+        disclosure_tier: "institutional",
+      }),
+    ).toEqual({
+      factsheet: "Stellar Neutral Alpha",
+      discovery: "Stellar Neutral Alpha",
+    });
+  });
+
+  it("exploratory row with no codename (PROD reality): discovery shows Strategy #<first 8 of id>", () => {
+    expect(
+      publicNamePreview({
+        id: "abcdef1234567890",
+        name: "Secret Alpha Fund",
+        codename: null,
+        disclosure_tier: "exploratory",
+      }),
+    ).toEqual({
+      factsheet: "Secret Alpha Fund",
+      discovery: "Strategy #abcdef12",
+    });
+  });
+
+  it("a row with no name falls back through the codename, then the synthetic label", () => {
+    expect(
+      publicNamePreview({
+        id: "abcdef1234567890",
+        name: null,
+        codename: "Orion",
+        disclosure_tier: "exploratory",
+      }).factsheet,
+    ).toBe("Orion");
+    expect(
+      publicNamePreview({
+        id: "abcdef1234567890",
+        name: null,
+        codename: null,
+        disclosure_tier: "exploratory",
+      }).factsheet,
     ).toBe("Strategy #abcdef12");
   });
 });

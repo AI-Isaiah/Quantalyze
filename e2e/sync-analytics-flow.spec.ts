@@ -122,13 +122,23 @@ test.describe("Sync & Analytics Flow", () => {
       ).toBeVisible();
     });
 
-    test("Use & Sync button is visible for unlinked keys", async ({ page }) => {
+    test("Change key… picks another key and opens the confirm without writing", async ({ page }) => {
       await goToStrategyEdit(page, TEST_STRATEGY_ID);
 
-      // Other keys (not currently linked) should show "Use & Sync"
-      await expect(
-        page.getByRole("button", { name: /Use & Sync/i }),
-      ).toBeVisible();
+      // Phase 200 D-03/D-07: the per-card "Use & Sync" is gone. One header
+      // "Change key…" appears when the account holds another key; a pick opens
+      // the confirm dialog, and only its "Change key" button writes. Needs a
+      // second key on the test account.
+      await page.getByRole("button", { name: "Change key…" }).click();
+      await page.locator('[data-testid^="change-key-option-"]').first().click();
+
+      // The native <dialog> carries no accessible name, so match it by its title.
+      const dialog = page.getByRole("dialog").filter({ hasText: "Change this strategy's key?" });
+      await expect(dialog).toBeVisible();
+
+      // Cancel: nothing was written, the strategy keeps its key.
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).toBeHidden();
     });
 
     test("clicking Resync shows syncing state", async ({ page }) => {

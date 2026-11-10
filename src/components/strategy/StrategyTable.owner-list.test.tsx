@@ -9,10 +9,12 @@
  *
  * WHAT IS PINNED, in the order a reader would be hurt by its loss:
  *   1. THE UNION, IN ORDER, IN ONE CELL. For role both, the Actions cell holds on one line
- *      (flex-nowrap): Edit, the server-built actions slot, Mark ownership / Change mark, Rename
- *      (a private or draft row only: the D-17 server gate), then Simulate Impact (published only).
+ *      (flex-nowrap): Edit, the server-built actions slot, Mark ownership / Change mark, then
+ *      Simulate Impact (published only). No row carries Rename… (Phase 200 D-09: the edit page is
+ *      the one rename place).
  *   2. NO FOREIGN FURNITURE (T-199-11). A manager-only mount (no allocatorFurniture) renders no
- *      OwnershipTag, no Simulate Impact, no Mark or Rename even when the callbacks are passed; an
+ *      OwnershipTag, no Simulate Impact, no Mark or Rename even when the callbacks are passed (a stale
+ *      `onRename` included); an
  *      allocator-only mount (an entry with a note only) renders no Edit link and no actions slot.
  *   3. OWNER-LIST COLUMNS ARE NOT FURNITURE. Status and Created always show and the in-name status
  *      badge never does, whichever furniture is on (UI-SPEC note 3).
@@ -149,6 +151,8 @@ afterEach(() => {
   restoreFetchMock();
 });
 
+const staleRenameProps: Record<string, unknown> = { onRename: () => {} };
+
 function renderList(props: {
   managerRows: ManagerRows;
   allocatorFurniture?: boolean;
@@ -162,7 +166,9 @@ function renderList(props: {
       managerRows={props.managerRows}
       allocatorFurniture={props.allocatorFurniture}
       onMarkOwnership={props.callbacks ? () => {} : undefined}
-      onRename={props.callbacks ? () => {} : undefined}
+      // Phase 200 D-09 removed `onRename`. A stale caller still passing it must not bring the
+      // control back, so the removed prop rides an untyped spread on the callbacks mounts.
+      {...(props.callbacks ? staleRenameProps : {})}
     />,
   );
 }
@@ -208,13 +214,12 @@ describe("owner-list mode, role both: the whole union on one row (D-02)", () => 
     expect(container!.className).toContain("whitespace-nowrap");
   });
 
-  it("a draft row reads Edit, actions, Mark ownership, Rename and no Simulate Impact (the D-17 and published-only gates)", () => {
+  it("a draft row reads Edit, actions, Mark ownership and no Rename or Simulate Impact (D-09 and the published-only gate)", () => {
     renderList({ managerRows: MANAGER_ENTRIES, allocatorFurniture: true, callbacks: true });
     expect(controlsInOrder(actionsCell(dataRow(NAME_DRAFT)))).toEqual([
       "edit",
       "actions",
       "Mark ownership…",
-      "Rename…",
     ]);
   });
 
@@ -253,7 +258,7 @@ describe("owner-list mode, manager only: no allocator furniture (T-199-11)", () 
 });
 
 describe("owner-list mode, allocator only: no manager furniture (T-199-11)", () => {
-  it("an entry with a note only renders the tag, Mark, Rename and Simulate Impact and no Edit link or actions slot", () => {
+  it("an entry with a note only renders the tag, Mark and Simulate Impact and no Edit link or actions slot", () => {
     renderList({ managerRows: NOTE_ONLY_ENTRIES, allocatorFurniture: true, callbacks: true });
     const published = dataRow(NAME_PUBLISHED);
     expect(controlsInOrder(actionsCell(published))).toEqual(["Change mark…", "simulate"]);
@@ -261,7 +266,7 @@ describe("owner-list mode, allocator only: no manager furniture (T-199-11)", () 
     expect(within(published).queryByRole("link", { name: `Edit ${NAME_PUBLISHED}` })).toBeNull();
     expect(within(published).queryByTestId(slotTestId(ID_PUBLISHED))).toBeNull();
     const draft = dataRow(NAME_DRAFT);
-    expect(controlsInOrder(actionsCell(draft))).toEqual(["Mark ownership…", "Rename…"]);
+    expect(controlsInOrder(actionsCell(draft))).toEqual(["Mark ownership…"]);
     // The note rows still render: the note is the allocator list's own furniture channel.
     expect(screen.getAllByTestId("strategy-row-note")).toHaveLength(2);
   });

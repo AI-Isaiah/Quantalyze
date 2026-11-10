@@ -3,8 +3,10 @@ import { test, expect, type Page } from "@playwright/test";
 /**
  * API Key Connection Flow (Task 2.2)
  *
- * Tests the strategy edit page's API key management UI:
- * exchange selector, form validation, key submission, and connected keys list.
+ * Tests the API key endpoint contract and the strategy edit page's one-key
+ * panel (heading and the link to the Profile API keys tab). Adding and deleting
+ * keys moved to the Profile tab in Phase 200 (see the note above the edit-page
+ * describe for where that is covered now).
  *
  * Tests that require a real authenticated session or valid exchange credentials
  * are marked with test.skip and a comment explaining why.
@@ -98,190 +100,65 @@ test.describe("API Key Connection Flow", () => {
   });
 
   // -------------------------------------------------------------------------
-  // UI tests — strategy edit page with API key form
+  // UI tests — strategy edit page, one-key panel
   // These require an authenticated session and a real strategy ID.
+  //
+  // Phase 200 D-07 / D-06: the edit page shows this strategy's ONE key
+  // (`Resync`, `Change key…`) and links to the Profile API keys tab, the one
+  // place keys are added, deleted and updated. The edit-page `Add Key`,
+  // `Delete` and `Delete API Key` modal this spec used to drive are gone, and
+  // so is the "No API keys connected" empty state. Their coverage now lives in:
+  //   - AllocatorExchangeManager.test.tsx, the `manager-only parity: add`,
+  //     `manager-only parity: delete` and `manager-only parity: update password`
+  //     cases (the Profile tab's add / delete / update flows for a manager),
+  //   - ApiKeyForm.test.tsx and ApiKeyForm.credential-input.test.tsx (the key
+  //     form's exchange selector, passphrase field and required-field checks).
+  // The credentialed submit and delete-modal e2e cases were dropped, not moved:
+  // they need a live exchange key and a Profile-tab driver that this spec does
+  // not have.
   // -------------------------------------------------------------------------
 
-  test.describe("Edit page — API key form rendering", () => {
-    // 140.5-06: was an UNCONDITIONAL `test.skip(true, …)`. The reason string
-    // already instructed the reader to supply a strategy id, so the gate is now
-    // the env var itself: CI-behaviour-preserving (the var is absent from every
-    // file in .github/workflows, so exactly the same tests skip there) while
-    // locally it becomes opt-in RUNNABLE instead of dead.
+  test.describe("Edit page — one-key panel", () => {
+    // 140.5-06: the gate is the env var itself: CI-behaviour-preserving (the var
+    // is absent from every file in .github/workflows, so exactly the same tests
+    // skip there) while locally it becomes opt-in RUNNABLE instead of dead.
     test.skip(
       !process.env.PLAYWRIGHT_TEST_STRATEGY_ID,
       "Requires authenticated session with a valid strategy ID in the database. " +
         "Set PLAYWRIGHT_TEST_STRATEGY_ID to run.",
     );
 
-    const TEST_STRATEGY_ID = "00000000-0000-0000-0000-000000000000";
+    const TEST_STRATEGY_ID = process.env.PLAYWRIGHT_TEST_STRATEGY_ID ?? "";
 
-    test("edit page renders ApiKeyManager section", async ({ page }) => {
+    test("edit page renders the panel heading and the Profile link", async ({ page }) => {
       await goToStrategyEdit(page, TEST_STRATEGY_ID);
 
       await expect(
         page.getByRole("heading", { name: /Exchange API Keys/i }),
       ).toBeVisible();
       await expect(
-        page.getByRole("button", { name: /Add Key/i }),
-      ).toBeVisible();
+        page.getByRole("link", { name: "Add or remove keys" }),
+      ).toHaveAttribute("href", "/profile?tab=exchanges");
     });
 
-    test("clicking Add Key reveals the API key form with exchange selector", async ({ page }) => {
+    test("edit page no longer offers Add Key or Delete", async ({ page }) => {
       await goToStrategyEdit(page, TEST_STRATEGY_ID);
+      const heading = page.getByRole("heading", { name: /Exchange API Keys/i });
+      await expect(heading).toBeVisible();
+      // The panel root: the heading's row sits inside the panel's `space-y-4` div.
+      const panel = heading.locator("xpath=../..");
 
-      await page.getByRole("button", { name: /Add Key/i }).click();
-
-      // Form heading
-      await expect(
-        page.getByText("Connect Exchange API Key"),
-      ).toBeVisible();
-
-      // Exchange selector with the three supported exchanges
-      const exchangeSelect = page.locator("select");
-      await expect(exchangeSelect).toBeVisible();
-      for (const exchange of ["Binance", "OKX", "Bybit"]) {
-        await expect(exchangeSelect.locator(`option:has-text("${exchange}")`)).toBeAttached();
-      }
-
-      // Required input fields
-      await expect(page.getByLabel(/Label/i)).toBeVisible();
-      await expect(page.getByLabel(/API Key/i)).toBeVisible();
-      await expect(page.getByLabel(/API Secret/i)).toBeVisible();
-
-      // Action buttons
-      await expect(page.getByRole("button", { name: /Cancel/i })).toBeVisible();
-      await expect(page.getByRole("button", { name: /Connect Key/i })).toBeVisible();
+      await expect(panel.getByRole("button", { name: /Add Key/i })).toHaveCount(0);
+      await expect(panel.getByRole("button", { name: /Delete/i })).toHaveCount(0);
+      await expect(panel.getByText(/No API keys connected/i)).toHaveCount(0);
     });
 
-    test("selecting OKX exchange shows passphrase field", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-      await page.getByRole("button", { name: /Add Key/i }).click();
-
-      // Passphrase should not be visible for Binance (default)
-      await expect(page.getByLabel(/Passphrase/i)).not.toBeVisible();
-
-      // Switch to OKX
-      await page.locator("select").selectOption("okx");
-
-      // Passphrase field should now appear
-      await expect(page.getByLabel(/Passphrase/i)).toBeVisible();
-    });
-
-    test("form shows validation when submitting without required fields", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-      await page.getByRole("button", { name: /Add Key/i }).click();
-
-      // Clear the label and try to submit — HTML5 required validation kicks in
-      const labelInput = page.getByLabel(/Label/i);
-      await labelInput.clear();
-
-      await page.getByRole("button", { name: /Connect Key/i }).click();
-
-      // The form should not submit — required fields block it.
-      // Verify we are still on the form (Connect Key button still visible).
-      await expect(
-        page.getByRole("button", { name: /Connect Key/i }),
-      ).toBeVisible();
-    });
-
-    test("Cancel button hides the form and shows Add Key again", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-      await page.getByRole("button", { name: /Add Key/i }).click();
-
-      await expect(page.getByText("Connect Exchange API Key")).toBeVisible();
-
-      await page.getByRole("button", { name: /Cancel/i }).click();
-
-      // Form should be gone, Add Key button should reappear
-      await expect(page.getByText("Connect Exchange API Key")).not.toBeVisible();
-      await expect(page.getByRole("button", { name: /Add Key/i })).toBeVisible();
-    });
-
-    test("empty state shows helpful message when no keys exist", async ({ page }) => {
+    test("Add or remove keys opens the Profile API keys tab", async ({ page }) => {
       await goToStrategyEdit(page, TEST_STRATEGY_ID);
 
-      await expect(
-        page.getByText(/No API keys connected/i),
-      ).toBeVisible();
-      await expect(
-        page.getByText(/read-only exchange key/i),
-      ).toBeVisible();
-    });
-  });
+      await page.getByRole("link", { name: "Add or remove keys" }).click();
 
-  // -------------------------------------------------------------------------
-  // Key submission + connected keys list
-  // Requires real exchange credentials — skipped in CI.
-  // -------------------------------------------------------------------------
-
-  test.describe("Key submission and connected keys list", () => {
-    // 140.5-06: was `test.skip(true, …)`. This reason NAMED its own env vars, so
-    // the unconditional form was contradicting its own instructions. Both are
-    // required, hence the disjunction. Absent from CI ⇒ same tests skip there.
-    test.skip(
-      !process.env.PLAYWRIGHT_TEST_EXCHANGE_KEY ||
-        !process.env.PLAYWRIGHT_TEST_EXCHANGE_SECRET,
-      "Requires authenticated session, valid strategy, AND real exchange API credentials. " +
-        "Run locally with PLAYWRIGHT_TEST_EXCHANGE_KEY / PLAYWRIGHT_TEST_EXCHANGE_SECRET env vars.",
-    );
-
-    const TEST_STRATEGY_ID = "00000000-0000-0000-0000-000000000000";
-
-    test("successful key submission shows key in connected keys list", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-      await page.getByRole("button", { name: /Add Key/i }).click();
-
-      // Fill form with test credentials
-      await page.locator("select").selectOption("binance");
-      await page.getByLabel(/Label/i).fill("E2E Test Key");
-      await page.getByLabel(/API Key/i).fill(process.env.PLAYWRIGHT_TEST_EXCHANGE_KEY ?? "");
-      await page.getByLabel(/API Secret/i).fill(process.env.PLAYWRIGHT_TEST_EXCHANGE_SECRET ?? "");
-
-      await page.getByRole("button", { name: /Connect Key/i }).click();
-
-      // Button should show loading state
-      await expect(page.getByRole("button", { name: /Validating/i })).toBeVisible();
-
-      // After success, form should close and key should appear in list
-      await expect(page.getByText("E2E Test Key")).toBeVisible({ timeout: 15000 });
-
-      // The key card should show the exchange name and action buttons
-      await expect(page.getByText(/Binance/i)).toBeVisible();
-      await expect(
-        page.getByRole("button", { name: /Resync|Use & Sync/i }),
-      ).toBeVisible();
-      await expect(page.getByRole("button", { name: /Delete/i })).toBeVisible();
-    });
-
-    test("submitting invalid credentials shows error message", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-      await page.getByRole("button", { name: /Add Key/i }).click();
-
-      await page.locator("select").selectOption("binance");
-      await page.getByLabel(/Label/i).fill("Bad Key");
-      await page.getByLabel(/API Key/i).fill("invalid-key-value");
-      await page.getByLabel(/API Secret/i).fill("invalid-secret-value");
-
-      await page.getByRole("button", { name: /Connect Key/i }).click();
-
-      // Should show an error message inside the form
-      await expect(page.locator(".text-negative")).toBeVisible({ timeout: 10000 });
-    });
-
-    test("delete key shows confirmation modal", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-
-      // Assumes at least one key exists
-      await page.getByRole("button", { name: /Delete/i }).first().click();
-
-      // Confirmation modal should appear
-      await expect(page.getByText(/Delete API Key/i)).toBeVisible();
-      await expect(page.getByText(/permanently remove/i)).toBeVisible();
-      await expect(page.getByRole("button", { name: /Cancel/i })).toBeVisible();
-      await expect(
-        page.getByRole("button", { name: /Delete/i }).last(),
-      ).toBeVisible();
+      await expect(page).toHaveURL(/\/profile\?tab=exchanges/);
     });
   });
 });

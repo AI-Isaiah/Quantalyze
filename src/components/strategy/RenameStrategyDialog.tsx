@@ -83,11 +83,18 @@ export function RenameStrategyDialog({
   onClose,
   strategyId,
   currentName,
+  publicNote,
 }: {
   open: boolean;
   onClose: () => void;
   strategyId: string;
   currentName: string;
+  /**
+   * Phase 200 / D-11 — what the public sees under the new name, computed by
+   * `publicNamePreview` and passed in by the host. Optional: a host that has no
+   * preview shows no hint rather than a claim it cannot back.
+   */
+  publicNote?: string;
 }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -212,7 +219,7 @@ export function RenameStrategyDialog({
     <Modal open={open} onClose={onClose} title="Rename strategy">
       <Field
         label="Name"
-        hint="Only you see this name. Public surfaces keep showing the codename."
+        hint={publicNote}
         error={fieldError ?? undefined}
       >
         <input

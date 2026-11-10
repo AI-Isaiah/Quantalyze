@@ -122,9 +122,9 @@ describe("/for-quants (D-02, D-04, D-05, D-06)", () => {
     return row as HTMLElement;
   };
 
-  it("the 'Envelope encryption at rest' row carries the shared key sentence and its link", () => {
+  it("the 'Keys encrypted at rest' row carries the shared key sentence and its link", () => {
     render(<ForQuantsPage />);
-    const row = rowOf("Envelope encryption at rest");
+    const row = rowOf("Keys encrypted at rest");
     const text = (row.textContent ?? "").replace(/\s+/g, " ");
     expect(text).toContain(`${S_KEY} ${KEY_LINK_LABEL}.`);
     const link = row.querySelector("a") as HTMLAnchorElement;

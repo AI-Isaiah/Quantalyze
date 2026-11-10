@@ -366,22 +366,22 @@ describe("DashboardChrome — ContributionWizardOverlay host (CONTRIB-01)", () =
     expect(screen.queryByTestId("mock-wizard")).toBeNull();
   });
 
-  it("opens the overlay when the desktop 'Add a Strategy' nav action fires", async () => {
+  it("opens the overlay when the desktop 'Add a strategy' nav action fires", async () => {
     const desktopNav = renderChrome();
-    fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
+    fireEvent.click(within(desktopNav).getByText("Add a strategy"));
     expect(await screen.findByTestId("mock-wizard")).toBeInTheDocument();
   });
 
   it("closes the overlay on the wizard onClose", async () => {
     const desktopNav = renderChrome();
-    fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
+    fireEvent.click(within(desktopNav).getByText("Add a strategy"));
     fireEvent.click(await screen.findByTestId("wizard-fire-close"));
     expect(screen.queryByTestId("mock-wizard")).toBeNull();
   });
 
   it("closes the overlay AND refreshes on the wizard onSuccess", async () => {
     const desktopNav = renderChrome();
-    fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
+    fireEvent.click(within(desktopNav).getByText("Add a strategy"));
     fireEvent.click(await screen.findByTestId("wizard-fire-success"));
     expect(screen.queryByTestId("mock-wizard")).toBeNull();
     expect(hoisted.refresh).toHaveBeenCalled();
@@ -400,7 +400,7 @@ describe("DashboardChrome — ContributionWizardOverlay host (CONTRIB-01)", () =
     // Open the drawer via the hamburger, then act from WITHIN the drawer dialog.
     fireEvent.click(screen.getByRole("button", { name: "Open menu" }));
     const drawer = screen.getByRole("dialog", { name: "Main navigation" });
-    fireEvent.click(within(drawer).getByText("Add a Strategy"));
+    fireEvent.click(within(drawer).getByText("Add a strategy"));
     // Overlay opened AND the drawer unmounted (window Tab trap torn down).
     // `findBy` because 154-05 made the wizard mount await the draft read; the
     // drawer assertion below stays SYNCHRONOUS on purpose — the drawer must be

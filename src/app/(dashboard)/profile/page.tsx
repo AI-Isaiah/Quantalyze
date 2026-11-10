@@ -38,15 +38,25 @@ export default async function ProfilePage() {
 
   if (!profile) redirect("/onboarding");
 
-  // Allocator-only tabs (mandate + exchanges) only fetch for allocator / both.
+  // The allocator-only tabs (mandate, security) only fetch for allocator / both.
   const isAllocator = profile.role === "allocator" || profile.role === "both";
   const initialPreferences = isAllocator
     ? await getOwnPreferences(supabase, user.id)
     : null;
 
-  let exchanges: ExchangesTabContentProps | null = null;
+  // Phase 200 D-06: the API keys tab is for every role that can hold keys, so
+  // the keys load for manager, allocator and both. The Active Allocation
+  // lookup and the holdings count below stay allocator-only.
+  const initialKeys = await getUserApiKeys(user.id);
+  let exchanges: ExchangesTabContentProps = {
+    initialKeys,
+    activePortfolio: null,
+    // A manager has no allocator holdings; null is "unknown", which keeps the
+    // subtitle neutral instead of asserting "no open positions yet".
+    hasHoldings: null,
+    role: profile.role,
+  };
   if (isAllocator) {
-    const initialKeys = await getUserApiKeys(user.id);
     const { data: activePortfolio } = await admin
       .from("portfolios")
       .select("id, name")
@@ -92,6 +102,7 @@ export default async function ProfilePage() {
         ? { id: activePortfolio.id as string, name: activePortfolio.name as string }
         : null,
       hasHoldings: holdingsCountError ? null : (holdingsCount ?? 0) > 0,
+      role: profile.role,
     };
   }
 

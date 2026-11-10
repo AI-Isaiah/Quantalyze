@@ -1145,8 +1145,9 @@ describe("[164.2-09] the population is real, whole, and excludes the terminal", 
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("[164.2-09] the FIFTH surface is excluded, and the blocker is measured", () => {
+  // Phase 200 plan 08: ApiKeyManager left this list when its Add Key control
+  // moved to the Profile tab (AllocatorExchangeManager); it no longer POSTs here.
   const CONSUMERS = [
-    "src/components/strategy/ApiKeyManager.tsx",
     "src/components/strategy/StrategyForm.tsx",
     "src/components/exchanges/AllocatorExchangeManager.tsx",
   ];
@@ -1192,9 +1193,10 @@ describe("[164.2-09] the FIFTH surface is excluded, and the blocker is measured"
     ).toEqual([...CONSUMERS].sort());
     expect(
       derived.length,
-      "Measured 2026-09-06 at 3 call sites. This pins the DERIVED count, not " +
-        "itself.",
-    ).toBe(3);
+      "Measured 2026-09-06 at 3 call sites; 2 since Phase 200 plan 08 moved " +
+        "ApiKeyManager's Add Key to the Profile tab. This pins the DERIVED count, " +
+        "not itself.",
+    ).toBe(2);
   });
 });
 

@@ -27,3 +27,27 @@ export function displayStrategyName(
   }
   return `Strategy #${strategy.id.slice(0, 8)}`;
 }
+
+/**
+ * Phase 200 / D-11 — the two names the public sees for one strategy.
+ *
+ * `factsheet` is the name the factsheet page title uses (a full-identity
+ * context: the row's name, then the codename, then the redacting fallback).
+ * `discovery` is `displayStrategyName`, which hides an exploratory name behind
+ * the codename or `Strategy #<id-prefix>`.
+ *
+ * The factsheet `<title>` in `src/app/factsheet/[id]/v2/page.tsx` and the
+ * rename place both call this, so what a manager is told the public sees runs
+ * the same code as the public surface. Disclosure itself is unchanged: this
+ * helper reports it, it does not decide it.
+ */
+export function publicNamePreview(strategy: DisplayableStrategy): {
+  factsheet: string;
+  discovery: string;
+} {
+  return {
+    factsheet:
+      strategy.name ?? strategy.codename ?? displayStrategyName(strategy),
+    discovery: displayStrategyName(strategy),
+  };
+}

@@ -25,8 +25,10 @@ vi.mock("server-only", () => ({}));
 const captureToSentryMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
 
-const { getUserMock, strategyDataMock, memberCountMock, memberCountReadMock, apiKeyManagerPropsMock } =
+const { getUserMock, strategyDataMock, memberCountMock, memberCountReadMock, apiKeyManagerPropsMock, nameBlockPropsMock } =
   vi.hoisted(() => ({
+    // Phase 200 / D-09: the props the page handed to <StrategyNameBlock>.
+    nameBlockPropsMock: vi.fn<(props: Record<string, unknown>) => void>(),
     getUserMock: vi.fn<() => Promise<{ data: { user: unknown } }>>(),
     strategyDataMock: vi.fn<() => Promise<{ data: unknown }>>(),
     // Phase 167.2 / KCS-23: the `strategy_keys` head-count answer the page's
@@ -122,6 +124,12 @@ vi.mock("@/components/layout/Breadcrumb", () => ({
 vi.mock("@/components/strategy/StrategyForm", () => ({
   StrategyForm: () =>
     React.createElement("form", { "data-testid": "strategy-form" }),
+}));
+vi.mock("@/components/strategy/StrategyNameBlock", () => ({
+  StrategyNameBlock: (props: Record<string, unknown>) => {
+    nameBlockPropsMock(props);
+    return React.createElement("div", { "data-testid": "strategy-name-block" });
+  },
 }));
 vi.mock("@/components/strategy/ApiKeyManager", () => ({
   ApiKeyManager: (props: Record<string, unknown>) => {
@@ -305,6 +313,16 @@ describe("EditStrategyPage composite shape (KCS-23)", () => {
     expect(lastKeyShape()).toBe("single");
   });
 
+  it("NAME-PROP (200-06, D-04): the page hands the key card the strategy's name, which the re-point confirm says out loud", async () => {
+    strategyDataMock.mockResolvedValue({
+      data: { ...apiStrategy, api_key_id: "key-synthetic-1" },
+    });
+    memberCountMock.mockReturnValue({ count: 0, error: null });
+    await renderEditPage();
+
+    expect(apiKeyManagerPropsMock.mock.calls.at(-1)![0].strategyName).toBe("Synthetic Composite");
+  });
+
   it("COUNT-FAILS: an unreadable member count renders the page with keyShape \"unknown\" and logs the strategy id server-side", async () => {
     strategyDataMock.mockResolvedValue({ data: apiStrategy });
     memberCountMock.mockReturnValue({
@@ -485,5 +503,57 @@ describe("EditStrategyPage composite shape (KCS-23)", () => {
     expect(screen.getByTestId("csv-edit-note")).toBeInTheDocument();
     expect(memberCountReadMock).not.toHaveBeenCalled();
     expect(apiKeyManagerPropsMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Phase 200 / D-09, D-10, D-11: the edit page mounts the one rename place with
+ * the loaded row's status (the block gates Rename on it) and a public-name
+ * preview computed on the server by `publicNamePreview`.
+ */
+describe("EditStrategyPage name block (Phase 200)", () => {
+  it("mounts <StrategyNameBlock> with the row's id, name, status and the computed preview", async () => {
+    strategyDataMock.mockResolvedValue({
+      data: {
+        id: STRATEGY_ID,
+        name: "Helios alpha sleeve",
+        codename: "Orion",
+        disclosure_tier: "exploratory",
+        status: "published",
+        source: "okx",
+        api_key_id: null,
+        supported_exchanges: ["OKX"],
+      },
+    });
+    await renderEditPage();
+
+    expect(screen.getByTestId("strategy-name-block")).toBeInTheDocument();
+    expect(nameBlockPropsMock).toHaveBeenCalledWith({
+      strategyId: STRATEGY_ID,
+      name: "Helios alpha sleeve",
+      status: "published",
+      preview: { factsheet: "Helios alpha sleeve", discovery: "Orion" },
+    });
+  });
+
+  it("an exploratory row with no codename previews discovery as Strategy #<first 8 of id>", async () => {
+    strategyDataMock.mockResolvedValue({
+      data: {
+        id: STRATEGY_ID,
+        name: "Alpha Centauri",
+        codename: null,
+        disclosure_tier: "exploratory",
+        status: "private",
+        source: "okx",
+        api_key_id: null,
+        supported_exchanges: ["OKX"],
+      },
+    });
+    await renderEditPage();
+
+    expect(nameBlockPropsMock.mock.calls.at(-1)![0].preview).toEqual({
+      factsheet: "Alpha Centauri",
+      discovery: "Strategy #13f7b07f",
+    });
   });
 });

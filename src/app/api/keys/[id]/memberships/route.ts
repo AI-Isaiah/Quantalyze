@@ -10,6 +10,12 @@ import {
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { isUuid } from "@/lib/utils";
+import {
+  compositeFeedFromRow,
+  errorCodeTag,
+  sortFeeds,
+  type KeyFeed,
+} from "@/lib/key-feeds";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -48,28 +54,21 @@ import type { User } from "@supabase/supabase-js";
  * database guard still refuses the Delete of a PUBLISHED composite's member.
  * Closing the window needs a migration.
  *
+ * Phase 200 D-01 (ROUTE-09): the body also carries `feeds`, every strategy this
+ * key feeds as `{ strategy_id, name, status, kind }`, so the Delete confirm can
+ * name single-key strategies (`strategies.api_key_id`) as well as composites.
+ * ADDITIVE: `memberships` is unchanged, and `deleteCompositeWarning` still reads
+ * only it. The single-key half is one more admin read, scoped by the explicit
+ * `user_id` AND the key id; it fails as a 500 like the composite read, never as
+ * an empty `feeds`. A composite row whose strategy is not the caller's is
+ * redacted in `feeds` too: no id, no name, no status.
+ *
  * Read-only: no mutation, so no audit event. Every response is no-store.
  */
 
 const ROUTE_TAG = "api/keys/[id]/memberships";
 
 type Membership = { name: string | null; status: string | null };
-
-/** PostgREST can answer a to-one embed as an object or a one-element array. */
-function unwrapEmbed(embed: unknown): Record<string, unknown> | null {
-  const one = Array.isArray(embed) ? embed[0] : embed;
-  return one !== null && typeof one === "object" ? (one as Record<string, unknown>) : null;
-}
-
-/**
- * The Sentry `code` tag for a failed read: the PostgREST/SQLSTATE code when the
- * error carries one, "none" when it does not, and "no_error" when there was no
- * error object at all (a read that answered no rows array and no error).
- */
-function errorCodeTag(err: { code?: unknown } | null | undefined): string {
-  if (!err) return "no_error";
-  return typeof err.code === "string" && err.code.length > 0 ? err.code : "none";
-}
 
 export const GET = withAuth(
   async (req: NextRequest, user: User): Promise<NextResponse> => {
@@ -152,24 +151,13 @@ export const GET = withAuth(
     // redacted. The row is still listed either way, so the warning still fires.
     let ownerMismatches = 0;
     let danglingEmbeds = 0;
+    const compositeFeeds: KeyFeed[] = [];
     const memberships: Membership[] = rows.map((row: unknown) => {
-      const strategy = unwrapEmbed(
-        row !== null && typeof row === "object"
-          ? (row as { strategies?: unknown }).strategies
-          : null,
-      );
-      if (!strategy) {
-        danglingEmbeds += 1;
-        return { name: null, status: null };
-      }
-      if (strategy.user_id !== user.id) {
-        ownerMismatches += 1;
-        return { name: null, status: null };
-      }
-      return {
-        name: typeof strategy.name === "string" ? strategy.name : null,
-        status: typeof strategy.status === "string" ? strategy.status : null,
-      };
+      const { feed, problem } = compositeFeedFromRow(row, user.id);
+      if (problem === "ownerMismatch") ownerMismatches += 1;
+      if (problem === "dangling") danglingEmbeds += 1;
+      compositeFeeds.push(feed);
+      return { name: feed.name, status: feed.status };
     });
     if (ownerMismatches > 0 || danglingEmbeds > 0) {
       // Counts only: no key id, no user id, no strategy id or name.
@@ -186,6 +174,38 @@ export const GET = withAuth(
       );
     }
 
-    return NextResponse.json({ memberships }, { status: 200, headers: NO_STORE_HEADERS });
+    // Phase 200 D-01: the single-key half of `feeds`. Scoped by the caller AND
+    // the key, on the service role, so a strategy another user pointed at this
+    // key is never named.
+    const { data: singleRows, error: singleErr } = await admin
+      .from("strategies")
+      .select("id, name, status")
+      .eq("user_id", user.id)
+      .eq("api_key_id", keyId);
+    if (singleErr || !Array.isArray(singleRows)) {
+      console.error(
+        "[keys/memberships] single-key feeds read failed:",
+        singleErr?.code,
+        singleErr?.message ?? "no rows array and no error",
+      );
+      captureToSentry(new Error("key memberships single-key feeds read failed"), {
+        tags: { route: ROUTE_TAG, stage: "single-links", code: errorCodeTag(singleErr) },
+      });
+      return NextResponse.json(
+        { error: "Lookup failed" },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
+    }
+    const singleFeeds: KeyFeed[] = (singleRows as Array<Record<string, unknown>>).map((row) => ({
+      strategy_id: typeof row.id === "string" ? row.id : null,
+      name: typeof row.name === "string" ? row.name : null,
+      status: typeof row.status === "string" ? row.status : null,
+      kind: "single",
+    }));
+
+    return NextResponse.json(
+      { memberships, feeds: sortFeeds([...compositeFeeds, ...singleFeeds]) },
+      { status: 200, headers: NO_STORE_HEADERS },
+    );
   },
 );

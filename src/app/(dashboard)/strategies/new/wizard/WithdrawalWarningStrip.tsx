@@ -36,8 +36,8 @@ export function WithdrawalWarningStrip() {
           </span>
         </p>
         <p className="mt-1 text-caption text-text-secondary">
-          Read-only is enforced server-side at validation — Trade/Withdraw
-          scopes are rejected before encryption.
+          Read-only is enforced server-side at validation — keys with
+          Trade/Withdraw scopes are rejected.
         </p>
       </div>
     </WarningBanner>

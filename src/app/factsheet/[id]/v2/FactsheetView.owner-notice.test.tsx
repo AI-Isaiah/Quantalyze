@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent } from "@testing-library/react";
+import { render } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
@@ -38,10 +38,10 @@ import { FactsheetBody } from "./FactsheetView";
  */
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
-// Phase 150 — the owner masthead mounts RenameStrategyDialog, whose
+// Phase 150 — the owner masthead once mounted RenameStrategyDialog, whose
 // router.refresh() needs an app-router context this harness does not provide.
-// Nothing else in the FactsheetView tree imports next/navigation (verified by
-// grep), so the mock is scoped to exactly the one consumer.
+// Phase 200 D-09 removed that mount; the mock stays because it is harmless and
+// this harness does not own the question of who else may call useRouter later.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
 }));
@@ -144,7 +144,7 @@ function renderBody(
  * lane-derived render props that must produce ZERO nodes when absent, so the
  * public masthead stays byte-identical.
  */
-describe("FactsheetHeader — owner masthead: read-only mark + Rename (OWN-03 / OWN-05)", () => {
+describe("FactsheetHeader — owner masthead: read-only mark, no Rename (OWN-03 / Phase 200 D-09)", () => {
   // Literals typed here, never imported from OwnershipTag.tsx / FactsheetView.tsx.
   const OWN_CAPITAL_LABEL = "Own capital";
   const TEAM_REVIEW_LABEL = "Team review";
@@ -154,7 +154,8 @@ describe("FactsheetHeader — owner masthead: read-only mark + Rename (OWN-03 / 
   function renderHeader(
     props: {
       ownershipMark?: "own_capital" | "team_review" | null;
-      renameTarget?: { id: string; name: string };
+      viewerNotice?: "owner_unpublished";
+      ownerShare?: { hasActiveShare: boolean };
     } = {},
   ) {
     return render(
@@ -191,41 +192,33 @@ describe("FactsheetHeader — owner masthead: read-only mark + Rename (OWN-03 / 
   it("renders no tag for an UNMARKED owner row — absence is honest, not a default", () => {
     const { container } = renderHeader({
       ownershipMark: null,
-      renameTarget: { id: "s-1", name: populatedPayload.strategyName },
+      viewerNotice: "owner_unpublished",
+      ownerShare: { hasActiveShare: false },
     });
 
     expect(container.textContent).not.toContain(OWN_CAPITAL_LABEL);
     expect(container.textContent).not.toContain(TEAM_REVIEW_LABEL);
-    // …while the rename affordance, which does not depend on the mark, is there.
-    expect(container.textContent).toContain(RENAME);
   });
 
-  it("`Rename…` sits on the H1 baseline row and opens the rename dialog", () => {
+  it("an owner sees NO `Rename…` on the factsheet and no rename dialog is mounted (D-09: the edit page is the one rename place)", () => {
+    // The full owner-lane prop set the page passes, so the absence is measured on
+    // the arm that used to carry the control, not on a public render.
     const { container } = renderHeader({
-      renameTarget: { id: "s-1", name: populatedPayload.strategyName },
+      ownershipMark: "own_capital",
+      viewerNotice: "owner_unpublished",
+      ownerShare: { hasActiveShare: true },
     });
 
-    const h1 = container.querySelector("h1");
-    expect(h1).not.toBeNull();
-    const action = Array.from(container.querySelectorAll("header button")).find(
-      (b) => b.textContent === RENAME,
-    ) as HTMLButtonElement | undefined;
-    expect(action).toBeDefined();
-    // Same parent as the H1 — the baseline row, not a line of its own below it.
-    expect(action!.parentElement).toBe(h1!.parentElement);
-
-    // The dialog is CLOSED until asked. `Modal` is a native <dialog>: its
-    // children are always in the tree and the element's `open` state is what
-    // makes it visible, so open-ness is asserted on the element — a text probe
-    // would be green before the click and prove nothing.
+    expect(container.querySelector("h1")).not.toBeNull();
+    const rename = Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.textContent ?? "").includes(RENAME),
+    );
+    expect(rename, "the factsheet must not offer Rename…").toBeUndefined();
+    expect(container.textContent).not.toContain(RENAME);
     const dialog = Array.from(container.querySelectorAll("dialog")).find((d) =>
       (d.textContent ?? "").includes(RENAME_DIALOG_TITLE),
-    ) as HTMLDialogElement | undefined;
-    expect(dialog).toBeDefined();
-    expect(dialog!.open).toBe(false);
-
-    fireEvent.click(action!);
-    expect(dialog!.open).toBe(true);
+    );
+    expect(dialog, "the factsheet must not mount RenameStrategyDialog").toBeUndefined();
   });
 
   it("the public masthead keeps its single unwrapped <h1> (no owner wrapper leaks in)", () => {

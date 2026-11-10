@@ -234,7 +234,7 @@ describe("S6 — KCS-21 shape remedies", () => {
     expect(r.id).toBe("KCS21-UNLINKED");
     expect(r.link).toEqual({ text: "edit page", href: `/strategies/${SID}/edit` });
     expect(rendered(r)).toBe(
-      "Link a key with Use & Sync on this strategy's edit page to start a new computation. Use the contact form if it does not complete.",
+      "Link a key with Change key… on this strategy's edit page (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.",
     );
   });
 
