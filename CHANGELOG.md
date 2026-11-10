@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.133.37.0] - 2026-11-11 — MANAGERKEYS: one key panel, one picker, a manager-only API keys tab
+
+Phase 200. 87 commits on `feat/200-managerkeys` (merge base `25d31622b`) ship as one PR. Plans 06, 08 and 11 ship together: the Use & Sync confirm (06), the one key panel (08) and the Change key picker (11) depend on each other. No migration.
+
+### Added
+- **API keys tab on Profile for every role (200-07, D-06),** with a manager deep link and a fixed tab order. A manager-only user now gets the full key manager there (200-10, PROFILE-PARITY: add, rename, delete and password live on Profile).
+- **A feeds line on every key card (200-01, 200-07, D-01).** New `GET /api/keys/feeds` is one owner-scoped read of what every key feeds. `GET /api/keys/[id]/memberships` gains an additive `feeds` field for the Delete confirm. Disconnect now opens a confirm that names the strategies the key feeds.
+- **One `Change key…` picker behind a confirm (200-11)** replaces the per-card Use & Sync. Use & Sync (the single-strategy path, 200-06) also waits for a confirm naming the strategy and both keys. The wizard's saved-key summary names the strategies the key feeds (200-09, D-01, D-08).
+- **Edit-page name block with a public-name preview (200-03, D-09, D-10, D-11).** The dialog hint and the factsheet title read the same helper in `src/lib/strategy-display.ts`.
+- **One key-storage sentence plus a `/security` link (200-02)** in every in-app key-storage description, with a census test and a pointer in the single-key wizard step.
+- **One `Add a strategy` control (200-05)** straight to the wizard on every add-a-strategy surface. The empty-state duplicate is gone.
+
+### Changed
+- **The strategy edit page keeps one key panel (200-08)** and links to Profile for add, delete and password. The Data Source card and Connect API Key modal render only in create mode (200-12, D-03, D-07). The edit form never sends or picks a strategy name (D-09).
+- **Rename is gone from the factsheet header, the strategy table and the strategies section (200-04, D-09).** The name is edited in the edit-page name block only.
+- **Retry on a failed feeds or holdings read (review round 1, 2):** the key card, `AllocatorExchangeManager` and the delete confirm each offer one Retry. Retry conditions its write on the attempt's expected key, not the live prop (R2-01), and the delete-confirm Retry resets the holdings count before re-reading (SFH2-1).
+- **Review decision D-R1:** an unchecked feeds read holds `Delete key` and only warns on `Disconnect` (R2-03). R3-01 then holds a cascade Disconnect while the feeds read is unchecked.
+- **Copy:** the unlinked-remedy copy names `Change key…` and the Profile fallback (WR-01). The API keys tab intro no longer promises a manager Active Allocation (WR-02). The rename dialog hint no longer quotes the old name as what the factsheet shows (WR-05).
+
+### Fixed
+- **No path re-points a strategy's key without the confirm (CR-01).**
+- **A manager's `Delete key` never cascades holdings (WR-06).** A refused delete (23503) maps to a plain message on every role's path (SFH2-2).
+- **A failed holdings-count read is unknown, not zero holdings (SFH-1).** Disconnect and Delete key are held while the feeds read could not check (SFH-2).
+
+### Tests
+- The nine `200-08-DEFERRED` cases are re-driven and `STALE-ANSWER-DROPPED` can now fail (WR-03, SFH-4). The validate-and-encrypt poster census drops `ApiKeyManager`. New RED-first cases cover Use & Sync (D-05), the keys tab for every role, the feeds contract and the feeds line. Two e2e specs were rewritten to match the one-key edit-page panel and assert `Change key…` and its confirm (WR-04, R2-02): `api-key-flow` and `sync-analytics-flow`.
+
+### Notes
+- Planning commits on the branch (not shipped in this PR, `.planning/` is filtered): context, research, 12 plans, per-plan SUMMARYs, tracking updates after each wave, review rounds 1 to 3 with dispositions, and the verification (human_needed, 6/6) and security audit (SECURED, 23/23). The wave merge commits (`merge(200-NN)`, `merge(200-r1-fix-*)`, `merge(200-r2-fix-*)`) carry the same changes as the commits above.
+- Known limits: the two rewritten e2e specs (`api-key-flow`, `sync-analytics-flow`) were not run locally, so CI is their first run. UAT is pending (verification is `human_needed`). Founder decisions D-01 to D-15 and D-R1 were recorded as orchestrator defaults, not asked.
+
 ## [0.133.36.1] - 2026-11-11 — records: close 206 SESSIONLOOP
 
 Phase 206 shipped as v0.133.36.0 (PR #1249, merge `6f3a99f59`). This entry publishes its records and closes the phase.
