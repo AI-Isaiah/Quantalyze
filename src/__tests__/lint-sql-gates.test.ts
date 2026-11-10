@@ -1173,7 +1173,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 109 -> 110, the bridge-outcome derived-basis gate file (test_bridge_outcome_deltas_derived.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 110 file(s); …' to match /scanned 109 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 110 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): 110 -> 106, the four gate files retired with the dropped legacy equity table and its functions (test_replace_allocator_equity_snapshots_window.sql, test_allocator_equity_pre_terminus_flag.sql, test_refresh_fanout_zero_snapshot_bootstrap.sql, test_refresh_fanout_owed_key_reconstruct.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 106 file(s); …' to match /scanned 110 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 106 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): 106 -> 107, the metadata-merge gate file (test_compute_job_metadata_merge.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 107 file(s); …' to match /scanned 106 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 107 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
-    expect(res.out).toMatch(/scanned 107 file/);
+    // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 107 -> 108, the intro-authorization gate file (test_contact_requests_insert_intro_authz.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 108 file(s); …' to match /scanned 107 file/`; `--parse-only` printed `coverage: files 81/108`.
+    expect(res.out).toMatch(/scanned 108 file/);
     expect(res.status, res.out).toBe(0);
   });
 

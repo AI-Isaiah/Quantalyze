@@ -13,3 +13,9 @@ export const INTRO_ATTESTATION_REQUIRED = "attestation_required" as const;
 
 /** 500: the attestation read itself failed; the route fails closed. */
 export const INTRO_ATTESTATION_CHECK_FAILED = "attestation_check_failed" as const;
+
+/**
+ * 403: the `contact_requests` insert was refused by row-level security (SQLSTATE 42501).
+ * Named so a policy refusal is visible and reported instead of reading as a generic 500.
+ */
+export const INTRO_INSERT_POLICY_REFUSED = "insert_policy_refused" as const;
