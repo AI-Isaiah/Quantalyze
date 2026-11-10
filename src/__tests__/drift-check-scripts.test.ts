@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=27 and ARMS_FLOOR=426 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=27 and ARMS_FLOOR=430 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5082,6 +5082,8 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // `expected 1 to be +0` once ci.yml carried SENTINEL_FLOOR=27, and
     // ci-anti-skip-gate.contract.test.ts re-derives the sentinel-bearing set from the corpus.
     // 405 + 11 = 416 is the table's own sum.
+    // RAISED 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01), 27/426 -> 27/430. The same file goes from
+    // `ALL 14 ARMS EXECUTED` to `ALL 18 ARMS EXECUTED` (arms 15 to 18); no file joined. 426 + 4 = 430 is the table's own sum.
     // RAISED 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18), 27/424 -> 27/426. The same file goes from
     // `ALL 12 ARMS EXECUTED` to `ALL 14 ARMS EXECUTED` (arms 13 and 14); no file joined. 424 + 2 = 426 is the table's own sum.
     // RAISED 2026-11-07 (Phase 194 FIGURETRUTH, plan 20), 27/418 -> 27/424. test_get_verified_cohort_rank_gate.sql goes
@@ -5102,7 +5104,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=426", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=430", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

@@ -4942,7 +4942,7 @@ jobs:
           #   test_enqueue_race_loss_40001.sql                3
           #   test_fan_in_failure_cascade.sql                     8
           #   test_fan_in_lock_order_race.sql                     8
-          #   test_get_verified_cohort_rank_gate.sql         14
+          #   test_get_verified_cohort_rank_gate.sql         18
           #   test_ledger_refresh_composite_arm.sql          23
           #   test_ledger_refresh_fanout.sql                 31
           #   test_ledger_refresh_staleness.sql               8
@@ -5257,6 +5257,13 @@ jobs:
           #   27; ARMS_FLOOR moves 424 -> 426 (+2), read off the file's own
           #   `ALL 14 ARMS EXECUTED` sentinel. The mutation runner's ARMS_FLOOR moves in the
           #   same plan (scripts/mutation-floors.mjs).
+          # Re-measured 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01), no file joined:
+          #   test_get_verified_cohort_rank_gate.sql goes 14 -> 18 (+4). Arms 15, 16 and 17 (a
+          #   malformed first date, last date or headline_since leaves the annualised cohort) and
+          #   arm 18 (the unreadable arm precedes the observation arm). Arm 12 is rewritten, not
+          #   added. SENTINEL_FLOOR stays 27; ARMS_FLOOR moves 426 -> 430 (+4), read off the file's
+          #   own `ALL 18 ARMS EXECUTED` sentinel. The mutation runner's ARMS_FLOOR moves in the
+          #   same plan (scripts/mutation-floors.mjs).
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5270,7 +5277,7 @@ jobs:
           #   and ARMS_FLOOR 386, re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never
           #   by adding the moves.
           SENTINEL_FLOOR=27  # files declaring a sentinel
-          ARMS_FLOOR=426     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 9 + 8 + 3 + 8 + 8 + 14 + 23 + 31 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35
+          ARMS_FLOOR=430     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 9 + 8 + 3 + 8 + 8 + 18 + 23 + 31 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

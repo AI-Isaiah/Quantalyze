@@ -1283,6 +1283,109 @@ test.describe("factsheet KPI — N-KPI", () => {
   }
 });
 
+// 194.2 item 7 (FIGURERESIDUALS) — the print view's equity figure fits its card at 1470px.
+//
+// WHY THIS EXISTS. The 194 UAT (2026-11-09, v0.133.30.0) measured the tearsheet's Equity Curve SVG
+// at 620px inside a card about 157px narrower at a 1470px viewport: the old tearsheet drew a
+// `<Sparkline width={620}>`, an intrinsic-pixel SVG that cannot shrink. Phase 196 (`f4a2ab4ce`)
+// rewrote the tearsheet as the factsheet's print view (`FactsheetView printView`), whose equity
+// figure is `TimeSeriesChart` through `ResponsiveChartFrame` (viewBox, `width: 100%`), and the
+// Sparkline is gone from the tree. That premise was closed by a code read only; this pins it with a
+// browser measure, so a fixed-pixel chart cannot come back into the print view unnoticed.
+//
+// THE CONTRACT. At 1470x900 every `svg` the equity section draws lies inside that section's box
+// (the card), and the section lies inside the `.tearsheet` container (`#tearsheet-main`). A
+// locator that resolves to nothing, or a figure that collapsed to a sliver, FAILS: an empty page
+// must never pass as "nothing overflowed" (W-02).
+const TEARSHEET_VIEWPORT = { width: 1470, height: 900 };
+/** The equity figure is a real chart, not an icon: the widest SVG in the section is at least this wide. */
+const EQUITY_FIGURE_MIN_PX = 300;
+/** Sub-pixel layout slop; the same half pixel the plan states. */
+const FIT_SLOP_PX = 0.5;
+
+test.describe("194.2 item 7: print-view equity figure fits its card at 1470px", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  test("1470px: every SVG in the tearsheet's equity section lies inside its card, and the card inside the page", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize(TEARSHEET_VIEWPORT);
+    const fixtureName = `${NAME_PREFIX} tearsheet ${Math.random().toString(36).slice(2, 8)}`;
+    const strategyId = await seedStrategyWithHistory({
+      days: 400,
+      name: fixtureName,
+      codename: fixtureName,
+      withDailyReturns: true,
+    });
+    const res = await page.goto(`/factsheet/${strategyId}/tearsheet`);
+    if (res && res.status() >= 400) {
+      throw new Error(`/factsheet/<seeded>/tearsheet returned HTTP ${res.status()} (W-02)`);
+    }
+
+    const card = page.locator('#tearsheet-main [data-census-section="equity"]');
+    const figures = card.locator("svg");
+    // The chart draws after hydration and its first measure; wait for the figure, then let layout settle.
+    await expect(figures.first(), "tearsheet equity figure never drew an SVG (W-02)").toBeVisible({
+      timeout: 20_000,
+    });
+    await page.waitForLoadState("networkidle");
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+    );
+
+    const measure = await card.first().evaluate((section) => {
+      const box = (el: Element) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, right: r.right, width: r.width, height: r.height };
+      };
+      const container = section.closest(".tearsheet");
+      return {
+        card: box(section),
+        page: container ? box(container) : null,
+        // A zero-box SVG (a hidden or collapsed one) has no edge to compare; the count below still
+        // fails the test when nothing real was drawn.
+        svgs: Array.from(section.querySelectorAll("svg"))
+          .map(box)
+          .filter((r) => r.width > 0 && r.height > 0),
+      };
+    });
+
+    expect(measure.page, "the equity section is not inside the .tearsheet container (W-02)").not.toBeNull();
+    expect(measure.svgs.length, "the equity section drew no measurable SVG (W-02)").toBeGreaterThan(0);
+    const widest = Math.max(...measure.svgs.map((r) => r.width));
+    expect(
+      widest >= EQUITY_FIGURE_MIN_PX,
+      `the widest equity SVG is ${widest.toFixed(1)}px, under ${EQUITY_FIGURE_MIN_PX}px: the figure collapsed, so the fit below would pass vacuously`,
+    ).toBe(true);
+
+    for (const [i, r] of measure.svgs.entries()) {
+      expect(
+        r.right <= measure.card.right + FIT_SLOP_PX,
+        `SVG ${i} right edge ${r.right.toFixed(1)} overflows its card's right edge ${measure.card.right.toFixed(1)} at ${TEARSHEET_VIEWPORT.width}px`,
+      ).toBe(true);
+      expect(
+        r.left >= measure.card.left - FIT_SLOP_PX,
+        `SVG ${i} left edge ${r.left.toFixed(1)} starts before its card's left edge ${measure.card.left.toFixed(1)}`,
+      ).toBe(true);
+    }
+    const tearsheet = measure.page!;
+    expect(
+      measure.card.right <= tearsheet.right + FIT_SLOP_PX && measure.card.left >= tearsheet.left - FIT_SLOP_PX,
+      `the equity card [${measure.card.left.toFixed(1)}, ${measure.card.right.toFixed(1)}] is not inside the .tearsheet container [${tearsheet.left.toFixed(1)}, ${tearsheet.right.toFixed(1)}]`,
+    ).toBe(true);
+  });
+});
+
 // Phase 170.2 (PROBEFIXES) SC-1 — the Holdings tab stops scrolling sideways.
 //
 // WHY a LOCAL viewport array: V735 is the width the founder's probe measured

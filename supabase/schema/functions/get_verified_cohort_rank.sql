@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261107140000_get_verified_cohort_rank_span_gate.sql
+-- source migration: 20261110120000_get_verified_cohort_rank_unreadable_dates.sql
 -- ==========================================================================
 -- STEP 1: get_verified_cohort_rank SECURITY DEFINER RPC (full re-base)
 -- ==========================================================================
@@ -10,7 +10,7 @@
 -- (the same hash sql-gate-lint reports for supabase/schema/baseline.sql), so this replace
 -- overwrites no out-of-band patch.
 --   get_verified_cohort_rank/3
--- prod-body-ack: 1fd8f0cd9e3e72ba5580453361eb202a8f2b371e409933e46f246f28dd23d55f
+-- prod-body-ack: 026f1250e0b0d7e51e14ddb5f4db72a51ee6bdb89d7135d2b9d5b58ee8b4eafe
 CREATE OR REPLACE FUNCTION public.get_verified_cohort_rank(
   p_sharpe   DOUBLE PRECISION,
   p_sortino  DOUBLE PRECISION,
@@ -69,7 +69,7 @@ BEGIN
   SELECT count(*) FILTER (WHERE r.rec_ok), count(*) INTO v_n, v_n_all
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
-  CROSS JOIN LATERAL (SELECT NOT COALESCE(CASE WHEN s.asset_class IS DISTINCT FROM 'crypto' AND (a.metrics_json->>'record_observations') ~ '^\d{1,9}$' THEN (a.metrics_json->>'record_observations')::int < v_min_obs WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' AND (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') - GREATEST(public.ledger_refresh_parse_series_date(a.returns_series->0->>'date'), CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') END) + 1 < v_min_span_days END, false) AS rec_ok) r
+  CROSS JOIN LATERAL (SELECT NOT COALESCE(CASE WHEN ((CASE WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->0->>'date') IS NULL ELSE (a.returns_series->0->>'date') <> '' END) OR (CASE WHEN (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') IS NULL ELSE (a.returns_series->-1->>'date') <> '' END) OR (CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') IS NULL ELSE (a.data_quality_flags->>'headline_since') <> '' END)) THEN true WHEN s.asset_class IS DISTINCT FROM 'crypto' AND (a.metrics_json->>'record_observations') ~ '^\d{1,9}$' THEN (a.metrics_json->>'record_observations')::int < v_min_obs WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' AND (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') - GREATEST(public.ledger_refresh_parse_series_date(a.returns_series->0->>'date'), CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') END) + 1 < v_min_span_days END, false) AS rec_ok) r
   WHERE s.status = 'published'
     AND a.computation_status IN ('complete', 'complete_with_warnings')
     AND a.sharpe IS NOT NULL
@@ -123,7 +123,7 @@ BEGIN
     (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n_all)) / 10.0 ) * 10)::INT
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
-  CROSS JOIN LATERAL (SELECT NOT COALESCE(CASE WHEN s.asset_class IS DISTINCT FROM 'crypto' AND (a.metrics_json->>'record_observations') ~ '^\d{1,9}$' THEN (a.metrics_json->>'record_observations')::int < v_min_obs WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' AND (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') - GREATEST(public.ledger_refresh_parse_series_date(a.returns_series->0->>'date'), CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') END) + 1 < v_min_span_days END, false) AS rec_ok) r
+  CROSS JOIN LATERAL (SELECT NOT COALESCE(CASE WHEN ((CASE WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->0->>'date') IS NULL ELSE (a.returns_series->0->>'date') <> '' END) OR (CASE WHEN (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') IS NULL ELSE (a.returns_series->-1->>'date') <> '' END) OR (CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') IS NULL ELSE (a.data_quality_flags->>'headline_since') <> '' END)) THEN true WHEN s.asset_class IS DISTINCT FROM 'crypto' AND (a.metrics_json->>'record_observations') ~ '^\d{1,9}$' THEN (a.metrics_json->>'record_observations')::int < v_min_obs WHEN (a.returns_series->0->>'date') ~ '^\d{4}-\d{2}-\d{2}$' AND (a.returns_series->-1->>'date') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.returns_series->-1->>'date') - GREATEST(public.ledger_refresh_parse_series_date(a.returns_series->0->>'date'), CASE WHEN (a.data_quality_flags->>'headline_since') ~ '^\d{4}-\d{2}-\d{2}$' THEN public.ledger_refresh_parse_series_date(a.data_quality_flags->>'headline_since') END) + 1 < v_min_span_days END, false) AS rec_ok) r
   WHERE s.status = 'published'
     AND a.computation_status IN ('complete', 'complete_with_warnings')
     AND a.sharpe IS NOT NULL

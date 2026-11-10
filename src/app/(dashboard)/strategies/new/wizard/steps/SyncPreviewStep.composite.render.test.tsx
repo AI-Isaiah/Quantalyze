@@ -1110,26 +1110,82 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the insufficient-window DQ caveat (HARD-04)", async () => {
+  /**
+   * 194.2 D-01 (194-WIZARD-HARD04-RAW-GAP, UI-SPEC S1 wizard rule). WHY: the server's raw
+   * `insufficient_window` flag is "elapsed days under 90", which is NOT D-15's gate (crypto
+   * covered days >= 90, non-crypto observations >= 60). The wizard used to print a hard-coded amber
+   * "Short track record" sentence from the raw flag while the preview tiles and `figureNote` read
+   * D-15, so the page could say two different things about one record. D-15's `figureNote` is now the
+   * one short-record statement, and the raw flag counts toward no caveat. These fixtures carry the
+   * record scalars the composite arm judges (`series_start`, `series_end`, `record_observations`;
+   * no asset class is served, so the record is non-crypto and observations decide).
+   */
+  const SHORT_TRACK_SENTENCE = /Short track record|computed on an insufficient window|may not be meaningful/;
+  const noGaps = { gap_spans: [], gap_day_count: 0 };
+
+  it("raw insufficient_window true on a record that clears D-15, no other caveat: no Data quality box, no short-record sentence, no figureNote", async () => {
     await renderPassed({
       analyticsRow: defaultAnalyticsRow({
-        data_quality_flags: {
-          ...DEFAULT_DQ,
-          gap_spans: [],
-          gap_day_count: 0,
-          insufficient_window: true,
-        },
+        series_start: "2024-01-01",
+        series_end: "2025-12-31",
+        headline_since: null,
+        record_observations: 700,
+        data_quality_flags: { ...DEFAULT_DQ, ...noGaps, insufficient_window: true },
       }),
     });
 
     expect(
-      screen.getByText(
-        /Short track record — annualized metrics are computed on an insufficient window and may not be meaningful\./,
-      ),
+      screen.getByRole("heading", { name: /your verified composite factsheet is ready/i }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /use this composite and continue/i }),
-    ).toBeEnabled();
+    // The box must not open EMPTY: the raw flag was the only caveat and it feeds nothing now.
+    expect(screen.queryByText(/Data quality/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/BEFORE YOU SUBMIT/)).not.toBeInTheDocument();
+    expect(screen.queryByText(SHORT_TRACK_SENTENCE)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("factsheet-preview-figure-note")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /use this composite and continue/i })).toBeEnabled();
+  });
+
+  it("raw insufficient_window false on a record under D-15: the muted figureNote is the one statement and the deleted sentence never appears", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        series_start: "2025-01-01",
+        series_end: "2025-01-20",
+        headline_since: null,
+        record_observations: 20,
+        data_quality_flags: { ...DEFAULT_DQ, ...noGaps, insufficient_window: false },
+      }),
+    });
+
+    const notes = screen.getAllByTestId("factsheet-preview-figure-note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(
+      "Annualized figures appear once the record reaches 60 trading days. This record has 20 trading days.",
+    );
+    expect(screen.queryByText(SHORT_TRACK_SENTENCE)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Data quality/)).not.toBeInTheDocument();
+  });
+
+  it("raw insufficient_window true beside another real caveat: the Data quality box lists that caveat only", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        series_start: "2024-01-01",
+        series_end: "2025-12-31",
+        headline_since: null,
+        record_observations: 700,
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          ...noGaps,
+          insufficient_window: true,
+          benchmark_unavailable: true,
+          benchmark_note: "no overlapping benchmark data",
+        },
+      }),
+    });
+
+    expect(screen.getByText(/Data quality/)).toBeInTheDocument();
+    expect(screen.getByText(/Benchmark overlay unavailable for this period\./)).toBeInTheDocument();
+    expect(screen.queryByText(SHORT_TRACK_SENTENCE)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /use this composite and continue/i })).toBeEnabled();
   });
 
   it("renders the degraded-member DQ caveat (HARD-05)", async () => {

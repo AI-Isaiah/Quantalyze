@@ -19,10 +19,11 @@ import {
   hasStoredAnalyticsResult,
   usesLastSuccessSnapshot,
 } from "./stored-analytics-result";
-import { figureRecord, type FigureRecord } from "@/lib/figure-gate";
+import { figureRecord, isReadableDay, type FigureRecord } from "@/lib/figure-gate";
 import { NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import {
   curveMethodFromFlags,
+  curveRecordStart,
   resolveDailyReturnSeries,
 } from "@/lib/factsheet/resolve-series";
 // Phase 169.4 plan 02 (D-69, D-77): the ONE BTC read, from its server-safe home.
@@ -238,11 +239,34 @@ const PERCENTILE_SPAN_COLUMNS: string =
   "series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations";
 
 /**
+ * 194.2 D-01 (194-PERCENTILE-SENTRY-DEDUP): one Sentry report per unreadable record, not one per
+ * read. `percentileRecord` runs for every row of every percentile read, so one bad record would
+ * otherwise report on every page view. Keyed `op|strategyId|seriesStart|seriesEnd|headlineSince`.
+ *
+ * A report whose send throws is not recorded as sent (194.2 WR-03), so the next read retries it.
+ *
+ * Honest limit: once per record per server PROCESS (serverless: per warm instance), and a record
+ * that is repaired and then broken again reports again only after the Set is cleared. The Set is
+ * bounded at 1000 keys; on overflow it is cleared (a re-report is cheaper than unbounded memory).
+ */
+const REPORTED_UNREADABLE_CAP = 1000;
+const reportedUnreadable = new Set<string>();
+function reportUnreadableOnce(key: string, send: () => void): void {
+  if (reportedUnreadable.has(key)) return;
+  if (reportedUnreadable.size >= REPORTED_UNREADABLE_CAP) reportedUnreadable.clear();
+  // 194.2 WR-03: the key is added only once `send()` has returned, so a send that throws does not
+  // mute this record's report for the rest of the process.
+  send();
+  reportedUnreadable.add(key);
+}
+
+/**
  * 194 D-15: the TOTAL record of one percentile row, from the four span aliases (or the
  * owner list's shaped copies of them) and the strategy's `asset_class`
- * (`annualizationPeriods`: crypto 365, everything else 252). A value that is not a date
- * string or a finite count is null, which the gate reads as "cannot be determined" and
- * which therefore keeps the row's ranks.
+ * (`annualizationPeriods`: crypto 365, everything else 252). An ABSENT date (null or `""`) or a
+ * count that is not finite is null, which the gate reads as "cannot be determined" and which
+ * therefore keeps the row's ranks. A PRESENT non-string date is kept as text (194.2 WR-02), so it
+ * is unreadable and withheld, as in SQL.
  */
 function percentileRecord(
   assetClass: string | null | undefined,
@@ -254,7 +278,9 @@ function percentileRecord(
   },
   strategyId: string,
 ): FigureRecord {
-  const day = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+  // 194.2 WR-02: a PRESENT non-string date (number, object, boolean) is kept as text, so it reads
+  // unreadable exactly as the SQL arm's `->>` text does, instead of being nulled to "absent" (shown).
+  const day = (v: unknown): string | null => (v == null || v === "" ? null : String(v));
   const record = figureRecord({
     seriesStart: day(a.series_start),
     seriesEnd: day(a.series_end),
@@ -265,16 +291,16 @@ function percentileRecord(
   // 194 R5 SFH-M3: an unreadable record leaves the annualised peer sets silently; report it
   // here, at the producer (never from a render-time gate), with the three dates that decide it.
   if (record.unreadable) {
-    captureToSentry(new Error("percentile record unreadable: a series date is not a date"), {
-      tags: { op: "percentileRecord", reason: "figure-record-unreadable" },
-      level: "error",
-      extra: {
-        strategyId,
-        seriesStart: day(a.series_start),
-        seriesEnd: day(a.series_end),
-        headlineSince: day(a.headline_since),
-      },
-    });
+    const seriesStart = day(a.series_start);
+    const seriesEnd = day(a.series_end);
+    const headlineSince = day(a.headline_since);
+    reportUnreadableOnce(`percentileRecord|${strategyId}|${seriesStart}|${seriesEnd}|${headlineSince}`, () =>
+      captureToSentry(new Error("percentile record unreadable: a series date is not a date"), {
+        tags: { op: "percentileRecord", reason: "figure-record-unreadable" },
+        level: "error",
+        extra: { strategyId, seriesStart, seriesEnd, headlineSince },
+      }),
+    );
   }
   return record;
 }
@@ -861,30 +887,39 @@ function shapedNativeUnit(a: StrategyAnalytics) {
  * Phase 194 plan 06 (D-15) — the three record scalars a list row's gate reads, each
  * from the alias when the read projected it (the anon ranked read) and otherwise
  * derived from the owner's wildcard embed, exactly as `series_end` and `three_month`
- * are. The owner arm takes the EARLIEST date in `returns_series`, so it does not rely
- * on the stored order (the `series_end` precondition above). A value that does not
- * read as a date or a finite count is null, never a guess.
+ * are.
+ *
+ * 194.2 D-01 (194-MALFORMED-DATES-ABSENT): a PRESENT, non-empty date string is kept VERBATIM,
+ * never read through a prefix pattern and never nulled, so `figureRecord` can flag a malformed
+ * one (`2026-02-28x`, `garbage`) exactly as the SQL aliases do. Nulling it would read "absent",
+ * which the gate treats as unknown and shows. The owner arm therefore reads
+ * `returns_series[0].date` as the alias `returns_series->0->>date` does, not an earliest-valid
+ * scan. `series_end` is added ONLY when the alias was not projected and the last element's
+ * date is present but unreadable (the `->-1->>date` alias, verbatim); `seriesEndOf` skips such
+ * an element, which would hide it from the gate. A readable series keeps `seriesEndOf`'s
+ * value, so recency for well-formed rows is untouched. A count that is not finite is null.
  */
 function shapedRecordScalars(a: StrategyAnalytics): {
   series_start: string | null;
   headline_since: string | null;
   record_observations: number | null;
+  series_end?: string;
 } {
-  const isoDay = (v: unknown): string | null =>
-    typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null;
-  let series_start = isoDay(a.series_start);
-  if (!series_start && Array.isArray(a.returns_series)) {
-    for (const p of a.returns_series) {
-      const d = isoDay((p as { date?: unknown } | null)?.date);
-      if (d && (series_start === null || d < series_start)) series_start = d;
-    }
-  }
+  // 194.2 WR-02: a PRESENT non-string date (number, object, boolean) is kept as text, so it reads
+  // unreadable exactly as the SQL arm's `->>` text does, instead of being nulled to "absent" (shown).
+  const day = (v: unknown): string | null => (v == null || v === "" ? null : String(v));
+  const points = Array.isArray(a.returns_series) ? a.returns_series : null;
+  const dateAt = (i: number): string | null =>
+    points ? day((points[i] as { date?: unknown } | null | undefined)?.date) : null;
+  const series_start = day(a.series_start) ?? dateAt(0);
+  const lastDate = a.series_end || !points ? null : dateAt(points.length - 1);
   const mj = a.metrics_json as Record<string, unknown> | null;
   const obs = a.record_observations ?? mj?.record_observations;
   return {
     series_start,
-    headline_since: isoDay(a.headline_since ?? a.data_quality_flags?.headline_since),
+    headline_since: day(a.headline_since ?? a.data_quality_flags?.headline_since),
     record_observations: typeof obs === "number" && Number.isFinite(obs) ? obs : null,
+    ...(lastDate !== null && !isReadableDay(lastDate) ? { series_end: lastDate } : {}),
   };
 }
 
@@ -1936,6 +1971,12 @@ export interface OwnCapitalStrategy {
   figure_span_days: number | null;
   figure_observations: number | null;
   figure_crypto: boolean;
+  /**
+   * 194.2 D-01: true when the record's dates could not be read (`figureRecord` marks it
+   * `unreadable`). The same fact the lazy route serves as `figure_unreadable`; `gatedSharpe`
+   * withholds the Holdings Sharpe on it, whatever the span and count say.
+   */
+  figure_unreadable: boolean;
   strategy_analytics: Pick<
     StrategyAnalytics,
     "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -1947,45 +1988,57 @@ export interface OwnCapitalStrategy {
  * (`getOwnCapitalStrategies`, `getMyAllocationDashboard`), computed once here so the two
  * halves of the Holdings table cannot disagree about one strategy's record. `series` is
  * the placeholder-free RESOLVED series (date-ascending), read BEFORE any native-to-USD
- * conversion so a price outage cannot shorten a record. A `headline_since` that is not an
- * ISO day is ignored, never guessed. The record is judged by `figureRecord`, the
+ * conversion so a price outage cannot shorten a record. A present `headline_since` that is
+ * not an ISO day is kept verbatim (194.2 D-01), so `figureRecord` marks the record
+ * `unreadable`; it is never nulled or guessed. The record is judged by `figureRecord`, the
  * constructor every other surface uses.
  */
 function figureRecordScalars(input: {
   series: ReadonlyArray<{ date: string }>;
+  /**
+   * 194.2 D-02: the stored curve's first date (`curveRecordStart`). A curve-derived series never
+   * carries day 0, so `series[0]` is the SECOND curve date; the record starts at this one, as the
+   * factsheet and every SQL reader do. Null/absent: the series' own first date (CSV-derived).
+   */
+  recordSeriesStart?: string | null;
   dataQualityFlags: unknown;
   recordObservations: unknown;
   assetClass: string | null | undefined;
   strategyId: string;
-}): Pick<OwnCapitalStrategy, "figure_span_days" | "figure_observations" | "figure_crypto"> {
+}): Pick<
+  OwnCapitalStrategy,
+  "figure_span_days" | "figure_observations" | "figure_crypto" | "figure_unreadable"
+> {
   const { series, dataQualityFlags, recordObservations, assetClass, strategyId } = input;
+  const seriesStartDate = input.recordSeriesStart ?? series[0]?.date ?? null;
   const since = (dataQualityFlags as { headline_since?: unknown } | null | undefined)
     ?.headline_since;
   const record = figureRecord({
-    seriesStart: series[0]?.date ?? null,
+    seriesStart: seriesStartDate,
     seriesEnd: series[series.length - 1]?.date ?? null,
-    headlineSince:
-      typeof since === "string" && /^\d{4}-\d{2}-\d{2}/.test(since) ? since.slice(0, 10) : null,
+    // 194.2 D-01 / WR-02: a present non-empty value is kept verbatim (as text) so a malformed one is flagged.
+    headlineSince: since == null || since === "" ? null : String(since),
     observations: typeof recordObservations === "number" ? recordObservations : null,
     periodsPerYear: annualizationPeriods(assetClass),
   });
   // 194 R5 SFH-M3: reported at the producer, once per call, never from a render-time gate.
   if (record.unreadable) {
-    captureToSentry(new Error("holdings figure record unreadable: a series date is not a date"), {
-      tags: { op: "figureRecordScalars", reason: "figure-record-unreadable" },
-      level: "error",
-      extra: {
-        strategyId,
-        seriesStart: series[0]?.date ?? null,
-        seriesEnd: series[series.length - 1]?.date ?? null,
-        headlineSince: typeof since === "string" ? since : null,
-      },
-    });
+    const seriesStart = seriesStartDate;
+    const seriesEnd = series[series.length - 1]?.date ?? null;
+    const headlineSince = since == null ? null : String(since);
+    reportUnreadableOnce(`figureRecordScalars|${strategyId}|${seriesStart}|${seriesEnd}|${headlineSince}`, () =>
+      captureToSentry(new Error("holdings figure record unreadable: a series date is not a date"), {
+        tags: { op: "figureRecordScalars", reason: "figure-record-unreadable" },
+        level: "error",
+        extra: { strategyId, seriesStart, seriesEnd, headlineSince },
+      }),
+    );
   }
   return {
     figure_span_days: record.spanDays,
     figure_observations: record.observations,
     figure_crypto: record.crypto,
+    figure_unreadable: record.unreadable === true,
   };
 }
 
@@ -2156,6 +2209,7 @@ export async function getOwnCapitalStrategies(
       );
       record = figureRecordScalars({
         series: resolved,
+        recordSeriesStart: curveRecordStart(analyticsObj.daily_returns, analyticsObj.returns_series),
         dataQualityFlags: dqf,
         recordObservations: analyticsObj.record_observations,
         assetClass: assetClass as string | null | undefined,
@@ -2592,6 +2646,7 @@ export interface MyAllocationDashboardPayload {
       figure_span_days?: number | null;
       figure_observations?: number | null;
       figure_crypto?: boolean;
+      figure_unreadable?: boolean;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -6334,6 +6389,7 @@ export const getMyAllocationDashboard = cache(
             series_state,
             ...figureRecordScalars({
               series: resolvedDailyReturns,
+              recordSeriesStart: curveRecordStart(analyticsObj?.daily_returns, analyticsObj?.returns_series),
               dataQualityFlags: dqf,
               recordObservations: analyticsObj?.record_observations,
               assetClass: strategy.asset_class,

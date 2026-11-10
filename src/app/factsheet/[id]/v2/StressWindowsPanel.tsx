@@ -26,7 +26,23 @@ export function StressWindowsPanel() {
   // take the existing null-bench form ("—", muted). The strategy columns are the
   // strategy's own series and stay.
   const unit = payload.returnsUnit ?? null;
-  const { windows, benchName, totalCatalogued, droppedOutOfRange, droppedPartial } = view.stressWindows;
+  const { windows, benchName, totalCatalogued, droppedOutOfRange, droppedPartial, unreadable } = view.stressWindows;
+  // 194.2 R2: an unreadable first date withholds the windows, in the one phrasing the figure
+  // gate's reasons use ("… are not shown: the record's dates could not be read.").
+  if (unreadable) {
+    return (
+      <figure className="flex flex-col gap-2">
+        <header>
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+            Stress Windows
+          </h3>
+          <p className="text-fixed-11 text-text-muted">
+            Stress windows are not shown: the record&apos;s dates could not be read.
+          </p>
+        </header>
+      </figure>
+    );
+  }
   // Honest empty state when nothing in our catalogue overlaps the observation
   // window — better to render a one-liner than silently disappear.
   if (windows.length === 0) {

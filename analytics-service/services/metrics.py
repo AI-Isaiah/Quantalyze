@@ -180,10 +180,10 @@ def figure_record_from_scalars(
     else None. ``crypto`` passes through. No threshold lives here: the verdict is
     ``record_clears`` / the TS ``gateAnnualized`` over this record.
 
-    Known divergence, deliberately outside the shared fixture: ``Date.parse`` rolls a
-    calendar-overflow day such as ``2026-02-30`` forward while ``date.fromisoformat`` rejects
-    it, so Python freezes that row unreadable (withheld, the documented failure direction).
-    Producers only write real ``yyyy-mm-dd`` days.
+    The former divergence on a calendar-overflow day such as ``2026-02-30`` is CLOSED
+    (194.2): TS ``isReadableDay`` now round-trips the day through ``toISOString``, so it
+    rejects an impossible day exactly as ``date.fromisoformat`` does and both runtimes read
+    it as unreadable (withheld, the documented failure direction).
     """
     start_text = _as_date_text(series_start)
     end_text = _as_date_text(series_end)

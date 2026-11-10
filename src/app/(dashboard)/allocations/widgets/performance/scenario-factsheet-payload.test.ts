@@ -9,6 +9,7 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
+import { gateAnnualized, widenedWithheldReason, withheldReason } from "@/lib/figure-gate";
 import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
 
 // ── Deterministic fixtures (no Math.random) ──────────────────────────
@@ -724,5 +725,38 @@ describe("buildScenarioFactsheetPayload — periodsPerYear knob (#597 part 2)", 
   it("with no basis argument the payload carries the builder's existing 252 default", () => {
     const dflt = buildScenarioFactsheetPayload({ portfolioDaily: BLEND_30 });
     expect(dflt.periodsPerYear).toBe(252);
+  });
+});
+
+// Phase 194.2 (194-SCENARIO-INTERIOR-DATES): the blend's record is judged on EVERY date, as the
+// factsheet builder's cash axis is. Before, only the two ends were read, so a malformed interior
+// date left the blend's annualised figures on screen. Expected sentences are typed by hand.
+describe("buildScenarioFactsheetPayload: a malformed interior date withholds the blend (194.2)", () => {
+  const DAY_MS = 86_400_000;
+  const blend400: DailyPoint[] = Array.from({ length: 400 }, (_, i) => ({
+    date: new Date(Date.parse("2024-01-01T00:00:00Z") + i * DAY_MS).toISOString().slice(0, 10),
+    value: 0.0011 + Math.sin(i * 0.37) * 0.011,
+  }));
+  const withBadInterior = blend400.map((p, i) => (i === 200 ? { ...p, date: "2025-06-31" } : p));
+
+  it("control: the same blend with readable dates carries a record with no unreadable key", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: blend400, periodsPerYear: 365 });
+    expect(p.figureRecord).not.toBeNull();
+    expect("unreadable" in p.figureRecord!).toBe(false);
+    expect(gateAnnualized(p.figureRecord!)).toBe("full");
+    expect(p.rollingWindow.annualization?.state).toBe("short");
+  });
+
+  it("a malformed interior date makes the record unreadable although both ends are fine", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: withBadInterior, periodsPerYear: 365 });
+    const rec = p.figureRecord!;
+    expect(rec.unreadable).toBe(true);
+    expect(gateAnnualized(rec)).toBe("withheld");
+    expect(p.rollingWindow.annualization?.state).toBe("withheld");
+    expect(p.rollingWindow1y?.annualization?.state).toBe("withheld");
+    expect(withheldReason("blend", rec)).toBe("Annualized figures are not shown: the blend's dates could not be read.");
+    expect(widenedWithheldReason("rolling", rec)).toBe(
+      "Rolling annualized figures are not shown: the record's dates could not be read.",
+    );
   });
 });

@@ -164,6 +164,11 @@ _SCOPED_RE = re.compile(
 #     arm 14's anti-vacuity step that lengthens ONLY the ten short rows' record
 #     (`WHERE strategy_id = ANY (v_short)`, the ids that arm itself seeded)  -> 6 -> 7
 #
+#   * Phase 194.2 (FIGURERESIDUALS, plan 03, D-01) rewrote arm 12 and added arms 15 to 18. Five scoped
+#     UPDATEs, each an anti-vacuity step that repairs ONLY the date that left the arm's own seeded
+#     row(s) out of the cohort: arm 12 (`WHERE strategy_id = ANY (v_seeded)`, the three rows it seeded)
+#     and arms 15, 16, 17 and 18 (`WHERE strategy_id = v_id`)  -> 7 -> 12
+#
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
 # never appears in it and an explicit `: 0` here would fail the comparison. The
@@ -171,7 +176,7 @@ _SCOPED_RE = re.compile(
 # a key this map does not have and the assertion still fires.
 # ---------------------------------------------------------------------------
 _EXPECTED_MATCH_COUNTS: dict[str, int] = {
-    "test_get_verified_cohort_rank_gate.sql": 7,
+    "test_get_verified_cohort_rank_gate.sql": 12,
     "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
     "test_okx_archive_rebuild.sql": 1,

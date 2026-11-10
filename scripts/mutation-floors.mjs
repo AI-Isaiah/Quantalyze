@@ -3402,7 +3402,13 @@ export const FILES_FLOOR = 80;
 // were re-pointed at the rec_ok flag the cohort queries now carry, and still bite. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`: `scope: FULL 80/80 annotated files`,
 // `arms: 811/811/0`, `biting: 811`, `lane-invocations: 811` (the two independent tallies AGREE). Per-file line: `test_get_verified_cohort_rank_gate.sql: sections 13 / judged 13 / annotated 13 / waived 0 / biting 13`.
 // FILES_FLOOR stays 80 (no file joined) and WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 811;
+// RAISED 811 -> 815 2026-11-10 (Phase 194.2 FIGURERESIDUALS plan 03, D-01): +4 arms, arms 15 to 18 of test_get_verified_cohort_rank_gate.sql (a malformed first date, last date or
+// headline_since leaves the annualised cohort of get_verified_cohort_rank, and the unreadable arm precedes the observation arm so a non-crypto row whose stored count clears is still out).
+// Arm 12 was REWRITTEN in place (an impossible calendar date now leaves the cohort and still cannot raise), not added. Every RED-UNDER-M edit was retargeted at the new definition,
+// 20261110120000, and arm 0 renames the parameter in all three files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`: `scope: FULL 80/80 annotated files`,
+// `arms: 815/815/0`, `biting: 815`, `lane-invocations: 815` (the two independent tallies AGREE). Per-file line: `test_get_verified_cohort_rank_gate.sql: sections 17 / judged 17 / annotated 17 / waived 0 / biting 17`.
+// FILES_FLOOR stays 80 (no file joined) and WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 815;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

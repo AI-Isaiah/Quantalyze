@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { convertNativeReturnsToUsd } from "./native-to-usd";
 import {
   curveMethodFromFlags,
+  curveRecordStart,
   equityCurveToDailyReturns,
   resolveDailyReturnSeries,
 } from "./resolve-series";
@@ -292,5 +293,24 @@ describe("WR-02: an absent day must not widen the next day's price interval", ()
         true,
       ),
     ).toEqual([]);
+  });
+});
+
+describe("curveRecordStart (194.2 D-02, WR-02): the stored curve's first date, verbatim", () => {
+  const CURVE = (first: unknown) => [{ date: first, value: 1 }, { date: "2026-01-02", value: 1.01 }];
+
+  it("a curve-derived series starts at the curve's FIRST point; a winning daily_returns column is not curve-derived", () => {
+    expect(curveRecordStart(null, CURVE("2026-01-01"))).toBe("2026-01-01");
+    expect(curveRecordStart([{ date: "2026-01-05", value: 0.01 }], CURVE("2026-01-01"))).toBeNull();
+  });
+
+  it("an absent first date (missing, null, empty string) is absent", () => {
+    for (const absent of [undefined, null, ""]) expect(curveRecordStart(null, CURVE(absent))).toBeNull();
+  });
+
+  it("a PRESENT non-string first date is kept as text, so the record reads it as unreadable (as the SQL ->> text does)", () => {
+    expect(curveRecordStart(null, CURVE(20260101))).toBe("20260101");
+    expect(curveRecordStart(null, CURVE(false))).toBe("false");
+    expect(curveRecordStart(null, CURVE({ y: 2026 }))).toBe("[object Object]");
   });
 });

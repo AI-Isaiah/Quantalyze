@@ -173,12 +173,16 @@ function gatedSharpe(
     figure_span_days?: number | null;
     figure_observations?: number | null;
     figure_crypto?: boolean;
+    figure_unreadable?: boolean;
   },
 ): Pick<StrategyRow, "sharpe" | "sharpeState" | "sharpeSpanDays" | "sharpeRecord"> {
   const record: FigureRecord = {
     spanDays: scalars.figure_span_days ?? null,
     observations: scalars.figure_observations ?? null,
     crypto: scalars.figure_crypto ?? false,
+    // 194.2 D-01: a record whose dates could not be read is withheld, exactly as on the
+    // factsheet and the lazy route (`parseConstituentRecord`).
+    ...(scalars.figure_unreadable === true ? { unreadable: true as const } : {}),
   };
   const state = gateAnnualized(record);
   return {

@@ -55,7 +55,17 @@ const STATE = vi.hoisted(() => ({
   // C-0094: hoisted rate-limit toggle so tests can drive 429 without
   // re-mocking the module.
   rateLimitResult: { success: true as boolean, retryAfter: 0 },
+  // Phase 194.2 D-03: what `from("investor_attestations")...maybeSingle()` answers.
+  // Default is an attested allocator so every pre-existing arm keeps its path.
+  attestation: {
+    data: { attested_at: "2026-01-01T00:00:00Z" } as { attested_at: string | null } | null,
+    error: null as { message: string } | null,
+  },
+  checkLimitCalls: 0,
 }));
+
+const captureToSentry = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry }));
 
 vi.mock("@/lib/supabase/server", () => {
   return {
@@ -79,6 +89,15 @@ vi.mock("@/lib/supabase/server", () => {
                   data: { role: STATE.profileRole },
                   error: null,
                 }),
+              }),
+            }),
+          };
+        }
+        if (table === "investor_attestations") {
+          return {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => STATE.attestation,
               }),
             }),
           };
@@ -131,7 +150,10 @@ vi.mock("@/lib/correlation-id", () => ({
 
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
-  checkLimit: async () => STATE.rateLimitResult,
+  checkLimit: async () => {
+    STATE.checkLimitCalls += 1;
+    return STATE.rateLimitResult;
+  },
 }));
 
 vi.mock("@/lib/analytics/usage-events", () => ({
@@ -196,6 +218,11 @@ beforeEach(() => {
   STATE.adminRpcCalls = [];
   STATE.snapshotImpl = null;
   STATE.rateLimitResult = { success: true, retryAfter: 0 };
+  STATE.attestation = {
+    data: { attested_at: "2026-01-01T00:00:00Z" },
+    error: null,
+  };
+  STATE.checkLimitCalls = 0;
 });
 
 afterEach(() => {
@@ -422,20 +449,79 @@ describe("POST /api/intro — C-0096 contact_requests error envelopes", () => {
   });
 });
 
-describe("POST /api/intro — the route does not gate on the accredited-investor attestation (Phase 196 R2-02)", () => {
-  // Parity with the pre-phase behaviour: the attestation was enforced in the UI
-  // only (/discovery's layout, and now the factsheet's affordances via
-  // resolveFactsheetViewer). The Bridge's ReplacementCard on /allocations posts
-  // here too and has no attestation gate or prompt, so an approved allocator
-  // without an attestation row must still get through. This harness answers
-  // from(investor_attestations) with a throw, so any attestation read in the
-  // route would refuse the request and fail this arm.
-  it("an approved allocator with no attestation row is not refused", async () => {
+describe("POST /api/intro — the route enforces the accredited-investor attestation (Phase 194.2 D-03, closes 196 R2-02)", () => {
+  // WHY: the attestation was a UI-only gate (/discovery's layout, the factsheet
+  // affordances), so a direct POST from an approved allocator who never attested
+  // went straight to a contact_requests insert and a manager's inbox. The check
+  // must come BEFORE the limiter (a refused click spends no token) and fail
+  // closed when the read itself fails.
+  async function expectNoSideEffects() {
+    await drainAuditMicrotasks();
+    expect(STATE.contactInsertPayload).toBeNull();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+    expect(STATE.checkLimitCalls).toBe(0);
+  }
+
+  it.each([
+    ["no attestation row", null],
+    ["a row with a null attested_at", { attested_at: null }],
+  ])("refuses an approved allocator with %s: 403 attestation_required, nothing inserted, no token spent", async (_label, data) => {
+    STATE.attestation = { data, error: null };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({ strategy_id: STRAT_ID, source: "bridge", replacement_for: REPLACEMENT_ID }),
+    );
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe("attestation_required");
+    expect(typeof body.error).toBe("string");
+    await expectNoSideEffects();
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("refuses BEFORE the body parse: an unattested caller with a malformed body gets the attestation refusal, not a 400", async () => {
+    STATE.attestation = { data: null, error: null };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({}));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("attestation_required");
+  });
+
+  it("an attested allocator reaches the existing flow (200, insert, audit, one limiter token)", async () => {
     const { POST } = await import("./route");
     const res = await POST(
       makeRequest({ strategy_id: STRAT_ID, source: "bridge", replacement_for: REPLACEMENT_ID }),
     );
     expect(res.status).toBe(200);
     expect(STATE.contactInsertPayload).not.toBeNull();
+    expect(STATE.checkLimitCalls).toBe(1);
+  });
+
+  it("fails closed when the attestation read errors: 500 attestation_check_failed, reported once, nothing inserted, no token spent", async () => {
+    STATE.attestation = { data: null, error: { message: "boom" } };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("attestation_check_failed");
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry.mock.calls[0][1].tags).toMatchObject({
+      area: "intro",
+      stage: "attestation-read",
+    });
+    await expectNoSideEffects();
+  });
+
+  it("non-allocator callers keep their existing 403 body with no code field", async () => {
+    STATE.profileRole = "manager";
+    STATE.attestation = { data: null, error: null };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("Only allocators can request introductions");
+    expect(body).not.toHaveProperty("code");
   });
 });

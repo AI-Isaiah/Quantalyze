@@ -68,6 +68,7 @@ function marked(over: {
     figure_span_days: over.span,
     figure_observations: over.observations ?? null,
     figure_crypto: over.crypto ?? true,
+    figure_unreadable: false,
     strategy_analytics: {
       cagr: null,
       sharpe: over.sharpe,

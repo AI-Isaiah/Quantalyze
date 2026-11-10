@@ -144,6 +144,10 @@ function makeMarked(over: {
    *  carries a return series across the RSC boundary. */
   mtd?: number | null;
   analytics?: OwnCapitalStrategy["strategy_analytics"];
+  /** 194.2 D-01: the record's dates could not be read. */
+  unreadable?: boolean;
+  /** A span and count that would CLEAR the gate on their own (400 days, crypto). */
+  clearingRecord?: boolean;
 }): OwnCapitalStrategy {
   return {
     id: over.id ?? "m-1",
@@ -156,9 +160,10 @@ function makeMarked(over: {
       : over.capital_ownership) as OwnCapitalStrategy["capital_ownership"],
     mtd: over.mtd ?? null,
     // 194 D-15: an unknown record (no deciding input) leaves the stored Sharpe as-is.
-    figure_span_days: null,
+    figure_span_days: over.clearingRecord ? 400 : null,
     figure_observations: null,
-    figure_crypto: false,
+    figure_crypto: over.clearingRecord ? true : false,
+    figure_unreadable: over.unreadable ?? false,
     strategy_analytics: over.analytics ?? null,
   };
 }
@@ -762,3 +767,36 @@ describe("HoldingsTabPanel — Allocate… with props.portfolio === null", () =>
     expect(screen.queryByText("No strategies yet.")).not.toBeInTheDocument();
   });
 });
+
+describe("HoldingsTable — a marked strategy whose record dates could not be read (194.2 D-01)", () => {
+  const REASON = "Withheld: the record's dates could not be read.";
+  const analytics = { cagr: 0.4, sharpe: 1.8, volatility: 0.3, max_drawdown: -0.12 };
+  /** [Strategy, Manager, Weight, Allocation, MTD, Sharpe, Max DD, Age, Actions] */
+  const cellsOf = (container: HTMLElement, id: string) =>
+    container.querySelector(`[data-strategy-row="${id}"]`)!.querySelectorAll("td");
+
+  it("withholds the Sharpe with the unreadable reason, while MTD and Max DD still print", () => {
+    const { container } = renderRows({
+      strategies: [
+        makeMarked({ id: "bad", unreadable: true, clearingRecord: true, mtd: 0.05, analytics }),
+      ],
+    });
+    const cells = cellsOf(container, "bad");
+    const sharpe = cells[5] as HTMLElement;
+    expect(sharpe.textContent).not.toContain("1.80");
+    expect(sharpe.textContent?.startsWith("—")).toBe(true);
+    expect(sharpe.querySelector(`[title="${REASON}"]`)).not.toBeNull();
+    expect(sharpe.querySelector(".sr-only")?.textContent).toBe(REASON);
+    expect(sharpe.innerHTML).not.toMatch(/text-(positive|negative)/);
+    expect(cells[4].textContent).not.toBe("—"); // MTD
+    expect(cells[6].textContent).toContain("12"); // Max DD
+  });
+
+  it("control: the same clearing record without the flag shows the Sharpe", () => {
+    const { container } = renderRows({
+      strategies: [makeMarked({ id: "ok", clearingRecord: true, mtd: 0.05, analytics })],
+    });
+    expect((cellsOf(container, "ok")[5] as HTMLElement).textContent).toBe("1.80");
+  });
+});
+

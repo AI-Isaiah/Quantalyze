@@ -120,3 +120,41 @@ describe("isPastCoverage (169.5 review WR-01)", () => {
     expect(isPastCoverage(null, "2025-03-16", CALENDAR_7D)).toBe(true);
   });
 });
+
+/**
+ * 194.2 D-05 (194-ZOOM-BENCHMARK-COVERAGE). WHY: the zoomed rail says "its data starts after this
+ * range" only when the benchmark really has a day missing at the front. A weekday benchmark against a
+ * window that opens on a weekend has no close until Monday by construction, so a raw-date compare
+ * would print a false "starts after" for SPX, GLD and IEF. Dates: 2026-02-28 is a Saturday,
+ * 2026-03-01 a Sunday, 2026-03-02 a Monday, 2026-03-03 a Tuesday.
+ */
+describe("startsAfterCoverage (194.2 D-05)", () => {
+  it("a weekday benchmark whose first covered day is the Monday after a Saturday window start is NOT short", async () => {
+    const { startsAfterCoverage, CALENDAR_WEEKDAY } = await import("./align");
+    expect(startsAfterCoverage("2026-03-02", "2026-02-28", CALENDAR_WEEKDAY)).toBe(false);
+    // Sunday start, Monday first close: the same.
+    expect(startsAfterCoverage("2026-03-02", "2026-03-01", CALENDAR_WEEKDAY)).toBe(false);
+  });
+
+  it("a weekday benchmark that skips a real weekday after the window start IS short", async () => {
+    const { startsAfterCoverage, CALENDAR_WEEKDAY } = await import("./align");
+    // Saturday start, first close Tuesday: Monday is missing.
+    expect(startsAfterCoverage("2026-03-03", "2026-02-28", CALENDAR_WEEKDAY)).toBe(true);
+  });
+
+  it("a 7-day benchmark (BTC) starting two days after the window start IS short", async () => {
+    const { startsAfterCoverage, CALENDAR_7D } = await import("./align");
+    expect(startsAfterCoverage("2026-03-03", "2026-03-01", CALENDAR_7D)).toBe(true);
+    // One day late is already a missing BTC day.
+    expect(startsAfterCoverage("2026-03-02", "2026-03-01", CALENDAR_7D)).toBe(true);
+  });
+
+  it("first covered on the window start, an absent first covered day, or a window start after it is never short", async () => {
+    const { startsAfterCoverage, CALENDAR_7D } = await import("./align");
+    expect(startsAfterCoverage("2026-03-01", "2026-03-01", CALENDAR_7D)).toBe(false);
+    expect(startsAfterCoverage(null, "2026-03-01", CALENDAR_7D)).toBe(false);
+    expect(startsAfterCoverage(undefined, "2026-03-01", CALENDAR_7D)).toBe(false);
+    expect(startsAfterCoverage("2026-03-01", "2026-03-05", CALENDAR_7D)).toBe(false);
+    expect(startsAfterCoverage("2026-03-03", undefined, CALENDAR_7D)).toBe(false);
+  });
+});

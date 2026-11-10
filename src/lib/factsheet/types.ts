@@ -169,6 +169,16 @@ export type ComparatorBlock = {
    */
   coveredShortSpanDays?: number;
   /**
+   * 194.2 D-05 (194-ZOOM-BENCHMARK-COVERAGE): the first and last strategy dates the comparator has
+   * a return for, in the dates this block was built over (a selected range's slice inside the
+   * windowed view). The rail reads them on a selected range to name the span the benchmark was
+   * compared over when it is shorter than the window. Set whenever at least one date is covered
+   * (equal when exactly one is); absent when none is, and on a block the browser has not rebuilt
+   * (full history never reads them).
+   */
+  coveredFrom?: string;
+  coveredThrough?: string;
+  /**
    * 194 R5 SFH-M2 (D-17): set when the comparator's OWN covered span could not be read (a first or
    * last covered date is present but is not a date). The benchmark's annualized cells are then
    * dashed (NaN) and no vol-matched curve is built; the rail reads this to give that column the
@@ -444,6 +454,12 @@ export type StressWindowPayload = {
   droppedOutOfRange: number;
   /** Catalogue windows dropped because coverage was too partial to label honestly. */
   droppedPartial: number;
+  /**
+   * 194.2 R2: true when the series' first date is unreadable, so no window could be evaluated.
+   * The counts are then 0 and `windows` is empty; the panel shows a withheld line instead of
+   * "every window occurred outside the observation period", which would be false.
+   */
+  unreadable?: boolean;
 };
 
 /** Square pairwise correlation matrix across strategy + each benchmark. */

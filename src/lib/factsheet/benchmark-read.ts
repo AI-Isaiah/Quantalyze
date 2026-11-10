@@ -23,6 +23,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import type { BenchmarkPricesOpt, BuildFactsheetOpts } from "./build-payload";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
+import { isReadableDay } from "@/lib/figure-gate";
 import { mergeWithFixture, readBenchmarkPrices } from "./benchmark-source";
 import { BTC_DAILY } from "./benchmarks";
 import type { DailyReturn } from "./types";
@@ -99,16 +100,35 @@ export async function readFactsheetBenchmark(
   ];
   let min: string | null = null;
   let max: string | null = null;
+  const unreadableDates: string[] = [];
   for (const axis of axes) {
     for (const r of axis) {
       if (!r || typeof r.date !== "string") continue;
+      // 194.2 WR-01: bound the read on READABLE days only. `isoMinusOneDay` throws on an unparseable
+      // minimum (`""`, `2025-1-5`, `2025-13-01`), which would reach the error boundary before the
+      // build's own unreadable gate withholds the figures; an unparseable maximum would be sent to
+      // the DB and reported as a price outage. The malformed date is still on the series, so the
+      // gate downstream sees it and withholds.
+      if (!isReadableDay(r.date)) {
+        unreadableDates.push(r.date);
+        continue;
+      }
       if (min === null || r.date < min) min = r.date;
       if (max === null || r.date > max) max = r.date;
     }
   }
   const from = min === null ? undefined : isoMinusOneDay(min);
   const to = max ?? undefined;
-  if (from === undefined || to === undefined) return BENCHMARK_UNAVAILABLE;
+  if (from === undefined || to === undefined) {
+    if (unreadableDates.length > 0) {
+      console.warn(BENCHMARK_UNAVAILABLE_MESSAGE, {
+        reason: "unreadable_dates",
+        id: strategyId,
+        unreadableDates: [...new Set(unreadableDates)].slice(0, 5),
+      });
+    }
+    return BENCHMARK_UNAVAILABLE;
+  }
   const ctx: BenchmarkLogContext = { id: strategyId, from, to };
 
   const db = await readBtcWithFirstStoredDate(client, ctx);

@@ -107,3 +107,80 @@ describe("buildFactsheetPayload: an unreadable record is reported once per build
     });
   });
 });
+
+/**
+ * Phase 194.2 (194-MALFORMED-DATES-ABSENT, R6 WR-02): every bundle gates on the ONE total record,
+ * and that record used to be judged on the cash dates alone. A malformed date on the
+ * mark-to-market or smoothed series left the record readable, so annualised figures showed on a
+ * series whose dates could not be read. Each case below fails when the scan is cash-only.
+ */
+describe("buildFactsheetPayload: the total record is judged on the cash, MTM and smoothed axes (194.2)", () => {
+  const withBadInterior = (rows: ReturnType<typeof series>, at = 200) => {
+    const out = [...rows];
+    out[at] = { date: `${out[at].date}x`, value: out[at].value };
+    return out;
+  };
+  const gaps: Array<{ start: string; end: string }> = [];
+
+  it("control: three readable axes leave the record equal to the ends-only record (no unreadable key)", () => {
+    const p = buildFactsheetPayload(strategy(), series(400), {
+      mtmSeries: { dailyReturns: series(400), gapSpans: gaps },
+      smoothedSeries: { dailyReturns: series(400), gapSpans: gaps },
+      reportUnreadable: true,
+    })!;
+    expect(p.figureRecord).not.toBeNull();
+    expect("unreadable" in p.figureRecord!).toBe(false);
+    expect(gateAnnualized(p.figureRecord!)).toBe("full");
+    expect(p.seriesByBasis!.mark_to_market!.rollingWindow.annualization?.state).not.toBe("withheld");
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  it("a malformed interior date on the MTM series only withholds the record on every basis", () => {
+    const p = buildFactsheetPayload(strategy(), series(400), {
+      mtmSeries: { dailyReturns: withBadInterior(series(400)), gapSpans: gaps },
+    })!;
+    expect(p.figureRecord!.unreadable).toBe(true);
+    expect(gateAnnualized(p.figureRecord!)).toBe("withheld");
+    // every bundle gates on that same record: the MTM rolling verdict is withheld too
+    expect(p.seriesByBasis!.mark_to_market!.rollingWindow.annualization?.state).toBe("withheld");
+  });
+
+  it("a malformed interior date on the smoothed series only withholds the record on every basis", () => {
+    const p = buildFactsheetPayload(strategy(), series(400), {
+      mtmSeries: { dailyReturns: series(400), gapSpans: gaps },
+      smoothedSeries: { dailyReturns: withBadInterior(series(400)), gapSpans: gaps },
+    })!;
+    expect(p.figureRecord!.unreadable).toBe(true);
+    expect(gateAnnualized(p.figureRecord!)).toBe("withheld");
+    expect(p.seriesByBasis!.mark_to_market!.rollingWindow.annualization?.state).toBe("withheld");
+    expect(p.seriesByBasis!.smoothed_mtm!.rollingWindow.annualization?.state).toBe("withheld");
+  });
+
+  it.each([
+    ["cash", (r: ReturnType<typeof series>) => ({ cash: withBadInterior(r), mtm: r, smoothed: r })],
+    ["mark_to_market", (r: ReturnType<typeof series>) => ({ cash: r, mtm: withBadInterior(r), smoothed: r })],
+    ["smoothed_mtm", (r: ReturnType<typeof series>) => ({ cash: r, mtm: r, smoothed: withBadInterior(r) })],
+  ])("reports once per build and names the %s axis of the first bad date", (axis, pick) => {
+    const rows = pick(series(400));
+    buildFactsheetPayload(strategy("strat-axis"), rows.cash, {
+      mtmSeries: { dailyReturns: rows.mtm, gapSpans: gaps },
+      smoothedSeries: { dailyReturns: rows.smoothed, gapSpans: gaps },
+      reportUnreadable: true,
+    });
+    const calls = vi.mocked(captureToSentry).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1].extra).toMatchObject({
+      strategyId: "strat-axis",
+      firstBadAxis: axis,
+      firstBadDate: `${series(400)[200].date}x`,
+    });
+  });
+
+  it("a bad date on an MTM series under two points builds no bundle and does not withhold the cash record", () => {
+    const p = buildFactsheetPayload(strategy(), series(400), {
+      mtmSeries: { dailyReturns: [{ date: "2025-02-31", value: 0.01 }], gapSpans: gaps },
+    })!;
+    expect(p.seriesByBasis).toBeUndefined();
+    expect(p.figureRecord!.unreadable).toBeUndefined();
+  });
+});

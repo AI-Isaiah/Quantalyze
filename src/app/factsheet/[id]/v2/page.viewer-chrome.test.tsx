@@ -306,16 +306,38 @@ describe("signed-in viewer matrix: the back link always, the actions by role", (
   // CR-01: an approved allocator who never signed the accredited-investor
   // attestation was refused by /discovery's layout, and the intro / allocate
   // actions lived only behind it.
-  it.each([
-    ["no attestation row", { data: null, error: null } as Result],
-    ["a failed attestation read", { data: null, error: { message: "blip" } } as Result],
-  ])("an approved allocator with %s gets the back link and no actions", async (_label, attestation) => {
+  it("an approved allocator with a failed attestation read gets the back link and no actions (no prompt that could re-attest an attested user)", async () => {
     givenPublished({ id: VIEWER_UID }, allocatorProfile());
-    S.attestation = attestation;
+    S.attestation = { data: null, error: { message: "blip" } };
     await renderPage();
     expect(screen.getByRole("navigation", { name: "Back" })).toBeTruthy();
     expect(actions()).toEqual([]);
     expect(screen.queryByRole("group", { name: "Actions for this strategy" })).toBeNull();
+  });
+
+  // 194.2 D-04 / D-07: the unattested allocator is no longer left with no actions and no hint.
+  // Request intro shows (it opens the attest step); "Add to my allocation" stays hidden until
+  // they attest.
+  it.each([
+    ["no attestation row", { data: null, error: null } as Result],
+    ["a null attested_at", { data: { attested_at: null }, error: null } as Result],
+  ])("an approved allocator with %s gets Request intro alone, never Add to my allocation", async (_label, attestation) => {
+    givenPublished({ id: VIEWER_UID }, allocatorProfile());
+    S.attestation = attestation;
+    await renderPage();
+    expect(screen.getByRole("navigation", { name: "Back" })).toBeTruthy();
+    expect(actions()).toEqual([INTRO]);
+    expect(screen.queryByRole("link", { name: "Add to my allocation" })).toBeNull();
+  });
+
+  it.each([
+    ["an unapproved allocator", allocatorProfile({ allocator_status: "newbie" })],
+    ["a manager-only viewer", allocatorProfile({ role: "manager", manager_status: "verified", allocator_status: "newbie" })],
+  ])("%s with no attestation row is not offered the attest step", async (_label, profile) => {
+    givenPublished({ id: VIEWER_UID }, profile);
+    S.attestation = { data: null, error: null };
+    await renderPage();
+    expect(actions()).toEqual([]);
   });
 
   it("the owner of a published strategy gets Edit strategy only, never Request intro or Add", async () => {

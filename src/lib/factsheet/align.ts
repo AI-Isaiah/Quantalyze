@@ -78,6 +78,30 @@ export function isPastCoverage(
   return false;
 }
 
+/**
+ * 194.2 D-05 (194-ZOOM-BENCHMARK-COVERAGE): the START-side mirror of {@link isPastCoverage}.
+ * A benchmark starts after a window when a date on the benchmark's OWN `calendar` lies in
+ * [`windowStart`, `firstCovered`). A raw-date compare is wrong for the same reason as the end
+ * side: a weekday benchmark against a window that opens on a Saturday has its first close the
+ * following Monday, and nothing is missing. `firstCovered` is the first strategy date the
+ * benchmark has a return for. Null (or an unreadable date) is false here, unlike
+ * `isPastCoverage`: with no covered day there is no span to name, so the rail prints no D-05 note.
+ * Known limit, shared with the end side: the calendar is Monday to Friday, not an exchange
+ * holiday table, so a window opening on a weekday holiday reads one weekday "short".
+ */
+export function startsAfterCoverage(
+  firstCovered: string | null | undefined,
+  windowStart: string | undefined,
+  calendar: WeekdayCalendar,
+): boolean {
+  if (typeof firstCovered !== "string" || windowStart === undefined || firstCovered <= windowStart) return false;
+  const to = utcDay(firstCovered);
+  for (let day = utcDay(windowStart); day < to; day++) {
+    if (calendar[weekdayOfDay(day)]) return true;
+  }
+  return false;
+}
+
 /** Index of the last element of ascending `xs` that is <= `x`, or -1. */
 function lastAtOrBefore(xs: readonly string[], x: string): number {
   let lo = 0;

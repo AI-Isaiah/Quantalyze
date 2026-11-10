@@ -310,6 +310,7 @@ function makeMarked(over: {
     figure_span_days: over.figure?.span ?? null,
     figure_observations: over.figure?.observations ?? null,
     figure_crypto: over.figure?.crypto ?? false,
+    figure_unreadable: false,
     strategy_analytics:
       over.analytics === undefined || over.analytics === null
         ? null

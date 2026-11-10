@@ -610,13 +610,14 @@ describe("shapeRowAnalytics — the D-15 record scalars (phase 194 plan 06)", ()
     ]);
   });
 
-  it("derives them on the owner path from the wildcard embed (earliest date, flags key, metrics key)", () => {
+  it("derives them on the owner path from the wildcard embed (first slot verbatim, flags key, metrics key)", () => {
     const shaped = shapeRowAnalytics(
       row({
-        // Deliberately not date-ascending: the start is the earliest date, not slot 0.
+        // 194.2 D-01: the start is slot 0's date as stored (the `returns_series->0->>date` alias),
+        // not an earliest-valid scan.
         returns_series: [
-          { date: "2026-03-05", value: 0.01 },
           { date: "2026-01-09", value: 0.02 },
+          { date: "2026-03-05", value: 0.01 },
         ],
         data_quality_flags: { headline_since: "2026-02-01" },
         metrics_json: { record_observations: 59 },
@@ -630,7 +631,7 @@ describe("shapeRowAnalytics — the D-15 record scalars (phase 194 plan 06)", ()
     ]);
   });
 
-  it("answers null, never a guess, for a malformed date or a non-finite count", () => {
+  it("keeps a present malformed date verbatim so the gate can flag it, and answers null for a non-finite count (194.2 D-01)", () => {
     const shaped = shapeRowAnalytics(
       row({
         series_start: "not a date",
@@ -640,10 +641,38 @@ describe("shapeRowAnalytics — the D-15 record scalars (phase 194 plan 06)", ()
       "s-1",
     );
     expect([shaped.series_start, shaped.headline_since, shaped.record_observations]).toEqual([
-      null,
-      null,
+      "not a date",
+      "soon",
       null,
     ]);
+  });
+
+  it("an absent date stays null: only a PRESENT unreadable one is kept (194.2 D-01)", () => {
+    const shaped = shapeRowAnalytics(row({ series_start: null, headline_since: "" }), "s-1");
+    expect([shaped.series_start, shaped.headline_since]).toEqual([null, null]);
+  });
+
+  it("owner arm: an unreadable last date is kept verbatim as series_end, a readable series keeps its own (194.2 D-01)", () => {
+    const bad = shapeRowAnalytics(
+      row({
+        returns_series: [
+          { date: "2026-01-09", value: 0.02 },
+          { date: "2026-02-28x", value: 0.01 },
+        ],
+      }),
+      "s-1",
+    );
+    expect(bad.series_end).toBe("2026-02-28x");
+    const ok = shapeRowAnalytics(
+      row({
+        returns_series: [
+          { date: "2026-01-09", value: 0.02 },
+          { date: "2026-02-27", value: 0.01 },
+        ],
+      }),
+      "s-1",
+    );
+    expect(ok.series_end).toBe("2026-02-27");
   });
 });
 

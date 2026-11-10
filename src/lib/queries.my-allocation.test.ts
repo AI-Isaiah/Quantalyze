@@ -2659,6 +2659,19 @@ describe("getMyAllocationDashboard — total-record scalars (194 plan 11, D-15)"
     expect(strat.figure_span_days).toBeNull();
   });
 
+  it("194.2 D-02: a curve-derived record starts at the stored curve's FIRST point (4 curve points, 2026-01-01 to 2026-01-04 = 4 days, not the 3 the inverted series spans)", async () => {
+    const strat = await strategyOf({
+      daily_returns: null,
+      returns_series: [
+        { date: "2026-01-01", value: 1 },
+        { date: "2026-01-02", value: 1.01 },
+        { date: "2026-01-03", value: 1.02 },
+        { date: "2026-01-04", value: 1.03 },
+      ],
+    });
+    expect(strat.figure_span_days).toBe(4);
+  });
+
   it("T-194-24: the alias is read and dropped; no series, flags or metrics key is added", async () => {
     const strat = await strategyOf({
       record_observations: 120,
