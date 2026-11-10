@@ -1008,11 +1008,20 @@ test.describe("/strategies — N-TABLE", () => {
       test.setTimeout(120_000);
       await page.setViewportSize({ width: vp.width, height: vp.height });
       const owner = await seedTestAllocator({ role: "both" });
-      // Enough owned rows that the table header can pass the filter bar.
+      // Enough owned rows that the table header can pass the filter bar. A
+      // wizard-source draft is hidden from a role "both" owner's list (199
+      // CD-10), so each row is moved off the wizard source; the name is
+      // unchanged, so the NAME_PREFIX cleanup still matches.
       for (let i = 0; i < 12; i++) {
-        await seedWizardDraft({
+        const draft = await seedWizardDraft({
           ownerUserId: owner.userId,
           namePrefix: `${NAME_PREFIX} table-${i}-`,
+        });
+        await setSeededStrategyNameAndTags({
+          strategyId: draft.strategyId,
+          name: draft.name,
+          strategyTypes: ["spot"],
+          status: "draft",
         });
       }
       await loginViaForm(page, owner.email, owner.password);

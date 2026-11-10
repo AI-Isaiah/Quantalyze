@@ -35,6 +35,7 @@ import { isPostLoginPath } from "./helpers/login";
 import {
   seedTestAllocator,
   seedWizardDraft,
+  setSeededStrategyNameAndTags,
   cleanupStrategiesByNamePrefix,
 } from "./helpers/seed-test-project";
 
@@ -122,9 +123,13 @@ test.describe("Phase 199 — /strategies owner list (NAV-01, was /my-strategies)
     const ownB = await seedTestAllocator({ role: "both" });
 
     // One strategy each, both minted HERE. seedWizardDraft is the lightest
-    // owner-specifiable strategy mint (status 'draft', which the owner list
-    // deliberately renders — Phase 149: every own row at every non-archived
-    // status). Distinct sub-prefixes keep the two names disjoint.
+    // owner-specifiable strategy mint, but its source='wizard' draft is HIDDEN
+    // from a manager-capable viewer's list (199 CD-10: role "both" keeps a
+    // resume banner and no row), so each row is moved off the wizard source
+    // with setSeededStrategyNameAndTags, which keeps it a status 'draft' row
+    // the list renders (Phase 149: every own row at every non-archived
+    // status). The name is unchanged, so the cleanup prefix still matches.
+    // Distinct sub-prefixes keep the two names disjoint.
     const draftA = await seedWizardDraft({
       ownerUserId: ownerA.userId,
       namePrefix: OWN_PREFIX,
@@ -133,6 +138,14 @@ test.describe("Phase 199 — /strategies owner list (NAV-01, was /my-strategies)
       ownerUserId: ownB.userId,
       namePrefix: OTHER_PREFIX,
     });
+    for (const d of [draftA, draftB]) {
+      await setSeededStrategyNameAndTags({
+        strategyId: d.strategyId,
+        name: d.name,
+        strategyTypes: ["spot"],
+        status: "draft",
+      });
+    }
 
     await loginViaForm(page, ownerA.email, ownerA.password);
 
