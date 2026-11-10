@@ -33,7 +33,7 @@ Closes the residuals Phase 194 FIGURETRUTH left open: a malformed record date no
 ### Notes
 - **Records.** Six plans in two waves, three review rounds with a fix record, a migration review (migration-reviewer and rls-policy-auditor both 0 findings at MEDIUM or above), a security audit (20 of 20 threats closed) and a verification judged passed live in the phase directory. 52 commits squash to this one.
 - **Known limits.** The 1470px e2e case has never run; its first execution is in CI's seeded lane. `compute.conventions.test.ts` fixtures B and C fail on a last-digit float in `skew`, identically on the base; no 194.2 change touches `compute.ts`. A `baseline-content-drift` / VAC-04 DRIFT reading on this PR is expected (no allowlist row added).
-- **Routed, not fixed here.** The `contact_requests` INSERT policy lets a signed-in user insert an intro row directly and skip `/api/intro`, and `send_intro_with_decision` (SECURITY DEFINER, EXECUTE granted to `anon`, measured on PROD) is a second such route. Both go to one security follow-up phase, to run first after this ship. Review round 3 WR-01..03 (the stress block, the api-arm allocator blends and the USD view each test dates themselves instead of following the record's single verdict) go to a one-verdict follow-up phase.
+- **Routed, not fixed here.** A pre-existing authorization gap on the intro path, outside this phase's route change, goes to a security follow-up phase that runs first after this ship. Review round 3 WR-01..03 (the stress block, the api-arm allocator blends and the USD view each test dates themselves instead of following the record's single verdict) go to a one-verdict follow-up phase.
 
 ## [0.133.31.3] - 2026-11-10 — records: close Phases 196 ONESTRATEGYPAGE and 197 SCREEN
 
