@@ -1,0 +1,1 @@
+No external API integration: the phase edits in-repo producers, one in-repo route (`/api/intro`), a Postgres function migration and UI components; it calls no third-party API or SDK beyond the existing Sentry capture helper.

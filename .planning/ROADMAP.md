@@ -97,7 +97,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 193: QUIETVIEW — viewing a strategy changes nothing and shows only its own content** - Scrolling never changes a factsheet's date range, a narrowed range is labelled with a reset and never restored on a later visit, no developer or demo text, and opening a page writes no row (completed 2026-11-07)
 - [x] **Phase 194: FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something** - One value per metric name across My Strategies, factsheet, tearsheet, Scenario and Holdings, deliberate differences labelled, impossible figures withheld or qualified (completed 2026-11-09)
 - [x] **Phase 194.1: D04SWEEP — the short-track rule (D-04 widened by D-11) applies on every page outside FIGURETRUTH** (INSERTED) - Census pages B1-B13, admin included, plus Sharpe deltas and lifts, alpha/TE/IR, peer ranks and rolling charts on those pages (completed 2026-11-08)
-- [ ] **Phase 194.2: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed** (INSERTED) - A record whose dates cannot be read is withheld on every path, including Holdings and book legs; the wizard caveat and zoomed benchmark note follow the page rules; one Sentry report per bad record
+- [x] **Phase 194.2: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed** (INSERTED) - A record whose dates cannot be read is withheld on every path, including Holdings and book legs; the wizard caveat and zoomed benchmark note follow the page rules; one Sentry report per bad record (completed 2026-11-10)
 - [x] **Phase 195: TRIM — leftover and duplicate surfaces are gone** - `/portfolios` removed and Decks hidden with no link left to them; the Tweaks panel, the dark-mode option, the do-nothing toggles, the single-card `/browse` and duplicated disclaimers removed (completed 2026-11-07)
 - [x] **Phase 196: ONESTRATEGYPAGE — a strategy has one page, the factsheet, and it reads as a short document** - Every strategy detail route leads to the factsheet, the tearsheet is its print view, signed-in users are not treated as visitors, there is a way back and a next step, and the factsheet opens as a summary with the rest under "Advanced" (completed 2026-11-10)
 - [x] **Phase 197: SCREEN — discovery reads plainly and a shortlist can be compared** - Compare startable from discovery rows; every column states its period and annualisation; stale strategies flagged and not ranked as current; shared exchange accounts named (completed 2026-11-10)
@@ -107,6 +107,8 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
+- [ ] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro**
+- [ ] **Phase 205: ONEVERDICT — every figure path follows the record's one readability verdict**
 
 ### Phase 192: PUBLICTRUTH — the public site and the demo tell a visitor one true story
 
@@ -291,10 +293,15 @@ Plans:
 **Goal:** The six Phase 194 figure-gate residuals booked to 194.1 on 2026-11-08 that 194.1's scope did not cover are closed. (The seventh, the baseline re-dump, lands through the CI redump PR, not a phase.) Each closes on its own TODOS trigger: `194-HOLDINGS-UNREADABLE-FLAG` (the Holdings and book-leg path carries the unreadable flag), `194-MALFORMED-DATES-ABSENT` (every date axis, `shapedRecordScalars` and the SQL cohort twin read a malformed date as unreadable), `194-SCENARIO-INTERIOR-DATES`, `194-WIZARD-HARD04-RAW-GAP` (the wizard reads the D-15 gate), `194-ZOOM-BENCHMARK-COVERAGE` and `194-PERCENTILE-SENTRY-DEDUP`. Two more from the Phase 194 browser UAT of 2026-11-09, routed here by the founder: the tearsheet Equity Curve fits its card (at a 1470px viewport its SVG was 620px wide and overflowed the card by about 157px), and one strategy's record length reads the same on every page (discovery and the tearsheet said "annualized from 193 days of record", the factsheet "192 days").
 **Requirements**: TBD
 **Depends on:** Phase 194.1; coordinate with Phase 196, which keeps the factsheet this phase touches
-**Plans:** 0 plans
+**Plans:** 6/6 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 194.2 to break down)
+- [x] 194.2-01-PLAN.md — strict day check on every TS date axis; Scenario interior dates (194-MALFORMED-DATES-ABSENT TS half, 194-SCENARIO-INTERIOR-DATES)
+- [x] 194.2-02-PLAN.md — Holdings and Scenario book leg carry the unreadable flag; list producers read malformed dates as unreadable (194-HOLDINGS-UNREADABLE-FLAG)
+- [x] 194.2-03-PLAN.md — get_verified_cohort_rank reads a present-but-malformed record date as unreadable (194-MALFORMED-DATES-ABSENT SQL half)
+- [x] 194.2-04-PLAN.md — /api/intro enforces the attestation with named codes (196-INTRO-API-ATTESTATION-01, D-03, D-04, D-06, D-07)
+- [x] 194.2-05-PLAN.md — one record length on every page; the factsheet record starts at the curve start (D-02)
+- [x] 194.2-06-PLAN.md — zoomed benchmark coverage note and one Sentry report per bad record (194-ZOOM-BENCHMARK-COVERAGE, 194-PERCENTILE-SENTRY-DEDUP, D-05)
 
 ### Phase 195: TRIM — leftover and duplicate surfaces are gone
 
@@ -602,7 +609,7 @@ Plans:
 | 193. QUIETVIEW | 7/7 | Complete | 2026-11-07 |
 | 194. FIGURETRUTH | 24/24 | Complete    | 2026-11-09 |
 | 194.1. D04SWEEP (INSERTED) | 13/13 | Complete    | 2026-11-08 |
-| 194.2. FIGURERESIDUALS (INSERTED) | 0/0 | Not started | - |
+| 194.2. FIGURERESIDUALS (INSERTED) | 6/6 | Complete    | 2026-11-10 |
 | 195. TRIM | 7/7 | Complete    | 2026-11-07 |
 | 196. ONESTRATEGYPAGE | 21/21 | Complete    | 2026-11-10 |
 | 197. SCREEN | 6/6 | Complete    | 2026-11-10 |
@@ -612,6 +619,8 @@ Plans:
 | 201. PLAINWORDS | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
+| 204. INTROAUTH | 0/0 | Not started | - |
+| 205. ONEVERDICT | 0/0 | Not started | - |
 
 ### Requirement Coverage (v1.21)
 
@@ -631,6 +640,26 @@ Plans:
 | 203 | RESID-02 (the window_truncated half) |
 
 32/32 mapped, each to exactly one phase, except RESID-02, which 202 and 203 share (203 owns the window_truncated half). TERMS-01/02 are Future and unmapped by founder decision.
+
+### Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro
+
+**Goal:** The database side of the intro path enforces what `/api/intro` enforces: only an approved, attested allocator can create an intro, on every entry point, not only through the route. Security phase, runs first after 194.2 (founder 2026-11-10, "Eigene Folgephase"). Pre-existing, found by the 194.2 reviews and security audit. ⚠️ Public repo: tracked text stays neutral until the fix is live on PROD; the 194.2 review files holding the detail (REVIEW-R2, REVIEW-FIX) are published with this phase's records, not before. Needs migration-reviewer and rls-policy-auditor clean before merge (PROD migrations auto-apply after apply-test).
+**Requirements**: TBD
+**Depends on:** Phase 194.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 204 to break down)
+
+### Phase 205: ONEVERDICT — every figure path follows the record's one readability verdict
+
+**Goal:** The stress-windows block, the api-arm allocator blends and the USD view each follow the record's one readability verdict (`totalRecord.unreadable`) instead of testing dates themselves, so an unreadable record is withheld the same way on every path and an unparseable first date never reaches an error page. Survivors of 194.2's three review rounds (194.2-REVIEW-R3.md WR-01..03), routed by founder decision 2026-11-10.
+**Requirements**: TBD
+**Depends on:** Phase 194.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 205 to break down)
 
 ---
 

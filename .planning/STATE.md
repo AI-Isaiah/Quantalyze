@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: "194.2"
-current_phase_name: FIGURERESIDUALS — the FIGURETRUTH figure-gate residuals D04SWEEP did not take are closed
-status: planning
-stopped_at: Phases 196 and 197 closed (production UAT 2026-11-10); 194.2 and 199 running in parallel
-last_updated: "2026-11-10T10:51:20.922Z"
+current_phase: 199
+current_phase_name: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health
+status: executing
+stopped_at: Phase 194.2 closed; 199 in review; 204 and 205 booked
+last_updated: "2026-11-10T16:39:36.758Z"
 last_activity: 2026-11-10
-last_activity_desc: Phases 196 and 197 closed after the 2026-11-10 production UAT
-state_head: 9bc83f894fa4a249ea3582fb26282c86d86797b3
+last_activity_desc: Phase 194.2 closed; 204 and 205 booked as its follow-ups
+state_head: 1f3256f360a07ca0531886b8a7d09424fc92d315
 progress:
-  total_phases: 14
-  completed_phases: 10
-  total_plans: 116
-  completed_plans: 116
-  percent: 71
+  total_phases: 16
+  completed_phases: 11
+  total_plans: 140
+  completed_plans: 122
+  percent: 69
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 194.2 (FIGURERESIDUALS) context gathered 2026-11-10 (D-01..D-05), planning and execution started; 199 (MANAGERHOME) execution resumed 2026-11-10; 200 and 201 not started (200 waits on 199, 201 on 200)
-Plan: 194.2: not planned yet; 199: 0 of 18
-Status: 196 and 197 closed; 194.2 and 199 in flight
-Last activity: 2026-11-10 — Phases 196 ONESTRATEGYPAGE and 197 SCREEN closed (production UAT; records PR v0.133.31.3)
-Progress: [███████░░░] 71% (10 of 14 phases)
+Phase: parallel — 199 (MANAGERHOME) in review round 3 of 3; 204 (INTROAUTH, security) starting; 205 (ONEVERDICT) booked; 200 waits on 199, 201 on 200
+Plan: 199: 18 of 18; 204: not planned yet; 205: not planned yet
+Status: 194.2 closed (shipped v0.133.32.0, PR #1240, migration applied to TEST then PROD); 199 in review; 204 starting
+Last activity: 2026-11-10 — Phase 194.2 FIGURERESIDUALS closed; 204 and 205 booked as its follow-ups
+Progress: [███████░░░] 69% (11 of 16 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -682,6 +682,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 203 added (2026-11-07, /gsd-phase add, founder D-17 "book the investigation as a phase"): B3TRUNC, from RESIDCHURN plan 07 (why book b3 carries window_truncated)
 - Phase 194.2 inserted after Phase 194: FIGURERESIDUALS: the six figure-gate residuals 194.1's scope did not cover (founder 2026-11-08)
 - Phase 194.2 edited: edited fields: goal (added the two Phase 194 browser-UAT extras: tearsheet Equity Curve overflow, 193 vs 192 days of record)
+- Phase 204 added (2026-11-10, /gsd-phase add, founder "Eigene Folgephase"): INTROAUTH, security follow-up of 194.2, runs first; tracked text neutral until the fix is live
+- Phase 205 added (2026-11-10, /gsd-phase add, founder 2026-11-10 routing): ONEVERDICT, 194.2 R3 WR-01..03
 
 ### Decisions
 
@@ -1764,7 +1766,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phases 196 and 197 closed (production UAT 2026-11-10); 194.2 and 199 running in parallel
+**Stopped At:** Phase 194.2 closed; 199 in review; 204 and 205 booked
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z

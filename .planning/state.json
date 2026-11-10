@@ -26,7 +26,7 @@
     {
       "number": "194.2",
       "name": "FIGURERESIDUALS (INSERTED)",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "195",
@@ -76,8 +76,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 194.2)",
-    "reason": "Phase 5 of 14 — needs a plan"
+    "label": "Advance to the next step (plan phase 199)",
+    "reason": "Phase 10 of 16 — needs a plan"
   },
-  "updated_at": "2026-11-10T10:51:20.954Z"
+  "updated_at": "2026-11-10T16:41:04.325Z"
 }
