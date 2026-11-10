@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.34.1] - 2026-11-10 — BASELINE: automated re-dump after the PROD apply of 2516d8b1
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `42902366311`, after the PROD apply of merge `2516d8b1`: sha256 `7568d083…` → `10799455…`.
+- Shape, old → new: tables 66 → 66, policies 153 → 153, function statements 134 → 134, distinct function names 132 → 132, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261110150000_intro_path_authz_hardening.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-10` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.34.0 → 0.133.34.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=319 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 134 — MATCH 131, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `42902366311` succeeded, and this entry was composed by the `redump-pr` job. Run `42902366311` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.34.0] - 2026-11-10 — INTROAUTH: the intro path's database-side authorization matches /api/intro
 
 Phase 204. The database now enforces the same rule as `/api/intro` on every entry point: only an approved, accredited-investor-attested allocator creates an intro for themselves. The admin match path keeps working through the service role.
