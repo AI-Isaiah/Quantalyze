@@ -16602,7 +16602,11 @@ COMMENT ON POLICY "compute_jobs_deny_all" ON "public"."compute_jobs" IS 'Service
 ALTER TABLE "public"."contact_requests" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "contact_requests_insert" ON "public"."contact_requests" FOR INSERT WITH CHECK (("allocator_id" = "auth"."uid"()));
+CREATE POLICY "contact_requests_insert" ON "public"."contact_requests" FOR INSERT WITH CHECK ((("allocator_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."id" = "auth"."uid"()) AND ("p"."role" = ANY (ARRAY['allocator'::"text", 'both'::"text"])) AND ("p"."is_admin" OR (("p"."role" = 'allocator'::"text") AND ("p"."allocator_status" = 'verified'::"text")) OR (("p"."role" = 'both'::"text") AND ("p"."allocator_status" = 'verified'::"text") AND ("p"."manager_status" = 'verified'::"text")))))) AND (EXISTS ( SELECT 1
+   FROM "public"."investor_attestations" "a"
+  WHERE (("a"."user_id" = "auth"."uid"()) AND ("a"."attested_at" IS NOT NULL))))));
 
 
 
@@ -18049,8 +18053,6 @@ GRANT ALL ON FUNCTION "public"."seed_weight_snapshots_for_portfolio"() TO "servi
 
 
 REVOKE ALL ON FUNCTION "public"."send_intro_with_decision"("p_allocator_id" "uuid", "p_strategy_id" "uuid", "p_original_strategy_id" "uuid", "p_candidate_id" "uuid", "p_admin_note" "text", "p_decided_by" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."send_intro_with_decision"("p_allocator_id" "uuid", "p_strategy_id" "uuid", "p_original_strategy_id" "uuid", "p_candidate_id" "uuid", "p_admin_note" "text", "p_decided_by" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."send_intro_with_decision"("p_allocator_id" "uuid", "p_strategy_id" "uuid", "p_original_strategy_id" "uuid", "p_candidate_id" "uuid", "p_admin_note" "text", "p_decided_by" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."send_intro_with_decision"("p_allocator_id" "uuid", "p_strategy_id" "uuid", "p_original_strategy_id" "uuid", "p_candidate_id" "uuid", "p_admin_note" "text", "p_decided_by" "uuid") TO "service_role";
 
 
