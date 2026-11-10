@@ -328,7 +328,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
     expect(pill.className).toMatch(/text-text-secondary/);
   });
 
-  it("rate_limited pill uses bg-warning/10 and text-warning", () => {
+  it("rate_limited pill uses bg-warning/6 and text-warning", () => {
     render(
       <AllocatorSyncStatus
         subject="holdings"
@@ -340,11 +340,11 @@ describe("AllocatorSyncStatus — pill color class map", () => {
       />,
     );
     const pill = screen.getByTestId("allocator-sync-pill");
-    expect(pill.className).toMatch(/bg-warning\/10/);
+    expect(pill.className).toMatch(/bg-warning\/6/);
     expect(pill.className).toMatch(/text-warning/);
   });
 
-  it("complete_with_warnings pill uses bg-warning/10 and text-warning", () => {
+  it("complete_with_warnings pill uses bg-warning/6 and text-warning", () => {
     render(
       <AllocatorSyncStatus
         subject="holdings"
@@ -355,11 +355,11 @@ describe("AllocatorSyncStatus — pill color class map", () => {
       />,
     );
     const pill = screen.getByTestId("allocator-sync-pill");
-    expect(pill.className).toMatch(/bg-warning\/10/);
+    expect(pill.className).toMatch(/bg-warning\/6/);
     expect(pill.className).toMatch(/text-warning/);
   });
 
-  it("revoked pill uses bg-negative/10 and text-negative", () => {
+  it("revoked pill uses bg-negative/4 and text-negative", () => {
     render(
       <AllocatorSyncStatus
         subject="holdings"
@@ -370,11 +370,11 @@ describe("AllocatorSyncStatus — pill color class map", () => {
       />,
     );
     const pill = screen.getByTestId("allocator-sync-pill");
-    expect(pill.className).toMatch(/bg-negative\/10/);
+    expect(pill.className).toMatch(/bg-negative\/4/);
     expect(pill.className).toMatch(/text-negative/);
   });
 
-  it("error pill uses bg-negative/10 and text-negative", () => {
+  it("error pill uses bg-negative/4 and text-negative", () => {
     render(
       <AllocatorSyncStatus
         subject="holdings"
@@ -385,7 +385,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
       />,
     );
     const pill = screen.getByTestId("allocator-sync-pill");
-    expect(pill.className).toMatch(/bg-negative\/10/);
+    expect(pill.className).toMatch(/bg-negative\/4/);
     expect(pill.className).toMatch(/text-negative/);
   });
 

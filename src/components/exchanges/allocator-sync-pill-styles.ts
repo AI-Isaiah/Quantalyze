@@ -33,10 +33,13 @@ export const PILL_STYLES: Record<
   idle: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
   syncing: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
   complete: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
-  complete_with_warnings: { bg: "bg-warning/10", text: "text-warning" },
-  rate_limited: { bg: "bg-warning/10", text: "text-warning" },
-  revoked: { bg: "bg-negative/10", text: "text-negative" },
-  error: { bg: "bg-negative/10", text: "text-negative" },
+  // Phase 199 CONTRAST: the /10 alpha fills put the ink under AA (warning
+  // 4.39:1, negative 4.13:1 — axe flagged "Key revoked" on /strategies), so
+  // the tints are lighter; same hues, pinned by tests/a11y/badge-contrast.test.ts.
+  complete_with_warnings: { bg: "bg-warning/6", text: "text-warning" },
+  rate_limited: { bg: "bg-warning/6", text: "text-warning" },
+  revoked: { bg: "bg-negative/4", text: "text-negative" },
+  error: { bg: "bg-negative/4", text: "text-negative" },
   // 167-UI-SPEC.md § Color — the DESIGN.md-pinned OPAQUE warning trio, not
   // the `bg-warning/10` alpha fill the neighbouring amber pills use: the
   // opaque `#FEF3C7` chip clears the 4.5:1 a11y minimum, the alpha fill does

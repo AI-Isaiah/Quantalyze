@@ -64,11 +64,15 @@ function tokenHex(css: string, name: string): string {
 const SOURCES = [
   { file: "src/components/ui/Badge.tsx", minPairs: 15 },
   { file: "src/components/strategy/OwnershipTag.tsx", minPairs: 2 },
+  { file: "src/components/exchanges/allocator-sync-pill-styles.ts", minPairs: 4 },
 ] as const;
 
-/** Every `bg-<token>/<alpha> text-<token>` pairing, in source order. */
+/**
+ * Every `bg-<token>/<alpha> text-<token>` pairing, in source order. Also reads
+ * the sync-pill map's `{ bg: "bg-<token>/<alpha>", text: "text-<token>" }` shape.
+ */
 function tintedPairs(source: string): Array<{ bg: string; alpha: number; fg: string }> {
-  const re = /bg-([a-z-]+)\/(\d+)\s+text-([a-z-]+)/g;
+  const re = /bg-([a-z-]+)\/(\d+)(?:",\s*text:\s*")?\s*text-([a-z-]+)/g;
   return [...source.matchAll(re)].map((m) => ({
     bg: m[1]!,
     alpha: Number(m[2]),
