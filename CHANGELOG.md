@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.133.36.1] - 2026-11-11 — records: close 206 SESSIONLOOP
+
+Phase 206 shipped as v0.133.36.0 (PR #1249, merge `6f3a99f59`). This entry publishes its records and closes the phase.
+
+### Added
+- **Phase 206 records** under `.planning/phases/206-sessionloop-…/`: CONTEXT and DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, the 206-01 PLAN and SUMMARY, REVIEW, SECURITY and VERIFICATION. The five discuss decisions, D-01 to D-05, are marked as orchestrator defaults the founder may revisit. REVIEW was clean on round 1. SECURITY is SECURED with 7/7 threats closed. VERIFICATION is `passed`, 4/4.
+- **`TODOS.md`: three LOW survivors of Phase 206.**
+  - `[206-PROXY-GETUSER-NO-TIMEOUT]`: the proxy's `getUser()` call has no timeout.
+  - `[206-PROXY-REDIRECT-DROPS-REFRESH-COOKIES]`: the signed-in redirect drops refreshed session cookies. This predates 206.
+  - `[206-SESSION-NOT-FOUND-COOKIE-CLEAR-UNMEASURED]`: no live check yet that a revoked session's cookie is cleared on the fall-through path.
+
+  Two other below-MEDIUM notes from the v0.133.36.0 entry are not booked. One is the auth-server cost of a crafted cookie, which private routes already carry through the page-level `getUser()`. The other is a test label naming the wrong auth error, which does not change what the test checks.
+
+### Changed
+- **ROADMAP:** Phase 206 is ticked and its Progress row reads 1/1 Complete. The Plans line reads `1/1 plans complete`, and the TBD stub is replaced by the ticked 206-01 row.
+- **STATE:** 15 of 17 phases are complete (88%), with `progress:` re-derived. The current position is 200 executing, with 201 waiting on 200. `phase complete` had moved the position to "ready to plan 200" and the bar to "14 of 17"; both were corrected by hand.
+
 ## [0.133.36.0] - 2026-11-11 — SESSIONLOOP: a revoked-but-unexpired session cookie no longer bounces between / and /home
 
 Phase 206. Source: Phase 199 review round 3, WR-01-R3. The bug was there before Phase 199; that phase added a second way to hit it.
