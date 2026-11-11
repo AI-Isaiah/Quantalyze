@@ -541,7 +541,7 @@ Plans 01-05 can execute now; plans 06-18 execute only after Phase 196 merges int
 **Goal:** A manager can see which strategies each key feeds, and nothing re-points a strategy's key without an explicit confirmation. Renaming happens in one place that shows which name is public. Adding a strategy and managing keys each have one entry point, and the security explanation lives in one place.
 **Requirements**: ROUTE-09, ROUTE-10, LEAN-04
 **Depends on:** Phase 192 (the one security explanation carries 192's corrected account), Phase 199 (adding a strategy's one entry point lives on the merged list)
-**Plans:** 0 plans
+**Plans:** 12/12 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -557,7 +557,29 @@ Plans 01-05 can execute now; plans 06-18 execute only after Phase 196 merges int
 UI changes are checked against `DESIGN.md` (Broker Selector Grid, Error Envelope, Voice / microcopy).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 200-01-PLAN.md — FEEDS: batched ownership-checked `GET /api/keys/feeds` to a feeds line per edit-page key card; additive `feeds` on `[id]/memberships` (wave 1)
+- [x] 200-02-PLAN.md — KEYSTORAGE: key-storage census RED first, then every in-app restatement becomes the shared sentence and link (wave 1)
+- [x] 200-03-PLAN.md — RENAME place: edit-page name block with public-name preview through `publicNamePreview` (wave 1)
+- [x] 200-05-PLAN.md — ADD-ENTRY: one `Add a strategy` header control straight to the wizard, one label everywhere (wave 1)
+- [x] 200-12-PLAN.md — FORM-WRITERS: `StrategyForm` stops writing name and key in edit mode (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 200-04-PLAN.md — RENAME removal: `Rename…` gone from the factsheet header and the strategies list (wave 2)
+- [x] 200-06-PLAN.md — CONFIRM: D-05 RED test, then re-pointing waits for a confirm naming the strategy and both keys (wave 2)
+- [x] 200-07-PLAN.md — PROFILE-KEYS: `API keys` tab for every role with feeds per key; delete confirm names fed strategies (wave 2)
+- [x] 200-09-PLAN.md — WIZARD-FEEDS: the wizard saved-key summary names what the key feeds (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 200-10-PLAN.md — PROFILE-PARITY: manager-only role switch, `Delete key`, three named parity tests (wave 3)
+- [x] 200-11-PLAN.md — CHANGE-KEY: `Change key…` picker behind the confirm replaces per-card `Use & Sync` (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 200-08-PLAN.md — SHRINK: after the parity gate passes, the edit page keeps only the strategy's key panel and links to Profile (wave 4)
+
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- Every new gate in this plan was seen RED by a neuter applied to a byte copy in the scratchpad and restored with `cp`, then `cmp` exit 0.
+
 
 ### Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed
 
@@ -650,7 +672,7 @@ Plans:
 | 197. SCREEN | 6/6 | Complete    | 2026-11-10 |
 | 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
 | 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
-| 200. MANAGERKEYS | 0/0 | Not started | - |
+| 200. MANAGERKEYS | 12/12 | In Progress | - |
 | 201. PLAINWORDS | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |

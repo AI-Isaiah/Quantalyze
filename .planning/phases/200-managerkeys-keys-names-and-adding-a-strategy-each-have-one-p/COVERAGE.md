@@ -1,0 +1,1 @@
+No external API integration: the phase consolidates in-app UI controls and adds one internal read route (`GET /api/keys/feeds`) over the app's own Supabase tables; the detector matched the words "API key" and "route", not a third-party service.
