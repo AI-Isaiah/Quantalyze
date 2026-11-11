@@ -136,7 +136,7 @@ describe("AllocatorExchangeManager — feeds line (200-07, D-01, D-02)", () => {
     await renderManager("allocator");
     await waitFor(() => expect(feedsLine(K1)).toHaveTextContent("Feeds: Alpha Single, Beta Composite"));
     const links = Array.from(feedsLine(K1).querySelectorAll("a"));
-    expect(links.map((a) => a.getAttribute("href"))).toEqual([`/factsheet/${S1}`, `/factsheet/${S2}`]);
+    expect(links.map((a) => a.getAttribute("href"))).toEqual([`/factsheet/${S1}?from=allocations`, `/factsheet/${S2}?from=allocations`]);
     expect(feedsLine(K2)).toHaveTextContent("Feeds no strategy.");
   });
 

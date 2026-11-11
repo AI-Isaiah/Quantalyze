@@ -62,6 +62,7 @@ import { formatUsd } from "@/lib/dollar-validation";
 import { venueLabel } from "@/lib/display-labels";
 import type { Role } from "@/lib/types";
 import type { KeyFeed } from "@/lib/key-feeds";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import {
   formatCloseDay,
   nativeAmount,
@@ -521,7 +522,7 @@ async function readKeyFeedsForConfirm(keyId: string): Promise<KeyFeed[] | "unrea
 function feedHref(role: Role, feed: KeyFeed): string | null {
   if (feed.strategy_id === null) return null;
   return role === "allocator"
-    ? `/factsheet/${feed.strategy_id}`
+    ? buildFactsheetHref(feed.strategy_id, { key: "allocations" })
     : `/strategies/${feed.strategy_id}/edit`;
 }
 

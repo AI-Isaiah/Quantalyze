@@ -150,7 +150,7 @@ const FILES = population();
 function censusHits(): string[] {
   const all = [...new Set([...findHits(FILES, WORD_RE), ...findHits(FILES, PHRASE_RE)])].sort();
   const pinned = new Set(ALLOWLIST.map((a) => a.file));
-  return all.filter((h) => !pinned.has(h.slice(0, h.lastIndexOf(":"))));
+  return all.filter((h) => !pinned.has(h.replace(/:\d+$/, "")));
 }
 
 describe("key-storage census (200, D-15)", () => {

@@ -44,6 +44,7 @@ import { contactHref } from "@/lib/contact";
 import { venueLabel } from "@/lib/display-labels";
 import { KEY_STORAGE_LINK, KEY_STORAGE_SENTENCE } from "@/lib/status-surface-copy";
 import type { KeyFeed } from "@/lib/key-feeds";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -910,7 +911,7 @@ function PreselectFeedsLine({ result }: { result: PreselectFeedsResult }) {
             "a strategy we could not read"
           ) : (
             <Link
-              href={`/factsheet/${feed.strategy_id}`}
+              href={buildFactsheetHref(feed.strategy_id, { key: "strategies" })}
               className="text-accent underline underline-offset-4"
             >
               {feed.name ?? "Unnamed strategy"}

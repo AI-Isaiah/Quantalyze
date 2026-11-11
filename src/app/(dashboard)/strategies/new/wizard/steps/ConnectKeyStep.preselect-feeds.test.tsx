@@ -80,11 +80,11 @@ describe("[200-09] the saved-key summary names what the preselected key feeds", 
     expect(line.textContent).not.toContain(UNCHECKED);
     expect(within(line).getByRole("link", { name: "Alpha" })).toHaveAttribute(
       "href",
-      "/factsheet/S1",
+      "/factsheet/S1?from=strategies",
     );
     expect(within(line).getByRole("link", { name: "Beta" })).toHaveAttribute(
       "href",
-      "/factsheet/S2",
+      "/factsheet/S2?from=strategies",
     );
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(String(fetchSpy.mock.calls[0][0])).toBe("/api/keys/feeds");
