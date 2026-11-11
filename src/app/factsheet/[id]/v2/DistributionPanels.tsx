@@ -562,7 +562,9 @@ export function CorrelationsMatrixPanel() {
   // Desktop cell/label dims = today's literals (88 / 36 / 110 / 11 / 12).
   const CELL_W = isMobile ? 104 : 88;
   const CELL_H = isMobile ? 48 : 36;
-  const LABEL_W = isMobile ? 128 : 110;
+  // Mobile 136: the row label is right-anchored at LABEL_W - 8 and the widest label is 13 mono
+  // characters ("My allocation", build-payload.ts) = 124.8 px at 16 px; 128 clipped it by 4.8 px.
+  const LABEL_W = isMobile ? 136 : 110;
   const HEADER_H = 28;
   const headerFont = isMobile ? 16 : 11;
   const rowLabelFont = isMobile ? 16 : 11;

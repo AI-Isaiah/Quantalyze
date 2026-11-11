@@ -25,7 +25,7 @@ Phase 201. Every concept now has one name in the UI, every registered metric or 
 - **CompareTable prints volatility unsigned** (`23.46%`) (201-04).
 - **Chart tooltip labels read a dash for a non-finite hover value** (review R2-SFH-01).
 - **Admin row `status` is required**, so a select that omits it fails to compile (review SFH-02).
-- **The correlation matrix prints the default allocation name whole.** Its first label was capped at 12 characters, which cut the renamed default `My allocation` (13) to `My allocati…`. The cap is 13 (`build-payload.ts`); a longer name still ends in an ellipsis. The three SC-4 byte-identity snapshots moved only by the `Bundle Fixture` fixture's own truncated label.
+- **The correlation matrix prints the default allocation name whole.** Its first label was capped at 12 characters, which cut the renamed default `My allocation` (13) to `My allocati…`. The cap is 13 (`build-payload.ts`) and the 390 px matrix gives its row labels 8 px more (`DistributionPanels.tsx`, 128 to 136), because 13 characters at 16 px clipped by 4.8 px; a longer name still ends in an ellipsis. The three SC-4 byte-identity snapshots moved only by the `Bundle Fixture` fixture's own truncated label.
 
 ### Removed
 - **Deprecated date helpers, the inert `formatCloseDay` option and the `book` noun (201-23).** This also removes the private date converters in `FactsheetView` and `MandatePanels`. An unparseable Terms date now reads as an em dash.
