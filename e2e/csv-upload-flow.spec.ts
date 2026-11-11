@@ -63,7 +63,8 @@ const HAS_SEED_ENV =
  * validation therefore self-skip VISIBLY unless the runner declares a
  * reachable service by exporting ANALYTICS_SERVICE_URL into the Playwright
  * process env (the same env-as-provisioning-proxy pattern as
- * PLAYWRIGHT_TEST_STRATEGY_ID in api-key-flow.spec.ts). The two client-side
+ * PLAYWRIGHT_TEST_STRATEGY_ID in sync-analytics-flow.spec.ts, whose
+ * analytics describe keeps that gate). The two client-side
  * cases below (submit-disabled, oversize-file) run everywhere.
  */
 const HAS_ANALYTICS_SERVICE = !!process.env.ANALYTICS_SERVICE_URL;

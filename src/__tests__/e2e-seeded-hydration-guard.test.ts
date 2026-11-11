@@ -36,11 +36,12 @@ const PLAYWRIGHT_MODULE = "@playwright/test";
  * added e2e/allocations-add.spec.ts; 27 -> 23 on 2026-11-09 when Phase 196 plan 02
  * deleted the four strategy-v2 e2e specs (their route now 308s to the
  * factsheet); 23 -> 24 on 2026-11-10 when Phase 199 plan 17 added
- * e2e/role-home.spec.ts. Update this pin TOGETHER with the CI
+ * e2e/role-home.spec.ts; 24 -> 25 on 2026-11-11 when Phase 200 gap closure (plan 13) added
+ * e2e/manager-keys.spec.ts. Update this pin TOGETHER with the CI
  * list. An empty or shorter parsed list fails, so a parser that stops finding
  * the step can never pass as "every spec is guarded".
  */
-const SEEDED_SPEC_COUNT = 24;
+const SEEDED_SPEC_COUNT = 25;
 
 function readRepoFile(rel: string): string {
   return readFileSync(resolve(REPO_ROOT, rel), "utf-8");

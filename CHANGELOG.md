@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.133.37.2] - 2026-11-11 — MANAGERKEYS gap closure: the panel e2e tests block, the 320px key row reads, the dialog Close is a full target
+
+Phase 200 gap closure. A UAT and e2e measurement on 2026-11-11 found three gaps after v0.133.37.0, recorded in `200-VERIFICATION.md`. Plans 200-13, 200-14 and 200-15 close them. Two review fix rounds and three review rounds follow. 19 code commits on `feat/200-gaps` (merge base `4a65c8843`) ship as one PR. No migration.
+
+### Fixed
+- **The shared `Modal` Close is a 44x44 target (200-14, gap 3).** It was a bare 20x20 button, below the 24px minimum (WCAG 2.5.8), in every dialog of the app, not only the key-change confirm. `-my-3 -mr-3` keeps the glyph and the header height where they were. No gate covered it: the tap-target scan pins a named list of controls and the target-size spec measured only fixed regions.
+- **The Profile key row reads at 320px and on narrow content widths (200-15, gap 2; review R-G1, WR-12).** At 320px the label truncated to about three characters and the metadata wrapped one word per line. The label column now takes the rest of the first line beside the venue tag, and Last sync, the status and the actions wrap below it. The row switches to one line on the key list's own width (`@container` on both key lists, `@4xl:`), not on the viewport. Measured before the fix: a 28px label column at 768px, where the sidebar narrows the row, and allocator MT5 and failed rows squeezed to 3px and 20px at 1024px. After: every width from 320 to 1180px is wrapped with the full label, and 1280px is one line.
+
+### Tests
+- **The one-key panel e2e tests run for real in the blocking `e2e-seeded` job (200-13, gap 1).** They lived in `api-key-flow` and `sync-analytics-flow`, ran only in the advisory `e2e` job (`continue-on-error`, in no aggregator) and skipped on an env var no workflow set. New `e2e/manager-keys.spec.ts` seeds a manager-only user with a strategy, a linked key and a spare key, signs in through `/login`, and has no env self-skip, so a missing seed fails it. A database read proves a pick writes nothing before `Change key`, and a second test proves `Change key` does write. The unauthenticated 401 contract tests stay in the old specs, unauthenticated. `SEEDED_SPEC_COUNT` is 25.
+- **`src/__tests__/manager-keys-e2e-wiring.test.ts` pins the wiring:** the spec is in the seeded list and not in the advisory one; nothing is chained after the seeded `npx playwright test` or its closing `fi`; the step has no `$?` capture, no errexit-off spelling and no `continue-on-error`; and the spec has no skip, fixme or only call on any receiver and no `process.env` read (review WR-10, WR-11). Its needles are built so the spec-disabling invariant does not flag the pin itself.
+- **The Modal Close is pinned in `tap-target-minimums.test.ts`** and measured with `assertTargetSizes` on the open confirm dialog at 320 and 1280px and on the Rename dialog at 320px. The key row is measured on real boxes at 320, 768, 1024 and 1280px, with a 200px label floor in the one-line layout.
+- **Review fixes to the moved tests:** the sync-failure test asserts the route's own error text inside the panel, not any `.text-negative` node, which the permissions badge's alert already satisfied (WR-07). The non-JSON test asserts the unavailable copy, and the "completion" test is renamed to the unrecognised-2xx case it covers (WR-08). The no-Add/Delete test waits for a key card first (WR-09). Every Resync stub uses one pattern and asserts it was hit (SFH-G3). Seed cleanup attempts every delete and throws one aggregated error (SFH-G1), and a seed that fails part-way rolls back its rows (SFH-G2).
+- Every new gate was seen RED on a neutered byte copy and restored with `cp`, then `cmp` exit 0. Local seeded lane: `manager-keys.spec.ts` 14 passed, 0 skipped.
+
+### Changed
+- **The OBSERV-12 floor for `e2e/api-key-flow.spec.ts` is 4600 bytes** (re-measured at 5750 after the panel tests moved out). One `csv-upload-flow` comment is re-pointed.
+- **The ci.yml OPS-03 comment and the `TODOS.md` 158-OPS-03 entry carry dated corrections:** the panel tests now block; the contract describes, the env-gated analytics describe and the retired-URL case left in the two old specs stay advisory, so the entry stays open.
+
+### Notes
+- Planning commits on the branch (not shipped in this PR, `.planning/` is filtered): the three recorded gaps, the gap-closure plans 200-13 to 200-15 with their SUMMARYs, the ROADMAP tracking update, the review rounds 1 to 3 in `200-REVIEW.md`, and the re-verification (`human_needed`, 9/9: every gap closed in code; the first CI run of the new spec, the UAT and the founder's review of D-01..D-15 and D-R1 remain).
+- Known limit, routed rather than fixed after the three-round review cap: in the one-line layout a row with a failed-state status helper can still squeeze the label column (review WR-13, MEDIUM, user-facing, older than Phase 200).
+- Not booked here: adding axe-core's `wcag22aa` tag to `buildAxe` would catch undersized targets anywhere, but it would re-baseline every axe spec.
+
 ## [0.133.37.1] - 2026-11-11 — records: close 200 MANAGERKEYS
 
 Records PR for Phase 200, which shipped as PR #1251 (v0.133.37.0). Five commits on `records/200`, no source change. Three summaries (200-03, 200-04, 200-12) quoted a local scratchpad path; it is a placeholder here so the planning hygiene gate passes. Its planning artifacts lived only on `feat/200-managerkeys` until now.

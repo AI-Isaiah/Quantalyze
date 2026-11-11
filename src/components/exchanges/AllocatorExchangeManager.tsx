@@ -1774,7 +1774,7 @@ export function AllocatorExchangeManager({
             </p>
           </div>
         ) : (
-          <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
+          <div className="@container divide-y divide-border border border-border rounded-lg overflow-hidden">
             {activeKeys.map((key) => {
               const tag = EXCHANGE_TAGS[key.exchange] ?? {
                 label: key.exchange.slice(0, 3).toUpperCase(),
@@ -1806,7 +1806,15 @@ export function AllocatorExchangeManager({
                   >
                     {tag.label}
                   </div>
-                  <div className="flex-1 min-w-0">
+                  {/* Below 56rem of ROW width (the key list is the @container, so
+                      the row's own width decides, not the viewport's: the sidebar
+                      and the page shell change it) the label column takes the rest
+                      of the first line (the row minus the 2.5rem venue tag and the
+                      1rem gap), so Last sync, the status and the actions wrap below
+                      it; from 56rem up it flexes as before (Phase 200 gap 2, 320px
+                      UAT; R-G1; WR-12: measured clean from about 52rem of row on
+                      the heaviest rows, 56rem leaves margin). */}
+                  <div className="flex-1 min-w-0 basis-[calc(100%_-_3.5rem)] @4xl:basis-0">
                     <p className="text-sm font-semibold text-text-primary truncate">
                       {key.label}
                     </p>
@@ -1844,7 +1852,7 @@ export function AllocatorExchangeManager({
                     <KeyFeedsLine keyId={key.id} state={feedsState} role={role} onRetry={refreshFeeds} />
                     {renderDepartedHistory(key.id)}
                   </div>
-                  <div className="text-right">
+                  <div className="@4xl:text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
                       Last sync
                     </p>
@@ -1917,7 +1925,7 @@ export function AllocatorExchangeManager({
               Historical holdings stay reflected in past performance.
             </p>
           </div>
-          <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
+          <div className="@container divide-y divide-border border border-border rounded-lg overflow-hidden">
             {disconnectedKeys.map((key) => {
               const tag = EXCHANGE_TAGS[key.exchange] ?? {
                 label: key.exchange.slice(0, 3).toUpperCase(),
@@ -1936,7 +1944,8 @@ export function AllocatorExchangeManager({
                   >
                     {tag.label}
                   </div>
-                  <div className="flex-1 min-w-0">
+                  {/* Mirrors the active row's label column (Phase 200 gap 2). */}
+                  <div className="flex-1 min-w-0 basis-[calc(100%_-_3.5rem)] @4xl:basis-0">
                     <p className="text-sm font-semibold text-text-primary truncate">
                       {key.label}
                     </p>
@@ -1966,7 +1975,7 @@ export function AllocatorExchangeManager({
                     <KeyFeedsLine keyId={key.id} state={feedsState} role={role} onRetry={refreshFeeds} />
                     {renderDepartedHistory(key.id)}
                   </div>
-                  <div className="text-right">
+                  <div className="@4xl:text-right">
                     <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
                       Last sync
                     </p>

@@ -12054,6 +12054,14 @@ No spec below is a delete-candidate: every route they target still exists (verif
   unseeded job's placeholder env, which is **not** evidence about the seeded job's env, and
   promoting an unverified spec into a blocking gate is how a required check reddens on an
   innocent PR. The ci.yml comment at the unseeded batch list carries the same warning.
+  ⛔ **CORRECTED 2026-11-11 (Phase 200 gap closure, plan 13):** the edit page's one-key panel
+  tests these two specs carried (Resync, the syncing and failure lines, `Change key…`, the
+  Profile link) moved to `e2e/manager-keys.spec.ts`, which runs seeded and logged in in the
+  **blocking** `e2e-seeded` list and carries no env self-skip
+  (`src/__tests__/manager-keys-e2e-wiring.test.ts` pins it). What is still advisory is the
+  unauthenticated contract describes in both specs, `sync-analytics-flow`'s env-gated analytics
+  describe and its retired-URL case, so this entry stays open and its **To close** paragraph
+  still applies to them.
 
 - [ ] **[158-OPS-03] `admin-csv-status-axe.spec.ts` — wire-later (seeded list).** Already
   conforms to the seeded contract (`HAS_SEED_ENV` present, uses the seed helpers) and

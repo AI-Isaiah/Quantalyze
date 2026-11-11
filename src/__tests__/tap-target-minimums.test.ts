@@ -18,6 +18,14 @@ import { join } from "node:path";
  *   - F2b: MandateQuickSetCard "Skip for now" — a bare `text-sm` button ~20px
  *          tall. Raised to the sibling `<Button>`'s 44px touch target.
  *
+ * Phase 200 gap closure (2026-11-11): the shared `Modal`'s header Close
+ * measured 20x20 at 320px and 1280px in every dialog that mounts it (16
+ * importers, the re-point confirm and the Rename dialog among them). It is
+ * pinned here because this scan covers NAMED controls only and the shared
+ * primitive was never named. It is now 44x44 like `ui/Button` md, and the seeded
+ * spec e2e/manager-keys.spec.ts measures two open dialogs with
+ * `assertTargetSizes`.
+ *
  * WHY THIS IS A SOURCE SCAN, NOT A RENDER TEST:
  *   The fixes are Tailwind utility-class LITERALS; the actual pixel size comes
  *   from Tailwind's compiled CSS, not from anything jsdom measures — jsdom has
@@ -87,6 +95,13 @@ const CONTROLS: { label: string; path: string; mustContain: string }[] = [
     ),
     mustContain:
       "min-h-6 inline-flex flex-wrap items-center gap-1 rounded-sm text-fixed-11",
+  },
+  // Phase 200 gap closure (2026-11-11): the shared dialog primitive's Close.
+  {
+    label:
+      "Modal header Close (shared by every dialog: 44x44 like ui/Button md, glyph held in place by -my-3 -mr-3)",
+    path: join(REPO, "src/components/ui/Modal.tsx"),
+    mustContain: "inline-flex h-11 w-11 shrink-0 items-center justify-center",
   },
 ];
 

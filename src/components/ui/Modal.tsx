@@ -28,9 +28,13 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
       <div className="bg-surface rounded-xl border border-border shadow-elevated w-full max-w-lg p-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-h3 font-semibold text-text-primary">{title}</h2>
+          {/* 44x44 matches the ui/Button md size the dialogs' own buttons use
+              and the 44px e2e target bar (WCAG 2.5.8's minimum is 24px).
+              -my-3 -mr-3 (12px) keeps the glyph and the header height where
+              they were, inside the card's 24px padding. */}
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+            className="-my-3 -mr-3 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-text-muted hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             aria-label="Close"
           >
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">

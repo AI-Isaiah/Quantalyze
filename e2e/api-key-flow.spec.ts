@@ -1,15 +1,15 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 
 /**
  * API Key Connection Flow (Task 2.2)
  *
- * Tests the API key endpoint contract and the strategy edit page's one-key
- * panel (heading and the link to the Profile API keys tab). Adding and deleting
- * keys moved to the Profile tab in Phase 200 (see the note above the edit-page
- * describe for where that is covered now).
- *
- * Tests that require a real authenticated session or valid exchange credentials
- * are marked with test.skip and a comment explaining why.
+ * Tests the API key endpoint contract with Playwright's unauthenticated
+ * `request` fixture. The strategy edit page's one-key panel tests (heading,
+ * the Profile link, Resync, Change key…) moved to the seeded, blocking
+ * `e2e/manager-keys.spec.ts` in Phase 200 gap closure: this file's only
+ * Playwright list is the advisory `e2e` job, and those tests skipped on an env
+ * var no workflow sets. Adding and deleting keys moved to the Profile tab in
+ * Phase 200 (see the note where the panel describe was, below).
  */
 
 // ---------------------------------------------------------------------------
@@ -31,11 +31,6 @@ import { test, expect, type Page } from "@playwright/test";
  * rationale comment there). Local `npm run dev` allowlists localhost natively.
  */
 const ORIGIN = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000";
-
-/** Navigate to a strategy edit page. Requires authentication. */
-async function goToStrategyEdit(page: Page, strategyId: string) {
-  await page.goto(`/strategies/${strategyId}/edit`);
-}
 
 // ---------------------------------------------------------------------------
 // API-level tests (no auth required — verify JSON contract)
@@ -100,9 +95,8 @@ test.describe("API Key Connection Flow", () => {
   });
 
   // -------------------------------------------------------------------------
-  // UI tests — strategy edit page, one-key panel
-  // These require an authenticated session and a real strategy ID.
-  //
+  // The edit page's one-key panel tests moved to e2e/manager-keys.spec.ts
+  // (Phase 200 gap closure: seeded, logged in, blocking in the e2e-seeded list).
   // Phase 200 D-07 / D-06: the edit page shows this strategy's ONE key
   // (`Resync`, `Change key…`) and links to the Profile API keys tab, the one
   // place keys are added, deleted and updated. The edit-page `Add Key`,
@@ -117,48 +111,4 @@ test.describe("API Key Connection Flow", () => {
   // they need a live exchange key and a Profile-tab driver that this spec does
   // not have.
   // -------------------------------------------------------------------------
-
-  test.describe("Edit page — one-key panel", () => {
-    // 140.5-06: the gate is the env var itself: CI-behaviour-preserving (the var
-    // is absent from every file in .github/workflows, so exactly the same tests
-    // skip there) while locally it becomes opt-in RUNNABLE instead of dead.
-    test.skip(
-      !process.env.PLAYWRIGHT_TEST_STRATEGY_ID,
-      "Requires authenticated session with a valid strategy ID in the database. " +
-        "Set PLAYWRIGHT_TEST_STRATEGY_ID to run.",
-    );
-
-    const TEST_STRATEGY_ID = process.env.PLAYWRIGHT_TEST_STRATEGY_ID ?? "";
-
-    test("edit page renders the panel heading and the Profile link", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-
-      await expect(
-        page.getByRole("heading", { name: /Exchange API Keys/i }),
-      ).toBeVisible();
-      await expect(
-        page.getByRole("link", { name: "Add or remove keys" }),
-      ).toHaveAttribute("href", "/profile?tab=exchanges");
-    });
-
-    test("edit page no longer offers Add Key or Delete", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-      const heading = page.getByRole("heading", { name: /Exchange API Keys/i });
-      await expect(heading).toBeVisible();
-      // The panel root: the heading's row sits inside the panel's `space-y-4` div.
-      const panel = heading.locator("xpath=../..");
-
-      await expect(panel.getByRole("button", { name: /Add Key/i })).toHaveCount(0);
-      await expect(panel.getByRole("button", { name: /Delete/i })).toHaveCount(0);
-      await expect(panel.getByText(/No API keys connected/i)).toHaveCount(0);
-    });
-
-    test("Add or remove keys opens the Profile API keys tab", async ({ page }) => {
-      await goToStrategyEdit(page, TEST_STRATEGY_ID);
-
-      await page.getByRole("link", { name: "Add or remove keys" }).click();
-
-      await expect(page).toHaveURL(/\/profile\?tab=exchanges/);
-    });
-  });
 });
