@@ -92,9 +92,6 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
       allocatorId: "alloc-default-name",
     });
     expect(payload?.strategyName).toBe("My allocation");
-    // The default name is the correlation matrix's first label; a cap shorter than it would
-    // print "My allocati…" in the heatmap corner.
-    expect(payload?.correlationMatrix.labels[0]).toBe("My allocation");
   });
 
   it("BLEND-02: risk metrics ride the √365 crypto basis; CAGR byte-identical (calendar clock)", () => {

@@ -25,18 +25,18 @@ Phase 201. Every concept now has one name in the UI, every registered metric or 
 - **CompareTable prints volatility unsigned** (`23.46%`) (201-04).
 - **Chart tooltip labels read a dash for a non-finite hover value** (review R2-SFH-01).
 - **Admin row `status` is required**, so a select that omits it fails to compile (review SFH-02).
-- **The correlation matrix prints the default allocation name whole.** Its first label was capped at 12 characters, which cut the renamed default `My allocation` (13) to `My allocati…`. The cap is 13 (`build-payload.ts`) and the 390 px matrix gives its row labels 8 px more (`DistributionPanels.tsx`, 128 to 136), because 13 characters at 16 px clipped by 4.8 px; a longer name still ends in an ellipsis. The three SC-4 byte-identity snapshots moved only by the `Bundle Fixture` fixture's own truncated label.
 
 ### Removed
 - **Deprecated date helpers, the inert `formatCloseDay` option and the `book` noun (201-23).** This also removes the private date converters in `FactsheetView` and `MandatePanels`. An unparseable Terms date now reads as an em dash.
 
 ### Tests
 - **Rendered-text tests pin every changed date site,** each with a negative `YYYY-MM-DD` assertion. The census gate and every scanner branch have RED and GREEN arms. The `visible: true` name call sites are pinned (review SFH-01), and so is the admin embed status, by a source scan (R2-03). Gap-closure RED proofs ran on byte backups restored with `cmp` identical.
-- **The seeded composite factsheet spec reads a KPI value from the label `<p>` by its test id,** not from the innermost text node, which is now the `Term` span inside it (201-09). `Max DD` carries a `Term`, so the old locator found no sibling value `<p>`. A vitest arm pins the matrix label.
+- **The seeded composite factsheet spec reads a KPI value from the label `<p>` by its test id,** not from the innermost text node, which is now the `Term` span inside it (201-09). `Max DD` carries a `Term`, so the old locator found no sibling value `<p>`. 
 - **The e2e literal sweep re-pinned the specs that quoted old copy** (201-24): axe, composer, CSV upload, discovery, layout-narrow, match queue and route redirects, plus the narrowcharts fixtures. The full suite at the phase head has two failures, both in `compute.conventions.test.ts`, and both fail identically at the pre-phase base.
 
 ### Notes
 - **`TODOS.md`.** Booked `201-F11-DATE-RESIDUALS-01` (review round 3) and closed it in place with the gap closure, including the census blind spots (review GC2-02). Closed the three Phase 197 name and volatility entries. Restated `196-STYLE-DRIFT-CENSUS-BLIND-01`. Added the egress statement to `167.1.2.2-BYBIT-STATIC-EGRESS`.
+- **Recorded, not fixed: the correlation matrix prints the default allocation name as `My allocati…`.** The matrix's first label has always been capped at 12 characters (`build-payload.ts`), and the renamed default `My allocation` has 13. The two NARROWCHARTS desktop fixtures now pin the ellipsis. Showing it whole needs the cap at 13 and the 390 px row-label gutter at 136 (128 clips by 4.8 px), which moves the 320 px `correlations-matrix-portrait-320` golden and so needs the `bake_svg_goldens` re-bake.
 - **Not fixed.** Rule C does not read a date field passed through `value=` or another display prop outside `USER_ATTRS` (review GC2-02). There is no live site of that shape. A bare `value` rule would also fire on `<Input type="date">` machine values. `StrategyHeader` keeps its raw start date: it is imported by nothing and is the one count-pinned rule C exception.
 - **Verification is `human_needed`, 8/8.** Still to check in a browser: tooltip hover and focus legibility, Escape with a nested popover, the egress link landing, compare real-name search, and the narrow-width date wrapping.
 - **Planning commits are not in this PR** (`.planning/` is filtered): the founder decisions F-01 to F-15, the UI-SPEC, 40 plans and SUMMARYs, review rounds, verification and the security audit (`threats_open: 0`).
