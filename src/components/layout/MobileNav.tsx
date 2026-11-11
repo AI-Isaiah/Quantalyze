@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition } from "@/lib/glossary";
 import {
   buildPrimaryMobileNav,
   formatBadgeCount,
@@ -112,11 +114,12 @@ export function MobileNav({
 
           // KEEP the existing pathname-prefix active rule (see header note).
           const active = pathname === item.href || pathname.startsWith(item.href + "/");
-          return (
+          const link = (describedBy?: string) => (
             <Link
               key={item.href}
               href={item.href}
               aria-current={active ? "page" : undefined}
+              aria-describedby={describedBy}
               className={cn(
                 // SC#4: min-h-[44px] + justify-center lifts the ~36px stub cell
                 // to the WCAG 2.5.8 floor. focus-visible ring added (the stub
@@ -128,6 +131,21 @@ export function MobileNav({
             >
               {iconAndLabel}
             </Link>
+          );
+          if (!item.term) return link();
+          // Phase 201 plan 34 (F-04, F-08, U-27) — Form B: the link is the control, so the
+          // registry definition rides on a Tooltip around it and `aria-describedby` lands on
+          // the link itself (function children). The wrapper and its inner span are flex boxes
+          // that take the cell's share of the bar, so the link sits exactly where an
+          // unwrapped one does.
+          return (
+            <Tooltip
+              key={item.href}
+              content={termDefinition(item.term)}
+              className="flex min-w-0 flex-1 [&>span]:flex [&>span]:min-w-0 [&>span]:flex-1"
+            >
+              {({ "aria-describedby": describedBy }) => link(describedBy)}
+            </Tooltip>
           );
         })}
       </div>

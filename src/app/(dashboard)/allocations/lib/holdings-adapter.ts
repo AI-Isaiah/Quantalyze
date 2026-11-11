@@ -65,9 +65,9 @@ export interface HoldingsAdapterInputs {
   strategies: Array<{
     id: string;
     /**
-     * audit-2026-05-07 G8.A.2 (P35): `name` is `null` server-side for
-     * non-institutional rows (the canonical name is no longer shipped to
-     * the client). Resolution falls through to alias → codename →
+     * Phase 201 / D-17: `name` is `null` server-side for a strategy the
+     * viewer cannot see in discovery (`redactedName` in `queries.ts`).
+     * Resolution is alias, then the name, then the codename, then a
      * synthetic id (see `displayStrategyName`); the adapter mirrors that
      * priority.
      */
@@ -211,17 +211,23 @@ export function toDesignHoldings(inputs: HoldingsAdapterInputs): DesignHoldingRo
       symbol: h.symbol,
       holding_type: h.holding_type,
       // audit-2026-05-07 G8.A.10 (P43): route through `displayStrategyName`
-      // so a non-institutional row (where P35 sets `name = null`) falls
-      // back to codename → synthetic id rather than rendering as null.
-      // Allocator-supplied alias still wins.
+      // so a row whose `name` arrived null falls back to codename → synthetic
+      // id rather than rendering as null. Allocator-supplied alias still wins.
+      // Phase 201 / D-09, D-17: `{ visible: true }` because the My allocation
+      // payload already nulls `name` for a strategy the viewer cannot see
+      // (`redactedName` in `queries.ts`, pinned by `queries.my-allocation.test.ts`).
+      // The upstream redaction is the control, not this flag.
       strategy: strat
         ? strat.alias?.trim() ||
-          displayStrategyName({
-            id: strat.id,
-            name: strat.name,
-            codename: strat.codename ?? null,
-            disclosure_tier: (strat.disclosure_tier ?? null) as DisclosureTier | null,
-          })
+          displayStrategyName(
+            {
+              id: strat.id,
+              name: strat.name,
+              codename: strat.codename ?? null,
+              disclosure_tier: (strat.disclosure_tier ?? null) as DisclosureTier | null,
+            },
+            { visible: true },
+          )
         : null,
       manager: strat?.codename ?? null,
       tag: strat?.strategy_types?.[0] ?? null,

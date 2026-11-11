@@ -59,7 +59,7 @@ export function ReplacementPanel({
         });
 
         if (!res.ok) {
-          const body = await res.json().catch(() => ({ error: "Bridge request failed" }));
+          const body = await res.json().catch(() => ({ error: "Replacement request failed" }));
           // The route's `error` field is reviewed copy — on a breaker trip it
           // IS the single-source sentence from src/lib/seam-copy.ts. Marking it
           // route-authored is what lets the catch below refuse to render
@@ -213,7 +213,7 @@ export function ReplacementPanel({
 
           {candidates !== null && candidates.length === 0 && (
             <p className="text-small text-text-secondary">
-              No replacement candidates found that would improve this portfolio.
+              No replacement candidates found that would improve this allocation.
             </p>
           )}
 

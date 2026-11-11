@@ -6,7 +6,7 @@ import type { ComputedMetrics } from "@/lib/scenario";
 /**
  * Phase 170.1 (D-11, UI-SPEC V-2): the element that carries the delta's aria-label and
  * title now holds TWO spans, the signed figure (with the tone class) and the
- * "vs current book" suffix (muted, never toned). Tone and figure pins read the first
+ * "vs current allocation" suffix (muted, never toned). Tone and figure pins read the first
  * span; the container's own className and textContent also hold the suffix.
  */
 const figureOf = (pill: Element): HTMLElement => pill.children[0] as HTMLElement;
@@ -24,7 +24,7 @@ const suffixOf = (pill: Element): HTMLElement => pill.children[1] as HTMLElement
  *     KpiStrip.warmup.test.tsx Phase 07 D-09 invariants)
  *   - aria contract: each delta pill carries an aria-label with
  *     "improved" / "regressed" / "no change" word
- *   - tooltip on each delta pill contains "Current book: " + baseline value
+ *   - tooltip on each delta pill contains "Current allocation: " + baseline value
  *   - graceful degradation when scenarioMetrics OR liveMetrics is null
  *
  * Sister suites: KpiStrip.warmup.test.tsx + KpiStrip.test.tsx must continue
@@ -93,8 +93,8 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         snapshotCount={30}
       />,
     );
-    // No aria-labels of shape "{label} delta vs current book:"
-    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current book:"]');
+    // No aria-labels of shape "{label} delta vs current allocation:"
+    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current allocation:"]');
     expect(deltaNodes.length).toBe(0);
   });
 
@@ -117,7 +117,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
     );
     expect(screen.getByText("1.51")).toBeTruthy();
     const sharpeDelta = container.querySelector(
-      '[aria-label^="Sharpe delta vs current book:"]',
+      '[aria-label^="Sharpe delta vs current allocation:"]',
     );
     expect(sharpeDelta).not.toBeNull();
     expect(figureOf(sharpeDelta!).textContent).toBe("+0.31");
@@ -152,7 +152,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
     expect(
       screen.queryByText("Projected — sum of enabled holdings"),
     ).toBeNull();
-    const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+    const group = screen.getByRole("group", { name: "Allocation KPIs" });
     const valueDivs = Array.from(
       group.querySelectorAll<HTMLDivElement>("div.font-mono"),
     );
@@ -179,7 +179,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
       />,
     );
     const maxDdDelta = container.querySelector(
-      '[aria-label^="Max DD 12m delta vs current book:"]',
+      '[aria-label^="Max DD 12m delta vs current allocation:"]',
     );
     expect(maxDdDelta).not.toBeNull();
     // -0.04 - (-0.08) = +0.04, max_drawdown is down-good so positive delta = improvement
@@ -205,7 +205,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
       />,
     );
     const twrDelta = container.querySelector(
-      '[aria-label^="YTD TWR delta vs current book:"]',
+      '[aria-label^="YTD TWR delta vs current allocation:"]',
     );
     expect(twrDelta).not.toBeNull();
     expect(figureOf(twrDelta!).className).toMatch(/text-negative/);
@@ -235,7 +235,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
       />,
     );
     const sharpeDelta = container.querySelector(
-      '[aria-label^="Sharpe delta vs current book:"]',
+      '[aria-label^="Sharpe delta vs current allocation:"]',
     );
     expect(sharpeDelta).not.toBeNull();
     expect(figureOf(sharpeDelta!).className).toMatch(/text-text-muted/);
@@ -256,7 +256,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
       />,
     );
     // No delta pills present
-    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current book:"]');
+    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current allocation:"]');
     expect(deltaNodes.length).toBe(0);
     // Warmup helper still renders for null cells (proves the warmup branch wins)
     expect(
@@ -284,7 +284,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         liveMetrics={LIVE_METRICS}
       />,
     );
-    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current book:"]');
+    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current allocation:"]');
     expect(deltaNodes.length).toBe(0);
   });
 
@@ -305,11 +305,11 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         liveMetrics={null}
       />,
     );
-    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current book:"]');
+    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current allocation:"]');
     expect(deltaNodes.length).toBe(0);
   });
 
-  it("T8: mode='scenario' Sharpe delta pill has 'Current book: 1.20' tooltip via title attribute", () => {
+  it("T8: mode='scenario' Sharpe delta pill has 'Current allocation: 1.20' tooltip via title attribute", () => {
     const { container } = render(
       <KpiStrip
         analytics={{
@@ -327,11 +327,11 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
       />,
     );
     const sharpeDelta = container.querySelector(
-      '[aria-label^="Sharpe delta vs current book:"]',
+      '[aria-label^="Sharpe delta vs current allocation:"]',
     );
     expect(sharpeDelta).not.toBeNull();
     const title = sharpeDelta!.getAttribute("title") ?? "";
-    expect(title).toMatch(/^Current book: /);
+    expect(title).toMatch(/^Current allocation: /);
     expect(title).toMatch(/1\.20/);
   });
 
@@ -353,7 +353,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
       />,
     );
     const sharpeDelta = container.querySelector(
-      '[aria-label^="Sharpe delta vs current book:"]',
+      '[aria-label^="Sharpe delta vs current allocation:"]',
     );
     expect(sharpeDelta!.getAttribute("aria-label") ?? "").toMatch(/improved/);
   });
@@ -390,7 +390,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
     // The scenario Sharpe (1.51) must NOT appear anywhere.
     expect(screen.queryByText("1.51")).toBeNull();
     // And no delta pills render in live mode.
-    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current book:"]');
+    const deltaNodes = container.querySelectorAll('[aria-label*="delta vs current allocation:"]');
     expect(deltaNodes.length).toBe(0);
   });
 
@@ -425,7 +425,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
       />,
     );
     const maxDdDelta = container.querySelector(
-      '[aria-label^="Max DD 12m delta vs current book:"]',
+      '[aria-label^="Max DD 12m delta vs current allocation:"]',
     );
     expect(maxDdDelta).not.toBeNull();
     expect(figureOf(maxDdDelta!).className).toMatch(/text-text-muted/);
@@ -454,7 +454,7 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         liveMetrics={noiseLive}
       />,
     );
-    const twrDelta = container.querySelector('[aria-label^="YTD TWR delta vs current book:"]');
+    const twrDelta = container.querySelector('[aria-label^="YTD TWR delta vs current allocation:"]');
     expect(twrDelta).not.toBeNull();
     expect(figureOf(twrDelta!).className).toMatch(/text-text-muted/);
     expect(twrDelta!.getAttribute("aria-label") ?? "").toMatch(/no change/);
@@ -503,18 +503,18 @@ describe("KpiStrip — scenario delta names its baseline (170.1-03)", () => {
         liveMetrics={LIVE_METRICS}
       />,
     );
-    const pill = container.querySelector(`[aria-label^="${label} delta vs current book:"]`);
+    const pill = container.querySelector(`[aria-label^="${label} delta vs current allocation:"]`);
     if (!pill) throw new Error(`no delta line for ${label}`);
     return pill as HTMLElement;
   }
 
-  it("a finite delta renders the toned signed figure and a muted, untoned 'vs current book' sibling", () => {
+  it("a finite delta renders the toned signed figure and a muted, untoned 'vs current allocation' sibling", () => {
     const pill = scenarioPill(SCENARIO_IMPROVEMENT, "Sharpe");
     expect(pill.children.length).toBe(2);
     expect(figureOf(pill).textContent).toBe("+0.31");
     expect(figureOf(pill).className).toMatch(/text-positive/);
     expect(figureOf(pill).className).toMatch(/whitespace-nowrap/);
-    expect(suffixOf(pill).textContent).toBe("vs current book");
+    expect(suffixOf(pill).textContent).toBe("vs current allocation");
     expect(suffixOf(pill).className).toMatch(/text-text-muted/);
     expect(suffixOf(pill).className).not.toMatch(/text-positive|text-negative/);
     expect(suffixOf(pill).className).toMatch(/whitespace-nowrap/);
@@ -532,17 +532,17 @@ describe("KpiStrip — scenario delta names its baseline (170.1-03)", () => {
     expect(suffixOf(pill).className).not.toMatch(/text-negative/);
   });
 
-  it("an uncomputable delta prints the dash and still carries 'vs current book', so no dash is unlabelled", () => {
+  it("an uncomputable delta prints the dash and still carries 'vs current allocation', so no dash is unlabelled", () => {
     const pill = scenarioPill({ ...SCENARIO_IMPROVEMENT, sharpe: null }, "Sharpe");
     expect(figureOf(pill).textContent).toBe("—");
-    expect(suffixOf(pill).textContent).toBe("vs current book");
-    expect(pill.getAttribute("aria-label")).toBe("Sharpe delta vs current book: — (no change)");
+    expect(suffixOf(pill).textContent).toBe("vs current allocation");
+    expect(pill.getAttribute("aria-label")).toBe("Sharpe delta vs current allocation: — (no change)");
   });
 
-  it("aria-label reads '{label} delta vs current book: {delta} ({sign})' and the title 'Current book: {live value}'", () => {
+  it("aria-label reads '{label} delta vs current allocation: {delta} ({sign})' and the title 'Current allocation: {live value}'", () => {
     const pill = scenarioPill(SCENARIO_IMPROVEMENT, "Sharpe");
-    expect(pill.getAttribute("aria-label")).toBe("Sharpe delta vs current book: +0.31 (improved)");
-    expect(pill.getAttribute("title")).toBe("Current book: 1.20");
+    expect(pill.getAttribute("aria-label")).toBe("Sharpe delta vs current allocation: +0.31 (improved)");
+    expect(pill.getAttribute("title")).toBe("Current allocation: 1.20");
     expect(pill.getAttribute("title")).not.toMatch(/Live/);
   });
 
@@ -558,13 +558,13 @@ describe("KpiStrip — scenario delta names its baseline (170.1-03)", () => {
         liveMetrics={LIVE_METRICS}
       />,
     );
-    expect(warm.container.textContent).not.toContain("vs current book");
+    expect(warm.container.textContent).not.toContain("vs current allocation");
     warm.unmount();
 
     const live = render(
       <KpiStrip analytics={ANALYTICS} metrics={LIVE_METRICS} timeframe="ALL" snapshotCount={30} />,
     );
-    expect(live.container.textContent).not.toContain("vs current book");
+    expect(live.container.textContent).not.toContain("vs current allocation");
     live.unmount();
 
     const noBaseline = render(
@@ -578,6 +578,6 @@ describe("KpiStrip — scenario delta names its baseline (170.1-03)", () => {
         liveMetrics={null}
       />,
     );
-    expect(noBaseline.container.textContent).not.toContain("vs current book");
+    expect(noBaseline.container.textContent).not.toContain("vs current allocation");
   });
 });

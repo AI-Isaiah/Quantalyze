@@ -131,7 +131,7 @@ export async function PATCH(req: NextRequest) {
   }
   if (!portfolio) {
     return NextResponse.json(
-      { error: "portfolio not found" },
+      { error: "Allocation not found" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }

@@ -145,7 +145,7 @@ describe("<ReplacementPanel> — H-1077", () => {
 
   it("renders the error message when the bridge fetch returns a non-OK body", async () => {
     mockFetch(async () =>
-      new Response(JSON.stringify({ error: "Bridge service unavailable" }), {
+      new Response(JSON.stringify({ error: "Scoring replacements failed. Please try again." }), {
         status: 500,
       }),
     );
@@ -153,9 +153,23 @@ describe("<ReplacementPanel> — H-1077", () => {
     renderPanel();
 
     await waitFor(() =>
-      expect(screen.getByText("Bridge service unavailable")).toBeInTheDocument(),
+      expect(screen.getByText("Scoring replacements failed. Please try again.")).toBeInTheDocument(),
     );
     expect(screen.queryByTestId("replacement-card")).toBeNull();
+  });
+
+  // Phase 201 / F-04, U-26: the route's 500 sentence is what the panel shows,
+  // and a body that does not parse falls back to "Replacement request failed".
+  // Neither string carries the retired word.
+  it("shows the fallback sentence when the non-OK body is not JSON", async () => {
+    mockFetch(async () => new Response("<html>502</html>", { status: 502 }));
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText("Replacement request failed")).toBeInTheDocument(),
+    );
+    expect(document.body.textContent).not.toMatch(/\bBridge\b/);
   });
 
   // ⚠️ 140.3-07 / B-27 — this case USED to assert `getByText("network down")`,
@@ -192,7 +206,7 @@ describe("<ReplacementPanel> — H-1077", () => {
   it("logs the bridge failure via console.error with a stable prefix when the fetch returns non-OK", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockFetch(async () =>
-      new Response(JSON.stringify({ error: "Bridge service unavailable" }), {
+      new Response(JSON.stringify({ error: "Scoring replacements failed. Please try again." }), {
         status: 500,
       }),
     );
@@ -200,7 +214,7 @@ describe("<ReplacementPanel> — H-1077", () => {
     renderPanel();
 
     await waitFor(() =>
-      expect(screen.getByText("Bridge service unavailable")).toBeInTheDocument(),
+      expect(screen.getByText("Scoring replacements failed. Please try again.")).toBeInTheDocument(),
     );
 
     const tagged = errorSpy.mock.calls.find(

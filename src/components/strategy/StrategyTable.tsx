@@ -16,6 +16,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { Term } from "@/components/ui/Term";
 import { NowrapWords } from "@/components/ui/NowrapWords";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { Sparkline } from "@/components/charts/Sparkline";
@@ -52,7 +53,7 @@ import { VerifiedCheck } from "./VerifiedCheck";
 import { ReturnsUnitChip } from "./ReturnsUnitChip";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { signTone, drawdownTone } from "@/lib/factsheet/display-sign";
-import { formatPercent, formatNumber, formatCurrency, formatIsoDay } from "@/lib/utils";
+import { formatPercent, formatNumber, formatCurrency, formatDay } from "@/lib/utils";
 import { isComputedAnalytics, deriveEmptySeriesState } from "@/lib/closed-sets";
 import { rowChipStatus } from "@/lib/strategy-health";
 import { listSeriesVerdict, type ListSeriesVerdictResult } from "@/lib/freshness";
@@ -1612,7 +1613,9 @@ export function StrategyTable({
                         aria-label={col.accessibleName}
                         className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}
                       >
-                        {col.tooltip ? <Tooltip content={col.tooltip}>{col.label}</Tooltip> : col.label}
+                        {/* Phase 201 plan 16 (D-01, U-06): a plain header is Form A, so it has a keyboard path.
+                            The sort headers stay Form B (the Tooltip around their button). */}
+                        {col.term ? <Term k={col.term} context="discovery">{col.label}</Term> : col.label}
                         {renderQualifier(col)}
                       </th>
                     ))}
@@ -1644,7 +1647,7 @@ export function StrategyTable({
                     const { series_start: trackFirst, series_end: trackLast, headline_since: trackHeadline } = s.analytics;
                     const trackTitle =
                       trackSpan != null && trackFirst && trackLast
-                        ? `${formatNumber(trackSpan, 0)} days of record, ${formatIsoDay(recordStartDay({ seriesStart: trackFirst, headlineSince: trackHeadline }))} to ${formatIsoDay(trackLast)}.`
+                        ? `${formatNumber(trackSpan, 0)} days of record, ${formatDay(recordStartDay({ seriesStart: trackFirst, headlineSince: trackHeadline }))} to ${formatDay(trackLast)}.`
                         : undefined;
                     const sixMonthText = formatPercent(s.analytics.six_month_return);
                     const aumText = formatCurrency(s.aum);
@@ -2054,7 +2057,7 @@ export function StrategyTable({
                             and the table is a client component). */}
                         {managerRows && (
                           <td className="px-4 py-3 whitespace-nowrap font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors">
-                            {formatIsoDay(s.created_at)}
+                            {formatDay(s.created_at)}
                           </td>
                         )}
                         {/* Phase 197 D-05 — the Track cell: whole months of record from the

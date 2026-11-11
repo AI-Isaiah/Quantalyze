@@ -27,7 +27,7 @@ import {
 } from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
-import { SFOX_UI_ENABLED, MT5_UI_ENABLED } from "@/lib/utils";
+import { SFOX_UI_ENABLED, MT5_UI_ENABLED, formatDay } from "@/lib/utils";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -2376,7 +2376,10 @@ function KeyPanel({
             </span>
             <span className="text-text-muted">·</span>
             <span className="font-metric text-caption tabular-nums text-text-secondary">
-              {p.windowStart} – {p.stillLive || !p.windowEnd ? "live" : p.windowEnd}
+              {formatDay(p.windowStart)}
+              {" – "}
+              {/* "live" stays OUTSIDE the helper: formatDay(null) is an em dash. */}
+              {p.stillLive || !p.windowEnd ? "live" : formatDay(p.windowEnd)}
             </span>
             <TrustTierLabel trustTier="api_verified" />
           </div>

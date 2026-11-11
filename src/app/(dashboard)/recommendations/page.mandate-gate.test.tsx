@@ -661,3 +661,64 @@ describe("164.6.6.3.1 / D-07 · /recommendations footer and batch chip", () => {
     expect(text).toContain("\u00b7");
   });
 });
+
+describe("Phase 201 plan 17 (D-06, T-201-23) · /recommendations names the criteria a mandate, and every link keeps /preferences", () => {
+  // WHY: the allocator's investment criteria were "preferences" here and "mandate" on
+  // /allocations and in the Profile tab. One concept, one name: the CTA, its body and the
+  // relax sentence say mandate. The RENAME must not move the route (`/preferences` is an
+  // identifier), or the allocator who follows the call to action lands nowhere.
+  it("PW1: no mandate renders 'Set your mandate →' linking to /preferences and the plain body sentence", async () => {
+    seeded.prefs = null;
+    const { container } = await renderPage();
+
+    const cta = screen.getByText("Set your mandate →");
+    expect(cta.closest("a")?.getAttribute("href"), "the CTA moved off /preferences").toBe(
+      "/preferences",
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain(
+      "Tell us your strategy type, ticket size, and exchanges. The match engine uses this to compute personalized recommendations every day at 01:00 UTC.",
+    );
+    expect(text, "the retired 'preferences' word survived on the CTA card").not.toMatch(
+      /Set preferences|exchange preferences/,
+    );
+  });
+
+  it("PW2: a batch with no matches says 'relaxing your mandate', with 'your mandate' as the /preferences link", async () => {
+    seeded.recs = [];
+    const { container } = await renderPage();
+
+    const link = screen.getByRole("link", { name: "your mandate" });
+    expect(link.getAttribute("href"), "the relax link moved off /preferences").toBe(
+      "/preferences",
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain(
+      "Try relaxing your mandate — the match engine will pick up the change on the next daily run.",
+    );
+    expect(text, "the relax sentence still points at 'preferences'").not.toMatch(
+      /relaxing your filters|in\s*preferences/,
+    );
+  });
+
+  it("PW3: the page's mandate wording is a registered term (data-term=mandate) and its metric labels render through Term", async () => {
+    seeded.recs = [];
+    seeded.batchMeta = [];
+    const noBatch = await renderPage();
+    expect(
+      noBatch.container.querySelector('[data-term="mandate"]'),
+      "the mandate wording is plain text, with no definition",
+    ).not.toBeNull();
+    noBatch.unmount();
+
+    seeded.recs = [rec(0), rec(1), rec(2)];
+    seeded.batchMeta = [BATCH];
+    const list = await renderPage();
+    for (const k of ["cagr", "sharpe", "max_drawdown"]) {
+      expect(
+        list.container.querySelector(`[data-term="${k}"]`),
+        `the ${k} metric label is not a Term`,
+      ).not.toBeNull();
+    }
+  });
+});

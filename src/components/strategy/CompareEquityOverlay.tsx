@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
-import { formatPercent } from "@/lib/utils";
+import { formatPercent, formatDay } from "@/lib/utils";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { curveMethodFromFlags } from "@/lib/factsheet/resolve-series";
 import {
@@ -48,21 +48,6 @@ interface CompareItem {
 interface CurvePoint {
   date: string;
   [key: string]: number | string;
-}
-
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-/**
- * `Mar 4, 2025` (UTC), the factsheet's `isoToMonthDay` contract. Copied rather
- * than imported: that function lives in `MetricsColumn.tsx`, a client module
- * that pulls the whole factsheet metrics rail into the /compare bundle for a
- * four-line formatter. Source of truth for the format:
- * `src/app/factsheet/[id]/v2/MetricsColumn.tsx :: isoToMonthDay`.
- */
-function formatSpanDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
 
 type Point = { date: string; cumRet: number };
@@ -149,7 +134,7 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
       seriesKeys.push({ key, name, color: LINE_COLORS[i % LINE_COLORS.length] });
       seriesMap.set(key, resolved.line);
       if (resolved.measuredSince !== null) {
-        noteLines.push(`Measured since ${formatSpanDate(resolved.measuredSince)} (${name})`);
+        noteLines.push(`Measured since ${formatDay(resolved.measuredSince)} (${name})`);
       }
     });
 

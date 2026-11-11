@@ -101,18 +101,30 @@ describe("toStrategyRows", () => {
       expect(row.strategy).toBe("Helios Basis");
     });
 
-    it("exploratory falls back to codename, never the real name", () => {
+    it("a readable name prints ahead of the codename (D-17)", () => {
       const [row] = toStrategyRows({
         strategies: [],
         positions: [
           makeStrategy({
-            strategy: { name: "Secret Manager Name", codename: "ACME-7", disclosure_tier: "exploratory" },
+            strategy: { name: "Fibonacci Ghost", codename: "Ghost-7", disclosure_tier: "exploratory" },
+          }),
+        ],
+        now: NOW,
+      });
+      expect(row.strategy).toBe("Fibonacci Ghost");
+    });
+
+    it("a name redacted upstream (null) falls back to the codename", () => {
+      const [row] = toStrategyRows({
+        strategies: [],
+        positions: [
+          makeStrategy({
+            strategy: { name: null, codename: "ACME-7", disclosure_tier: "exploratory" },
           }),
         ],
         now: NOW,
       });
       expect(row.strategy).toBe("ACME-7");
-      expect(row.strategy).not.toContain("Secret");
     });
   });
 
@@ -575,16 +587,17 @@ describe("toStrategyRows — OWN-05 SC 1c owner-name carve-out", () => {
 
   it("[DISCLOSURE] the carve-out NEVER reaches an unmarked third-party position row", () => {
     // The carve-out is owner-scoped: marked-set membership IS ownership
-    // (getOwnCapitalStrategies is user_id-filtered). A third-party exploratory
-    // row must still redact to its codename — pairing the real name with the
-    // codename defeats pseudonymity (browse/route.ts:44-56).
+    // (getOwnCapitalStrategies is user_id-filtered). A third-party row the viewer
+    // cannot see arrives with `name` nulled upstream (D-17, `redactedName` in
+    // `queries.ts`), so it still reads as its codename: the owner's name
+    // is not borrowed for it, and a name is never paired with a codename.
     const [row] = toStrategyRows({
       strategies: [],
       positions: [
         makeStrategy({
           strategy_id: "theirs",
           strategy: {
-            name: "Secret Manager Name",
+            name: null,
             codename: "ACME-7",
             disclosure_tier: "exploratory",
           },

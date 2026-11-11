@@ -330,7 +330,10 @@ describe("POST /api/simulator", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("42");
     const body = await res.json();
-    expect(body.error).toMatch(/Too many simulations/i);
+    // 201-21 / D-04: hand-typed full sentence, with the retired noun gone.
+    expect(body.error).toBe(
+      "Too many simulations. The allocation impact simulator is capped at 20 runs per hour.",
+    );
     expect(body.retryAfter).toBe(42);
   });
 
@@ -461,7 +464,7 @@ describe("POST /api/simulator", () => {
     );
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toBe("Portfolio impact simulation failed.");
+    expect(body.error).toBe("Allocation impact simulation failed.");
     expect(body.error).not.toContain("traceback");
     expect(captureSpy).toHaveBeenCalledWith(
       expect.any(Error),
@@ -488,7 +491,7 @@ describe("POST /api/simulator", () => {
     );
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toBe("Portfolio impact simulation failed.");
+    expect(body.error).toBe("Allocation impact simulation failed.");
     expect(body.error).not.toContain("sharpe_delta");
     expect(body.error).not.toContain("contract violation");
   });
@@ -555,7 +558,9 @@ describe("POST /api/simulator", () => {
     );
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body.error).toBe("Portfolio not found");
+    // 201-21 / D-04: hand-typed full sentence; the TC7b forwarded upstream text
+    // above is Python copy and keeps its old spelling.
+    expect(body.error).toBe("Allocation not found");
   });
 });
 
@@ -629,7 +634,9 @@ describe("[140.3-G5 / SEAMUX-03] POST /api/simulator — a machine code on every
     const { POST } = await import("./route");
     const res = await POST(req());
     expect(res.status).toBe(404);
-    expect((await res.json()).code).toBe("PORTFOLIO_NOT_FOUND");
+    const body = await res.json();
+    expect(body.code).toBe("PORTFOLIO_NOT_FOUND");
+    expect(body.error).toBe("Allocation not found");
   });
 
   it("503 breaker → CIRCUIT_OPEN, sentence + Retry-After byte-unchanged", async () => {
@@ -713,7 +720,7 @@ describe("[140.3-G5 / SEAMUX-03] POST /api/simulator — a machine code on every
   // ───────────────────────────────────────────────────────────────────────────
 
   /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
-  const SIMULATOR_TERMINAL_SENTENCE = "Portfolio impact simulation failed.";
+  const SIMULATOR_TERMINAL_SENTENCE = "Allocation impact simulation failed.";
 
   /**
    * Shaped like what M-0959/M-0963 keeps off the wire: the `parseResponse()`

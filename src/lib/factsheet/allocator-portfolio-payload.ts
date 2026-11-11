@@ -108,7 +108,7 @@ export function buildAllocatorPortfolioFactsheetPayload(
   // localStorage persistence keys per allocator rather than colliding
   // across users on a shared device.
   const strategyId = `portfolio:${meta.allocatorId}`;
-  const portfolioName = meta.portfolioName?.trim() || "My Portfolio";
+  const portfolioName = meta.portfolioName?.trim() || "My allocation";
 
   const payload = buildFactsheetPayload(
     {

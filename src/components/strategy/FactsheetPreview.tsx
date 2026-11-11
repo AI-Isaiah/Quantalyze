@@ -1,4 +1,7 @@
 import { Sparkline } from "@/components/charts/Sparkline";
+import { formatDay } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 
 /**
  * Shared factsheet hero-metric panel. Takes preformatted strings so
@@ -21,12 +24,18 @@ export interface FactsheetPreviewMetric {
   value: string;
   /** Optional qualitative suffix (e.g., "Strong", "Modest"). */
   qualifier?: string;
+  /**
+   * Phase 201 D-01 (plan 201-19): the registry key of a label that is a registered term. When
+   * set, the label renders through `Term` (definition on hover and focus) and keeps its text.
+   * Absent: the label prints plain, so every other caller is unchanged.
+   */
+  term?: TermKey;
 }
 
 export type FactsheetVerificationState = "draft" | "pending" | "verified";
 
 export interface FactsheetPreviewProps {
-  /** Strategy display name — shown in the header. Pass the codename for exploratory-tier. */
+  /** Strategy display name — shown in the header. Pass the displayed name: the strategy's name when the viewer can see it (D-09), else its codename. */
   strategyName: string;
   /** Strategy types + markets blurb, e.g. "SMA crossover · BTC, ETH". */
   subtitle?: string;
@@ -65,7 +74,7 @@ function resolveBadge(
   computedAt: string | null | undefined,
 ): VerificationBadgeStyle {
   const dateLabel = computedAt
-    ? `Data from exchange API · ${new Date(computedAt).toLocaleDateString()}`
+    ? `Data from exchange API · ${formatDay(computedAt)}`
     : null;
 
   if (state === "draft") {
@@ -134,7 +143,7 @@ export function FactsheetPreview({
         {metrics.map((m) => (
           <div key={m.label} className="px-4 py-4">
             <p className="text-fixed-10 uppercase tracking-wide text-text-muted">
-              {m.label}
+              {m.term ? <Term k={m.term}>{m.label}</Term> : m.label}
             </p>
             <p className="mt-1 font-metric text-lg font-semibold text-text-primary">
               {m.value}

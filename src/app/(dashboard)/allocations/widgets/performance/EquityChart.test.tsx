@@ -292,12 +292,13 @@ describe("EquityChart", () => {
     expect(pctLabels.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("renders an always-visible legend entry for Portfolio", () => {
+  it("renders an always-visible legend entry for the allocation (D-04: Allocation, not Portfolio)", () => {
     const { getByLabelText } = render(
       <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
     );
     const legend = getByLabelText("Series legend");
-    expect(legend.textContent).toMatch(/Portfolio/);
+    expect(legend.textContent).toMatch(/Allocation/);
+    expect(legend.textContent).not.toMatch(/Portfolio/);
   });
 
   it("renders a BTC legend entry when benchmark is supplied", () => {
@@ -1034,6 +1035,44 @@ describe("syncStampLabel — honest sync-freshness footer copy", () => {
     expect(syncStampLabel(FIVE_MIN_AGO, true, NOW)).toBe(
       "stale · last sync 5m ago",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 201 plan 14 (D-11, D-21, U-13, U-15): one date format on the chart.
+// A hover tooltip and a sync title read through the helper, in UTC, so the
+// string means one instant on the server and in every browser. Axis ticks read
+// MONTH_ABBR (their own exempt category) and so print the same month names.
+// ---------------------------------------------------------------------------
+describe("EquityChart — plan 201-14 helper dates (U-13, U-15)", () => {
+  it("U-15: the hover tooltip prints the helper day, `Jan 16, 2024`, not a locale string", () => {
+    const pts: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 30; i++) {
+      pts.push({ date: d.toISOString().slice(0, 10), value: 1.0 + i * 0.001 });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container } = render(
+      <EquityChart equityDailyPoints={pts} initialPeriod="ALL" />,
+    );
+    const svg = container.querySelector("svg");
+    fireEvent.mouseMove(svg!, { clientX: (15 / 29) * 960 + 8, clientY: 40 });
+    expect(container.textContent).toMatch(/[A-Z][a-z]{2} \d{1,2}, 2024/);
+    expect(container.textContent).not.toMatch(/\d{1,2}\/\d{1,2}\/\d{4}/);
+  });
+
+  it("U-13: the last-sync title names the instant in UTC, `Oct 9, 2026, 23:59 UTC`, on a near-midnight value", () => {
+    const { container } = render(
+      <EquityChart
+        equityDailyPoints={makeSeries(60)}
+        lastSyncAt="2026-10-09T23:59:00.000Z"
+        initialPeriod="ALL"
+      />,
+    );
+    const titled = Array.from(container.querySelectorAll("[title]")).map((e) =>
+      e.getAttribute("title"),
+    );
+    expect(titled).toContain("Oct 9, 2026, 23:59 UTC");
   });
 });
 

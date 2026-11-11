@@ -55,6 +55,17 @@ describe("Sidebar workspace — allocator view", () => {
     expect(screen.queryByText("Connections")).toBeNull();
   });
 
+  it("keeps the desktop names (My allocation, Strategies) and has no 'Bridge' entry (Phase 201 D-07)", () => {
+    // D-07 renamed only the MOBILE nav's third item (it opens the Scenario tab).
+    // The desktop sidebar was already canonical and never carried a "Bridge"
+    // entry; Bridge is a different feature (the intro workflow), so no nav
+    // label may borrow its name.
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.queryByText("Bridge")).toBeNull();
+  });
+
   it("does NOT render 'Scenarios' as a top-level entry (it's a tab inside My allocation)", () => {
     // 2026-05-20: Scenarios used to be a top-level sidebar entry pointing
     // at /scenarios, but the actual surface is a tab inside My allocation

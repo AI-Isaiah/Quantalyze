@@ -590,11 +590,11 @@ describe("the book-wide lines name their whole-history scope and one action, in 
   it.each([
     [
       "allocation.book.awaiting-derivation",
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
+      "Your allocation's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
     ],
     [
       "allocation.book.derivation-rejected",
-      "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
+      "The latest rebuild of your allocation's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
     ],
     [
       "allocation.book.shared-account-history-truncated",
@@ -641,7 +641,7 @@ describe("the book-wide lines name their whole-history scope and one action, in 
     expect(entry.action).toBeNull();
     expect(entry.shippedAction).toBe("Reload the page to try again.");
     expect(text("allocation.book.history-read-failed")).toBe(
-      "We could not load your book's history just now. Reload the page to try again.",
+      "We could not load your allocation's history just now. Reload the page to try again.",
     );
   });
 
@@ -725,16 +725,16 @@ describe("scenario.per-source-fallback names the keys with no per-key series and
 
   it("several keys: the UI-SPEC target sentence, key labels first", () => {
     expect(text([KEY_A, KEY_B])).toBe(
-      `${KEY_A} and ${KEY_B} have no per-key return series yet, so this projection blends your whole book. Per-source toggles appear after their next sync.`,
+      `${KEY_A} and ${KEY_B} have no per-key return series yet, so this projection blends your whole allocation. Per-source toggles appear after their next sync.`,
     );
   });
 
   it("one key reads 'has'; no resolvable label reads about the connected keys and still ends on the wait", () => {
     expect(text([KEY_A])).toBe(
-      `${KEY_A} has no per-key return series yet, so this projection blends your whole book. Per-source toggles appear after their next sync.`,
+      `${KEY_A} has no per-key return series yet, so this projection blends your whole allocation. Per-source toggles appear after their next sync.`,
     );
     expect(text([])).toBe(
-      "Your connected keys have no per-key return series yet, so this projection blends your whole book. Per-source toggles appear after their next sync.",
+      "Your connected keys have no per-key return series yet, so this projection blends your whole allocation. Per-source toggles appear after their next sync.",
     );
   });
 });

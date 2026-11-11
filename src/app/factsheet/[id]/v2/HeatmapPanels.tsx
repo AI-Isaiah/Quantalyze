@@ -10,6 +10,13 @@ import { useTapPin } from "@/hooks/useTapPin";
 import type { DailyHeatmapYear, MonthlyReturnsRow } from "@/lib/factsheet/types";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { fitBaselineY } from "@/lib/chart-ticks";
+import { MONTH_ABBR, formatDay, formatMonth } from "@/lib/utils";
+
+/** A monthly cell's tooltip date, `Mar 2026` (Phase 201 D-11), not the machine key `2026-03`.
+ *  `i` is the zero-based month column. */
+function monthCellLabel(year: number | string, i: number): string {
+  return formatMonth(`${year}-${String(i + 1).padStart(2, "0")}`);
+}
 
 /** Resolve the heatmap mixing trio from the central palette. */
 function useHeatmapBase(): { base: string; accent: string; negative: string } {
@@ -33,8 +40,6 @@ function useHeatmapBase(): { base: string; accent: string; negative: string } {
  * negative-red negatives, neutral surface around zero). Magnitude clamps to the
  * 5th/95th percentile so a single outlier day doesn't wash the scale.
  */
-
-const MONTH_HEADERS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
 /* -------------------- Monthly heatmap -------------------- */
 
@@ -83,7 +88,7 @@ export function MonthlyReturnsHeatmap({ fullHistoryWithheld }: { fullHistoryWith
         <table className="w-full border-separate" style={{ borderSpacing: 2, fontFamily: "var(--font-mono)" }}>
           <colgroup>
             <col style={{ width: 44 }} />
-            {MONTH_HEADERS.map(m => <col key={m} />)}
+            {MONTH_ABBR.map(m => <col key={m} />)}
             <col style={{ width: 56 }} />
           </colgroup>
           <thead>
@@ -91,7 +96,7 @@ export function MonthlyReturnsHeatmap({ fullHistoryWithheld }: { fullHistoryWith
               <th className="text-left py-1 px-1 text-micro uppercase tracking-[0.18em] font-medium text-text-muted">
                 Year
               </th>
-              {MONTH_HEADERS.map(m => (
+              {MONTH_ABBR.map(m => (
                 <th
                   key={m}
                   className="text-center py-1 text-micro uppercase tracking-[0.12em] font-medium text-text-muted"
@@ -151,7 +156,7 @@ function MonthlyRow({
                 height: 22,
                 fontWeight: 500,
               }}
-              title={`${row.year}-${String(i + 1).padStart(2, "0")}: no data`}
+              title={`${monthCellLabel(row.year, i)}: no data`}
             >
               ·
             </td>
@@ -168,7 +173,7 @@ function MonthlyRow({
                 height: 22,
                 fontWeight: 500,
               }}
-              title={`${row.year}-${String(i + 1).padStart(2, "0")}: withheld`}
+              title={`${monthCellLabel(row.year, i)}: withheld`}
             >
               —
             </td>
@@ -185,7 +190,7 @@ function MonthlyRow({
               height: 22,
               fontWeight: 500,
             }}
-            title={`${row.year}-${String(i + 1).padStart(2, "0")}: ${formatPct(v, 2)}`}
+            title={`${monthCellLabel(row.year, i)}: ${formatPct(v, 2)}`}
           >
             {formatPctShort(v)}
           </td>
@@ -291,7 +296,7 @@ function YearCalendar({ year, maxAbs, palette }: { year: DailyHeatmapYear; maxAb
         if (dt.getUTCFullYear() !== parseInt(year.year, 10)) continue;
         const m = dt.getUTCMonth();
         if (m !== lastMonth) {
-          out.push({ col: w, label: MONTH_HEADERS[m] });
+          out.push({ col: w, label: MONTH_ABBR[m] });
           lastMonth = m;
           break;
         }
@@ -625,7 +630,7 @@ function YearCalendarCanvas({
               boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
             }}
           >
-            <span className="text-text-muted mr-1">{reveal.iso}</span>
+            <span className="text-text-muted mr-1">{formatDay(reveal.iso)}</span>
             <span style={{ ...toneStyle(reveal.v, 2), fontWeight: 600 }}>
               {formatPct(reveal.v, 2)}
             </span>

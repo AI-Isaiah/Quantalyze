@@ -156,3 +156,37 @@ export function withPublishedOrOwner<Q>(query: Q, authUserId: string): Q {
     `status.eq.published,user_id.eq.${authUserId}`,
   );
 }
+
+/**
+ * Phase 201 / D-17 — the ROW form of `withPublishedOrOwner`: is this strategy
+ * visible to this viewer in discovery?
+ *
+ * Discovery's list is `getStrategiesByCategory`, filtered by `withPublishedOnly`
+ * (status published); the owner-inclusive browse route is filtered by
+ * `withPublishedOrOwner`, which mirrors the `strategies_read` RLS policy
+ * (`status = 'published' OR user_id = auth.uid()`). So "visible in discovery to
+ * this viewer" is: the row is published, or it is the viewer's own.
+ *
+ * The query helpers above decide which rows a read RETURNS. This decides, for a
+ * row already in hand, whether the viewer may see it NAMED. It exists because
+ * two raw-row paths (the My allocation builder, the bridge outcome embeds) read
+ * `strategies` through the service-role client, which bypasses RLS: a name-first
+ * resolver alone would print an unpublished strategy's name through them
+ * (197 D-02: an unpublished strategy is never named).
+ *
+ * Fails CLOSED. A row that was selected without `status` / `user_id`, a null or
+ * empty viewer id, and a null owner all read as NOT visible, so a query that
+ * forgets a column can only withhold a name, never reveal one. An empty or
+ * missing viewer id never matches an owner (`null === null` is not ownership).
+ */
+export function isDiscoveryVisible(
+  row: { status?: string | null; user_id?: string | null },
+  viewerId: string | null | undefined,
+): boolean {
+  if (row.status === "published") return true;
+  return (
+    typeof viewerId === "string" &&
+    viewerId.length > 0 &&
+    row.user_id === viewerId
+  );
+}

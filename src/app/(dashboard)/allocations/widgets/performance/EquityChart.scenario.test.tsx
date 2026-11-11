@@ -1,5 +1,6 @@
-import { render, fireEvent, within } from "@testing-library/react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { act, render, fireEvent, within, screen } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { termDefinition } from "@/lib/glossary";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import { EquityChart, toWealth } from "./EquityChart";
@@ -628,5 +629,78 @@ describe("PARITY-03 — legacy EquityChart projection guard mirrors DrawdownChar
     expect(queryByText(/Equity data warming up/i)).toBeNull();
     // The chart svg renders (role="img", aria-label="Equity chart" on the well).
     expect(within(container).getAllByLabelText("Equity chart").length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// Phase 201 plan 34 (F-04, F-08, U-27): the equity chart's "Scenario" mode toggle is a control, so the
+// registry term is explained by Form B, a Tooltip around the existing radio with the `scenario`
+// definition. The chart also prints the overlay label as a DOM legend item, which is a static label,
+// so there the word carries Form A. The arms fail when the Tooltip goes (no bubble), when the bubble
+// is not wired to the radio itself, when another mode picks up a bubble, when a mode switch breaks,
+// when the legend loses its Term, and when a Term lands inside the radio.
+describe("EquityChart — the Scenario toggle and legend explain scenario (U-27)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  function renderWithScenario() {
+    return render(
+      <EquityChart
+        equityDailyPoints={makeWealthSeries(60)}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
+        initialPeriod="ALL"
+      />,
+    );
+  }
+
+  it("focusing the Scenario radio shows the registry definition after 150 ms and the radio describes itself by it", () => {
+    renderWithScenario();
+    const radio = screen.getByRole("radio", { name: "Scenario" });
+    fireEvent.focus(radio);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const bubble = screen.getByRole("tooltip");
+    expect(bubble.textContent).toBe(termDefinition("scenario"));
+    expect(radio).toHaveAttribute("aria-describedby", bubble.id);
+  });
+
+  it("Live and Both show no definition, and the radio stays one control with its text unchanged", () => {
+    renderWithScenario();
+    for (const name of ["Live", "Both"]) {
+      fireEvent.focus(screen.getByRole("radio", { name }));
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    }
+    const radio = screen.getByRole("radio", { name: "Scenario" });
+    expect(radio.textContent).toBe("Scenario");
+    expect(radio.querySelector("[tabindex], a, button, [data-term]")).toBeNull();
+  });
+
+  it("switching modes through the wrapped radio still works", () => {
+    renderWithScenario();
+    fireEvent.click(screen.getByRole("radio", { name: "Scenario" }));
+    expect(screen.getByRole("radio", { name: "Scenario" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Both" })).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(screen.getByRole("radio", { name: "Live" }));
+    expect(screen.getByRole("radio", { name: "Live" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("the legend prints the overlay label with Form A on the word Scenario, outside any control", () => {
+    renderWithScenario();
+    const legend = screen.getByLabelText("Series legend");
+    const term = legend.querySelector('[data-term="scenario"]');
+    expect(term).not.toBeNull();
+    expect(term?.textContent).toBe("Scenario");
+    expect(term?.closest("button, a, [role=radio]")).toBeNull();
+    // Nothing else in the legend gained a Term.
+    expect(legend.querySelectorAll("[data-term]")).toHaveLength(1);
   });
 });

@@ -49,7 +49,7 @@ type PositionRow = MyAllocationDashboardPayload["strategies"][number];
 export interface StrategyRow {
   /** Stable React key — the strategy id. Dialogs use this; there is no second id field. */
   id: string;
-  /** Display name: alias wins, then the OWNER's real name, then tier-aware `displayStrategyName`. */
+  /** Display name: alias wins, then the OWNER's real name, then `displayStrategyName` (the payload's redacted name, then the codename). */
   strategy: string;
   /**
    * Managing org/team. `organization_name` is already server-redacted (null
@@ -222,17 +222,25 @@ export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] 
     // owner already knows their own name + codename". Note the SCOPE: the
     // carve-out is gated on marked-set membership, and the marked set is
     // `user_id`-filtered server-side, so it is reachable ONLY for the viewer's
-    // own strategies. A third-party exploratory row still redacts to its
-    // codename; pairing a real name with a codename would defeat pseudonymity.
+    // own strategies. A third-party row the viewer cannot see still redacts to
+    // its codename (Phase 201 D-09, D-17: a published strategy prints its name
+    // first, through the resolver below); pairing a real name with a codename
+    // would defeat pseudonymity.
     const strategy =
       ps.alias?.trim() ||
       owned?.name ||
-      displayStrategyName({
-        id: s.id,
-        name: s.name,
-        codename: s.codename ?? null,
-        disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
-      });
+      // Phase 201 / D-09, D-17: `{ visible: true }` because the My allocation
+      // payload already nulls `name` for a strategy the viewer cannot see
+      // (`redactedName` in `queries.ts`); the upstream redaction is the control.
+      displayStrategyName(
+        {
+          id: s.id,
+          name: s.name,
+          codename: s.codename ?? null,
+          disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
+        },
+        { visible: true },
+      );
 
     // organization_name is already null for non-institutional rows
     // (server-side redaction); codename is the safe public pseudonym.
@@ -270,12 +278,17 @@ export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] 
       // position row this strategy does not have.
       strategy:
         s.name ||
-        displayStrategyName({
-          id: s.id,
-          name: s.name,
-          codename: s.codename ?? null,
-          disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
-        }),
+        // Phase 201 / D-09, D-17: `{ visible: true }` - `getOwnCapitalStrategies`
+        // returns the viewer's own strategies, so the viewer may read the name.
+        displayStrategyName(
+          {
+            id: s.id,
+            name: s.name,
+            codename: s.codename ?? null,
+            disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
+          },
+          { visible: true },
+        ),
       // Review round 3 E3 — this comment used to promise an honest `—`, but the
       // line has always read `codename`, and every finalized strategy is
       // assigned one, so the Manager cell renders the codename. The CODENAME is

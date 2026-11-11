@@ -14,13 +14,17 @@
  *     Pitfall-1 acceptance gate that proves the external StrategyTable role=tabpanel
  *     wiring survives the Radix port.
  *
+ * Phase 201 (U-10, D-07): the discovery tab is navigation, and navigation names are
+ * sentence case, so the tab reads "My watchlist" (was "My Watchlist"). The e2e anchor
+ * (e2e/discovery-watchlist.spec.ts) names the same string.
+ *
  * Behaviour contract (per 13-01-PLAN.md Task 1 + 13-UI-SPEC.md State Matrix):
  *   1. Renders <div role="tablist" aria-label="Strategy list scope">.
  *   2. Both tabs have role="tab"; aria-selected="true" only on the active one.
  *   3. Watchlist tab carries a count badge when count > 0; hidden when count === 0.
- *   4. Arrow-Right on All → focus moves to My Watchlist (and activates it).
- *   5. Arrow-Left on My Watchlist → focus moves to All (and activates it).
- *   6. Click "My Watchlist" → calls onScopeChange("watchlist").
+ *   4. Arrow-Right on All → focus moves to My watchlist (and activates it).
+ *   5. Arrow-Left on My watchlist → focus moves to All (and activates it).
+ *   6. Click "My watchlist" → calls onScopeChange("watchlist").
  *   7. No wrap-around: ArrowLeft on All / ArrowRight on Watchlist are no-ops.
  *   8. idBase-derived trigger ids + aria-controls=panelId preserved (Pitfall 1).
  */
@@ -46,15 +50,15 @@ describe("WatchlistTabs", () => {
   it("marks the All tab aria-selected when scope='all'", () => {
     render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     expect(allTab.getAttribute("aria-selected")).toBe("true");
     expect(watchTab.getAttribute("aria-selected")).toBe("false");
   });
 
-  it("marks the My Watchlist tab aria-selected when scope='watchlist'", () => {
+  it("marks the My watchlist tab aria-selected when scope='watchlist'", () => {
     render(<WatchlistTabs scope="watchlist" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     expect(allTab.getAttribute("aria-selected")).toBe("false");
     expect(watchTab.getAttribute("aria-selected")).toBe("true");
   });
@@ -119,7 +123,7 @@ describe("WatchlistTabs", () => {
     const user = userEvent.setup();
     render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     await user.tab();
     expect(allTab).toHaveFocus();
     expect(allTab.getAttribute("tabindex")).toBe("0");
@@ -130,31 +134,31 @@ describe("WatchlistTabs", () => {
     const user = userEvent.setup();
     render(<WatchlistTabs scope="watchlist" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     await user.tab();
     expect(watchTab).toHaveFocus();
     expect(allTab.getAttribute("tabindex")).toBe("-1");
     expect(watchTab.getAttribute("tabindex")).toBe("0");
   });
 
-  it("ArrowRight on focused All tab moves focus to My Watchlist AND activates the scope (automatic activation)", async () => {
+  it("ArrowRight on focused All tab moves focus to My watchlist AND activates the scope (automatic activation)", async () => {
     const user = userEvent.setup();
     const onScopeChange = vi.fn();
     render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     allTab.focus();
     await user.keyboard("{ArrowRight}");
     expect(document.activeElement).toBe(watchTab);
     expect(onScopeChange).toHaveBeenCalledWith("watchlist");
   });
 
-  it("ArrowLeft on focused My Watchlist tab moves focus to All AND activates the scope (automatic activation)", async () => {
+  it("ArrowLeft on focused My watchlist tab moves focus to All AND activates the scope (automatic activation)", async () => {
     const user = userEvent.setup();
     const onScopeChange = vi.fn();
     render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     watchTab.focus();
     await user.keyboard("{ArrowLeft}");
     expect(document.activeElement).toBe(allTab);
@@ -172,22 +176,22 @@ describe("WatchlistTabs", () => {
     expect(onScopeChange).not.toHaveBeenCalled();
   });
 
-  it("ArrowRight on focused My Watchlist tab is a no-op (no wrap-around, no scope change)", async () => {
+  it("ArrowRight on focused My watchlist tab is a no-op (no wrap-around, no scope change)", async () => {
     const user = userEvent.setup();
     const onScopeChange = vi.fn();
     render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     watchTab.focus();
     await user.keyboard("{ArrowRight}");
     expect(document.activeElement).toBe(watchTab);
     expect(onScopeChange).not.toHaveBeenCalled();
   });
 
-  it("clicking My Watchlist calls onScopeChange('watchlist')", async () => {
+  it("clicking My watchlist calls onScopeChange('watchlist')", async () => {
     const user = userEvent.setup();
     const onScopeChange = vi.fn();
     render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
-    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    await user.click(screen.getByRole("tab", { name: /My watchlist/ }));
     expect(onScopeChange).toHaveBeenCalledWith("watchlist");
   });
 
@@ -204,19 +208,19 @@ describe("WatchlistTabs", () => {
     const onScopeChange = vi.fn();
     render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={2} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     watchTab.focus();
     await user.keyboard("{Home}");
     expect(document.activeElement).toBe(allTab);
     expect(onScopeChange).toHaveBeenCalledWith("all");
   });
 
-  it("End key jumps focus to My Watchlist tab and activates 'watchlist' scope", async () => {
+  it("End key jumps focus to My watchlist tab and activates 'watchlist' scope", async () => {
     const user = userEvent.setup();
     const onScopeChange = vi.fn();
     render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={2} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     allTab.focus();
     await user.keyboard("{End}");
     expect(document.activeElement).toBe(watchTab);
@@ -230,7 +234,7 @@ describe("WatchlistTabs", () => {
   it("tab DOM ids derive from idBase prop, not hardcoded strings (multi-instance safety)", () => {
     render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="abc123" panelId="panel-x" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     expect(allTab.id).toBe("abc123-tab-all");
     expect(watchTab.id).toBe("abc123-tab-watchlist");
   });
@@ -238,7 +242,7 @@ describe("WatchlistTabs", () => {
   it("aria-controls on each tab points at the panelId prop", () => {
     render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="my-custom-panel" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
-    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = screen.getByRole("tab", { name: /My watchlist/ });
     expect(allTab.getAttribute("aria-controls")).toBe("my-custom-panel");
     expect(watchTab.getAttribute("aria-controls")).toBe("my-custom-panel");
   });

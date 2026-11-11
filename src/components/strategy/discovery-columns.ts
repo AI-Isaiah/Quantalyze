@@ -15,7 +15,7 @@
  * drawdown, and ABSENT for Strategy, Track, AUM and the sparklines: none of those is a rate (U-05).
  */
 
-import { SIX_MONTH_WINDOW_DAYS } from "@/lib/factsheet/compute";
+import { termDefinition, type TermKey } from "@/lib/glossary";
 
 /** Keys of the columns that sort. `track` is a table-only key: it is never a filter-bar `SortKey`. */
 export type SortableDiscoveryKey =
@@ -41,7 +41,13 @@ interface DiscoveryColumnBase {
   annualized?: boolean;
   /** The sort button's accessible name (UI-SPEC "Accessible name" column, verbatim). */
   accessibleName: string;
-  /** The definition shown on hover or keyboard focus; absent for Strategy. */
+  /**
+   * The registry key this column's label names; absent for Strategy. Phase 201 plan 16 (D-01):
+   * the tooltip below is read from the glossary registry through this key, so the discovery
+   * header has no second definition source.
+   */
+  term?: TermKey;
+  /** The definition shown on hover or keyboard focus (`termDefinition(term, "discovery")`); absent for Strategy. */
   tooltip?: string;
   align?: "right";
 }
@@ -50,8 +56,8 @@ export type DiscoveryColumn =
   | (DiscoveryColumnBase & { key: SortableDiscoveryKey; sortable: true })
   | (DiscoveryColumnBase & { key: PlainDiscoveryKey; sortable: false });
 
-/** The UI-SPEC clause every full-record figure's tooltip ends on. */
-const FULL_RECORD_BASIS = "From the first return day, or from the last break in the record.";
+/** A column's tooltip, read from the registry (D-01). */
+const discoveryTooltip = (key: TermKey): string => termDefinition(key, "discovery");
 
 export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
   { key: "name", label: "Strategy", accessibleName: "Strategy", sortable: true },
@@ -60,7 +66,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     label: "Track",
     period: "months of record",
     accessibleName: "Track, months of record",
-    tooltip: "How long the record is, in whole months. Counted over the days its returns cover.",
+    term: "track",
+    tooltip: discoveryTooltip("track"),
     align: "right",
     sortable: true,
   },
@@ -70,7 +77,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     period: "full record",
     annualized: false,
     accessibleName: "Return, full record, not annualized",
-    tooltip: `Total return over the whole record. ${FULL_RECORD_BASIS}`,
+    term: "return_full",
+    tooltip: discoveryTooltip("return_full"),
     align: "right",
     sortable: true,
   },
@@ -80,7 +88,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     period: "full record",
     annualized: true,
     accessibleName: "CAGR, full record, annualized",
-    tooltip: `Compound annual growth rate over the whole record. ${FULL_RECORD_BASIS}`,
+    term: "cagr",
+    tooltip: discoveryTooltip("cagr"),
     align: "right",
     sortable: true,
   },
@@ -90,7 +99,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     period: "full record",
     annualized: true,
     accessibleName: "Sharpe, full record, annualized",
-    tooltip: `Annualized return divided by annualized volatility over the whole record. ${FULL_RECORD_BASIS}`,
+    term: "sharpe",
+    tooltip: discoveryTooltip("sharpe"),
     align: "right",
     sortable: true,
   },
@@ -100,7 +110,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     period: "full record",
     annualized: false,
     accessibleName: "Max DD, full record, not annualized",
-    tooltip: `The largest fall from a peak over the whole record. ${FULL_RECORD_BASIS}`,
+    term: "max_drawdown",
+    tooltip: discoveryTooltip("max_drawdown"),
     align: "right",
     sortable: true,
   },
@@ -110,7 +121,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     period: "full record",
     annualized: true,
     accessibleName: "Volatility, full record, annualized",
-    tooltip: "How much daily returns vary, annualized over the whole record. It is never negative, so it carries no sign.",
+    term: "volatility",
+    tooltip: discoveryTooltip("volatility"),
     align: "right",
     sortable: true,
   },
@@ -120,7 +132,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     period: "last 6 months",
     annualized: false,
     accessibleName: "Return, last 6 months, not annualized",
-    tooltip: `Return over the ${SIX_MONTH_WINDOW_DAYS} calendar days that end on the record's last day.`,
+    term: "return_6m",
+    tooltip: discoveryTooltip("return_6m"),
     align: "right",
     sortable: true,
   },
@@ -129,7 +142,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     label: "AUM",
     period: "stated by manager",
     accessibleName: "AUM, stated by manager",
-    tooltip: "Assets under management as the manager states it. It is not measured from the exchange.",
+    term: "aum",
+    tooltip: discoveryTooltip("aum"),
     align: "right",
     sortable: true,
   },
@@ -138,7 +152,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     label: "Return curve",
     period: "full record",
     accessibleName: "Return curve, full record",
-    tooltip: "Cumulative return over the whole record.",
+    term: "return_curve",
+    tooltip: discoveryTooltip("return_curve"),
     sortable: false,
   },
   {
@@ -146,7 +161,8 @@ export const DISCOVERY_COLUMNS: readonly DiscoveryColumn[] = [
     label: "Underwater",
     period: "full record",
     accessibleName: "Underwater, full record",
-    tooltip: "Distance below the previous peak over the whole record.",
+    term: "underwater",
+    tooltip: discoveryTooltip("underwater"),
     sortable: false,
   },
 ];

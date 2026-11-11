@@ -8,6 +8,8 @@ import { useTapPin } from "@/hooks/useTapPin";
 import { decimalExponent, fitBaselineY, pow10 } from "@/lib/chart-ticks";
 import { pct, pctSigned, ratio } from "./format";
 import type { FigureState } from "@/lib/figure-gate";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -304,11 +306,11 @@ export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld
       <header className="mb-2 border-b border-text pb-1">
         {selected ? (
           <div className="flex items-baseline gap-2">
-            <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+            <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary"><Term k="calmar">Calmar</Term> by Year</h3>
             <ScopeNote text={FULL_HISTORY_NOTE} />
           </div>
         ) : (
-          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary"><Term k="calmar">Calmar</Term> by Year</h3>
         )}
       </header>
       <table className="w-full text-micro">
@@ -316,8 +318,8 @@ export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld
           <tr className="border-b border-border/60">
             <th className="py-1 pr-2 text-left font-mono text-micro uppercase tracking-wider text-text-muted">Year</th>
             <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Return</th>
-            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Max DD</th>
-            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Calmar</th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted"><Term k="max_drawdown">Max DD</Term></th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted"><Term k="calmar">Calmar</Term></th>
             <th className="py-1 pl-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Days</th>
           </tr>
         </thead>
@@ -426,7 +428,7 @@ export function BootstrapCIPanel({
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Bootstrap 95% Confidence</h3>
+        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary"><Term k="bootstrap_ci">Bootstrap 95% Confidence</Term></h3>
       </header>
       {lowN && variant === "full" && (
         // Phase 194 (D-13, A-194-D13-01): a short-record warning, so it is muted with no glyph;
@@ -447,9 +449,9 @@ export function BootstrapCIPanel({
           </tr>
         </thead>
         <tbody>
-          <Row label="Sharpe" point={variant === "full" ? ratio(b.sharpe.point) : null} ci={`[${ratio(b.sharpe.lo)}, ${ratio(b.sharpe.hi)}]`} />
-          <Row label="Sortino" point={variant === "full" ? ratio(b.sortino.point) : null} ci={`[${ratio(b.sortino.lo)}, ${ratio(b.sortino.hi)}]`} />
-          <Row label="Max Drawdown" point={variant === "full" ? pct(b.max_dd.point, 2) : null} ci={`[${pct(b.max_dd.lo, 2)}, ${pct(b.max_dd.hi, 2)}]`} />
+          <Row label="Sharpe" term="sharpe" point={variant === "full" ? ratio(b.sharpe.point) : null} ci={`[${ratio(b.sharpe.lo)}, ${ratio(b.sharpe.hi)}]`} />
+          <Row label="Sortino" term="sortino" point={variant === "full" ? ratio(b.sortino.point) : null} ci={`[${ratio(b.sortino.lo)}, ${ratio(b.sortino.hi)}]`} />
+          <Row label="Max Drawdown" term="max_drawdown" point={variant === "full" ? pct(b.max_dd.point, 2) : null} ci={`[${pct(b.max_dd.lo, 2)}, ${pct(b.max_dd.hi, 2)}]`} />
         </tbody>
       </table>
 
@@ -459,11 +461,11 @@ export function BootstrapCIPanel({
       <div className="mt-3 flex flex-col gap-2.5" data-testid="bootstrap-sparklines">
         {!annualizedWithheld && (
           <>
-            <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => ratio(n)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
-            <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => ratio(n)} nValid={sortinoUsed} nTotal={b.n_resamples} />
+            <BootHist title="Sharpe" term="sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => ratio(n)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
+            <BootHist title="Sortino" term="sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => ratio(n)} nValid={sortinoUsed} nTotal={b.n_resamples} />
           </>
         )}
-        <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => pct(n)} />
+        <BootHist title="Max DD" term="max_drawdown" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => pct(n)} />
       </div>
 
       {!withheld && (
@@ -478,6 +480,7 @@ export function BootstrapCIPanel({
 
 function BootHist({
   title,
+  term,
   hist,
   point,
   ci,
@@ -487,6 +490,8 @@ function BootHist({
   accent,
 }: {
   title: string;
+  /** The registry term the title names; the title renders through `Term` (Phase 201 plan 09, D-01). */
+  term?: TermKey;
   hist: { lo: number; hi: number; bins: number[] };
   point: number;
   ci: [number, number];
@@ -522,7 +527,7 @@ function BootHist({
       return (
         <div>
           <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
-            <span>{title}</span>
+            <span>{term ? <Term k={term}>{title}</Term> : title}</span>
             <span className="normal-case tracking-normal text-text-muted">—</span>
           </div>
           <div className="h-[36px]" aria-hidden="true" />
@@ -532,7 +537,7 @@ function BootHist({
     return (
       <div>
         <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
-          <span>{title}</span>
+          <span>{term ? <Term k={term}>{title}</Term> : title}</span>
           <span className="normal-case tracking-normal text-text-muted">no variance</span>
         </div>
         <div className="h-[36px] flex items-center justify-center text-micro text-text-muted italic">
@@ -544,7 +549,7 @@ function BootHist({
   return (
     <div>
       <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
-        <span>{title}</span>
+        <span>{term ? <Term k={term}>{title}</Term> : title}</span>
         <span className="normal-case tracking-normal">
           <span className="text-text-2">{show(ci[0])}</span> ·{" "}
           <span className="text-text-primary font-semibold">{show(point)}</span> ·{" "}
@@ -607,10 +612,10 @@ function degenerateNote(title: string, nValid: number | undefined, nTotal: numbe
 }
 
 /** `point` is `null` for the CI-only (document) variant: no Point cell is rendered. */
-function Row({ label, point, ci }: { label: string; point: string | null; ci: string }) {
+function Row({ label, term, point, ci }: { label: string; term?: TermKey; point: string | null; ci: string }) {
   return (
     <tr className="border-b border-border/30 last:border-0">
-      <td className="py-1 pr-2 text-text-2">{label}</td>
+      <td className="py-1 pr-2 text-text-2">{term ? <Term k={term}>{label}</Term> : label}</td>
       {point !== null && <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{point}</td>}
       <td className="py-1 pl-2 text-right font-mono tabular-nums text-text-2">{ci}</td>
     </tr>

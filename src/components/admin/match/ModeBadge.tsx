@@ -14,7 +14,7 @@ export function ModeBadge({ mode }: { mode: "personalized" | "screening" }) {
         Screening
       </span>
       <p className="mt-1 text-micro text-text-muted text-right">
-        No portfolio context — score reflects preference fit only.
+        No allocation context — score reflects mandate fit only.
       </p>
     </div>
   );

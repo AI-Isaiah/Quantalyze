@@ -1,7 +1,7 @@
 import type { JointMetrics } from "./types";
 import { mean } from "@/lib/portfolio-math-utils";
 import { beta as betaOf, dispersion, pearson, sharpe } from "@/lib/return-stats";
-import { formatAbsoluteDate } from "@/lib/utils";
+import { formatDay } from "@/lib/utils";
 
 /**
  * 169.4 review SFH MEDIUM-4: the fewest PAIRED strategy/benchmark
@@ -18,7 +18,7 @@ export const MIN_PAIRED_OBSERVATIONS = 10;
 /**
  * 169.4 review round 2 (SFH-R2 MEDIUM-2): the ONE sentence naming why the
  * joint statistics are withheld below `MIN_PAIRED_OBSERVATIONS`. The
- * Allocations alpha/beta widget ("this book") and the factsheet KPI strip and
+ * Allocations alpha/beta widget ("this allocation") and the factsheet KPI strip and
  * §IV ("this record") both print it, so one screen gives one cause.
  *
  * Phase 169.1 (D-85): inside a selected zoom range the strip and §IV print the
@@ -28,20 +28,20 @@ export const MIN_PAIRED_OBSERVATIONS = 10;
  *
  * Phase 170.6 (D-08, founder 2026-10-13): `comparatorThrough` is the comparator's last
  * price day (an ISO date) when its prices end BEFORE the strategy's window does; the
- * sentence then ends " {comparator} prices end {Mon D}." so a reader sees why so few
+ * sentence then ends " {comparator} prices end {Mon D, YYYY}." so a reader sees why so few
  * days pair. Null or omitted (full coverage, or a caller with no comparator end date:
  * the Allocations book, the strategy page's BTC reason) leaves the sentence unchanged.
  */
 export function pairedFloorReason(
   comparator: string,
   paired: number,
-  noun: "book" | "record" | "range",
+  noun: "allocation" | "record" | "range",
   floor: number = MIN_PAIRED_OBSERVATIONS,
   comparatorThrough: string | null = null,
 ): string {
   const subject = noun === "range" ? "the selected range" : `this ${noun}`;
   const base = `Alpha and beta need at least ${floor} days paired with ${comparator}; ${subject} has ${paired}.`;
-  return comparatorThrough == null ? base : `${base} ${comparator} prices end ${formatAbsoluteDate(comparatorThrough)}.`;
+  return comparatorThrough == null ? base : `${base} ${comparator} prices end ${formatDay(comparatorThrough)}.`;
 }
 
 /**

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { formatDay } from "@/lib/utils";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
 
 interface IntroRequest {
@@ -149,7 +150,11 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
                 <p className="text-xs text-text-muted mt-0.5">
                   Interested in{" "}
                   <span className="font-medium text-text-secondary">
-                    {displayStrategyName(r.strategies)}
+                    {/* D-17: `{ visible: true }` because the viewer owns every row. The
+                        /strategies page loader filters the intro-request read by
+                        `.in("strategy_id", strategyIds)`, and those ids come from a
+                        `user_id`-filtered read of the viewer's own strategies. */}
+                    {displayStrategyName(r.strategies, { visible: true })}
                   </span>
                 </p>
                 {r.message && (
@@ -163,7 +168,7 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
                   </p>
                 )}
                 <p className="text-fixed-10 text-text-muted mt-1">
-                  {new Date(r.created_at).toLocaleDateString()}
+                  {formatDay(r.created_at)}
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">

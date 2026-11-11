@@ -41,6 +41,7 @@ vi.mock("recharts", async () => {
 });
 
 import { HoldingsTabPanel } from "./HoldingsTabPanel";
+import { formatDay } from "@/lib/utils";
 import { EMPTY_EXPOSURE, type ExposureSectionData } from "./lib/exposure-props";
 import type { NetExposurePoint, AllocationPoint } from "@/lib/portfolio-exposure";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
@@ -158,7 +159,7 @@ describe("HoldingsTabPanel — Exposure section (99-04 wiring)", () => {
     const card = exposureCard(section);
     expect(card.querySelector("table")).toBeNull();
     expect(card.querySelector("tr")).toBeNull();
-    expect(section.textContent).toContain("as of 2026-10-03");
+    expect(section.textContent).toContain("as of Oct 3, 2026");
     expect(section.textContent).not.toContain("No current positions.");
   });
 
@@ -224,8 +225,12 @@ describe("HoldingsTabPanel — Exposure section (99-04 wiring)", () => {
     expect(section.textContent).toContain("Net exposure over time");
     expect(section.textContent).toContain("Allocation over time");
     // As-of stamps: snapshot asof + the last point of each series.
-    expect(section.textContent).toContain("as of 2024-03-01");
-    expect(section.textContent).toContain(`as of ${isoDay(4)}`);
+    expect(section.textContent).toContain("as of Mar 1, 2024");
+    // F-11 / D-11 (review R3-01 item 2, plan 201-36): the chart captions read
+    // the helper's day form, the same one ExposureByClass prints, so the
+    // section carries no `as of` followed by a raw YYYY-MM-DD day.
+    expect(section.textContent).toContain(`as of ${formatDay(isoDay(4))}`);
+    expect(section.textContent).not.toMatch(/as of \d{4}-\d{2}-\d{2}/);
   });
 
   it("renders a >1000-row-backed volume shape without throwing (Phase-98 carry-forward)", () => {

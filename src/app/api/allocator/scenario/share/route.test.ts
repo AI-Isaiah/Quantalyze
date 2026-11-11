@@ -376,7 +376,10 @@ describe("scenario/share generate route — static security guards", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { code?: string; message?: string };
     expect(body.code).toBe("book_only_draft");
-    expect(body.message).toMatch(/private book/i);
+    // 201-21 / D-04: hand-typed full sentence; `book_only_draft` above is a machine code and stays.
+    expect(body.message).toBe(
+      "This scenario is built only on your private allocation sources, which are never shown on a public link. Add catalog strategies to share a computable projection.",
+    );
     // No token minted, no RPC write.
     expect(rpcSpy).not.toHaveBeenCalled();
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");

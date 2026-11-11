@@ -107,7 +107,7 @@
       {
         "surface": "overview",
         "index": 2,
-        "label": "Cumulative Returns: My Portfolio",
+        "label": "Cumulative Returns: My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -170,7 +170,7 @@
       {
         "surface": "overview",
         "index": 3,
-        "label": "Cumulative Returns vs Benchmark: My Portfolio",
+        "label": "Cumulative Returns vs Benchmark: My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -245,7 +245,7 @@
       {
         "surface": "overview",
         "index": 4,
-        "label": "Daily Returns: My Portfolio",
+        "label": "Daily Returns: My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -326,7 +326,7 @@
       {
         "surface": "overview",
         "index": 5,
-        "label": "Rolling Volatility (30d): My Portfolio",
+        "label": "Rolling Volatility (30d): My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -419,7 +419,7 @@
       {
         "surface": "overview",
         "index": 6,
-        "label": "Rolling Sharpe (30d): My Portfolio",
+        "label": "Rolling Sharpe (30d): My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -512,7 +512,7 @@
       {
         "surface": "overview",
         "index": 7,
-        "label": "Rolling Sortino (30d): My Portfolio",
+        "label": "Rolling Sortino (30d): My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -587,7 +587,7 @@
       {
         "surface": "overview",
         "index": 8,
-        "label": "Rolling β (90d) vs Comparator: My Portfolio",
+        "label": "Rolling β (90d) vs Comparator: My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -668,7 +668,7 @@
       {
         "surface": "overview",
         "index": 9,
-        "label": "Worst 10 Drawdown Periods: My Portfolio",
+        "label": "Worst 10 Drawdown Periods: My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -737,7 +737,7 @@
       {
         "surface": "overview",
         "index": 10,
-        "label": "Underwater Chart for Accumulated Capital: My Portfolio",
+        "label": "Underwater Chart for Accumulated Capital: My allocation",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -800,7 +800,7 @@
       {
         "surface": "overview",
         "index": 11,
-        "label": "Distribution of daily returns: My Portfolio",
+        "label": "Distribution of daily returns: My allocation",
         "emitter": null,
         "width": 400,
         "texts": [
@@ -871,7 +871,7 @@
         "width": 400,
         "texts": [
           {
-            "text": "My Portfolio",
+            "text": "My allocation",
             "anchor": "start",
             "x": 74,
             "y": 12
@@ -997,7 +997,7 @@
         "width": 644,
         "texts": [
           {
-            "text": "My Portfolio",
+            "text": "My allocati…",
             "anchor": "middle",
             "x": 154,
             "y": 20
@@ -1033,7 +1033,7 @@
             "y": 20
           },
           {
-            "text": "My Portfolio",
+            "text": "My allocati…",
             "anchor": "end",
             "x": 102,
             "y": 50

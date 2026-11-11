@@ -80,4 +80,68 @@ describe("CorrelationMatrix — D-01 name misses", () => {
     expect(screen.getAllByText("Alpha").length).toBeGreaterThanOrEqual(2);
     expect(screen.getAllByText("Unnamed strategy").length).toBeGreaterThanOrEqual(2);
   });
+
+  // Phase 201 / D-09, D-17 - name before codename. The My allocation payload
+  // nulls `name` upstream for a strategy the viewer cannot see (`redactedName`
+  // in `queries.ts`), so a null name here is the redaction and the codename is
+  // the right label for it.
+  describe("name before codename (D-09, D-17)", () => {
+    const strat = (
+      id: string,
+      s: { name?: string | null; codename?: string | null },
+      extra: Record<string, unknown> = {},
+    ) => ({
+      strategy_id: id,
+      ...extra,
+      strategy: { ...s, strategy_analytics: { daily_returns: returns(id === ID_A ? 1 : 2) } },
+    });
+
+    const computed = (a: { name?: string | null; codename?: string | null }) =>
+      render(
+        <CorrelationMatrix
+          data={{ strategies: [strat(ID_A, a), strat(ID_B, { name: "Other", codename: "Other-1" })] }}
+          {...base}
+        />,
+      );
+
+    const precomputed = (a: { name?: string | null; codename?: string | null }) =>
+      render(
+        <CorrelationMatrix
+          data={{
+            strategies: [
+              { strategy_id: ID_A, strategy: a },
+              { strategy_id: ID_B, strategy: { name: "Other", codename: "Other-1" } },
+            ],
+            analytics: {
+              correlation_matrix: {
+                [ID_A]: { [ID_A]: 1, [ID_B]: 0.5 },
+                [ID_B]: { [ID_A]: 0.5, [ID_B]: 1 },
+              },
+            },
+          }}
+          {...base}
+        />,
+      );
+
+    for (const [label, renderIt] of [
+      ["computed path", computed],
+      ["precomputed path", precomputed],
+    ] as const) {
+      it(`${label}: a readable name beats the codename`, () => {
+        const { container } = renderIt({ name: "Fibonacci Ghost", codename: "Ghost-7" });
+        expect(screen.getAllByText("Fibonacci Ghost").length).toBeGreaterThanOrEqual(2);
+        expect(container.innerHTML).not.toContain("Ghost-7");
+      });
+
+      it(`${label}: a name redacted upstream (null) reads as the codename`, () => {
+        renderIt({ name: null, codename: "Ghost-7" });
+        expect(screen.getAllByText("Ghost-7").length).toBeGreaterThanOrEqual(2);
+      });
+
+      it(`${label}: a whitespace-only name falls through to the codename`, () => {
+        renderIt({ name: "   ", codename: "Ghost-7" });
+        expect(screen.getAllByText("Ghost-7").length).toBeGreaterThanOrEqual(2);
+      });
+    }
+  });
 });

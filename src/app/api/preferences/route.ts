@@ -76,7 +76,7 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
     // propagation failure), and network errors without parsing raw error objects.
     const code = (err as { code?: string | null })?.code ?? null;
     console.error("[api/preferences] GET error:", { code, message: (err as Error)?.message ?? String(err) });
-    return NextResponse.json({ error: "Failed to load preferences" }, { status: 500, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Failed to load mandate" }, { status: 500, headers: NO_STORE_HEADERS });
   }
 }
 

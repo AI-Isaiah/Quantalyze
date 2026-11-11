@@ -1,5 +1,6 @@
-import { render, fireEvent } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, fireEvent, screen } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { termDefinition } from "@/lib/glossary";
 import { cloneElement, createElement, type ReactElement } from "react";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
@@ -405,5 +406,66 @@ describe("DrawdownChart — scenarioDailyPoints overlay (10-04)", () => {
       // would be a production fix, out of scope for a test-only change.
       expect(curves.length).toBeGreaterThanOrEqual(2);
     });
+  });
+});
+
+// Phase 201 plan 34 (F-04, F-08, U-27): the drawdown chart's "Scenario" mode toggle is a control, so the
+// registry term is explained by Form B, a Tooltip around the existing radio with the `scenario`
+// definition. Fails when the Tooltip goes, when the bubble is not wired to the radio itself, when
+// another mode picks up a bubble, when a mode switch breaks, and when a Term lands inside the radio.
+describe("DrawdownChart — the Scenario toggle explains scenario (U-27)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  function renderWithScenario() {
+    return render(
+      <DrawdownChart
+        {...baseProps}
+        data={EMPTY_DATA}
+        equityDailyPoints={LIVE_EQUITY}
+        scenarioDailyPoints={SCENARIO_EQUITY}
+      />,
+    );
+  }
+
+  it("focusing the Scenario radio shows the registry definition after 150 ms and the radio describes itself by it", () => {
+    renderWithScenario();
+    const radio = screen.getByRole("radio", { name: "Scenario" });
+    fireEvent.focus(radio);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const bubble = screen.getByRole("tooltip");
+    expect(bubble.textContent).toBe(termDefinition("scenario"));
+    expect(radio).toHaveAttribute("aria-describedby", bubble.id);
+  });
+
+  it("Live and Both show no definition, and the radio stays one control with its text unchanged", () => {
+    renderWithScenario();
+    for (const name of ["Live", "Both"]) {
+      fireEvent.focus(screen.getByRole("radio", { name }));
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    }
+    const radio = screen.getByRole("radio", { name: "Scenario" });
+    expect(radio.textContent).toBe("Scenario");
+    expect(radio.querySelector("[tabindex], a, button, [data-term]")).toBeNull();
+  });
+
+  it("switching modes through the wrapped radio still works", () => {
+    renderWithScenario();
+    fireEvent.click(screen.getByRole("radio", { name: "Scenario" }));
+    expect(screen.getByRole("radio", { name: "Scenario" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Both" })).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(screen.getByRole("radio", { name: "Live" }));
+    expect(screen.getByRole("radio", { name: "Live" })).toHaveAttribute("aria-checked", "true");
   });
 });

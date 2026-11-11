@@ -1,3 +1,5 @@
+import { formatDay } from "@/lib/utils";
+
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
 export const metadata = {
@@ -13,7 +15,7 @@ export default function RiskDisclaimerPage() {
   return (
     <>
       <h1 className="font-display text-page-title text-text-primary">Risk Disclaimer</h1>
-      <p className="text-caption text-text-muted">Last updated: 2026-04-07</p>
+      <p className="text-caption text-text-muted">Last updated: {formatDay("2026-04-07")}</p>
 
       <h2>Past performance is not indicative of future results</h2>
       <p>
@@ -57,7 +59,7 @@ export default function RiskDisclaimerPage() {
         {PLATFORM_NAME} does <strong>not</strong> hold client assets. Strategy
         performance is monitored via <strong>read-only</strong> exchange APIs.
         Managers retain full custody of their assets and are solely responsible
-        for their operational security. {PLATFORM_NAME} does <strong>not</strong>
+        for their operational security. {PLATFORM_NAME} does <strong>not</strong>{" "}
         operate a fund, act as a broker-dealer, or execute trades on your
         behalf.
       </p>

@@ -1,5 +1,6 @@
 import type { ComputedMetrics } from "@/lib/scenario";
 import type { CoverageWindow } from "@/lib/scenario-window";
+import { formatDay } from "@/lib/utils";
 
 /**
  * BlendHeader (COVERAGE-03) — the phase's PRIMARY visual anchor.
@@ -17,9 +18,13 @@ import type { CoverageWindow } from "@/lib/scenario-window";
  *           zero-weight-mass empty shape) → "No weight on the selected
  *           strategies — not a blend"
  *   N === 1 → "1 strategy — not a blend"
- *   else    → "Mean of {N} strategies · {effStart}–{effEnd}"
+ *   else    → "Mean of {N} strategies · {formatDay(effStart)} – {formatDay(effEnd)}"
  *             (+ " · window truncated from full range" when the effective window
  *              is narrower than the union of the selected set)
+ *   F-11 (founder 2026-11-11) and UI-SPEC Interaction contract 5 supersede the
+ *   58-UI-SPEC verbatim range for the dates only: each bound prints through
+ *   `formatDay` (`Jun 15, 2022`), joined by space, en dash, space. The
+ *   `truncated` compare below stays on the engine's ISO bounds.
  *
  * Non-blocking live region: this is a polite status region, never an assertive
  * one. Numbers + dates render in Geist Mono (`font-mono tabular-nums`) per
@@ -74,9 +79,9 @@ export function BlendHeader({ metrics, unionSpan }: BlendHeaderProps) {
         <span>
           Mean of{" "}
           <span className="font-mono tabular-nums">{n}</span> strategies ·{" "}
-          <span className="font-mono tabular-nums">{effStart}</span>
-          {"–"}
-          <span className="font-mono tabular-nums">{effEnd}</span>
+          <span className="font-mono tabular-nums">{formatDay(effStart)}</span>
+          {" – "}
+          <span className="font-mono tabular-nums">{formatDay(effEnd)}</span>
           {truncated ? (
             <span className="text-fixed-11 font-normal text-text-muted">
               {" · window truncated from full range"}

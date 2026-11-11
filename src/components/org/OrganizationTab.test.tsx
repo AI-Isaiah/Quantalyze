@@ -17,15 +17,22 @@ vi.mock("next/navigation", () => ({
 }));
 
 let memberRows: unknown[] = [];
+let inviteRows: unknown[] = [];
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
-    from: () => ({
-      select: () => Promise.resolve({ data: memberRows }),
+    from: (table: string) => ({
+      select: () =>
+        table === "organization_invites"
+          ? { eq: () => ({ eq: () => Promise.resolve({ data: inviteRows }) }) }
+          : Promise.resolve({ data: memberRows }),
     }),
     auth: {
-      // No email: the component skips the invite query entirely.
-      getUser: () => Promise.resolve({ data: { user: null } }),
+      // No email unless the case holds invites: the component then skips the invite query.
+      getUser: () =>
+        Promise.resolve({
+          data: { user: inviteRows.length ? { email: "allocator@example.test" } : null },
+        }),
     },
   }),
 }));
@@ -40,6 +47,7 @@ function member(id: string, name: string, role: string) {
 
 beforeEach(() => {
   memberRows = [];
+  inviteRows = [];
 });
 
 describe("OrganizationTab — member role label (170.1.2-08)", () => {
@@ -61,5 +69,15 @@ describe("OrganizationTab — member role label (170.1.2-08)", () => {
     render(<OrganizationTab />);
     expect(await screen.findByText("Unknown role")).toBeTruthy();
     expect(screen.queryByText("superuser")).toBeNull();
+  });
+});
+
+describe("OrganizationTab: invitation date (Phase 201 D-11)", () => {
+  it("prints the invite date through formatDay, not the browser locale", async () => {
+    inviteRows = [
+      { id: "i1", status: "pending", created_at: "2026-10-09T08:00:00Z", organizations: { name: "Acme Fund" } },
+    ];
+    render(<OrganizationTab />);
+    expect(await screen.findByText("Invited Oct 9, 2026")).toBeTruthy();
   });
 });

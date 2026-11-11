@@ -205,7 +205,7 @@ export const POST = withAllocatorAuth(
           error: "Nothing shareable",
           code: "book_only_draft",
           message:
-            "This scenario is built only on your private book sources, which are never shown on a public link. Add catalog strategies to share a computable projection.",
+            "This scenario is built only on your private allocation sources, which are never shown on a public link. Add catalog strategies to share a computable projection.",
         },
         { status: 409, headers: NO_STORE_HEADERS },
       );

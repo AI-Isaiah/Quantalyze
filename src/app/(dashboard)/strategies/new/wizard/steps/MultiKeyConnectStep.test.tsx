@@ -274,6 +274,9 @@ describe("[ONB-01] MultiKeyConnectStep — per-key validate", () => {
 
   it("POSTs creds to composite/add-key and collapses to a verified summary on success", async () => {
     const { fetchSpy, panel1 } = enterMultiAndFillKey2();
+    // F-11 / D-11 (plan 201-38): the editing input is an `<input type="date">`,
+    // exempt from the day helper. Its value stays YYYY-MM-DD.
+    expect(within(panel1).getByTestId("key-1-window-start")).toHaveValue("2024-01-01");
     fireEvent.click(within(panel1).getByTestId("key-1-validate"));
 
     await waitFor(() =>
@@ -293,7 +296,11 @@ describe("[ONB-01] MultiKeyConnectStep — per-key validate", () => {
     const summary = screen.getByTestId("key-1-summary");
     expect(summary).toHaveTextContent("Binance key");
     expect(summary).toHaveTextContent("Binance");
-    expect(summary).toHaveTextContent("2024-01-01");
+    // F-11 / D-11 / R3-01 item 5 / plan 201-38: the collapsed summary prints its
+    // window through `formatDay`; an open window reads "live" (T-201-54), which
+    // stays OUTSIDE the helper call because formatDay(null) is an em dash.
+    expect(summary).toHaveTextContent("Jan 1, 2024 – live");
+    expect(summary.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     const pill = within(summary).getByTestId("trust-tier-label");
     expect(pill).toHaveAttribute("data-trust-tier", "api_verified");
   });
@@ -861,10 +868,20 @@ describe("[WIZ-02] MultiKeyConnectStep — State B rehydration (back-nav)", () =
 
     // Two panels, both collapsed to their verified summary (status "validated").
     expect(screen.getByTestId("key-0-summary")).toHaveTextContent("Binance");
-    expect(screen.getByTestId("key-0-summary")).toHaveTextContent("2025-08-03");
+    // F-11 / plan 201-38: a closed window reads `<start> – <end>` in the
+    // helper's form, with no ISO day.
+    expect(screen.getByTestId("key-0-summary")).toHaveTextContent(
+      "Aug 3, 2025 – Sep 27, 2025",
+    );
+    expect(screen.getByTestId("key-0-summary").textContent).not.toMatch(
+      /\d{4}-\d{2}-\d{2}/,
+    );
     expect(screen.getByTestId("key-1-summary")).toHaveTextContent("Deribit");
     // The live-window member shows "live" (window_end null → stillLive).
-    expect(screen.getByTestId("key-1-summary")).toHaveTextContent("live");
+    expect(screen.getByTestId("key-1-summary")).toHaveTextContent("Sep 27, 2025 – live");
+    expect(screen.getByTestId("key-1-summary").textContent).not.toMatch(
+      /\d{4}-\d{2}-\d{2}/,
+    );
     // Verified pill on each panel.
     expect(
       within(screen.getByTestId("key-0-summary")).getByTestId("trust-tier-label"),

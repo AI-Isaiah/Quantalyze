@@ -1,7 +1,9 @@
 "use client";
 
 import { ResponsiveTable } from "@/components/ResponsiveTable";
-import { formatPercent, formatNumber, cn } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
+import { formatPercent, formatNumber, formatDay, cn } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
@@ -122,6 +124,8 @@ function gateColumn(c: ScenarioColumn): GatedColumn {
 
 interface MetricRow {
   label: string;
+  /** Registry key (D-01, D-02): present for a registered term, absent for a plain label. */
+  term?: TermKey;
   key: keyof ComputedMetrics;
   format: "percent" | "number";
   higherIsBetter: boolean;
@@ -145,11 +149,11 @@ interface MetricRow {
  */
 const METRICS: MetricRow[] = [
   { label: "Cumulative Return", key: "twr", format: "percent", higherIsBetter: true },
-  { label: "CAGR", key: "cagr", format: "percent", higherIsBetter: true },
-  { label: "Sharpe", key: "sharpe", format: "number", higherIsBetter: true },
-  { label: "Sortino", key: "sortino", format: "number", higherIsBetter: true },
-  { label: "Max Drawdown", key: "max_drawdown", format: "percent", higherIsBetter: true },
-  { label: "Volatility", key: "volatility", format: "percent", higherIsBetter: false },
+  { label: "CAGR", term: "cagr", key: "cagr", format: "percent", higherIsBetter: true },
+  { label: "Sharpe", term: "sharpe", key: "sharpe", format: "number", higherIsBetter: true },
+  { label: "Sortino", term: "sortino", key: "sortino", format: "number", higherIsBetter: true },
+  { label: "Max Drawdown", term: "max_drawdown", key: "max_drawdown", format: "percent", higherIsBetter: true },
+  { label: "Volatility", term: "volatility", key: "volatility", format: "percent", higherIsBetter: false },
 ];
 
 /**
@@ -237,7 +241,7 @@ export function ScenarioCompareTable({
   if (allColumns.length < 2) {
     return (
       <p className="text-sm text-text-muted text-center py-8">
-        Select 2 or more scenarios (or the live book) to compare.
+        Select 2 or more scenarios (or the live allocation) to compare.
       </p>
     );
   }
@@ -298,7 +302,13 @@ export function ScenarioCompareTable({
               const hasComparison = realValueCount(allColumns, metric.key) >= 2;
               return (
                 <tr key={metric.key} className="border-b border-border/50 hover:bg-page/50">
-                  <td className="px-4 py-2.5 text-xs text-text-muted">{metric.label}</td>
+                  <td className="px-4 py-2.5 text-xs text-text-muted">
+                    {metric.term ? (
+                      <Term k={metric.term}>{metric.label}</Term>
+                    ) : (
+                      metric.label
+                    )}
+                  </td>
                   {allColumns.map((c, i) => {
                     const val = getValue(c.metrics, metric.key);
                     const isWinner = winnerIdx === i && hasComparison;
@@ -366,15 +376,17 @@ export function ScenarioCompareTable({
                       // use Geist Mono") at the text-fixed-11 tier, and stays
                       // the quiet text-text-muted honesty caption — never
                       // accent/warning/winner. Omitted when either bound is null
-                      // (degenerate) — show just the day-count stamp.
+                      // (degenerate) — show just the day-count stamp. F-11 /
+                      // UI-SPEC Interaction contract 5: each bound prints through
+                      // formatDay, joined by space, en dash, space.
                       <span className="text-fixed-11 font-metric text-text-muted">
                         {methodologyLine(c.metrics.n)}
                         {c.metrics.effective_start && c.metrics.effective_end ? (
                           <>
                             {" · "}
-                            {c.metrics.effective_start}
-                            {"–"}
-                            {c.metrics.effective_end}
+                            {formatDay(c.metrics.effective_start)}
+                            {" – "}
+                            {formatDay(c.metrics.effective_end)}
                           </>
                         ) : null}
                       </span>

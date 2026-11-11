@@ -13,7 +13,7 @@ import { ConstituentMandatePanel } from "./MandatePanels";
  * Load-bearing proofs:
  *   1. SCENARIO + mixed constituents: one with strategy_types + markets renders
  *      its chips + a leverage chip; an empty constituent renders the
- *      per-constituent honest-empty "no mandate metadata"; NO fabricated aggregate.
+ *      per-constituent honest-empty "no type or market listed"; NO fabricated aggregate.
  *   2. ALL-EMPTY constituents: the whole-panel honest-empty copy renders AND the
  *      "Mandate" title still renders (the absence is informative).
  *   3. NON-SCENARIO (no scenarioMandate): the panel returns null — the real route
@@ -97,7 +97,7 @@ describe("ConstituentMandatePanel — per-constituent chips (PEER-04)", () => {
     const { getByText, getAllByText, queryByText } = renderPanel(csvPayload(mandate));
 
     // The "Mandate" title renders.
-    expect(getByText("Mandate")).toBeTruthy();
+    expect(getByText("Constituents")).toBeTruthy();
 
     // Populated constituent: name + type chip + market chips + leverage chip.
     expect(getByText("Trend Alpha")).toBeTruthy();
@@ -119,14 +119,14 @@ describe("ConstituentMandatePanel — per-constituent chips (PEER-04)", () => {
 
     // Empty constituent: name + per-constituent honest-empty copy (NO leverage chip).
     expect(getByText("Empty Strat")).toBeTruthy();
-    expect(getByText("no mandate metadata")).toBeTruthy();
+    expect(getByText("no type or market listed")).toBeTruthy();
     // The empty constituent does NOT render a 1× leverage chip (it is treated as
     // empty when types+markets are both absent).
     expect(queryByText("1×")).toBeNull();
 
     // NO fabricated aggregate — only the two named constituents appear.
     // (Exactly one honest-empty sub-block for the single empty constituent.)
-    expect(getAllByText("no mandate metadata").length).toBe(1);
+    expect(getAllByText("no type or market listed").length).toBe(1);
   });
 
   it("GUARD-01: a populated constituent at exactly 1× suppresses the leverage chip; any other value (<1× or >1×) renders it", () => {
@@ -173,14 +173,14 @@ describe("ConstituentMandatePanel — per-constituent chips (PEER-04)", () => {
     const { getByText, queryByText } = renderPanel(csvPayload(mandate));
 
     // Title still present — the absence is informative.
-    expect(getByText("Mandate")).toBeTruthy();
+    expect(getByText("Constituents")).toBeTruthy();
     // Whole-panel honest-empty copy.
     expect(
-      getByText("No mandate metadata available for this blend's constituents."),
+      getByText("No strategy type or market is listed for this blend's constituents."),
     ).toBeTruthy();
     // The per-constituent sub-blocks do NOT render in the whole-panel-empty path.
     expect(queryByText("A")).toBeNull();
-    expect(queryByText("no mandate metadata")).toBeNull();
+    expect(queryByText("no type or market listed")).toBeNull();
   });
 
   it("non-scenario (no scenarioMandate): the panel returns null (real route byte-identical)", () => {

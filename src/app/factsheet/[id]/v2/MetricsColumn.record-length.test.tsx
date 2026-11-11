@@ -9,6 +9,11 @@
  * record it does not: 166 observations spread over 1.20 calendar years printed
  * "(0.45y)" in the warning while "Years Observed" two panels up said 1.20. An
  * allocator reading the page could not tell which was the record's length.
+ *
+ * Plan 201-35 (F-11, D-11, review R3-01 item 1): the Terms dates (Live since, the
+ * observation-window clause, Observation start and end) print through `formatDay`
+ * ("Jan 1, 2024"), so the arms below pin the helper's literal form and assert no
+ * YYYY-MM-DD day is printed. The window still describes the selected basis (169 WR-03).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useEffect } from "react";
@@ -17,6 +22,7 @@ import { buildFactsheetPayload, deriveSeriesBundle, fixtureBenchmarkPrices } fro
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
 import { formatRecordLength } from "@/lib/factsheet/record-length";
+import { formatDay } from "@/lib/utils";
 
 import { FactsheetProvider } from "./factsheet-context";
 import { BasisProvider, useBasis, type Basis } from "./basis-context";
@@ -336,8 +342,13 @@ describe("the record length follows the selected basis at every site (WR-03)", (
     expect(thesisText).not.toContain(cashLength.text);
     expect(termValue(container, "Sample size")).toBe(mtmLength.text);
     // The Terms window beside Sample size describes the same record.
-    expect(termValue(container, "Observation start")).toBe(mtm.strategyMetrics.start);
-    expect(termValue(container, "Observation end")).toBe(mtm.strategyMetrics.end);
+    expect(termValue(container, "Observation start")).toBe(formatDay(mtm.strategyMetrics.start));
+    expect(termValue(container, "Observation end")).toBe(formatDay(mtm.strategyMetrics.end));
+    // ...and it is the MTM window, not the cash one (169 WR-03 still holds).
+    expect(termValue(container, "Observation start")).not.toBe(formatDay(payload.strategyMetrics.start));
+    // F-11: one day format, no ISO day.
+    expect(termValue(container, "Observation start")).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(termValue(container, "Observation end")).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 
   it("under cash the same payload states the cash record at every site (control)", () => {
@@ -373,17 +384,18 @@ describe("the record length follows the selected basis at every site (WR-03)", (
     expect(mtm.strategyMetrics.start).toBe("2024-08-08");
 
     const { container } = renderOn(live, "mark_to_market");
-    expect(liveSinceText(container)).toBe("2024-01-01");
+    expect(liveSinceText(container)).toBe("Jan 1, 2024");
     expect(liveSinceText(container)).not.toContain("backtest");
     // The length fields still describe the selected (MTM) record.
-    expect(termValue(container, "Observation start")).toBe("2024-08-08");
+    expect(termValue(container, "Observation start")).toBe("Aug 8, 2024");
   });
 
   it("R2-1: the same strategy makes no backtest claim under cash (control, unchanged)", () => {
     const { payload } = mtmPayload();
     const live = { ...payload, startDate: "2024-01-01" } as FactsheetPayload;
     const { container } = renderOn(live, "cash_settlement");
-    expect(liveSinceText(container)).toBe("2024-01-01");
+    expect(liveSinceText(container)).toBe("Jan 1, 2024");
+    expect(liveSinceText(container)).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 
   it("R2-1: a live date before the cash record flags the backtest on both bases, naming the cash start", () => {
@@ -392,8 +404,9 @@ describe("the record length follows the selected basis at every site (WR-03)", (
     for (const basis of ["cash_settlement", "mark_to_market"] as const) {
       const { container, unmount } = renderOn(early, basis);
       expect(liveSinceText(container), basis).toContain(
-        "observation window starts 2024-01-01; portion before live date is backtest",
+        "observation window starts Jan 1, 2024; portion before live date is backtest",
       );
+      expect(liveSinceText(container), basis).not.toMatch(/\d{4}-\d{2}-\d{2}/);
       unmount();
     }
   });

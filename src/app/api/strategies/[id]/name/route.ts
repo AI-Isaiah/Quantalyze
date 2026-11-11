@@ -89,13 +89,17 @@ import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
  * so it does not read as an oversight: this route is the FIRST path putting
  * free text into `strategies.name`, which until now was constrained to the
  * STRATEGY_NAMES allow-list by the wizard (finalize-wizard/route.ts:365). The
- * public pseudonymity contract (C-0112) is nevertheless byte-untouched — public
- * surfaces render the codename per the disclosure rules in browse/route.ts and
- * displayStrategyName regardless of what `name` holds, and the proper name is
- * the OWNER's own label. D-17 restricts the rename to private/draft rows, and
- * publication is admin-gated by guard_strategies_publish_transition
- * (20260716131000), so an admin reviews the name before it can ever become
- * public. That is the accepted residual risk (T-150-15), not an unnoticed hole.
+ * public pseudonymity contract (C-0112) was, in Phase 150, byte-untouched by
+ * it. Phase 201 D-09 and D-17 (founder decision "Real name everywhere") changed
+ * what that contract means for the name: the owner-set name is what every
+ * viewer who can see the strategy reads (a published strategy, or the owner's
+ * own), through `displayStrategyName`, and a viewer who cannot see the strategy
+ * never reads it. The "D-17" cited elsewhere in this file is Phase 150's own
+ * (the private/draft gate), not Phase 201's. That gate restricts the rename to
+ * private/draft rows, and publication is admin-gated by
+ * guard_strategies_publish_transition (20260716131000), so an admin reviews the
+ * name before it can ever become public. That review stays the control, and it
+ * is the accepted residual risk (T-150-15), not an unnoticed hole.
  *
  * D-18: this route writes `strategies.name` and nothing else. The codename /
  * disclosure redaction contract is not read, not written, and not widened here.

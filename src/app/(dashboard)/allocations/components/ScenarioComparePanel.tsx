@@ -49,7 +49,7 @@ import type { SavedScenarioListRow } from "./SavedScenariosList";
 export interface ScenarioComparePanelProps {
   /** The selected SAVED rows (each with its persisted draft JSONB). */
   selectedRows: SavedScenarioListRow[];
-  /** Whether the "Live book" pseudo-row is part of the comparison. */
+  /** Whether the "Live allocation" pseudo-row is part of the comparison. */
   includeLiveBook: boolean;
   /**
    * The SSR-lifted live payload slice the compare engine needs — the SAME
@@ -364,13 +364,13 @@ export function ScenarioComparePanel({
         liveInputs,
         { liveBook: true },
       );
-      return { name: "Live book", metrics, periodsPerYear };
+      return { name: "Live allocation", metrics, periodsPerYear };
     } catch (err) {
       warnAudit("scenario_compare_compute_failed", {
         id: "__live_book__",
         error: String(err),
       });
-      return { name: "Live book", metrics: NULL_METRICS };
+      return { name: "Live allocation", metrics: NULL_METRICS };
     }
   }, [includeLiveBook, liveInputs, payload]);
 

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
+import { formatDay } from "@/lib/utils";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import {
   CSV_SUBMIT_STEP_HEADINGS,
@@ -139,7 +140,7 @@ const CSV_SUBMIT_STEP_HEADINGS_CONTRIBUTION = {
   title: "Review and add",
   subtitle:
     "This strategy is added privately to your account. Only you can see it — it is never published or submitted for review.",
-  submitCtaLabel: "Add to my strategies",
+  submitCtaLabel: "Add to Strategies",
   submittingCtaLabel: "Adding…",
 } as const;
 
@@ -713,7 +714,7 @@ export function CsvSubmitStep({
           />
           <SummaryRow
             label="Date range"
-            value={`${preview.date_range[0]} → ${preview.date_range[1]}`}
+            value={`${formatDay(preview.date_range[0])} – ${formatDay(preview.date_range[1])}`}
           />
           <SummaryRow
             label="Columns detected"
@@ -861,7 +862,7 @@ export function CsvSubmitStep({
             not a tinted panel: nothing is wrong, nothing is pending, and a
             second bordered box beside the summary card would out-weigh the
             fact it carries. The CTA is named verbatim from `headings` so the
-            contribution mount ("Add to my strategies") reads correctly too. */}
+            contribution mount ("Add to Strategies") reads correctly too. */}
         {sessionRestarted && (
           <p
             data-testid="wizard-csv-session-restarted"

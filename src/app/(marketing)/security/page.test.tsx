@@ -5,11 +5,11 @@
  *   - S4a (D-06) SOC-2 status banner inside the Compliance Posture section
  *   - S4c (D-05) public audit-log link line inside the Data-handling-summary section
  *
- * S4b (inline egress-IP block per D-07) is DEFERRED in this plan because the
- * analytics-service does not currently advertise static egress IPs. The
- * contact-form path ("Use the contact form for the current IP set", Phase
- * 164.6.6.3.5 DOMAINONE S6) is the disclosure channel; the assertions below
- * confirm the deferral state.
+ * S4b (inline egress-IP block per D-07) is DEFERRED because the
+ * analytics-service does not currently advertise static egress IPs. Since
+ * Phase 201 PLAINWORDS plan 32 (F-12, UI-SPEC 8.1) the #egress-ips section opens
+ * with a static statement that there is no static egress IP yet; the describe
+ * "Phase 201 / F-12" below pins it. No address is listed (U-29 deferred).
  *
  * Anchor-ID preservation: every `<section aria-labelledby="…">` ID and the
  * `Section id="…"` rendered subsection ID must stay byte-identical because
@@ -18,12 +18,16 @@
  *
  * Public + indexable: `metadata.robots.index === true` is locked by
  * UI-SPEC AC #10 — `/security` is unauthenticated and meant to be crawled.
+ *
+ * Plan 201-35 (F-11, D-11, review R3-01 item 7): the "Last reviewed" line prints through the
+ * one date helper ("Nov 7, 2026."); the describe at the end of this file pins it. The page
+ * source keeps the ISO day beside the marker for security-packet-date-drift.test.ts.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import SecurityPage, { metadata } from "./page";
-import { contactHref } from "@/lib/contact";
+import { contactHref, EGRESS_IP_STATUS_LINK } from "@/lib/contact";
 
 describe("Phase 11 / S4a — D-06 SOC-2 status banner", () => {
   it("renders the verbatim SOC-2 banner copy inside the Compliance Posture section", () => {
@@ -68,24 +72,51 @@ describe("Phase 11 / S4a — D-06 SOC-2 status banner", () => {
   });
 });
 
-describe("Phase 11 / S4b — DEFERRED (egress-IP body unchanged)", () => {
-  it("keeps the contact-form path body in the #egress-ips section", () => {
+/**
+ * Phase 201 PLAINWORDS plan 32 (F-12, UI-SPEC 8.1, U-28, U-29 deferred) — the
+ * #egress-ips section tells the truth the wizard's "egress IP status" link
+ * promises: there is no static egress IP yet. Replaces the plan-05-era "S4b
+ * DEFERRED" describe, which pinned the contact-form body ("current IP set").
+ *
+ * Fails when: the statement is not the first element of the section body, its
+ * words drift, a contact-form link returns to the section, an address literal
+ * appears, or the exported href's fragment stops matching the rendered id.
+ */
+describe("Phase 201 / F-12 — #egress-ips states there is no static egress IP yet", () => {
+  const NONE_YET =
+    "We have no static egress IP yet, so there is no address to add to an IP allowlist. Create your read-only key without an IP restriction; this section will list the addresses once they exist.";
+
+  it("opens the section body with the none-yet statement, word for word", () => {
     render(<SecurityPage />);
-    // S4b deferral: Plan 11-06 originally specified an inline IP block per
-    // D-07. The analytics-service doesn't advertise static egress IPs yet,
-    // so "Use the contact form for the current IP set" remains the canonical
-    // disclosure path (the mail address it replaced is retired, D-01).
-    // Re-evaluate post static-IP infrastructure work.
     const section = document.getElementById("egress-ips") as HTMLElement;
     expect(section).toBeTruthy();
-    expect(section.textContent).toMatch(
-      /Use the contact form for the current IP set/,
-    );
-    expect(section.textContent).toMatch(/rotate infrequently/);
-    expect(section.textContent).not.toMatch(/Email/);
-    expect(
-      within(section).getByRole("link", { name: "contact form" }),
-    ).toHaveAttribute("href", contactHref({ topic: "security" }));
+    const body = section.querySelector("div") as HTMLElement;
+    const first = body.firstElementChild as HTMLElement;
+    expect(first.getAttribute("data-testid")).toBe("egress-ip-status");
+    expect(first.tagName).toBe("P");
+    expect(first.textContent).toBe(NONE_YET);
+  });
+
+  it("carries no contact-form link and no address literal in the section", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("egress-ips") as HTMLElement;
+    expect(section.querySelectorAll('a[href^="/contact"]')).toHaveLength(0);
+    expect(section.textContent).not.toMatch(/\b\d{1,3}(\.\d{1,3}){3}\b/);
+    expect(section.textContent).not.toMatch(/current IP set|rotate infrequently/);
+  });
+
+  it("keeps its heading anchor and aria-labelledby", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("egress-ips") as HTMLElement;
+    expect(section.getAttribute("aria-labelledby")).toBe("egress-ips-title");
+    expect(section.querySelector('h3 a[href="#egress-ips"]')).not.toBeNull();
+  });
+
+  it("the exported link's fragment equals the id this page renders", () => {
+    // Hand-typed id on purpose: if either side is renamed alone this goes red.
+    expect(EGRESS_IP_STATUS_LINK.href.split("#")[1]).toBe("egress-ips");
+    render(<SecurityPage />);
+    expect(document.getElementById("egress-ips")).not.toBeNull();
   });
 });
 
@@ -287,7 +318,7 @@ describe("Phase 122 — sFOX guide is founder-gated (F1, SFOX_ENABLED off)", () 
     render(<SecurityPage />);
     // The sfox-only "whitelist our static egress IP … paste the token into the
     // wizard" copy lives ONLY in the gated SubAnchor; the #egress-ips section's
-    // generic contact-form copy is unaffected. With the flag off, the sfox phrasing
+    // none-yet statement (F-12) is unaffected. With the flag off, the sfox phrasing
     // must be gone from the whole page.
     expect(document.body.textContent).not.toMatch(/paste the token into the wizard/i);
     expect(document.body.textContent).not.toMatch(/single API token/i);
@@ -434,7 +465,7 @@ describe("Phase 138 — MT5 guide is founder-gated (MT5_ENABLED off)", () => {
  * Phase 164.6.6.3.5 DOMAINONE (D-01, UI-SPEC S6) — the page names no mailbox.
  *
  * Every former address mention (posture-letter banner, Security contact
- * section, sFOX step, #egress-ips, #sync-timing) is now a link to
+ * section, sFOX step, #sync-timing) is now a link to
  * `/contact?topic=security`, and nothing on the page renders an `@` or a
  * mail-scheme link. A researcher or allocator reading this page must land on
  * the form that writes to the founder CRM, not on a mailbox nobody reads.
@@ -489,8 +520,9 @@ describe("Phase 164.6.6.3.5 — /security names no address (D-01, S6)", () => {
     const links = screen
       .getAllByRole("link")
       .filter((a) => a.getAttribute("href")?.startsWith("/contact"));
-    // posture letter, Security contact section, sFOX step, #egress-ips, #sync-timing
-    expect(links).toHaveLength(5);
+    // posture letter, Security contact section, sFOX step, #sync-timing
+    // (#egress-ips carried the fifth until F-12 replaced its body, plan 201-32)
+    expect(links).toHaveLength(4);
     for (const a of links) {
       expect(a).toHaveAttribute("href", SECURITY_HREF);
       expect(a.className).toContain("text-accent underline underline-offset-4");
@@ -676,5 +708,28 @@ describe("Phase 192 — /security retention copy states only what the code does"
     const text = squash(compliance.textContent);
     expect(text).not.toContain("retention windows");
     expect(text).toContain("encryption spec, data retention, exchange scopes");
+  });
+});
+
+describe("Phase 201 PLAINWORDS (D-04) — the description says allocation data", () => {
+  const DESCRIPTION =
+    "How Quantalyze handles your exchange API keys, allocation data, and compliance posture.";
+
+  it("the page description and its Open Graph description both read the D-04 sentence", () => {
+    expect(metadata.description).toBe(DESCRIPTION);
+    expect(metadata.openGraph?.description).toBe(DESCRIPTION);
+    expect(`${metadata.description} ${metadata.openGraph?.description}`).not.toMatch(
+      /portfolio/i,
+    );
+  });
+});
+
+describe("Plan 201-35 (F-11, D-11) — the Last reviewed day prints in the one date format", () => {
+  it("reads 'Last reviewed: Nov 7, 2026.' and carries no ISO day anywhere on the page", () => {
+    const { container } = render(<SecurityPage />);
+    const text = squash(container.textContent);
+    expect(text).toContain("Last reviewed: Nov 7, 2026.");
+    expect(text).not.toMatch(/Last reviewed: \d/);
+    expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });

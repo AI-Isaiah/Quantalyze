@@ -11,7 +11,7 @@ import { OwnBookDeltaPanel } from "./BatchDPanels";
  * Phase 42 Plan 05 (PEER-05) — the OwnBookDeltaPanel signed-delta render contract.
  *
  * Load-bearing proofs:
- *   1. SCENARIO + delta: a "vs Your Book" panel with 3 signed rows; the sign is in
+ *   1. SCENARIO + delta: a "vs Your Allocation" panel with 3 signed rows; the sign is in
  *      the TEXT (U+2212 for negative), never color-only; Sharpe/Sortino color
  *      follows sign; Max DD color is INVERTED (a positive maxDD-delta = shallower
  *      = positive token) and shows pp; the basis note discloses BOTH observation
@@ -106,7 +106,7 @@ function valueCellFor(container: HTMLElement, label: string): HTMLElement {
 }
 
 describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
-  it("scenario + delta: 'vs Your Book' with signs in text, U+2212 for negative, inverted maxDD color, dual-count basis note", () => {
+  it("scenario + delta: 'vs Your Allocation' with signs in text, U+2212 for negative, inverted maxDD color, dual-count basis note", () => {
     // positive Sharpe, negative Sortino, positive maxDD-delta (blend shallower).
     // blend_n != book_n so the disclosure must surface BOTH (the window mismatch).
     const delta: OwnBookDeltaPayload = {
@@ -119,7 +119,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     };
     const { getByText, container } = renderPanel(csvPayload(delta));
 
-    expect(getByText("vs Your Book")).toBeTruthy();
+    expect(getByText("vs Your Allocation")).toBeTruthy();
 
     // Sharpe: positive → "+0.24", positive token.
     const sharpeCell = valueCellFor(container, "Sharpe");
@@ -133,7 +133,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     expect(sortinoCell.getAttribute("style")).toContain("var(--color-negative)");
 
     // Max DD: positive delta = shallower = good → INVERTED to positive token; pp units.
-    const maxddCell = valueCellFor(container, "Max DD (blend vs book)");
+    const maxddCell = valueCellFor(container, "Max DD (blend vs allocation)");
     expect(maxddCell.textContent).toBe("+1.8pp");
     expect(maxddCell.getAttribute("style")).toContain("var(--color-positive)");
 
@@ -143,7 +143,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     // rendered &rsquo; apostrophe.
     expect(
       getByText(
-        `Delta = blend minus your live book · sample/252 basis · over each series’ own window (${(287).toLocaleString()} obs blend · ${(412).toLocaleString()} obs book)`,
+        `Delta = blend minus your live allocation · sample/252 basis · over each series’ own window (${(287).toLocaleString()} obs blend · ${(412).toLocaleString()} obs allocation)`,
       ),
     ).toBeTruthy();
   });
@@ -157,7 +157,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
       book_n: 90,
     };
     const { container } = renderPanel(csvPayload(delta));
-    const maxddCell = valueCellFor(container, "Max DD (blend vs book)");
+    const maxddCell = valueCellFor(container, "Max DD (blend vs allocation)");
     expect(maxddCell.textContent).toBe(`${U2212}2.3pp`);
     expect(maxddCell.getAttribute("style")).toContain("var(--color-negative)");
   });
@@ -177,10 +177,10 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     expect(sharpeCell.getAttribute("style") ?? "").not.toContain("--color-");
   });
 
-  it("no live book (absent carve-out): the panel renders nothing (silently absent)", () => {
+  it("no live allocation (absent carve-out): the panel renders nothing (silently absent)", () => {
     const { container, queryByText } = renderPanel(csvPayload(undefined));
     expect(container.querySelector("section")).toBeNull();
-    expect(queryByText("vs Your Book")).toBeNull();
+    expect(queryByText("vs Your Allocation")).toBeNull();
   });
 
   it("non-scenario (api arm): the panel returns null (real route byte-identical)", () => {
@@ -199,7 +199,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     };
     const { container, queryByText } = renderPanel(apiPayload);
     expect(container.querySelector("section")).toBeNull();
-    expect(queryByText("vs Your Book")).toBeNull();
+    expect(queryByText("vs Your Allocation")).toBeNull();
   });
 });
 

@@ -29,10 +29,15 @@ const captured = vi.hoisted(() => ({
   formatter: null as
     | null
     | ((v: unknown, name: unknown, item: unknown) => [string, string]),
+  labelFormatter: null as null | ((ms: unknown) => string),
 }));
 vi.mock("@/components/charts/TouchTooltip", () => ({
-  TouchTooltip: (props: { formatter: NonNullable<typeof captured.formatter> }) => {
+  TouchTooltip: (props: {
+    formatter: NonNullable<typeof captured.formatter>;
+    labelFormatter: NonNullable<typeof captured.labelFormatter>;
+  }) => {
     captured.formatter = props.formatter;
+    captured.labelFormatter = props.labelFormatter;
     return null;
   },
 }));
@@ -223,7 +228,10 @@ describe("AllocationOverTime — header + a11y", () => {
       screen.getByRole("img", { name: "Per-venue allocation weights over time" }),
     ).toBeTruthy();
     expect(screen.getByText("Allocation over time")).toBeTruthy();
-    expect(screen.getByText("as of 2026-03-02")).toBeTruthy();
+    // F-11 / D-11 (review R3-01 item 2, plan 201-36): the helper's day form,
+    // never the raw ISO day.
+    expect(screen.getByText("as of Mar 2, 2026")).toBeTruthy();
+    expect(screen.queryByText(/as of \d{4}-\d{2}-\d{2}/)).toBeNull();
   });
 });
 
@@ -240,5 +248,18 @@ describe("AllocationOverTime — tooltip formatter (170.1.2 M3)", () => {
     expect(line).toBe("40.0% ($400K)");
     expect(line).not.toContain("—");
     expect(label).toBe("OKX");
+  });
+});
+
+describe("tooltip labelFormatter - a non-finite hover value (201 R2-SFH-01)", () => {
+  // `new Date(NaN).toISOString()` throws a RangeError inside tooltip render, so
+  // a hover value that is not a finite ms must read as a dash, not crash.
+  it("formats a finite ms as a day and a non-finite one as a dash", () => {
+    render(<AllocationOverTime points={ALLOC_POINTS} gaps={[]} />);
+    const fmt = captured.labelFormatter!;
+    expect(fmt(utc("2026-03-01"))).toBe("Mar 1, 2026");
+    expect(() => fmt(undefined)).not.toThrow();
+    expect(fmt(undefined)).toBe("\u2014");
+    expect(fmt("not-a-number")).toBe("\u2014");
   });
 });

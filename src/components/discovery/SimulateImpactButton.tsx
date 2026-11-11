@@ -65,8 +65,8 @@ export function SimulateImpactButton({
 
   const disabled = !portfolioId;
   const tooltip = disabled
-    ? "Create a portfolio first to see the impact of adding this strategy."
-    : "See portfolio impact on Sharpe, MaxDD, correlation.";
+    ? "Start your allocation first to see the impact of adding this strategy."
+    : "See the impact on your allocation's Sharpe, Max DD and correlation.";
   const panelId = `portfolio-impact-panel-${candidateStrategyId}`;
 
   return (
@@ -78,7 +78,7 @@ export function SimulateImpactButton({
           disabled={disabled}
           aria-expanded={open}
           aria-controls={open ? panelId : undefined}
-          aria-label={`Simulate impact of adding ${candidateName} to your portfolio`}
+          aria-label={`Simulate impact of adding ${candidateName} to your allocation`}
           className="rounded-md border px-2.5 py-1 text-xs font-medium transition-colors duration-150 ease-out focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
           style={{
             borderColor: "#1B6B5A",

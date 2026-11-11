@@ -5,7 +5,7 @@ export function EmptyWatchlist() {
         Your watchlist is empty
       </p>
       <p className="text-sm text-text-secondary">
-        Star strategies from the All tab to track them here.
+        Use the star on a strategy in the All tab to add it to your watchlist.
       </p>
     </div>
   );

@@ -358,7 +358,7 @@ describe("ROUTE-05 selection: the selection survives the list changing (U-13)", 
     const user = userEvent.setup();
     mount({ selectable: true });
     await tick(user, MERIDIAN, BASTION);
-    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    await user.click(screen.getByRole("tab", { name: /My watchlist/ }));
     expect(within(bar()!).getByText("2 selected")).toBeTruthy();
     await user.click(screen.getByRole("tab", { name: /All/ }));
     await user.click(screen.getByRole("button", { name: "Grid view" }));

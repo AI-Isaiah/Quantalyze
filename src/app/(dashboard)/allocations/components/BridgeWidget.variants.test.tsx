@@ -13,6 +13,11 @@ import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 //   - the slice(0,3) hero list + "…and N more" overflow line
 //   - the Review CTA opening the BridgeDrawer (drawer mocked to a sentinel)
 //
+// Phase 201 plan 28 — F-04 / U-26: the three variants' regions are named
+// "Replacement suggestions"; the card and full eyebrows read "Mandate check"
+// (Term Form A around "Mandate"); the subtle line reads
+// "{count} holding{plural} outside your mandate —" with no Term.
+//
 // BridgeDrawer is mocked so we can assert the open/closed transition without
 // pulling in its own state machine.
 // ---------------------------------------------------------------------------
@@ -47,6 +52,12 @@ describe("BridgeWidget — active-breach variants (H-0088)", () => {
         flaggedHoldings={[holding()]}
         matchDecisionsByHoldingRef={{}}
       />,
+    );
+    // D-01 / D-06: the hero's "Mandate check" eyebrow wraps only "Mandate" in a Term.
+    const hero = screen.getByRole("region", { name: "Replacement suggestions" });
+    expect(hero.querySelector('[data-term="mandate"]')?.textContent).toBe("Mandate");
+    expect(hero.querySelector('[data-term="mandate"]')?.closest("span.inline")?.nextSibling?.textContent).toBe(
+      " check",
     );
     // Singular: "1 holding needs review" (no trailing "s" on holding/needs).
     expect(screen.getByText(/1 holding needs review/i)).toBeInTheDocument();
@@ -107,6 +118,12 @@ describe("BridgeWidget — active-breach variants (H-0088)", () => {
       />,
     );
     expect(screen.getByText(/2 holdings flagged/i)).toBeInTheDocument();
+    // D-01 / D-06: the card's "Mandate check" caption opens the mandate definition.
+    const cardRegion = screen.getByRole("region", { name: "Replacement suggestions" });
+    expect(cardRegion.querySelector('[data-term="mandate"]')?.textContent).toBe("Mandate");
+    expect(cardRegion.querySelector('[data-term="mandate"]')?.closest("span.inline")?.nextSibling?.textContent).toBe(
+      " check",
+    );
     // The card variant does NOT render the hero "need review" headline.
     expect(screen.queryByText(/need review/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Review candidates/i }));
@@ -121,10 +138,23 @@ describe("BridgeWidget — active-breach variants (H-0088)", () => {
         variant="subtle"
       />,
     );
-    expect(
-      screen.getByText(/Bridge flagged 1 holding/i),
-    ).toBeInTheDocument();
+    // U-26: the line is prose ("outside your mandate" is not wrapped, D-19).
+    const region = screen.getByRole("region", { name: "Replacement suggestions" });
+    expect(region.textContent).toMatch(/^1 holding outside your mandate —/);
+    expect(region.querySelector("[data-term]")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Review/i }));
     expect(screen.getByTestId("bridge-drawer-open")).toBeInTheDocument();
+  });
+
+  it("subtle variant — plural line for 2 holdings", () => {
+    render(
+      <BridgeWidget
+        flaggedHoldings={[holding(), holding({ symbol: "ETH" })]}
+        matchDecisionsByHoldingRef={{}}
+        variant="subtle"
+      />,
+    );
+    const region = screen.getByRole("region", { name: "Replacement suggestions" });
+    expect(region.textContent).toMatch(/^2 holdings outside your mandate —/);
   });
 });

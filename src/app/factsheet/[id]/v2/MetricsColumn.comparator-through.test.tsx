@@ -68,7 +68,9 @@ function payloadWith(prices: DailyPrice[]): FactsheetPayload {
 function benchHeader(container: HTMLElement, title: string): string {
   const h = [...container.querySelectorAll("h3")].find(el => el.textContent === title);
   if (!h) throw new Error(`no ${title} panel`);
-  const span = h.closest("header")?.querySelector("span");
+  // The title's own `Term` trigger is a span inside the h3 (Phase 201); the bench header is the
+  // header's direct span child.
+  const span = [...(h.closest("header")?.children ?? [])].find(c => c.tagName === "SPAN");
   return span?.textContent ?? "";
 }
 

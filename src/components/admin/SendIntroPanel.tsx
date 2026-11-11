@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Textarea } from "@/components/ui/Textarea";
 import { displayStrategyName } from "@/lib/strategy-display";
+import { isDiscoveryVisible } from "@/lib/visibility";
 import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 
 interface Props {
@@ -152,7 +153,12 @@ export function SendIntroPanel({
               Send intro
             </p>
             <h2 className="mt-0.5 text-h3 font-display text-text-primary">
-              {displayStrategyName(candidate.strategies)}
+              {/* D-17: the admin gate (`isAdminUser`) admits this row; discovery
+                  visibility (`isDiscoveryVisible`, null viewer id) decides whether
+                  its name is printed. */}
+              {displayStrategyName(candidate.strategies, {
+                visible: isDiscoveryVisible(candidate.strategies ?? {}, null),
+              })}
             </h2>
           </div>
           <button
@@ -191,7 +197,7 @@ export function SendIntroPanel({
             </p>
             <p className="mt-1 text-caption text-text-secondary">
               Allocator has no current holdings — cannot send intro without an
-              underperformer reference. Have them connect a portfolio first, or
+              underperformer reference. Have them start an allocation first, or
               record at least one position.
             </p>
           </div>
@@ -228,7 +234,7 @@ export function SendIntroPanel({
               </p>
             ) : holdingsEmpty ? (
               <p className="text-caption text-text-muted">
-                No current holdings on this allocator&apos;s portfolio.
+                No current holdings in this allocation.
               </p>
             ) : (
               <select

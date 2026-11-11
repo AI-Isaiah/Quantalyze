@@ -7,6 +7,8 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import type { ComputedMetrics } from "@/lib/scenario";
 import { KpiPanel, type KpiPanelCell } from "@/components/kpi/KpiPanel";
+import { Term } from "@/components/ui/Term";
+import type { TermContext, TermKey } from "@/lib/glossary";
 
 /**
  * Phase 09.1 / Plan 06 (D-09): designer-aligned KPI strip.
@@ -122,6 +124,13 @@ interface Cell {
    * real key (Phase 64 / PRESENT-01 removed the only metricKey:null cell, AUM).
    */
   metricKey: string | null;
+  /**
+   * Phase 201 plan 12 (D-03, U-22): the registry term the label names. The label renders through
+   * `Term`; the caption (`sub`) stays outside it, a sibling under the value.
+   */
+  term?: TermKey;
+  /** The registry context for the definition (Max DD 12m reads the `last12m` text). */
+  termContext?: TermContext;
 }
 
 /**
@@ -339,7 +348,7 @@ export function KpiStrip({
   //  - Avg |ρ|: prefer analytics.avg_correlation, then fall back to
   //    metrics.avg_pairwise_correlation (review-pass P2 fix — parallel to
   //    Plan 10's `metricKey: "avg_pairwise_correlation"` scenario-mode
-  //    lookup, so the tooltip "Current book: X" pill in scenario mode reads the
+  //    lookup, so the tooltip "Current allocation: X" pill in scenario mode reads the
   //    same value the live-mode strip displayed). The production payload
   //    doesn't carry analytics.avg_correlation yet; the metrics fallback
   //    surfaces the engine-computed value when present, otherwise both
@@ -428,6 +437,7 @@ export function KpiStrip({
       formatted: formatPercent(allKeysStale ? null : ytdValue),
       sub: resolveSub(ytdValue, "year-to-date time-weighted return"),
       metricKey: "twr",
+      term: "twr",
     },
     {
       label: "Sharpe",
@@ -439,6 +449,7 @@ export function KpiStrip({
       // Honest window-copy, parallel to the Avg |ρ| honest-pending fix.
       sub: resolveSub(sharpeValue, "risk-adjusted return (selected period)"),
       metricKey: "sharpe",
+      term: "sharpe",
     },
     {
       label: "Max DD 12m",
@@ -446,6 +457,8 @@ export function KpiStrip({
       formatted: formatPercent(allKeysStale ? null : maxDdValue),
       sub: resolveSub(maxDdValue, "worst peak-to-trough in last 12 months"),
       metricKey: "max_drawdown",
+      term: "max_drawdown",
+      termContext: "last12m",
     },
     {
       // CORR-03 — the label reads "Avg |ρ|" (off-diagonal ABSOLUTE mean) so the
@@ -458,6 +471,7 @@ export function KpiStrip({
       formatted: formatNumber(allKeysStale ? null : avgRhoValue, 2),
       sub: resolveAvgRhoSub(avgRhoValue),
       metricKey: "avg_pairwise_correlation",
+      term: "avg_abs_correlation",
     },
   ];
 
@@ -472,7 +486,7 @@ export function KpiStrip({
   // The delta pill + sub-copy are passed as `children` verbatim so the emitted
   // DOM is byte-identical to the pre-extraction strip.
   const panelCells: KpiPanelCell[] = cells.map(
-    ({ label, raw, formatted, sub, metricKey }) => {
+    ({ label, raw, formatted, sub, metricKey, term, termContext }) => {
       // Resolve scenario primary + delta for this cell when the gate
       // is open AND the cell has a metricKey (all 4 return-form cells
       // carry one since Phase 64 removed the metricKey-less AUM cell).
@@ -529,7 +543,13 @@ export function KpiStrip({
 
       return {
         key: label,
-        label,
+        label: term ? (
+          <Term k={term} context={termContext}>
+            {label}
+          </Term>
+        ) : (
+          label
+        ),
         value: drawdownImpossible ? "—" : primaryFormatted,
         valueClassName: valueColorClass(
           primaryRaw,
@@ -545,8 +565,8 @@ export function KpiStrip({
             {showDeltaPill ? (
               <div
                 className="mt-1 flex flex-wrap items-baseline gap-x-1 font-mono text-xs tabular-nums"
-                title={`Current book: ${formatLiveValue(liveImpossible ? null : liveVal, metricKey!)}`}
-                aria-label={`${label} delta vs current book: ${formatSignedDelta(delta, metricKey!)} (${sign})`}
+                title={`Current allocation: ${formatLiveValue(liveImpossible ? null : liveVal, metricKey!)}`}
+                aria-label={`${label} delta vs current allocation: ${formatSignedDelta(delta, metricKey!)} (${sign})`}
               >
                 {/* Phase 170.1 (D-11, UI-SPEC V-2): the baseline is named on the
                     line itself. Both spans are whitespace-nowrap so a signed
@@ -557,7 +577,7 @@ export function KpiStrip({
                 >
                   {formatSignedDelta(delta, metricKey!)}
                 </span>
-                <span className="whitespace-nowrap text-text-muted">vs current book</span>
+                <span className="whitespace-nowrap text-text-muted">vs current allocation</span>
               </div>
             ) : null}
             {sub ? (
@@ -588,6 +608,6 @@ export function KpiStrip({
   }, [impossibleKey]);
 
   return (
-    <KpiPanel cells={panelCells} ariaLabel="Portfolio KPIs" variant={variant} />
+    <KpiPanel cells={panelCells} ariaLabel="Allocation KPIs" variant={variant} />
   );
 }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import * as utils from "./utils";
 import {
   formatPercent,
   formatNumber,
@@ -6,8 +7,10 @@ import {
   metricColor,
   cn,
   formatRelativeTime,
-  formatAbsoluteDate,
-  formatIsoDay,
+  formatDay,
+  formatMonth,
+  formatDayTime,
+  MONTH_ABBR,
   isUuid,
   minuteBucket,
   UUID_RE,
@@ -272,34 +275,81 @@ describe("isUuid / UUID_RE", () => {
   });
 });
 
-describe("formatAbsoluteDate", () => {
-  it("returns a stable en-US short form in UTC", () => {
-    // UTC slice so SSR/CSR hydration produces identical output.
-    expect(formatAbsoluteDate("2026-04-11T08:30:00Z")).toBe("Apr 11");
-  });
-  it("handles year boundary correctly", () => {
-    expect(formatAbsoluteDate("2026-01-01T00:00:00Z")).toBe("Jan 1");
+describe("retired date helpers (D-11, plan 201-23)", () => {
+  // Every date prints through `formatDay`, `formatMonth` or `formatDayTime`; the two transitional
+  // helpers existed only so callers could move in parallel and are deleted with the last caller.
+  it("no longer exports formatAbsoluteDate or formatIsoDay", () => {
+    expect(utils).not.toHaveProperty("formatAbsoluteDate");
+    expect(utils).not.toHaveProperty("formatIsoDay");
   });
 });
 
-describe("formatIsoDay", () => {
-  // 170.7 / D-09 - the manager table's Created cell. UTC calendar day, never
-  // the runtime locale or zone, so the server render and the browser agree.
-  it("prints the UTC day of a full timestamp", () => {
-    expect(formatIsoDay("2026-10-09T12:34:56.789+00:00")).toBe("2026-10-09");
+describe("MONTH_ABBR", () => {
+  it("is the twelve three-letter abbreviations, Sep not Sept", () => {
+    expect(MONTH_ABBR).toEqual([
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]);
   });
-  it("converts to UTC rather than slicing the string", () => {
-    // 23:30 at -05:00 is 04:30 UTC the NEXT day; a slice(0, 10) would say 10-09.
-    expect(formatIsoDay("2026-10-09T23:30:00-05:00")).toBe("2026-10-10");
+});
+
+describe("formatDay", () => {
+  // Phase 201 / D-11 - the one UI date. en-US short month, unpadded day,
+  // four-digit year, UTC fields only so SSR and the browser agree.
+  it("prints a bare date as Oct 9, 2026", () => {
+    expect(formatDay("2026-10-09")).toBe("Oct 9, 2026");
   });
-  it("keeps a bare date as that date", () => {
-    expect(formatIsoDay("2026-01-05")).toBe("2026-01-05");
+  it("reads the UTC instant, not the offset the string carries", () => {
+    // 23:30 at -05:00 is 04:30 UTC the NEXT day.
+    expect(formatDay("2026-10-09T23:30:00-05:00")).toBe("Oct 10, 2026");
+  });
+  it("handles a year boundary", () => {
+    expect(formatDay("2026-01-01T00:00:00Z")).toBe("Jan 1, 2026");
+  });
+  it("prints Sep, not Sept, with an unpadded day", () => {
+    expect(formatDay("2026-09-03")).toBe("Sep 3, 2026");
   });
   it("prints an em dash for null, undefined, empty and unparseable input", () => {
-    expect(formatIsoDay(null)).toBe("\u2014");
-    expect(formatIsoDay(undefined)).toBe("\u2014");
-    expect(formatIsoDay("")).toBe("\u2014");
-    expect(formatIsoDay("not a date")).toBe("\u2014");
+    expect(formatDay(null)).toBe("\u2014");
+    expect(formatDay(undefined)).toBe("\u2014");
+    expect(formatDay("")).toBe("\u2014");
+    expect(formatDay("garbage")).toBe("\u2014");
+  });
+});
+
+describe("formatMonth", () => {
+  it("prints a month string and a timestamp as Oct 2026", () => {
+    expect(formatMonth("2026-10")).toBe("Oct 2026");
+    expect(formatMonth("2026-10-31T23:59:00Z")).toBe("Oct 2026");
+  });
+  it("reads the UTC instant across a year boundary", () => {
+    // 23:30 at -05:00 on Dec 31 is 04:30 UTC on Jan 1.
+    expect(formatMonth("2026-12-31T23:30:00-05:00")).toBe("Jan 2027");
+  });
+  it("prints an em dash for null, undefined, empty and unparseable input", () => {
+    expect(formatMonth(null)).toBe("\u2014");
+    expect(formatMonth(undefined)).toBe("\u2014");
+    expect(formatMonth("")).toBe("\u2014");
+    expect(formatMonth("garbage")).toBe("\u2014");
+  });
+});
+
+describe("formatDayTime", () => {
+  // U-13: both parts in UTC, zone named.
+  it("prints day and 24-hour UTC time", () => {
+    expect(formatDayTime("2026-10-09T14:05:00Z")).toBe("Oct 9, 2026, 14:05 UTC");
+  });
+  it("zero-pads hours and minutes", () => {
+    expect(formatDayTime("2026-10-09T03:07:00Z")).toBe("Oct 9, 2026, 03:07 UTC");
+  });
+  it("converts an offset to UTC, day included", () => {
+    expect(formatDayTime("2026-10-09T23:30:00-05:00")).toBe("Oct 10, 2026, 04:30 UTC");
+  });
+  it("prints an em dash for null, undefined, empty and unparseable input", () => {
+    expect(formatDayTime(null)).toBe("\u2014");
+    expect(formatDayTime(undefined)).toBe("\u2014");
+    expect(formatDayTime("")).toBe("\u2014");
+    expect(formatDayTime("garbage")).toBe("\u2014");
   });
 });
 
@@ -326,9 +376,14 @@ describe("formatRelativeTime", () => {
     const iso = new Date(NOW - 4 * 24 * 60 * 60_000).toISOString();
     expect(formatRelativeTime(iso, NOW)).toBe("4d ago");
   });
-  it("falls back to absolute date past 30 days", () => {
+  it("falls back to the full formatDay date, year included, past 30 days", () => {
     const iso = new Date(NOW - 45 * 24 * 60 * 60_000).toISOString();
-    expect(formatRelativeTime(iso, NOW)).toBe(formatAbsoluteDate(iso));
+    expect(formatRelativeTime(iso, NOW)).toBe(formatDay(iso));
+    expect(formatRelativeTime(iso, NOW)).toBe("Feb 25, 2026");
+  });
+  it("keeps the under-30-day age unchanged", () => {
+    const iso = new Date(NOW - 3 * 24 * 60 * 60_000).toISOString();
+    expect(formatRelativeTime(iso, NOW)).toBe("3d ago");
   });
 });
 

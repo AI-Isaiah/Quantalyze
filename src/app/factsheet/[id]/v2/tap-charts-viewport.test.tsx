@@ -207,7 +207,7 @@ describe("[CHART-01a/02/03] tap-reveal panels — both viewport branches", () =>
   // cover the isMobile font branches; this test drives an actual touch tap so a
   // regression in that glue (e.g. the wk*7+d ↔ idx/7 round-trip) is caught.
 
-  it("a synthetic touch tap on DailyReturnsHeatmap pins the cell tooltip (ISO + pct)", () => {
+  it("a synthetic touch tap on DailyReturnsHeatmap pins the cell tooltip (day + pct)", () => {
     setBreakpoint("mobile");
     // Build the payload up-front so we can find a populated (wk, d) cell and tap
     // its exact center deterministically (no reliance on the synthetic layout).
@@ -244,11 +244,12 @@ describe("[CHART-01a/02/03] tap-reveal panels — both viewport branches", () =>
     fireEvent.pointerDown(wrap, { clientX: cx, clientY: cy, pointerType: "touch", pointerId: 1 });
     fireEvent.pointerUp(wrap, { clientX: cx, clientY: cy, pointerType: "touch", pointerId: 1 });
 
-    // The pinned reveal is the role=status tooltip; it reuses the ISO + pct copy
+    // The pinned reveal is the role=status tooltip; it reuses the day + pct copy
     // the desktop hover shows. A regression in the bespoke glue fails this.
     const tip = container.querySelector('[role="status"]');
     expect(tip).not.toBeNull();
-    expect(tip?.textContent ?? "").toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(tip?.textContent ?? "").toMatch(/[A-Z][a-z]{2} \d{1,2}, \d{4}/);
+    expect(tip?.textContent ?? "").not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 
   it("DailyReturnsHeatmap shows no pinned reveal by default (desktop mouse render)", () => {

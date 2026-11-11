@@ -27,8 +27,8 @@ import type React from "react";
 export interface KpiPanelCell {
   /** Stable React key + identity. KpiStrip uses the cell label. */
   key: string;
-  /** Micro uppercase muted label. */
-  label: string;
+  /** Micro uppercase muted label. A node, so a caller can wrap it in `Term` (201-12 D-03). */
+  label: React.ReactNode;
   /** Pre-formatted display value (caller resolves null → "—"). */
   value: string;
   /**
@@ -45,7 +45,7 @@ export interface KpiPanelCell {
 
 export interface KpiPanelProps {
   cells: KpiPanelCell[];
-  /** Accessible group label. Defaults to KpiStrip's "Portfolio KPIs". */
+  /** Accessible group label. Defaults to KpiStrip's "Allocation KPIs". */
   ariaLabel?: string;
   /**
    * Phase 170 / SC1-LAYERS (C1-A2). "cards" (default) is the free-standing
@@ -67,7 +67,7 @@ const PANEL_CELL =
 
 export function KpiPanel({
   cells,
-  ariaLabel = "Portfolio KPIs",
+  ariaLabel = "Allocation KPIs",
   variant = "cards",
 }: KpiPanelProps) {
   const panel = variant === "panel";

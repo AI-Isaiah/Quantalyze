@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { formatDay } from "@/lib/utils";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
@@ -1537,7 +1538,7 @@ export function ApiKeyManager({
                       allocator card's source; an id outside the map renders
                       verbatim. The title-case it replaces read "Mt5" / "Okx". */}
                   {dataSourceLabel(key).exchange}
-                  {key.last_sync_at && ` · Key checked ${new Date(key.last_sync_at).toLocaleDateString()}`}
+                  {key.last_sync_at && ` · Key checked ${formatDay(key.last_sync_at)}`}
                 </p>
                 {key.exchange === "mt5" && (
                   <p className="text-xs text-text-muted font-metric mt-0.5">

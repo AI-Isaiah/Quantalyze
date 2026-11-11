@@ -22,6 +22,11 @@ import { MatchEvalDashboard } from "./MatchEvalDashboard";
  * Every expected string is hand-typed. Nothing is imported from
  * `venueOutageCopy.ts` — a test that read the sentence out of the module that
  * declares it could not detect the sentence changing (C-1).
+ *
+ * Phase 201 plan 39 (F-11, D-11, UI-SPEC "Wider date cells"): the weekly table's
+ * Week column prints `week_start` through `formatDay` ("Oct 5, 2026") in a cell
+ * that does not wrap; the row key stays the ISO value. Neuter to redden: print
+ * `{w.week_start}` bare again.
  */
 
 const EVAL_URL_PREFIX = "/api/admin/match/eval";
@@ -217,6 +222,16 @@ describe("<MatchEvalDashboard> — 170.1.2 D-01: missed intros name their alloca
     expect(screen.getByText("Alpha")).toBeInTheDocument();
   });
 
+  // Phase 201 plan 20 (D-06, D-11, U-13): the staff-facing hint says "mandate" and the date
+  // prints as the helper's `Oct 1, 2026` in a cell that cannot wrap.
+  it("names the mandate in the hint and prints the date as 'Oct 1, 2026' in a nowrap cell", async () => {
+    mountMissed(missedPayload("Jane Allocator", "Alpha"));
+    const stamp = await screen.findByText("Oct 1, 2026");
+    expect(stamp.className).toContain("whitespace-nowrap");
+    expect(document.body.textContent).toContain("Use this list to tune the mandate or retrain the engine");
+    expect(document.body.textContent).not.toMatch(/tune preferences/i);
+  });
+
   it("reads the miss reason as a sentence, never the raw code", async () => {
     mountMissed(missedPayload("Jane Allocator", "Alpha"));
     await waitFor(() => {
@@ -234,5 +249,35 @@ describe("<MatchEvalDashboard> — 170.1.2 D-01: missed intros name their alloca
     // The 8-character id slices this table used to print.
     expect(document.body.textContent).not.toContain(ALLOCATOR_ID.slice(0, 8));
     expect(document.body.textContent).not.toContain(STRATEGY_ID.slice(0, 8));
+  });
+});
+
+describe("<MatchEvalDashboard> — 201-39 F-11: the weekly table's Week column is a formatted day", () => {
+  it("prints the week as 'Oct 5, 2026' in a nowrap cell, never the raw ISO day", async () => {
+    mountWith(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            ...buildMetrics(),
+            weekly: [
+              {
+                week_start: "2026-10-05",
+                intros: 4,
+                hits_top_3: 2,
+                hits_top_10: 3,
+                hit_rate_top_3: 0.5,
+                hit_rate_top_10: 0.75,
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    const cell = await screen.findByText("Oct 5, 2026");
+    expect(cell.className).toContain("whitespace-nowrap");
+    for (const td of Array.from(document.querySelectorAll("td"))) {
+      expect(td.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    }
   });
 });

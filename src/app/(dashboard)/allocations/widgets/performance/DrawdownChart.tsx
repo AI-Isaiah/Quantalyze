@@ -14,6 +14,8 @@ import {
   YAxis,
 } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition } from "@/lib/glossary";
 import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import {
   CHART_BORDER,
@@ -193,12 +195,13 @@ export default function DrawdownChart({
             const active = visibilityMode === m;
             const label =
               m === "live" ? "Live" : m === "scenario" ? "Scenario" : "Both";
-            return (
+            const radio = (describedBy?: string) => (
               <button
                 key={m}
                 type="button"
                 role="radio"
                 aria-checked={active}
+                aria-describedby={describedBy}
                 onClick={() => setVisibilityMode(m)}
                 style={{
                   padding: "3px 8px",
@@ -220,6 +223,20 @@ export default function DrawdownChart({
               >
                 {label}
               </button>
+            );
+            if (m !== "scenario") return radio();
+            // Phase 201 plan 34 (F-04, F-08, U-27) — Form B: the radio is the control, so the
+            // registry definition rides on a Tooltip around it and `aria-describedby` lands on
+            // the radio itself. The wrapper spans are role-less and attribute-less, and flex
+            // boxes so the radio sits in the pill row as an unwrapped one does.
+            return (
+              <Tooltip
+                key={m}
+                content={termDefinition("scenario")}
+                className="inline-flex [&>span]:flex"
+              >
+                {({ "aria-describedby": describedBy }) => radio(describedBy)}
+              </Tooltip>
             );
           })}
         </div>

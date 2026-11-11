@@ -9,6 +9,10 @@
  * offers an "include" switch for an account the book already counts through a
  * live key. So both implementations are tested against every row of the same
  * file, read by path, never a copied table.
+ *
+ * Phase 201 plan 39 (F-11, D-11, R3-01 item 6): the sentence prints its day through
+ * `formatDay` ("Jun 10, 2026"); the decision's `until` stays the ISO day the
+ * inclusion logic computes, and every `until` assertion below still reads it so.
  */
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -145,7 +149,7 @@ describe("departedHistoryCard — the switch and the line never disagree (SFH-C4
   it("an anchored included key: switch on, and it can be excluded", () => {
     const card = departedHistoryCard(knownKey, knownCase.keys, { state: "anchored" });
     expect(card).toEqual({
-      sentence: "History included until 2026-06-10.",
+      sentence: "History included until Jun 10, 2026.",
       checked: true,
       toggleTo: "exclude",
     });

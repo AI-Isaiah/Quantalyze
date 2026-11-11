@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
+import type { TermKey } from "@/lib/glossary";
 
 export type IconComponent = ({ className }: { className?: string }) => React.JSX.Element;
 
@@ -24,6 +25,10 @@ interface NavItemBase {
   /** Accessible name for the badge. Defaults to the flagged-holdings wording,
    *  which is what the "My Allocation" badge has always said. */
   badgeLabel?: (count: number) => string;
+  /** Phase 201 plan 34 (F-04, F-08, U-27): the glossary term this label is. The item is a
+   *  control, so a surface that honours `term` explains it with Form B (a Tooltip around the
+   *  control), never a nested `Term`. Typed `TermKey`, so an unregistered key is a type error. */
+  term?: TermKey;
 }
 /** The default nav item: an href-based <Link>. Every pre-Phase-110 item. */
 export interface NavLinkItem extends NavItemBase {
@@ -244,17 +249,17 @@ function buildNavSections(
  * project Rule 6). `MobileNav` imports this; there is NO second hardcoded list.
  *
  * Why not derive directly from `buildNavSections`? Two of the three SC#1
- * allocator destinations (Risk, Bridge) are NOT routes in `buildNavSections`:
+ * allocator destinations (Risk, Scenario) are NOT routes in `buildNavSections`:
  * there is no `/bridge` route (verified 45-RESEARCH Pitfall 1), so we represent
  * them as tab deep-links with DISTINCT hrefs:
  *   - My Allocation → `/allocations`
  *   - Risk         → `/allocations?tab=risk`
- *   - Bridge       → `/allocations?tab=scenario`
+ *   - Scenario     → `/allocations?tab=scenario` (Phase 201 D-07: named for the tab it opens)
  * No two items resolve to the identical URL, satisfying SC#1's "labeled,
  * reachable entries with distinct hrefs".
  *
- * Bridge lands on the Scenario tab because that is where the live bridge flow
- * actually is: the ScenarioComposer renders the "Open Bridge" card → BridgeDrawer
+ * Scenario lands on the Scenario tab because that is where the live replacement flow
+ * actually is: the ScenarioComposer renders the "Review replacements" card → BridgeDrawer
  * (the per-holding cross-strategy browse). The earlier `/allocations?tab=risk#bridge`
  * target was wrong — the Risk tab has no bridge surface and `BridgeWidget` is
  * mounted nowhere, so the `#bridge` hash anchored nothing (product decision
@@ -292,7 +297,7 @@ export function buildPrimaryMobileNav(p: {
     primary.push(
       { label: "My allocation", href: "/allocations", icon: PortfolioIcon, badge: p.flaggedCount },
       { label: "Risk", href: "/allocations?tab=risk", icon: ShieldIcon },
-      { label: "Bridge", href: "/allocations?tab=scenario", icon: BridgeIcon },
+      { label: "Scenario", term: "scenario", href: "/allocations?tab=scenario", icon: BridgeIcon },
     );
     // Phase 110 CONTRIB-01 — the allocator "Add a Strategy" client action as the
     // LEADING discretionary filler. The SC#1 primary trio still leads (fillers
@@ -651,7 +656,8 @@ function CompareIcon({ className }: { className?: string }) {
 }
 
 // Phase 45 Plan 01 (NAV-01) — a suspension-bridge glyph for the allocator
-// bottom nav's "Bridge" deep-link. Matches the established 16x16 / stroke-1.5
+// bottom nav's "Scenario" deep-link (Phase 201 D-07: named for the tab it
+// opens; the glyph keeps its suspension-bridge drawing). Matches the established 16x16 / stroke-1.5
 // house style of the icons above. NOT cream-tinted (DESIGN.md Bridge cream
 // identity is for the Bridge surfaces themselves; the bottom nav uses the
 // standard accent/muted active/inactive treatment for visual consistency).

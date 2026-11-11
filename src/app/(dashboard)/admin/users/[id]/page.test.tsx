@@ -101,6 +101,13 @@ describe("/admin/users/[id] labels", () => {
     expect(screen.getByText("Legacy admin")).toBeTruthy();
   });
 
+  // Phase 201 plan 20 (D-11, U-13): the Created stamp carries a time of day, so it prints
+  // through `formatDayTime`: one instant, one string, UTC named.
+  it("prints Created as 'Jan 1, 2026, 00:00 UTC', not a locale string", async () => {
+    render(await AdminUserDetailPage({ params }));
+    expect(rowValue("Created")).toBe("Jan 1, 2026, 00:00 UTC");
+  });
+
   it("reads a role outside the set as Unknown role, never the raw value", async () => {
     state.profile = profile({ role: "zzz" });
     render(await AdminUserDetailPage({ params }));

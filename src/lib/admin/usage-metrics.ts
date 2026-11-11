@@ -27,6 +27,8 @@ import "server-only";
  * `/insights/trend/` endpoint is supported for compat only.
  */
 
+import { formatDayTime } from "@/lib/utils";
+
 const POSTHOG_HOST = process.env.POSTHOG_HOST ?? "https://us.posthog.com";
 const POSTHOG_PROJECT_ID = process.env.POSTHOG_PROJECT_ID ?? "";
 const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY ?? "";
@@ -130,8 +132,7 @@ function writeCache<T>(key: string, value: T): void {
 }
 
 function staleBannerMessage(storedAt: number): string {
-  const iso = new Date(storedAt).toISOString();
-  return `PostHog unavailable — showing cached data from ${iso}`;
+  return `PostHog unavailable — showing cached data from ${formatDayTime(new Date(storedAt).toISOString())}`;
 }
 
 /** Reset for tests. Do NOT call from production code. */

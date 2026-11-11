@@ -1764,13 +1764,16 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   //
   // The fix list orders the two candidates by base rate — scope first — and
   // says which is which, rather than presenting one as the diagnosis.
+  // The IP bullet says "egress IP status" (F-12, U-28): ErrorEnvelope links that
+  // phrase to the /security#egress-ips statement of whether there is an address
+  // to allow, so the line neither promises an address nor invents a mailbox.
   KEY_PERMISSION_DENIED: {
     title: "The exchange refused this key's permissions.",
     cause:
       "The exchange rejected the request on permission grounds without telling us which of two settings caused it: the key may be missing a required read scope, or it may be pinned to an IP allowlist that does not include us. We are not guessing between them.",
     fix: [
       "First, check the key's scopes: every Read scope on, every trading and withdrawal scope off.",
-      "Then, if the key is pinned to specific IPs, either remove the restriction or add our egress IPs — see the docs link below.",
+      "Then, if the key is pinned to specific IPs, remove the restriction. Our egress IP status says whether there is an address you could allow instead.",
       "Save, then paste the key here again.",
     ],
     docsHref: "/security#egress-ips",
@@ -2251,10 +2254,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   KEY_IP_ALLOWLIST: {
     title: "This key has an IP allowlist that does not include Quantalyze.",
     cause:
-      "The exchange rejected the request with an IP restriction error. You enabled IP pinning on this key and our egress IPs are not on the list.",
+      "The exchange rejected the request with an IP restriction error. You enabled IP pinning on this key, and the address our requests come from is not on the list.",
     fix: [
       "Remove the IP restriction on this key (recommended — read-only keys cannot move funds regardless of origin).",
-      "Or, add our egress IPs to the allowlist. See the docs link below.",
+      "Or, if our egress IP status lists addresses, add them to the allowlist instead.",
     ],
     docsHref: "/security#egress-ips",
     actions: ["try_another_key", "request_call"],
@@ -2679,7 +2682,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again cannot build a new strategy over the saved key, and the saved key does not clear on its own.",
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
-      "If your account includes the My Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
+      "If your account includes the Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
       "If that page is not part of your account, or it does not list this key, send the correlation id below through the contact form: releasing the stored key is not something you can do from this page.",
     ],
     docsHref: "/security",
@@ -2722,7 +2725,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // ⛔ IT STILL CLAIMS NOTHING ABOUT WHERE THE READER CAME FROM — but ⚠️ NOT
   // FOR THE REASON THAT STOOD HERE. The retired sentence read "This refusal also
   // renders in the manager wizard while /my-strategies is allocator-gated, so a
-  // flat 'go back to My Strategies' would re-open the D-17 class for managers".
+  // flat 'go back to Strategies' would re-open the D-17 class for managers".
   // TRACED AT HEAD (162-06 review) AND FALSE: there is no manager population on
   // this path at all.
   //   · `preselectKey` reaches `ConnectKeyStep` only through the step mount in
@@ -2743,7 +2746,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // ⭐ THE MEASURED REASON THE SECOND LINE STAYS CONDITIONAL is about the SEAM,
   // not about roles. The preselect is a PROP: `ContributionWizardOverlay` is
   // mounted at five sites and four of them pass none today, and any one of them
-  // may start to. A flat "go back to My Strategies" would be a claim about where
+  // may start to. A flat "go back to Strategies" would be a claim about where
   // the reader came from that the component cannot check — the same unearned
   // claim the bullet above it (the credential-form one) turned into a live
   // defect. "If you arrived from…" costs the current population nothing and
@@ -2756,7 +2759,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "You asked us to finish setting up a strategy using a key already stored on your account, and we could not find a live one matching it. It may have been disconnected or removed since the page you started from was loaded. Nothing was created and none of your stored keys changed.",
     fix: [
       "Choose “Use a different key” on this screen to connect this account with its own API credentials instead.",
-      "If you arrived from My Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
+      "If you arrived from Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
       "If neither clears it, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
@@ -3273,7 +3276,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       // The two labels are the ones CapitalOwnershipRadioGroup.tsx renders, so
       // the user reads back the words they are looking at.
       'Pick either "My own capital" or "A trading team\'s key I\'m verifying".',
-      "You can change the answer later from My Strategies.",
+      "You can change the answer later from Strategies.",
     ],
     docsHref: "/security",
     // Non-recoverable — see the class comment above this block.
@@ -4289,7 +4292,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause:
       "Money can only sit against a strategy you have marked as your own capital. That mark is either not set, or it changed after this page loaded — so the allocation was refused and nothing was saved.",
     fix: [
-      "Open My Strategies and mark this strategy as your own capital, then allocate again.",
+      "Open Strategies and mark this strategy as your own capital, then allocate again.",
       "If it is marked as a trading team's capital under review, it cannot take an allocation until that changes.",
       "Close this dialog to see the strategy's current state — the list reloads with the mark as it stands now.",
     ],
@@ -5529,7 +5532,7 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "`portfolio_simulator` in simulator.py. Its consumer is the simulator " +
         "route, which — like the two admin match routes — forwards 4xx with the " +
         "upstream code and answers everything 500-and-up from its own terminal " +
-        "arm, here with 'Portfolio impact simulation failed.' and code UNKNOWN. " +
+        "arm, here with 'Allocation impact simulation failed.' and code UNKNOWN. " +
         "That surface is the portfolio impact panel, which has no key, no draft " +
         "and no connect step, so every KEY_* and SEAM_* member in this table " +
         "would be describing a wizard the user is not in.",

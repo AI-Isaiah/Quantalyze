@@ -2,17 +2,17 @@
  * Phase 23 Plan 05 / Task 1 — RED tests for SavedScenariosList.
  *
  * The saved-scenarios surface on the Scenario tab (PERSIST-03): list rows with
- * Open / Rename / Delete + selection checkboxes + a "Live book" pseudo-row + a
+ * Open / Rename / Delete + selection checkboxes + a "Live allocation" pseudo-row + a
  * "Compare selected" CTA, and an honest EmptyStateCard when none exist.
  *
  * Honesty + UI-SPEC invariants pinned here:
- *   - Empty list → EmptyStateCard heading "No saved portfolios yet" matches the
+ *   - Empty list → EmptyStateCard heading "No saved scenarios yet" matches the
  *     UI-SPEC body (the #509 heading-matches-body lesson).
  *   - Rename → inline edit input (NOT a modal) → PATCH with the TRIMMED name;
  *     empty / >120 shows the validation copy and does NOT PATCH.
  *   - Delete → small inline "Delete "{name}"?" confirm (NOT a modal) → DELETE →
  *     row removed from the list.
- *   - Selection checkboxes are keyboard-focusable + name-labeled; a "Live book"
+ *   - Selection checkboxes are keyboard-focusable + name-labeled; a "Live allocation"
  *     pseudo-row participates in selection.
  *   - "Compare selected" disabled until >= 2 selections, enabled at >= 2; on
  *     click it raises the selected rows + includeLiveBook to the parent.
@@ -80,7 +80,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     render(
       <SavedScenariosList rows={[]} onOpen={vi.fn()} onCompare={vi.fn()} />,
     );
-    expect(screen.getByText("No saved portfolios yet")).toBeInTheDocument();
+    expect(screen.getByText("No saved scenarios yet")).toBeInTheDocument();
     expect(
       screen.getByText(/Compose a draft above, then choose/i),
     ).toBeInTheDocument();
@@ -158,6 +158,39 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
       .closest("li") as HTMLElement;
     expect(rowEl.textContent).not.toContain("Invalid Date");
     expect(within(rowEl).getByText(/^Saved\s+\S/)).toBeInTheDocument();
+    // D-11 / U-14: the one helper date, year included.
+    expect(within(rowEl).getByText("Saved Jun 10, 2026")).toBeInTheDocument();
+  });
+
+  // D-11 / U-14: the saved-on date prints through `formatDay` (`Oct 9, 2026`),
+  // never the runtime-locale string. A row whose updated time is later reads
+  // "Updated <date>"; an unedited row reads "Saved <date>".
+  it("D11 saved-on dates print as the helper date (Oct 9, 2026), UTC day, year included", () => {
+    const edited: SavedScenarioListRow = {
+      id: "55555555-5555-5555-5555-555555555555",
+      name: "Edited blend",
+      schema_version: 2,
+      created_at: "2026-10-01T10:00:00Z",
+      updated_at: "2026-10-09T23:30:00Z",
+      draft: { schema_version: 2 },
+    };
+    const unedited: SavedScenarioListRow = {
+      id: "66666666-6666-6666-6666-666666666666",
+      name: "Untouched blend",
+      schema_version: 2,
+      created_at: "2026-10-09T00:30:00Z",
+      updated_at: "2026-10-09T00:30:00Z",
+      draft: { schema_version: 2 },
+    };
+    render(
+      <SavedScenariosList
+        rows={[edited, unedited]}
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Updated Oct 9, 2026")).toBeInTheDocument();
+    expect(screen.getByText("Saved Oct 9, 2026")).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -185,7 +218,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /^Rename$/ })[0]);
     // Inline input, NOT a modal.
     expect(screen.queryByRole("dialog")).toBeNull();
-    const input = screen.getByLabelText(/rename portfolio/i);
+    const input = screen.getByLabelText(/rename scenario/i);
     fireEvent.change(input, { target: { value: "  Renamed blend  " } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
 
@@ -208,13 +241,13 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
       <SavedScenariosList rows={ROWS} onOpen={vi.fn()} onCompare={vi.fn()} />,
     );
     fireEvent.click(screen.getAllByRole("button", { name: /^Rename$/ })[0]);
-    const input = screen.getByLabelText(/rename portfolio/i);
+    const input = screen.getByLabelText(/rename scenario/i);
 
     // Empty (whitespace) → validation copy, no PATCH.
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
     expect(
-      screen.getByText("Enter a name to save this portfolio."),
+      screen.getByText("Enter a name to save this scenario."),
     ).toBeInTheDocument();
     expect(mockFetch).not.toHaveBeenCalled();
 
@@ -222,7 +255,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.change(input, { target: { value: "x".repeat(121) } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
     expect(
-      screen.getByText("Portfolio names are limited to 120 characters."),
+      screen.getByText("Scenario names are limited to 120 characters."),
     ).toBeInTheDocument();
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -305,7 +338,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
 
     // Honest, visible failure (role=alert), with the rename-specific copy.
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn't rename this portfolio");
+    expect(alert.textContent).toContain("Couldn't rename this scenario");
     // onMutated fires ONLY on success — it must NOT fire on a failed rename
     // (proves the optimistic setLocalRows after the !ok return never ran).
     expect(onMutated).not.toHaveBeenCalled();
@@ -337,7 +370,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.click(within(firstRow).getByRole("button", { name: /^Delete$/ }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn't delete this portfolio");
+    expect(alert.textContent).toContain("Couldn't delete this scenario");
     // Row NOT optimistically removed on failure.
     expect(screen.getByText("Conservative blend")).toBeInTheDocument();
     expect(onMutated).not.toHaveBeenCalled();
@@ -345,9 +378,9 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
 
   // -------------------------------------------------------------------------
   // T_SL8 — Selection checkboxes are keyboard-focusable + name-labeled; a
-  //         Live book pseudo-row participates.
+  //         Live allocation pseudo-row participates.
   // -------------------------------------------------------------------------
-  it("T_SL8 selection checkboxes are name-labeled + focusable; Live book pseudo-row participates", () => {
+  it("T_SL8 selection checkboxes are name-labeled + focusable; Live allocation pseudo-row participates", () => {
     render(
       <SavedScenariosList rows={ROWS} onOpen={vi.fn()} onCompare={vi.fn()} />,
     );
@@ -359,11 +392,11 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     // Keyboard-focusable (not disabled, focusable element).
     cb1.focus();
     expect(cb1).toHaveFocus();
-    // A Live book pseudo-row participates in selection.
+    // A Live allocation pseudo-row participates in selection.
     expect(
-      screen.getByRole("checkbox", { name: /Live book/i }),
+      screen.getByRole("checkbox", { name: /Live allocation/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Live book")).toBeInTheDocument();
+    expect(screen.getByText("Live allocation")).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -381,7 +414,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     expect(compareCta).toBeDisabled();
     expect(
       screen.getByText(
-        "Select 2 or more portfolios (or the live book) to compare.",
+        "Select 2 or more scenarios (or the live allocation) to compare.",
       ),
     ).toBeInTheDocument();
 
@@ -408,9 +441,9 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_SL10 — Live book + one real row counts as 2 (pseudo-row participates).
+  // T_SL10 — Live allocation + one real row counts as 2 (pseudo-row participates).
   // -------------------------------------------------------------------------
-  it("T_SL10 Live book + one scenario enables compare and reports includeLiveBook=true", () => {
+  it("T_SL10 Live allocation + one scenario enables compare and reports includeLiveBook=true", () => {
     const onCompare = vi.fn();
     render(
       <SavedScenariosList rows={ROWS} onOpen={vi.fn()} onCompare={onCompare} />,
@@ -418,12 +451,12 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     const compareCta = screen.getByRole("button", {
       name: /Compare selected/i,
     });
-    fireEvent.click(screen.getByRole("checkbox", { name: /Live book/i }));
-    expect(compareCta).toBeDisabled(); // only 1 (live book)
+    fireEvent.click(screen.getByRole("checkbox", { name: /Live allocation/i }));
+    expect(compareCta).toBeDisabled(); // only 1 (live allocation)
     fireEvent.click(
       screen.getByRole("checkbox", { name: /Conservative blend/i }),
     );
-    expect(compareCta).toBeEnabled(); // live book + 1 real = 2
+    expect(compareCta).toBeEnabled(); // live allocation + 1 real = 2
 
     fireEvent.click(compareCta);
     const arg = onCompare.mock.calls[0][0];
@@ -468,10 +501,10 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     // Distinct error copy via the canonical role="alert" path.
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(
-      "Couldn't load your saved portfolios. Try again.",
+      "Couldn't load your saved scenarios. Try again.",
     );
-    // The fabricated "no portfolios" empty state must NOT appear.
-    expect(screen.queryByText("No saved portfolios yet")).toBeNull();
+    // The fabricated "no scenarios" empty state must NOT appear.
+    expect(screen.queryByText("No saved scenarios yet")).toBeNull();
     expect(
       screen.queryByText(/Compose a draft above, then choose/i),
     ).toBeNull();

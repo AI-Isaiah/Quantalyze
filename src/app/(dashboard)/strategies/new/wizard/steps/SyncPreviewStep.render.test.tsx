@@ -1030,6 +1030,38 @@ describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () =>
     expect(screen.getByTestId("wizard-use-this-key")).toBeInTheDocument();
   });
 
+  // Phase 201 D-01 / D-02: the draft preview's metric labels are registered terms, so each
+  // renders through Term (a focusable trigger carrying data-term) and keeps its printed text.
+  // "Cumulative" is not registered and stays plain. A raw label string would still read the same
+  // to getByText, which is why this asserts the data-term markers and not the text alone.
+  it("201 D-01: the preview's CAGR, Sharpe, Sortino, Max DD and Volatility labels render through Term", async () => {
+    installDeribitPassMock(30);
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    const expected: Array<[string, string]> = [
+      ["cagr", "CAGR"],
+      ["sharpe", "Sharpe"],
+      ["sortino", "Sortino"],
+      ["max_drawdown", "Max DD"],
+      ["volatility", "Volatility"],
+    ];
+    for (const [key, text] of expected) {
+      const trigger = document.querySelector(`[data-term="${key}"]`);
+      expect(trigger, `no [data-term="${key}"] in the preview`).not.toBeNull();
+      expect(trigger?.textContent).toBe(text);
+      expect(trigger).toHaveAttribute("tabindex", "0");
+    }
+    expect(document.querySelector('[data-term="cumulative"]')).toBeNull();
+  });
+
   it("[mig-20260707120000] complete_with_warnings is terminal — reaches the factsheet preview, does NOT poll forever", async () => {
     // Regression: a warned first compute (e.g. Deribit onboarding tripping a DQ
     // guard) now PERSISTS 'complete_with_warnings' instead of being laundered to

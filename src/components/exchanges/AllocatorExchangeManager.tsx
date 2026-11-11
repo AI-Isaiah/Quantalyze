@@ -346,7 +346,7 @@ function balanceSegment(key: ExchangeConnection): ReactNode {
     <span
       title={`Converted from ${unit} at the stored daily BTC close for ${formatCloseDay(closeDate)}.`}
     >
-      {` · Balance ${native} · ≈ ${formatUsd(key.account_balance_usdt)} at ${formatCloseDay(closeDate, { year: false })} close`}
+      {` · Balance ${native} · ≈ ${formatUsd(key.account_balance_usdt)} at ${formatCloseDay(closeDate)} close`}
     </span>
   );
 }
@@ -2046,8 +2046,7 @@ export function AllocatorExchangeManager({
                 <li>
                   Our analytics service reads your positions and trade history
                   on a daily schedule. It groups related trades into strategy
-                  positions and writes them into your Active Allocation
-                  portfolio.
+                  positions and writes them into your allocation.
                 </li>
                 <li>
                   Deposits and withdrawals on the exchange become{" "}

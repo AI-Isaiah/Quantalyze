@@ -257,6 +257,8 @@ describe("PUT /api/admin/match/preferences/[allocator_id] (C-0046)", () => {
     const res = await PUT(makeReq({ founder_notes: "x" }), makeCtx());
 
     expect(res.status).toBe(500);
+    // 201-21 / D-06: the admin save failure uses the mandate word (full sentence, hand-typed).
+    expect((await res.json()).error).toBe("Failed to save mandate");
     expect(state.upsertCalls).toHaveBeenCalledTimes(1);
     // No mutation → no audit row.
     expect(state.auditLog).not.toHaveBeenCalled();

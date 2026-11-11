@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
+import { Term } from "@/components/ui/Term";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 /**
@@ -47,7 +49,7 @@ function MandateSnapshotCard({
         className="p-4"
       >
         <div className="text-xs uppercase tracking-wider text-text-muted">
-          Mandate snapshot
+          <Term k="mandate">Mandate</Term> snapshot
         </div>
         <div className="mt-2 text-sm text-text-secondary">
           No mandate set yet. Open the Mandate form below to define max weight,
@@ -57,16 +59,23 @@ function MandateSnapshotCard({
     );
   }
 
-  const rows: Array<{ label: string; value: string }> = [];
+  const rows: Array<{ id: string; label: ReactNode; value: string }> = [];
   if (mandate.max_weight != null) {
     rows.push({
+      id: "max_weight",
       label: "Max weight",
       value: `${(mandate.max_weight * 100).toFixed(1)}%`,
     });
   }
   if (mandate.correlation_ceiling != null) {
     rows.push({
-      label: "Correlation ceiling",
+      id: "correlation_ceiling",
+      // D-01: the registered word opens its definition; "ceiling" stays plain.
+      label: (
+        <>
+          <Term k="correlation">Correlation</Term> ceiling
+        </>
+      ),
       value: mandate.correlation_ceiling.toFixed(2),
     });
   }
@@ -81,6 +90,7 @@ function MandateSnapshotCard({
       low: "<$1M",
     };
     rows.push({
+      id: "minimum_aum",
       label: "Minimum AUM",
       value: aumTierLabel[mandate.liquidity_preference],
     });
@@ -92,12 +102,12 @@ function MandateSnapshotCard({
       className="p-4"
     >
       <div className="text-xs uppercase tracking-wider text-text-muted">
-        Mandate snapshot
+        <Term k="mandate">Mandate</Term> snapshot
       </div>
       {rows.length > 0 ? (
         <dl className="mt-2 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
           {rows.map((r) => (
-            <div key={r.label}>
+            <div key={r.id}>
               <dt className="text-xs text-text-muted">{r.label}</dt>
               <dd
                 className="mt-0.5 font-medium"
@@ -161,8 +171,8 @@ export function MandateTabPanel(props: MyAllocationDashboardPayload) {
       <MandateSnapshotCard mandate={mandate ?? null} />
       <div className="border-t border-border p-4 text-sm">
         <p className="mb-2 text-text-secondary">
-          Edit your mandate in the profile surface. Changes take effect
-          immediately across the Bridge engine.
+          Edit your mandate in the profile surface. Changes apply at once to
+          the mandate check and the replacement suggestions.
         </p>
         <Link
           href="/profile?tab=mandate"

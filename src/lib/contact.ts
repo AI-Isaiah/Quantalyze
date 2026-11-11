@@ -52,6 +52,19 @@ export type ContactSource = (typeof CONTACT_SOURCES)[number];
 export const CONTACT_FORM_LINK_TEXT = "contact form";
 
 /**
+ * Phase 201 PLAINWORDS plan 32 (F-12, U-28) — the one phrase-and-href pair for
+ * "egress IP status". The wizard's IP-allowlist hint and `ErrorEnvelope` both
+ * import it, so the phrase a line links and the place it links to cannot drift
+ * apart. The href's fragment is the id of the `/security` section that states
+ * whether there is an address to allow; the page test pins the two together.
+ * Pinned by contact.test.ts.
+ */
+export const EGRESS_IP_STATUS_LINK = Object.freeze({
+  text: "egress IP status",
+  href: "/security#egress-ips",
+});
+
+/**
  * The prefill fence (D-02): an id from a link is accepted only in this shape.
  * Charset of the ids the app mints: UUIDs, `cid-…` tokens, and the wizard's
  * page-load correlation id `wizard:<uuid>` (`src/lib/wizard/wizard-correlation.ts`),

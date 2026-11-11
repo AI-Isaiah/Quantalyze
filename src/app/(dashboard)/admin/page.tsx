@@ -27,7 +27,7 @@ export default async function AdminPage() {
   const [introRequests, pendingStrategies, pendingAllocators, pendingManagers] = await Promise.all([
     admin
       .from("contact_requests")
-      .select("id, status, message, admin_note, created_at, allocator_id, strategy_id, profiles!contact_requests_allocator_id_fkey(display_name, company), strategies!contact_requests_strategy_id_fkey(id, name, codename, disclosure_tier)")
+      .select("id, status, message, admin_note, created_at, allocator_id, strategy_id, profiles!contact_requests_allocator_id_fkey(display_name, company), strategies!contact_requests_strategy_id_fkey(id, name, codename, disclosure_tier, status)")
       .order("created_at", { ascending: false })
       .limit(50)
       // createAdminClient() is untyped, so supabase-js infers each to-one

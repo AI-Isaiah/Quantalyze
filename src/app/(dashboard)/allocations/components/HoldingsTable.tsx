@@ -75,6 +75,8 @@ import { holdingIsPriceGap } from "@/lib/holding-equity";
 import { OWN_CAPITAL } from "@/lib/capital-ownership";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { Button } from "@/components/ui/Button";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition, type TermKey } from "@/lib/glossary";
 import { dustHiddenLine } from "../lib/dust";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import type { StrategyRow } from "../lib/strategies-row-adapter";
@@ -316,9 +318,9 @@ export function HoldingsTable(props: HoldingsTableProps) {
 // F4b — one row per onboarded portfolio strategy. No status-dot, no
 // per-holding bridge-outcome banner / sub-row (those are holding-centric and
 // live on the secondary Exchange-Positions section). Each row's Strategy cell
-// links to the strategy factsheet; the displayed name is already tier-redacted
-// by the adapter (alias → codename → synthetic id), and the factsheet route
-// applies its own disclosure-tier handling.
+// links to the strategy factsheet; the adapter names the row from the payload's
+// redacted name first (null for a strategy the viewer cannot see, D-17), then
+// the codename, and the factsheet route applies its own disclosure-tier handling.
 
 type StrategySortKey =
   | "strategy"
@@ -479,7 +481,7 @@ function StrategyRowsTable({
                   No strategies marked as own capital.
                 </p>
                 <p className="mt-2 text-small text-text-secondary">
-                  Set the mark from My Strategies, or when you connect a new
+                  Set the mark from Strategies, or when you connect a new
                   key.
                 </p>
                 <p className="mt-4">
@@ -487,7 +489,7 @@ function StrategyRowsTable({
                     href="/strategies"
                     className="text-small font-medium text-accent underline"
                   >
-                    Go to My Strategies →
+                    Go to Strategies →
                   </Link>
                 </p>
               </>
@@ -519,8 +521,8 @@ function StrategyRowsTable({
               <StrategySortableHeader label="Weight" sortKey="weight" sort={sort} onSort={toggleSort} align="right" title="share of allocated capital" />
               <StrategySortableHeader label="Allocation" sortKey="allocation" sort={sort} onSort={toggleSort} align="right" />
               <StrategySortableHeader label="MTD" sortKey="mtd" sort={sort} onSort={toggleSort} align="right" />
-              <StrategySortableHeader label="Sharpe" sortKey="sharpe" sort={sort} onSort={toggleSort} align="right" />
-              <StrategySortableHeader label="Max DD" sortKey="maxDd" sort={sort} onSort={toggleSort} align="right" />
+              <StrategySortableHeader label="Sharpe" term="sharpe" sortKey="sharpe" sort={sort} onSort={toggleSort} align="right" />
+              <StrategySortableHeader label="Max DD" term="max_drawdown" sortKey="maxDd" sort={sort} onSort={toggleSort} align="right" />
               <StrategySortableHeader label="Age" sortKey="age" sort={sort} onSort={toggleSort} align="right" />
               <th scope="col" className="px-4 py-2 text-right font-semibold">
                 Actions
@@ -622,6 +624,7 @@ function StrategyRowsTable({
 
 function StrategySortableHeader({
   label,
+  term,
   sortKey,
   sort,
   onSort,
@@ -629,6 +632,8 @@ function StrategySortableHeader({
   title,
 }: {
   label: string;
+  /** A registered glossary term this label names (Form B: the sort button is the affordance). */
+  term?: TermKey;
   sortKey: StrategySortKey;
   sort: { key: StrategySortKey; dir: SortDir };
   onSort: (key: StrategySortKey) => void;
@@ -637,6 +642,16 @@ function StrategySortableHeader({
   title?: string;
 }) {
   const isActive = sort.key === sortKey;
+  const button = (
+    <button
+      type="button"
+      className="inline-flex items-center gap-1 uppercase tracking-wider hover:text-text-primary"
+      onClick={() => onSort(sortKey)}
+    >
+      {label}
+      {isActive ? <span aria-hidden>{sort.dir === "asc" ? "▲" : "▼"}</span> : null}
+    </button>
+  );
   return (
     <th
       className={`px-4 py-2 font-semibold ${align === "right" ? "text-right" : ""}`}
@@ -645,14 +660,7 @@ function StrategySortableHeader({
         isActive ? (sort.dir === "asc" ? "ascending" : "descending") : "none"
       }
     >
-      <button
-        type="button"
-        className="inline-flex items-center gap-1 uppercase tracking-wider hover:text-text-primary"
-        onClick={() => onSort(sortKey)}
-      >
-        {label}
-        {isActive ? <span aria-hidden>{sort.dir === "asc" ? "▲" : "▼"}</span> : null}
-      </button>
+      {term ? <Tooltip content={termDefinition(term)}>{button}</Tooltip> : button}
     </th>
   );
 }
@@ -1127,6 +1135,7 @@ function DesignHoldingsTable({
               />
               <SortableHeader
                 label="Sharpe"
+                term="sharpe"
                 sortKey="sharpe"
                 sort={sort}
                 onSort={toggleSort}
@@ -1134,6 +1143,7 @@ function DesignHoldingsTable({
               />
               <SortableHeader
                 label="Max DD"
+                term="max_drawdown"
                 sortKey="dd"
                 sort={sort}
                 onSort={toggleSort}
@@ -1306,12 +1316,15 @@ function DesignHoldingsTable({
 
 function SortableHeader({
   label,
+  term,
   sortKey,
   sort,
   onSort,
   align,
 }: {
   label: string;
+  /** A registered glossary term this label names (Form B: the sort button is the affordance). */
+  term?: TermKey;
   sortKey: SortKey;
   sort: { key: SortKey; dir: SortDir };
   onSort: (key: SortKey) => void;
@@ -1319,6 +1332,16 @@ function SortableHeader({
 }) {
   const isActive = sort.key === sortKey;
   const arrow = isActive ? (sort.dir === "asc" ? "↑" : "↓") : "";
+  const button = (
+    <button
+      type="button"
+      onClick={() => onSort(sortKey)}
+      className="inline-flex items-center gap-1 text-micro uppercase tracking-wider text-text-muted hover:text-text-primary"
+    >
+      {label}
+      {arrow ? <span aria-hidden="true">{arrow}</span> : null}
+    </button>
+  );
   return (
     <th
       className={
@@ -1330,14 +1353,7 @@ function SortableHeader({
         isActive ? (sort.dir === "asc" ? "ascending" : "descending") : "none"
       }
     >
-      <button
-        type="button"
-        onClick={() => onSort(sortKey)}
-        className="inline-flex items-center gap-1 text-micro uppercase tracking-wider text-text-muted hover:text-text-primary"
-      >
-        {label}
-        {arrow ? <span aria-hidden="true">{arrow}</span> : null}
-      </button>
+      {term ? <Tooltip content={termDefinition(term)}>{button}</Tooltip> : button}
     </th>
   );
 }

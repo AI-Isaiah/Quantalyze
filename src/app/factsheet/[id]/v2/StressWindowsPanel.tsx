@@ -3,6 +3,7 @@
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { benchmarkWithheldReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
+import { formatDay } from "@/lib/utils";
 
 import { usePayload } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
@@ -131,7 +132,7 @@ export function StressWindowsPanel() {
                 <div className="text-fixed-10 text-text-muted">{w.note}</div>
               </td>
               <td className="py-1.5 px-2 font-mono tabular-nums text-text-2 whitespace-nowrap">
-                {w.start.slice(0, 10)} → {w.end.slice(0, 10)}
+                {formatDay(w.start)} → {formatDay(w.end)}
               </td>
               <td className="py-1.5 px-2 text-right font-mono tabular-nums text-text-2">
                 {w.days}d{w.coverage === "partial" && <span className="text-text-muted">/{w.expectedCalendarDays}</span>}

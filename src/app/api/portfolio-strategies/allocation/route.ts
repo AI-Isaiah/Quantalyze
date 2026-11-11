@@ -491,7 +491,7 @@ export async function DELETE(req: NextRequest) {
     );
   if (resolved.id === null)
     return json(
-      { code: "DASHBOARD_ROW_STALE", error: "portfolio not found" },
+      { code: "DASHBOARD_ROW_STALE", error: "Allocation not found" },
       404,
     );
 

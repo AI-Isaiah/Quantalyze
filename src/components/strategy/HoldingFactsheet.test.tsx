@@ -52,6 +52,14 @@ describe("HoldingFactsheet (finding g4)", () => {
     expect(screen.getByText(/vol/i)).toBeInTheDocument();
   });
 
+  // Phase 201 plan 18 (D-02, D-06): the Sharpe label is a registry term on /compare.
+  it("renders the Sharpe label as a registry term (Form A) with its text unchanged", () => {
+    render(<HoldingFactsheet item={SAMPLE} />);
+    const label = screen.getByText("Sharpe");
+    expect(label).toHaveAttribute("data-term", "sharpe");
+    expect(label).toHaveAttribute("tabindex", "0");
+  });
+
   it("renders em-dash for null metrics", () => {
     const item: HoldingCompareItem = {
       ...SAMPLE,

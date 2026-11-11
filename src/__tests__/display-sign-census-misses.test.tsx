@@ -133,7 +133,7 @@ describe("KpiStrip value colour follows the rounded sign (D-03)", () => {
 });
 
 // Phase 170.1 (D-11): the aria-label element holds two spans, the toned figure and the
-// untoned "vs current book" suffix, so the colour pins read the first span.
+// untoned "vs current allocation" suffix, so the colour pins read the first span.
 describe("KpiStrip delta pill at the noise floor keeps its direction word and colour (characterization)", () => {
   const live: ComputedMetrics = { ...EMPTY_METRICS, n: 252, sharpe: 1.2, max_drawdown: -0.08, twr: 0.15 };
   const strip = (scenario: ComputedMetrics) =>
@@ -151,30 +151,30 @@ describe("KpiStrip delta pill at the noise floor keeps its direction word and co
 
   it("a Sharpe delta of exactly +0.01 is 'improved' in text-positive", () => {
     const { container } = strip({ ...live, sharpe: 1.21 });
-    const pill = container.querySelector('[aria-label^="Sharpe delta vs current book:"]');
+    const pill = container.querySelector('[aria-label^="Sharpe delta vs current allocation:"]');
     expect(pill).not.toBeNull();
-    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current book: +0.01 (improved)");
+    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current allocation: +0.01 (improved)");
     expect((pill!.children[0] as HTMLElement).className).toContain("text-positive");
   });
 
   it("a Sharpe delta of exactly -0.01 is 'regressed' in text-negative", () => {
     const { container } = strip({ ...live, sharpe: 1.19 });
-    const pill = container.querySelector('[aria-label^="Sharpe delta vs current book:"]');
-    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current book: −0.01 (regressed)");
+    const pill = container.querySelector('[aria-label^="Sharpe delta vs current allocation:"]');
+    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current allocation: −0.01 (regressed)");
     expect((pill!.children[0] as HTMLElement).className).toContain("text-negative");
   });
 
   it("a Sharpe delta of +0.004 is under the noise floor: 'no change' in the muted colour", () => {
     const { container } = strip({ ...live, sharpe: 1.204 });
-    const pill = container.querySelector('[aria-label^="Sharpe delta vs current book:"]');
-    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current book: 0.00 (no change)");
+    const pill = container.querySelector('[aria-label^="Sharpe delta vs current allocation:"]');
+    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current allocation: 0.00 (no change)");
     expect((pill!.children[0] as HTMLElement).className).toContain("text-text-muted");
   });
 
   it("a Max DD delta of +0.04 (a shallower drawdown) is 'improved' in text-positive", () => {
     const { container } = strip({ ...live, max_drawdown: -0.04 });
-    const pill = container.querySelector('[aria-label^="Max DD 12m delta vs current book:"]');
-    expect(pill!.getAttribute("aria-label")).toBe("Max DD 12m delta vs current book: +4.0% (improved)");
+    const pill = container.querySelector('[aria-label^="Max DD 12m delta vs current allocation:"]');
+    expect(pill!.getAttribute("aria-label")).toBe("Max DD 12m delta vs current allocation: +4.0% (improved)");
     expect((pill!.children[0] as HTMLElement).className).toContain("text-positive");
   });
 });
@@ -196,6 +196,11 @@ function candidate(partial: Partial<BridgeCandidate> = {}): BridgeCandidate {
   };
 }
 
+// Phase 201 / F-04, U-26, A-14: the intro message a manager reads no longer
+// opens with the retired "[Bridge]" prefix. The census scanner skips a string
+// that starts with "[", so these three pins are the only enforcement of this
+// copy. Requests already stored keep their old prefix (no migration); no
+// consumer keys on it (A-14).
 describe("ReplacementCard intro message prints the composite score on the rounded sign (D-02)", () => {
   async function sentMessage(composite: number): Promise<string> {
     const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
@@ -209,13 +214,13 @@ describe("ReplacementCard intro message prints the composite score on the rounde
 
   it("a composite score of -0.003 is sent as 0.00, not -0.00", async () => {
     expect(await sentMessage(-0.003)).toBe(
-      "[Bridge] Replacement candidate for strategy old. Composite score: 0.00.",
+      "Suggested replacement for strategy old. Composite score: 0.00.",
     );
   });
 
   it("an ordinary composite score keeps its digits: 0.82 and -0.41", async () => {
-    expect(await sentMessage(0.82)).toBe("[Bridge] Replacement candidate for strategy old. Composite score: 0.82.");
+    expect(await sentMessage(0.82)).toBe("Suggested replacement for strategy old. Composite score: 0.82.");
     cleanup();
-    expect(await sentMessage(-0.41)).toBe("[Bridge] Replacement candidate for strategy old. Composite score: -0.41.");
+    expect(await sentMessage(-0.41)).toBe("Suggested replacement for strategy old. Composite score: -0.41.");
   });
 });

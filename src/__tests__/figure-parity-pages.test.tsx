@@ -17,7 +17,9 @@
  *   - the tearsheet page (Phase 196 plan 13: the factsheet's PRINT VIEW, so it is checked as a
  *     CONSTRUCTION: the page hands `FactsheetView printView` the payload the factsheet's own
  *     builder makes, and that payload is compared like the factsheet's);
- *   - the Holdings tab (`toStrategyRows`).
+ *   - the Holdings tab (`toStrategyRows`);
+ *   - the CompareTable Volatility cell (Phase 201 D-15/D-25: unsigned, as the StrategyTable and
+ *     the tearsheet print it; closes the CompareTable half of TODOS 197-VOL-SIGN-TEARSHEET-COMPARE).
  *
  * "SAME VALUE" IS CHECKED IN THE FORM EACH SURFACE EXPOSES. A DATA surface (the payload's
  * `strategyMetrics`, the Holdings adapter output) is compared as a number within 1e-12 of
@@ -168,6 +170,7 @@ import { withPublishedOrOwner } from "@/lib/visibility";
 import { FIGURE_DEFS_VERSION, gateAnnualized, shortTrackMarkerTitle, shortTrackNote } from "@/lib/figure-gate";
 import { formatNumber, formatPercent } from "@/lib/utils";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
+import { CompareTable } from "@/components/strategy/CompareTable";
 import TearSheetPage from "@/app/factsheet/[id]/tearsheet/page";
 import { toStrategyRows } from "@/app/(dashboard)/allocations/lib/strategies-row-adapter";
 import { recordFromScalars, type RecordScalarRow } from "@/lib/figure-record-scalars";
@@ -406,6 +409,33 @@ function tableCell(label: string): string {
 }
 
 /**
+ * CompareTable: one strategy column over the stored row. The `figureRecord` is built from the
+ * same record scalars the other readers use, so the total-record gate shows the value.
+ */
+function renderCompareTable(analytics: Row, series: { date: string }[]) {
+  const item = {
+    kind: "strategy" as const,
+    strategy: { id: STRATEGY_ID, name: "Parity Fixture" },
+    analytics,
+    figureRecord: recordFromScalars(recordScalars(analytics, series), "crypto"),
+  };
+  return render(<CompareTable items={[item] as unknown as React.ComponentProps<typeof CompareTable>["items"]} />);
+}
+
+/**
+ * The figure text of the CompareTable cell in the row labelled `label` (first strategy column).
+ * The cell also holds a qualitative chip ("Moderate"), so the figure is read from the
+ * `font-metric` span that carries the number, not from the whole cell.
+ */
+function compareCell(label: string): string {
+  const row = Array.from(document.querySelectorAll("tbody tr")).find(
+    (tr) => tr.querySelector("td")?.textContent === label,
+  );
+  if (!row) throw new Error(`CompareTable has no row named ${label}`);
+  return row.querySelectorAll("td")[1].querySelector("span.font-metric")?.textContent ?? "";
+}
+
+/**
  * Tearsheet: the page, run over the same stored row the factsheet's fetch path reads. Returns what
  * the page handed `FactsheetView` (its payload and `printView`), which is all the page decides.
  * The detail read only identifies the strategy for the identity panel and the ranks' category.
@@ -616,6 +646,16 @@ describe.each(FIXTURES)("one stored row, every page ($name)", ({ stored }) => {
     // Phase 197 D-05: volatility can never be negative, so the table prints it unsigned.
     expect(tableCell("Volatility"), "Volatility").toBe(formatPercent(stored.volatility, 2, { signed: false }));
     expect(tableCell("6 Month"), "6 Month").toBe(formatPercent(stored.six_month_return));
+  });
+
+  it("CompareTable: the Volatility cell is the stored field printed unsigned, as exact text (D-15, D-25)", () => {
+    renderCompareTable(analytics(), MARKED_SERIES);
+    // Exact text: volatility can never be negative, so no plus sign, the same as the
+    // StrategyTable cell above. Another row keeps its sign rule, so the arm is not
+    // satisfied by unsigning the whole table.
+    expect(compareCell("Volatility"), "Volatility").toBe(formatPercent(stored.volatility, 2, { signed: false }));
+    expect(compareCell("Volatility"), "Volatility has no plus").not.toContain("+");
+    expect(compareCell("Cumulative Return"), "Cumulative Return").toBe(formatPercent(stored.cumulative_return));
   });
 
   it("tearsheet: renders the factsheet's own view in printView, on a payload whose every shared metric is the stored field to within 1e-12", async () => {

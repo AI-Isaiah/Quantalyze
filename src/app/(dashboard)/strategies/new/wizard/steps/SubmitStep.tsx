@@ -53,7 +53,7 @@ import {
  */
 const MARK_DROPPED_TITLE = "Saved. The own-capital mark didn't stick.";
 const MARK_DROPPED_BODY =
-  "Everything else was saved. Mark this strategy as your own capital in My Strategies — until you do, the Allocate action won't appear for it.";
+  "Everything else was saved. Mark this strategy as your own capital in Strategies — until you do, the Allocate action won't appear for it.";
 const MARK_DROPPED_CONTINUE = "Continue";
 
 /**
@@ -871,7 +871,7 @@ export function SubmitStep({
             {submitting
               ? "Submitting..."
               : isContribution
-                ? "Add to my strategies"
+                ? "Add to Strategies"
                 : "Submit for review"}
           </Button>
         </div>

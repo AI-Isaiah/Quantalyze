@@ -60,7 +60,8 @@ const KEYS = [
 
 const BTC_K1 = "holding:binance:BTC:spot#k1";
 const BTC_K2 = "holding:binance:BTC:spot#k2";
-const BANNER = "Record outcome for Bridge-introduced strategy";
+// F-04 / U-26 (plan 201-28): the banner region lost the retired word.
+const BANNER = "Record outcome for a suggested replacement";
 
 const BOOK: Row[] = [
   hold("BTC", 40_000, { api_key_id: "k1" }),

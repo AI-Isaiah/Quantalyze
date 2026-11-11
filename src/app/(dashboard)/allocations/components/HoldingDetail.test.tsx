@@ -98,6 +98,11 @@ describe("HoldingDetail — H-0091", () => {
     // Metric labels present.
     expect(within(panel).getByText("Allocation")).toBeInTheDocument();
     expect(within(panel).getByText("Sharpe")).toBeInTheDocument();
+    // D-01: the two registered statistics open their definitions; "Weight" and
+    // "Age" are plain words and stay plain.
+    expect(within(panel).getByText("Sharpe").closest("[data-term]")).toHaveAttribute("data-term", "sharpe");
+    expect(within(panel).getByText("Max DD").closest("[data-term]")).toHaveAttribute("data-term", "max_drawdown");
+    expect(within(panel).getByText("Weight").closest("[data-term]")).toBeNull();
   });
 
   it("clicking the 'Record outcome' tab switches aria-selected and shows that tabpanel", () => {
@@ -117,10 +122,25 @@ describe("HoldingDetail — H-0091", () => {
   it("Record-outcome tab with no candidate → renders the no-candidate guidance, not the form", () => {
     render(<HoldingDetail row={makeRow()} topCandidateStrategyId={null} />);
     fireEvent.click(screen.getByRole("tab", { name: "Record outcome" }));
+    // Phase 201 plan 29 (F-04, U-26): exact plain-words sentence, no retired word.
     expect(
-      screen.getByText(/not flagged for Bridge action/i),
+      screen.getByText(
+        "This holding is not flagged as outside your mandate — no replacement to record against.",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("outcome-form")).not.toBeInTheDocument();
+  });
+
+  it("renders no retired product word in text, aria-label or title (F-04)", () => {
+    const { container } = render(
+      <HoldingDetail row={makeRow()} topCandidateStrategyId={null} />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Record outcome" }));
+    expect(container.textContent ?? "").not.toMatch(/\bBridge\b/);
+    for (const el of container.querySelectorAll("[aria-label], [title]")) {
+      expect(el.getAttribute("aria-label") ?? "").not.toMatch(/\bBridge\b/);
+      expect(el.getAttribute("title") ?? "").not.toMatch(/\bBridge\b/);
+    }
   });
 
   it("Record-outcome tab WITH a candidate → mounts OutcomeForm threaded the candidate strategy id", () => {

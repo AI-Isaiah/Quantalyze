@@ -18,6 +18,8 @@ import { buildFactsheetHref, type FactsheetOrigin } from "@/lib/factsheet/origin
 import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
 import { annualizedCell, rowRecord } from "./annualized-cell";
 import { DISCOVERY_COLUMNS, type DiscoveryColumn } from "./discovery-columns";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition } from "@/lib/glossary";
 import type { ListSeriesVerdictResult } from "@/lib/freshness";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
@@ -240,7 +242,13 @@ export function StrategyGrid({
               {/* AUM / Max Capacity */}
               <div className="flex items-center gap-4 text-xs text-text-muted mb-3 max-[375px]:mb-2 max-[375px]:gap-2">
                 <span>
-                  AUM{" "}
+                  {/* Phase 201 plan 16 (D-01, D-19): this label sits inside the card's factsheet
+                      <Link>, so a Form A `Term` (a tab stop) would nest a focusable in a link.
+                      Hover shows the registry definition; the AUM column header in the table is
+                      the keyboard-reachable term. */}
+                  <Tooltip content={termDefinition("aum", "discovery")} className="inline">
+                    AUM
+                  </Tooltip>{" "}
                   <span className="text-text-secondary font-medium">
                     {formatCurrency(s.aum)}
                   </span>

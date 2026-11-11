@@ -292,7 +292,7 @@ describe("step 1: rows", () => {
     const unmarked = screen.getByTestId(`add-allocation-row-${ID_B}`);
     expect(unmarked).toHaveAttribute("aria-disabled", "true");
     expect(
-      within(unmarked).getByText("Not marked as your own capital. Mark it on My Strategies first."),
+      within(unmarked).getByText("Not marked as your own capital. Mark it on Strategies first."),
     ).toBeInTheDocument();
     await user.click(unmarked);
     expect(screen.getByText("Step 1 of 2 · Strategy")).toBeInTheDocument();
@@ -322,15 +322,15 @@ describe("step 1: rows", () => {
     expect(screen.getByTestId(`add-allocation-row-${ID_B}`)).not.toHaveAttribute("aria-disabled");
   });
 
-  it("a held row says 'In your book', is aria-disabled, explains itself, and is never selectable", async () => {
+  it("a held row says 'In your allocation', is aria-disabled, explains itself, and is never selectable", async () => {
     const user = userEvent.setup();
     setup({ heldStrategyIds: new Set([ID_A]) });
     await ready();
     const held = screen.getByTestId(`add-allocation-row-${ID_A}`);
     expect(held).toHaveAttribute("aria-disabled", "true");
-    expect(within(held).getByText("In your book")).toBeInTheDocument();
+    expect(within(held).getByText("In your allocation")).toBeInTheDocument();
     expect(
-      within(held).getByText("Already in your book. Change its amount on Holdings."),
+      within(held).getByText("Already in your allocation. Change its amount on Holdings."),
     ).toBeInTheDocument();
     await user.click(held);
     expect(screen.getByText("Step 1 of 2 · Strategy")).toBeInTheDocument();
@@ -338,7 +338,7 @@ describe("step 1: rows", () => {
     // A row that is not held carries neither the tag nor the attribute.
     const free = screen.getByTestId(`add-allocation-row-${ID_C}`);
     expect(free).not.toHaveAttribute("aria-disabled");
-    expect(within(free).queryByText("In your book")).toBeNull();
+    expect(within(free).queryByText("In your allocation")).toBeNull();
   });
 
   it("ArrowDown and ArrowUp move focus between rows, and Enter on a row opens step 2 with the amount focused", async () => {
@@ -390,7 +390,7 @@ describe("step 1: the ?add= deep link", () => {
     const { props } = setup({ deepLink: { raw: ID_A }, heldStrategyIds: new Set([ID_A]) });
     const notice = await screen.findByTestId("add-allocation-notice");
     expect(notice).toHaveTextContent(
-      "Alpha One is already in your book. Change its amount on Holdings.",
+      "Alpha One is already in your allocation. Change its amount on Holdings.",
     );
     const link = within(notice).getByRole("link", { name: "Open Holdings" });
     expect(link).toHaveAttribute("href", "?tab=holdings");
@@ -407,7 +407,7 @@ describe("step 1: the ?add= deep link", () => {
     });
     const notice = await screen.findByTestId("add-allocation-notice");
     expect(notice).toHaveTextContent(
-      "Beta Two: Not marked as your own capital. Mark it on My Strategies first.",
+      "Beta Two: Not marked as your own capital. Mark it on Strategies first.",
     );
     expect(screen.getByText("Step 1 of 2 · Strategy")).toBeInTheDocument();
     expect(screen.queryByText("Step 2 of 2 · Amount and date")).toBeNull();
@@ -538,7 +538,7 @@ describe("step 2: the form", () => {
   it("prints the share line from Book equity as the amount is typed", async () => {
     const { user, amountInput } = await atStep2(ID_A);
     await user.type(amountInput, "25000");
-    expect(screen.getByText("≈ 25.0% of your book equity ($100,000).")).toBeInTheDocument();
+    expect(screen.getByText("≈ 25.0% of your allocation equity ($100,000).")).toBeInTheDocument();
   });
 
   it.each([
@@ -549,7 +549,7 @@ describe("step 2: the form", () => {
   ])("prints no share line when %s", async (_why, over, typed) => {
     const { user, amountInput } = await atStep2(ID_A, over);
     if (typed) await user.type(amountInput, typed);
-    expect(screen.queryByText(/of your book equity/)).toBeNull();
+    expect(screen.queryByText(/of your allocation equity/)).toBeNull();
   });
 
   it("nothing is posted by opening, choosing and typing", async () => {
@@ -581,7 +581,7 @@ describe("step 2: refusals send nothing", () => {
     await user.type(amountInput, "1000");
     await user.click(primary());
     expect(
-      screen.getByText("We cannot size this allocation until your book equity is available."),
+      screen.getByText("We cannot size this allocation until your allocation equity is available."),
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -594,7 +594,7 @@ describe("step 2: refusals send nothing", () => {
     await user.type(amountInput, "1000");
     await user.click(primary());
     expect(
-      screen.getByText("We cannot size this allocation until your book equity is available."),
+      screen.getByText("We cannot size this allocation until your allocation equity is available."),
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
     cleanup();
@@ -611,7 +611,7 @@ describe("step 2: refusals send nothing", () => {
     await user.type(amountInput, "150000");
     await user.click(primary());
     expect(
-      screen.getByText("Enter an amount up to your book equity ($100,000)."),
+      screen.getByText("Enter an amount up to your allocation equity ($100,000)."),
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });

@@ -45,7 +45,7 @@ export interface InsightStripProps {
   className?: string;
   /**
    * Phase 09 / D-07 + finding f5. When > 0, prepends a dedicated line
-   * "Bridge flagged N holding(s) — Review in Scenario →" that links to
+   * "{n} holding(s) ... — Review in Scenario →" (flagged holdings) that links to
    * /allocations?tab=scenario. Hidden entirely when 0 or undefined.
    * No empty-state copy — presence is the signal.
    */
@@ -147,7 +147,7 @@ export function InsightStrip({
 
   return (
     <section
-      aria-label="Portfolio insights"
+      aria-label="Allocation insights"
       className={cn("flex flex-col gap-3", className)}
     >
       <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
@@ -161,7 +161,7 @@ export function InsightStrip({
               className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full bg-text-muted"
             />
             <Link href="/allocations?tab=scenario" className="hover:underline">
-              {`Bridge flagged ${flaggedCount} holding(s) — Review in Scenario →`}
+              {`${flaggedCount} holding(s) outside your mandate — Review in Scenario →`}
             </Link>
           </li>
         )}

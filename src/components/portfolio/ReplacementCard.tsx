@@ -107,7 +107,7 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           strategy_id: candidate.strategy_id,
-          message: `[Bridge] Replacement candidate for strategy ${replacementFor}. Composite score: ${formatFixedSigned(candidate.composite_score, { dp: 2 })}.`,
+          message: `Suggested replacement for strategy ${replacementFor}. Composite score: ${formatFixedSigned(candidate.composite_score, { dp: 2 })}.`,
           source: "bridge",
           replacement_for: replacementFor,
         }),

@@ -113,7 +113,7 @@
       {
         "surface": "overview",
         "index": 2,
-        "label": "Cumulative Returns: My Portfolio vs BTC-USD",
+        "label": "Cumulative Returns: My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -212,7 +212,7 @@
       {
         "surface": "overview",
         "index": 3,
-        "label": "Cumulative Returns vs Benchmark: My Portfolio divided by BTC-USD",
+        "label": "Cumulative Returns vs Benchmark: My allocation divided by BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -293,7 +293,7 @@
       {
         "surface": "overview",
         "index": 4,
-        "label": "Cumulative Returns — Volatility Matched: My Portfolio vs BTC-USD",
+        "label": "Cumulative Returns — Volatility Matched: My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -392,7 +392,7 @@
       {
         "surface": "overview",
         "index": 5,
-        "label": "Daily Returns: My Portfolio vs BTC-USD",
+        "label": "Daily Returns: My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -455,7 +455,7 @@
       {
         "surface": "overview",
         "index": 6,
-        "label": "Rolling Volatility (6mo): My Portfolio vs BTC-USD",
+        "label": "Rolling Volatility (6mo): My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -530,7 +530,7 @@
       {
         "surface": "overview",
         "index": 7,
-        "label": "Rolling Sharpe (6mo): My Portfolio vs BTC-USD",
+        "label": "Rolling Sharpe (6mo): My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -611,7 +611,7 @@
       {
         "surface": "overview",
         "index": 8,
-        "label": "Rolling Sortino (6mo): My Portfolio vs BTC-USD",
+        "label": "Rolling Sortino (6mo): My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -704,7 +704,7 @@
       {
         "surface": "overview",
         "index": 9,
-        "label": "Rolling β (90d) vs Comparator: My Portfolio divided by BTC-USD",
+        "label": "Rolling β (90d) vs Comparator: My allocation divided by BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -773,7 +773,7 @@
       {
         "surface": "overview",
         "index": 10,
-        "label": "Worst 10 Drawdown Periods: My Portfolio vs BTC-USD",
+        "label": "Worst 10 Drawdown Periods: My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -896,7 +896,7 @@
       {
         "surface": "overview",
         "index": 11,
-        "label": "Underwater Chart for Accumulated Capital: My Portfolio vs BTC-USD",
+        "label": "Underwater Chart for Accumulated Capital: My allocation vs BTC-USD",
         "emitter": "timeseries-y",
         "width": 400,
         "texts": [
@@ -977,7 +977,7 @@
       {
         "surface": "overview",
         "index": 12,
-        "label": "Distribution of daily returns: My Portfolio overlaid with BTC-USD",
+        "label": "Distribution of daily returns: My allocation overlaid with BTC-USD",
         "emitter": null,
         "width": 400,
         "texts": [
@@ -1048,7 +1048,7 @@
         "width": 400,
         "texts": [
           {
-            "text": "My Portfolio",
+            "text": "My allocation",
             "anchor": "start",
             "x": 74,
             "y": 12
@@ -1204,7 +1204,7 @@
         "width": 644,
         "texts": [
           {
-            "text": "My Portfolio",
+            "text": "My allocati…",
             "anchor": "middle",
             "x": 154,
             "y": 20
@@ -1240,7 +1240,7 @@
             "y": 20
           },
           {
-            "text": "My Portfolio",
+            "text": "My allocati…",
             "anchor": "end",
             "x": 102,
             "y": 50

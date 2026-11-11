@@ -147,7 +147,7 @@ export interface UseScenarioStateReturn {
    */
   setWindow: (window: CoverageWindow) => void;
   /**
-   * Phase 151 AUM-01 — write the manual portfolio AUM through into the draft so
+   * Phase 151 AUM-01 — write the manual scenario AUM through into the draft so
    * the localStorage autosave, the save handlers' POST/PUT payload and a reopen
    * all carry it. `undefined` clears the override (back to the live-holdings
    * sum). Rebases via `baseOf` like every other mutator. The composer validates
@@ -419,11 +419,11 @@ export function useScenarioState(
   // weight edit counts as one gesture (WR-01) — the prior "conservative zero"
   // plus the `!== true` guard locked out the voluntary_modify workflow and
   // per-key edits respectively.
-  //   (d) a manual portfolio AUM (Phase 151 AUM-01).
+  //   (d) a manual scenario AUM (Phase 151 AUM-01).
   //
   // 151 review WR-06 — `manualAumUsd` is a first-class, persisted,
   // commit-affecting draft field and was counted NOWHERE. So an allocator who
-  // set the portfolio AUM and nothing else saw the footer chip read "0 changes"
+  // set the scenario AUM and nothing else saw the footer chip read "0 changes"
   // for a real unsaved edit, and — worse — sailed past
   // `handleEntryModeSelect`'s `if (scenario.diffCount > 0)` guard, so the mode
   // switch wiped the AUM with no ResetConfirmationModal. That guard exists

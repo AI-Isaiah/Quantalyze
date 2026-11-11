@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import { getMetricLabel, LABEL_COLORS } from "@/lib/metric-labels";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import {
   ANNUALIZED_KEYS,
@@ -36,20 +38,22 @@ type CompareItem = StrategyItem | HoldingCompareItem;
 interface MetricRow {
   label: string;
   key: string;
-  format: "percent" | "number" | "days";
+  format: "percent" | "percentUnsigned" | "number" | "days";
   higherIsBetter: boolean;
   qualKey?: string;
+  /** The registry key this row's label names (D-02); the label renders as a `Term`. */
+  term?: TermKey;
 }
 
 const METRICS: MetricRow[] = [
   { label: "Cumulative Return", key: "cumulative_return", format: "percent", higherIsBetter: true },
-  { label: "CAGR", key: "cagr", format: "percent", higherIsBetter: true, qualKey: "cagr" },
-  { label: "Sharpe", key: "sharpe", format: "number", higherIsBetter: true, qualKey: "sharpe" },
-  { label: "Sortino", key: "sortino", format: "number", higherIsBetter: true, qualKey: "sortino" },
-  { label: "Calmar", key: "calmar", format: "number", higherIsBetter: true, qualKey: "calmar" },
-  { label: "Max Drawdown", key: "max_drawdown", format: "percent", higherIsBetter: true, qualKey: "max_drawdown" },
-  { label: "DD Duration", key: "max_drawdown_duration_days", format: "days", higherIsBetter: false },
-  { label: "Volatility", key: "volatility", format: "percent", higherIsBetter: false, qualKey: "volatility" },
+  { label: "CAGR", key: "cagr", format: "percent", higherIsBetter: true, qualKey: "cagr", term: "cagr" },
+  { label: "Sharpe", key: "sharpe", format: "number", higherIsBetter: true, qualKey: "sharpe", term: "sharpe" },
+  { label: "Sortino", key: "sortino", format: "number", higherIsBetter: true, qualKey: "sortino", term: "sortino" },
+  { label: "Calmar", key: "calmar", format: "number", higherIsBetter: true, qualKey: "calmar", term: "calmar" },
+  { label: "Max Drawdown", key: "max_drawdown", format: "percent", higherIsBetter: true, qualKey: "max_drawdown", term: "max_drawdown" },
+  { label: "DD Duration", key: "max_drawdown_duration_days", format: "days", higherIsBetter: false, term: "dd_duration" },
+  { label: "Volatility", key: "volatility", format: "percentUnsigned", higherIsBetter: false, qualKey: "volatility", term: "volatility" },
   { label: "6 Month Return", key: "six_month_return", format: "percent", higherIsBetter: true },
 ];
 
@@ -71,6 +75,9 @@ function cellValue(item: StrategyItem, key: string, state: FigureState): number 
 function formatValue(value: number | null, format: MetricRow["format"]): string {
   if (value == null) return "—";
   if (format === "percent") return formatPercent(value);
+  // Phase 201 D-15/D-25: volatility is never negative, so a plus sign says nothing. Unsigned,
+  // the same as the discovery table and the tearsheet print it.
+  if (format === "percentUnsigned") return formatPercent(value, 2, { signed: false });
   if (format === "days") return `${value}d`;
   return formatNumber(value);
 }
@@ -172,7 +179,7 @@ export function CompareTable({
                 const gated = ANNUALIZED.has(metric.key);
                 return (
                   <tr key={metric.key} className="border-b border-border/50 hover:bg-page/50">
-                    <td className="px-4 @3xl:px-8 py-2.5 text-xs text-text-muted">{metric.label}</td>
+                    <td className="px-4 @3xl:px-8 py-2.5 text-xs text-text-muted">{metric.term ? <Term k={metric.term}>{metric.label}</Term> : metric.label}</td>
                     {strategyItems.map((item, i) => {
                       const val = cellValue(item, metric.key, states[i]);
                       const record = item.figureRecord;

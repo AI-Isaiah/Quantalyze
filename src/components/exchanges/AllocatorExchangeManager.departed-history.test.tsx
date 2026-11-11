@@ -12,6 +12,9 @@ import { AllocatorExchangeManager } from "./AllocatorExchangeManager";
  * with the owner's own client), and its switch must call the owner RPC. A card
  * that guessed a day, or a switch whose failure left it flipped, would tell the
  * owner the book holds something it does not.
+ *
+ * Phase 201 plan 39 (F-11, D-11, R3-01 item 6): the history sentence names its day in
+ * the app's one form (`formatDay`, "Jun 10, 2026"), never the raw ISO day.
  */
 
 const routerRefreshMock = vi.fn();
@@ -183,9 +186,11 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     expect(historyBlock("key-dep").textContent).toContain("Checking this key's history");
     await waitFor(() =>
       expect(historyBlock("key-dep").textContent).toContain(
-        "History included until 2026-06-10.",
+        "History included until Jun 10, 2026.",
       ),
     );
+    // F-11: the block carries no raw ISO day.
+    expect(historyBlock("key-dep").textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("true");
     // The first and last returns day come from one ascending and one
     // descending limit(1) read per key, through the owner's own client.
@@ -224,7 +229,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       }),
     );
     await settledSwitch("key-dep", "true");
-    expect(historyBlock("key-dep").textContent).toContain("History included until 2026-06-10.");
+    expect(historyBlock("key-dep").textContent).toContain("History included until Jun 10, 2026.");
     expect(historyBlock("key-dep").textContent).toContain(
       "Your equity history is recomputed with this change within a few minutes.",
     );
@@ -328,7 +333,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       />,
     );
     await waitFor(() =>
-      expect(historyBlock("key-rev").textContent).toContain("History included until 2026-06-08."),
+      expect(historyBlock("key-rev").textContent).toContain("History included until Jun 8, 2026."),
     );
     expect(historySwitch("key-rev").getAttribute("aria-checked")).toBe("true");
     // A live, working key has no history choice.
@@ -346,7 +351,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     );
     await waitFor(() =>
       expect(historyBlock("key-dep").textContent).toContain(
-        "History included until 2026-06-14. From the next day a key you still have connected reads this account.",
+        "History included until Jun 14, 2026. From the next day a key you still have connected reads this account.",
       ),
     );
     // The live key's first day was read too: it bounds the departed one.
@@ -371,7 +376,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       />,
     );
     await waitFor(() =>
-      expect(historyBlock("key-b").textContent).toContain("History included until 2026-06-10."),
+      expect(historyBlock("key-b").textContent).toContain("History included until Jun 10, 2026."),
     );
     expect(historyBlock("key-b").textContent).not.toContain("an earlier key");
     expect(historySwitch("key-b").getAttribute("aria-checked")).toBe("true");

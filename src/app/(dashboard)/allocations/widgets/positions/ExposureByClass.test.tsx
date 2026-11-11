@@ -133,12 +133,12 @@ describe("<ExposureByClass> — honest-empty", () => {
 describe("<ExposureByClass> — read-day stamp (D-01)", () => {
   it("names the one day every key was read on", () => {
     render(<ExposureByClass snapshot={snap(HEDGED.slices, { asof: "2026-10-03", oldestAsof: "2026-10-03" })} />);
-    expect(screen.getByText("as of 2026-10-03")).toBeTruthy();
+    expect(screen.getByText("as of Oct 3, 2026")).toBeTruthy();
   });
 
   it("names the range when the keys were read on different days", () => {
     render(<ExposureByClass snapshot={snap(HEDGED.slices, { asof: "2026-10-03", oldestAsof: "2026-10-01" })} />);
-    expect(screen.getByText("as of 2026-10-01 to 2026-10-03")).toBeTruthy();
+    expect(screen.getByText("as of Oct 1, 2026 to Oct 3, 2026")).toBeTruthy();
   });
 
   it("renders no stamp at all, and never an invented day, when no row has a read day", () => {

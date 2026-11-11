@@ -122,8 +122,9 @@ describe("FactsheetPreview", () => {
     // `verificationState`. The verified variant (the default) now shows
     // "Data from exchange API · <date>" instead of the historic
     // "Data verified from exchange API · <date>" prefix.
+    // D-11 (Phase 201): the stamp prints through formatDay (`Apr 10, 2026`).
     expect(
-      screen.getByText(/Data from exchange API/),
+      screen.getByText(/Data from exchange API · Apr 10, 2026$/),
     ).toBeInTheDocument();
   });
 

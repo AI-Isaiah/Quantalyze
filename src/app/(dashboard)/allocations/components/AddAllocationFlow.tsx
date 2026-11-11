@@ -94,9 +94,9 @@ const AMOUNT_LABEL = "Allocation (USD)";
 // The commit route's 422 `error` for a key reused with another body
 // (src/app/api/allocator/scenario/commit/route.ts); a rolled-back batch has none.
 const IDEMPOTENCY_BODY_MISMATCH_ERROR = "Idempotency-Key reuse with different body";
-const HELD_ROW_CAPTION = "Already in your book. Change its amount on Holdings.";
+const HELD_ROW_CAPTION = "Already in your allocation. Change its amount on Holdings.";
 const NOT_OWN_CAPITAL_CAPTION =
-  "Not marked as your own capital. Mark it on My Strategies first.";
+  "Not marked as your own capital. Mark it on Strategies first.";
 const NOT_AVAILABLE_NOTICE =
   "That strategy is not available to add. Search for another below.";
 const NOT_LOADED_NOTICE =
@@ -505,7 +505,7 @@ function AddAllocationPanel({
     Number.isFinite(bookEquityUsd) &&
     bookEquityUsd > 0 &&
     parsedAmount.ok
-      ? `≈ ${formatPercent(parsedAmount.value / bookEquityUsd, 1, { signed: false })} of your book equity (${formatUsd(bookEquityUsd)}).`
+      ? `≈ ${formatPercent(parsedAmount.value / bookEquityUsd, 1, { signed: false })} of your allocation equity (${formatUsd(bookEquityUsd)}).`
       : null;
 
   function retryRead() {
@@ -579,7 +579,7 @@ function AddAllocationPanel({
               >
                 {notice.kind === "held" && (
                   <>
-                    {notice.name} is already in your book. Change its amount on
+                    {notice.name} is already in your allocation. Change its amount on
                     Holdings.{" "}
                     <Link
                       href="?tab=holdings"
@@ -828,7 +828,7 @@ function StrategyRow({
           {row.isOwn === true && <YoursChip className="shrink-0" />}
           {held && (
             <span className="inline-flex items-center rounded-md bg-badge-other/10 px-2 py-0.5 text-caption font-medium text-text-secondary">
-              In your book
+              In your allocation
             </span>
           )}
         </span>

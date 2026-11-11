@@ -774,17 +774,17 @@ describe("ComputeJobsTable — labels and targets (D-01)", () => {
     expect(row.textContent).not.toMatch(/derive_allocator_equity|failed_retry/);
   });
 
-  it("Target: a name, else Unnamed strategy / Unnamed portfolio, else an em dash; text and title agree", async () => {
+  it("Target: a name, else Unnamed strategy / Unnamed allocation, else an em dash; text and title agree", async () => {
     await renderWith([
       jobRow({ id: ID.job[0], strategy_id: ID.strategy, strategy_name: "Alpha" }),
       jobRow({ id: ID.job[1], strategy_id: ID.strategy }),
       jobRow({ id: "j3", portfolio_id: ID.portfolio }),
       jobRow({ id: "j4" }),
-      jobRow({ id: "j5", portfolio_id: ID.portfolio, portfolio_name: "Core book" }),
+      jobRow({ id: "j5", portfolio_id: ID.portfolio, portfolio_name: "Core allocation" }),
     ]);
 
     const cells = targetCells();
-    const expected = ["Alpha", "Unnamed strategy", "Unnamed portfolio", "—", "Core book"];
+    const expected = ["Alpha", "Unnamed strategy", "Unnamed allocation", "—", "Core allocation"];
     expect(cells.map((c) => c.textContent)).toEqual(expected);
     // The tooltip carries the same words as the cell.
     expect(cells.map((c) => c.getAttribute("title"))).toEqual(expected);

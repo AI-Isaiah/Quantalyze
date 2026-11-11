@@ -742,17 +742,15 @@ export default async function FactsheetV2Page({
     // in progress, may have failed, or may never have run (KCS-09 states which
     // on the owner lane; the public lane says one neutral sentence). Hard-404
     // only on the signature gate above.
-    // Full-identity context — prefer the real name, fall back to the
-    // pseudonym only when the strategy genuinely has no public name.
-    const pendingName =
-      signature.name ??
-      signature.codename ??
-      displayStrategyName({
-        id: signature.id,
-        name: null,
-        codename: null,
-        disclosure_tier: (signature.disclosure_tier ?? null) as DisclosureTier | null,
-      });
+    // Visibility fact (Phase 201 D-09, D-17): the signature read came through
+    // `withPublishedOnly` on the public lane or `withPublishedOrOwner` on the owner
+    // lane, so the row is published or the viewer's own, and discovery shows it to
+    // that viewer under its real name. A signed-in viewer who is neither gets
+    // `notFound()` above, so no name.
+    const pendingName = displayStrategyName(
+      { id: signature.id, name: signature.name, codename: signature.codename },
+      { visible: true },
+    );
 
     // Phase 167.2 / KCS-09 — on the OWNER lane, say what is actually happening
     // to this strategy's computation instead of a fixed "still computing". The

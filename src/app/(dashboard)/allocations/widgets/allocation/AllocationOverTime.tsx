@@ -12,7 +12,7 @@ import {
   CHART_TICK_STYLE,
   CHART_TOOLTIP_STYLE,
 } from "@/components/charts/chart-tokens";
-import { STRATEGY_PALETTE, formatCurrency } from "@/lib/utils";
+import { STRATEGY_PALETTE, formatCurrency, formatDay } from "@/lib/utils";
 import {
   asofToUtcMs,
   gapXDomain,
@@ -161,7 +161,7 @@ export function AllocationOverTime({
       <div className="flex items-baseline justify-between">
         <h4 className="text-small font-semibold text-text-primary">Allocation over time</h4>
         <span className="text-caption font-metric text-text-muted">
-          as of {points.at(-1)!.asof}
+          as of {formatDay(points.at(-1)!.asof)}
         </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
@@ -224,7 +224,9 @@ export function AllocationOverTime({
             <TouchTooltip
               contentStyle={CHART_TOOLTIP_STYLE}
               itemSorter={(item) => -Number(item.value ?? 0)}
-              labelFormatter={(ms) => new Date(Number(ms)).toISOString().slice(0, 10)}
+              labelFormatter={(ms) =>
+                Number.isFinite(Number(ms)) ? formatDay(new Date(Number(ms)).toISOString()) : "—"
+              }
               formatter={(v, name, item) => [
                 `${(Number(v) * 100).toFixed(1)}% (${formatCurrency(
                   // `name` is the display label now; the USD map is keyed by the

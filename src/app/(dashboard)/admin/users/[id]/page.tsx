@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/Badge";
 import { UserRolesPanel } from "@/components/admin/UserRolesPanel";
 import type { AppRole } from "@/lib/auth";
 import { profileRoleLabel, profileStatusLabel } from "@/lib/display-labels";
+import { formatDayTime } from "@/lib/utils";
 import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 /**
@@ -179,7 +180,7 @@ export default async function AdminUserDetailPage({
             />
             <Row
               label="Created"
-              value={new Date(profile.created_at).toLocaleString()}
+              value={formatDayTime(profile.created_at)}
             />
             <Row
               label="User ID"

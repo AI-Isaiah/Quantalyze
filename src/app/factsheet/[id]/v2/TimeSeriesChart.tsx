@@ -20,6 +20,7 @@ import {
   placeMarksStartLabel,
 } from "@/lib/nav-marks-start";
 import { formatIsoDate } from "../trade-fetch-lines";
+import { MONTH_ABBR, formatDay } from "@/lib/utils";
 import { isZoomWheel } from "./wheel-zoom";
 import { ChartHintContext } from "./chart-hint";
 
@@ -1516,7 +1517,7 @@ function CrosshairTooltipInner({
         fontWeight={600}
         fill="var(--color-text-primary)"
       >
-        {date}
+        {formatDay(date)}
       </text>
       {visible.map((s, i) => {
         const cy = ty + padY + headerH + i * rowH + 8;
@@ -1721,13 +1722,12 @@ function makeXTicks(dates: string[], xStart: number, xEnd: number) {
       }
     }
   } else {
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let lastM: string | null = null;
     for (let i = visStart; i <= visEnd; i++) {
       const key = dates[i].slice(0, 7);
       if (key !== lastM) {
         const m = parseInt(dates[i].slice(5, 7), 10);
-        out.push({ idx: i, label: months[m - 1] });
+        out.push({ idx: i, label: MONTH_ABBR[m - 1] });
         lastM = key;
       }
     }

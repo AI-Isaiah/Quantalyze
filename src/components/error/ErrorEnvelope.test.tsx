@@ -12,12 +12,16 @@
  *     aria-label="Retry {operation}" when it is (UI-SPEC §8.4, HI-01 fix)
  *   - aria-label="Cancel and return" on Cancel button (UI-SPEC §8.4, HI-01)
  *   - role="alert" + data-testid="error-envelope" + data-testid-legacy="wizard-error-envelope"
+ *   - Phase 201 plan 32 (F-12, U-28, UI-SPEC 8.3): a line that says `egress IP status`
+ *     links that phrase to /security#egress-ips in a new tab; other lines keep the
+ *     contact-form pointer
  */
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ErrorEnvelope } from "./ErrorEnvelope";
-import type { ErrorEnvelope as ErrorEnvelopeType } from "@/lib/envelope";
+import { buildEnvelope, type ErrorEnvelope as ErrorEnvelopeType } from "@/lib/envelope";
+import { EGRESS_IP_STATUS_LINK } from "@/lib/contact";
 
 function makeEnvelope(
   overrides?: Partial<ErrorEnvelopeType>,
@@ -674,6 +678,70 @@ describe("ErrorEnvelope contact pointer (DOMAINONE D-02)", () => {
       `/contact?topic=support&ref=${CID}&draft=${DRAFT}`,
     );
     expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  // Phase 201 PLAINWORDS plan 32 (F-12, U-28, UI-SPEC 8.3): a line that says
+  // `egress IP status` links that phrase to /security#egress-ips in a new tab,
+  // through the same renderer as the contact pointer. Every other line keeps the
+  // contact-form pointer. Built from the two REAL wizard envelopes, so a copy
+  // edit that drops the phrase turns these red.
+  describe("egress IP status link (F-12, U-28)", () => {
+    const EGRESS_NAME = /^egress IP status\s?\(opens in a new tab\)$/;
+
+    it.each(["KEY_IP_ALLOWLIST", "KEY_PERMISSION_DENIED"] as const)(
+      "%s renders exactly one egress link, to the anchor, in a new tab",
+      (code) => {
+        render(<ErrorEnvelope envelope={buildEnvelope(code, CID)} />);
+        const link = screen.getByRole("link", { name: EGRESS_NAME });
+        expect(link).toHaveAttribute("href", "/security#egress-ips");
+        expect(link).toHaveAttribute("target", "_blank");
+        expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+        // Not the only link on the page to /security, and no second one.
+        const toSecurity = screen
+          .getAllByRole("link")
+          .filter((a) => (a.getAttribute("href") ?? "").startsWith("/security"));
+        expect(toSecurity).toHaveLength(1);
+        // The link sits in the bullet that carries the phrase.
+        expect(link.closest("li")?.textContent).toContain("egress IP status");
+      },
+    );
+
+    it("a cause carrying the phrase links it the same way as a debug_context line", () => {
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({
+            correlation_id: CID,
+            cause: `Look at our ${EGRESS_IP_STATUS_LINK.text} first.`,
+            debug_context: [],
+          })}
+        />,
+      );
+      const link = screen.getByRole("link", { name: EGRESS_NAME });
+      expect(link).toHaveAttribute("href", "/security#egress-ips");
+      expect(link).toHaveAttribute("target", "_blank");
+    });
+
+    it("a line without the phrase keeps the contact-form pointer beside the egress link", () => {
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({
+            correlation_id: CID,
+            debug_context: [
+              "See our egress IP status.",
+              "Or send the correlation id through the contact form.",
+            ],
+          })}
+        />,
+      );
+      expect(screen.getByRole("link", { name: EGRESS_NAME })).toHaveAttribute(
+        "href",
+        "/security#egress-ips",
+      );
+      expect(screen.getByRole("link", { name: /^contact form/ })).toHaveAttribute(
+        "href",
+        `/contact?topic=support&ref=${CID}`,
+      );
+    });
   });
 
   it("renders a phrase-less envelope exactly as before: no link, same text", () => {

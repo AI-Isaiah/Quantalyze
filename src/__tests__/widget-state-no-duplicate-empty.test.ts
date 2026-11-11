@@ -22,8 +22,8 @@ import { join, relative, resolve } from "node:path";
  *   - src/app/(dashboard)/allocations/components/OnboardingBanner.tsx
  *       (Phase 11 / Plan 05 forward-compat — banner ships in Plan 05)
  *   - src/app/(dashboard)/allocations/components/OptimizerPanel.tsx
- *       (Phase 116 / ADDALLOC-04 — the 0-portfolio Simulate-Impact remedy
- *        carries distinct "Simulate Impact needs a live portfolio" copy and
+ *       (Phase 116 / ADDALLOC-04 — the 0-allocation Simulate-Impact remedy
+ *        carries distinct "Simulate Impact needs a live allocation" copy and
  *        deep-links the allocator connect-exchange path; different empty
  *        context, same CTA label is intentional — mirrors ScenarioComposer)
  *

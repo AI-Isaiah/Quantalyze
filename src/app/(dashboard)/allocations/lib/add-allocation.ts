@@ -19,7 +19,7 @@
  */
 
 import { formatUsd } from "@/lib/dollar-validation";
-import { isUuid } from "@/lib/utils";
+import { formatDay, isUuid } from "@/lib/utils";
 import {
   OUTCOME_DATE_FUTURE_MESSAGE,
   OUTCOME_DATE_TOO_OLD_MESSAGE,
@@ -29,15 +29,15 @@ import { ALLOCATION_ROUTE, parseAmount } from "../components/AllocateDialog";
 /** The scenario commit route a third-party add is recorded through. */
 export const COMMIT_ROUTE = "/api/allocator/scenario/commit";
 
-/** Refused at the amount field when Book equity is not a usable divisor. */
+/** Refused at the amount field when Allocation equity is not a usable divisor. */
 export const BOOK_EQUITY_UNAVAILABLE_MESSAGE =
-  "We cannot size this allocation until your book equity is available.";
+  "We cannot size this allocation until your allocation equity is available.";
 
 /** Refused at the date field when the value is empty or not a calendar date. */
 export const ALLOCATION_DATE_REQUIRED_MESSAGE = "Enter the allocation date.";
 
 export function aboveBookEquityMessage(bookEquityUsd: number): string {
-  return `Enter an amount up to your book equity (${formatUsd(bookEquityUsd)}).`;
+  return `Enter an amount up to your allocation equity (${formatUsd(bookEquityUsd)}).`;
 }
 
 // ───────────────────────────────────────────────────────────────── dispatch
@@ -190,15 +190,6 @@ export function earliestAllocationDateIso(todayIso: string): string {
 
 // ───────────────────────────────────────────────────────────────────── copy
 
-function formatCalendarDate(dateIso: string): string {
-  return new Date(`${dateIso}T00:00:00Z`).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  });
-}
-
 /**
  * Says WHERE the allocation landed. An own allocation is a Holdings row; a
  * third-party add is an Outcomes record and never claims a Holdings row (C3).
@@ -214,7 +205,7 @@ export function successAnnouncement(args: {
   if (isOwn) {
     return `Allocation recorded: ${name}, ${amount}. It is listed under Strategies on Holdings.`;
   }
-  return `Allocation recorded: ${name}, ${amount} from ${formatCalendarDate(dateIso)}. It is listed under Outcomes on Holdings.`;
+  return `Allocation recorded: ${name}, ${amount} from ${formatDay(dateIso)}. It is listed under Outcomes on Holdings.`;
 }
 
 // ──────────────────────────────────────────────────────────────── held set

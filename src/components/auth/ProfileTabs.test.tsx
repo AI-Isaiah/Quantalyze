@@ -22,10 +22,11 @@ import {
   beforeEach,
   afterEach,
 } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ProfileTabs } from "./ProfileTabs";
 import type { Profile } from "@/lib/types";
+import { termDefinition } from "@/lib/glossary";
 
 // next/navigation hooks are not available in jsdom — supply minimal stubs.
 // routerReplace is a STABLE hoisted spy (a fresh vi.fn() per useRouter() call
@@ -296,6 +297,52 @@ describe("ProfileTabs — API keys tab for every role (200-07, D-06)", () => {
       );
       expect(screen.getByRole("tab", { selected: true })).toHaveTextContent("Personal Info");
       unmount();
+    }
+  });
+});
+
+// Phase 201 plan 18 (U-01, D-06): the Mandate tab is a control, so the term is
+// explained by Form B: a Tooltip around the existing tab trigger, with the
+// registry text. A Form A span inside a tab would add a second tab stop to one
+// control. The arm fails when the Tooltip goes (no bubble), when a focusable
+// child appears inside the tab, and when another tab picks up a bubble.
+describe("ProfileTabs: the Mandate tab explains mandate (Form B)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it("focusing the Mandate tab shows the registry definition after 150 ms and the tab describes itself by it", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    const tab = screen.getByRole("tab", { name: "Mandate" });
+    fireEvent.focus(tab);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const bubble = screen.getByRole("tooltip");
+    expect(bubble.textContent).toBe(termDefinition("mandate"));
+    expect(tab).toHaveAttribute("aria-describedby", bubble.id);
+  });
+
+  it("the tab stays one control: role tab, no focusable descendant, no Form A span", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    const tab = screen.getByRole("tab", { name: "Mandate" });
+    expect(tab.querySelector("[tabindex], a, button, [data-term]")).toBeNull();
+    expect(document.querySelectorAll("[data-term]")).toHaveLength(0);
+  });
+
+  it("no other tab carries a definition", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    for (const name of ["Personal Info", "API keys", "Security", "Organizations", "Account"]) {
+      fireEvent.focus(screen.getByRole("tab", { name }));
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.queryByRole("tooltip")).toBeNull();
     }
   });
 });

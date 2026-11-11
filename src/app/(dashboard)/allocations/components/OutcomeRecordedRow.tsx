@@ -5,6 +5,7 @@ import {
   REJECTION_REASON_LABELS,
   type BridgeOutcome,
 } from "@/lib/bridge-outcome-schema";
+import { formatDay } from "@/lib/utils";
 
 export type OutcomeRecordedRowProps = {
   outcome: BridgeOutcome;
@@ -58,7 +59,7 @@ export function OutcomeRecordedRow({ outcome }: OutcomeRecordedRowProps) {
         {"Recorded: Allocated "}
         <span className="font-metric tabular-nums">{outcome.percent_allocated}%</span>
         {" on "}
-        <span className="font-metric tabular-nums">{outcome.allocated_at}</span>
+        <span className="font-metric tabular-nums">{formatDay(outcome.allocated_at)}</span>
         {" \u2022 "}
         <span className={`font-metric tabular-nums ${toneClass}`}>
           {label.value}

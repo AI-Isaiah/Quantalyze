@@ -128,10 +128,13 @@ describe("CoverageTimeline (COVERAGE-01)", () => {
     const inLabel = inBlend.getAttribute("aria-label") ?? "";
     const outLabel = autoExcluded.getAttribute("aria-label") ?? "";
     // Coverage dates present in both.
-    expect(inLabel).toContain("2022-01-01");
-    expect(inLabel).toContain("2024-12-31");
-    expect(outLabel).toContain("2022-01-01");
-    expect(outLabel).toContain("2023-08-15");
+    // F-11 / D-11 / UI-SPEC Interaction contract 5 / R3-01 item 4 / plan
+    // 201-38: the bar's spoken name prints its days through `formatDay`, never
+    // the raw ISO. The union endpoint labels below stay ISO (D-21 axis ends).
+    expect(inLabel).toContain("covers Jan 1, 2022 – Dec 31, 2024");
+    expect(outLabel).toContain("covers Jan 1, 2022 – Aug 15, 2023");
+    expect(inLabel).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(outLabel).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // Membership stated as a word — never color-only.
     expect(inLabel.toLowerCase()).toContain("in blend");
     expect(outLabel.toLowerCase()).toContain("auto-excluded");

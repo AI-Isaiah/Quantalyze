@@ -272,6 +272,21 @@ describe("CustomRangePicker", () => {
     expect(getByText(/180 days/i)).toBeTruthy();
   });
 
+  it("SC-3 / GC-01 — the footer range reads 'Mon D, YYYY – Mon D, YYYY', never an ISO day", () => {
+    const { getByText, container } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={MIN}
+        max={MAX}
+        initialRange={{ start: "2024-02-01", end: "2024-05-01" }}
+      />,
+    );
+    expect(getByText("Feb 1, 2024 – May 1, 2024")).toBeTruthy();
+    expect(container.textContent ?? "").not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
   it("PR3 — left + right month grids show consecutive months", () => {
     const min = new Date(2024, 2, 1); // March 2024
     const max = new Date(2024, 5, 30); // June 30, 2024
@@ -286,8 +301,8 @@ describe("CustomRangePicker", () => {
       />,
     );
     // initialRange.start is March 15 → leftMonth = March, rightMonth = April.
-    expect(getByText(/March 2024/)).toBeTruthy();
-    expect(getByText(/April 2024/)).toBeTruthy();
+    expect(getByText(/Mar 2024/)).toBeTruthy();
+    expect(getByText(/Apr 2024/)).toBeTruthy();
   });
 
   // ─────────────────────────────────────────── M-1099 — pickDay state machine
@@ -456,7 +471,7 @@ describe("CustomRangePicker", () => {
     const labels = Array.from(container.querySelectorAll("div"))
       .map((d) => d.textContent ?? "")
       .filter((t) => /^[A-Z][a-z]+ \d{4}$/.test(t));
-    expect(labels).toEqual(["May 2024", "June 2024"]);
+    expect(labels).toEqual(["May 2024", "Jun 2024"]);
   });
 
   it("M-1105 — typing a Start date ABOVE max clamps to maxIso; Apply emits the clamped value, not the typed one", () => {
@@ -542,10 +557,10 @@ describe("CustomRangePicker", () => {
       />,
     );
     // leftMonth = April, rightMonth = May initially.
-    expect(monthLabels(container)).toEqual(["April 2024", "May 2024"]);
+    expect(monthLabels(container)).toEqual(["Apr 2024", "May 2024"]);
     fireEvent.click(getAllByLabelText("Previous month")[0]);
     // After one ‹ click: left → March, right → April.
-    expect(monthLabels(container)).toEqual(["March 2024", "April 2024"]);
+    expect(monthLabels(container)).toEqual(["Mar 2024", "Apr 2024"]);
   });
 
   it("M-1100 — 'Next month' advances BOTH grid labels forward one month", () => {
@@ -561,9 +576,9 @@ describe("CustomRangePicker", () => {
         initialRange={{ start: "2024-04-15", end: "2024-04-15" }}
       />,
     );
-    expect(monthLabels(container)).toEqual(["April 2024", "May 2024"]);
+    expect(monthLabels(container)).toEqual(["Apr 2024", "May 2024"]);
     fireEvent.click(getAllByLabelText("Next month")[0]);
-    expect(monthLabels(container)).toEqual(["May 2024", "June 2024"]);
+    expect(monthLabels(container)).toEqual(["May 2024", "Jun 2024"]);
   });
 
   it("M-1100 — navigating across the year boundary (Jan → Dec) renders 'December 2023'", () => {
@@ -580,10 +595,10 @@ describe("CustomRangePicker", () => {
       />,
     );
     // leftMonth = January 2024 initially.
-    expect(monthLabels(container)).toEqual(["January 2024", "February 2024"]);
+    expect(monthLabels(container)).toEqual(["Jan 2024", "Feb 2024"]);
     fireEvent.click(getAllByLabelText("Previous month")[0]);
     // Cross-year: left → December 2023.
-    expect(monthLabels(container)).toEqual(["December 2023", "January 2024"]);
+    expect(monthLabels(container)).toEqual(["Dec 2023", "Jan 2024"]);
   });
 
   it("M-1100 — leap-day Feb 2024 renders the clickable 29th without throwing", () => {
@@ -793,8 +808,40 @@ describe("CustomRangePicker", () => {
     // 2099-01-01 is above max → clampDate pins it to 2024-06-30; the silent
     // adjustment is announced.
     fireEvent.change(startInput, { target: { value: "2099-01-01" } });
-    expect(liveRegion!.textContent).toContain("2024-06-30");
-    expect(liveRegion!.textContent).toMatch(/adjusted/i);
+    // Phase 201 plan 201-37 (gap SC-3, F-11, D-11, R3-01 item 4): the announced
+    // days print through formatDay, so a screen reader hears "Jun 30, 2024",
+    // never an ISO string. The <input type="date"> value stays ISO (D-11).
+    expect(liveRegion!.textContent).toBe(
+      "Start date Jan 1, 2099 is outside the allowed range; adjusted to Jun 30, 2024.",
+    );
+    expect(liveRegion!.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(startInput.value).toBe("2024-06-30");
+  });
+
+  it("M-1104 — typing an out-of-range End date announces the clamp in the helper's day form (F-11)", () => {
+    const min = new Date(2024, 0, 1);
+    const max = new Date(2024, 5, 30);
+    const { container } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-02-01", end: "2024-05-01" }}
+      />,
+    );
+    const liveRegion = container.querySelector('[aria-live="polite"]');
+    const endInput = container.querySelectorAll<HTMLInputElement>(
+      'input[type="date"]',
+    )[1];
+    fireEvent.change(endInput, { target: { value: "2099-12-31" } });
+    expect(liveRegion!.textContent).toBe(
+      "End date Dec 31, 2099 is outside the allowed range; adjusted to Jun 30, 2024.",
+    );
+    expect(liveRegion!.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    // The input's value stays machine-readable ISO (D-11 exemption).
+    expect(endInput.value).toBe("2024-06-30");
   });
 
   it("M-1104 — typing an in-range Start date leaves the aria-live region empty (no false announcement)", () => {

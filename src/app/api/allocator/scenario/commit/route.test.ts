@@ -1823,7 +1823,9 @@ describe("T_R24 — B11 / NEW-C18-10 portfolio-fingerprint precondition", () => 
     expect(res.headers.get("Retry-After")).toBeNull();
     const body = await res.json();
     expect(body.code).toBe("portfolio_fingerprint_stale");
-    expect(body.error).toMatch(/Portfolio changed/i);
+    // 201-21 / D-04: the allocator reads "allocation", never "portfolio". The full
+    // sentence is hand-typed (not imported) so a reworded or reverted message reddens.
+    expect(body.error).toBe("Your allocation changed since you started this scenario");
     expect(emit).not.toHaveBeenCalled();
   });
 });

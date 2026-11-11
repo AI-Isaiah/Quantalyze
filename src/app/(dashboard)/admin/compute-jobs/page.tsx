@@ -10,6 +10,7 @@ import {
   computeJobStatusLabel,
   venueLabel,
 } from "@/lib/display-labels";
+import { formatDayTime } from "@/lib/utils";
 import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
@@ -147,7 +148,7 @@ export default async function ComputeJobsPage() {
                       (job.strategy_id
                         ? "Unnamed strategy"
                         : job.portfolio_id
-                          ? "Unnamed portfolio"
+                          ? "Unnamed allocation"
                           : "—")}
                   </td>
                   <td className="px-3 py-2 font-metric text-caption text-text-secondary">
@@ -164,14 +165,8 @@ export default async function ComputeJobsPage() {
                         : job.last_error.slice(0, 60)
                       : "—"}
                   </td>
-                  <td className="px-3 py-2 text-caption text-text-muted font-metric">
-                    {new Date(job.updated_at).toLocaleString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      timeZone: "UTC",
-                    })}
+                  <td className="px-3 py-2 text-caption text-text-muted font-metric whitespace-nowrap">
+                    {formatDayTime(job.updated_at)}
                   </td>
                 </tr>
               ))}

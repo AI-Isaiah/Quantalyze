@@ -121,6 +121,13 @@ describe("Risk Widgets — render without crash", () => {
     expect(screen.getByTestId("var-expected-shortfall")).toBeInTheDocument();
   });
 
+  // Plan 201-14 (D-01): the VaR and CVaR labels open their registry definitions.
+  it("VarExpectedShortfall's VaR 95% and CVaR 95% labels are Terms", () => {
+    const { container } = render(<VarExpectedShortfall {...WIDGET_PROPS} />);
+    expect(container.querySelector('[data-term="var_95"]')?.textContent).toBe("VaR 95%");
+    expect(container.querySelector('[data-term="cvar_95"]')?.textContent).toBe("CVaR 95%");
+  });
+
   it("RiskDecomposition renders", () => {
     render(<RiskDecomposition {...WIDGET_PROPS} />);
     expect(screen.getByTestId("risk-decomposition")).toBeInTheDocument();
@@ -184,8 +191,19 @@ describe("Risk Widgets — render without crash", () => {
     );
     // Each threshold renders as "P5 -x.x%" / "P1 -x.x%" — assert the label AND
     // an accompanying numeric, so a bare "P5" string couldn't pass vacuously.
-    expect(screen.getByText(/P5\s*-?\d/)).toBeInTheDocument();
-    expect(screen.getByText(/P1\s*-?\d/)).toBeInTheDocument();
+    // The P5 label is a Term (D-01) inside the readout span, so the match reads
+    // the span's whole text rather than its own text node.
+    const readout = (re: RegExp) =>
+      screen.getByText(
+        (_, el) =>
+          el?.tagName === "SPAN" &&
+          el.className.includes("font-metric") &&
+          re.test(el.textContent ?? ""),
+      );
+    expect(readout(/^P5\s*-?\d/)).toBeInTheDocument();
+    expect(readout(/^P1\s*-?\d/)).toBeInTheDocument();
+    // Plan 201-14 (D-01): P5 opens its definition from the registry.
+    expect(document.querySelector('[data-term="percentile"]')).not.toBeNull();
   });
 
   it("M-0220: TailRisk shows the empty state when no return breaches -2% (empty MUST appear)", () => {

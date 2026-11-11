@@ -46,7 +46,7 @@ import {
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
-import { cn } from "@/lib/utils";
+import { cn, formatDay } from "@/lib/utils";
 import {
   CoverageTimeline,
   type CoverageTimelineRow,
@@ -1752,6 +1752,7 @@ export function SyncPreviewStep({
             const compositeMetrics: FactsheetPreviewMetric[] = [
               {
                 label: "CAGR",
+                term: "cagr",
                 value: formatCagr(
                   gatedValue(
                     (analyticsRow?.cagr as number) ?? null,
@@ -1761,6 +1762,7 @@ export function SyncPreviewStep({
               },
               {
                 label: "Sharpe",
+                term: "sharpe",
                 value: formatMetric(
                   gatedValue(
                     (analyticsRow?.sharpe as number) ?? null,
@@ -1770,6 +1772,7 @@ export function SyncPreviewStep({
               },
               {
                 label: "Sortino",
+                term: "sortino",
                 value: formatMetric(
                   gatedValue(
                     (analyticsRow?.sortino as number) ?? null,
@@ -1779,6 +1782,7 @@ export function SyncPreviewStep({
               },
               {
                 label: "Max DD",
+                term: "max_drawdown",
                 value:
                   analyticsRow?.max_drawdown != null
                     ? formatCagr(analyticsRow.max_drawdown as number)
@@ -1786,6 +1790,7 @@ export function SyncPreviewStep({
               },
               {
                 label: "Volatility",
+                term: "volatility",
                 value: formatMetric(
                   gatedValue(
                     (analyticsRow?.volatility as number | null) ?? null,
@@ -2199,22 +2204,27 @@ export function SyncPreviewStep({
           const metrics: FactsheetPreviewMetric[] = [
             {
               label: "CAGR",
+              term: "cagr",
               value: formatCagr(gatedValue(analytics?.cagr, verdict.state)),
             },
             {
               label: "Sharpe",
+              term: "sharpe",
               value: formatMetric(gatedValue(analytics?.sharpe, verdict.state)),
             },
             {
               label: "Sortino",
+              term: "sortino",
               value: formatMetric(gatedValue(analytics?.sortino, verdict.state)),
             },
             {
               label: "Max DD",
+              term: "max_drawdown",
               value: analytics?.max_drawdown != null ? formatCagr(analytics.max_drawdown) : "—",
             },
             {
               label: "Volatility",
+              term: "volatility",
               value: formatMetric(gatedValue(analytics?.volatility, verdict.state), "%"),
             },
             {
@@ -2695,7 +2705,7 @@ export function SyncPreviewStep({
     const firstDay = firstDays.length > 0 ? firstDays.reduce((a, b) => (a < b ? a : b)) : null;
     const lastDay = lastDays.length > 0 ? lastDays.reduce((a, b) => (a > b ? a : b)) : null;
     const rangeClause =
-      firstDay && lastDay ? `, ${firstDay} – ${lastDay}` : "";
+      firstDay && lastDay ? `, ${formatDay(firstDay)} – ${formatDay(lastDay)}` : "";
 
     // activeWindow (the accent band) = the stitched ACTUAL data span, drawn over
     // the DECLARED bars. Null when either bound is absent — the gantt degrades.
@@ -2872,11 +2882,16 @@ export function SyncPreviewStep({
                 // n_days=0. The Days column stays coverage-honest below. "live"
                 // matches the wizard's open-ended (stillLive) vocabulary. Tier 3:
                 // "—" only when no window was ever entered.
+                // "live" is decided OUTSIDE the helper call: formatDay(null)
+                // prints an em dash, which would erase an open window.
+                const declaredEnd = member?.windowEnd
+                  ? formatDay(member.windowEnd)
+                  : "live";
                 const windowText =
                   pk?.first_day && pk?.last_day
-                    ? `${pk.first_day} – ${pk.last_day}`
+                    ? `${formatDay(pk.first_day)} – ${formatDay(pk.last_day)}`
                     : member?.windowStart
-                      ? `${member.windowStart} – ${member.windowEnd ?? "live"}`
+                      ? `${formatDay(member.windowStart)} – ${declaredEnd}`
                       : "—";
                 const contributionClass = contributionToneClass(row.contribution);
                 return (
@@ -2894,7 +2909,7 @@ export function SyncPreviewStep({
                         <TrustTierLabel trustTier="api_verified" />
                       </span>
                     </td>
-                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary">
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums whitespace-nowrap text-text-secondary">
                       {windowText}
                     </td>
                     <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary">
@@ -2963,7 +2978,7 @@ export function SyncPreviewStep({
                       key={`${gap.start}-${gap.end}`}
                       className="font-metric text-caption tabular-nums text-text-muted"
                     >
-                      {gap.start} → {gap.end} (
+                      {formatDay(gap.start)} → {formatDay(gap.end)} (
                       {inclusiveGapDays(gap.start, gap.end)} days). Your
                       composite shows this as a break, not zero returns.
                     </li>

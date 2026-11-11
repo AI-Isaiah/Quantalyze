@@ -10,8 +10,8 @@
  *   5. Click close-X closes; close-X aria-label = "Close customize panel".
  *   6. Heading text = "Customize" (NOT "Customize View").
  *   7. Description includes "Saved per device".
- *   8. Save button visible text = "Save preferences".
- *   9. Save button aria-label = "Save preferences" (WCAG 2.5.3).
+ *   8. Save button visible text = "Save view".
+ *   9. Save button aria-label = "Save view" (WCAG 2.5.3).
  *  10. Save button disabled when draft === persisted (deep equality).
  *  11. Save button enables when draft differs.
  *  12. Reset button visible text = "Reset to defaults".
@@ -146,16 +146,16 @@ describe("CustomizeDrawer", () => {
     expect(screen.getByText(/Saved per device/i)).toBeDefined();
   });
 
-  it("Save button visible text is 'Save preferences'", () => {
+  it("Save button visible text is 'Save view'", () => {
     renderDrawer();
-    const saveBtn = screen.getByRole("button", { name: "Save preferences" });
-    expect(saveBtn.textContent).toContain("Save preferences");
+    const saveBtn = screen.getByRole("button", { name: "Save view" });
+    expect(saveBtn.textContent).toContain("Save view");
   });
 
-  it("Save button aria-label is 'Save preferences' (WCAG 2.5.3 — Label in Name)", () => {
+  it("Save button aria-label is 'Save view' (WCAG 2.5.3 — Label in Name)", () => {
     renderDrawer();
-    const saveBtn = screen.getByRole("button", { name: "Save preferences" });
-    expect(saveBtn.getAttribute("aria-label")).toBe("Save preferences");
+    const saveBtn = screen.getByRole("button", { name: "Save view" });
+    expect(saveBtn.getAttribute("aria-label")).toBe("Save view");
   });
 
   it("Save button is disabled when draft === persisted", () => {
@@ -163,7 +163,7 @@ describe("CustomizeDrawer", () => {
       draft: { ...DEFAULTS },
       persisted: { ...DEFAULTS },
     });
-    const saveBtn = screen.getByRole("button", { name: "Save preferences" });
+    const saveBtn = screen.getByRole("button", { name: "Save view" });
     expect(saveBtn.hasAttribute("disabled")).toBe(true);
   });
 
@@ -172,7 +172,7 @@ describe("CustomizeDrawer", () => {
       draft: { ...DEFAULTS, view: "grid" },
       persisted: { ...DEFAULTS, view: "table" },
     });
-    const saveBtn = screen.getByRole("button", { name: "Save preferences" });
+    const saveBtn = screen.getByRole("button", { name: "Save view" });
     expect(saveBtn.hasAttribute("disabled")).toBe(false);
   });
 
@@ -210,7 +210,7 @@ describe("CustomizeDrawer", () => {
       persisted: { ...DEFAULTS, view: "table" },
       onSave,
     });
-    const saveBtn = screen.getByRole("button", { name: "Save preferences" });
+    const saveBtn = screen.getByRole("button", { name: "Save view" });
     fireEvent.click(saveBtn);
     expect(onSave).toHaveBeenCalledTimes(1);
   });

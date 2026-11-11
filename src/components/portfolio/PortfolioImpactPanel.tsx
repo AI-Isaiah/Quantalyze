@@ -7,6 +7,8 @@ import type {
   TimeSeriesPoint,
 } from "@/lib/types";
 import { DELTA_UNITS } from "@/lib/api/simulatorSchema";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
 import { ErrorResponseSchema } from "@/lib/api/errorSchema";
 import { dateMapStrict } from "@/lib/keys";
@@ -298,7 +300,7 @@ export function PortfolioImpactPanel({
               id={descriptionId}
               className="mt-1 text-caption leading-relaxed text-text-muted"
             >
-              Preview how adding this strategy would shift your portfolio&rsquo;s
+              Preview how adding this strategy would shift your allocation&rsquo;s
               Sharpe, drawdown, correlation and concentration.
             </p>
           </div>
@@ -365,7 +367,7 @@ export function PortfolioImpactPanel({
 
 function LoadingSkeleton() {
   return (
-    <div className="space-y-4" aria-label="Loading portfolio impact">
+    <div className="space-y-4" aria-label="Loading allocation impact">
       <div className="grid grid-cols-2 gap-2">
         {[1, 2, 3, 4].map((i) => (
           <div
@@ -429,10 +431,10 @@ function formatRetryAfter(seconds: number): string {
 function NonOkState({ data }: { data: SimulatorCandidate }) {
   const copy =
     data.status === "insufficient_data"
-      ? "Not enough overlapping history to simulate this candidate. Requires at least 30 trading days of overlap with your portfolio."
+      ? "Not enough overlapping history to simulate this candidate. Requires at least 30 trading days of overlap with your allocation."
       : data.status === "already_in_portfolio"
-        ? "This strategy is already in your portfolio, so the ADD scenario doesn't apply."
-        : "Your portfolio has no strategies yet. Add at least one strategy before simulating impact.";
+        ? "This strategy is already in your allocation, so the ADD scenario doesn't apply."
+        : "Your allocation has no strategies yet. Add at least one strategy before simulating impact.";
   return (
     <div className="rounded-lg border border-border bg-page px-4 py-3">
       <p className="text-small text-text-secondary">{copy}</p>
@@ -465,7 +467,7 @@ function SuccessBody({ data }: { data: SimulatorResponseOk }) {
       <div className="rounded-lg border border-border bg-page px-4 py-3">
         <p className="text-small text-text-secondary">
           Not enough overlapping history to compute reliable projections.
-          Requires at least 30 trading days of overlap with your portfolio.
+          Requires at least 30 trading days of overlap with your allocation.
         </p>
       </div>
     );
@@ -500,7 +502,7 @@ function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
     >
       <strong className="font-medium">Partial history:</strong>{" "}
       the candidate has only {overlapDays} overlapping trading days with your
-      portfolio. Both current and proposed metrics are measured over this
+      allocation. Both current and proposed metrics are measured over this
       shorter overlap window, so they are comparable but based on limited
       history — treat them as directional signals, not precise measurements.
     </div>
@@ -514,6 +516,8 @@ function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
 type DeltaChip = {
   key: string;
   label: string;
+  // 201 D-01: the registry term this label names, when it has one (Concentration has none).
+  term?: TermKey;
   // NEW-C11-01: null = not computable (operand metric was None upstream).
   value: number | null;
   format: "ratio" | "percent";
@@ -602,14 +606,16 @@ function deltaChips(gated: GatedSimulatorDeltas): DeltaChip[] {
     {
       key: "sharpe",
       label: "Sharpe",
+      term: "sharpe",
       value: deltas.sharpe_delta,
       format: DELTA_UNITS.sharpe_delta,
-      hint: "Change in portfolio Sharpe ratio.",
+      hint: "Change in allocation Sharpe ratio.",
       reason: gated.state === "withheld" ? sharpeWithheldReason(gated) : undefined,
     },
     {
       key: "maxdd",
       label: "MaxDD",
+      term: "max_drawdown",
       value: deltas.dd_delta,
       format: DELTA_UNITS.dd_delta,
       hint: "Positive = shallower maximum drawdown.",
@@ -617,6 +623,7 @@ function deltaChips(gated: GatedSimulatorDeltas): DeltaChip[] {
     {
       key: "correlation",
       label: "Correlation",
+      term: "correlation",
       value: deltas.corr_delta,
       format: DELTA_UNITS.corr_delta,
       hint: "Positive = lower average pairwise correlation.",
@@ -635,7 +642,7 @@ function DeltaHero({ gated }: { gated: GatedSimulatorDeltas }) {
   const chips = deltaChips(gated);
   const note = annualizationNote(gated);
   return (
-    <section aria-label="Portfolio impact deltas">
+    <section aria-label="Allocation impact deltas">
       <h3 className="mb-2 text-micro font-medium uppercase tracking-wider text-text-muted">
         Projected impact
       </h3>
@@ -694,7 +701,7 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
     >
       <div className="flex items-center justify-between">
         <p className="text-micro font-medium uppercase tracking-wider text-text-muted">
-          {chip.label}
+          {chip.term ? <Term k={chip.term}>{chip.label}</Term> : chip.label}
         </p>
         {improving && (
           <span
@@ -844,7 +851,7 @@ function EquityOverlayChart({ merged }: { merged: MergedPoint[] }) {
         width="100%"
         height={height}
         role="img"
-        aria-label="Portfolio equity curve: current vs proposed"
+        aria-label="Allocation equity curve: current vs proposed"
       >
         {/* Midline for reference */}
         <line

@@ -110,7 +110,7 @@ export const POST = withAuth(async (req, user) => {
     // optimizer shape.
     return NextResponse.json(
       {
-        error: "Too many requests. Bridge scoring is compute-intensive.",
+        error: "Too many requests. Scoring replacements is compute-intensive.",
         retryAfter: rl.retryAfter,
         // OUR limiter refused this request — RATE_LIMITED is the app-global
         // token for exactly that (as opposed to KEY_RATE_LIMIT, an EXCHANGE
@@ -135,7 +135,7 @@ export const POST = withAuth(async (req, user) => {
   if (!portfolio) {
     return NextResponse.json(
       // Same spelling as G5's simulator 404 — one fact, one token across routes.
-      { error: "Portfolio not found", code: "PORTFOLIO_NOT_FOUND" },
+      { error: "Allocation not found", code: "PORTFOLIO_NOT_FOUND" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -202,7 +202,7 @@ export const POST = withAuth(async (req, user) => {
     // A timed-out Python round-trip is a gateway timeout, not a client error.
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
-        { error: "Bridge scoring timed out. Please try again.", code: "UPSTREAM_TIMEOUT" },
+        { error: "Scoring replacements timed out. Please try again.", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -246,7 +246,7 @@ export const POST = withAuth(async (req, user) => {
       // The terminal arm — "we do not know what this is" is now said ONLY when
       // it is true, i.e. when the seam named no code.
       {
-        error: "Bridge scoring failed. Please try again.",
+        error: "Scoring replacements failed. Please try again.",
         code: seamCode ?? "UNKNOWN",
       },
       { status: 500, headers: NO_STORE_HEADERS },

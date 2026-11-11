@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
+import { Term } from "@/components/ui/Term";
 import { STRATEGY_TYPES, SUBTYPES, EXCHANGES } from "@/lib/constants";
 import type { AllocatorOwnPreferences } from "@/lib/preferences";
 import { useMandateAutoSave } from "./useMandateAutoSave";
@@ -222,7 +223,7 @@ export function MandateForm({ initial }: Props) {
 
           <MandateSlider
             label="Max weight per strategy"
-            helper="Largest share of your portfolio any single strategy can hold. 5%-50%."
+            helper="Largest share of your allocation any single strategy can hold. 5%-50%."
             value={maxWeight}
             min={0.05}
             max={0.5}
@@ -309,7 +310,7 @@ export function MandateForm({ initial }: Props) {
                 htmlFor="mandate-archetype"
                 className="text-sm font-medium text-text-primary"
               >
-                Mandate in one sentence
+                <Term k="mandate">Mandate</Term> in one sentence
               </label>
               {archetype.trim() !== "" && (
                 <button
@@ -344,6 +345,7 @@ export function MandateForm({ initial }: Props) {
           <MandateAdvancedSection trigger="Advanced constraints">
             <MandateSlider
               label="Correlation ceiling"
+              term="correlation"
               helper="Max pairwise correlation across your allocations. 0 = fully diversified, 1 = no limit."
               value={correlationCeiling}
               min={0}
@@ -358,7 +360,7 @@ export function MandateForm({ initial }: Props) {
 
             <MandateSlider
               label="Max drawdown tolerance"
-              helper="Worst peak-to-trough loss you can accept across your portfolio."
+              helper="Worst peak-to-trough loss you can accept across your allocation."
               value={maxDrawdown}
               min={0}
               max={1}

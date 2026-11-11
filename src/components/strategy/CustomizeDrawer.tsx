@@ -293,9 +293,9 @@ export function CustomizeDrawer({
             onClick={onSave}
             disabled={!dirty}
             className="flex-1"
-            aria-label="Save preferences"
+            aria-label="Save view"
           >
-            Save preferences
+            Save view
           </Button>
           <Button variant="ghost" onClick={() => setDraft(DEFAULTS)}>
             Reset to defaults

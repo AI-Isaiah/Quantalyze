@@ -2,6 +2,9 @@
 
 import { useRef, type ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
+import { formatDay, formatMonth } from "@/lib/utils";
 import type { ComparatorBlock, ComparatorSummary, FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { recordCoversWindow } from "@/lib/factsheet/compute";
@@ -420,58 +423,73 @@ export function MetricsColumn({
       </table>
     </Panel>
   );
-  const benchmarkSection = (variant: "full" | "document") =>
-    payload.returnsUnit && cmpKey === "none" ? (
+  // Phase 201 (D-10): the Benchmark section is a name and its children, or null; the numeral is
+  // assigned by `NumberedSections` from the section's place among those that render.
+  const benchmarkSection = (variant: "full" | "document"): SectionSpec | null => {
+    if (payload.returnsUnit && cmpKey === "none") {
       // Phase 164.6.6.2 (D-10, UI-SPEC A15): a strategy whose returns are in a native
       // unit has no BTC benchmark (measured in BTC it is a flat line; the USD-priced
-      // one mixes units), so §IV stays, every row reads "—", and one line says why
+      // one mixes units), so the section stays, every row reads "—", and one line says why
       // ("show null with the reason"). With SPX active the arms below render as today.
-      <EditorialSection label="IV" name="Benchmark — vs BTC">
-        <BenchmarkMetricsBody
-          variant={variant}
-          joint={null}
-          withheldReason={
-            // Phase 164.6.6.2.1 (D-15): the USD view's returns were CONVERTED, so the
-            // native view's "flat line" sentence is false there; it says why in its own words.
-            payload.convertedFrom != null
-              ? `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit, payload.convertedFrom)}, so they carry the ${payload.convertedFrom} price by construction.`
-              : `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit)}. A BTC benchmark measured in ${payload.returnsUnit} is a flat line.`
-          }
-        />
-      </EditorialSection>
-    ) : jointCmp.joint ? (
-      <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
-        {/* Phase 164.6.6.3.3 (D-04, UI-SPEC 2.2): a flat strategy leg's joint carries NaN for
-            alpha, beta, IR and the captures ("—") and the block's `flatLeg` marker picks the
-            one muted reason line. The marker, never the NaN values, selects it. */}
-        <BenchmarkMetricsBody
-          variant={variant}
-          joint={wholeRecordWithheld ? null : jointCmp.joint}
-          withheldReason={jointCmp.flatLeg && !wholeRecordWithheld ? flatLegReason(selected ? "range" : "record") : undefined}
-          reasonTestId="joint-flat-leg-reason"
-          annualizationNote={wholeRecordWithheld ? undefined : jointAnnualizationNote(jointCmp.jointAnnualization, figureRec)}
-        />
-      </EditorialSection>
-    ) : jointCmp.jointWithheld && bn != null ? (
-      // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor §IV
+      return {
+        name: "Benchmark — vs BTC",
+        children: (
+          <BenchmarkMetricsBody
+            variant={variant}
+            joint={null}
+            withheldReason={
+              // Phase 164.6.6.2.1 (D-15): the USD view's returns were CONVERTED, so the
+              // native view's "flat line" sentence is false there; it says why in its own words.
+              payload.convertedFrom != null
+                ? `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit, payload.convertedFrom)}, so they carry the ${payload.convertedFrom} price by construction.`
+                : `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit)}. A BTC benchmark measured in ${payload.returnsUnit} is a flat line.`
+            }
+          />
+        ),
+      };
+    }
+    if (jointCmp.joint) {
+      return {
+        name: `Benchmark — vs ${bn}`,
+        // Phase 164.6.6.3.3 (D-04, UI-SPEC 2.2): a flat strategy leg's joint carries NaN for
+        // alpha, beta, IR and the captures ("—") and the block's `flatLeg` marker picks the
+        // one muted reason line. The marker, never the NaN values, selects it.
+        children: (
+          <BenchmarkMetricsBody
+            variant={variant}
+            joint={wholeRecordWithheld ? null : jointCmp.joint}
+            withheldReason={jointCmp.flatLeg && !wholeRecordWithheld ? flatLegReason(selected ? "range" : "record") : undefined}
+            reasonTestId="joint-flat-leg-reason"
+            annualizationNote={wholeRecordWithheld ? undefined : jointAnnualizationNote(jointCmp.jointAnnualization, figureRec)}
+          />
+        ),
+      };
+    }
+    if (jointCmp.jointWithheld && bn != null) {
+      // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the section
       // stays, every joint figure reads "—" and one muted line names the
       // cause in the Allocations widget's words. No figure is shown (D-69).
-      <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
-        <BenchmarkMetricsBody
-          variant={variant}
-          joint={null}
-          withheldReason={pairedFloorReason(
-            bn,
-            jointCmp.jointWithheld.paired,
-            // D-85: inside a window the count is the slice's, named as the range's.
-            selected ? "range" : "record",
-            jointCmp.jointWithheld.floor,
-            // D-08 (170.6): dated only when the comparator's prices end before the strategy's.
-            benchThrough,
-          )}
-        />
-      </EditorialSection>
-    ) : null;
+      return {
+        name: `Benchmark — vs ${bn}`,
+        children: (
+          <BenchmarkMetricsBody
+            variant={variant}
+            joint={null}
+            withheldReason={pairedFloorReason(
+              bn,
+              jointCmp.jointWithheld.paired,
+              // D-85: inside a window the count is the slice's, named as the range's.
+              selected ? "range" : "record",
+              jointCmp.jointWithheld.floor,
+              // D-08 (170.6): dated only when the comparator's prices end before the strategy's.
+              benchThrough,
+            )}
+          />
+        ),
+      };
+    }
+    return null;
+  };
 
   // Phase 196 (D-04, LEAN-05) — the two halves of the rail the one-page layout mounts: `main` in
   // the opening view, `detailed` inside Advanced. Every figure below is the same expression the
@@ -522,18 +540,18 @@ export function MetricsColumn({
               </>
             )}
             <Row label="Win Rate (days)" value={wr(pct(m.win_rate, 2))} bench={wr(pct(b?.win_rate, 2))} />
-            <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
+            <Row term="profit_factor" label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
           </Kpm>
           <GroupHeading>Risk</GroupHeading>
           {maxDdSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{maxDdSpan.text}</p>}
           <Kpm>
-            <Row label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
-            <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="dd_duration" label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
+            <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
             <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
             <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
-            <Row label="Skew" value={wr(signed(m.skew))} bench="" />
-            <Row label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
+            <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
+            <Row term="kurtosis" label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
           </Kpm>
           <p className="mt-2 text-fixed-10 italic text-text-muted" data-testid="var-method-line">{VAR_METHOD_LINE}</p>
         </Panel>
@@ -548,34 +566,53 @@ export function MetricsColumn({
           <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">Detailed metrics</h3>
         </header>
         <StrategyThesisPanel />
-        <EditorialSection label="I" name="Performance">
-          <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
-          <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} record={figureRec} variant="document" />
-        </EditorialSection>
-
-        <EditorialSection label="II" name="Risk">
-          <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} figureState={gateState} variant="document" />
-          {bestWorstPanel}
-          <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
-          <WorstDrawdownsTablePanel />
-          <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} variant="document" />
-        </EditorialSection>
-
-        {(hasStyleDrift || scenarioMode) && (
-          <EditorialSection label="III" name="Style" scopeNote={selected ? FULL_HISTORY_NOTE : undefined}>
-            <StyleDriftPanel />
-            {scenarioMode && payload.ingestSource === "csv" && payload.scenarioPeer != null && <PeerPercentilePanel />}
-            {scenarioMode && <OwnBookDeltaPanel />}
-          </EditorialSection>
-        )}
-
-        <EditorialSection label="V" name="Terms">
-          {scenarioMode && <ConstituentMandatePanel />}
-          <LeverageProfilePanel />
-          <TermsPanel variant="document" />
-        </EditorialSection>
-
-        {benchmarkSection("document")}
+        <NumberedSections
+          sections={[
+            {
+              name: "Performance",
+              children: (
+                <>
+                  <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
+                  <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} record={figureRec} variant="document" />
+                </>
+              ),
+            },
+            {
+              name: "Risk",
+              children: (
+                <>
+                  <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} figureState={gateState} variant="document" />
+                  {bestWorstPanel}
+                  <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
+                  <WorstDrawdownsTablePanel />
+                  <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} variant="document" />
+                </>
+              ),
+            },
+            (hasStyleDrift || scenarioMode) && {
+              name: "Style",
+              scopeNote: selected ? FULL_HISTORY_NOTE : undefined,
+              children: (
+                <>
+                  <StyleDriftPanel />
+                  {scenarioMode && payload.ingestSource === "csv" && payload.scenarioPeer != null && <PeerPercentilePanel />}
+                  {scenarioMode && <OwnBookDeltaPanel />}
+                </>
+              ),
+            },
+            {
+              name: "Terms",
+              children: (
+                <>
+                  {scenarioMode && <ConstituentMandatePanel />}
+                  <LeverageProfilePanel />
+                  <TermsPanel variant="document" />
+                </>
+              ),
+            },
+            benchmarkSection("document"),
+          ]}
+        />
       </aside>
     );
   }
@@ -585,7 +622,12 @@ export function MetricsColumn({
       <StrategyThesisPanel />
       {/* Phase 169.1 (D-27): the range the rail's figures cover, as on the strip. */}
       <RangeEyebrow scope={scope} surface="rail" />
-      <EditorialSection label="I" name="Performance">
+      <NumberedSections
+        sections={[
+      {
+        name: "Performance",
+        children: (
+      <>
         <Panel title="Compound Performance">
           <Kpm>
             <Row label="Start Date" value={isoToMonthDay(m.start)} bench="" />
@@ -617,13 +659,13 @@ export function MetricsColumn({
               above stands for both columns. D-19: the benchmark cells are withheld only with the strategy's TOTAL record (the same `gv`); no overlap or window length withholds them. */}
           <Kpm>
             <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pctSigned(m.cum_ret, 2)} bench={pctSigned(hb?.cum_ret, 2)} />
-            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pctSigned(gv(m.cagr), 2)} bench={pctSigned(gv(hb?.cagr), 2)} />
-            <Row label="Ann. Volatility" value={pct(gv(m.ann_vol), 2)} bench={pct(gv(hb?.ann_vol), 2)} />
-            <Row label="Sharpe" value={ratio(gv(m.sharpe))} bench={ratio(gv(hb?.sharpe))} accent />
-            <Row label="Sortino" value={ratio(gv(m.sortino))} bench={ratio(gv(hb?.sortino))} />
-            <Row label="Calmar" value={ratio(gv(m.calmar))} bench={ratio(gv(hb?.calmar))} />
-            <Row label="Skew" value={wr(signed(m.skew))} bench="" />
-            <Row label="Kurtosis" value={wr(ratio(m.kurt))} bench="" />
+            <Row term="cagr" label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pctSigned(gv(m.cagr), 2)} bench={pctSigned(gv(hb?.cagr), 2)} />
+            <Row term="volatility" label="Ann. Volatility" value={pct(gv(m.ann_vol), 2)} bench={pct(gv(hb?.ann_vol), 2)} />
+            <Row term="sharpe" label="Sharpe" value={ratio(gv(m.sharpe))} bench={ratio(gv(hb?.sharpe))} accent />
+            <Row term="sortino" label="Sortino" value={ratio(gv(m.sortino))} bench={ratio(gv(hb?.sortino))} />
+            <Row term="calmar" label="Calmar" value={ratio(gv(m.calmar))} bench={ratio(gv(hb?.calmar))} />
+            <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
+            <Row term="kurtosis" label="Kurtosis" value={wr(ratio(m.kurt))} bench="" />
           </Kpm>
         </Panel>
         <Panel title="Returns" benchHeader={bnDated}>
@@ -653,25 +695,30 @@ export function MetricsColumn({
               </>
             )}
             <Row label="Win Rate (days)" value={wr(pct(m.win_rate, 2))} bench={wr(pct(b?.win_rate, 2))} />
-            <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
+            <Row term="profit_factor" label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
           </Kpm>
         </Panel>
         <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
         <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} record={figureRec} />
         {/* D-04: the panel mounts at full history only, so `gateState` here is the RECORD-scope verdict. */}
         {!selected && <CumulativeReturnsPanel figureState={gateState} />}
-      </EditorialSection>
+      </>
+        ),
+      },
 
-      <EditorialSection label="II" name="Risk">
+      {
+        name: "Risk",
+        children: (
+      <>
         {/* SFH-M-05: this panel carries no bench header at full coverage; it gains
             the dated one only when the comparator's figures stop early. */}
-        <Panel title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
+        <Panel term="max_drawdown" title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
           {maxDdSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{maxDdSpan.text}</p>}
           <Kpm>
-            <Row label="Max Drawdown" value={pct(m.max_dd, 2)} bench={pct(hb?.max_dd, 2)} accent />
-            <Row label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
-            <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="max_drawdown" label="Max Drawdown" value={pct(m.max_dd, 2)} bench={pct(hb?.max_dd, 2)} accent />
+            <Row term="dd_duration" label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
+            <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
             <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
             <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
           </Kpm>
@@ -683,9 +730,15 @@ export function MetricsColumn({
         <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
         <WorstDrawdownsTablePanel />
         <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} />
-      </EditorialSection>
+      </>
+        ),
+      },
 
-      <EditorialSection label="III" name="Style" scopeNote={selected ? FULL_HISTORY_NOTE : undefined}>
+      {
+        name: "Style",
+        scopeNote: selected ? FULL_HISTORY_NOTE : undefined,
+        children: (
+      <>
         <StyleDriftPanel />
         {/* PeerPercentile ranks the scenario BLEND — Phase 42 (PEER-01, ADR-0025):
             it carries an additive `scenarioPeer` ranked vs the REAL verified
@@ -704,9 +757,14 @@ export function MetricsColumn({
             absent without a live book), so non-scenario factsheets are
             byte-identical. */}
         {scenarioMode && <OwnBookDeltaPanel />}
-      </EditorialSection>
+      </>
+        ),
+      },
 
-      <EditorialSection label="V" name="Terms">
+      {
+        name: "Terms",
+        children: (
+      <>
         {/* Phase 42 (PEER-04): per-constituent mandate chips for the scenario
             BLEND, BEFORE TermsPanel (UI-SPEC §V). scenarioMode-gated here — the
             panel ALSO null-guards on its csv-only `scenarioMandate` carve-out, so
@@ -715,9 +773,13 @@ export function MetricsColumn({
         {scenarioMode && <ConstituentMandatePanel />}
         <LeverageProfilePanel />
         <TermsPanel />
-      </EditorialSection>
+      </>
+        ),
+      },
 
-      {benchmarkSection("full")}
+          benchmarkSection("full"),
+        ]}
+      />
     </aside>
   );
 }
@@ -747,6 +809,31 @@ function EditorialSection({
       </header>
       {children}
     </section>
+  );
+}
+
+/** Phase 201 (D-10): a section's name, optional scope note and body; the numeral is not stored. */
+type SectionSpec = { name: string; scopeNote?: string; children: ReactNode };
+
+const ROMAN_NUMERALS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"] as const;
+
+/**
+ * Phase 201 (D-10, UI-SPEC Interaction contract 6): the one place section numerals are assigned.
+ * The numeral is the section's position among the sections that rendered, so the sequence reads
+ * I..N in the order a reader sees them whether or not Style or the benchmark is present. A
+ * falsy entry is an absent section and takes no numeral. Section names are the caller's, byte
+ * for byte.
+ */
+function NumberedSections({ sections }: { sections: ReadonlyArray<SectionSpec | null | false> }) {
+  const shown = sections.filter((s): s is SectionSpec => Boolean(s));
+  return (
+    <>
+      {shown.map((s, i) => (
+        <EditorialSection key={s.name} label={ROMAN_NUMERALS[i] ?? String(i + 1)} name={s.name} scopeNote={s.scopeNote}>
+          {s.children}
+        </EditorialSection>
+      ))}
+    </>
   );
 }
 
@@ -796,20 +883,21 @@ function BenchmarkMetricsBody({
       <Kpm>
         {variant === "full" && (
           <Row
+            term="alpha"
             label="Alpha (ann)"
             value={v(j => pctSigned(j.alpha, 2))}
             bench=""
             accent={joint != null}
           />
         )}
-        <Row label="Beta" value={v(j => ratio(j.beta))} bench="" />
-        <Row label="Correlation" value={v(j => ratio(j.corr))} bench="" />
-        <Row label="R²" value={v(j => ratio(j.r2))} bench="" />
-        {variant === "full" && <Row label="Information Ratio" value={v(j => ratio(j.info_ratio))} bench="" />}
-        <Row label="Treynor" value={v(j => ratio(j.treynor))} bench="" />
-        <Row label="Tracking Error" value={v(j => pct(j.tracking_error, 2))} bench="" />
-        <Row label="Up Capture" value={v(j => ratio(j.up_capture))} bench="" />
-        <Row label="Down Capture" value={v(j => ratio(j.down_capture))} bench="" />
+        <Row term="beta" label="Beta" value={v(j => ratio(j.beta))} bench="" />
+        <Row term="correlation" label="Correlation" value={v(j => ratio(j.corr))} bench="" />
+        <Row term="r_squared" label="R²" value={v(j => ratio(j.r2))} bench="" />
+        {variant === "full" && <Row term="information_ratio" label="Information Ratio" value={v(j => ratio(j.info_ratio))} bench="" />}
+        <Row term="treynor" label="Treynor" value={v(j => ratio(j.treynor))} bench="" />
+        <Row term="tracking_error" label="Tracking Error" value={v(j => pct(j.tracking_error, 2))} bench="" />
+        <Row term="up_capture" label="Up Capture" value={v(j => ratio(j.up_capture))} bench="" />
+        <Row term="down_capture" label="Down Capture" value={v(j => ratio(j.down_capture))} bench="" />
       </Kpm>
       {withheldReason && (
         <p className="mt-2 text-fixed-11 text-text-muted" data-testid={reasonTestId}>
@@ -831,17 +919,20 @@ function Panel({
   benchHeader,
   hideHeaderRule,
   scopeNote,
+  term,
 }: {
   title: string;
   children: ReactNode;
   benchHeader?: string;
   hideHeaderRule?: boolean;
+  /** Phase 201 (D-03): the glossary key when the panel title is a registered term. */
+  term?: TermKey;
   /** Phase 169.1 (D-27): "Full history" on a full-history panel while a range is selected. */
   scopeNote?: string;
 }) {
   const heading = (
     <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">
-      {title}
+      {term ? <Term k={term}>{title}</Term> : title}
     </h3>
   );
   return (
@@ -904,17 +995,20 @@ function Row({
   bench,
   accent,
   windowKey,
+  term,
 }: {
   label: string;
   value: string;
   bench: string;
   accent?: boolean;
+  /** Phase 201 (D-03): the glossary key when the label is a registered term; the label stays the text. */
+  term?: TermKey;
   /** Phase 169.1 (D-27): the compute() field of a record-anchored return row. */
   windowKey?: "mtd" | "ytd" | "p3m" | "p6m" | "p1y";
 }) {
   return (
     <tr className="border-b border-border/30 last:border-0" data-window-key={windowKey}>
-      <td className="py-1.5 pr-2 text-text-2">{label}</td>
+      <td className="py-1.5 pr-2 text-text-2">{term ? <Term k={term}>{label}</Term> : label}</td>
       <td
         className={
           "py-1.5 px-2 text-right font-mono tabular-nums " +
@@ -966,9 +1060,6 @@ function BwRow({ scale, best, worst, dash = false }: { scale: string; best: numb
   );
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-/** The factsheet's "Mon D, YYYY" date (UTC); "—" for an empty or unparseable input. */
 /**
  * 194.2 D-05 (194-ZOOM-BENCHMARK-COVERAGE): on a selected range, the one muted sentence naming the
  * span the benchmark was compared over, when its data starts after the window start or ends before
@@ -1057,7 +1148,7 @@ export function monthRowLabel(end: string, now: Date = new Date()): string {
   const monthsBehind =
     (now.getUTCFullYear() - d.getUTCFullYear()) * 12 + (now.getUTCMonth() - d.getUTCMonth());
   if (monthsBehind <= 0) return "Month-to-date";
-  const named = `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  const named = formatMonth(end);
   return monthsBehind === 1 ? `Last month (${named})` : `Final month (${named})`;
 }
 
@@ -1118,11 +1209,13 @@ export function RangeEyebrow({
   );
 }
 
+/**
+ * The factsheet's "Mon D, YYYY" date (UTC); "—" for an empty or unparseable input. Phase 201
+ * (D-11): a thin alias of `formatDay`, kept exported because `DistributionPanels`,
+ * `ComparatorPicker` and several tests import it by this name.
+ */
 export function isoToMonthDay(iso: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  return formatDay(iso);
 }
 
 /**
@@ -1265,9 +1358,9 @@ function RollingTable({
         </tr>
       </thead>
       <tbody>
-        <RollingRow label="Volatility" fmt="pct" stats={v} />
-        <RollingRow label="Sharpe" fmt="num" stats={sh} accent />
-        <RollingRow label="Sortino" fmt="num" stats={so} />
+        <RollingRow term="volatility" label="Volatility" fmt="pct" stats={v} />
+        <RollingRow term="sharpe" label="Sharpe" fmt="num" stats={sh} accent />
+        <RollingRow term="sortino" label="Sortino" fmt="num" stats={so} />
       </tbody>
     </table>
   );
@@ -1278,16 +1371,19 @@ function RollingRow({
   fmt,
   stats,
   accent,
+  term,
 }: {
   label: string;
   fmt: "pct" | "num";
   stats: ReturnType<typeof rollingStats>;
   accent?: boolean;
+  /** Phase 201 (D-03): the glossary key of a registered label. */
+  term?: TermKey;
 }) {
   const f = (v: number | null) => (fmt === "pct" ? pct(v, 1) : ratio(v));
   return (
     <tr className="border-b border-border/30 last:border-0">
-      <td className="py-1 pr-2 text-text-2">{label}</td>
+      <td className="py-1 pr-2 text-text-2">{term ? <Term k={term}>{label}</Term> : label}</td>
       <td className={"py-1 px-2 text-right font-mono tabular-nums " + (accent && f(stats.current) !== "—" ? "text-accent font-medium" : "text-text-primary")}>
         {f(stats.current)}
       </td>
@@ -1339,7 +1435,7 @@ function CumulativeReturnsPanel({ figureState }: { figureState: FigureState }) {
         {m.p5y != null && <Row label="5 Year" value={pctSigned(m.p5y, 2)} bench="" />}
         <Row label="Since Inception" value={pctSigned(m.cum_ret, 2)} bench="" accent />
         {/* Phase 194 (D-04 as superseded by D-15): the one rail CAGR plan 04 did not route. */}
-        <Row label="CAGR" value={pctSigned(gatedValue(m.cagr, figureState), 2)} bench="" />
+        <Row term="cagr" label="CAGR" value={pctSigned(gatedValue(m.cagr, figureState), 2)} bench="" />
       </Kpm>
     </Panel>
   );
@@ -1389,23 +1485,23 @@ function ExtendedMetricsPanel({
       <Kpm>
         {full && (
           <>
-            <Row label="Skew" value={wr(signed(m.skew))} bench="" />
-            <Row label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
-            <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
-            <Row label="P5 (daily)" value={wr(pctSigned(q.p05, 2))} bench="" />
-            <Row label="P95 (daily)" value={wr(pctSigned(q.p95, 2))} bench="" />
+            <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
+            <Row term="kurtosis" label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
+            <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="percentile" label="P5 (daily)" value={wr(pctSigned(q.p05, 2))} bench="" />
+            <Row term="percentile" label="P95 (daily)" value={wr(pctSigned(q.p95, 2))} bench="" />
             <Row label="Median (daily)" value={wr(pctSigned(q.p50, 2))} bench="" />
-            <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench="" />
+            <Row term="profit_factor" label="Profit Factor" value={wr(ratio(m.profit_factor))} bench="" />
           </>
         )}
-        <Row label="Omega (θ=0)" value={wr(ratio(m.omega_ratio))} bench="" />
-        <Row label="Tail Ratio (P95/|P5|)" value={wr(ratio(tailRatio))} bench="" />
-        <Row label="Common-sense Ratio" value={wr(ratio(commonSenseRatio))} bench="" />
-        <Row label="Recovery Factor" value={wr(ratio(m.recovery_factor))} bench="" accent={m.recovery_factor != null && m.recovery_factor >= 3} />
-        <Row label="Pain Index" value={wr(pct(m.pain_index, 2))} bench="" />
-        <Row label="Ulcer Index" value={wr(pct(m.ulcer_index, 2))} bench="" />
-        <Row label="Avg Win / Avg Loss" value={wr(ratioStr(m.avg_win, m.avg_loss))} bench="" />
+        <Row term="omega" label="Omega (θ=0)" value={wr(ratio(m.omega_ratio))} bench="" />
+        <Row term="tail_ratio" label="Tail Ratio (P95/|P5|)" value={wr(ratio(tailRatio))} bench="" />
+        <Row term="common_sense_ratio" label="Common-sense Ratio" value={wr(ratio(commonSenseRatio))} bench="" />
+        <Row term="recovery_factor" label="Recovery Factor" value={wr(ratio(m.recovery_factor))} bench="" accent={m.recovery_factor != null && m.recovery_factor >= 3} />
+        <Row term="pain_index" label="Pain Index" value={wr(pct(m.pain_index, 2))} bench="" />
+        <Row term="ulcer_index" label="Ulcer Index" value={wr(pct(m.ulcer_index, 2))} bench="" />
+        <Row term="avg_win_loss" label="Avg Win / Avg Loss" value={wr(ratioStr(m.avg_win, m.avg_loss))} bench="" />
       </Kpm>
       {full && <p className="mt-2 text-fixed-10 italic text-text-muted" data-testid="var-method-line">{VAR_METHOD_LINE}</p>}
     </Panel>
@@ -1503,9 +1599,9 @@ function WorstDrawdownsTablePanel() {
             return (
               <tr key={i} className="border-b border-border/30 last:border-0">
                 <td className="py-1 pr-1 text-right font-mono tabular-nums text-text-2">#{i + 1}</td>
-                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.start])}</td>
-                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.trough])}</td>
-                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.recover])}</td>
+                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{formatDay(view.dates[r.start])}</td>
+                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{formatDay(view.dates[r.trough])}</td>
+                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{formatDay(view.dates[r.recover])}</td>
                 <td className="py-1 px-1 text-right font-mono tabular-nums" style={toneStyle(drawdownTone(r.depth, 2, 100))}>
                   {pct(r.depth, 2)}
                 </td>
@@ -1520,12 +1616,6 @@ function WorstDrawdownsTablePanel() {
       </ResponsiveTable>
     </Panel>
   );
-}
-
-function ymd(iso: string | undefined): string {
-  if (!iso) return "—";
-  // Already in YYYY-MM-DD from payload.dates; trim if needed.
-  return iso.length >= 10 ? iso.slice(0, 10) : iso;
 }
 
 /**

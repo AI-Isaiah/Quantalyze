@@ -7,7 +7,10 @@ import { FreshnessBadge } from "./FreshnessBadge";
  * it is, not only how fresh. The date is an opt-in `showDate` on the pill arm,
  * so every other caller (portfolio, tearsheet) renders exactly what it did.
  *
- * The date text is typed by hand ("Sep 25", "·"), never produced by calling the
+ * Phase 201 (U-14, D-11): the date names the full day, "Sep 25, 2026", not the yearless
+ * "Sep 25", so a batch from last year cannot read as this year's.
+ *
+ * The date text is typed by hand ("Sep 25, 2026", "·"), never produced by calling the
  * formatter in the test: a test that computed its own expectation with the code
  * under test could not fail when that code was wrong.
  */
@@ -54,7 +57,7 @@ describe("FreshnessBadge — the batch date (D-07)", () => {
     const sep = container.querySelector('span[aria-hidden="true"]');
     expect(sep?.textContent).toBe("·");
     const date = container.querySelector(".font-metric");
-    expect(date?.textContent).toBe("Sep 25");
+    expect(date?.textContent).toBe("Sep 25, 2026");
     expect(container.textContent).toContain("Batch:");
   });
 
@@ -80,14 +83,14 @@ describe("FreshnessBadge — the batch date (D-07)", () => {
       <FreshnessBadge computedAt={new Date(PARSEABLE)} showDate />,
     );
     expect(asDate.container.querySelector(".font-metric")?.textContent).toBe(
-      "Sep 25",
+      "Sep 25, 2026",
     );
     asDate.unmount();
     const asNumber = render(
       <FreshnessBadge computedAt={Date.parse(PARSEABLE)} showDate />,
     );
     expect(asNumber.container.querySelector(".font-metric")?.textContent).toBe(
-      "Sep 25",
+      "Sep 25, 2026",
     );
   });
 

@@ -16,11 +16,11 @@
  *   3. KpiStrip in mode="scenario" with scenarioMetrics + liveMetrics
  *   4. ScenarioFactsheetChart (factsheet-engine equity + drawdown) fed the
  *      scenario wealth series — Phase 38-03 (was EquityChart + DrawdownChart)
- *   5. Bridge inline card (only when flaggedHoldings.length > 0) embedding
+ *   5. Flagged-holdings card (only when flaggedHoldings.length > 0) embedding
  *      ScenarioFlaggedHoldingsList — RESEARCH §Architecture decision
  *   6. CompositionList — read-only-tokens model: live holdings are FIXED
  *      context (symbol · venue · USD value, plus the multi-venue caveat and the
- *      Bridge "Compare →" deep-link); only ADDED strategies carry the
+ *      replacement "Compare →" deep-link); only ADDED strategies carry the
  *      interactive controls (toggle / weight / leverage / Remove). A commit
  *      therefore emits only voluntary_add — holdings produce no
  *      voluntary_remove / voluntary_modify decision.
@@ -137,6 +137,7 @@ import { RollingSortinoChart } from "@/components/charts/RollingSortinoChart";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { PartialDataBanner } from "@/components/strategy-v2/PartialDataBanner";
 import { Card } from "@/components/ui/Card";
+import { Term } from "@/components/ui/Term";
 import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
@@ -146,7 +147,7 @@ import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
 // row-detail panel's Sharpe (HoldingDetail precedent: same module, same null
 // semantics as formatPercent — both return "—" for null/non-finite, so the panel
 // never needs an inline toFixed and can never render a fabricated 0.00).
-import { formatCurrency, formatNumber, formatPercent } from "@/lib/utils";
+import { formatCurrency, formatDay, formatMonth, formatNumber, formatPercent } from "@/lib/utils";
 // Phase 151 AUM-01 — the ONE money kit for NEW surfaces on this screen
 // (150-UI-SPEC / PATTERNS Correction 4): `isValidDollar` is the shared [0, 1e12)
 // bound and `formatUsd` the shared whole-dollar renderer (null → "—", never $0).
@@ -514,35 +515,6 @@ function liveBaselineToComputedMetrics(
   };
 }
 
-const MONTH_ABBR = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-] as const;
-
-/**
- * Format an ISO "YYYY-MM-DD" day as "Mon YYYY" for the auto-excluded inline
- * reason. Pure STRING slicing — never `new Date(iso)` (the UTC/local off-by-one
- * `dateday.ts` exists to kill). Falls back to the raw string on a malformed
- * input (defensive; the composer only ever feeds it valid spans).
- */
-function formatIsoMonth(iso: string): string {
-  const year = iso.slice(0, 4);
-  const monthIdx = Number(iso.slice(5, 7)) - 1;
-  const abbr = MONTH_ABBR[monthIdx];
-  if (!abbr || year.length !== 4) return iso;
-  return `${abbr} ${year}`;
-}
-
 /**
  * Phase 57 Plan 03 (POLISH-02) — the minimal honest reason a SELECTED strategy
  * is coverage-auto-excluded from the current window. Derived from its span vs
@@ -558,10 +530,10 @@ function coverageDropReason(
 ): string {
   if (!span) return "no data — outside window";
   if (span.last < window.end) {
-    return `ends ${formatIsoMonth(span.last)} — outside window`;
+    return `ends ${formatMonth(span.last)} — outside window`;
   }
   if (span.first > window.start) {
-    return `starts ${formatIsoMonth(span.first)} — outside window`;
+    return `starts ${formatMonth(span.first)} — outside window`;
   }
   return "outside window";
 }
@@ -794,7 +766,7 @@ function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
 /** The canonical connection-failure copy — honest for a genuine network drop
  *  (the `catch` path) or an opaque non-400 server failure. */
 const SAVE_ERROR_GENERIC =
-  "Couldn't save this portfolio. Check your connection and try again.";
+  "Couldn't save this scenario. Check your connection and try again.";
 
 /**
  * Phase 151 AUM-03 — the AUM-zero commit refusal, in two variants.
@@ -818,9 +790,9 @@ const SAVE_ERROR_GENERIC =
  * assert it by equality.
  */
 const AUM_REFUSAL_NO_BOOK =
-  "Can't record a scenario commit: portfolio AUM is not set. Set portfolio AUM before submitting.";
+  "Can't record a scenario commit: scenario AUM is not set. Set scenario AUM before submitting.";
 const AUM_REFUSAL_BOOK_REACHABLE =
-  'Can\'t record a scenario commit: portfolio AUM is not set. Set portfolio AUM, or switch to "From my book", before submitting.';
+  'Can\'t record a scenario commit: scenario AUM is not set. Set scenario AUM, or switch to "From my allocation", before submitting.';
 
 /** A single zod issue as it arrives in the save route's 400 body
  *  (`{ error: "Invalid request body", issues }` — saved/route.ts:102-106). */
@@ -852,7 +824,7 @@ function saveErrorMessage(status: number, issues?: SaveIssue[]): string {
       // composer, so "remove some sources" pointed at a control that does not
       // exist here. The honest remediation is disconnecting an unused exchange
       // connection. Ceiling stays interpolated from the const, never literal.
-      return `This portfolio spans more than ${MAX_MEMBER_KEY_IDS} connected exchange keys — the current save limit. Disconnect an unused exchange connection and try again.`;
+      return `This scenario spans more than ${MAX_MEMBER_KEY_IDS} connected exchange keys — the current save limit. Disconnect an unused exchange connection and try again.`;
     }
   }
   return SAVE_ERROR_GENERIC;
@@ -1503,7 +1475,7 @@ export function ScenarioComposer({
   const [pickerOpen, setPickerOpen] = useState(false);
 
   // -------------------------------------------------------------------------
-  // Phase 151 AUM-01 — the Portfolio AUM input's text state.
+  // Phase 151 AUM-01 — the Scenario AUM input's text state.
   //
   // The DRAFT is the authority (`draft.manualAumUsd`); this holds only the raw
   // keystrokes between commits, because the user must be able to type through
@@ -1532,7 +1504,7 @@ export function ScenarioComposer({
     // consistent with the non-finite path above.
     if (weight > 1) {
       setCommitError(
-        "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
+        "Weight clamped to 1 — the most one strategy can take is 100% of scenario AUM.",
       );
     } else {
       // IMP-3: unconditionally clear any stale clamp-error on in-range weights
@@ -2021,7 +1993,7 @@ export function ScenarioComposer({
       }
       if (typeof serializedDraft !== "string") {
         setOpenNotice(
-          "This saved portfolio uses an older format and can't be reopened.",
+          "This saved scenario uses an older format and can't be reopened.",
         );
         return;
       }
@@ -2030,7 +2002,7 @@ export function ScenarioComposer({
       if (decoded.outcome === "reset") {
         // Older incompatible / corrupt format — honest notice, no hydrate.
         setOpenNotice(
-          "This saved portfolio uses an older format and can't be reopened.",
+          "This saved scenario uses an older format and can't be reopened.",
         );
         return;
       }
@@ -2205,7 +2177,7 @@ export function ScenarioComposer({
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
         setOpenNotice(
-          "This portfolio was saved by a newer version and is read-only here.",
+          "This scenario was saved by a newer version and is read-only here.",
         );
         setNameInputOpen(false);
         return;
@@ -2390,11 +2362,11 @@ export function ScenarioComposer({
   function validateName(raw: string): string | null {
     const trimmed = raw.trim();
     if (trimmed.length < 1) {
-      setNameError("Enter a name to save this portfolio.");
+      setNameError("Enter a name to save this scenario.");
       return null;
     }
     if (trimmed.length > 120) {
-      setNameError("Portfolio names are limited to 120 characters.");
+      setNameError("Scenario names are limited to 120 characters.");
       return null;
     }
     setNameError(null);
@@ -4610,7 +4582,7 @@ export function ScenarioComposer({
   // whole book, its NOTIONAL cell `share × totalBookEquity × L` against the
   // modelled one, differing by the whole-book/contributing ratio.
   //
-  // The basis chosen is the MODELLED book (founder's AUM model: portfolio AUM
+  // The basis chosen is the MODELLED book (founder's AUM model: scenario AUM
   // is the sum of what is actually being modelled, built bottom-up from the
   // per-strategy dollars). A key with no return series contributes no row, no
   // weight and no projection, so its custody value cannot be part of a number
@@ -4621,7 +4593,7 @@ export function ScenarioComposer({
   // every active key, manager-side included". That asymmetry is exactly the
   // defect: it put the manager-side and series-less keys' custody value into a
   // denominator the composer's own rows renormalize without them. Because the
-  // headline PORTFOLIO AUM now means something narrower for a partial book, it
+  // headline SCENARIO AUM now means something narrower for a partial book, it
   // is DISCLOSED next to the field (`scenario-aum-modelled-note`) rather than
   // changed silently.
   //
@@ -4638,7 +4610,7 @@ export function ScenarioComposer({
   // DERIVATIVES book they do not: `value_usd` there is the leveraged NOTIONAL
   // contract size while the equity at stake is `unrealized_pnl_usd`, so a 10x
   // perp put ~10x its own equity into the AUM. The founder's production book is
-  // Deribit, i.e. exactly that case — the headline PORTFOLIO AUM and the
+  // Deribit, i.e. exactly that case — the headline SCENARIO AUM and the
   // NOTIONAL cells were two different definitions of what a position is worth,
   // and the per-row dollars could not reconcile against the notionals no matter
   // how the key set was narrowed.
@@ -4653,7 +4625,7 @@ export function ScenarioComposer({
   // reads the same 0-or-negative number, so refusing is the honest answer and
   // the remedy is one field away (type the size). The remedy is NAMED: the
   // refusal copy and the `liveHoldingsSum <= 0` hint next to the field both
-  // point at the Portfolio AUM input.
+  // point at the Scenario AUM input.
   //
   // Phase 167.1 AUMTRUST — the loop that computed this sum MOVED, unchanged in
   // walk order, filters and accumulation order, into `summarizeLiveHoldings`
@@ -4750,7 +4722,7 @@ export function ScenarioComposer({
       ? scenario.draft.manualAumUsd
       : undefined;
 
-  // Phase 151 AUM-01 — the scenario's portfolio AUM. MANUAL WINS IN BOTH MODES:
+  // Phase 151 AUM-01 — the scenario's AUM. MANUAL WINS IN BOTH MODES:
   // in book mode the live sum is a seed the allocator may override (they may be
   // modelling a different size than custody currently holds), and in blank mode
   // there is no live sum by construction (holdingsSummary is [] at the entryMode
@@ -4828,7 +4800,7 @@ export function ScenarioComposer({
     }
     const parsed = Number(raw);
     if (!isValidDollar(parsed) || parsed <= 0) {
-      console.warn("[ScenarioComposer] refused an invalid portfolio AUM", {
+      console.warn("[ScenarioComposer] refused an invalid scenario AUM", {
         raw,
       });
       // Review round 2 F4 — SAY SO, for the same reason `commitDollarInput`'s
@@ -4859,8 +4831,8 @@ export function ScenarioComposer({
       // follow-up rather than smuggled in behind a copy fix.)
       setCommitError(
         parsed === 0
-          ? "Portfolio AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied."
-          : "Invalid portfolio AUM — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+          ? "Scenario AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied."
+          : "Invalid scenario AUM — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
       );
       // G1 — disarm (see the note at the top of this function): the snap-back
       // below restores the committed text, so a subsequent bare blur must not
@@ -5121,12 +5093,12 @@ export function ScenarioComposer({
             className="mb-2 text-2xl text-text-primary"
             style={{ fontFamily: "var(--font-serif)" }}
           >
-            Start a portfolio
+            Start a scenario
           </h2>
           <p className="mx-auto max-w-md text-sm text-text-secondary">
             {hasConnectedKeys
               ? "Your connected exchange accounts hold no open positions yet. Start from a blank slate and browse strategies to compose one."
-              : "Connect a read-only exchange API key to project portfolio scenarios from your live book — or start from a blank slate and browse strategies to compose one."}
+              : "Connect a read-only exchange API key to project scenarios from your live allocation — or start from a blank slate and browse strategies to compose one."}
           </p>
           <div className="mt-6 flex items-center justify-center gap-3">
             <Link
@@ -5273,7 +5245,7 @@ export function ScenarioComposer({
   const priceGapCount =
     entryMode === "book" ? liveHoldingsSummary.priceGap : 0;
   // Review WR-02 — the note that qualifies the field's value is its accessible
-  // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
+  // description, so a screen-reader user who tabs to SCENARIO AUM hears the
   // qualification with the number and not only in linear reading order.
   // Derived from the SAME flags that render the notes, so it can never point
   // at an element that is not on screen. Review round 3 IN-01: that is three
@@ -5322,12 +5294,12 @@ export function ScenarioComposer({
           filled <Badge> primitive. A projection is a hypothetical, not your
           live book — the badge says so unconditionally. */}
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-2xl font-semibold text-text-primary">Scenario portfolio</h2>
+        <h2 className="text-2xl font-semibold text-text-primary"><Term k="scenario">Scenario</Term> draft</h2>
         <span
           data-testid="scenario-projected-badge"
           className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-fixed-10 uppercase tracking-wide font-semibold text-text-muted"
         >
-          PROJECTED — hypothetical, not your live book
+          PROJECTED — hypothetical, not your live allocation
         </span>
 
         {/* UNIFY-01/02 — entry-mode segmented control (29-UI-SPEC §1). Two
@@ -5370,7 +5342,7 @@ export function ScenarioComposer({
                   : "border border-transparent text-text-secondary"
               }`}
             >
-              From my book
+              From my allocation
             </button>
           )}
           <button
@@ -5411,7 +5383,7 @@ export function ScenarioComposer({
                 setNameInputOpen(true);
               }}
             >
-              Save portfolio
+              Save scenario
             </Button>
           ) : (
             <>
@@ -5425,7 +5397,7 @@ export function ScenarioComposer({
                     void putUpdateScenario();
                   }}
                 >
-                  Update portfolio
+                  Update scenario
                 </Button>
               )}
               <Button
@@ -5438,7 +5410,7 @@ export function ScenarioComposer({
                   setNameInputOpen(true);
                 }}
               >
-                Save as new portfolio
+                Save as new scenario
               </Button>
             </>
           )}
@@ -5451,8 +5423,8 @@ export function ScenarioComposer({
             type="text"
             value={nameValue}
             onChange={(e) => setNameValue(e.target.value)}
-            placeholder="Name this portfolio"
-            aria-label="Name this portfolio"
+            placeholder="Name this scenario"
+            aria-label="Name this scenario"
             className="min-w-[220px] rounded-md border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/50"
           />
           <Button
@@ -5499,11 +5471,11 @@ export function ScenarioComposer({
       )}
 
       <p className="mt-1 text-sm text-text-muted">
-        Compose a draft portfolio and project KPI / equity / drawdown impact vs
+        Compose a draft scenario and project KPI / equity / drawdown impact vs
         your live baseline.
       </p>
 
-      {/* Phase 151 AUM-01 — the ONE Portfolio AUM field, present in BOTH entry
+      {/* Phase 151 AUM-01 — the ONE Scenario AUM field, present in BOTH entry
           modes (UI-SPEC §1). Blank mode starts empty; book mode pre-fills from
           the live-holdings total and stays editable as an override. Weights
           remain the single source of truth — editing this rescales the DOLLAR
@@ -5521,7 +5493,7 @@ export function ScenarioComposer({
               keys carrying a return series, see the Models-N-of-M note below),
               so it names that quantity. Blank mode is a typed input and keeps
               its label. */}
-          {entryMode === "book" ? "Modelled equity (USD)" : "PORTFOLIO AUM (USD)"}
+          {entryMode === "book" ? "Modelled equity (USD)" : "SCENARIO AUM (USD)"}
         </label>
         <input
           id="scenario-aum"
@@ -5961,7 +5933,7 @@ export function ScenarioComposer({
             data-testid="scenario-coverage-window-value"
           >
             {coverageWindow
-              ? `${coverageWindow.start} → ${coverageWindow.end}`
+              ? `${formatDay(coverageWindow.start)} → ${formatDay(coverageWindow.end)}`
               : "All history"}
           </span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -6054,7 +6026,7 @@ export function ScenarioComposer({
       {/* Row 4 — the hairline is absent when rows 1–3 did not render. */}
       <div className={windowBounds ? "border-t border-border" : undefined}>
         <p className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted px-4 pt-3">
-          Scenario blend
+          <Term k="scenario">Scenario</Term> blend
         </p>
         <KpiStrip
           mode="scenario"
@@ -6526,7 +6498,7 @@ export function ScenarioComposer({
           // two predicates from ever diverging into a headed-but-empty panel.
           <PartialDataBanner
             heading="Awaiting more data"
-            body="This portfolio needs at least 10 overlapping daily returns to chart its distribution."
+            body="This scenario needs at least 10 overlapping daily returns to chart its distribution."
           />
         ) : (
           <div className="space-y-6">
@@ -6644,8 +6616,8 @@ export function ScenarioComposer({
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">
           <div className="text-base font-semibold text-text-primary">
-            Bridge flagged {flaggedHoldings.length} holding
-            {flaggedHoldings.length === 1 ? "" : "s"}
+            {flaggedHoldings.length} holding
+            {flaggedHoldings.length === 1 ? "" : "s"} outside your mandate
           </div>
           <p className="mt-1 text-xs text-text-muted">
             Review the recommended replacement
@@ -6657,7 +6629,7 @@ export function ScenarioComposer({
             onClick={() => setBridgeOpen(true)}
             className="mt-3 rounded-md bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent/90"
           >
-            Open Bridge
+            Review replacements
           </button>
           <div className="mt-4">
             <ScenarioFlaggedHoldingsList
@@ -6835,8 +6807,7 @@ export function ScenarioComposer({
           Add more strategies
         </div>
         <p className="mt-1 text-xs text-text-muted">
-          Browse the verified-strategies catalog to add candidates outside the
-          Bridge recommendations.
+          Browse the verified-strategies catalog to add candidates beyond the suggested replacements.
         </p>
         <button
           type="button"
@@ -7084,21 +7055,21 @@ function AutoExcludedRow({
               <>
                 Include → moves window start to{" "}
                 <span className="font-mono tabular-nums">
-                  {includeCost.target.start}
+                  {formatDay(includeCost.target.start)}
                 </span>{" "}
               </>
             ) : includeCost.movedBound === "both" ? (
               <>
                 Include → shortens window to{" "}
                 <span className="font-mono tabular-nums">
-                  {includeCost.target.start}–{includeCost.target.end}
+                  {formatDay(includeCost.target.start)} – {formatDay(includeCost.target.end)}
                 </span>{" "}
               </>
             ) : (
               <>
                 Include → shortens window to{" "}
                 <span className="font-mono tabular-nums">
-                  {includeCost.target.end}
+                  {formatDay(includeCost.target.end)}
                 </span>{" "}
               </>
             )}
@@ -7142,13 +7113,13 @@ const NOTIONAL_DERIVED_NOTE =
  *
  * None of these is the AUM sentence (`AUM_UNSET_REMEDY`), and re-unifying them
  * with it is the named regression: this cell's em-dash is never caused by
- * `scenarioAum`, so "set portfolio AUM" would name a remedy that cannot make the
+ * `scenarioAum`, so "set scenario AUM" would name a remedy that cannot make the
  * cell derivable. The AUM sentence stays on the USD cell, where it is true.
  */
 const NOTIONAL_NOTE_BY_CAUSE = {
   /** `totalBookEquity == null` — there is no live book equity to size against.
    *  True for a book-less allocator and for a degenerate Σ ≤ 0 book. */
-  equity: "Notional needs live book equity — not derivable in this scenario",
+  equity: "Notional needs live allocation equity — not derivable in this scenario",
   /** The ref is absent from `blendShareByRef`: the row is toggled OFF, or the
    *  selected weight mass is 0 so the map is empty for EVERY row, or the ref is
    *  not in this render's engine set. In all three the row genuinely carries no
@@ -7236,7 +7207,7 @@ interface CompositionListProps {
    */
   totalBookEquity: number | null;
   /**
-   * Phase 151 AUM-01 — the scenario's portfolio AUM (`sanitizedManualAum ??
+   * Phase 151 AUM-01 — the scenario's AUM (`sanitizedManualAum ??
    * liveHoldingsSum`). The base for the per-strategy DOLLAR input: a row's
    * allocation in dollars is `weight × scenarioAum`, and a typed amount
    * back-computes `weight = amount / scenarioAum`. `<= 0` (nothing set, no
@@ -7427,7 +7398,7 @@ function CompositionList({
   }
 
   /** Phase 152 SCEN-03 — the composer's mono-eyebrow recipe, byte-verbatim from
-   *  the PORTFOLIO AUM label (152-UI-SPEC reuse rule: no new visual primitives). */
+   *  the SCENARIO AUM label (152-UI-SPEC reuse rule: no new visual primitives). */
   const DETAIL_EYEBROW =
     "font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted";
 
@@ -7441,7 +7412,7 @@ function CompositionList({
   // Phase 152 review CR-01 — the returned `cause` is the HONESTY INVARIANT, not
   // decoration. The em-dash has three independent causes and they demand three
   // different sentences. Pinning one string (the shipped
-  // "Notional needs live book equity …") told an allocator who HAS a live book
+  // "Notional needs live allocation equity …") told an allocator who HAS a live book
   // that the blocker was missing equity whenever they simply toggled the row
   // off — a false blocker whose implied remedy (get a live book) CANNOT make the
   // cell derivable. That is the exact defect class this phase exists to remove,
@@ -7529,7 +7500,7 @@ function CompositionList({
   // The adjacent Notional span is a DIFFERENT number (equity × share × leverage)
   // and is untouched by any of this.
   // -------------------------------------------------------------------------
-  const AUM_UNSET_REMEDY = "Set portfolio AUM to size in dollars";
+  const AUM_UNSET_REMEDY = "Set scenario AUM to size in dollars";
 
   /**
    * A ref's weight, derived EXACTLY as the row that renders it does. ONE
@@ -7649,7 +7620,7 @@ function CompositionList({
               { ref, amount },
             );
             onRefuseEdit(
-              "A portfolio needs a size — zeroing the last funded strategy would leave nothing to allocate. Set another strategy's dollars first, or exclude this row instead.",
+              "A scenario needs a size — zeroing the last funded strategy would leave nothing to allocate. Set another strategy's dollars first, or exclude this row instead.",
             );
 
             el.value = String(displayed);
@@ -7720,7 +7691,7 @@ function CompositionList({
     // allocator is about to fill. Rendering the em-dash here made the bottom-up
     // path unreachable from a fresh blank scenario (`liveHoldingsSum` is 0 by
     // construction and nothing has been typed, so `scenarioAum` is 0 and EVERY
-    // row rendered the em-dash): the allocator had to seed a Portfolio AUM
+    // row rendered the em-dash): the allocator had to seed a Scenario AUM
     // top-down first — exactly the flow UAT-1 replaced. `bottomUpAumFor` needs
     // no non-zero AUM to work (the other rows contribute Σ w_j × 0 = 0, so the
     // first amount typed simply becomes the portfolio), and every division
@@ -7759,7 +7730,7 @@ function CompositionList({
           inputMode="numeric"
           defaultValue={String(displayed)}
           disabled={disabled}
-          title="Allocation in dollars = weight × portfolio AUM. Commits on blur/Enter and back-computes the weight."
+          title="Amount in dollars = weight × scenario AUM. Commits on blur/Enter and back-computes the weight."
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               commitDollarInput(ref, e.target as HTMLInputElement, displayed);
@@ -7815,7 +7786,7 @@ function CompositionList({
     <>
       <label className="sr-only" htmlFor={`target-dd-${ref}`}>
         {labelText} target max drawdown (percent) — this constituent&apos;s own
-        standalone drawdown, not the portfolio&apos;s
+        standalone drawdown, not the whole scenario&apos;s
       </label>
       <input
         id={`target-dd-${ref}`}
@@ -7824,7 +7795,7 @@ function CompositionList({
         min="0"
         max="100"
         disabled={disabled}
-        title="Target this constituent's OWN standalone max drawdown (the sleeve, not the portfolio). Commits on blur/Enter and back-solves the leverage."
+        title="Target this constituent's OWN standalone max drawdown (the sleeve, not the whole scenario). Commits on blur/Enter and back-solves the leverage."
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             const raw = (e.target as HTMLInputElement).value;
@@ -7871,8 +7842,8 @@ function CompositionList({
           data-testid="scenario-target-dd-portfolio-note"
           className="mt-2 text-fixed-11 text-text-muted"
         >
-          Portfolio max-DD at {result.leverage.toFixed(2)}× (computed for the
-          whole book):{" "}
+          <Term k="scenario">Scenario</Term> max-DD at {result.leverage.toFixed(2)}× (computed for the
+          whole scenario):{" "}
           <span className="font-metric">
             {formatPercent(portfolioMaxDrawdown, 2)}
           </span>

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { contactHref } from "@/lib/contact";
+import { formatDay } from "@/lib/utils";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
@@ -17,7 +18,7 @@ export default function PrivacyPolicyPage() {
   return (
     <>
       <h1 className="font-display text-page-title text-text-primary">Privacy Policy</h1>
-      <p className="text-caption text-text-muted">Last updated: 2026-04-07</p>
+      <p className="text-caption text-text-muted">Last updated: {formatDay("2026-04-07")}</p>
 
       <h2>Who we are</h2>
       <p>

@@ -68,7 +68,7 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
     // The header strip carries aria-label="Series legend"; Portfolio chip is
     // unconditional inside it.
     const legend = screen.getByLabelText("Series legend");
-    expect(within(legend).getByText("Portfolio")).toBeInTheDocument();
+    expect(within(legend).getByText("Allocation")).toBeInTheDocument();
   });
 
   it("renders the BTC swatch when btcBenchmark is present", () => {

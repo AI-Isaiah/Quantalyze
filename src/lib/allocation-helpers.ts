@@ -7,12 +7,12 @@ export { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 /**
  * Pick the display name for an investment row.
  *
- * audit-2026-05-07 G8.A.10 (P43): the previous body inverted the
- * canonical disclosure-tier rule by using codename only on exploratory
- * tier. The canonical resolver `displayStrategyName` says "codename
- * wins at any tier" and falls back to a synthetic `Strategy #<id>`
- * for missing data — and once G8.A.2 (P35) redacts `name` to `null`
- * for non-institutional rows, the previous body would have returned
+ * audit-2026-05-07 G8.A.10 (P43): the previous body used the codename
+ * only on exploratory tier. Phase 201 D-09: the canonical resolver
+ * `displayStrategyName` prints the name first for a strategy the viewer
+ * can see, then the codename, then a synthetic `Strategy #<id>` for
+ * missing data — and once G8.A.2 (P35) redacts `name` to `null` for a
+ * strategy the viewer cannot see, the previous body would have returned
  * `null` (typed as string!) for those. Route through the canonical
  * resolver here; the allocator-provided alias remains a final
  * override on top.
@@ -27,12 +27,19 @@ export function displayName(row: {
   };
 }): string {
   if (row.alias && row.alias.trim()) return row.alias.trim();
-  return displayStrategyName({
-    id: row.strategy.id ?? "",
-    name: row.strategy.name ?? null,
-    codename: row.strategy.codename,
-    disclosure_tier: row.strategy.disclosure_tier as DisclosureTier,
-  });
+  // Phase 201 / D-09, D-17: `{ visible: true }` because the row comes from the
+  // My allocation payload, which already nulls `name` for a strategy the viewer
+  // cannot see (`redactedName` in `queries.ts`); the upstream redaction is the
+  // control, not this flag.
+  return displayStrategyName(
+    {
+      id: row.strategy.id ?? "",
+      name: row.strategy.name ?? null,
+      codename: row.strategy.codename,
+      disclosure_tier: row.strategy.disclosure_tier as DisclosureTier,
+    },
+    { visible: true },
+  );
 }
 
 function isoDate(d: Date): string {

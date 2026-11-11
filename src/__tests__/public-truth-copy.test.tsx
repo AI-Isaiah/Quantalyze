@@ -105,11 +105,16 @@ describe("Terms (D-02, D-05)", () => {
     );
   });
 
+  // Plan 201-35 (F-11, D-11, review R3-01 item 7): the line prints through the one date helper
+  // ("Nov 7, 2026"). The arm's intent is unchanged: the Terms page was re-dated when its copy
+  // changed, so the date is present and is not the HEAD date (Apr 7, 2026) any more.
   it("the Last updated line carries a date and is no longer the HEAD date", () => {
     render(<TermsOfServicePage />);
-    const m = /Last updated: (\d{4}-\d{2}-\d{2})/.exec(pageText());
+    const m = /Last updated: ([A-Z][a-z]{2} \d{1,2}, \d{4})/.exec(pageText());
     expect(m).not.toBeNull();
-    expect(m![1]).not.toBe("2026-04-07");
+    expect(m![1]).not.toBe("Apr 7, 2026");
+    // F-11: no ISO day follows the label.
+    expect(pageText()).not.toMatch(/Last updated: \d/);
   });
 });
 
@@ -147,23 +152,32 @@ describe("/for-quants (D-02, D-04, D-05, D-06)", () => {
     );
   });
 
-  it("says what a signed-out request returns: a factsheet listed on Browse, codename only (WR-01)", () => {
+  it("says what a signed-out request returns: a factsheet listed on Browse, the strategy's name only (WR-01, D-09, D-17, U-11)", () => {
     // /browse is in PUBLIC_ROUTES and getStrategiesByCategory lists every
     // published strategy to a signed-out visitor, so "by link" understated it.
+    // Phase 201 D-09: a published factsheet prints strategies.name (the codename
+    // the manager picked at listing, or the name the owner gave it earlier), and
+    // the manager stays pseudonymous until an intro (U-11).
     render(<ForQuantsPage />);
-    const row = rowOf("Public, under your codename");
+    const row = rowOf("Public, under your strategy's name");
     expect((row.textContent ?? "").replace(/\s+/g, " ")).toContain(
-      "A published factsheet is listed on Browse and opens for anyone, without signing in. It shows your codename, never your firm name.",
+      "A published factsheet is listed on Browse and opens for anyone, without signing in. It shows your strategy's name, never your firm name. Your identity as its manager is disclosed once an allocator requests an introduction and you accept.",
     );
     expect(pageText()).not.toContain("Public by link");
     expect(pageText()).not.toContain("who has its link");
     expect(pageText()).toContain(
-      "You pick a codename at listing time. A visitor who is not signed in sees the codename, never your firm name.",
+      "You pick a codename at listing time. A visitor who is not signed in sees your strategy's name, never your firm name.",
     );
     expect(pageText()).toContain(
-      "Allocators read the factsheet under your codename. Intro requests are routed through the founder.",
+      "Allocators read the factsheet under your strategy's name. Intro requests are routed through the founder, and your identity as its manager is disclosed once an allocator requests an introduction and you accept.",
+    );
+    expect(pageText()).toContain(
+      "Allocator view: your strategy's factsheet and verified risk metrics.",
     );
     expect(pageText()).toContain("A visitor who is not signed in never sees your firm name.");
+    // The public no longer reads the codename as the strategy's public name (D-09).
+    expect(pageText()).not.toContain("under your codename");
+    expect(pageText()).not.toContain("your codename factsheet");
   });
 
   it("the key-delete row says the credential row goes and the listing stays until archived (CR-01)", () => {

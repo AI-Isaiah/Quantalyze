@@ -11,7 +11,7 @@
  * WHY two scans + an add-step (the load-bearing correctness fix):
  *   A freshly-seeded allocator has no book and no draft, so the composer renders
  *   its blank-slate branch (`isEmptyState`, ScenarioComposer.tsx:1583) — the
- *   "Start a portfolio" front door, NOT the composed surface. The Phase-30 graph
+ *   "Start a scenario" front door, NOT the composed surface. The Phase-30 graph
  *   cards (`blend-returns-distribution` / `blend-rolling`, lines 2076/2126) live
  *   ONLY in the composed branch (after the isEmptyState early-return). So to
  *   honour JOURNEY-03 ("the unified composer + new graphs pass a11y checks") the
@@ -28,8 +28,8 @@
  *
  * Defense-in-depth against false-green (load-bearing): each analyze() is gated
  * behind a visible-anchor assertion that fails LOUDLY (not a hollow zero) if the
- * intended surface did not render — the "Start a portfolio" heading for the
- * blank slate, and the <h2>Portfolio</h2> + BOTH graph cards for the composed
+ * intended surface did not render — the "Start a scenario" heading for the
+ * blank slate, and the <h2>Scenario draft</h2> + BOTH graph cards for the composed
  * surface.
  *
  * Phase 43 / GUARD-03 (milestone v1.2.2 close): the composed surface now FOLDS
@@ -131,10 +131,10 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
 
     // --- Scan 1: blank-slate front door (JOURNEY-02 focus-ring CTAs) ---
     // Sanity gate (W-02): a no-book/no-draft session renders the blank-slate
-    // branch. Its "Start a portfolio" heading must be visible — a 404 / empty
+    // branch. Its "Start a scenario" heading must be visible — a 404 / empty
     // <main> / login chrome would NOT show it, so axe can't report a hollow zero.
     await expect(
-      page.locator("h2", { hasText: "Start a portfolio" }),
+      page.locator("h2", { hasText: "Start a scenario" }),
     ).toBeVisible({ timeout: 5_000 });
 
     const blankSlate = await buildAxe(page).analyze();
@@ -165,10 +165,10 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     await page.waitForLoadState("networkidle");
 
     // --- Scan 2: composed surface incl. Phase-30 graph cards (JOURNEY-03) ---
-    // Sanity gate (W-02): the composed branch renders <h2>Portfolio</h2>
+    // Sanity gate (W-02): the composed branch renders <h2>Scenario draft</h2>
     // alongside the PROJECTED pill — proof isEmptyState flipped false.
     await expect(
-      page.locator("h2", { hasText: "Portfolio" }).first(),
+      page.locator("h2", { hasText: "Scenario draft" }).first(),
     ).toBeVisible({ timeout: 10_000 });
 
     // Phase 170 / C1-A3 (2026-09-28, PC-3) — open the closed blend-detail
@@ -193,7 +193,7 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     // leaf a11y (ReturnHistogram / RollingMetrics) is independently covered by
     // strategy-v2-axe.spec.ts; this spec's JOURNEY-03 job is the COMPOSER
     // surface (the cards as the composer hosts them), which the wrappers prove.
-    // Combined with the skip-on-no-seed + <h2>Portfolio</h2> sanity gates above,
+    // Combined with the skip-on-no-seed + <h2>Scenario draft</h2> sanity gates above,
     // this still fails loudly on a hollow page rather than false-greening.
     await page
       .locator('[data-panel="blend-returns-distribution"]')
@@ -262,13 +262,15 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     await windowControl.scrollIntoViewIfNeeded();
     await expect(windowControl).toBeVisible({ timeout: 15_000 });
 
-    // The window value must be a REAL derived ISO range (rendered as
-    // "{start} → {end}") — proves the WINDOW-01 intersection default derived
+    // The window value must be a REAL derived range, rendered as
+    // "{Mon D, YYYY} → {Mon D, YYYY}" (two formatDay calls; F-11, review R2-02
+    // fix 9ec81739d moved it off raw ISO days and this pin was left behind;
+    // plan 201-37) — proves the WINDOW-01 intersection default derived
     // from the seeded series (coverageSpanOf), not merely that the container
     // mounted with its "All history" fallback.
     await expect(
       page.locator('[data-testid="scenario-coverage-window-value"]'),
-    ).toHaveText(/\d{4}-\d{2}-\d{2}\s*→\s*\d{4}-\d{2}-\d{2}/, {
+    ).toHaveText(/[A-Z][a-z]{2} \d{1,2}, \d{4}\s*→\s*[A-Z][a-z]{2} \d{1,2}, \d{4}/, {
       timeout: 10_000,
     });
 

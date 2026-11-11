@@ -16,6 +16,11 @@ import { FactsheetView } from "./FactsheetView";
  * turned "API-verified" into "—" and could print a backtest clause about a live
  * record. The fixture reproduces exactly the shape the pages hand `FactsheetView`
  * before the fix: the outer payload carries the tier, `usdView.payload` carries null.
+ *
+ * Plan 201-35 (F-11, D-11, review R3-01 item 1): the Live since row and its observation-window
+ * clause print through `formatDay` ("Jan 1, 2023"), so the Terms panel reads the one day format
+ * the rest of the factsheet uses. The clause arm asserts the helper's literal form and that the
+ * row carries no YYYY-MM-DD day.
  */
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
@@ -162,6 +167,7 @@ describe("CR-02 — the Terms panel describes the strategy, not the unit", () =>
     const usdLive = termValue(termsPanel(container), "Live since");
     expect(usdLive).not.toContain("backtest");
     expect(usdLive).toBe(live);
+    expect(live).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 
   it("the Live since row still reports a real backtest gap in BOTH views (the clause is not removed)", async () => {
@@ -175,6 +181,9 @@ describe("CR-02 — the Terms panel describes the strategy, not the unit", () =>
     const usd = termValue(termsPanel(container), "Live since");
     expect(usd).toContain("portion before live date is backtest");
     // ...and it names the NATIVE record's start, not the USD series' later one.
-    expect(usd).toContain("observation window starts 2023-01-01");
+    expect(usd).toContain("observation window starts Jan 1, 2023");
+    // F-11: one day format, no ISO day anywhere in the row (declared start included).
+    expect(usd).toContain("Dec 25, 2022");
+    expect(usd).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });

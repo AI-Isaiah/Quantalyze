@@ -105,6 +105,10 @@ describe("computeBiggestRisk", () => {
     expect(insight?.sentence).toContain("Alpha");
     expect(insight?.sentence).toContain("60%");
     expect(insight?.sentence).toContain("30%");
+    // Phase 201 D-04: the sentence names the allocation; the figures are unchanged.
+    expect(insight?.sentence).toBe(
+      "Risk is concentrated in Alpha: 60% of allocation volatility on 30% of capital.",
+    );
   });
 
   // 2026-09-29, Phase 169 review round 1 SFH M-5. A row whose weight does
@@ -143,6 +147,9 @@ describe("computeBiggestRisk", () => {
     );
     expect(insight?.key).toBe("biggest_risk_correlation");
     expect(insight?.sentence).toContain("62%");
+    expect(insight?.sentence).toBe(
+      "Your allocation is 62% correlated on average. Concentration risk masked as diversification.",
+    );
   });
 
   it("prioritizes drawdown over concentration over correlation", () => {
@@ -311,7 +318,7 @@ describe("computeRegimeChange", () => {
       { window: 5, minDelta: 0.15 },
     );
     expect(insight?.sentence).toBe(
-      "Correlation regime shift: pairwise correlation loosened from 0.62 to 0.00 between two strategies in your portfolio.",
+      "Correlation regime shift: pairwise correlation loosened from 0.62 to 0.00 between two strategies in your allocation.",
     );
   });
 
@@ -340,7 +347,7 @@ describe("computeRegimeChange", () => {
         opts,
       );
       expect(insight?.sentence).toBe(
-        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.62 between two strategies in your portfolio.",
+        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.62 between two strategies in your allocation.",
       );
       expect(insight?.sentence).not.toContain("—");
     });
@@ -353,7 +360,7 @@ describe("computeRegimeChange", () => {
         opts,
       );
       expect(insight?.sentence).toBe(
-        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.50 between two strategies in your portfolio.",
+        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.50 between two strategies in your allocation.",
       );
     });
 
@@ -365,7 +372,7 @@ describe("computeRegimeChange", () => {
         opts,
       );
       expect(insight?.sentence).toBe(
-        "Correlation regime shift: pairwise correlation tightened from 0.30 to 0.70 between two strategies in your portfolio.",
+        "Correlation regime shift: pairwise correlation tightened from 0.30 to 0.70 between two strategies in your allocation.",
       );
     });
 
@@ -394,7 +401,7 @@ describe("computeRegimeChange", () => {
         opts,
       );
       expect(insight?.sentence).toBe(
-        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.50 between two strategies in your portfolio.",
+        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.50 between two strategies in your allocation.",
       );
     });
 
@@ -427,7 +434,7 @@ describe("computeRegimeChange", () => {
       { window: 5, minDelta: 0.15 },
     );
     expect(insight?.sentence).toBe(
-      "Correlation regime shift: pairwise correlation loosened from 0.30 to -0.25 between two strategies in your portfolio.",
+      "Correlation regime shift: pairwise correlation loosened from 0.30 to -0.25 between two strategies in your allocation.",
     );
   });
 });
@@ -463,7 +470,7 @@ describe("computeUnderperformance", () => {
     // Average contribution = (0.05 + -0.04 + 0.03) / 3 = 0.0133...
     // Trail distance for Beta = 0.0133 - (-0.04) = 0.0533 → formats to "5.33%"
     expect(insight?.sentence).toContain("Beta");
-    expect(insight?.sentence).toContain("trailed the portfolio baseline");
+    expect(insight?.sentence).toContain("trailed the allocation baseline");
     expect(insight?.sentence).toContain("5.33%");
   });
 
@@ -570,7 +577,7 @@ describe("computeConcentrationCreep — a missing weight", () => {
     );
     // 4 strategies -> equal weight 25%, trip at 37.5%; Beta's 50% trips.
     expect(insight?.sentence).toBe(
-      "Beta is 50% of the portfolio (equal-weight baseline would be 25%).",
+      "Beta is 50% of the allocation (equal-weight baseline would be 25%).",
     );
   });
 

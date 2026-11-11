@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import type { DeckWithCount } from "@/lib/types";
+import { formatDay } from "@/lib/utils";
 
 interface DeckCardProps {
   deck: DeckWithCount;
@@ -22,7 +23,7 @@ export function DeckCard({ deck }: DeckCardProps) {
           <span>
             {deck.strategy_count} {deck.strategy_count === 1 ? "strategy" : "strategies"}
           </span>
-          <span>{new Date(deck.created_at).toLocaleDateString()}</span>
+          <span>{formatDay(deck.created_at)}</span>
         </div>
       </Card>
     </Link>

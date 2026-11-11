@@ -105,10 +105,10 @@ const BOOK = [
 ];
 
 describe("Positions header: Book equity, one string with the glance", () => {
-  it("prints Book equity and the read day, byte-equal to the glance's figure", () => {
+  it("prints Allocation equity and the read day, byte-equal to the glance's figure", () => {
     const { glance } = renderBoth(BOOK);
     const header = screen.getByTestId("positions-book-equity");
-    expect(header.textContent).toBe("Book equity $43,700 · read Nov 7, 2026");
+    expect(header.textContent).toBe("Allocation equity $43,700 · read Nov 7, 2026");
     expect(glance("glance-book-equity").textContent).toBe("$43,700");
     expect(header.textContent).toContain(glance("glance-book-equity").textContent);
   });
@@ -152,14 +152,14 @@ describe("Positions header: Book equity, one string with the glance", () => {
   it("drops the read half when no row carries a read day, never inventing one", () => {
     renderBoth([spot("BTC", 40_000), spot("ETH", 2_500), perp("BTC-PERP", 1_200)]);
     expect(screen.getByTestId("positions-book-equity").textContent).toBe(
-      "Book equity $43,700",
+      "Allocation equity $43,700",
     );
   });
 
   it("an empty book reads a dash, never $0", () => {
     renderBoth([]);
     const text = screen.getByTestId("positions-book-equity").textContent;
-    expect(text).toBe("Book equity —");
+    expect(text).toBe("Allocation equity —");
     expect(text).not.toContain("$0");
   });
 });

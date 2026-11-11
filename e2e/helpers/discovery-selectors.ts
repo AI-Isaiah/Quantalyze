@@ -53,7 +53,7 @@ export const SELECTORS = {
    */
   customizeCog: 'button[aria-label="Customize discovery view"]',
   /** CustomizeDrawer save button — CustomizeDrawer.tsx:282 aria-label. */
-  savePreferences: 'button[aria-label="Save preferences"]',
+  saveView: 'button[aria-label="Save view"]',
   /** StarToggle "add" state — StarToggle.tsx aria-label "...to watchlist". */
   starAddButton: 'button[aria-label*="to watchlist"]',
   /** StarToggle "remove" state — aria-label "...from watchlist". */

@@ -11,6 +11,7 @@ import {
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { Term } from "@/components/ui/Term";
 import { buildCompositeReturns } from "../lib/composite-returns";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
@@ -108,7 +109,7 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
             className="font-metric text-fixed-10 tabular-nums"
             style={{ color: "#CA8A04" }}
           >
-            P5 {formatUnsignedPercent(p5, 1)}
+            <Term k="percentile">P5</Term> {formatUnsignedPercent(p5, 1)}
           </span>
           <span
             className="font-metric text-fixed-10 tabular-nums"

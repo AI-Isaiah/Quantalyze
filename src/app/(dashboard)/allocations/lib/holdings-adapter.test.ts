@@ -398,6 +398,30 @@ describe("toDesignHoldings (D-18 pure adapter)", () => {
       expect(out[0].strategy).toBe("My Custom Label");
     });
 
+    // Phase 201 / D-09, D-17: the payload nulls `name` upstream for a strategy
+    // the viewer cannot see (`redactedName` in `queries.ts`), so a name that
+    // arrives IS one the viewer may read and prints ahead of the codename.
+    it("a readable name prints ahead of the codename (D-17)", () => {
+      const h = makeHolding({ symbol: "BTC" });
+      const ref = buildHoldingRef(h);
+      const inputs = makeInputs({
+        holdingsSummary: [h],
+        strategies: [
+          makeStrategy({
+            id: "strat-1",
+            name: "Fibonacci Ghost",
+            codename: "Ghost-7",
+            alias: null,
+            disclosure_tier: "exploratory",
+          }),
+        ],
+        holdingToStrategyId: { [ref]: "strat-1" },
+      });
+      const out = toDesignHoldings(inputs);
+      expect(out[0].strategy).toBe("Fibonacci Ghost");
+      expect(out[0].manager).toBe("Ghost-7");
+    });
+
     it("institutional-tier rows surface canonical name when codename is absent", () => {
       const h = makeHolding({ symbol: "BTC" });
       const ref = buildHoldingRef(h);

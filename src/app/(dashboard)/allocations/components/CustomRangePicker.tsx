@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { diffDays, isoDayFromDate, localMidnight, parseIsoDay } from "@/lib/dateday";
+import { formatDay, formatMonth } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // PR3 (HANDOFF G6) — CustomRangePicker dual-month + presets rail
@@ -220,7 +221,7 @@ export function CustomRangePicker({
   // wall-clock-now end. `+ 1` makes the count inclusive; clamp at 1 so a
   // collapsed/degenerate range still reads "1 day".
   const dayCount = Math.max(1, diffDays(isoDayFromDate(start), isoDayFromDate(end)) + 1);
-  const rangeLabel = `${startIso} → ${endIso}`;
+  const rangeLabel = `${formatDay(startIso)} – ${formatDay(endIso)}`;
 
   // Day cells for both months; computed via useMemo because the cell
   // arrays only need to recompute when the visible month changes.
@@ -384,10 +385,13 @@ export function CustomRangePicker({
               const d = parseISODate(v);
               if (d) {
                 const c = clampDate(d, min, max);
+                // F-11 / D-11: the announced days go through formatDay on the
+                // same ISO string the input holds (UTC read), so the day heard
+                // is the day shown. The input values themselves stay ISO.
                 setClampNotice(
                   sameDay(c, d)
                     ? ""
-                    : `Start date ${toISODate(d)} is outside the allowed range; adjusted to ${toISODate(c)}.`,
+                    : `Start date ${formatDay(toISODate(d))} is outside the allowed range; adjusted to ${formatDay(toISODate(c))}.`,
                 );
                 setStart(c);
                 setViewMonth(startOfMonth(c));
@@ -412,7 +416,7 @@ export function CustomRangePicker({
                 setClampNotice(
                   sameDay(c, d)
                     ? ""
-                    : `End date ${toISODate(d)} is outside the allowed range; adjusted to ${toISODate(c)}.`,
+                    : `End date ${formatDay(toISODate(d))} is outside the allowed range; adjusted to ${formatDay(toISODate(c))}.`,
                 );
                 setEnd(c);
               }
@@ -663,10 +667,13 @@ function MonthGrid({
     return out;
   }, [monthYear, monthIndex]);
 
-  const monthLabel = month.toLocaleDateString("en-US", {
-    month: "long",
-    year: "numeric",
-  });
+  // D-11: `Oct 2026` through the one month helper. `month` is a local-midnight
+  // Date, so the helper is fed the UTC instant built from its local year and
+  // month, never `month.toISOString()` (a zone east of UTC would name the
+  // previous month).
+  const monthLabel = formatMonth(
+    new Date(Date.UTC(monthYear, monthIndex, 1)).toISOString(),
+  );
 
   return (
     <div style={{ width: 240 }}>

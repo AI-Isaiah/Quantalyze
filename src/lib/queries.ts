@@ -91,7 +91,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
 import { drainById } from "./drain-by-id";
-import { withPublishedOnly } from "./visibility";
+import { isDiscoveryVisible, withPublishedOnly } from "./visibility";
 import { departedHistoryInclusion, isDepartedKey, type DepartedHistoryKey } from "./departed-history";
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "./nav-marks-start";
 import { OPTIONS_ACTIVITY_FLAG, OPTIONS_CASH_BASIS_FLAG, isOptionsCashBasis } from "./options-cash-basis-flag";
@@ -2540,12 +2540,12 @@ export interface MyAllocationDashboardPayload {
     strategy: {
       id: string;
       /**
-       * audit-2026-05-07 G8.A.2 (P35): redacted to `null` server-side when
-       * `disclosure_tier !== 'institutional'`. The disclosure tier model
-       * forbids leaking the manager-given canonical name to allocators on
-       * exploratory rows; the RSC payload is what the client sees, so the
-       * redaction has to happen at the query layer (not just in the
-       * rendered DOM). Consumers must use `displayName` from
+       * audit-2026-05-07 G8.A.2 (P35), narrowed by Phase 201 / D-17: redacted to
+       * `null` server-side unless the viewer can see the strategy in discovery
+       * (`isDiscoveryVisible`: published, or the viewer's own row). The read is
+       * service-role, so the redaction has to happen at the query layer (not just
+       * in the rendered DOM), and an unpublished strategy is never named (197
+       * D-02), institutional tier included. Consumers must use `displayName` from
        * `@/lib/allocation-helpers` (which routes through
        * `displayStrategyName`) and tolerate `null`.
        */
@@ -2557,9 +2557,8 @@ export interface MyAllocationDashboardPayload {
       start_date: string | null;
       /**
        * F4b — the managing organization's display name, REDACTED to `null`
-       * server-side for non-`institutional` rows (same trust boundary as
-       * `name` above: surfacing the org identity on exploratory tiers would
-       * defeat the disclosure-tier redaction). Drives the "Manager" column;
+       * server-side for non-`institutional` rows (manager identity keeps its
+       * tier rule; D-17 narrowed `name` above, not this field). Drives the "Manager" column;
        * the client falls through to `codename` when this is null.
        */
       organization_name: string | null;
@@ -5160,15 +5159,17 @@ export const getMyAllocationDashboard = cache(
       admin
         .from("bridge_outcomes")
         .select(
-          // audit-2026-05-07 G8.A.2 (P35) follow-up: co-select
-          // `disclosure_tier` + `codename` on both embedded strategy joins so
-          // the normaliser below can apply tier-aware redaction to
+          // Phase 201 / D-17: both embedded strategy joins co-select `codename`,
+          // `disclosure_tier`, `status` and `user_id`. This read is service-role,
+          // so RLS does not decide what the viewer may see named: the normaliser
+          // below does, through `isDiscoveryVisible`, for
           // `replacement_strategy.name` and
-          // `match_decision.original_strategy.name`. Without these columns,
-          // the canonical name leaked to the RSC payload regardless of tier
-          // (security specialist finding from /ship review). Same trust
-          // boundary as `MyAllocationDashboardPayload.strategies[].strategy`.
-          "id, strategy_id, match_decision_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at, replacement_strategy:strategies!bridge_outcomes_strategy_id_fkey(id, name, codename, disclosure_tier), match_decision:match_decisions!bridge_outcomes_match_decision_id_fkey(original_strategy:strategies!match_decisions_original_strategy_id_fkey(id, name, codename, disclosure_tier))",
+          // `match_decision.original_strategy.name`. `status` and `user_id`
+          // feed that decision only; the normaliser returns `{ id, name }`, so
+          // neither column reaches the RSC payload (audit-2026-05-07 G8.A.2 /
+          // P35 follow-up, same trust boundary as
+          // `MyAllocationDashboardPayload.strategies[].strategy`).
+          "id, strategy_id, match_decision_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at, replacement_strategy:strategies!bridge_outcomes_strategy_id_fkey(id, name, codename, disclosure_tier, status, user_id), match_decision:match_decisions!bridge_outcomes_match_decision_id_fkey(original_strategy:strategies!match_decisions_original_strategy_id_fkey(id, name, codename, disclosure_tier, status, user_id))",
         )
         .eq("allocator_id", userId)
         .order("created_at", { ascending: false })
@@ -5336,14 +5337,14 @@ export const getMyAllocationDashboard = cache(
     // (replacement_strategy) and nested (match_decision.original_strategy)
     // embeds. Phase 5 D-15 (revised).
     //
-    // audit-2026-05-07 G8.A.2 (P35) follow-up: the wire shape now carries
-    // the four columns required for tier-aware redaction
-    // (id/name/codename/disclosure_tier); we resolve to the public
-    // `OutcomeRow.replacement_strategy = { id, name }` shape by routing
-    // through `displayStrategyName` and overwriting `name` with the
-    // tier-safe display string. The leaf type stays `{id, name}` so
-    // downstream consumers don't have to learn a new contract; the
-    // server-side resolver is the gate.
+    // Phase 201 / D-17: the wire shape carries the columns the name rule reads
+    // (id/name/codename/disclosure_tier plus status/user_id); we resolve to the
+    // public `OutcomeRow.replacement_strategy = { id, name }` shape by routing
+    // through `displayStrategyName` with the viewer's visibility fact
+    // (`isDiscoveryVisible`, the viewer being `userId`) and overwriting `name`
+    // with that string. The leaf type stays `{id, name}` so downstream consumers
+    // don't have to learn a new contract, and `status` / `user_id` never leave
+    // this function; the server-side resolver is the gate.
     type EmbeddedStrategy = { id: string; name: string };
     type RawRow = Record<string, unknown>;
     const normalizeEmbed = (v: unknown): EmbeddedStrategy | null => {
@@ -5364,12 +5365,23 @@ export const getMyAllocationDashboard = cache(
           : null;
       return {
         id: raw.id,
-        name: displayStrategyName({
-          id: raw.id,
-          name: rawName,
-          codename: rawCodename,
-          disclosure_tier: rawTier,
-        }),
+        name: displayStrategyName(
+          {
+            id: raw.id,
+            name: rawName,
+            codename: rawCodename,
+            disclosure_tier: rawTier,
+          },
+          {
+            visible: isDiscoveryVisible(
+              {
+                status: typeof raw.status === "string" ? raw.status : null,
+                user_id: typeof raw.user_id === "string" ? raw.user_id : null,
+              },
+              userId,
+            ),
+          },
+        ),
       };
     };
     // audit-2026-05-07 H-0484: explicit field assignment instead of
@@ -5633,12 +5645,17 @@ export const getMyAllocationDashboard = cache(
     const nameById = new Map(
       (candidateStrategies ?? []).map((s) => [
         s.id,
-        displayStrategyName({
-          id: s.id,
-          name: s.name ?? null,
-          codename: s.codename ?? null,
-          disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
-        }),
+        // Phase 201 / D-09, D-17: `{ visible: true }` because the read above is
+        // `withPublishedOnly`, so every row here is published and visible in discovery.
+        displayStrategyName(
+          {
+            id: s.id,
+            name: s.name ?? null,
+            codename: s.codename ?? null,
+            disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
+          },
+          { visible: true },
+        ),
       ]),
     );
 
@@ -5991,6 +6008,8 @@ export const getMyAllocationDashboard = cache(
             name,
             codename,
             disclosure_tier,
+            status,
+            user_id,
             strategy_types,
             markets,
             start_date,
@@ -6299,15 +6318,20 @@ export const getMyAllocationDashboard = cache(
         existing_outcome === null &&
         !activeDismissalSet.has(row.strategy_id as string);
 
-      // audit-2026-05-07 G8.A.2 (P35): redact `name` to `null` for
-      // non-institutional rows so the canonical strategy name never
-      // reaches the RSC payload. The canonical client-side resolver
-      // (`displayStrategyName` via `displayName` in allocation-helpers)
-      // already falls back to `codename` first, then a synthetic
-      // `Strategy #<id-prefix>`, so this is a strict redaction without UX
-      // cost on exploratory tier.
-      const redactedName =
-        strategy.disclosure_tier === "institutional" ? strategy.name : null;
+      // audit-2026-05-07 G8.A.2 (P35), narrowed by Phase 201 / D-17 (founder
+      // decision 2026-11-10, "Real name everywhere"): `name` is redacted to
+      // `null` unless the viewer can see this strategy in discovery
+      // (`isDiscoveryVisible`: published, or the viewer's own row). This read is
+      // service-role, so RLS does not decide that; an unpublished strategy is
+      // never named (197 D-02), institutional tier included. A `null` name falls
+      // back to the codename, then `Strategy #<id-prefix>`, in the client
+      // resolver. `redactedOrgName` below is NOT narrowed: manager identity
+      // keeps its tier rule.
+      const visibleInDiscovery = isDiscoveryVisible(
+        strategy as unknown as { status?: string | null; user_id?: string | null },
+        userId,
+      );
+      const redactedName = visibleInDiscovery ? strategy.name : null;
 
       // F4b — same trust boundary as `redactedName` (P35): the managing
       // organization's name is manager-identifying, so it must NOT reach the
@@ -6338,15 +6362,22 @@ export const getMyAllocationDashboard = cache(
       // missing-row age bound above; it is dropped here for the same reason as
       // the embeds — this projection ships exactly the fields the payload type
       // declares, never an undeclared passenger.
+      // Phase 201 / D-17: `status` and `user_id` are selected only to decide
+      // `redactedName`; they are dropped here for the same reason. `user_id` is
+      // manager-identifying and must never ship.
       const {
         organization: _rawOrganization,
         strategy_verifications: _rawVerifications,
         created_at: _rawStrategyCreatedAt,
+        status: _rawStrategyStatus,
+        user_id: _rawStrategyOwnerId,
         ...strategyRest
       } = strategy as StrategyPayload & {
         organization?: unknown;
         strategy_verifications?: unknown;
         created_at?: unknown;
+        status?: unknown;
+        user_id?: unknown;
       };
 
       // NEW-C09-08 (B1, audit-2026-05-07) — CLOSED. Gate `current_weight`

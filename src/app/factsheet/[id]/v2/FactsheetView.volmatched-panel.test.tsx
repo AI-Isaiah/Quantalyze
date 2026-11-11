@@ -55,6 +55,9 @@ beforeEach(() => {
 
 const TITLE = "Cumulative Returns — Volatility Matched";
 const REASON_TITLE = "Volatility Matched — Not available";
+// Phase 201 plan 09 (D-01): the panel's name is a Term inside the h3, so the title is read from the
+// heading's whole text rather than from one text node.
+const REASON_HEADING = (_content: string, el: Element | null) => el?.tagName === "H3" && el.textContent === REASON_TITLE;
 const DAY = 86_400_000;
 const START = Date.UTC(2024, 0, 1);
 
@@ -105,7 +108,7 @@ describe("the Volatility Matched panel hides when there is nothing to match (169
     expect(Array.isArray(payload.comparators[payload.activeComparator].volMatched)).toBe(true);
     const { queryByText } = renderBody(payload);
     expect(queryByText(TITLE)).not.toBeNull();
-    expect(queryByText(REASON_TITLE)).toBeNull();
+    expect(queryByText(REASON_HEADING)).toBeNull();
   });
 
   it("a selected comparator whose volMatched is null does not render the panel, and says why", () => {
@@ -115,7 +118,7 @@ describe("the Volatility Matched panel hides when there is nothing to match (169
     expect(payload.comparators[payload.activeComparator].summary).not.toBeNull();
     const { queryByText } = renderBody(payload);
     expect(queryByText(TITLE)).toBeNull();
-    expect(queryByText(REASON_TITLE)).not.toBeNull();
+    expect(queryByText(REASON_HEADING)).not.toBeNull();
     expect(queryByText(/no measurable volatility on this basis/)).not.toBeNull();
   });
 
@@ -133,7 +136,7 @@ describe("the Volatility Matched panel hides when there is nothing to match (169
     } as FactsheetPayload;
     const { queryByText } = renderBody(payload);
     expect(queryByText(TITLE)).toBeNull();
-    expect(queryByText(REASON_TITLE)).toBeNull();
+    expect(queryByText(REASON_HEADING)).toBeNull();
   });
 
   it("the filter follows the basis view: a null volMatched on the MTM bundle only hides the panel on MTM", () => {
@@ -149,11 +152,11 @@ describe("the Volatility Matched panel hides when there is nothing to match (169
     const { container, queryByText } = renderBody(payload);
     // Cash: the cash block has a real match, so the panel is there.
     expect(queryByText(TITLE)).not.toBeNull();
-    expect(queryByText(REASON_TITLE)).toBeNull();
+    expect(queryByText(REASON_HEADING)).toBeNull();
     const group = container.querySelector('[role="group"][aria-label="Metrics basis"]');
     expect(group, "the basis toggle").not.toBeNull();
     fireEvent.click(within(group as HTMLElement).getByText("Mark-to-market"));
     expect(queryByText(TITLE)).toBeNull();
-    expect(queryByText(REASON_TITLE)).not.toBeNull();
+    expect(queryByText(REASON_HEADING)).not.toBeNull();
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, waitFor, within } from "@testing-library/react";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
+import { formatDay } from "@/lib/utils";
 import { censusPayloadA, censusPayloadB } from "./test-fixtures/census-payloads";
 
 /**
@@ -22,6 +23,11 @@ import { censusPayloadA, censusPayloadB } from "./test-fixtures/census-payloads"
  *
  * The benchmark: the HEAD tear sheet printed "BTC" when none was declared, which states a value
  * nobody declared. Terms carries a declared value only; the last two arms pin that.
+ *
+ * Plan 201-35 (F-11, D-11, review R3-01 item 1): the footer stamp and the Terms dates print
+ * through the one date helper, `formatDay` ("Jun 1, 2024"), so a reader sees one day format
+ * across the factsheet. The date arms below assert the helper's literal form and that the
+ * element carries no YYYY-MM-DD (or dotted YYYY.MM.DD) day.
  */
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
@@ -213,6 +219,11 @@ describe("the rest of the opening view", () => {
     const footer = container.querySelector("footer");
     expect(footer, "the footer did not render").not.toBeNull();
     expect(footer!.textContent).toContain(`QSF · ${payload.strategyId.slice(0, 8).toUpperCase()}`);
+    // 201-35 / F-11: the stamp's day is the helper's form of computedAt, never a dotted day.
+    const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${formatDay(payload.computedAt)}`;
+    expect(footer!.textContent).toContain(stamp);
+    expect(footer!.textContent).not.toMatch(/\d{4}\.\d{2}\.\d{2}/);
+    expect(footer!.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });
 
@@ -239,11 +250,15 @@ describe("inside Advanced", () => {
   });
   it('"Live since" start date -> a Live since row in Terms', async () => {
     const { advanced } = await mountOpen();
-    expect(termValue(advanced, "Live since")).toContain("2024-06-01");
+    const liveSince = termValue(advanced, "Live since");
+    expect(liveSince).toContain("Jun 1, 2024");
+    expect(liveSince).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
   it("the Generated date -> the Terms Factsheet computed row", async () => {
     const { advanced } = await mountOpen();
-    expect(termValue(advanced, "Factsheet computed")).not.toBeNull();
+    const computed = termValue(advanced, "Factsheet computed");
+    expect(computed).toBe(formatDay(full().computedAt));
+    expect(computed).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });
 

@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import { KpiStrip } from "./KpiStrip";
+import { termDefinition } from "@/lib/glossary";
 import type { ComputedMetrics } from "@/lib/scenario";
 import { captureToSentry } from "@/lib/sentry-capture";
 
@@ -58,7 +59,7 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
     );
 
     const labels = ["YTD TWR", "Sharpe", "Max DD 12m", "Avg |ρ|"];
-    const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+    const group = screen.getByRole("group", { name: "Allocation KPIs" });
     // The grid maps exactly one wrapper <div> per cell; count them directly so
     // the 4-cell contract fails loud against a 5-cell strip (the RED anchor).
     const cells = Array.from(group.children);
@@ -83,7 +84,7 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
       />,
     );
     expect(screen.queryByText("AUM")).toBeNull();
-    const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+    const group = screen.getByRole("group", { name: "Allocation KPIs" });
     const valueDivs = Array.from(
       group.querySelectorAll<HTMLDivElement>("div.font-mono"),
     );
@@ -315,7 +316,7 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
           snapshotCount={30}
         />,
       );
-      const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+      const group = screen.getByRole("group", { name: "Allocation KPIs" });
       // The column count must vary by CONTAINER width (`@`-prefixed variants),
       // never by viewport (`sm:`/`lg:`) — that is the whole point of TYPE-04.
       expect(group.className).toMatch(/@\S*grid-cols-/);
@@ -355,7 +356,7 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
           snapshotCount={30}
         />,
       );
-      const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+      const group = screen.getByRole("group", { name: "Allocation KPIs" });
       // Each cell's primary value div is `font-mono … tabular-nums`. Query the
       // value divs directly (font-mono is the value-cell marker) and assert
       // EVERY one keeps both classes so a future refactor can't silently drop
@@ -408,7 +409,7 @@ describe("KpiStrip — Max DD 12m is never green (170.6 D-04)", () => {
   }
 
   function ddValueIn(container: HTMLElement): HTMLElement {
-    const group = screen.getAllByRole("group", { name: "Portfolio KPIs" }).find((g) => container.contains(g))!;
+    const group = screen.getAllByRole("group", { name: "Allocation KPIs" }).find((g) => container.contains(g))!;
     const cell = Array.from(group.children).find(
       (c) => c.querySelector("div")?.textContent === "Max DD 12m",
     )!;
@@ -465,7 +466,7 @@ describe("KpiStrip — Max DD 12m is never green (170.6 D-04)", () => {
 
 // R3-SFH-1 (170.6 round 3): the impossible-drawdown gate covers BOTH operands of the scenario
 // delta, not only the figure the cell prints. A scenario value or a live baseline that prints
-// above zero must not feed a delta pill or the "Current book: ..." tooltip, and either side is reported.
+// above zero must not feed a delta pill or the "Current allocation: ..." tooltip, and either side is reported.
 describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 R3-SFH-1)", () => {
   beforeEach(() => {
     vi.mocked(captureToSentry).mockClear();
@@ -489,9 +490,9 @@ describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 
 
   /** The Max DD cell's primary value and its delta pill, found by the pill's aria-label. */
   function ddPartsIn(container: HTMLElement) {
-    const pill = container.querySelector<HTMLElement>('[aria-label^="Max DD 12m delta vs current book:"]')!;
+    const pill = container.querySelector<HTMLElement>('[aria-label^="Max DD 12m delta vs current allocation:"]')!;
     const cell = pill.parentElement!;
-    // 170.1 (D-11): the pill holds the toned figure, then the untoned "vs current book" suffix.
+    // 170.1 (D-11): the pill holds the toned figure, then the untoned "vs current allocation" suffix.
     return { primary: cell.querySelector<HTMLElement>("div.font-mono")!, pill, figure: pill.children[0] as HTMLElement };
   }
 
@@ -501,10 +502,10 @@ describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 
     expect(primary.textContent?.trim()).toBe("—");
     // Typed by hand. Before R3-SFH-1 this pill read "+12.0%" (0.04 - -0.08), improved, green.
     expect(figure.textContent?.trim()).toBe("—");
-    expect(pill.children[1].textContent).toBe("vs current book");
-    expect(pill.getAttribute("aria-label")).toBe("Max DD 12m delta vs current book: — (no change)");
+    expect(pill.children[1].textContent).toBe("vs current allocation");
+    expect(pill.getAttribute("aria-label")).toBe("Max DD 12m delta vs current allocation: — (no change)");
     expect(figure.className).not.toMatch(/text-(positive|negative)/);
-    expect(pill.getAttribute("title")).toBe("Current book: -8.00%");
+    expect(pill.getAttribute("title")).toBe("Current allocation: -8.00%");
     expect(captureToSentry).toHaveBeenCalledTimes(1);
   });
 
@@ -513,10 +514,10 @@ describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 
     const { primary, pill, figure } = ddPartsIn(container);
     expect(primary.textContent?.trim()).toBe("-4.00%");
     expect(primary.className).toContain("text-negative");
-    // Before R3-SFH-1: pill "−4.0%" computed against the garbage baseline, tooltip "Current book: +4.00%", no report.
+    // Before R3-SFH-1: pill "−4.0%" computed against the garbage baseline, tooltip "Current allocation: +4.00%", no report.
     expect(figure.textContent?.trim()).toBe("—");
     expect(figure.className).not.toMatch(/text-(positive|negative)/);
-    expect(pill.getAttribute("title")).toBe("Current book: —");
+    expect(pill.getAttribute("title")).toBe("Current allocation: —");
     expect(captureToSentry).toHaveBeenCalledTimes(1);
     const [, opts] = vi.mocked(captureToSentry).mock.calls[0];
     expect(opts.extra).toMatchObject({ max_drawdown: 0.04, impossible: "live:0.04" });
@@ -526,7 +527,7 @@ describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 
     const { container } = render(scenarioStrip(-0.04, -0.08));
     const { pill, figure } = ddPartsIn(container);
     expect(figure.textContent?.trim()).toBe("+4.0%");
-    expect(pill.getAttribute("title")).toBe("Current book: -8.00%");
+    expect(pill.getAttribute("title")).toBe("Current allocation: -8.00%");
     expect(figure.className).toContain("text-positive");
     expect(captureToSentry).not.toHaveBeenCalled();
   });
@@ -534,7 +535,88 @@ describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 
   it("a live baseline that only rounds to zero (+0.000004) is a zero, not a violation", () => {
     const { container } = render(scenarioStrip(-0.04, 0.000004));
     const { pill } = ddPartsIn(container);
-    expect(pill.getAttribute("title")).toBe("Current book: 0.00%");
+    expect(pill.getAttribute("title")).toBe("Current allocation: 0.00%");
     expect(captureToSentry).not.toHaveBeenCalled();
+  });
+});
+
+// Phase 201 plan 12 (D-01, D-03, D-04, U-22): the strip's labels are registered terms and its
+// region reads "Allocation KPIs". The caption under a label stays a sibling of the Term, outside
+// its trigger, because it is visible text and not a definition (U-22). Tooltip needs a viewport.
+Object.defineProperty(document.documentElement, "clientWidth", { configurable: true, get: () => 1024 });
+Object.defineProperty(document.documentElement, "clientHeight", { configurable: true, get: () => 768 });
+
+describe("KpiStrip — labels are terms (201-12 D-03, U-22)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  function strip() {
+    return render(
+      <KpiStrip
+        analytics={{ ytd_twr: 0.12, sharpe: 1.2 }}
+        metrics={EMPTY_METRICS}
+        timeframe="ALL"
+        snapshotCount={30}
+      />,
+    );
+  }
+
+  it("names its region Allocation KPIs, never Portfolio KPIs (D-04)", () => {
+    strip();
+    expect(screen.getByRole("group", { name: "Allocation KPIs" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Portfolio KPIs" })).toBeNull();
+  });
+
+  it("the Sharpe label is a Term that opens the registry definition on focus after 150 ms", () => {
+    strip();
+    const group = screen.getByRole("group", { name: "Allocation KPIs" });
+    const trigger = group.querySelector<HTMLElement>('[data-term="sharpe"]')!;
+    expect(trigger).not.toBeNull();
+    expect(trigger.textContent).toBe("Sharpe");
+    fireEvent.focus(trigger);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(screen.getByRole("tooltip").textContent).toBe(termDefinition("sharpe"));
+  });
+
+  it("every label is a Term with its registry key; Max DD 12m opens the last12m text", () => {
+    strip();
+    const group = screen.getByRole("group", { name: "Allocation KPIs" });
+    const keyed = [
+      ["YTD TWR", "twr"],
+      ["Sharpe", "sharpe"],
+      ["Max DD 12m", "max_drawdown"],
+      ["Avg |ρ|", "avg_abs_correlation"],
+    ] as const;
+    for (const [text, key] of keyed) {
+      const trigger = group.querySelector<HTMLElement>(`[data-term="${key}"]`);
+      expect(trigger?.textContent, `${key} Term`).toBe(text);
+    }
+    const maxDd = group.querySelector<HTMLElement>('[data-term="max_drawdown"]')!;
+    fireEvent.focus(maxDd);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const text = screen.getByRole("tooltip").textContent;
+    expect(text).toBe(termDefinition("max_drawdown", "last12m"));
+    expect(text).not.toBe(termDefinition("max_drawdown"));
+  });
+
+  it("the caption under the Sharpe label stays outside the Term trigger", () => {
+    strip();
+    const group = screen.getByRole("group", { name: "Allocation KPIs" });
+    const trigger = group.querySelector<HTMLElement>('[data-term="sharpe"]')!;
+    const caption = screen.getByText("risk-adjusted return (selected period)");
+    expect(trigger.contains(caption)).toBe(false);
+    // The label div holds the Term alone; the caption is a sibling block below the value.
+    const labelDiv = trigger.closest("div")!;
+    expect(labelDiv.contains(caption)).toBe(false);
   });
 });

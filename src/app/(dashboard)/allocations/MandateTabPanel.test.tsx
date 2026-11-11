@@ -31,6 +31,50 @@ function renderPanel(mandate: unknown) {
   return render(<MandateTabPanel {...props} />);
 }
 
+describe("MandateTabPanel — registered terms (Phase 201 D-01, D-06)", () => {
+  it("the snapshot heading's word 'Mandate' opens its definition, in the empty state and the filled one", () => {
+    for (const mandate of [null, { max_weight: 0.2 }]) {
+      const { unmount } = renderPanel(mandate);
+      const snapshot = screen.getByTestId("mandate-snapshot");
+      expect(snapshot.querySelector('[data-term="mandate"]')?.textContent).toBe("Mandate");
+      expect(snapshot.textContent).toMatch(/^Mandate snapshot/);
+      unmount();
+    }
+  });
+
+  it("the 'Correlation ceiling' row opens the correlation definition on its own word", () => {
+    renderPanel({ correlation_ceiling: 0.7 });
+    const row = screen.getByTestId("mandate-snapshot").querySelector('[data-term="correlation"]');
+    expect(row?.textContent).toBe("Correlation");
+    expect(row?.closest("dt")?.textContent).toBe("Correlation ceiling");
+  });
+});
+
+// Phase 201 plan 29 (F-04, U-26): the edit note says what the mandate drives in
+// plain words, and the retired product word does not render anywhere on the tab.
+describe("MandateTabPanel — plain-words note (F-04, U-26)", () => {
+  it("the edit note names the mandate check and the replacement suggestions", () => {
+    renderPanel(null);
+    expect(
+      screen.getByText(
+        "Edit your mandate in the profile surface. Changes apply at once to the mandate check and the replacement suggestions.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders no retired product word in text, aria-label or title", () => {
+    for (const mandate of [null, { max_weight: 0.2 }]) {
+      const { container, unmount } = renderPanel(mandate);
+      expect(container.textContent ?? "").not.toMatch(/\bBridge\b/);
+      for (const el of container.querySelectorAll("[aria-label], [title]")) {
+        expect(el.getAttribute("aria-label") ?? "").not.toMatch(/\bBridge\b/);
+        expect(el.getAttribute("title") ?? "").not.toMatch(/\bBridge\b/);
+      }
+      unmount();
+    }
+  });
+});
+
 describe("MandateTabPanel — Minimum AUM rename + snapshot (M-1050)", () => {
   it("mandate=null → renders the 'No mandate set yet' empty-state copy", () => {
     renderPanel(null);

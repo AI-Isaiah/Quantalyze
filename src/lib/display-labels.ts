@@ -45,7 +45,7 @@ export function labelOf(
 export const COMPUTE_JOB_KIND_LABELS = {
   sync_trades: "Trade sync",
   compute_analytics: "Analytics computation",
-  compute_portfolio: "Portfolio computation",
+  compute_portfolio: "Allocation computation",
   poll_positions: "Position poll",
   sync_funding: "Funding sync",
   reconcile_strategy: "Strategy reconciliation",
@@ -219,7 +219,7 @@ export function introSnapshotStatusLabel(value: unknown): string {
 /** `contact_requests_source_check`. */
 export const INTRO_SOURCE_LABELS = {
   direct: "Direct",
-  bridge: "Bridge",
+  bridge: "Replacement",
 } as const;
 
 export function introSourceLabel(value: unknown): string {

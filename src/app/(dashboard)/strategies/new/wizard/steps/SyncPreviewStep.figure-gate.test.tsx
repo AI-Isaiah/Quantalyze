@@ -159,9 +159,12 @@ async function settle() {
   });
 }
 
-/** The printed value under a tile label (the tile is the label's parent). */
+/**
+ * The printed value under a tile label. The label's own `<p>` sits in the tile, and since
+ * 201-19 the label text itself may sit inside a `Term` span, so climb to the `<p>` first.
+ */
 function tile(label: string): string {
-  const el = screen.getByText(label).parentElement;
+  const el = screen.getByText(label).closest("p")?.parentElement;
   return el?.querySelectorAll("p")[1]?.textContent ?? "";
 }
 

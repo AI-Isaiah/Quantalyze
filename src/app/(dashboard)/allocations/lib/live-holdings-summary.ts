@@ -633,7 +633,7 @@ export function priceGapSentence(count: number): string {
 /**
  * Phase 167.2.1.1.1.1 D-07 (UI-SPEC P0): the Holdings tab's note that portfolio
  * AUM excludes the rows with no price, e.g.
- * `3 holdings have no price, so portfolio AUM leaves them out.`
+ * `3 holdings have no price, so allocation AUM leaves them out.`
  *
  * Same contract as `priceGapSentence`: raw count, singular for 1, empty below 1,
  * no symbol, venue or amount.
@@ -641,8 +641,8 @@ export function priceGapSentence(count: number): string {
 export function priceGapHoldingsNote(count: number): string {
   if (!(count >= 1)) return "";
   return count === 1
-    ? `${count} holding has no price, so portfolio AUM leaves it out.`
-    : `${count} holdings have no price, so portfolio AUM leaves them out.`;
+    ? `${count} holding has no price, so allocation AUM leaves it out.`
+    : `${count} holdings have no price, so allocation AUM leaves them out.`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */

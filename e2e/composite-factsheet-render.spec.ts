@@ -102,9 +102,11 @@ async function gotoFactsheet(page: Page, strategyId: string): Promise<void> {
  * T-91-04a.
  */
 function kpiValue(page: Page, label: string) {
+  // Phase 201 (D-03): a label with a registry term wraps its text in a <Term> span INSIDE the
+  // label <p>, so name the <p> by its test id and exact text, not the innermost text node.
   return page
-    .locator("#factsheet-main")
-    .getByText(label, { exact: true })
+    .locator('#factsheet-main [data-testid="factsheet-kpi-label"]')
+    .filter({ hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) })
     // Phase 196 (D-04): the document layout prints the comparator's value in a second <p>
     // under each KPI (`factsheet-kpi-bench`), so name the value <p> by its test id.
     .locator('xpath=following-sibling::p[@data-testid="factsheet-kpi-value"]');

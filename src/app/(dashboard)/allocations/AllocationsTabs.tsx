@@ -22,6 +22,8 @@ import { ScenarioComparePanel } from "./components/ScenarioComparePanel";
 import type { ScenarioComparePanelProps } from "./components/ScenarioComparePanel";
 import type { SavedScenarioRow } from "./components/ScenarioComposer";
 import { computeTabStripScroll } from "@/lib/tab-strip-scroll";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition, type TermKey } from "@/lib/glossary";
 
 // Plan 170-08 imports the scroll math from the lib module. Re-exported here
 // so the existing test import from this file keeps working unchanged.
@@ -338,6 +340,12 @@ const TAB_LABELS: Record<TabKey, string> = {
   overview: "Overview",
   holdings: "Holdings",
   scenario: "Scenario",
+};
+
+// Phase 201 plan 34 (F-04, F-08, U-27) — the glossary term a tab's label is. A tab is a control,
+// so it is explained by Form B (a Tooltip around the tab), never a nested `Term`.
+const TAB_TERMS: Partial<Record<TabKey, TermKey>> = {
+  scenario: "scenario",
 };
 
 // Tab-button class strings — pulled out of the render JSX so the active /
@@ -685,8 +693,8 @@ export function AllocationsTabs(
   // scrollable strip (a scroller at EVERY width since GC-01, 2026-09-30). A
   // keyboard arrow-nav or a programmatic tab change can leave the selected
   // tab clipped off-screen; scroll it back into view on every activeTab
-  // change. We scroll the STRIP (the role="tablist" scroll container — the
-  // tab button's direct parent, pinned by the axe aria-required-children gate) on its horizontal axis ONLY, never the page.
+  // change. We scroll the STRIP (the role="tablist" scroll container — every tab
+  // sits inside it, pinned by the axe aria-required-children gate) on its horizontal axis ONLY, never the page.
   // The earlier `el.scrollIntoView({ block: "nearest" })` also moved the
   // nearest VERTICAL scroll container, so switching tabs after scrolling down
   // yanked the page back up to the strip — defeating changeTab's deliberate
@@ -701,7 +709,9 @@ export function AllocationsTabs(
   // (jsdom, older browsers) — the effect no-ops there instead of throwing.
   useEffect(() => {
     const el = tabRefs.current[activeTab];
-    const strip = el?.parentElement;
+    // `closest`, not `parentElement`: a tab that carries a term sits inside the Form B
+    // Tooltip's wrapper spans, so its direct parent is not the strip.
+    const strip = el?.closest<HTMLElement>('[role="tablist"]');
     if (
       !el ||
       !strip ||
@@ -827,7 +837,10 @@ export function AllocationsTabs(
               reachable on a phone (no tab dropped) and the strip never wraps.
               JOURNEY-03 is preserved: this is the SAME element with the SAME
               role="tablist" and the SAME direct role="tab" children — no role is
-              added to any wrapper and the tabs are NOT re-nested (re-nesting would
+              added to any wrapper and the tabs are NOT re-nested. The one exception
+              is the Scenario tab, which sits in the Form B Tooltip's two spans
+              (Phase 201 plan 34): they are role-less and attribute-less, so axe looks
+              through them and the tablist still owns the tab (re-nesting would
               re-introduce the critical axe aria-required-children violation the
               comment above warns about; the seeded composer-axe.spec.ts gate
               catches a regression). `flex-nowrap overflow-x-auto` keeps the tabs on
@@ -852,7 +865,7 @@ export function AllocationsTabs(
             const isActive = activeTab === key;
             const label = TAB_LABELS[key];
             const count = tabCount[key];
-            return (
+            const tabButton = (describedBy?: string) => (
               <button
                 key={key}
                 ref={(el) => {
@@ -864,6 +877,7 @@ export function AllocationsTabs(
                 data-tab-key={key}
                 aria-selected={isActive}
                 aria-controls={`panel-${key}`}
+                aria-describedby={describedBy}
                 tabIndex={isActive ? 0 : -1}
                 onClick={() => changeTab(key)}
                 onKeyDown={(e) => handleTabKeyDown(e, key)}
@@ -889,6 +903,24 @@ export function AllocationsTabs(
                   </span>
                 ) : null}
               </button>
+            );
+            const term = TAB_TERMS[key];
+            if (!term) return tabButton();
+            // Phase 201 plan 34 (F-04, F-08, U-27) — Form B. The Tooltip's function children put
+            // `aria-describedby` on the tab itself, so its two wrapper spans carry no role, no
+            // `aria-*` attribute and no tabindex: axe's aria-required-children looks through an
+            // owned element like that, so the tablist still owns its tabs. Do not add any of the
+            // three to the wrapper. `flex shrink-0` keeps it a flex item that cannot compress, and
+            // `[&>span]:flex` makes the inner span a flex box, so the tab sits in the strip as an
+            // unwrapped one does.
+            return (
+              <Tooltip
+                key={key}
+                content={termDefinition(term)}
+                className="flex shrink-0 [&>span]:flex"
+              >
+                {({ "aria-describedby": describedBy }) => tabButton(describedBy)}
+              </Tooltip>
             );
           })}
           </div>

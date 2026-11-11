@@ -92,8 +92,8 @@ export default async function DiscoveryPage({
           aria-live="polite"
           className="mb-6 rounded-lg border border-border bg-card px-4 py-3 text-sm text-text-secondary"
         >
-          Watchlist temporarily unavailable — your starred strategies may not
-          appear. Refresh to retry.
+          Watchlist temporarily unavailable — strategies on your watchlist may
+          not appear. Refresh to retry.
         </div>
       )}
       {/* F9 M-0475/M-0476 — key by (user, slug) so a client-side category

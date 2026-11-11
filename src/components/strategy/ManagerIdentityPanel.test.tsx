@@ -44,7 +44,7 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
       <ManagerIdentityPanel
         disclosureTier="institutional"
         manager={baseManager({ linkedin: "https://linkedin.com/in/jane-doe" })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     const link = screen.getByRole("link", { name: /LinkedIn profile/i });
@@ -56,7 +56,7 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
       <ManagerIdentityPanel
         disclosureTier="institutional"
         manager={baseManager({ linkedin: "http://linkedin.com/in/jane-doe" })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     expect(
@@ -71,7 +71,7 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
         manager={baseManager({
           linkedin: 'javascript:fetch("/api/keys?exfil="+document.cookie)',
         })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     // No anchor at all — the panel renders, but the LinkedIn row is gone.
@@ -88,7 +88,7 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
         manager={baseManager({
           linkedin: "data:text/html,<script>alert(1)</script>",
         })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     expect(screen.queryByRole("link", { name: /LinkedIn profile/i })).toBeNull();
@@ -99,7 +99,7 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
       <ManagerIdentityPanel
         disclosureTier="institutional"
         manager={baseManager({ linkedin: "vbscript:msgbox(1)" })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     expect(screen.queryByRole("link", { name: /LinkedIn profile/i })).toBeNull();
@@ -110,7 +110,7 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
       <ManagerIdentityPanel
         disclosureTier="institutional"
         manager={baseManager({ linkedin: "not a url at all" })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     expect(screen.queryByRole("link", { name: /LinkedIn profile/i })).toBeNull();
@@ -121,7 +121,7 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
       <ManagerIdentityPanel
         disclosureTier="institutional"
         manager={baseManager({ linkedin: "" })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     expect(screen.queryByRole("link", { name: /LinkedIn profile/i })).toBeNull();
@@ -134,10 +134,67 @@ describe("ManagerIdentityPanel — linkedin XSS guard", () => {
       <ManagerIdentityPanel
         disclosureTier="exploratory"
         manager={baseManager({ linkedin: "https://linkedin.com/in/jane-doe" })}
-        strategyCodename="STRAT-001"
+        strategyName="STRAT-001"
       />,
     );
     expect(screen.queryByRole("link", { name: /LinkedIn profile/i })).toBeNull();
-    expect(screen.getByText(/Pseudonymous strategy/i)).toBeInTheDocument();
+    expect(screen.getByText("Pseudonymous manager")).toBeInTheDocument();
+  });
+});
+
+describe("ManagerIdentityPanel - the strategy name is never presented as the manager's (Phase 201 U-11)", () => {
+  it("exploratory lane: eyebrow Manager, h3 Pseudonymous manager, the U-11 body, badge Exploratory", () => {
+    render(
+      <ManagerIdentityPanel
+        disclosureTier="exploratory"
+        manager={null}
+        strategyName="Fibonacci Ghost"
+      />,
+    );
+    expect(screen.getByText("Manager")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Pseudonymous manager" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Manages Fibonacci Ghost. The manager's identity is disclosed once an allocator requests an introduction and the manager accepts.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Exploratory")).toBeInTheDocument();
+    // The strategy name is not the heading: a heading naming it would read as the manager's name.
+    expect(screen.queryByRole("heading", { name: "Fibonacci Ghost" })).toBeNull();
+  });
+
+  it("disclosed lane with neither display_name nor company: the heading is Name not provided, not the strategy name", () => {
+    render(
+      <ManagerIdentityPanel
+        disclosureTier="institutional"
+        manager={baseManager({ display_name: null, company: null })}
+        strategyName="Fibonacci Ghost"
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Name not provided" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Fibonacci Ghost")).toBeNull();
+  });
+
+  it("disclosed lane still prefers display_name, then company", () => {
+    const { rerender } = render(
+      <ManagerIdentityPanel
+        disclosureTier="institutional"
+        manager={baseManager({ display_name: null })}
+        strategyName="Fibonacci Ghost"
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 3, name: "Doe Capital" })).toBeInTheDocument();
+    rerender(
+      <ManagerIdentityPanel
+        disclosureTier="institutional"
+        manager={baseManager()}
+        strategyName="Fibonacci Ghost"
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 3, name: "Jane Doe" })).toBeInTheDocument();
   });
 });

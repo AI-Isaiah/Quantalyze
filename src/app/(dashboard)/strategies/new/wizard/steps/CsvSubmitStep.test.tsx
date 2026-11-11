@@ -246,7 +246,7 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
   });
 
   // Contribution mount → entry_context='contribution' (→ status='private')
-  // plus allocator-framed copy: "Add to my strategies", no "Submit strategy".
+  // plus allocator-framed copy: "Add to Strategies" (201 U-18, D-07), no "Submit strategy".
   it("sends entry_context='contribution' and shows allocator copy when entryContext='contribution'", async () => {
     render(
       <CsvSubmitStep
@@ -265,7 +265,7 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
 
     // Allocator-framed CTA replaces the sell-side "Submit strategy" label.
     expect(
-      screen.getByRole("button", { name: /add to my strategies/i }),
+      screen.getByRole("button", { name: /^add to strategies$/i }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /submit strategy/i }),
@@ -799,5 +799,33 @@ describe("CsvSubmitStep — 170.1-02 R-2 the format hint follows fmt", () => {
     await screen.findByTestId("wizard-csv-error");
 
     expect(screen.queryByText(HINT)).toBeNull();
+  });
+});
+
+// F-11 / D-11 / UI-SPEC Interaction contract 5 / R3-01 item 5 / plan 201-38:
+// the Submit step's "Date range" row prints the CSV range through
+// `formatDay`, the same form the Preview and Review steps use. The old
+// `2024-01-01 → 2024-01-03` form is a stale pin.
+describe("CsvSubmitStep — 201-38 the date range reads in the helper's form", () => {
+  it("prints `Jan 1, 2024 – Jan 3, 2024` with no ISO day", () => {
+    render(
+      <CsvSubmitStep
+        wizardSessionId="22222222-2222-2222-2222-222222222222"
+        fmt="daily_returns"
+        strategyName="Range form test"
+        preview={PREVIEW}
+        dailyReturnsSeries={SERIES}
+        metadata={META}
+        onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
+        onBack={() => {}}
+      />,
+    );
+    const row = screen.getByText("Date range").closest("div");
+    expect(row).not.toBeNull();
+    expect(row!.textContent).toContain("Jan 1, 2024 – Jan 3, 2024");
+    expect(row!.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(row!.textContent).not.toContain("→");
+    cleanup();
   });
 });

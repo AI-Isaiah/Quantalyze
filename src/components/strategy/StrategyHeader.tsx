@@ -28,16 +28,23 @@ import type { Strategy } from "@/lib/types";
  */
 export function StrategyHeader({
   strategy,
+  nameVisible,
   computedAt,
 }: {
   strategy: Strategy;
+  /**
+   * Phase 201 / D-09, D-17: whether the viewer can see this strategy in discovery
+   * (`isDiscoveryVisible` in `@/lib/visibility`). Required, so a caller states where
+   * its fact comes from. This component has no caller at HEAD (see above).
+   */
+  nameVisible: boolean;
   computedAt?: string;
 }) {
   return (
     <div>
       <div className="flex items-center gap-3 mb-2">
         <h1 className="text-fixed-32 font-bold tracking-tight text-text-primary">
-          {displayStrategyName(strategy)}
+          {displayStrategyName(strategy, { visible: nameVisible })}
         </h1>
         {/* Phase 15 / CSV-03: csv_uploaded only renders text; other tiers
             return null. Phase 17 / DESIGN-01 swaps to a polished pill

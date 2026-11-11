@@ -161,14 +161,18 @@ describe("the metrics rail follows the zoom window (SC10, D-27)", () => {
     await click("zoom");
     const p = panel("Worst 10 Drawdowns");
     expect(p).not.toBeNull();
-    const lo = payload.dates[100];
-    const hi = payload.dates[299];
+    // Phase 201 (D-11): the date cells print "Oct 9, 2026", which does not sort as text, so the
+    // window's own days are formatted the same way and each cell must be one of them.
+    const inWindow = new Set(payload.dates.slice(100, 300).map((d) => isoToMonthDay(d)));
+    const outside = payload.dates.filter((_, i) => i < 100 || i > 299).map((d) => isoToMonthDay(d));
+    expect(outside.some((d) => !inWindow.has(d)), "control: the record has days outside the window").toBe(true);
     const bodyRows = [...p!.querySelectorAll("tbody tr")];
     expect(bodyRows.length).toBeGreaterThan(0);
     for (const r of bodyRows) {
       const tds = [...r.querySelectorAll("td")].map((td) => td.textContent ?? "");
       for (const d of tds.slice(1, 4)) {
-        expect(d >= lo && d <= hi, `${d} inside ${lo}..${hi}`).toBe(true);
+        expect(d, `${d} is not a day inside the window`).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/);
+        expect(inWindow.has(d), `${d} is inside the window`).toBe(true);
       }
     }
   });

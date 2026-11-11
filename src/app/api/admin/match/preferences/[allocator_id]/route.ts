@@ -83,7 +83,7 @@ export async function PUT(
 
   if (error) {
     console.error("[api/admin/match/preferences/[allocator_id]] error:", error);
-    return NextResponse.json({ error: "Failed to save preferences" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to save mandate" }, { status: 500 });
   }
 
   // Sprint 8 Phase 2 — audit the admin-edited mandate. B4b: the mandate

@@ -94,6 +94,11 @@ describe("PendingIntros — Audit C-0135/C-0136 server-route refactor", () => {
     expect(body).toEqual({ id: REQUEST.id, action: "accept" });
   });
 
+  it("prints the request date through formatDay (D-11)", () => {
+    render(<PendingIntros requests={[REQUEST]} />);
+    expect(screen.getByText("Apr 1, 2026")).toBeDefined();
+  });
+
   it("shows the confirm message after a successful Accept", async () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
     render(<PendingIntros requests={[REQUEST]} />);

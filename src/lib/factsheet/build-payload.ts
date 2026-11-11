@@ -1249,7 +1249,7 @@ function buildFromBuildableSeries(
         },
         {
           key: "crypto_book",
-          name: "Diversified Crypto Book",
+          name: "Diversified Crypto Blend",
           composition: "70% BTC · 30% ETH",
           // D-70(3): BTC + ETH legs, 7-day calendar → 365 (unchanged).
           ...portfolioFigures([btcLeg(0.7), comparatorLeg("eth", 0.3, ETH_DAILY, [])], btcUnavailable),

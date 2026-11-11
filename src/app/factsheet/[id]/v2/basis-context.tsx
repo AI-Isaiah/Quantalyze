@@ -888,11 +888,11 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // the range pointed past EOF — every past-EOF citation into that file is
       // that ONE event, not one independent rot per citer. Anchored on the symbol
       // instead: a name survives the next shrink, a coordinate does not.
-      return "Mark-to-market unavailable: composites that include an options book report cash settlement only.";
+      return "Mark-to-market unavailable: composites that include options positions report cash settlement only.";
     case "mtm_basis_unavailable_for_venue":
       return "Mark-to-market unavailable for this venue.";
     case "mtm_summary_coverage_incomplete":
-      return "Mark-to-market unavailable: settlement history does not fully cover this book, so a mark-to-market series cannot be reconstructed.";
+      return "Mark-to-market unavailable: settlement history does not fully cover these positions, so a mark-to-market series cannot be reconstructed.";
     case "mtm_series_uncomputable":
       return "Mark-to-market unavailable: the reconstructed mark-to-market series could not produce valid metrics.";
     case "mtm_second_pass_timeout":

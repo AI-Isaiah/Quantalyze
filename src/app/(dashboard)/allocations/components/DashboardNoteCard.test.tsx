@@ -48,7 +48,7 @@ describe("DashboardNoteCard (UI-SPEC W1 — dashboard note card)", () => {
     const ta = container.querySelector("textarea");
     expect(ta).not.toBeNull();
     expect(ta?.getAttribute("placeholder")).toBe(
-      "Add a private note about your allocation book — markdown supported. Visible only to you.",
+      "Add a private note about your allocation — markdown supported. Visible only to you.",
     );
     // Honest-empty: no rendered markdown preview, no sample text.
     expect(container.querySelector("h1")).toBeNull();

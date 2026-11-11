@@ -1,4 +1,5 @@
 import { resolveTradeFetch } from "@/lib/freshness";
+import { formatDay } from "@/lib/utils";
 import { inclusiveDayCount } from "@/lib/factsheet/build-payload";
 import type {
   ReconstructedRange,
@@ -25,12 +26,10 @@ import type {
  * so adjacent lines can never format one day two ways.
  */
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
+/** The factsheet's one date formatter. Delegates to the app-wide `formatDay` (Phase 201 D-11), which
+ *  reads the instant in UTC and prints `—` for a value that does not parse. */
 export function formatIsoDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  return formatDay(iso);
 }
 
 /**

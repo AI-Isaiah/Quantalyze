@@ -4,7 +4,7 @@ import type { DisclosureTier, ManagerIdentity } from "@/lib/types";
 interface ManagerIdentityPanelProps {
   disclosureTier: DisclosureTier;
   manager: ManagerIdentity | null;
-  strategyCodename: string;
+  strategyName: string;
   className?: string;
 }
 
@@ -36,7 +36,8 @@ function safeLinkedinHref(raw: string | null | undefined): string | null {
  * `disclosure_tier`:
  *
  *   institutional — full manager identity (name, bio, years, AUM, LinkedIn)
- *   exploratory   — codename only + "identity disclosed on accepted intro" blurb
+ *   exploratory   — an unnamed manager, the strategy it manages, and the
+ *                   "identity disclosed on accepted intro" blurb
  *
  * Server-side redaction lives in `getStrategyDetail()` / `getPublicStrategyDetail()`
  * — the caller MUST NOT pass a populated `manager` object for an exploratory
@@ -45,22 +46,22 @@ function safeLinkedinHref(raw: string | null | undefined): string | null {
 export function ManagerIdentityPanel({
   disclosureTier,
   manager,
-  strategyCodename,
+  strategyName,
   className,
 }: ManagerIdentityPanelProps) {
   if (disclosureTier === "exploratory" || !manager) {
     return (
       <Card className={className}>
         <div className="flex items-start justify-between gap-4">
-          <div>
+          <div className="min-w-0 flex-1">
             <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-medium mb-2">
               Manager
             </p>
             <h3 className="text-lg font-semibold text-text-primary">
-              {strategyCodename}
+              Pseudonymous manager
             </h3>
-            <p className="mt-2 text-sm text-text-secondary">
-              Pseudonymous strategy. The manager&apos;s identity is disclosed
+            <p className="mt-2 text-sm text-text-secondary break-words">
+              Manages {strategyName}. The manager&apos;s identity is disclosed
               once an allocator requests an introduction and the manager accepts.
             </p>
           </div>
@@ -72,7 +73,7 @@ export function ManagerIdentityPanel({
     );
   }
 
-  const displayName = manager.display_name ?? manager.company ?? strategyCodename;
+  const displayName = manager.display_name ?? manager.company ?? "Name not provided";
   const linkedinHref = safeLinkedinHref(manager.linkedin);
   const detailLines: string[] = [];
   if (manager.years_trading) {

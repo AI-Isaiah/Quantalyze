@@ -66,7 +66,7 @@ export function WatchlistTabs({ scope, onScopeChange, count, idBase, panelId }: 
           aria-controls={panelId}
           className="inline-flex items-center gap-2 border-l border-border"
         >
-          My Watchlist
+          My watchlist
           {count > 0 && (
             <span
               data-testid="watchlist-count-badge"

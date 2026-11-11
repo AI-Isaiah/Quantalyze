@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/server";
 import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
+import { Term } from "@/components/ui/Term";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
@@ -472,15 +473,15 @@ function NoMandateState() {
         Set your mandate to see recommendations
       </h2>
       <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
-        Tell us your strategy type, ticket size, and exchange preferences. The
-        match engine uses this to compute personalized recommendations every
-        day at 01:00 UTC.
+        Tell us your strategy type, ticket size, and exchanges. The match
+        engine uses this to compute personalized recommendations every day at
+        01:00 UTC.
       </p>
       <Link
         href="/preferences"
         className="mt-6 inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
       >
-        Set preferences →
+        Set your mandate →
       </Link>
     </Card>
   );
@@ -522,7 +523,12 @@ function NoBatchState({ mandateSet }: { mandateSet: boolean }) {
         Your first batch is computing
       </h2>
       <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
-        {mandateSet ? "Your mandate is set. " : null}The match engine
+        {mandateSet ? (
+          <>
+            Your <Term k="mandate">mandate</Term> is set.{" "}
+          </>
+        ) : null}
+        The match engine
         recomputes recommendations once a day — your first batch will appear
         here after the next run.
       </p>
@@ -538,9 +544,9 @@ function NoCandidatesState() {
       </h2>
       <p className="mt-2 text-sm text-text-secondary max-w-md mx-auto">
         We computed a batch but none of the current strategies matched your
-        mandate. Try relaxing your filters in{" "}
+        mandate. Try relaxing{" "}
         <Link href="/preferences" className="underline hover:text-text-primary">
-          preferences
+          your mandate
         </Link>{" "}
         — the match engine will pick up the change on the next daily run.
       </p>
@@ -618,7 +624,7 @@ function RecommendationCard({
           )}
           <div className="mt-3 flex items-center gap-4 text-xs">
             <Metric
-              label="CAGR"
+              label={<Term k="cagr">CAGR</Term>}
               value={annualizedCell(
                 formatPercent(strategy.cagr),
                 strategy.figure_state,
@@ -626,7 +632,7 @@ function RecommendationCard({
               )}
             />
             <Metric
-              label="Sharpe"
+              label={<Term k="sharpe">Sharpe</Term>}
               value={annualizedCell(
                 formatNumber(strategy.sharpe),
                 strategy.figure_state,
@@ -634,7 +640,7 @@ function RecommendationCard({
               )}
             />
             <Metric
-              label="Max DD"
+              label={<Term k="max_drawdown">Max DD</Term>}
               value={formatPercent(strategy.max_drawdown)}
               negative={drawdownTone(strategy.max_drawdown, 2, 100) === "negative"}
             />
@@ -658,12 +664,12 @@ function Metric({
   value,
   negative,
 }: {
-  label: string;
+  label: ReactNode;
   value: ReactNode;
   negative?: boolean;
 }) {
   return (
-    <div className="flex items-baseline gap-1.5">
+    <div data-metric className="flex items-baseline gap-1.5">
       <span className="text-fixed-10 uppercase tracking-wider text-text-muted">
         {label}
       </span>

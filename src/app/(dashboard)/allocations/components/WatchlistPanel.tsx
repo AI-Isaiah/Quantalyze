@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { TRUST_TIER_TOKENS, type TrustTier } from "@/lib/design-tokens/trust-tier";
-import { cn } from "@/lib/utils";
+import { cn, formatDay } from "@/lib/utils";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import type { FavoriteRow } from "../lib/watchlist-read";
 
@@ -97,7 +97,7 @@ export function WatchlistPanel({
   const emptyState = (
     <>
       <p className="text-small text-text-secondary">
-        No favorites yet. Star strategies in Discovery to build your watchlist.
+        No strategies on your watchlist yet. Use the star on a strategy in Discovery to add it.
       </p>
       <Link
         href="/discovery"
@@ -242,8 +242,8 @@ export function WatchlistPanel({
           <TrustTierLabel trustTier={row.trust_tier} />
         </div>
       </td>
-      <td className="py-2.5 pr-3 font-mono text-caption tabular-nums text-text-muted">
-        {row.created_at.slice(0, 10)}
+      <td className="whitespace-nowrap py-2.5 pr-3 font-mono text-caption tabular-nums text-text-muted">
+        {formatDay(row.created_at)}
       </td>
       <td className="py-2.5 pr-3">
         {suggested.has(row.strategy_id) && (

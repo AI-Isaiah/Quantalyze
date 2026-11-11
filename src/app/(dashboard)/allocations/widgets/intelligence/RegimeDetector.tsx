@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { detectRegimeChanges } from "@/lib/portfolio-stats";
+import { formatDay } from "@/lib/utils";
 import { buildCompositeReturns } from "../lib/composite-returns";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
@@ -88,10 +89,7 @@ function RegimeDetectorInner({ data }: { data: RiskWidgetData } & BaseWidgetProp
         <span>
           Since{" "}
           <span className="font-mono tabular-nums">
-            {new Date(regime.startDate + "T00:00:00Z").toLocaleDateString(
-              "en-US",
-              { month: "short", day: "numeric", year: "numeric" },
-            )}
+            {formatDay(regime.startDate)}
           </span>
         </span>
         <span className="text-[#E2E8F0]">|</span>

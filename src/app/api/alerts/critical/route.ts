@@ -36,7 +36,7 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
 
   if (portfolioId) {
     if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
-      return NextResponse.json({ error: "Portfolio not found" }, { status: 404, headers: NO_STORE_HEADERS });
+      return NextResponse.json({ error: "Allocation not found" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     query = query.eq("portfolio_id", portfolioId);
   } else {

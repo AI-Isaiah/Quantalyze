@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { termDefinition } from "@/lib/glossary";
 import { HoldingsTable } from "./HoldingsTable";
 import { backTargetFor, parseOrigin } from "@/lib/factsheet/origin";
 import { HoldingsTabPanel } from "../HoldingsTabPanel";
@@ -595,8 +596,8 @@ describe("HoldingsTable — D-12-A union row states", () => {
 
 describe("HoldingsTable — D-15 three empty-state arms, in priority order", () => {
   const ARM_2_HEADING = "No strategies marked as own capital.";
-  const ARM_2_BODY = "Set the mark from My Strategies, or when you connect a new key.";
-  const ARM_2_LINK = "Go to My Strategies →";
+  const ARM_2_BODY = "Set the mark from Strategies, or when you connect a new key.";
+  const ARM_2_LINK = "Go to Strategies →";
   const ARM_3_HEADING = "No strategies yet.";
   const ARM_3_BODY =
     "Connect an exchange API key or upload a CSV to see your strategies here.";
@@ -830,5 +831,31 @@ describe("HoldingsTable — a failed strategies read renders its registry entry 
       <HoldingsTable strategyRows={[]} hasAnyStrategies={false} strategiesReadFailed={false} />,
     );
     expect(container.querySelector(`[data-degrade-id="${ID}"]`)).toBeNull();
+  });
+});
+
+// Plan 201-15 (D-01, D-03): the Strategies table's "Sharpe" and "Max DD" headers are
+// registered terms and the label of a sort button, so they are Form B: the button is
+// wrapped in a Tooltip with the registry text; no focusable span nests inside it.
+describe("HoldingsTable strategies headers — registered terms explain themselves (plan 201-15)", () => {
+  it.each([
+    ["Sharpe", "sharpe"],
+    ["Max DD", "max_drawdown"],
+  ] as const)("%s: keyboard focus on the sort button shows the registry definition", (label, key) => {
+    vi.useFakeTimers();
+    try {
+      renderPositions([makeStrategy({ strategy_id: "a", alias: "Alpha" })]);
+      const table = screen.getByRole("table");
+      const button = within(table).getByRole("button", { name: label });
+      expect(button.querySelector("[tabindex]")).toBeNull();
+      fireEvent.focus(button);
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.getByRole("tooltip").textContent).toBe(termDefinition(key));
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
   });
 });

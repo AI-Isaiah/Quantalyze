@@ -114,10 +114,10 @@ describe("buildAllocationRequest", () => {
         ok: false,
         field: "amount",
         message:
-          "We cannot size this allocation until your book equity is available.",
+          "We cannot size this allocation until your allocation equity is available.",
       });
       expect(BOOK_EQUITY_UNAVAILABLE_MESSAGE).toBe(
-        "We cannot size this allocation until your book equity is available.",
+        "We cannot size this allocation until your allocation equity is available.",
       );
     },
   );
@@ -133,10 +133,10 @@ describe("buildAllocationRequest", () => {
     expect(out).toEqual({
       ok: false,
       field: "amount",
-      message: "Enter an amount up to your book equity ($100,000).",
+      message: "Enter an amount up to your allocation equity ($100,000).",
     });
     expect(aboveBookEquityMessage(100000)).toBe(
-      "Enter an amount up to your book equity ($100,000).",
+      "Enter an amount up to your allocation equity ($100,000).",
     );
   });
 

@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/Input";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { orgMemberRoleLabel } from "@/lib/display-labels";
+import { formatDay } from "@/lib/utils";
 
 interface Org {
   organization_id: string;
@@ -167,7 +168,7 @@ export function OrganizationTab() {
               <div key={inv.id} className="flex items-center justify-between rounded-lg border border-border p-3">
                 <div>
                   <p className="text-sm font-medium text-text-primary">{inv.organizations.name}</p>
-                  <p className="text-xs text-text-muted">Invited {new Date(inv.created_at).toLocaleDateString()}</p>
+                  <p className="text-xs text-text-muted">Invited {formatDay(inv.created_at)}</p>
                 </div>
                 <div className="flex gap-2">
                   <Button size="sm" onClick={() => respondInvite(inv.id, true)}>Accept</Button>

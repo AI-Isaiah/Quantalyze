@@ -72,28 +72,29 @@ const eslintConfig = defineConfig([
       //     so it fails CI by construction on a future zoom-unsafe clamp string.
       //   - no-raw-font-px → repo-wide ERROR as of Phase 54 / BP-03 (the final
       //     strangler flip; was `warn` through phases 49–53). Phases 54-01b/
-      //     02a/02b cleaned every migratable non-frozen, non-test orphan to the
+      //     02a/02b cleaned every migratable non-test orphan outside the chart off-glob to the
       //     `--text-fixed-*` / named `--text-*` tiers, and 54-01a added the
-      //     frozen-chart off-glob, so the repo-wide flip now passes with 0
+      //     chart off-glob, so the repo-wide flip now passes with 0
       //     errors. The Phase-52/53 per-surface `error` ratchet blocks below are
       //     redundant once repo-wide is error, but are harmless and left in
       //     place (future cleanup, not required by BP-03).
       //
       //     BP-03 AUDIT NOTE — "error repo-wide" is satisfied as "error
-      //     everywhere EXCEPT the documented frozen-chart islands". The frozen
+      //     everywhere EXCEPT the chart files that still carry raw px". The
       //     EquityChart (src/app/(dashboard)/allocations/widgets/performance/
       //     EquityChart.tsx) and the three chart-internal factsheet SVGs
       //     (TimeSeriesChart/HistogramChart/MasterBrush) carry raw `text-[Npx]`
-      //     sites that can NEVER migrate: they are in the FROZEN_ISLANDS
-      //     git-diff-zero list at phase-52-frozen-spine-guards.test.ts:158, so
-      //     any byte edit reds the frozen-spine guard. The CONTEXT-locked
-      //     resolution of the BP-03-vs-FROZEN_ISLANDS conflict is to EXEMPT
-      //     them via the `off` glob below (mirroring src/components/charts/**),
-      //     NEVER to edit them. This is NOT an unmet BP-03 gap — it is the
-      //     documented island carve-out. WorstDrawdowns.tsx rides the
-      //     components/charts/** off-glob; test/spec fixtures ride the
-      //     test-exempt block. No production source can author a new raw px
-      //     without failing CI.
+      //     sites. They were frozen islands when this block was written; they have
+      //     since LEFT the `FROZEN_ISLANDS` git-diff-zero list in
+      //     src/__tests__/phase-52-frozen-spine-guards.test.ts by reviewed edits
+      //     (the reasons are written beside that list; read the current members
+      //     there, by symbol, not from this comment). The raw px sites remain, so
+      //     the `off` glob below stays: it is what keeps the repo-wide `error`
+      //     flip passing for them. This is
+      //     NOT an unmet BP-03 gap — it is a documented carve-out for files with
+      //     raw px. WorstDrawdowns.tsx rides the components/charts/** off-glob;
+      //     test/spec fixtures ride the test-exempt block. No new production
+      //     source can author a raw px without failing CI.
       "quantalyze/no-rem-less-clamp": "error",
       "quantalyze/no-raw-font-px": "error",
       // SEAM-01 (Phase 140) — ban a raw fetch() of the analytics service base
@@ -207,8 +208,8 @@ const eslintConfig = defineConfig([
   // harmless — retained as the historical ratchet record, no longer load-bearing.
   // All formerly-orphan files were migrated to `text-fixed-N` in 54-01b/02a/02b
   // and ride the repo-wide `error` clean; the only surviving raw-px holdouts are
-  // the off-globbed frozen chart islands (EquityChart + the 3 factsheet SVGs)
-  // + components/charts/**.
+  // the off-globbed chart files with raw px (EquityChart + the 3 factsheet SVGs,
+  // no longer frozen islands) + components/charts/**.
   {
     files: [
       // Fully-clean surface globs (grep-verified 0 raw text-[Npx]):
@@ -219,7 +220,7 @@ const eslintConfig = defineConfig([
       "src/components/strategy/CompareTable.tsx",
       "src/components/strategy/StrategyGrid.tsx",
       // Allocations — per-FILE (only the grep-proven-clean files; the orphan
-      // widgets/components + the frozen EquityChart stay at warn):
+      // widgets/components + EquityChart, off-globbed below, stay at warn):
       "src/app/(dashboard)/allocations/HoldingsTabPanel.tsx",
       "src/app/(dashboard)/allocations/RiskTabPanel.tsx",
       "src/app/(dashboard)/allocations/OutcomesTabPanel.tsx",
@@ -238,7 +239,7 @@ const eslintConfig = defineConfig([
       // Factsheet v2 — per-FILE (Phase-52 record; all factsheet files incl.
       // MetricsColumn/MandatePanels/StressWindowsPanel/page were migrated in
       // 54-01b and now ride the repo-wide `error` clean. The chart-internal SVGs
-      // TimeSeriesChart/HistogramChart/MasterBrush remain off-globbed (frozen)):
+      // TimeSeriesChart/HistogramChart/MasterBrush remain off-globbed, they carry raw px):
       "src/app/factsheet/[id]/v2/FactsheetView.tsx",
       "src/app/factsheet/[id]/v2/AnalyticalPanels.tsx",
       "src/app/factsheet/[id]/v2/BatchDPanels.tsx",
@@ -290,17 +291,18 @@ const eslintConfig = defineConfig([
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },
   },
-  // Phase 54 / BP-03 — FROZEN-island chart off-glob. These 4 files carry raw
-  // `text-[Npx]` sites but can NEVER migrate: they are in the FROZEN_ISLANDS
-  // git-diff-zero list (src/__tests__/phase-52-frozen-spine-guards.test.ts:158),
-  // so any byte change reds the frozen-spine guard. The CONTEXT-locked BP-03/
-  // FROZEN conflict resolution is to EXEMPT them via this `off` glob (mirroring
-  // the src/components/charts/** block below) instead of editing them — so the
-  // repo-wide `error` flip (Plan 54-05) passes while the render stays
-  // byte-identical. EquityChart lives under allocations/widgets/performance/,
-  // NOT under src/components/charts/**, so it needs an explicit entry; the three
-  // factsheet SVG charts (TimeSeriesChart/HistogramChart/MasterBrush) are the
-  // chart-internal frozen islands. NEVER add edits to these files.
+  // Phase 54 / BP-03 — chart off-glob. These 4 files carry raw `text-[Npx]`
+  // sites. When this block was written they were in the FROZEN_ISLANDS
+  // git-diff-zero list; they have since left it by reviewed edits (see the
+  // comments beside `FROZEN_ISLANDS` in
+  // src/__tests__/phase-52-frozen-spine-guards.test.ts, where the current members
+  // are read by symbol). The raw px sites are still there, so this `off` glob (mirroring the
+  // src/components/charts/** block below) stays: it is what lets the repo-wide
+  // `error` flip (Plan 54-05) pass for them. EquityChart lives under
+  // allocations/widgets/performance/, NOT under src/components/charts/**, so it
+  // needs an explicit entry; the three factsheet SVG charts
+  // (TimeSeriesChart/HistogramChart/MasterBrush) are the chart-internal files.
+  // Removing a raw px site is welcome; widening this glob is not.
   //
   // NOTE (Plan 54-05): the three factsheet paths live under the literal `[id]`
   // dynamic-route segment, so the brackets MUST be backslash-escaped. ESLint
@@ -308,7 +310,7 @@ const eslintConfig = defineConfig([
   // as a character class (one of `i`/`d`) — NOT the literal directory `[id]` —
   // so the unescaped form silently fails to match and the files ride the
   // repo-wide rule. Before the warn→error flip that was harmless (they stayed
-  // `warn`); at `error` it would red CI on these frozen files. Escaping `\[id\]`
+  // `warn`); at `error` it would red CI on these chart files. Escaping `\[id\]`
   // makes the off-glob actually match the on-disk path. EquityChart has no
   // bracket segment, so it matches as written.
   {

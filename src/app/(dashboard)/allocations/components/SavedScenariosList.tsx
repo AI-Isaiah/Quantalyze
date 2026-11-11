@@ -3,27 +3,28 @@
 import { useCallback, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
-import { cn } from "@/lib/utils";
+import { cn, formatDay } from "@/lib/utils";
 
 /**
  * Plan 23-05 (PERSIST-03) — the saved-scenarios list on the Scenario tab.
  *
  * One row per saved scenario: a name-labeled selection checkbox + the name +
  * a saved/updated timestamp, with Open (ghost) · Rename (inline edit → PATCH) ·
- * Delete (small inline danger confirm → DELETE) affordances. A "Live book"
+ * Delete (small inline danger confirm → DELETE) affordances. A "Live allocation"
  * pseudo-row participates in selection; the "Compare selected" CTA enables at
- * >= 2 selections (incl. the live book) and raises the selected rows +
+ * >= 2 selections (incl. the live allocation) and raises the selected rows +
  * includeLiveBook flag to the parent (which mounts ScenarioComparePanel).
  *
- * Phase 29 (UNIFY-05) — the UI copy surfaces the noun "portfolio" while the
- * persistence (the `scenarios` table + `/api/allocator/scenario/saved*` routes)
- * and all code/route/state names stay "scenario". Copy-only relabel; the
+ * Phase 29 (UNIFY-05) surfaced the noun "portfolio" in the copy; Phase 201 (D-18,
+ * U-19) renamed it to "scenario", the canonical word. The persistence (the
+ * `scenarios` table + `/api/allocator/scenario/saved*` routes) and all
+ * code/route/state names stay "scenario". Copy-only relabel; the
  * fetch URLs, the codec-trichotomy Open delegation, the Share affordance and
  * the Compare gate are byte-identical.
  *
  * Honesty + UI-SPEC invariants:
  *   - Empty list → EmptyStateCard whose heading MATCHES its body (the #509
- *     lesson) — "No saved portfolios yet".
+ *     lesson) — "No saved scenarios yet".
  *   - Rename / Delete are INLINE (no modal): Rename reveals a text input that
  *     PATCHes the trimmed name (1..120, else the validation copy + no PATCH);
  *     Delete reveals a small "Delete "{name}"?" danger confirm.
@@ -61,7 +62,7 @@ export interface SavedScenarioOpenRow {
 export interface CompareSelection {
   /** The selected SAVED rows (excludes the live-book pseudo-row). */
   rows: SavedScenarioListRow[];
-  /** Whether the "Live book" pseudo-row is part of the selection. */
+  /** Whether the "Live allocation" pseudo-row is part of the selection. */
   includeLiveBook: boolean;
 }
 
@@ -70,7 +71,7 @@ interface SavedScenariosListProps {
   /**
    * True when the list GET failed (non-2xx or threw) AND no prior rows are
    * cached. When set with an empty `rows`, the list renders an honest ERROR
-   * state ("Couldn't load…") instead of the "No saved portfolios yet" empty card
+   * state ("Couldn't load…") instead of the "No saved scenarios yet" empty card
    * — an unloaded list must never masquerade as an empty list (a fabricated
    * fact, the #509 lesson). If `rows` is non-empty (a prior load succeeded),
    * the cached rows stay rendered and this flag is ignored.
@@ -92,12 +93,8 @@ function timestampLabel(row: SavedScenarioListRow): string {
   const updated = new Date(row.updated_at);
   const c = created.getTime();
   const u = updated.getTime();
-  const fmt = (d: Date) =>
-    d.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
+  // D-11, U-14: the one UI date (`Oct 9, 2026`), never the runtime locale.
+  const fmt = (d: Date) => formatDay(d.toISOString());
   // WR-04 (Phase 29 review): a malformed/empty timestamp column yields a NaN
   // getTime(); `NaN > NaN` is false, so the pre-fix code silently fell through
   // to `Saved <Invalid Date>` (fmt of an invalid Date renders the literal
@@ -115,11 +112,11 @@ function timestampLabel(row: SavedScenarioListRow): string {
 function validateName(raw: string): { name: string | null; error: string | null } {
   const trimmed = raw.trim();
   if (trimmed.length < 1)
-    return { name: null, error: "Enter a name to save this portfolio." };
+    return { name: null, error: "Enter a name to save this scenario." };
   if (trimmed.length > 120)
     return {
       name: null,
-      error: "Portfolio names are limited to 120 characters.",
+      error: "Scenario names are limited to 120 characters.",
     };
   return { name: trimmed, error: null };
 }
@@ -262,7 +259,7 @@ export function SavedScenariosList({
           // Honest failure — onMutated NOT fired (T_SL7b/T_SL7c contract).
           // P61-BUG-2: a 409 book_only_draft carries a stable user-facing
           // `message` saying WHY nothing is shareable (no added strategies —
-          // private book sources never render on the public page); surface it
+          // private allocation sources never render on the public page); surface it
           // instead of the generic retry copy, which can't fix it.
           const body = (await res.json().catch(() => null)) as {
             code?: string;
@@ -396,7 +393,7 @@ export function SavedScenariosList({
           body: JSON.stringify({ name }),
         });
         if (!res.ok) {
-          setMutationError("Couldn't rename this portfolio. Try again.");
+          setMutationError("Couldn't rename this scenario. Try again.");
           return;
         }
         setLocalRows((prev) =>
@@ -406,7 +403,7 @@ export function SavedScenariosList({
         setRenameValue("");
         onMutated?.();
       } catch {
-        setMutationError("Couldn't rename this portfolio. Try again.");
+        setMutationError("Couldn't rename this scenario. Try again.");
       }
     },
     [renameValue, onMutated],
@@ -420,7 +417,7 @@ export function SavedScenariosList({
           method: "DELETE",
         });
         if (!res.ok) {
-          setMutationError("Couldn't delete this portfolio. Try again.");
+          setMutationError("Couldn't delete this scenario. Try again.");
           return;
         }
         setLocalRows((prev) => prev.filter((r) => r.id !== row.id));
@@ -432,13 +429,13 @@ export function SavedScenariosList({
         setConfirmingDeleteId(null);
         onMutated?.();
       } catch {
-        setMutationError("Couldn't delete this portfolio. Try again.");
+        setMutationError("Couldn't delete this scenario. Try again.");
       }
     },
     [onMutated],
   );
 
-  // Compare gating: live book + selected real rows, enabled at >= 2.
+  // Compare gating: live allocation + selected real rows, enabled at >= 2.
   const includeLiveBook = selected.has(LIVE_BOOK_KEY);
   const selectedRows = localRows.filter((r) => selected.has(r.id));
   const selectionCount = selectedRows.length + (includeLiveBook ? 1 : 0);
@@ -450,37 +447,37 @@ export function SavedScenariosList({
   }, [compareEnabled, onCompare, selectedRows, includeLiveBook]);
 
   return (
-    <section className="space-y-3" aria-labelledby="saved-portfolios-heading">
+    <section className="space-y-3" aria-labelledby="saved-scenarios-heading">
       <h2
-        id="saved-portfolios-heading"
+        id="saved-scenarios-heading"
         className="text-base font-semibold text-text-primary"
       >
-        Saved portfolios
+        Saved scenarios
       </h2>
 
       {listLoadError && localRows.length === 0 ? (
         // Hard load failure with nothing cached → honest ERROR state (canonical
-        // error path, role="alert"), NOT the "No saved portfolios yet" empty card
-        // (which would fabricate "you have no portfolios" from a transport
+        // error path, role="alert"), NOT the "No saved scenarios yet" empty card
+        // (which would fabricate "you have no scenarios" from a transport
         // failure — the #509 heading/body honesty lesson).
         <div
           role="alert"
           className="rounded-md border border-negative/40 bg-surface px-4 py-3 text-sm text-negative"
         >
-          Couldn&apos;t load your saved portfolios. Try again.
+          Couldn&apos;t load your saved scenarios. Try again.
         </div>
       ) : localRows.length === 0 ? (
         <EmptyStateCard
-          heading="No saved portfolios yet"
+          heading="No saved scenarios yet"
           body={
-            'Compose a draft above, then choose "Save portfolio" to keep it here. ' +
-            "Saved portfolios reopen into the composer and can be compared side-by-side."
+            'Compose a draft above, then choose "Save scenario" to keep it here. ' +
+            "Saved scenarios reopen into the composer and can be compared side-by-side."
           }
         />
       ) : (
         <>
           <ul className="space-y-2">
-            {/* Live book pseudo-row — participates in selection only. */}
+            {/* Live allocation pseudo-row — participates in selection only. */}
             <li className="flex items-center justify-between gap-3 rounded-md border border-border p-3">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -488,9 +485,9 @@ export function SavedScenariosList({
                   className="h-4 w-4 rounded border-border text-accent focus:ring-2 focus:ring-accent/50"
                   checked={includeLiveBook}
                   onChange={() => toggleSelected(LIVE_BOOK_KEY)}
-                  aria-label="Live book"
+                  aria-label="Live allocation"
                 />
-                <span className="text-sm text-text-primary">Live book</span>
+                <span className="text-sm text-text-primary">Live allocation</span>
                 <span className="text-xs text-text-muted">
                   (your current actual blend)
                 </span>
@@ -524,7 +521,7 @@ export function SavedScenariosList({
                       <div className="flex flex-col gap-1">
                         <input
                           type="text"
-                          aria-label={`Rename portfolio ${row.name}`}
+                          aria-label={`Rename scenario ${row.name}`}
                           value={renameValue}
                           onChange={(e) => {
                             setRenameValue(e.target.value);
@@ -782,7 +779,7 @@ export function SavedScenariosList({
             </Button>
             {!compareEnabled && (
               <p className={cn("text-xs text-text-muted")}>
-                Select 2 or more portfolios (or the live book) to compare.
+                Select 2 or more scenarios (or the live allocation) to compare.
               </p>
             )}
           </div>

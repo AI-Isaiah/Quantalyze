@@ -137,13 +137,14 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
       // Seed 2 strategies (orig + replacement)
       const S_ORIG_NAME = `Phase5-Orig-${stamp}`;
       const S_REPL_NAME = `Phase5-Repl-${stamp}`;
-      // ⚠️ Phase 164.9 fix round — `disclosure_tier` is what decides whether the
-      // REAL name reaches the payload. `displayStrategyName` returns the
-      // synthetic `Strategy #<id-prefix>` for anything that is not
-      // `institutional` and carries no codename, so a tier-less seed made this
-      // arm assert a label the resolver can never produce. The arm's own title
-      // is "resolves nested payload.match_decision.original_strategy.name", so
-      // the fixture must seed the tier under which a name IS resolved.
+      // Phase 201 / D-17 — what decides whether the REAL name reaches the
+      // payload is the viewer's visibility fact (`isDiscoveryVisible`): the
+      // strategy is published, or it is the viewer's own. These strategies are
+      // alloc1's own rows (`status` defaults to draft), so alloc1 sees their real
+      // names and alloc2, whose outcomes reference the same rows, must not.
+      // (Phase 164.9 fix round: the old tier-based reading seeded
+      // `disclosure_tier: "institutional"`; the tier no longer decides this, and
+      // the seed keeps it only so the rows stay realistic.)
       const { data: origStrat, error: origErr } = await admin
         .from("strategies")
         .insert({
@@ -283,6 +284,12 @@ describe("Phase 5 outcomes fan-out + nested match_decisions join (Voice-D11)", (
       expect(result1Ids).not.toContain(alloc2OutcomeId);
       expect(result2Ids).toContain(alloc2OutcomeId);
       expect(result2Ids).not.toContain(alloc1OutcomeId);
+
+      // D-17: alloc2 references alloc1's UNPUBLISHED strategies through the
+      // service-role read, and must never see their real names.
+      const o2 = result2.outcomes.find((o) => o.id === alloc2OutcomeId);
+      expect(o2?.replacement_strategy?.name).not.toBe(S_REPL_NAME);
+      expect(o2?.match_decision?.original_strategy.name).not.toBe(S_ORIG_NAME);
 
       // Phase B pr-test-analyzer F3 — cross-tenant exfiltration probe.
       // alloc2 (signed in) tries to call getMyAllocationDashboard(alloc1).

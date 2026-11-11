@@ -99,6 +99,31 @@ beforeEach(() => {
   });
 });
 
+describe("GET /api/portfolio-alerts — not-owned allocation (201-21 / D-04)", () => {
+  it("404 reads `Allocation not found` when the portfolio_id is not the caller's", async () => {
+    const { assertPortfolioOwnership } = await import("@/lib/queries");
+    vi.mocked(assertPortfolioOwnership).mockResolvedValueOnce(false);
+    // The route builds the (unawaited) query before the ownership probe; the 404
+    // returns before it is ever awaited, so a chain that never resolves is enough.
+    mockFrom.mockImplementation(() => ({
+      select: vi.fn().mockReturnThis(),
+      is: vi.fn().mockReturnThis(),
+      order: vi.fn().mockReturnThis(),
+      range: vi.fn().mockReturnThis(),
+    }));
+
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      `http://localhost:3000/api/portfolio-alerts?portfolio_id=${PORTFOLIO_ID}`,
+      { method: "GET", headers: { origin: "http://localhost:3000" } },
+    );
+    const res = await GET(req);
+    expect(res.status).toBe(404);
+    // Hand-typed full sentence; the `portfolio_id` query field is a machine value and is unchanged.
+    expect((await res.json()).error).toBe("Allocation not found");
+  });
+});
+
 describe("GET /api/portfolio-alerts — P464 pagination", () => {
   it("returns the pagination envelope { alerts, page_size, offset, has_more }", async () => {
     const rows = makeAlertRows(10);

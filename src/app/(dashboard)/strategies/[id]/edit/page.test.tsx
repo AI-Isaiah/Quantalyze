@@ -532,11 +532,11 @@ describe("EditStrategyPage name block (Phase 200)", () => {
       strategyId: STRATEGY_ID,
       name: "Helios alpha sleeve",
       status: "published",
-      preview: { factsheet: "Helios alpha sleeve", discovery: "Orion" },
+      preview: { factsheet: "Helios alpha sleeve", discovery: "Helios alpha sleeve" },
     });
   });
 
-  it("an exploratory row with no codename previews discovery as Strategy #<first 8 of id>", async () => {
+  it("an exploratory row with no codename previews the same real name in both legs (Phase 201 D-09)", async () => {
     strategyDataMock.mockResolvedValue({
       data: {
         id: STRATEGY_ID,
@@ -553,7 +553,7 @@ describe("EditStrategyPage name block (Phase 200)", () => {
 
     expect(nameBlockPropsMock.mock.calls.at(-1)![0].preview).toEqual({
       factsheet: "Alpha Centauri",
-      discovery: "Strategy #13f7b07f",
+      discovery: "Alpha Centauri",
     });
   });
 });

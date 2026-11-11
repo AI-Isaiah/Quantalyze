@@ -174,7 +174,7 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     // 7. Metadata correct: 5 rows, columns 'date, daily_return', typed name.
     await expect(page.getByText("5 rows")).toBeVisible();
     await expect(page.getByText("date, daily_return")).toBeVisible();
-    await expect(page.getByText("2026-01-05 → 2026-01-09")).toBeVisible();
+    await expect(page.getByText("Jan 5, 2026 – Jan 9, 2026")).toBeVisible();
     await expect(page.getByText(typedName).first()).toBeVisible();
 
     // 8. Click "Submit strategy" on Preview to advance to the Strategy

@@ -6,14 +6,18 @@
  *   - NO pie/donut/weight-bar/"allocation %" framing anywhere (absence asserted).
  *   - Mandatory footer disclaimer renders verbatim.
  *   - The narrative metric glossary renders one entry per rendered column
- *     label (Sharpe lift / Corr w/ portfolio / DD improve); the never-rendered
+ *     label (Sharpe lift / Corr w/ allocation / DD improve); the never-rendered
  *     "Score" column is NOT documented (red-team F-2).
+ *   - U-02 / U-17 (Phase 201): the glossary is `Term` from the registry, so the
+ *     app keeps ONE dotted-underline affordance and one definition source, and
+ *     each glossary label equals the column label PortfolioOptimizer renders.
  *   - 0-portfolio honest gate (PortfolioOptimizer NOT mounted, no fake rows).
  *   - Portfolio switch remounts PortfolioOptimizer with null initials.
  */
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { OptimizerPanel } from "./OptimizerPanel";
+import { termDefinition, termLabel } from "@/lib/glossary";
 import type { OptimizerPrefetch } from "../lib/watchlist-read";
 
 // PortfolioOptimizer (mounted via next/dynamic) calls useRouter().
@@ -61,17 +65,11 @@ const FOOTER =
   "Ranked by modeled fit from historical daily returns — suggestions, not an allocation and not a forecast.";
 
 // The rendered column labels PortfolioOptimizer emits; every glossary entry
-// must align to one of these (red-team F-2).
-const COLUMN_LABELS = ["Sharpe lift", "Corr w/ portfolio", "DD improve"];
+// must align to one of these (red-team F-2). U-17: "Corr w/ allocation" in both places.
+const COLUMN_LABELS = ["Sharpe lift", "Corr w/ allocation", "DD improve"];
 
-const TOOLTIPS = {
-  sharpe:
-    "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest.",
-  corr:
-    "Correlation of this strategy's daily returns with your current portfolio, from -1 to 1 (not a percentage). Lower means more diversification benefit.",
-  dd:
-    "Modeled reduction in your portfolio's maximum drawdown from adding this strategy, as a percentage of NAV.",
-};
+// The registry keys behind the three glossary entries (U-02).
+const GLOSSARY_KEYS = ["sharpe_lift", "corr_with_allocation", "dd_improve"] as const;
 
 function prefetch(overrides: Partial<OptimizerPrefetch> = {}): OptimizerPrefetch {
   return {
@@ -101,7 +99,7 @@ describe("OptimizerPanel", () => {
     );
     // Honest copy names WHY the affordance is inert (ADDALLOC-04, Rule-9 intent).
     expect(
-      screen.getByText("Simulate Impact needs a live portfolio"),
+      screen.getByText("Simulate Impact needs a live allocation"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -137,7 +135,7 @@ describe("OptimizerPanel", () => {
       />,
     );
     expect(
-      screen.getByText("Simulate Impact needs a live portfolio"),
+      screen.getByText("Simulate Impact needs a live allocation"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /Connect Exchange/i }),
@@ -161,11 +159,11 @@ describe("OptimizerPanel", () => {
       />,
     );
     expect(
-      screen.getByText("Simulate Impact needs a portfolio"),
+      screen.getByText("Simulate Impact needs an allocation"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Your exchange keys are connected, but you have no portfolio yet. A portfolio starts when you allocate to a strategy.",
+        "Your exchange keys are connected, but you have no allocation yet. An allocation starts when you allocate to a strategy.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -180,24 +178,43 @@ describe("OptimizerPanel", () => {
     expect(screen.getByText(FOOTER)).toBeInTheDocument();
   });
 
-  it("renders the narrative metric glossary verbatim (one per column)", () => {
-    render(<OptimizerPanel prefetch={prefetch()} />);
-    expect(screen.getByTitle(TOOLTIPS.corr)).toBeInTheDocument();
-    expect(screen.getByTitle(TOOLTIPS.sharpe)).toBeInTheDocument();
-    expect(screen.getByTitle(TOOLTIPS.dd)).toBeInTheDocument();
+  it("renders the glossary through Term: three [data-term] triggers, the registry text on focus (U-02)", async () => {
+    const { container } = render(<OptimizerPanel prefetch={prefetch()} />);
+    const triggers = Array.from(container.querySelectorAll("dl [data-term]"));
+    expect(triggers.map((t) => t.getAttribute("data-term"))).toEqual([...GLOSSARY_KEYS]);
+    const corr = container.querySelector('dl [data-term="corr_with_allocation"]') as HTMLElement;
+    fireEvent.focus(corr);
+    // The bubble opens after the Tooltip's 150 ms enter delay.
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      termDefinition("corr_with_allocation"),
+    );
   });
 
-  it("glossary labels match the rendered column labels; 'Score' is NOT documented (F-2)", () => {
-    render(<OptimizerPanel prefetch={prefetch()} />);
-    // Rendered synchronously before the dynamic PortfolioOptimizer resolves, so
-    // these <dt> labels are the glossary's own — one per real column label.
-    for (const label of COLUMN_LABELS) {
-      expect(screen.getByText(label, { selector: "dt" })).toBeInTheDocument();
+  it("keeps ONE affordance: no private dt tab stop, title, aria-label or dotted border (U-02)", () => {
+    const { container } = render(<OptimizerPanel prefetch={prefetch()} />);
+    const dts = Array.from(container.querySelectorAll("dl dt"));
+    expect(dts).toHaveLength(3);
+    for (const dt of dts) {
+      expect(dt.hasAttribute("tabindex")).toBe(false);
+      expect(dt.hasAttribute("title")).toBe(false);
+      expect(dt.hasAttribute("aria-label")).toBe(false);
+      expect(dt.className).not.toContain("border-dotted");
     }
+    // One tab stop per entry: exactly the Term trigger inside each dt.
+    expect(container.querySelectorAll("dl [tabindex]")).toHaveLength(3);
+  });
+
+  it("glossary labels equal the rendered column labels and the registry; 'Score' is NOT documented (F-2, U-17)", () => {
+    const { container } = render(<OptimizerPanel prefetch={prefetch()} />);
+    // Rendered synchronously before the dynamic PortfolioOptimizer resolves, so
+    // these triggers are the glossary's own — one per real column label.
+    const labels = Array.from(container.querySelectorAll("dl [data-term]")).map(
+      (t) => t.textContent,
+    );
+    expect(labels).toEqual(COLUMN_LABELS);
+    expect(labels).toEqual(GLOSSARY_KEYS.map((k) => termLabel(k)));
     // "Score" is only a sort key, never a rendered column → must not be a glossary entry.
-    expect(
-      screen.queryByText("Score", { selector: "dt" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Score", { selector: "dl *" })).not.toBeInTheDocument();
   });
 
   it("renders suggestions as a ranked list sorted by score DESC", async () => {
@@ -232,7 +249,7 @@ describe("OptimizerPanel", () => {
         })}
       />,
     );
-    const select = screen.getByRole("combobox", { name: /portfolio/i });
+    const select = screen.getByRole("combobox", { name: /allocation/i });
     // Default portfolio's persisted suggestions render first.
     await screen.findByText("Alpha");
 
@@ -246,9 +263,26 @@ describe("OptimizerPanel", () => {
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
 
+  // U-17 / F-2: the label equality is asserted against the columns PortfolioOptimizer really
+  // renders, not against a constant. Kept after the dynamic chunk resolves (see the note below).
+  it("every glossary label equals a column label PortfolioOptimizer renders, key for key (U-17)", async () => {
+    const { container } = render(<OptimizerPanel prefetch={prefetch()} />);
+    await screen.findByText("Alpha");
+    for (const key of GLOSSARY_KEYS) {
+      const glossary = container.querySelector(`dl [data-term="${key}"]`);
+      const columns = Array.from(
+        container.querySelectorAll(`[data-term="${key}"]`),
+      ).filter((el) => !el.closest("dl"));
+      expect(columns.length, `${key}: a rendered column`).toBeGreaterThan(0);
+      for (const column of columns) {
+        expect(column.textContent).toBe(glossary?.textContent);
+      }
+    }
+  });
+
   // Kept LAST: it resolves the next/dynamic PortfolioOptimizer chunk, whose own
-  // <dt>-less markup repeats the glossary titles, so any glossary getByTitle
-  // test placed after it in this file would see duplicates.
+  // column labels repeat the glossary's `[data-term]` triggers, so any glossary
+  // query placed after it in this file would see duplicates.
   it.each([true, false])(
     "a portfolio with no analytics mounts the optimizer's never-run state and shows no connect copy (hasConnectedKeys=%s) (D-06)",
     async (hasConnectedKeys) => {

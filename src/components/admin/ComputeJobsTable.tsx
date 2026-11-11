@@ -306,7 +306,7 @@ export function ComputeJobsTable() {
                 (job.strategy_id
                   ? "Unnamed strategy"
                   : job.portfolio_id
-                    ? "Unnamed portfolio"
+                    ? "Unnamed allocation"
                     : "—");
               const errorText = job.last_error
                 ? job.last_error.length > 60

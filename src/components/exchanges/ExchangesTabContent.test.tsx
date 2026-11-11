@@ -12,7 +12,7 @@ vi.mock("@/components/exchanges/AllocatorExchangeManager", () => ({
   AllocatorExchangeManager: () => <div data-testid="manager-stub" />,
 }));
 
-const ALLOCATOR_INTRO = /build your Active Allocation portfolio/;
+const ALLOCATOR_INTRO = /build your allocation\. No manual data entry/;
 
 function renderFor(role: "manager" | "allocator" | "both") {
   return render(
@@ -34,5 +34,33 @@ describe("ExchangesTabContent intro (WR-02)", () => {
     renderFor(role);
     expect(screen.getByText(ALLOCATOR_INTRO)).toBeInTheDocument();
     expect(document.body.textContent).toMatch(/invest and divest events are detected/);
+  });
+});
+
+// Phase 201 D-04: the allocator's live holdings are an "allocation", and the link back to the
+// dashboard uses the sentence-case canonical name from Interaction contract 3.
+describe("ExchangesTabContent live-holdings card (D-04)", () => {
+  function renderWithPortfolio() {
+    return render(
+      <ExchangesTabContent
+        initialKeys={[]}
+        activePortfolio={{ id: "p1", name: "Active Allocation" }}
+        hasHoldings
+        role="allocator"
+      />,
+    );
+  }
+
+  it("names the card an allocation and links to Open My allocation →", () => {
+    renderWithPortfolio();
+    expect(screen.getByText("Real allocation")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open My allocation →" })).toHaveAttribute(
+      "href",
+      "/allocations",
+    );
+    expect(document.body.textContent).toMatch(
+      /This allocation's positions, amounts, and invest\/divest events are derived automatically/,
+    );
+    expect(document.body.textContent).not.toMatch(/portfolio/i);
   });
 });

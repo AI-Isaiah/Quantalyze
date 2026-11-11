@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { formatDay } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/PageHeader";
 import {
   dailyFunnel,
@@ -125,7 +126,7 @@ export default async function AdminUsagePage() {
                 {funnel.rows.map((row) => (
                   <tr key={row.day} className="border-b border-border/60">
                     <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary whitespace-nowrap">
-                      {row.day}
+                      {formatDay(row.day)}
                     </td>
                     <td className="py-2 pr-4 text-text-primary font-metric tabular-nums text-right">
                       {row.session_start}
@@ -215,7 +216,7 @@ export default async function AdminUsagePage() {
                       key={d}
                       className="py-2 pr-2 font-medium text-text-muted text-micro uppercase tracking-wider text-right whitespace-nowrap"
                     >
-                      {d.slice(5)}
+                      {formatDay(d)}
                     </th>
                   ))}
                   <th className="py-2 font-medium text-text-muted text-caption uppercase tracking-wider text-right">

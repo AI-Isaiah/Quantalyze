@@ -15,6 +15,11 @@ import { CircuitOpenError } from "@/lib/seam-errors";
  * Covers 7 branches: CSRF, auth, rate-limit, JSON parse, validation,
  * ownership, scoring. Mirrors simulator/route.test.ts.
  *
+ * Phase 201 / F-04, U-26: the route's three own error sentences (429, 504,
+ * 500) no longer carry the retired word "Bridge" and read "Scoring
+ * replacements ...". Status codes and `code` values are unchanged. The
+ * terminal sentence below stays hand-typed on purpose.
+ *
  * TC4 (G13-038/G15-046 family) asserts the desired behavior: a
  * ratelimit_misconfigured fail-CLOSED result SHOULD surface as 503 so
  * canary alarms fire instead of looking like a normal 429 throttle.
@@ -347,7 +352,9 @@ describe("POST /api/bridge", () => {
     );
     expect(res.status).toBe(429);
     const body = await res.json();
-    expect(body.error).toMatch(/Too many requests/i);
+    // F-04 / U-26: the retired word is gone from the sentence a user reads.
+    expect(body.error).toBe("Too many requests. Scoring replacements is compute-intensive.");
+    expect(body.error).not.toMatch(/\bBridge\b/);
   });
 
   // G13-038: 429 envelope includes Retry-After header (parity with sibling
@@ -506,7 +513,11 @@ describe("POST /api/bridge", () => {
     );
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body.error).toBe("Portfolio not found");
+    // 201-21 / D-04: the route's OWN not-found speaks the allocator's word. The
+    // full sentence is hand-typed. The PORTFOLIO_NOT_FOUND code and the TC9
+    // forwarded upstream text are a machine value and Python copy: both keep
+    // their old spelling.
+    expect(body.error).toBe("Allocation not found");
   });
 
   it("TC6b — cross-tenant: a portfolio owned by another user 404s, and the route MUST filter on session user.id", async () => {
@@ -527,7 +538,11 @@ describe("POST /api/bridge", () => {
     );
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body.error).toBe("Portfolio not found");
+    // 201-21 / D-04: the route's OWN not-found speaks the allocator's word. The
+    // full sentence is hand-typed. The PORTFOLIO_NOT_FOUND code and the TC9
+    // forwarded upstream text are a machine value and Python copy: both keep
+    // their old spelling.
+    expect(body.error).toBe("Allocation not found");
     // Discriminating: the route must have scoped the lookup to the session
     // user — without `.eq("user_id", user.id)` this assertion fails.
     expect(STATE.eqCalls).toContainEqual(["user_id", STATE.authUser!.id]);
@@ -578,7 +593,8 @@ describe("POST /api/bridge", () => {
     );
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toBe("Bridge scoring failed. Please try again.");
+    expect(body.error).toBe("Scoring replacements failed. Please try again.");
+    expect(body.error).not.toMatch(/\bBridge\b/);
     // The internal Python detail must never appear in the response envelope.
     expect(body.error).not.toContain("simulator_scoring.py");
     expect(body.error).not.toContain("Zod");
@@ -626,7 +642,8 @@ describe("POST /api/bridge", () => {
     );
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toBe("Bridge scoring failed. Please try again.");
+    expect(body.error).toBe("Scoring replacements failed. Please try again.");
+    expect(body.error).not.toMatch(/\bBridge\b/);
     expect(body.error).not.toContain("traceback");
     expect(captureSpy).toHaveBeenCalledWith(
       expect.any(Error),
@@ -650,7 +667,8 @@ describe("POST /api/bridge", () => {
     );
     expect(res.status).toBe(504);
     const body = await res.json();
-    expect(body.error).toMatch(/timed out/i);
+    expect(body.error).toBe("Scoring replacements timed out. Please try again.");
+    expect(body.error).not.toMatch(/\bBridge\b/);
   });
 
   // Phase 140 / SEAM-04 (SC-5c): a tripped Railway breaker is a distinct
@@ -827,7 +845,7 @@ describe("POST /api/bridge", () => {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
-  const BRIDGE_TERMINAL_SENTENCE = "Bridge scoring failed. Please try again.";
+  const BRIDGE_TERMINAL_SENTENCE = "Scoring replacements failed. Please try again.";
 
   /**
    * A message shaped like the things H-1062 exists to keep off the wire: a

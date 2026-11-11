@@ -3,7 +3,7 @@
  *
  *   T_D1  isOpen=false → returns null
  *   T_D2  isOpen=true  → backdrop + 720px panel + role=dialog + aria-label="Commit scenario" + aria-modal=true
- *   T_D3  Header copy "Commit scenario" + subtitle "{N} decisions to record · routed through the Bridge outcome graph"
+ *   T_D3  Header copy "Commit scenario" + subtitle "{N} decisions to record · each is saved as an outcome" (201-30, F-04, U-26)
  *   T_D4  Mixed diffs → 3 grouped sections (Holdings removed · 1 / Strategies added · 1 / Weight changes · 1)
  *   T_D5  Empty group hidden — single voluntary_remove → no "Strategies added" section
  *   T_D6  Each voluntary_remove row embeds RejectedForm
@@ -147,8 +147,49 @@ describe("T_D2-T_D8 — drawer shell + grouped sections + form embedding + foote
     );
     expect(screen.getByText("Commit scenario")).toBeInTheDocument();
     expect(
-      screen.getByText(/3 decisions to record · routed through the Bridge outcome graph/i),
+      screen.getByText("3 decisions to record · each is saved as an outcome"),
     ).toBeInTheDocument();
+  });
+
+  // Plan 201-30 (F-04, U-26): the group notes say what is recorded, in plain
+  // words, and no text, aria-label or title renders the retired word.
+  it("T_D3b: the removed and added notes name the recorded outcome in plain words", () => {
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "Each removal is recorded as a rejected outcome, so your outcomes show why you exited.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Each addition is recorded as an allocated outcome, so its realized return is tracked daily.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("T_D3c: the drawer renders no retired word in text, aria-label, title or Term", () => {
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF, VM_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    expect(document.body.textContent ?? "").not.toMatch(/\bBridge\b/);
+    for (const attr of ["aria-label", "title"]) {
+      for (const el of Array.from(document.body.querySelectorAll(`[${attr}]`))) {
+        expect(el.getAttribute(attr) ?? "").not.toMatch(/\bBridge\b/);
+      }
+    }
+    expect(document.querySelector('[data-term="bridge"]')).toBeNull();
   });
 
   it("T_D4: 3 sections render with per-kind counts", () => {
@@ -246,6 +287,30 @@ describe("T_D9 — M11 pre-flight modal a11y (portal'd, only ONE role=dialog at 
       '[role="dialog"][aria-modal="true"]',
     );
     expect(modals.length).toBe(1);
+  });
+
+  // Plan 201-30 (T-201-39, F-04, U-26): the confirmation keeps the outcome count,
+  // the daily-tracking claim and the "can't be undone" clause, with the plural
+  // filled for one and for many, and names no retired word.
+  it.each([
+    [[VR_DIFF], "This will record 1 outcome, and the realized return of each is tracked daily. Decisions can't be undone — but you can record corrections later from the Outcomes timeline."],
+    [[VR_DIFF, VA_DIFF], "This will record 2 outcomes, and the realized return of each is tracked daily. Decisions can't be undone — but you can record corrections later from the Outcomes timeline."],
+  ] as const)("confirmation sentence, case %# (1 diff, then 2 diffs), reads the recorded-outcome copy", (diffs, expected) => {
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[...diffs]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([...diffs]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+    expect(dialogs.length).toBe(1);
+    const text = (dialogs[0].textContent ?? "").replace(/\s+/g, " ");
+    expect(text).toContain(expected);
+    expect(text).not.toMatch(/\bBridge\b/);
   });
 });
 
@@ -451,7 +516,7 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
       async () =>
         new Response(
           JSON.stringify({
-            error: "Portfolio changed since you started this scenario",
+            error: "Your allocation changed since you started this scenario",
             detail:
               "Your holdings were updated after you opened this scenario. Refresh to load the latest holdings, then re-apply your changes.",
             code: "portfolio_fingerprint_stale",
@@ -486,6 +551,45 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
     expect(onSubmitSuccess).not.toHaveBeenCalled();
     // Retry is futile for a stale conflict → the Submit button is disabled.
     expect(screen.getByTestId("commit-drawer-submit")).toBeDisabled();
+
+    vi.unstubAllGlobals();
+  });
+
+  // D-04 / D-18: when the 409 carries only the machine code (no detail, no
+  // error), the drawer's own fallback names the holdings and the scenario, and
+  // the machine code (`portfolio_fingerprint_stale`) never reaches the user.
+  it("the stale-conflict fallback message carries no retired word and not the machine code", async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ code: "portfolio_fingerprint_stale" }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={vi.fn()}
+        initHoldingsFingerprint="BTC:binance:spot"
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const banner = screen.getByTestId("commit-drawer-error");
+    expect(banner).toHaveTextContent(
+      "Your holdings changed since you started this scenario.",
+    );
+    expect(banner).not.toHaveTextContent(/portfolio|\bbook\b/i);
 
     vi.unstubAllGlobals();
   });

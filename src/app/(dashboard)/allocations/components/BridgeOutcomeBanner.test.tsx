@@ -5,7 +5,12 @@ import { BridgeOutcomeBanner } from "./BridgeOutcomeBanner";
 // ---------------------------------------------------------------------------
 // H-0086 — BridgeOutcomeBanner had NO dedicated test file. The row-integrated
 // strip exposes Allocated / Rejected CTAs plus a "Dismiss for today" button
-// that POSTs /api/bridge/outcome/dismiss. The critical, untested behaviour is
+// that POSTs /api/bridge/outcome/dismiss.
+//
+// F-04 / U-26 (Phase 201 plan 28): "Bridge" is retired from user-visible copy.
+// The region is "Record outcome for a suggested replacement" and the question
+// reads "Did you act on this replacement suggestion?"; a rendered arm fails on
+// the retired word in text, aria-label or title. The critical, untested behaviour is
 // the dismiss state machine: success → onDismiss(); failure → banner stays
 // (onDismiss NOT called) and the error is surfaced rather than optimistically
 // hiding.
@@ -43,10 +48,25 @@ describe("BridgeOutcomeBanner — H-0086", () => {
     vi.restoreAllMocks();
   });
 
+  it("is found by its plain-words region name and carries no retired word (F-04, U-26)", () => {
+    const { container } = renderBanner();
+    expect(
+      screen.getByRole("region", { name: "Record outcome for a suggested replacement" }),
+    ).toBeInTheDocument();
+    const values = [
+      container.textContent ?? "",
+      ...Array.from(container.querySelectorAll("[aria-label], [title]")).flatMap((el) => [
+        el.getAttribute("aria-label") ?? "",
+        el.getAttribute("title") ?? "",
+      ]),
+    ];
+    for (const v of values) expect(v).not.toMatch(/\bBridge\b/);
+  });
+
   it("renders the prompt + Allocated/Rejected CTAs + dismiss button", () => {
     renderBanner();
     expect(
-      screen.getByText(/Did you act on this Bridge suggestion\?/i),
+      screen.getByText(/Did you act on this replacement suggestion\?/i),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Allocated" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Rejected" })).toBeInTheDocument();
@@ -106,7 +126,7 @@ describe("BridgeOutcomeBanner — H-0086", () => {
     expect(onDismiss).not.toHaveBeenCalled();
     // Banner still present + the dismiss button is re-enabled (finally block).
     expect(
-      screen.getByText(/Did you act on this Bridge suggestion\?/i),
+      screen.getByText(/Did you act on this replacement suggestion\?/i),
     ).toBeInTheDocument();
     await waitFor(() => expect(dismissBtn).not.toBeDisabled());
   });

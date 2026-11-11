@@ -209,7 +209,7 @@ describe("FactsheetBody — Phase 90 FS-03 basis toggle (RED until 90-05)", () =
     const bMtm = within(b.container).getByText("Mark-to-market");
     expect(bMtm.getAttribute("aria-disabled")).toBe("true");
     expect(bMtm.getAttribute("title")).toBe(
-      "Mark-to-market unavailable: composites that include an options book report cash settlement only.",
+      "Mark-to-market unavailable: composites that include options positions report cash settlement only.",
     );
 
     // (d) gated with no reason: the basis-agnostic default fallback copy (Phase 102
@@ -333,7 +333,8 @@ function fixtureSingleKeyMtmLeverageNoSeries(): FactsheetPayload {
 // Read the numeric value cell for a KPI label within a rendered container.
 function kpiValue(container: HTMLElement, label: string): string {
   const labelEl = within(container).getAllByText(label)[0]!;
-  const cell = labelEl.parentElement as HTMLElement;
+  // Phase 201 plan 09: the label text sits in a Term span inside the factsheet-kpi-label <p>.
+  const cell = (labelEl.closest('[data-testid="factsheet-kpi-label"]') ?? labelEl).parentElement as HTMLElement;
   // The value <p> is the label's sibling inside the cell div.
   const value = cell.querySelector("p:last-child");
   return value?.textContent ?? "";
@@ -605,9 +606,9 @@ function fixtureSingleKeyMtmParity(): FactsheetPayload {
 // <h3> title so "Sharpe"/"Sortino" (which also label the Rolling Metrics table)
 // resolve unambiguously. Rail rows are <tr><td>label</td><td>strategy</td><td>bench</td>.
 function railValue(container: HTMLElement, panelTitle: string, rowLabel: string): string {
-  const heading = within(container)
-    .getAllByText(panelTitle)
-    .find((el) => el.tagName === "H3");
+  // Phase 201 D-03: a panel title that is a registered term (Max Drawdown) renders inside a Term, so the
+  // h3 owns no text node of its own. Find the h3 by its whole text, which the Term keeps unchanged.
+  const heading = Array.from(container.querySelectorAll("h3")).find((h) => h.textContent === panelTitle);
   const section = heading?.closest("section") as HTMLElement;
   const labelTd = Array.from(section.querySelectorAll("td")).find(
     (td) => td.textContent === rowLabel,
@@ -1020,7 +1021,8 @@ function fixtureSmoothedJoint(withBundle: boolean): FactsheetPayload {
 // Read the α-vs-comparator KPI cell (label carries a live comparator short name).
 function alphaCell(container: HTMLElement): string {
   const label = within(container).getAllByText(/α vs/)[0]!;
-  const cell = label.parentElement as HTMLElement;
+  // Phase 201 plan 09: the label text sits in a Term span inside the factsheet-kpi-label <p>.
+  const cell = (label.closest('[data-testid="factsheet-kpi-label"]') ?? label).parentElement as HTMLElement;
   return cell.querySelector("p:last-child")?.textContent ?? "";
 }
 

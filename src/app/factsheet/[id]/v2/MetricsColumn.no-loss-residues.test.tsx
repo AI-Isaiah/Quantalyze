@@ -54,13 +54,15 @@ function viaCache(p: FactsheetPayload): FactsheetPayload {
 
 /** Renders the column once; returns a reader of a panel row's value cell. */
 function renderColumn(payload: FactsheetPayload): (panel: string, label: string) => string {
-  const { getAllByText } = render(
+  const { container } = render(
     <FactsheetProvider payload={payload}>
       <MetricsColumn />
     </FactsheetProvider>,
   );
   return (panel: string, label: string) => {
-    const heading = getAllByText(panel, { selector: "h3" })[0];
+    // By the h3's full text, not its own text node: a titled term sits inside a `Term` span (Phase 201).
+    const heading = [...container.querySelectorAll("h3")].find(h => h.textContent === panel);
+    if (!heading) throw new Error(`no panel titled "${panel}"`);
     const section = heading.closest("section") as HTMLElement;
     const row = [...section.querySelectorAll("tbody tr")].find(
       tr => tr.querySelector("td")?.textContent === label,
@@ -108,12 +110,16 @@ describe("HI3-02: Calmar by Year reads \"—\" for a year with no drawdown", () 
   );
 
   function calmarCells(payload: FactsheetPayload): Record<string, string> {
-    const { getAllByText } = render(
+    const { container } = render(
       <FactsheetProvider payload={payload}>
         <MetricsColumn />
       </FactsheetProvider>,
     );
-    const section = getAllByText("Calmar by Year", { selector: "h3" })[0].closest("section") as HTMLElement;
+    // Phase 201 D-01: "Calmar" is a Term, so the heading's words sit in two nodes. Find the h3 by its
+    // whole text, which is still "Calmar by Year" (the Term trigger keeps its label text).
+    const heading = Array.from(container.querySelectorAll("h3")).find(h => h.textContent === "Calmar by Year");
+    expect(heading, "the Calmar by Year heading reads its whole text").toBeDefined();
+    const section = heading!.closest("section") as HTMLElement;
     const out: Record<string, string> = {};
     for (const tr of section.querySelectorAll("tbody tr")) {
       const tds = tr.querySelectorAll("td");

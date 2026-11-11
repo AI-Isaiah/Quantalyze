@@ -6,6 +6,7 @@ import {
   CONTACT_SOURCES,
   CONTACT_TOPICS,
   CONTACT_TOPIC_LABELS,
+  EGRESS_IP_STATUS_LINK,
   contactHref,
   parseContactPrefill,
 } from "./contact";
@@ -43,6 +44,17 @@ describe("contract constants (UI-SPEC, pinned verbatim)", () => {
 
   it("uses the exact link text every pointer sentence carries", () => {
     expect(CONTACT_FORM_LINK_TEXT).toBe("contact form");
+  });
+
+  // Phase 201 PLAINWORDS plan 32 (F-12, U-28): the phrase and the anchor the
+  // wizard hint and ErrorEnvelope both link. Hand-typed, so renaming either
+  // half in the module alone is red here and in the /security page test.
+  it("pins the egress IP status phrase and its /security anchor", () => {
+    expect(EGRESS_IP_STATUS_LINK).toEqual({
+      text: "egress IP status",
+      href: "/security#egress-ips",
+    });
+    expect(Object.isFrozen(EGRESS_IP_STATUS_LINK)).toBe(true);
   });
 
   it("fences ids to the charset and length of the ids the app mints", () => {

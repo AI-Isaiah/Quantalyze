@@ -7,7 +7,9 @@ import { Button } from "@/components/ui/Button";
 import { LiveRegion } from "@/components/ui/LiveRegion";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { computeFreshness } from "@/lib/freshness";
+import { formatDay } from "@/lib/utils";
 import { displayStrategyName } from "@/lib/strategy-display";
+import { isDiscoveryVisible } from "@/lib/visibility";
 import { matchDecisionLabel } from "@/lib/display-labels";
 import type { DisclosureTier } from "@/lib/types";
 import type { AllocatorPreferences } from "@/lib/preferences";
@@ -63,6 +65,9 @@ export interface CandidateRow {
     name: string | null;
     codename: string | null;
     disclosure_tier: DisclosureTier | null;
+    // Phase 201 / D-17: read with the embed so the name follows discovery
+    // visibility. Pinned by the admin embeds test in src/lib/strategy-display.test.ts (the compiler cannot check an untyped select).
+    status: string | null;
     strategy_types: string[] | null;
     supported_exchanges: string[] | null;
     aum: number | null;
@@ -128,6 +133,8 @@ interface Decision {
     name: string | null;
     codename: string | null;
     disclosure_tier: DisclosureTier | null;
+    // Phase 201 / D-17: see `CandidateRow.strategies.status`.
+    status: string | null;
   } | null;
 }
 
@@ -542,7 +549,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
             onClick={guard(() => setShowPreferencesPanel(true))}
             className="hidden md:inline-flex"
           >
-            Edit preferences
+            Edit mandate
           </Button>
           {batch && (
             <span className="ml-auto text-micro text-text-muted font-mono tabular-nums">
@@ -583,7 +590,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
       {batch && candidates.length === 0 && (
         <Card className="text-center py-10">
           <p className="text-small text-text-muted">
-            No eligible candidates for this batch. Try editing preferences or relaxing criteria.
+            No eligible candidates for this batch. Try editing the mandate or relaxing criteria.
           </p>
         </Card>
       )}
@@ -659,7 +666,9 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                               <span className="font-mono tabular-nums text-text-muted @2xl:hidden">
                                 {cand.rank !== null ? `${cand.rank}. ` : ""}
                               </span>
-                              {displayStrategyName(cand.strategies)}
+                              {/* D-17: the admin gate (`isAdminUser`) admits this row; discovery visibility
+                                  (`isDiscoveryVisible`, null viewer id) decides whether its name is printed. */}
+                              {displayStrategyName(cand.strategies, { visible: isDiscoveryVisible(cand.strategies ?? {}, null) })}
                             </p>
                             {cand.reasons[0] && (
                               <p
@@ -749,7 +758,9 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                     {excluded.map((exc) => (
                       <tr key={exc.id} className="border-b border-border">
                         <td className="px-4 py-2 text-small text-text-primary">
-                          {displayStrategyName(exc.strategies)}
+                          {/* D-17: the admin gate (`isAdminUser`) admits this row; discovery visibility
+                              (`isDiscoveryVisible`, null viewer id) decides whether its name is printed. */}
+                          {displayStrategyName(exc.strategies, { visible: isDiscoveryVisible(exc.strategies ?? {}, null) })}
                         </td>
                         <td
                           className="px-4 py-2 text-small text-text-secondary"
@@ -814,19 +825,21 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                   <tbody>
                     {decisions.map((d) => (
                       <tr key={d.id} className="border-b border-border">
-                        <td className="px-4 py-2 text-caption font-mono text-text-muted @max-2xl:hidden">
-                          {new Date(d.created_at).toLocaleDateString()}
+                        <td className="px-4 py-2 text-caption font-mono text-text-muted whitespace-nowrap @max-2xl:hidden">
+                          {formatDay(d.created_at)}
                         </td>
                         <td className="px-4 py-2 text-caption font-mono uppercase tracking-wider text-text-secondary">
                           {matchDecisionLabel(d.decision)}
                           {/* Narrow-container relocation of the collapsed When
                               column \u2014 the REAL decision date. */}
-                          <span className="mt-0.5 block font-mono normal-case tracking-normal text-micro text-text-muted @2xl:hidden">
-                            {new Date(d.created_at).toLocaleDateString()}
+                          <span className="mt-0.5 block whitespace-nowrap font-mono normal-case tracking-normal text-micro text-text-muted @2xl:hidden">
+                            {formatDay(d.created_at)}
                           </span>
                         </td>
                         <td className="px-4 py-2 text-small text-text-primary">
-                          {displayStrategyName(d.strategies)}
+                          {/* D-17: the admin gate (`isAdminUser`) admits this row; discovery visibility
+                              (`isDiscoveryVisible`, null viewer id) decides whether its name is printed. */}
+                          {displayStrategyName(d.strategies, { visible: isDiscoveryVisible(d.strategies ?? {}, null) })}
                         </td>
                         <td
                           className="px-4 py-2 text-caption text-text-secondary max-w-[320px] truncate"

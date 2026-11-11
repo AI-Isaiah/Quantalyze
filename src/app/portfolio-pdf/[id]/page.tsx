@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { Button } from "@/components/ui/Button";
 import { LegalFooter } from "@/components/legal/LegalFooter";
+import { formatDay } from "@/lib/utils";
 
 /**
  * Phase 195 TRIM (D-03), 2026-11-07 — the portfolio report is RETIRED.
@@ -21,7 +22,7 @@ import { LegalFooter } from "@/components/legal/LegalFooter";
  * `LegalFooter` links are navigation, not a disclaimer.
  */
 export const metadata: Metadata = {
-  title: "Portfolio report retired",
+  title: "Allocation report retired",
   robots: "noindex",
 };
 
@@ -31,19 +32,19 @@ export default function PortfolioReportRetiredPage() {
       <main className="min-h-full bg-page">
         <article className="mx-auto max-w-2xl px-6 py-16">
           <p className="text-micro font-mono uppercase tracking-[0.22em] text-text-muted">
-            Portfolio report · Retired
+            Allocation report · Retired
           </p>
           <h1 className="mt-2 font-display text-page-title leading-tight text-text-primary">
-            This portfolio report has been retired
+            This allocation report has been retired
           </h1>
           <p className="mt-4 text-body leading-normal text-text-secondary">
-            The link you followed opened a portfolio report. We no longer
-            publish portfolio reports, so this report is not available here or
+            The link you followed opened an allocation report. We no longer
+            publish allocation reports, so this report is not available here or
             as a PDF.
           </p>
           <p className="mt-2 text-body leading-normal text-text-secondary">
             If you hold an allocation with us, its current figures are on My
-            Allocation once you sign in. You can also browse the strategies we
+            allocation once you sign in. You can also browse the strategies we
             list.
           </p>
           <div className="mt-6 flex flex-wrap gap-3">
@@ -54,12 +55,12 @@ export default function PortfolioReportRetiredPage() {
             </Link>
             <Link href="/allocations">
               <Button variant="secondary" size="md">
-                Open My Allocation
+                Open My allocation
               </Button>
             </Link>
           </div>
           <p className="mt-8 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
-            Retired 2026-11-07
+            Retired {formatDay("2026-11-07")}
           </p>
         </article>
       </main>

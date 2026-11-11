@@ -80,7 +80,9 @@ function mount(payload: FactsheetPayload) {
 }
 
 function cellValue(label: string): string {
-  const cell = screen.getByText(label).parentElement!;
+  // Phase 201 plan 09: the label text sits in a Term span inside the factsheet-kpi-label <p>.
+  const text = screen.getByText(label);
+  const cell = (text.closest('[data-testid="factsheet-kpi-label"]') ?? text).parentElement!;
   return cell.querySelectorAll("p")[1]?.textContent ?? "";
 }
 
@@ -110,7 +112,7 @@ describe("below the paired floor the factsheet names the cause (169.4 review rou
 
     // 170.6 plan 11 (D-08): SPX's last close (2026-05-08) is before this record's last date, so the
     // sentence now ends with the day its prices end. The rest of the sentence is unchanged.
-    const reason = `Alpha and beta need at least ${MIN_PAIRED_OBSERVATIONS} days paired with SPX; this record has ${paired}. SPX prices end May 8.`;
+    const reason = `Alpha and beta need at least ${MIN_PAIRED_OBSERVATIONS} days paired with SPX; this record has ${paired}. SPX prices end May 8, 2026.`;
     const reasons = screen.getAllByTestId("joint-floor-reason");
     // One under the KPI strip, one in §IV.
     expect(reasons).toHaveLength(2);
@@ -131,7 +133,7 @@ describe("below the paired floor the factsheet names the cause (169.4 review rou
     expect(cellValue("α vs SPX")).toBe("—");
     for (const r of screen.getAllByTestId("joint-floor-reason")) {
       // 170.6 plan 11 (D-08): the record is wholly past SPX's last close, so the clause says so.
-      expect(r.textContent).toBe(`Alpha and beta need at least ${MIN_PAIRED_OBSERVATIONS} days paired with SPX; this record has 0. SPX prices end May 8.`);
+      expect(r.textContent).toBe(`Alpha and beta need at least ${MIN_PAIRED_OBSERVATIONS} days paired with SPX; this record has 0. SPX prices end May 8, 2026.`);
     }
   });
 

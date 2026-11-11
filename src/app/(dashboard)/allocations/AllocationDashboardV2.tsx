@@ -17,6 +17,7 @@ import {
   namedExitKeyIds,
 } from "./components/MissingDataMessage";
 import { GlancePanel } from "./components/GlancePanel";
+import { Term } from "@/components/ui/Term";
 import { MandateTabPanel } from "./MandateTabPanel";
 import { historyGate, resolveNotSyncingKeys } from "./lib/history-gate";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
@@ -187,7 +188,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         ? null
         : buildAllocatorPortfolioFactsheetPayload(equityDailyPoints, {
             allocatorId: props.allocator_id,
-            portfolioName: portfolio?.name ?? "My Portfolio",
+            portfolioName: portfolio?.name ?? "My allocation",
             computedAt: analytics?.computed_at ?? null,
             markets: activeVenues,
             startDate: equityDailyPoints[0]?.date ?? null,
@@ -244,7 +245,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             id="overview-mandate-heading"
             className="mb-3 text-sm font-semibold uppercase tracking-wider text-text-primary"
           >
-            Mandate
+            <Term k="mandate">Mandate</Term>
           </h2>
           <MandateTabPanel {...props} />
         </section>
@@ -254,7 +255,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
   const equitySlot = (
     <section
-      aria-label="Portfolio equity curve"
+      aria-label="Allocation equity curve"
       className="mt-6"
       data-testid="overview-equity-curve"
     >
@@ -369,7 +370,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           </div>
         ) : (
           <p className="mt-3 text-sm text-text-secondary">
-            This section needs your book&apos;s history. See the note above.
+            This section needs your allocation&apos;s history. See the note above.
           </p>
         )}
       </section>
@@ -384,7 +385,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           id="overview-mandate-heading"
           className="mb-3 text-sm font-semibold uppercase tracking-wider text-text-primary"
         >
-          Mandate
+          <Term k="mandate">Mandate</Term>
         </h2>
         <MandateTabPanel {...props} />
       </section>
@@ -424,7 +425,7 @@ function FactsheetWarmupNote({ curveDays }: { curveDays: number }) {
       className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
     >
       <p className="text-fixed-10 font-mono uppercase tracking-[0.18em] text-text-muted">
-        Portfolio factsheet
+        Allocation factsheet
       </p>
       <p className="mt-3 text-sm text-text-secondary">
         Aggregated factsheet panels appear once at least three days of

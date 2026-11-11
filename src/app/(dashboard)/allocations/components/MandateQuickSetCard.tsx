@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Term } from "@/components/ui/Term";
 import { STRATEGY_TYPES } from "@/lib/constants";
 import { useSessionStorageBoolean } from "@/lib/hooks/useSessionStorageBoolean";
 
@@ -139,10 +140,10 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
         id="mandate-quick-set-heading"
         className="text-lg font-semibold text-text-primary leading-snug mb-2"
       >
-        Mandate quick-set
+        <Term k="mandate">Mandate</Term> quick-set
       </h2>
       <p className="text-sm text-text-secondary leading-relaxed mb-4">
-        Set how the Bridge ranks recommendations for you. We&apos;ve suggested
+        Set the mandate your holdings are checked against. We&apos;ve suggested
         defaults — review and save, or skip for now.
       </p>
 
@@ -177,8 +178,8 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
           </span>
         </div>
         <p className="text-xs text-text-muted mt-1">
-          Suggested: 15%. The Bridge flags any holding that exceeds this share
-          of your portfolio.
+          Suggested: 15%. Any holding above this share of your allocation
+          is flagged for review.
         </p>
       </div>
 
@@ -211,8 +212,8 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
           })}
         </div>
         <p className="text-xs text-text-muted mt-1">
-          Suggested: none — keep open until you&apos;ve seen a few Bridge
-          picks.
+          Suggested: none — keep open until you&apos;ve seen a few replacement
+          suggestions.
         </p>
       </div>
 

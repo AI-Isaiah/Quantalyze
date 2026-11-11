@@ -541,7 +541,7 @@ describe("useScenarioState", () => {
   // composer's `if (scenario.diffCount > 0)` mode-switch guard — whose entire
   // purpose is "a mode switch can never silently wipe in-progress edits" —
   // let the switch through, discarding the AUM with no confirmation.
-  it("WR-06 — setting a manual portfolio AUM alone increments diffCount (an unsaved edit is never reported as zero changes)", () => {
+  it("WR-06 — setting a manual scenario AUM alone increments diffCount (an unsaved edit is never reported as zero changes)", () => {
     const { result } = renderHook(() =>
       useScenarioState({ holdingsSummary: HOLDINGS_3, allocatorId: ALLOCATOR_A }),
     );

@@ -127,7 +127,7 @@ export async function getAllocatorMatchPayload(
       .from("match_decisions")
       .select(
         "id, strategy_id, decision, founder_note, contact_request_id, created_at, " +
-          "strategies!match_decisions_strategy_id_fkey(id, name, codename, disclosure_tier)",
+          "strategies!match_decisions_strategy_id_fkey(id, name, codename, disclosure_tier, status)",
       )
       .eq("allocator_id", allocatorId)
       .order("created_at", { ascending: false })
@@ -176,7 +176,7 @@ export async function getAllocatorMatchPayload(
     .from("match_candidates")
     .select(
       "id, strategy_id, score, score_breakdown, reasons, rank, exclusion_reason, exclusion_provenance, " +
-        "strategies!match_candidates_strategy_id_fkey(id, name, codename, disclosure_tier, " +
+        "strategies!match_candidates_strategy_id_fkey(id, name, codename, disclosure_tier, status, " +
         "strategy_types, supported_exchanges, aum, max_capacity, user_id, asset_class)",
     )
     .eq("batch_id", batchRow.id as string)

@@ -154,7 +154,7 @@ export interface ScenarioDraft {
    */
   window?: CoverageWindow;
   /**
-   * Phase 151 AUM-01 — the MANUAL portfolio-AUM override, in whole USD.
+   * Phase 151 AUM-01 — the MANUAL scenario-AUM override, in whole USD.
    *
    * Optional + additive, so SCENARIO_SCHEMA_VERSION stays 4
    * (userWeightOverrides / window / leverageOverrides precedent): a pre-151
@@ -870,7 +870,7 @@ export function setLeverageOverrides(
 }
 
 /**
- * Phase 151 AUM-01 — write the MANUAL portfolio AUM onto the draft. `undefined`
+ * Phase 151 AUM-01 — write the MANUAL scenario AUM onto the draft. `undefined`
  * CLEARS the override (the draft falls back to the live-holdings sum); the
  * composer never writes 0, because a zero is a claim, not an absence.
  *
@@ -997,7 +997,7 @@ export const scenarioDraftSchema = z.object({
   // clamp happens on READ (sanitizeLeverage, plan 90.5-04); `boundedRecord`
   // already caps entry count (the DoS guard).
   leverageOverrides: boundedRecord(z.number(), "leverageOverrides").optional(),
-  // Phase 151 AUM-01 — the manual portfolio-AUM override (whole USD). Optional +
+  // Phase 151 AUM-01 — the manual scenario-AUM override (whole USD). Optional +
   // additive so every pre-151 draft validates; no schema_version bump.
   // ⚠️ LOAD-BEARING (same trap as leverageOverrides above): `z.object` STRIPS
   // unknown keys and saved/route.ts persists `parsed.data.draft`, so WITHOUT this

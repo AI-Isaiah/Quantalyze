@@ -69,7 +69,7 @@ export function OnboardingBanner() {
           </h2>
           <p className="text-sm text-text-secondary leading-relaxed mt-1">
             Add a read-only API key — we&apos;ll pull your real holdings within
-            one sync cycle and populate Performance, Bridge, and Scenario.
+            one sync cycle and populate Overview, Holdings and Scenario.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-4">

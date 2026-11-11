@@ -257,8 +257,11 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
     render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[row]} />);
     fireEvent.click(screen.getByText("Test Strategy"));
     fireEvent.click(screen.getByRole("tab", { name: "Record outcome" }));
+    // Phase 201 plan 29 (F-04, U-26): the plain-words not-flagged sentence.
     expect(
-      screen.getByText(/not flagged for Bridge action/i),
+      screen.getByText(
+        "This holding is not flagged as outside your mandate — no replacement to record against.",
+      ),
     ).toBeInTheDocument();
   });
 

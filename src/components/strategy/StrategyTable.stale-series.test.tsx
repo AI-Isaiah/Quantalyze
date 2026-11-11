@@ -42,6 +42,9 @@ vi.mock("@/components/discovery/SimulateImpactButton", () => ({
 
 // --- Frozen clock --------------------------------------------------------
 
+// The chip prints the series end through the one date helper (Phase 201 D-11, U-14): `Oct 9, 2026`.
+// The expected strings below are typed by hand from this frozen day, 30 days ago = Oct 9 and 11 days
+// ago = Oct 28, so a broken helper cannot agree with its own oracle.
 const NOW_ISO = "2026-11-08T12:00:00.000Z";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -251,7 +254,7 @@ describe("CLAR-02 stale ranking (SC-3): a stale best-Sharpe row does not rank as
   it("shows the amber 'Data from {series_end}' chip on the stale row and on no current row", () => {
     mount([dormant(), currentA(), currentB()]);
     const stale = rowOf(NAME_DORMANT);
-    const chip = within(stale).getByText(`Data from ${daysAgo(30)}`);
+    const chip = within(stale).getByText("Data from Oct 9, 2026");
     expect(chip.className).toContain("text-warning");
     expect(chip.className).toContain("bg-warning-bg");
     expect(chip.className).toContain("border-warning-border");
@@ -317,7 +320,7 @@ describe("CLAR-02 thresholds at the table: exactly at the line is current, one d
   it("traditional: 11 days is stale, with the 10-day threshold named in the chip title", () => {
     const over = makeRow(ID_DORMANT, NAME_DORMANT, { ...BEST, series_end: daysAgo(11) }, { asset_class: "traditional" });
     expect(rankedFirst([over, currentA()])[0]).toBe(NAME_CURRENT_A);
-    const chip = within(rowOf(NAME_DORMANT)).getByText(`Data from ${daysAgo(11)}`);
+    const chip = within(rowOf(NAME_DORMANT)).getByText("Data from Oct 28, 2026");
     expect(chip.getAttribute("title")).toContain("older than 10 days");
     expect(chip.getAttribute("title")).toContain("is 11 days old");
   });
@@ -498,7 +501,7 @@ describe("CLAR-02 the grid shows the same chip in the same order", () => {
     expect(titles).toEqual([NAME_CURRENT_A, NAME_CURRENT_B, NAME_DORMANT, NAME_UNKNOWN]);
     const cardOf = (name: string) =>
       Array.from(document.querySelectorAll("h3")).find((h) => h.textContent === name)!.closest("a") as HTMLElement;
-    expect(within(cardOf(NAME_DORMANT)).getByText(`Data from ${daysAgo(30)}`).className).toContain("text-warning");
+    expect(within(cardOf(NAME_DORMANT)).getByText("Data from Oct 9, 2026").className).toContain("text-warning");
     expect(within(cardOf(NAME_UNKNOWN)).getByText("Data date unknown")).toBeTruthy();
     expect(within(cardOf(NAME_CURRENT_A)).queryByText(/^Data (from|date)/)).toBeNull();
   });
@@ -570,7 +573,7 @@ describe("CLAR-02 /browse keeps the stale ordering on the table's own once-per-m
     mountBrowse([dormant(), currentA(), currentB()]);
     expect(rankCellText(NAME_DORMANT)).not.toContain("#");
     expect(rowOf(NAME_DORMANT).textContent).not.toMatch(/P\d\d/);
-    expect(within(rowOf(NAME_DORMANT)).getByText(`Data from ${daysAgo(30)}`)).toBeTruthy();
+    expect(within(rowOf(NAME_DORMANT)).getByText("Data from Oct 9, 2026")).toBeTruthy();
     expect(rankCellText(NAME_CURRENT_A)).toBe("#1");
     expect(rankCellText(NAME_CURRENT_B)).toBe("#2");
   });

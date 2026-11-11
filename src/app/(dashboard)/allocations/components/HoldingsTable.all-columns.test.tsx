@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { termDefinition } from "@/lib/glossary";
 import { HoldingsTable, type HoldingRow } from "./HoldingsTable";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 
@@ -236,6 +237,62 @@ describe("HoldingsTable all-columns guard — DesignHoldingsTable (DESIGN_TOTAL_
     const headers = within(thead).getAllByRole("columnheader");
     for (const h of headers) {
       expect(h.className).not.toMatch(HIDDEN_OR_TRUNCATE);
+    }
+  });
+});
+
+// Plan 201-15 (D-01, D-03): "Sharpe" and "Max DD" are registered terms. Each is the
+// label of a sort BUTTON, so it is Form B: the control itself is wrapped in a Tooltip
+// carrying the registry text, and no second focusable (a Form A span) sits inside the
+// button. The button keeps sorting; the definition shows on focus.
+describe("HoldingsTable design-table headers — registered terms explain themselves (plan 201-15)", () => {
+  function renderDesignHeaders() {
+    return render(
+      <HoldingsTable
+        rows={[makeDesignRow()]}
+        disconnectedAtByHoldingId={{}}
+        revokedStatusByHoldingId={{}}
+        flaggedHoldingsByRef={{}}
+        showRevoked={true}
+      />,
+    );
+  }
+
+  it.each([
+    ["Sharpe", "sharpe"],
+    ["Max DD", "max_drawdown"],
+  ] as const)("%s: keyboard focus on the sort button shows the registry definition", (label, key) => {
+    vi.useFakeTimers();
+    try {
+      const { container } = renderDesignHeaders();
+      const thead = container.querySelector("thead")!;
+      const button = within(thead).getByRole("button", { name: label });
+      // No focusable span nested in the button (a focusable inside a focusable).
+      expect(button.querySelector("[tabindex]")).toBeNull();
+      fireEvent.focus(button);
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.getByRole("tooltip").textContent).toBe(termDefinition(key));
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a header that is not a registered term gets no bubble", () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = renderDesignHeaders();
+      const thead = container.querySelector("thead")!;
+      fireEvent.focus(within(thead).getByRole("button", { name: "MTD" }));
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
     }
   });
 });

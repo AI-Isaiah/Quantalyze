@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { termDefinition } from "@/lib/glossary";
 import type { ComputedMetrics } from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
 import { ScenarioCompareTable, type ScenarioColumn } from "./ScenarioCompareTable";
@@ -13,7 +14,7 @@ import { ScenarioCompareTable, type ScenarioColumn } from "./ScenarioCompareTabl
  * `methodologyLine(n)` — heterogeneous windows are correct; there is NO single
  * shared-window header. The honesty invariants are assertions, not prose:
  *
- *   1. Six metric rows × N scenario columns + the "Live book" column render.
+ *   1. Six metric rows × N scenario columns + the "Live allocation" column render.
  *   2. A null/degenerate column renders "—" in every value cell — never "0",
  *      "0.00", "0%", or "N/A". The test FAILS if a 0 is shown for that column.
  *   3. Each column renders its OWN methodologyLine(n) — two columns with
@@ -28,9 +29,11 @@ import { ScenarioCompareTable, type ScenarioColumn } from "./ScenarioCompareTabl
  *
  * v1.5 PERSIST-03 adds the per-column effective-window label pins:
  *   8. A verdict.ok column AUGMENTS its day-count stamp with the effective
- *      {start}–{end} window (engine-emitted bounds, whole-line font-metric
- *      mono at text-fixed-11, en-dash) — quiet text-text-muted caption,
- *      never accent/warning.
+ *      window (engine-emitted bounds, whole-line font-metric mono at
+ *      text-fixed-11) — quiet text-text-muted caption, never accent/warning.
+ *      Phase 201 plan 201-37 (gap SC-3, F-11, UI-SPEC Interaction contract 5,
+ *      R3-01 item 4): the bounds print through `formatDay` and read
+ *      `Jan 2, 2024 – Jun 1, 2024` (space, en dash, space), never a raw ISO day.
  *   9. Two columns with different windows render DIFFERENT ranges (heterogeneous).
  *  10. Undecodable + below-floor columns SUPPRESS the range (no honest window);
  *      a verdict.ok column with null bounds shows just the day-count stamp.
@@ -88,11 +91,11 @@ function col(name: string, metrics: ComputedMetrics): ScenarioColumn {
 // =========================================================================
 
 describe("ScenarioCompareTable", () => {
-  it("renders the six metric rows plus the Live book column", () => {
+  it("renders the six metric rows plus the Live allocation column", () => {
     render(
       <ScenarioCompareTable
         columns={[col("Alpha", healthy(120)), col("Beta", healthy(120))]}
-        liveBook={col("Live book", healthy(120))}
+        liveBook={col("Live allocation", healthy(120))}
       />,
     );
 
@@ -108,14 +111,52 @@ describe("ScenarioCompareTable", () => {
     }
     expect(screen.getByText("Alpha")).toBeInTheDocument();
     expect(screen.getByText("Beta")).toBeInTheDocument();
-    expect(screen.getByText("Live book")).toBeInTheDocument();
+    expect(screen.getByText("Live allocation")).toBeInTheDocument();
+  });
+
+  // D-01, D-02, D-19: the registered metric labels are Term triggers (the text
+  // stays exactly the label); the unregistered one stays plain.
+  it("the registered metric labels render as Term triggers that open the registry definition", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <ScenarioCompareTable
+          columns={[col("Alpha", healthy(120)), col("Beta", healthy(120))]}
+          liveBook={null}
+        />,
+      );
+      const terms: Array<[string, string]> = [
+        ["CAGR", "cagr"],
+        ["Sharpe", "sharpe"],
+        ["Sortino", "sortino"],
+        ["Max Drawdown", "max_drawdown"],
+        ["Volatility", "volatility"],
+      ];
+      for (const [label, key] of terms) {
+        expect(screen.getByText(label).getAttribute("data-term")).toBe(key);
+      }
+      // Cumulative Return is not registered (UI-SPEC "Not registered").
+      expect(
+        screen.getByText("Cumulative Return").getAttribute("data-term"),
+      ).toBeNull();
+
+      fireEvent.focus(screen.getByText("Sharpe"));
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.getByRole("tooltip").textContent).toBe(
+        termDefinition("sharpe"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders '—' in every cell of a degenerate column — never a fabricated 0", () => {
     render(
       <ScenarioCompareTable
         columns={[col("Healthy", healthy(120)), col("Empty", degenerate(4))]}
-        liveBook={col("Live book", healthy(120))}
+        liveBook={col("Live allocation", healthy(120))}
       />,
     );
 
@@ -138,7 +179,7 @@ describe("ScenarioCompareTable", () => {
     render(
       <ScenarioCompareTable
         columns={[col("Long", healthy(120)), col("Short", healthy(65))]}
-        liveBook={col("Live book", healthy(90))}
+        liveBook={col("Live allocation", healthy(90))}
       />,
     );
 
@@ -160,7 +201,7 @@ describe("ScenarioCompareTable", () => {
     render(
       <ScenarioCompareTable
         columns={[col("Alpha", alpha), col("Beta", beta)]}
-        liveBook={col("Live book", healthy(120, { sharpe: 0.5, max_drawdown: -0.3 }))}
+        liveBook={col("Live allocation", healthy(120, { sharpe: 0.5, max_drawdown: -0.3 }))}
       />,
     );
 
@@ -192,7 +233,7 @@ describe("ScenarioCompareTable", () => {
           col("Alpha", healthy(120, { sharpe: 1.0 })),
           col("Beta", healthy(120, { sharpe: 3.3 })),
         ]}
-        liveBook={col("Live book", healthy(120, { sharpe: 0.4 }))}
+        liveBook={col("Live allocation", healthy(120, { sharpe: 0.4 }))}
       />,
     );
 
@@ -207,7 +248,7 @@ describe("ScenarioCompareTable", () => {
     render(
       <ScenarioCompareTable
         columns={[col("Healthy", healthy(120)), col("Thin", healthy(30))]}
-        liveBook={col("Live book", healthy(120))}
+        liveBook={col("Live allocation", healthy(120))}
       />,
     );
 
@@ -275,7 +316,7 @@ describe("ScenarioCompareTable", () => {
   // suppressed where there is no honest window: undecodable + below-floor columns.
   // =======================================================================
 
-  it("appends the column's effective {start}–{end} window to the verdict.ok stamp", () => {
+  it("appends the column's effective window (Mon D, YYYY – Mon D, YYYY) to the verdict.ok stamp", () => {
     render(
       <ScenarioCompareTable
         columns={[
@@ -290,17 +331,18 @@ describe("ScenarioCompareTable", () => {
     // The day-count stamp is preserved (augmented, not replaced) — the
     // methodologyLine text is now one node among several, so match as substring.
     expect(within(alphaStamp).getByText(methodologyLine(120), { exact: false })).toBeInTheDocument();
-    // Both effective bounds render, joined by an en-dash, after a " · " separator.
-    expect(alphaStamp.textContent).toContain("2024-01-02");
-    expect(alphaStamp.textContent).toContain("2024-06-01");
-    expect(alphaStamp.textContent).toMatch(/·\s*2024-01-02–2024-06-01/);
+    // Both effective bounds render through formatDay, joined by a spaced
+    // en-dash (U+2013), after a " · " separator (F-11, UI-SPEC contract 5).
+    expect(alphaStamp.textContent).toContain("· Jan 2, 2024 – Jun 1, 2024");
+    // F-11: no raw YYYY-MM-DD day reaches the stamp.
+    expect(alphaStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // The WHOLE stamp (day count + dates) keeps the pre-existing font-metric
     // whole-line mono convention (Geist Mono + tabular-nums, Rule 11) at the
     // text-fixed-11 tier — no inner per-date font spans.
     const stampSpan = alphaStamp.querySelector("span.font-metric");
     expect(stampSpan).not.toBeNull();
     expect(stampSpan!.className).toContain("text-fixed-11");
-    expect(stampSpan!.textContent).toContain("2024-01-02–2024-06-01");
+    expect(stampSpan!.textContent).toContain("Jan 2, 2024 – Jun 1, 2024");
     // The label stays the quiet honesty caption — never accent/warning/winner.
     expect(alphaStamp.innerHTML).not.toMatch(/text-accent|text-negative|text-warning/);
   });
@@ -319,8 +361,10 @@ describe("ScenarioCompareTable", () => {
     const earlyStamp = screen.getByTestId("stamp-Early");
     const lateStamp = screen.getByTestId("stamp-Late");
     // Heterogeneous windows are visible — each column shows its OWN range.
-    expect(earlyStamp.textContent).toMatch(/2023-01-02–2023-06-01/);
-    expect(lateStamp.textContent).toMatch(/2024-01-02–2024-06-03/);
+    expect(earlyStamp.textContent).toContain("Jan 2, 2023 – Jun 1, 2023");
+    expect(lateStamp.textContent).toContain("Jan 2, 2024 – Jun 3, 2024");
+    expect(earlyStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(lateStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // They are DIFFERENT — not force-aligned to a shared window.
     expect(earlyStamp.textContent).not.toBe(lateStamp.textContent);
   });
@@ -380,13 +424,14 @@ describe("ScenarioCompareTable", () => {
     const stamp = screen.getByTestId("stamp-NoBounds");
     // The day-count stamp still renders; no date range is fabricated.
     expect(within(stamp).getByText(methodologyLine(80))).toBeInTheDocument();
-    expect(stamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}–\d{4}-\d{2}-\d{2}/);
+    expect(stamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(stamp.textContent).not.toContain(" – ");
   });
 
   it("renders the under-selection hint with fewer than 2 columns", () => {
     render(<ScenarioCompareTable columns={[]} liveBook={null} />);
     expect(
-      screen.getByText("Select 2 or more scenarios (or the live book) to compare."),
+      screen.getByText("Select 2 or more scenarios (or the live allocation) to compare."),
     ).toBeInTheDocument();
   });
 

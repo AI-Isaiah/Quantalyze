@@ -416,6 +416,23 @@ describe("RequestIntroButton — attest step (194.2)", () => {
     });
   });
 
+  it("Phase 201 (D-06): the mandate context placeholder names the mandate in plain words, and the two '— No preference —' options stay", async () => {
+    // WHY: "style preferences" was a second name for part of the mandate; the placeholder now
+    // says "preferred styles". The select's "— No preference —" is ordinary English (an unset
+    // choice), the named exception, so it must not be renamed with the concept.
+    render(<RequestIntroButton strategyId={STRATEGY_ID} />);
+    await clickRequestIntro();
+    fireEvent.click(screen.getByRole("button", { name: /Add mandate context/ }));
+
+    expect(
+      screen.getByPlaceholderText(
+        "Mandate details: horizon, constraints, preferred styles...",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/style preferences/)).toBeNull();
+    expect(screen.getAllByRole("option", { name: "— No preference —" })).toHaveLength(2);
+  });
+
   it("reactive dismiss returns to the form with the typed fields intact, no error line, and nothing re-sent", async () => {
     route([jsonResponse(403, REQUIRED)]);
     render(<RequestIntroButton strategyId={STRATEGY_ID} />);

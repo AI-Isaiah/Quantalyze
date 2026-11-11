@@ -109,11 +109,11 @@ export function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);
 }
 
-/** Human-friendly "N{m,h,d} ago" formatter with a fallback to absolute
- *  date once the gap crosses 30 days. Callers pass an explicit `now`
- *  so the function stays pure and client components can memo-gate on
- *  bucket changes. Both branches use the `en-US` locale + UTC
- *  timezone so SSR and client-first-paint produce identical strings. */
+/** Human-friendly "N{m,h,d} ago" formatter with a fallback to the full
+ *  `formatDay` date (`Oct 9, 2026`, year included, U-14) once the gap crosses
+ *  30 days. Callers pass an explicit `now` so the function stays pure and
+ *  client components can memo-gate on bucket changes. Both branches read UTC
+ *  so SSR and client-first-paint produce identical strings. */
 export function formatRelativeTime(iso: string, now: number): string {
   const then = new Date(iso).getTime();
   const minutes = Math.round((now - then) / 60_000);
@@ -123,38 +123,56 @@ export function formatRelativeTime(iso: string, now: number): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.round(hours / 24);
   if (days < 30) return `${days}d ago`;
-  return formatAbsoluteDate(iso);
+  return formatDay(iso);
 }
 
-/** SSR-deterministic short date. Same output on Node and browser. */
-export function formatAbsoluteDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
-}
+/** Three-letter month abbreviations, `Sep` not `Sept`. The one list; axis-tick
+ *  and heatmap-header code reads it instead of carrying its own array. */
+export const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const;
 
 /**
- * The UTC calendar day of a timestamp as `YYYY-MM-DD`, or `—` when the
- * value is null, undefined, empty or does not parse. Phase 170.7 / D-09: the
- * manager table's Created cell.
+ * The one UI date (Phase 201 / D-11): `Oct 9, 2026`. en-US short month,
+ * unpadded day, four-digit year, or `—` when the value is null, undefined,
+ * empty or does not parse.
  *
- * UTC fields only, never the runtime locale or time zone, so the server render
- * and the browser print the same string. That is why it is not
- * `toLocaleDateString` (locale- and zone-dependent: a hydration-mismatch risk)
- * and not `iso.slice(0, 10)` (it reads the day in the OFFSET the string
- * happens to carry, so `2026-10-09T23:30:00-05:00` would print the 9th while
- * the instant is the 10th in UTC).
+ * UTC fields only, never the runtime locale or time zone, so the server
+ * render and the browser print the same string (a hydration-mismatch risk
+ * with `toLocaleDateString`), and the instant decides the day, not the offset
+ * the string happens to carry. No locale argument and no `Date.now()` (D-21).
+ *
+ * Outside it by design (D-11, D-21, U-15): chart axis ticks, a time of day
+ * printed alone, relative ages ("3d ago"), and machine values (ISO in a
+ * data attribute, a CSV, an API field).
  */
-export function formatIsoDay(iso: string | null | undefined): string {
+export function formatDay(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  const y = String(d.getUTCFullYear()).padStart(4, "0");
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+}
+
+/** Month and year, `Oct 2026` (D-11). Same guards and UTC reading as
+ *  `formatDay`; `—` for null, undefined, empty or unparseable input. */
+export function formatMonth(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+/** Day with time, `Oct 9, 2026, 14:05 UTC` (U-13). Both parts are read in UTC
+ *  and the zone is named, so the string means one instant everywhere. Same
+ *  guards as `formatDay`. */
+export function formatDayTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${formatDay(iso)}, ${hh}:${mm} UTC`;
 }
 
 /** Minute-bucket key used to gate relative-time re-renders. Callers

@@ -19,7 +19,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 // ScenarioComposer renders it when no scenario is active, with the module's
 // gated Sharpe in `metrics` (the composer's `liveMetricsForStrip`; the
 // composer's own prop is pinned in ScenarioComposer.test.tsx).
-// Book equity and Positions are pinned against the Holdings header in 198-11.
+// Allocation equity and Positions are pinned against the Holdings header in 198-11.
 // ---------------------------------------------------------------------------
 
 type Baseline = MyAllocationDashboardPayload["liveBaselineMetrics"];
@@ -75,7 +75,9 @@ const tone = (el: Element) =>
       : "none";
 
 function stripValue(strip: HTMLElement, label: string): Element {
-  const value = within(strip).getByText(label).nextElementSibling;
+  // 201-12 (D-03): a label may be a Term, so the text node sits in a span inside the label div.
+  // The value is the sibling of that label div.
+  const value = within(strip).getByText(label).closest("div")?.nextElementSibling;
   if (!value) throw new Error(`no value node under ${label}`);
   return value;
 }

@@ -163,4 +163,33 @@ describe("getAllocatorMatchPayload: the reads the record verdict needs (194.1 B1
     // The constant itself stays a plain column list the schema-sync test can check.
     expect(STRATEGY_ANALYTICS_MATCH_COLUMNS).not.toMatch(/[:>]/);
   });
+
+  // Phase 201 / D-17: the admin match queue names a strategy only when it is published,
+  // so both strategy embeds must read `status`. Without it every row is not visible
+  // and keeps its codename. Neuter to redden: drop `status` from either embed.
+  it("reads the strategy's status in the candidate and decision embeds (D-17)", async () => {
+    const selects: Record<string, string[]> = {};
+    const base = fakeAdmin({
+      ...baseTables({
+        match_batches: { data: BATCH_ROW, error: null },
+        match_candidates: { data: [], error: null },
+      }),
+    });
+    const spied = {
+      from(table: string) {
+        const builder = (base as unknown as { from: (t: string) => Record<string, unknown> }).from(table);
+        const select = builder.select as (...a: unknown[]) => unknown;
+        builder.select = (...args: unknown[]) => {
+          (selects[table] ??= []).push(String(args[0]));
+          return select(...args);
+        };
+        return builder;
+      },
+    } as unknown as SupabaseClient;
+
+    await getAllocatorMatchPayload(spied, ALLOCATOR_ID);
+
+    expect(selects.match_candidates[0]).toMatch(/strategies!match_candidates_strategy_id_fkey\([^)]*\bstatus\b/);
+    expect(selects.match_decisions[0]).toMatch(/strategies!match_decisions_strategy_id_fkey\([^)]*\bstatus\b/);
+  });
 });

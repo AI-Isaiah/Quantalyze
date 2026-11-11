@@ -156,19 +156,19 @@ function mountBody(payload: FactsheetPayload) {
 }
 
 describe("D-08: the paired-floor sentence dates a comparator that ends early", () => {
-  it("precondition: SPX pairs 5 intervals, below the floor, and its prices end Aug 2", () => {
+  it("precondition: SPX pairs 5 intervals, below the floor, and its prices end Aug 2, 2024", () => {
     const spx = longPayload().comparators.spx;
     expect(spx.jointWithheld).toEqual({ paired: 5, floor: 10 });
     expect(spx.through).toBe("2024-08-02");
   });
 
-  it("the KPI strip line and section IV both end with 'SPX prices end Aug 2.'", () => {
+  it("the KPI strip line and section IV both end with 'SPX prices end Aug 2, 2024.'", () => {
     mountBody(longPayload());
     const reasons = screen.getAllByTestId("joint-floor-reason");
     expect(reasons).toHaveLength(2);
     for (const r of reasons) {
       expect(r.textContent).toBe(
-        "Alpha and beta need at least 10 days paired with SPX; this record has 5. SPX prices end Aug 2.",
+        "Alpha and beta need at least 10 days paired with SPX; this record has 5. SPX prices end Aug 2, 2024.",
       );
     }
   });

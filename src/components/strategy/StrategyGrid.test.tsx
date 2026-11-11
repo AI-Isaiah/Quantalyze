@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { render } from "@testing-library/react";
+import { render, fireEvent, within, screen } from "@testing-library/react";
 import { StrategyGrid } from "./StrategyGrid";
 import { DISCOVERY_COLUMNS } from "./discovery-columns";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
@@ -273,5 +273,31 @@ describe("StrategyGrid - footer labels read the table's column map (Phase 197 D-
     const { container } = render(<StrategyGrid strategies={[fixture]} />);
     const footer = container.querySelector("div.border-t.border-border.pt-2\\.5");
     expect(footer?.className).toContain("max-[375px]:flex-col");
+  });
+});
+
+// Phase 201 plan 16 (D-01, D-19): the card's AUM label sits INSIDE the card's factsheet link. A Form A
+// `Term` is a tab stop, and a focusable inside a link is the nesting UI-SPEC Interaction contract 1
+// forbids. So the label shows the registry definition on hover through a Tooltip and adds no tab stop.
+// The definition is typed by hand: a registry edit must change it here too.
+describe("StrategyGrid - the AUM label opens its definition without nesting a tab stop in the card link", () => {
+  it("hover or focus shows the registry's discovery AUM definition", async () => {
+    render(<StrategyGrid strategies={[makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" })]} />);
+    fireEvent.focus(screen.getByText("AUM"));
+    const tip = await within(document.body).findByRole("tooltip");
+    expect(tip.textContent).toBe(
+      "Assets under management as the manager states it. It is not measured from the exchange.",
+    );
+  });
+
+  it("adds no [data-term] and no tab stop inside the card's link", () => {
+    const { container } = render(
+      <StrategyGrid strategies={[makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" })]} />,
+    );
+    const link = container.querySelector("a")!;
+    expect(link.querySelector("[data-term]")).toBeNull();
+    expect(link.querySelector('[tabindex="0"]')).toBeNull();
+    // Non-vacuity: the label is there, inside that link.
+    expect(within(link).getByText("AUM")).toBeTruthy();
   });
 });

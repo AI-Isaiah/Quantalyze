@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, within, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, render, screen, within, fireEvent } from "@testing-library/react";
+import { termDefinition } from "@/lib/glossary";
 import { buildPrimaryMobileNav } from "./Sidebar";
 import { MobileNav } from "./MobileNav";
 
@@ -15,11 +16,12 @@ import { MobileNav } from "./MobileNav";
  *     allocator never gets manager-only destinations and vice-versa, and a
  *     bare is_admin fixture surfaces only Profile (T-45-01
  *     information-disclosure mitigation in the plan threat register);
- *   - the SC#1 allocator head — My allocation / Risk / Bridge with DISTINCT
+ *   - the SC#1 allocator head — My allocation / Risk / Scenario with DISTINCT
  *     hrefs (there is no /bridge route, verified in 45-RESEARCH Pitfall 1;
- *     Bridge deep-links the Scenario tab `/allocations?tab=scenario`, where the
- *     composer's "Open Bridge" card → BridgeDrawer lives — see buildPrimaryMobileNav
- *     in Sidebar.tsx);
+ *     the third item deep-links the Scenario tab `/allocations?tab=scenario`, where the
+ *     composer's "Review replacements" card → BridgeDrawer lives — see buildPrimaryMobileNav
+ *     in Sidebar.tsx). Phase 201 D-07: that item is named "Scenario", the tab it opens.
+ *     "Bridge" is a different feature, so no mobile nav item carries that name;
  *   - role "both" lighting the allocator set (NOT the pre-fix !isAllocator
  *     short-circuit);
  *   - the <=5 cap;
@@ -35,7 +37,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
-  it("allocator-only: heads with My allocation, Risk, Bridge (distinct hrefs), <=5", () => {
+  it("allocator-only: heads with My allocation, Risk, Scenario (distinct hrefs), <=5", () => {
     const items = buildPrimaryMobileNav({ isAllocator: true });
     const hrefs = items.map((i) => i.href);
     expect(items.length).toBeLessThanOrEqual(5);
@@ -43,7 +45,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).toContain("/allocations");
     expect(hrefs).toContain("/allocations?tab=risk");
     expect(hrefs).toContain("/allocations?tab=scenario");
-    // The SC#1 trio leads the list (My allocation, Risk, Bridge in order).
+    // The SC#1 trio leads the list (My allocation, Risk, Scenario in order).
     expect(hrefs.slice(0, 3)).toEqual([
       "/allocations",
       "/allocations?tab=risk",
@@ -55,7 +57,9 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     const labels = items.map((i) => i.label);
     expect(labels).toContain("My allocation");
     expect(labels).toContain("Risk");
-    expect(labels).toContain("Bridge");
+    expect(labels).toContain("Scenario");
+    // D-07: Bridge is a different feature; no mobile nav item is named for it.
+    expect(labels).not.toContain("Bridge");
     // Profile is always present (ACCOUNT).
     expect(labels).toContain("Profile");
     // Allocator must NOT get manager-only destinations.
@@ -109,7 +113,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     // via pure role. Pin the EXACT set + ORDER so a reorder of the priority
     // array can't silently change which destination is dropped at the <=5 cap
     // (WR-02): budget = CAP(5) - 1 reserved for Profile = 4 → [My allocation,
-    // Risk, Bridge, Strategies] then Profile; Portfolios + Discovery overflow
+    // Risk, Scenario, Strategies] then Profile; Portfolios + Discovery overflow
     // to the hamburger drawer (the full nav) by design.
     expect(hrefs).toEqual([
       "/allocations",
@@ -152,7 +156,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(items.slice(0, 3).map((i) => i.label)).toEqual([
       "My allocation",
       "Risk",
-      "Bridge",
+      "Scenario",
     ]);
   });
 
@@ -189,7 +193,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     expect(hrefs).toContain("/allocations?tab=risk");
     expect(hrefs).toContain("/allocations?tab=scenario");
     expect(within(nav).getByText("My allocation")).toBeInTheDocument();
-    expect(within(nav).getByText("Bridge")).toBeInTheDocument();
+    expect(within(nav).getByText("Scenario")).toBeInTheDocument();
     expect(within(nav).getByText("Risk")).toBeInTheDocument();
   });
 
@@ -225,16 +229,16 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     const myAlloc = within(nav).getByText("My allocation").closest("a");
     expect(myAlloc).toHaveAttribute("aria-current", "page");
     // The inactive branch (aria-current={active ? "page" : undefined}): the
-    // Risk and Bridge cells keep the query string in their hrefs, which the
+    // Risk and Scenario cells keep the query string in their hrefs, which the
     // stripped pathname `/allocations` never contains, so they must NOT be
     // marked active even though they live under /allocations* (pins the
     // documented query-stripping tradeoff so a regression that lit every cell
     // — or the wrong cell — on a non-matching pathname fails here).
     const risk = within(nav).getByText("Risk").closest("a");
-    const bridge = within(nav).getByText("Bridge").closest("a");
+    const scenario = within(nav).getByText("Scenario").closest("a");
     const profile = within(nav).getByText("Profile").closest("a");
     expect(risk).not.toHaveAttribute("aria-current");
-    expect(bridge).not.toHaveAttribute("aria-current");
+    expect(scenario).not.toHaveAttribute("aria-current");
     expect(profile).not.toHaveAttribute("aria-current");
   });
 
@@ -296,7 +300,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     for (const cell of navCells()) {
       expect(tokens(cell).filter(clipping), `${cell.textContent} clips`).toEqual([]);
     }
-    for (const label of within(nav).getAllByText(/^(My allocation|Risk|Bridge|Add a strategy|Profile)$/)) {
+    for (const label of within(nav).getAllByText(/^(My allocation|Risk|Scenario|Add a strategy|Profile)$/)) {
       expect(tokens(label).filter(clipping), `${label.textContent} label clips`).toEqual([]);
     }
   });
@@ -343,5 +347,77 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     rerender(<MobileNav isAllocator inert={false} />);
     nav = screen.getByRole("navigation", { name: "Primary mobile" });
     expect(nav).not.toHaveAttribute("inert");
+  });
+});
+
+// Phase 201 plan 34 (F-04, F-08, U-27): the bottom nav's "Scenario" link is a control, so the
+// registry term is explained by Form B: a Tooltip around the existing link with the `scenario`
+// definition, never a nested Form A span (a second tab stop inside one link). The arms fail when
+// the Tooltip goes (no bubble), when the visible label changes, when a focusable or Term child
+// appears in the link, and when another nav item picks up a bubble.
+describe("MobileNav: the Scenario link explains scenario (Form B)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    pathnameMock.mockReturnValue("/allocations");
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  function scenarioLink(): HTMLElement {
+    const nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    return within(nav).getByRole("link", { name: "Scenario" });
+  }
+
+  it("focusing the Scenario link shows the registry definition after 150 ms and the link describes itself by it", () => {
+    render(<MobileNav isAllocator />);
+    const link = scenarioLink();
+    expect(link).toHaveAttribute("href", "/allocations?tab=scenario");
+    fireEvent.focus(link);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const bubble = screen.getByRole("tooltip");
+    expect(bubble.textContent).toBe(termDefinition("scenario"));
+    expect(link).toHaveAttribute("aria-describedby", bubble.id);
+  });
+
+  it("the label text is still exactly Scenario and the link stays one control (no Form A span, no focusable child)", () => {
+    render(<MobileNav isAllocator />);
+    const link = scenarioLink();
+    expect(link.textContent).toBe("Scenario");
+    expect(link.querySelector("[tabindex], a, button, [data-term]")).toBeNull();
+    expect(document.querySelectorAll("[data-term]")).toHaveLength(0);
+  });
+
+  it("the cell still fills its share of the bar through the Tooltip wrapper", () => {
+    render(<MobileNav isAllocator />);
+    const link = scenarioLink();
+    const t = (el: Element | null) => (el?.getAttribute("class") ?? "").split(/\s+/);
+    const inner = link.parentElement;
+    const wrapper = inner?.parentElement ?? null;
+    // The wrapper is the flex item of the bar: it carries the share, and can shrink.
+    expect(t(wrapper)).toEqual(expect.arrayContaining(["flex", "min-w-0", "flex-1"]));
+    // The wrapper spans add no role, aria attribute or tab stop of their own.
+    for (const span of [inner, wrapper]) {
+      expect(span?.getAttribute("role")).toBeNull();
+      expect(span?.hasAttribute("tabindex")).toBe(false);
+      expect(span?.getAttributeNames().filter((n) => n.startsWith("aria-"))).toEqual([]);
+    }
+  });
+
+  it("no other nav item carries a definition", () => {
+    render(<MobileNav isAllocator />);
+    const nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    for (const link of within(nav).getAllByRole("link")) {
+      if (link === scenarioLink()) continue;
+      fireEvent.focus(link);
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    }
   });
 });

@@ -241,28 +241,28 @@ test.describe("DISCO-01 watchlist", () => {
       "StarToggle did not persist 'starred' state across reload",
     ).toBeVisible({ timeout: 5000 });
 
-    // 3. The My Watchlist tab badge must read exactly "1". Use the
+    // 3. The My watchlist tab badge must read exactly "1". Use the
     // dedicated `[data-testid="watchlist-count-badge"]` element from
     // WatchlistTabs.tsx so a substring match like
     // `toContainText("1")` can't false-pass on a future count of 11,
     // 100, etc. — PR #236 anchor-element principle applied to the
     // badge text.
-    const watchTab = page.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = page.getByRole("tab", { name: /My watchlist/ });
     const watchTabBadge = watchTab.getByTestId("watchlist-count-badge");
     await expect(
       watchTabBadge,
-      "My Watchlist tab badge missing — WatchlistTabs.tsx render " +
+      "My watchlist tab badge missing — WatchlistTabs.tsx render " +
         "regression or count is zero (badge is conditional on count > 0)",
     ).toHaveText("1", { timeout: 5000 });
 
-    // 4. Clicking My Watchlist filters to exactly the seeded row.
+    // 4. Clicking My watchlist filters to exactly the seeded row.
     // Assert by the seeded factsheet anchor (not `.toHaveCount(1)`) so
     // a parallel-shard pollution or unclean DB cannot make the test
     // pass against an unrelated starred row.
     await watchTab.click();
     await expect(
       page.locator(`table tbody tr a[href^="/factsheet/${strategyId}?"]`),
-      "My Watchlist tab did not filter to the seeded row — server-side " +
+      "My watchlist tab did not filter to the seeded row — server-side " +
         "user_favorites scope regression or hydration race",
     ).toBeVisible({ timeout: 5000 });
     await expect(page.locator(SELECTORS.tableRows)).toHaveCount(1);
@@ -360,7 +360,7 @@ test.describe("DISCO-01 watchlist", () => {
     // proof was indirect: `getMyWatchlist(userBId)` applies an explicit
     // `.eq('user_id', userBId)` filter (src/lib/queries.ts:2554) on
     // top of RLS. If RLS leaked, the explicit filter would still hide
-    // user-A's row, so the My Watchlist tab badge would stay empty for
+    // user-A's row, so the My watchlist tab badge would stay empty for
     // user-B and the spec would pass with the RLS policy actually
     // broken. The leak only surfaces when BOTH the server-side
     // user_id filter AND the RLS policy regress simultaneously — a
@@ -422,11 +422,11 @@ test.describe("DISCO-01 watchlist", () => {
     ]);
 
     // Per `WatchlistTabs` (src/components/strategy/WatchlistTabs.tsx) the
-    // "My Watchlist" `TabsTrigger` is ALWAYS rendered; only the
+    // "My watchlist" `TabsTrigger` is ALWAYS rendered; only the
     // `data-testid="watchlist-count-badge"` span nested inside it is
     // conditional on `count > 0`. So user-B (zero favorites) sees the tab present
     // with no digit in its text; the plain text is literally
-    // "My Watchlist". A leaked count would surface as a digit anywhere
+    // "My watchlist". A leaked count would surface as a digit anywhere
     // in the tab text.
     //
     // audit-2026-05-07 SPECIALIST-testing fix:
@@ -436,10 +436,10 @@ test.describe("DISCO-01 watchlist", () => {
     // bug), both RLS-leak assertions would silently no-op and the test
     // would pass with ZERO assertions actually firing. Inverted to assert
     // the tab IS visible first, so a hidden tab is an explicit failure.
-    const watchTab = page.getByRole("tab", { name: /My Watchlist/ });
+    const watchTab = page.getByRole("tab", { name: /My watchlist/ });
     await expect(
       watchTab,
-      "My Watchlist tab not visible — render regression masks the entire " +
+      "My watchlist tab not visible — render regression masks the entire " +
         "RLS-leak assertion. Tab is always rendered per WatchlistTabs.tsx.",
     ).toBeVisible();
     const tabText = (await watchTab.textContent()) ?? "";
@@ -447,15 +447,15 @@ test.describe("DISCO-01 watchlist", () => {
     // Stricter than `/\b1\b/` — covers leaks of size 1, 2, 11, 100, etc.
     expect(
       tabText.replace(/\s+/g, " ").trim(),
-      `user-B sees a count digit in My Watchlist tab text — RLS LEAK ` +
-        `of user-A's favorites (expected exactly "My Watchlist", got "${tabText}")`,
+      `user-B sees a count digit in My watchlist tab text — RLS LEAK ` +
+        `of user-A's favorites (expected exactly "My watchlist", got "${tabText}")`,
     ).not.toMatch(/\d/);
 
-    // Belt-and-braces: click into the My Watchlist tab and assert the
+    // Belt-and-braces: click into the My watchlist tab and assert the
     // resulting table is empty. If RLS leaked, user-B would see user-A's
     // favorited strategy here.
     await watchTab.click();
-    // If the table renders rows under "My Watchlist" for user-B, RLS
+    // If the table renders rows under "My watchlist" for user-B, RLS
     // has leaked. The expected state is the "no strategies" empty
     // state OR an empty tbody.
     const watchlistRowCount = await page
@@ -463,7 +463,7 @@ test.describe("DISCO-01 watchlist", () => {
       .count();
     expect(
       watchlistRowCount,
-      "user-B sees rows under My Watchlist — RLS LEAK",
+      "user-B sees rows under My watchlist — RLS LEAK",
     ).toBe(0);
 
     // Cleanup the seeded row so the next run starts clean. cleanupTestAllocator
@@ -481,7 +481,7 @@ test.describe("DISCO-01 watchlist", () => {
  * H-1058 (pr-test-analyzer): the four discovery specs all sign in as a single
  * allocator. Per feedback_e2e_all_user_groups the public/anon path must also
  * be covered — specifically that the PUBLIC /browse surface HIDES the
- * allocator-only watchlist controls (star column, Customize cog, My Watchlist
+ * allocator-only watchlist controls (star column, Customize cog, My watchlist
  * tab). StrategyTable.tsx gates all of these on `userId !== undefined`
  * (showStarColumn = userId !== undefined at :327; the Customize/My-Watchlist
  * chrome at :552 is `userId !== undefined && (...)`). The public /browse/[slug]
@@ -496,7 +496,7 @@ test.describe("DISCO-01 watchlist", () => {
  * only the dev server.
  */
 test.describe("DISCO-01 watchlist — public/anon path (no allocator chrome)", () => {
-  test("anonymous /browse/[slug] hides star toggles, Customize cog, and My Watchlist tab", async ({
+  test("anonymous /browse/[slug] hides star toggles, Customize cog, and My watchlist tab", async ({
     page,
   }) => {
     // Visit the public category page as an unauthenticated user. proxy.ts
@@ -541,12 +541,12 @@ test.describe("DISCO-01 watchlist — public/anon path (no allocator chrome)", (
         "controls leaked onto the public path",
     ).toHaveCount(0);
 
-    // 3. No "My Watchlist" tab (WatchlistTabs is part of the userId-gated
+    // 3. No "My watchlist" tab (WatchlistTabs is part of the userId-gated
     //    chrome). A logged-out browser must never see a personal-watchlist
     //    surface.
     await expect(
-      page.getByRole("tab", { name: /My Watchlist/ }),
-      "anon /browse shows a 'My Watchlist' tab — personal watchlist surface " +
+      page.getByRole("tab", { name: /My watchlist/ }),
+      "anon /browse shows a 'My watchlist' tab — personal watchlist surface " +
         "leaked to a logged-out user",
     ).toHaveCount(0);
   });

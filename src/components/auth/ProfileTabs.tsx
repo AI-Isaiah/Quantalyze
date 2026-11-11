@@ -2,6 +2,8 @@
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition, type TermKey } from "@/lib/glossary";
 import { ProfileForm } from "./ProfileForm";
 import { DeleteAccountButton } from "./DeleteAccountButton";
 import { OrganizationTab } from "@/components/org/OrganizationTab";
@@ -16,7 +18,10 @@ import type { AllocatorOwnPreferences } from "@/lib/preferences";
 
 const ALL_TABS = [
   { key: "personal", label: "Personal Info" },
-  { key: "mandate", label: "Mandate", allocatorOnly: true },
+  // `term` marks a label the glossary explains. The tab is a control, so it is
+  // explained by Form B (a Tooltip around the trigger), never a nested Form A
+  // span (Phase 201 U-01, D-06).
+  { key: "mandate", label: "Mandate", term: "mandate", allocatorOnly: true },
   // Phase 200 D-06: the one key manager, for every role that can hold keys
   // (manager, allocator, both). The tab keeps its key `exchanges` so the
   // inbound `/profile?tab=exchanges` links keep working; only the label moved.
@@ -98,22 +103,37 @@ export function ProfileTabs({
       activationMode="manual"
     >
       <TabsList variant="underline" className="mb-6">
-        {tabs.map((tab) => (
-          <TabsTrigger
-            key={tab.key}
-            value={tab.key}
-            variant="underline"
-            // ProfileTabs' exact active treatment differs from the underline
-            // default: active text is text-text-primary (not text-accent),
-            // inactive hover is text-text-secondary (not text-text-primary), and
-            // the strip uses py-2.5. Override those three via the className hook
-            // (data-[state=active] wins over the base via cascade order) to keep
-            // the 1:1 port byte-faithful (50-UI-SPEC consumer mapping).
-            className="py-2.5 hover:text-text-secondary data-[state=active]:text-text-primary"
-          >
-            {tab.label}
-          </TabsTrigger>
-        ))}
+        {tabs.map((tab) => {
+          const trigger = (describedBy?: string) => (
+            <TabsTrigger
+              key={tab.key}
+              value={tab.key}
+              variant="underline"
+              aria-describedby={describedBy}
+              // ProfileTabs' exact active treatment differs from the underline
+              // default: active text is text-text-primary (not text-accent),
+              // inactive hover is text-text-secondary (not text-text-primary), and
+              // the strip uses py-2.5. Override those three via the className hook
+              // (data-[state=active] wins over the base via cascade order) to keep
+              // the 1:1 port byte-faithful (50-UI-SPEC consumer mapping).
+              className="py-2.5 hover:text-text-secondary data-[state=active]:text-text-primary"
+            >
+              {tab.label}
+            </TabsTrigger>
+          );
+          if (!("term" in tab)) return trigger();
+          // The wrapper and its inner span are flex boxes so the trigger sits in
+          // the strip exactly as an unwrapped one does (no line box under it).
+          return (
+            <Tooltip
+              key={tab.key}
+              content={termDefinition(tab.term satisfies TermKey)}
+              className="flex shrink-0 [&>span]:flex"
+            >
+              {({ "aria-describedby": describedBy }) => trigger(describedBy)}
+            </Tooltip>
+          );
+        })}
       </TabsList>
 
       {/* Each body lives in a Radix TabsContent (role="tabpanel") so every

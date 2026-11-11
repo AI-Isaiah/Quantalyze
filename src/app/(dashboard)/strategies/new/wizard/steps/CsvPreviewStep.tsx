@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/Button";
 import { CSV_PREVIEW_STEP_HEADINGS } from "@/lib/wizardErrors";
+import { formatDay } from "@/lib/utils";
 
 /**
  * Phase 15 / CSV-01..CSV-02 — sub-step 2 of the CSV branch.
@@ -64,6 +65,12 @@ function truncate(value: string, max: number): string {
  * `new Date(raw).toISOString()` shifts U.S. dates back a day in
  * non-UTC locales. Returns the original string when the format is
  * unrecognized rather than silently coercing.
+ *
+ * F-11 (founder, 2026-11-11, plan 201-38) supersedes ISSUE-014 for the
+ * `date_range` pill only: the pill is copy, so it prints through the one
+ * `formatDay` helper (`Apr 3, 2025 – May 6, 2026`). The sample-row cells
+ * stay ISO. They preview the uploaded file's own contents, a D-11
+ * exemption, so this helper and its ISO normalisation are unchanged.
  */
 export function formatPreviewCell(value: unknown, columnName: string): string {
   const raw = String(value ?? "");
@@ -113,7 +120,7 @@ export function CsvPreviewStep({
           />
           <SummaryRow
             label="Date range"
-            value={`${preview.date_range[0]} → ${preview.date_range[1]}`}
+            value={`${formatDay(preview.date_range[0])} – ${formatDay(preview.date_range[1])}`}
           />
           <SummaryRow
             label="Columns detected"

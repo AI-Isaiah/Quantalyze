@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
+import { useTooltip } from "@/components/ui/Tooltip";
+import { termDefinition, type TermKey } from "@/lib/glossary";
 
 type OpenState = "open" | "closed";
 
@@ -33,6 +35,7 @@ export const COLLAPSIBLE_OPEN_ALL_EVENT = "collapsible-section:open-all";
 export function CollapsibleSection({
   id,
   title,
+  term,
   subtitle,
   defaultOpen = true,
   storageKey,
@@ -41,6 +44,16 @@ export function CollapsibleSection({
 }: {
   id: string;
   title: string;
+  /**
+   * Phase 201 (D-01): the registry term the title names. The title sits inside the `<summary>`,
+   * which is already the interactive control, so this is Form B: nothing focusable is added to
+   * the look. Hover on the title and keyboard focus on the summary both open the registry text,
+   * and the summary carries `aria-describedby`. The summary stays the `<details>` element's
+   * direct child (a `Tooltip` wrapper around it would break that), so the behaviour comes from
+   * `useTooltip` wired onto the summary rather than from a wrapper. (`Term` would nest a
+   * focusable inside a summary.)
+   */
+  term?: TermKey;
   subtitle?: string;
   defaultOpen?: boolean;
   storageKey?: string;
@@ -90,6 +103,7 @@ export function CollapsibleSection({
   });
 
   const [open, setOpen] = useState(defaultOpen);
+  const { setTriggerEl, show, hide, id: tipId, open: tipOpen, bubble } = useTooltip(term ? termDefinition(term) : "");
 
   // After the primitive's deferred load completes, adopt the persisted (or
   // cross-tab-synced) open/closed state into the local `open` flag that drives
@@ -134,7 +148,13 @@ export function CollapsibleSection({
       }}
       className="group"
     >
-      <summary className="flex items-baseline justify-between gap-3 cursor-pointer list-none border-b border-border py-3 mb-4 select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent rounded-sm min-h-[44px]">
+      <summary
+        aria-describedby={term && tipOpen ? tipId : undefined}
+        onFocus={term ? show : undefined}
+        onBlur={term ? hide : undefined}
+        onMouseLeave={term ? hide : undefined}
+        className="flex items-baseline justify-between gap-3 cursor-pointer list-none border-b border-border py-3 mb-4 select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent rounded-sm min-h-[44px]"
+      >
         <div className="flex items-baseline gap-3">
           <span
             aria-hidden
@@ -146,7 +166,19 @@ export function CollapsibleSection({
             }}
           />
           <h2 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
-            {title}
+            {term ? (
+              <span
+                ref={setTriggerEl}
+                className="inline"
+                onMouseEnter={show}
+                onMouseLeave={hide}
+              >
+                {title}
+                {bubble}
+              </span>
+            ) : (
+              title
+            )}
           </h2>
           {subtitle && (
             <span className="text-fixed-11 text-text-muted normal-case tracking-normal">
