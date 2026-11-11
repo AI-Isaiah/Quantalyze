@@ -350,7 +350,6 @@ describe("StrategyTable default mounts — byte identity with the post-170.2 hea
         placeholderKeys={[{ id: "pk-1", exchangeLabel: "Binance", keyLabel: "Main key" }]}
         onFinishSetup={() => {}}
         onMarkOwnership={() => {}}
-        onRename={() => {}}
       />,
     );
   });
@@ -439,8 +438,8 @@ describe("StrategyTable and StrategyGrid factsheet links carry their origin (196
 //
 // The three mounts differ only in which furniture the server hands the table (`managerRows`
 // entries and `allocatorFurniture`): manager only (Edit and the actions slot, no allocator
-// controls even with the callbacks passed), allocator only (a note-only entry, the tag, Mark,
-// Rename and Simulate Impact), and both (one row carries the union). They use the first three
+// controls even with the callbacks passed), allocator only (a note-only entry, the tag, Mark
+// and Simulate Impact), and both (one row carries the union). They use the first three
 // owner rows: published with a mark, draft, private.
 //
 // 2026-11-10 Phase 199 plan 12 (D-03): ONE hand-classified hunk per mount, nothing regenerated. The Health
@@ -488,12 +487,11 @@ describe("StrategyTable owner-list mounts (199 plan 07, D-02)", () => {
         {...common}
         managerRows={managerEntries}
         onMarkOwnership={() => {}}
-        onRename={() => {}}
       />,
     );
   });
 
-  it("allocator only: tag, Mark, Rename and Simulate Impact, no Edit and no slot", () => {
+  it("allocator only: tag, Mark and Simulate Impact, no Edit and no slot", () => {
     checkListMount(
       "allocatorOnly",
       <StrategyTable
@@ -501,7 +499,6 @@ describe("StrategyTable owner-list mounts (199 plan 07, D-02)", () => {
         managerRows={noteEntries}
         allocatorFurniture
         onMarkOwnership={() => {}}
-        onRename={() => {}}
       />,
     );
   });
@@ -514,7 +511,6 @@ describe("StrategyTable owner-list mounts (199 plan 07, D-02)", () => {
         managerRows={bothEntries}
         allocatorFurniture
         onMarkOwnership={() => {}}
-        onRename={() => {}}
       />,
     );
   });

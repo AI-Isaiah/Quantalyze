@@ -477,83 +477,33 @@ describe("StrategyForm — KEYLINK-01 connected state must match a persisted lin
     fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
   }
 
-  it("edit mode: persists api_key_id onto THIS strategy before reporting it connected", async () => {
-    mockMintedKeyResponse();
+  // 200-12 (D-03, D-07): the three specs that stood here drove the EDIT-mode
+  // connect flow (link the minted key to THIS strategy from the browser, with a
+  // 42501 arm and a generic-failure arm). That flow was a writer of
+  // `strategies.api_key_id` with no confirmation, and a third place to add a
+  // key. Edit mode renders no Data Source card, so there is nothing to drive;
+  // the absence is pinned below instead. The create-mode INSERT arm stays.
+  it("edit mode: renders no Connect API Key control and no Data Source card", () => {
     render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY_NO_KEY} />);
-    connectAKey();
 
-    expect(
-      await screen.findByText("Read-only API key verified and connected."),
-    ).toBeInTheDocument();
-
-    // The load-bearing assertion: the id the server minted reached the database,
-    // aimed at the strategy being edited. Without it the "connected" copy above
-    // is a claim about a row that does not exist.
-    const link = strategiesUpdateCalls.find(
-      (c) => c.payload.api_key_id !== undefined,
-    );
-    expect(link).toBeTruthy();
-    expect(link!.payload.api_key_id).toBe(MINTED_KEY_ID);
-    expect(link!.eq).toEqual(["id", EDIT_STRATEGY_NO_KEY.id]);
-    // The api_keys row is written server-side; this surface composes no insert.
-    expect(apiKeysInsertArg).toBeNull();
+    expect(screen.queryByRole("button", { name: "Connect API Key" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "API Key Connected" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Data Source")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connect Exchange API Key")).not.toBeInTheDocument();
   });
 
-  it("edit mode: a 42501 link denial leaves the key UNCONNECTED and shows the owned-keys copy", async () => {
-    mockMintedKeyResponse();
-    // The cross-tenant api_key_id guard (migration 028/029). Its raw text is the
-    // H-0405 leak, so the redaction has to hold on THIS path too.
-    strategiesUpdateResult = {
-      error: {
-        code: "42501",
-        message:
-          "api_key_id 11111111-1111-1111-1111-111111111111 does not belong to user 22222222-2222-2222-2222-222222222222 (cross-tenant linkage blocked by migration 028/029)",
-      },
-    };
-    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY_NO_KEY} />);
-    connectAKey();
+  it("edit mode with a key already linked: still no Data Source card (no re-point surface)", () => {
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
 
-    expect(
-      await screen.findByText("You can only link API keys you own."),
-    ).toBeInTheDocument();
-    // The whole point: the flag must NOT flip. A denied link rendering as
-    // "connected" is the defect relocated, not fixed.
-    expect(
-      screen.queryByText("Read-only API key verified and connected."),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Data Source")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "API Key Connected" })).not.toBeInTheDocument();
+  });
+
+  it("create mode: still renders the Data Source card and the Connect API Key control", () => {
+    render(<StrategyForm mode="create" />);
+
+    expect(screen.getByText("Data Source")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect API Key" })).toBeEnabled();
-    // H-0405 still holds on the link path — no UUIDs, no migration name.
-    expect(screen.queryByText(/cross-tenant linkage blocked/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/migration 028/)).not.toBeInTheDocument();
-  });
-
-  it("edit mode: any other link failure reports the key as saved-but-unattached, not as connected", async () => {
-    mockMintedKeyResponse();
-    strategiesUpdateResult = {
-      error: { code: "PGRST301", message: "JWT expired" },
-    };
-    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY_NO_KEY} />);
-    connectAKey();
-
-    // Distinct from the validation copy on purpose: the credentials were
-    // accepted and the api_keys row EXISTS against the user's quota, so
-    // "check your credentials and retry" would aim the user at the wrong
-    // problem. The three failure modes get three sentences.
-    expect(
-      await screen.findByText(
-        "Your key was saved to your account, but we couldn't attach it to this strategy. Reload the page and try again.",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText("Read-only API key verified and connected."),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("Couldn't save your strategy. Please try again."),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("Your key was verified but not saved. Please try again."),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText(/JWT expired/)).not.toBeInTheDocument();
   });
 
   it("create mode: the INSERT that creates the strategy carries the minted api_key_id", async () => {
@@ -592,27 +542,23 @@ describe("StrategyForm — KEYLINK-01 connected state must match a persisted lin
 });
 
 /**
- * 164.6.6.3.1 item 1 (D-01, D-02) — the edit form must not lie about, or
- * rewrite, a strategy's name.
+ * 200-12 (D-09) — the edit form is not a rename writer.
  *
- * The defect (seen on MM-2x and AI-FX-35, 2026-10-03 UAT): the picker only
- * offered STRATEGY_NAMES, so a strategy named outside that list rendered as
- * "Alpha Centauri" while React state still held the real name, and every save
- * re-sent `name` whatever the user had touched.
+ * `strategies.name` is renamed in exactly one place: the name route
+ * (`/api/strategies/[id]/name`), which carries the admin-review gate (D-17) for
+ * a published or pending strategy. This form used to carry a second writer: a
+ * `Strategy Name` picker whose pick rode the browser `.update(...)` straight to
+ * PostgREST, behind no status gate. It replaced the 164.6.6.3.1 item 1 rules
+ * (D-01 off-list option, D-02 send-name-only-when-changed), which existed
+ * because the picker could rename; with no picker in edit mode they have no
+ * subject.
  *
- * WHY these specs are shaped this way (Rule 9): the DOM value is what the user
- * sees, so D-01 is asserted on the rendered <select>. D-02 is asserted on the
- * ABSENCE of the `name` key in the persisted update payload; "payload.name did
- * not change" would pass with the bug present because state already held the
- * real name. Every expected literal is typed by hand on purpose.
+ * WHY these specs are shaped this way (Rule 9): the invariant is "an edit save
+ * never carries a name", so it is asserted on the ABSENCE of the `name` key in
+ * the persisted update payload, and on the absence of the control that could
+ * set one. Create mode is the mirror: a new strategy must still be named.
  */
-describe("StrategyForm — 164.6.6.3.1 item 1: own name kept, no rename on unrelated save", () => {
-  function nameSelect() {
-    return screen.getByLabelText("Strategy Name") as HTMLSelectElement;
-  }
-  function optionValues(select: HTMLSelectElement) {
-    return Array.from(select.options).map((o) => o.value);
-  }
+describe("StrategyForm — 200-12 D-09: edit mode is not a rename writer", () => {
   async function saveAndGetUpdatePayload() {
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
     await waitFor(() => expect(routerPushMock).toHaveBeenCalledWith("/strategies"));
@@ -620,17 +566,14 @@ describe("StrategyForm — 164.6.6.3.1 item 1: own name kept, no rename on unrel
     return strategiesUpdateCalls[0].payload;
   }
 
-  it("edit mode: an off-list name is offered verbatim and preselected (D-01)", () => {
+  it("edit mode: renders no Strategy Name control", () => {
     render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
 
-    const select = nameSelect();
-    expect(select.value).toBe("Momentum Alpha");
-    expect(select.options[0].value).toBe("Momentum Alpha");
-    expect(select.options[0].textContent).toBe("Momentum Alpha");
-    expect(optionValues(select).filter((v) => v === "Momentum Alpha")).toHaveLength(1);
+    expect(screen.queryByLabelText("Strategy Name")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Strategy Name" })).not.toBeInTheDocument();
   });
 
-  it("edit mode: an unrelated save sends no name key (D-02)", async () => {
+  it("edit mode: a save after changing the description sends no name key", async () => {
     render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
     fireEvent.change(screen.getByLabelText("Description"), {
       target: { value: "a different description" },
@@ -641,33 +584,17 @@ describe("StrategyForm — 164.6.6.3.1 item 1: own name kept, no rename on unrel
     expect(payload).not.toHaveProperty("name");
   });
 
-  it("edit mode: a deliberate pick sends the new name (D-02)", async () => {
+  it("edit mode: an untouched save sends no name key either", async () => {
     render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
-    fireEvent.change(nameSelect(), { target: { value: "Black Swan" } });
-
-    const payload = await saveAndGetUpdatePayload();
-    expect(payload.name).toBe("Black Swan");
-  });
-
-  it("edit mode: re-picking the original name sends no name key (D-02)", async () => {
-    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
-    fireEvent.change(nameSelect(), { target: { value: "Black Swan" } });
-    fireEvent.change(nameSelect(), { target: { value: "Momentum Alpha" } });
 
     const payload = await saveAndGetUpdatePayload();
     expect(payload).not.toHaveProperty("name");
   });
 
-  it("edit mode: an on-list name is not duplicated (D-01)", () => {
-    const onList = {
-      ...(EDIT_STRATEGY as unknown as Record<string, unknown>),
-      name: "Black Swan",
-    } as unknown as Strategy;
-    render(<StrategyForm mode="edit" strategy={onList} />);
+  it("create mode: still renders the Strategy Name picker", () => {
+    render(<StrategyForm mode="create" />);
 
-    const select = nameSelect();
-    expect(select.value).toBe("Black Swan");
-    expect(optionValues(select).filter((v) => v === "Black Swan")).toHaveLength(1);
+    expect(screen.getByLabelText("Strategy Name")).toBeInTheDocument();
   });
 
   it("create mode still sends name, defaulting to Alpha Centauri", async () => {

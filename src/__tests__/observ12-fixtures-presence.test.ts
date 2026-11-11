@@ -11,6 +11,8 @@ import { describe, it, expect } from "vitest";
 // a remaining fixture, protecting Phase 16's diagnostic harness (Plan 7 SSE,
 // Plan 8 vcrpy cassettes, all e2e replay flows) from silent regression.
 //
+// 2026-11-11 (Phase 200): api-key-flow.spec.ts was rewritten to the one-key edit-page panel and
+// legitimately shrank (Add/Delete key controls moved to Profile), so its floor dropped 8000 -> 6000.
 // Lower-bound thresholds intentionally allow ~20% drift for line-ending,
 // whitespace, or formatter changes; values calibrated against bytes-on-disk
 // at planning time (2026-05-01).
@@ -41,7 +43,7 @@ interface FixtureSpec {
 // caller nobody asked for. Its behaviour test (src/lib/observability.test.ts) went
 // with it.
 const FIXTURES: FixtureSpec[] = [
-  { path: "e2e/api-key-flow.spec.ts", minBytes: 8000, recordedBytes: 9861 },
+  { path: "e2e/api-key-flow.spec.ts", minBytes: 6000, recordedBytes: 7750 },
   { path: "scripts/seed-full-app-demo.ts", minBytes: 50000, recordedBytes: 59393 },
 ];
 

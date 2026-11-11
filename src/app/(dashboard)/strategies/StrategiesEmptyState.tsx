@@ -50,7 +50,7 @@ export function StrategiesEmptyState() {
         ranked here. First metrics arrive ~10–15 minutes after a key connects.
       </p>
       <div className="mt-6">
-        <Button onClick={() => setWizardOpen(true)}>Add a Strategy</Button>
+        <Button onClick={() => setWizardOpen(true)}>Add a strategy</Button>
       </div>
       <ContributionWizardOverlay
         isOpen={wizardOpen}

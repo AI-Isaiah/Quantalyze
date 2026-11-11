@@ -599,13 +599,14 @@ describe("WR-01 regression — a PUBLISHED row reached via Lane B renders WITHOU
   });
 });
 
-describe("Phase 150 — the mark and the rename target ride the OWNER LANE only", () => {
+describe("Phase 150 — the mark rides the OWNER LANE only; Phase 200 D-09 — no lane threads a rename target", () => {
   // The failure this forbids: folding either value into `FactsheetPayload`.
+  // (Phase 200 D-09 removed the rename target; its absence is asserted below.)
   // The payload is what `buildFactsheetPayloadCached` stores under an id-keyed
   // entry that anonymous readers are served for the full TTL, so an owner's
   // capital declaration inside it would be published by the cache (T-150-27).
   // These two properties are RENDER props, exactly like `viewerNotice`.
-  it("12. owner + draft → ownershipMark and renameTarget are threaded, and NEITHER is on the payload", async () => {
+  it("12. owner + draft → ownershipMark is threaded, no renameTarget is, and NEITHER is on the payload", async () => {
     givenOwnerDraft();
     STATE.ownerRow = {
       ...signatureRow("Draft Alpha"),
@@ -617,10 +618,8 @@ describe("Phase 150 — the mark and the rename target ride the OWNER LANE only"
 
     const props = findViewProps(jsx);
     expect(props?.ownershipMark).toBe("own_capital");
-    expect(props?.renameTarget).toEqual({
-      id: STRATEGY_ID,
-      name: "Draft Alpha",
-    });
+    // D-09: the factsheet offers no Rename…, so the page threads no target.
+    expect(props).not.toHaveProperty("renameTarget");
 
     // The cache was never touched, and the payload carries neither value.
     expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
@@ -638,11 +637,6 @@ describe("Phase 150 — the mark and the rename target ride the OWNER LANE only"
     const props = findViewProps(await renderPage());
 
     expect(props?.ownershipMark).toBeNull();
-    // The rename target is still present: renaming does not depend on the mark.
-    expect(props?.renameTarget).toEqual({
-      id: STRATEGY_ID,
-      name: "Draft Alpha",
-    });
   });
 
   it("14. an unrecognised column value fails CLOSED to no mark rather than rendering it", async () => {
@@ -669,7 +663,7 @@ describe("Phase 150 — the mark and the rename target ride the OWNER LANE only"
     const props = findViewProps(await renderPage());
 
     expect(props?.ownershipMark).toBeUndefined();
-    expect(props?.renameTarget).toBeUndefined();
+    expect(props).not.toHaveProperty("renameTarget");
   });
 
   it("16. a PUBLISHED row reached via Lane B threads neither (the WR-01 shape)", async () => {
@@ -688,7 +682,7 @@ describe("Phase 150 — the mark and the rename target ride the OWNER LANE only"
     const props = findViewProps(await renderPage());
 
     expect(props?.ownershipMark).toBeUndefined();
-    expect(props?.renameTarget).toBeUndefined();
+    expect(props).not.toHaveProperty("renameTarget");
   });
 });
 

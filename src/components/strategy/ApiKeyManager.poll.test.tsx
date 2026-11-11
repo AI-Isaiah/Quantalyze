@@ -52,7 +52,7 @@ vi.mock("next/navigation", () => ({
 //   api_keys.select(...).order(...)        → the key list (`loadKeys`)
 //   api_keys.select(...).eq(...).single()  → the exchange name (SyncProgress)
 //   strategies.select(...).eq(...).single()→ the linked key id (SyncProgress)
-//   strategies.update(...).eq(...)         → the link write (`handleLinkKey`)
+//   strategies.update(...).eq(...).eq(...).select(...) → the re-point write (`handleLinkKey`; a Resync writes none)
 //   strategy_analytics.select(...).eq(...).single() → THE POLL, counted
 //   strategy_analytics.select(...).eq(...).maybeSingle() → THE KCS-02 BASELINE,
 //     counted SEPARATELY from the poll (RESEARCH P4), so "no poll before the
@@ -127,13 +127,22 @@ vi.mock("@/lib/supabase/client", () => ({
           },
         }),
       }),
-      update: (vals: { api_key_id?: string }) => ({
-        eq: () => {
-          mockState.linkCount += 1;
-          mockState.linkedKeyId = vals.api_key_id ?? null;
-          return mockState.linkResult ?? Promise.resolve({ error: null });
-        },
-      }),
+      // Phase 200 CR-01: the confirmed re-point is
+      // `update().eq("id").eq("api_key_id", <current>).select("id")`; a Resync
+      // writes nothing. The write lands (and answers its one row) when it is sent.
+      update: (vals: { api_key_id?: string }) => {
+        const chain = {
+          eq: () => chain,
+          is: () => chain,
+          select: () => {
+            mockState.linkCount += 1;
+            mockState.linkedKeyId = vals.api_key_id ?? null;
+            const answer = mockState.linkResult ?? Promise.resolve({ error: null });
+            return answer.then((r) => (r.error ? r : { data: [{ id: "strat-1" }], error: null }));
+          },
+        };
+        return chain;
+      },
     }),
   }),
 }));
@@ -185,6 +194,11 @@ function healthyRow() {
     disconnected_at: null,
     venue_account_id: null,
   };
+}
+
+/** A second account key, the target of a re-point (`Change key…`). */
+function secondRow() {
+  return { ...healthyRow(), id: "key-2", label: "Second Binance" };
 }
 
 function analyticsRow(
@@ -242,6 +256,20 @@ function accepted() {
   } as unknown as Response;
 }
 
+/**
+ * The key feeds read (`GET /api/keys/feeds`), answered with a clean empty map.
+ * Without an answer the feeds line says it could not check and offers its own
+ * `Retry` (SFH-3), which these panel cases must not see.
+ */
+function feedsOk() {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-type": "application/json" }),
+    json: async () => ({ feeds: { "key-h": [], "key-2": [] } }),
+  } as unknown as Response;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -259,10 +287,16 @@ async function tick(ms: number) {
   });
 }
 
-/** Render one healthy current key, click its Resync, and hold the enqueue open. */
-async function startResyncWithHeldEnqueue() {
+/**
+ * Render one healthy current key, click its Resync, and hold the enqueue open.
+ * With `repoint`, the account holds a second key and the attempt is started the
+ * only way that still writes a link: `Change key…`, a pick, and the dialog's
+ * `Change key` (Phase 200 CR-01: a Resync writes nothing).
+ */
+async function startResyncWithHeldEnqueue(repoint = false) {
   const enqueue = deferred<Response>();
   const fetchMock = vi.fn().mockImplementation((url: string) => {
+    if (url === "/api/keys/feeds") return Promise.resolve(feedsOk());
     if (url === "/api/keys/sync") return enqueue.promise;
     // A real read of the job-state projection. Phase 167.2 / KCS-18: the panel
     // reads it before it forwards a terminal success (plan 167.2-10). Lineage:
@@ -288,14 +322,29 @@ async function startResyncWithHeldEnqueue() {
   vi.stubGlobal("fetch", fetchMock);
 
   await act(async () => {
-    render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+    render(<ApiKeyManager strategyName="Synthetic strategy" strategyId="strat-1" currentKeyId="key-h" />);
   });
   await tick(0);
   expect(screen.getByText("Healthy Binance")).toBeInTheDocument();
 
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Resync" }));
-  });
+  if (repoint) {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Change key…" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("change-key-option-key-2"));
+    });
+    const dialog = Array.from(document.querySelectorAll("dialog")).find((d) =>
+      d.textContent?.includes("Change this strategy's key?"),
+    ) as HTMLElement;
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Change key" }));
+    });
+  } else {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Resync" }));
+    });
+  }
   await tick(0);
   return enqueue;
 }
@@ -315,6 +364,17 @@ function panelShowsTimeout() {
 }
 
 beforeEach(() => {
+  // The re-point confirm is a <dialog>; jsdom lacks showModal/close.
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.setAttribute("open", "");
+    };
+  }
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.removeAttribute("open");
+    };
+  }
   vi.useFakeTimers();
   mockState.analyticsResult = { data: null, error: null };
   mockState.analyticsSelectCount = 0;
@@ -322,6 +382,8 @@ beforeEach(() => {
   mockState.baselineReadCount = 0;
   mockState.baselineSelects = [];
   mockState.keysRows = [healthyRow()];
+  mockState.linkedKeyId = "key-h";
+  mockState.linkCount = 0;
   mockState.hangNextKeysRead = false;
   mockState.jobStatuses = [];
   mockState.jobReadCount = 0;
@@ -997,11 +1059,14 @@ describe("ApiKeyManager + the REAL poller: a link update that never answers is b
   it("LINK-HANG: at 15 s the attempt ends as Sync not started with the KCS03-LINK sentence, and no enqueue was ever sent", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     mockState.linkResult = new Promise(() => {});
-    await startResyncWithHeldEnqueue();
+    mockState.keysRows = [healthyRow(), secondRow()];
+    await startResyncWithHeldEnqueue(true);
 
     await tick(LINK_BOUND - 1_000);
     expect(screen.queryByText(KCS03_LINK_LABEL)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+    // The attempt is for key-2, which has no card here; the current key's
+    // Resync is locked while it is live.
+    expect(screen.getByRole("button", { name: "Resync" })).toBeDisabled();
 
     await tick(1_000);
     expect(screen.getByText(KCS03_LINK_LABEL)).toBeInTheDocument();
@@ -1022,7 +1087,8 @@ describe("ApiKeyManager + the REAL poller: a link update that never answers is b
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const link = deferred<{ error: unknown }>();
     mockState.linkResult = link.promise;
-    await startResyncWithHeldEnqueue();
+    mockState.keysRows = [healthyRow(), secondRow()];
+    await startResyncWithHeldEnqueue(true);
 
     await tick(LINK_BOUND);
     expect(screen.getByText(KCS03_LINK_LABEL)).toBeInTheDocument();
@@ -1052,6 +1118,7 @@ describe("ApiKeyManager + the REAL job-state read: no attempt starts while a cha
   it("GATE-E2E: a Resync while the projection says running writes no link, sends no enqueue, and says why on the panel", async () => {
     mockState.jobStatuses = ["running"];
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+    if (url === "/api/keys/feeds") return Promise.resolve(feedsOk());
       if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
         mockState.jobReadCount += 1;
         const jobStatus = mockState.jobStatuses.shift() ?? "done";
@@ -1068,7 +1135,7 @@ describe("ApiKeyManager + the REAL job-state read: no attempt starts while a cha
     mockState.linkCount = 0;
 
     await act(async () => {
-      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+      render(<ApiKeyManager strategyName="Synthetic strategy" strategyId="strat-1" currentKeyId="key-h" />);
     });
     await tick(0);
     await act(async () => {
@@ -1097,6 +1164,7 @@ describe("ApiKeyManager + the REAL job-state read: the pre-attempt gate cannot h
   it("GATE-BOUND: a sync-progress read that never settles ends the attempt at 15 s as Sync not started; no link, no enqueue, and Resync comes back", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+    if (url === "/api/keys/feeds") return Promise.resolve(feedsOk());
       if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
         mockState.jobReadCount += 1;
         return new Promise(() => {});
@@ -1107,7 +1175,7 @@ describe("ApiKeyManager + the REAL job-state read: the pre-attempt gate cannot h
     mockState.linkCount = 0;
 
     await act(async () => {
-      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+      render(<ApiKeyManager strategyName="Synthetic strategy" strategyId="strat-1" currentKeyId="key-h" />);
     });
     await tick(0);
     await act(async () => {
@@ -1130,67 +1198,6 @@ describe("ApiKeyManager + the REAL job-state read: the pre-attempt gate cannot h
   });
 });
 
-describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R2 WR-02, founder decision)", () => {
-  // Hand-typed from the UI-SPEC round-2 founder-decision row.
-  const WARN_UNCHECKED =
-    "We could not check whether this key is part of a composite strategy. If it is, deleting it also removes it from that composite, and a composite with no other key left becomes unlinked.";
-
-  // jsdom has no HTMLDialogElement.showModal / close; the confirm renders
-  // through <Modal>, which calls them (ApiKeyManager.test.tsx polyfills the same).
-  beforeEach(() => {
-    if (!HTMLDialogElement.prototype.showModal) {
-      HTMLDialogElement.prototype.showModal = function showModal() {
-        this.setAttribute("open", "");
-      };
-    }
-    if (!HTMLDialogElement.prototype.close) {
-      HTMLDialogElement.prototype.close = function close() {
-        this.removeAttribute("open");
-      };
-    }
-  });
-
-  function confirmDialog() {
-    const dialog = Array.from(document.querySelectorAll("dialog")).find((d) =>
-      d.textContent?.includes("Delete API Key"),
-    );
-    expect(dialog).toBeTruthy();
-    return dialog!;
-  }
-
-  it("DELETE-MEMBERSHIP-BOUND: a membership read that never settles holds the confirm's Delete for 15 s, then warns it could not check and lets the owner choose", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    // Phase 167.2.1 D-01 (lineage): the never-settling read moved from the
-    // browser `strategy_keys` query to the membership route's fetch.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string) =>
-        /^\/api\/keys\/[^/]+\/memberships$/.test(url)
-          ? new Promise(() => {})
-          : Promise.resolve(accepted()),
-      ),
-    );
-
-    await act(async () => {
-      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
-    });
-    await tick(0);
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    });
-    await tick(0);
-    expect(confirmDialog()).toHaveAttribute("open");
-    // Held while the read is open: the owner decides with the answer, not before it.
-    expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeDisabled();
-
-    await tick(14_000);
-    expect(screen.queryByText(WARN_UNCHECKED)).not.toBeInTheDocument();
-
-    await tick(1_000);
-    expect(within(confirmDialog()).getByText(WARN_UNCHECKED)).toBeInTheDocument();
-    expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
-  });
-});
 
 describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answer does not promise a retry (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1)", () => {
   // Hand-typed from the UI-SPEC round-2 rows.
@@ -1206,6 +1213,7 @@ describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answ
   async function resyncAgainst(body: Record<string, unknown>) {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+    if (url === "/api/keys/feeds") return Promise.resolve(feedsOk());
       if (/^\/api\/strategies\/[^/]+\/sync-progress$/.test(url)) {
         return Promise.resolve({
           ok: true,
@@ -1219,7 +1227,7 @@ describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answ
     vi.stubGlobal("fetch", fetchMock);
     mockState.linkCount = 0;
     await act(async () => {
-      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-h" />);
+      render(<ApiKeyManager strategyName="Synthetic strategy" strategyId="strat-1" currentKeyId="key-h" />);
     });
     await tick(0);
     await act(async () => {

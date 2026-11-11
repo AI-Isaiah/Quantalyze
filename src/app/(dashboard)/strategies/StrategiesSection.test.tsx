@@ -2,7 +2,7 @@
  * Phase 199 plan 09 (D-02, T-199-11, T-199-33) - what StrategiesSection hands the shared table.
  *
  * The table has its own `allocatorFurniture` gate, so a page-level test cannot tell whether the
- * section ALSO withholds the Mark and Rename callbacks from a manager-only list: with the callbacks
+ * section ALSO withholds the Mark callback from a manager-only list: with the callback
  * wrongly passed, the table still renders nothing. This suite reads the props the section passes
  * (StrategyTable is replaced by a probe), so the first lock is pinned on its own, and the origin
  * the section forwards is pinned too (it is a required prop, never hard-coded).
@@ -42,19 +42,20 @@ function mount(extra: Partial<React.ComponentProps<typeof StrategiesSection>> = 
 }
 
 describe("StrategiesSection props to the table (199-09)", () => {
-  it("passes Mark and Rename callbacks only under allocatorFurniture", () => {
+  it("passes the Mark callback only under allocatorFurniture, and no Rename callback in any role (D-09)", () => {
     const manager = mount({ allocatorFurniture: false });
     expect(manager.onMarkOwnership).toBeUndefined();
-    expect(manager.onRename).toBeUndefined();
+    expect(manager).not.toHaveProperty("onRename");
     expect(manager.allocatorFurniture).toBe(false);
 
     const defaulted = mount();
     expect(defaulted.onMarkOwnership).toBeUndefined();
-    expect(defaulted.onRename).toBeUndefined();
+    expect(defaulted).not.toHaveProperty("onRename");
 
     const allocator = mount({ allocatorFurniture: true });
     expect(typeof allocator.onMarkOwnership).toBe("function");
-    expect(typeof allocator.onRename).toBe("function");
+    // The edit page is the one rename place: no list role is handed a rename callback.
+    expect(allocator).not.toHaveProperty("onRename");
     expect(allocator.allocatorFurniture).toBe(true);
   });
 

@@ -158,6 +158,32 @@ vi.mock("@/components/strategy/ApiKeyForm", async (importOriginal) => {
 
 // Polyfill jsdom's missing HTMLDialogElement methods so the <Modal> component
 // can open/close without throwing. Native <dialog> isn't implemented in jsdom.
+/**
+ * 200-07 (D-01): the manager reads `GET /api/keys/feeds` once on mount. This suite's
+ * per-call mocks (`mockResolvedValueOnce` order, call counts) are about every OTHER request,
+ * so that read gets its own answer here and never reaches the mock a test is measuring. The
+ * feeds line itself is pinned in `AllocatorExchangeManager.feeds.test.tsx`.
+ */
+function stubFetch(mock: unknown) {
+  vi.stubGlobal("fetch", (url: unknown, init?: unknown) =>
+    String(url).startsWith("/api/keys/feeds")
+      ? Promise.resolve(new Response(JSON.stringify({ feeds: {} }), { status: 200 }))
+      : (mock as (u: unknown, i?: unknown) => unknown)(url, init),
+  );
+}
+
+/**
+ * stubFetch plus a successful `GET /api/keys/[id]/memberships`. A Disconnect / Delete confirm
+ * is held while that read could not check (SFH-2), so a test that confirms one needs it answered.
+ */
+function stubFetchWithMemberships(mock: unknown) {
+  stubFetch((url: unknown, init?: unknown) =>
+    /\/api\/keys\/[^/]+\/memberships/.test(String(url))
+      ? Promise.resolve(new Response(JSON.stringify({ memberships: [], feeds: [] }), { status: 200 }))
+      : (mock as (u: unknown, i?: unknown) => unknown)(url, init),
+  );
+}
+
 beforeEach(() => {
   if (!HTMLDialogElement.prototype.showModal) {
     HTMLDialogElement.prototype.showModal = function showModal() {
@@ -199,7 +225,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     insertMock.mockReset();
     getUserMock.mockReset();
     fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
   });
 
   afterEach(() => {
@@ -512,7 +538,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     apiKeysRefetchMock.mockReset();
     apiKeysRefetchCall = null;
     fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
 
     getUserMock.mockResolvedValue({
       data: { user: { id: "user-a" } },
@@ -715,7 +741,7 @@ describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
     insertMock.mockReset();
     getUserMock.mockReset();
     fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
   });
 
   afterEach(() => {
@@ -899,6 +925,11 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
     getUserMock.mockReset();
     rpcMock.mockReset();
     holdingsCountMock.mockReset();
+    stubFetchWithMemberships(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   function renderWithHoldings(count: number) {
@@ -1183,7 +1214,7 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     // `unstubGlobals: true` (vitest.config.ts), and this describe (unlike its
     // siblings above) has no afterEach of its own. A direct assignment leaks
     // this mock to every later file in the worker.
-    vi.stubGlobal("fetch", fetchMockReconnect as unknown as typeof fetch);
+    stubFetch(fetchMockReconnect);
   });
 
   it("disconnected key renders in the Disconnected section with a Reconnect button (no Sync / Disconnect)", () => {
@@ -1576,7 +1607,7 @@ describe("AllocatorExchangeManager — initialKeys prop→state merge (Landmine 
     let fetchMock: ReturnType<typeof vi.fn>;
     beforeEach(() => {
       fetchMock = vi.fn();
-      vi.stubGlobal("fetch", fetchMock);
+      stubFetch(fetchMock);
     });
     afterEach(() => {
       vi.unstubAllGlobals();
@@ -1836,7 +1867,7 @@ describe("AllocatorExchangeManager — M1 (red-team) Reconnect replica-lag guard
       status: 200,
       json: async () => ({ ok: true, job_id: "j1" }),
     });
-    vi.stubGlobal("fetch", fetchSpy);
+    stubFetch(fetchSpy);
     const { rerender } = render(
       <AllocatorExchangeManager
         hasHoldings={true} initialKeys={[
@@ -1880,7 +1911,7 @@ describe("AllocatorExchangeManager — M2 (red-team) Reconnect revert timestamp"
     routerRefreshMock.mockReset();
     rpcMock.mockReset();
     fetchMockM2 = vi.fn();
-    vi.stubGlobal("fetch", fetchMockM2);
+    stubFetch(fetchMockM2);
   });
 
   afterEach(() => {
@@ -2082,7 +2113,7 @@ describe("AllocatorExchangeManager — F6 canonical-lowercase exchange in the ad
         json: async () => ({ ok: true, job_id: "job-1" }),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
   });
 
   afterEach(() => {
@@ -2183,7 +2214,7 @@ describe("AllocatorExchangeManager — 160-03 server-side persist + row re-fetch
         json: async () => ({ ok: true, job_id: "job-1" }),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetch(fetchMock);
   });
 
   afterEach(() => {
@@ -2354,7 +2385,7 @@ describe("AllocatorExchangeManager — round-2 review: state crossing sections",
     holdingsCountMock.mockReset();
     holdingsCountMock.mockReturnValue({ count: 0, error: null });
     fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+    stubFetchWithMemberships(fetchMock);
   });
 
   afterEach(() => {
@@ -2605,6 +2636,7 @@ describe("AllocatorExchangeManager — round-2 review: state crossing sections",
 describe("AllocatorExchangeManager — duplicate-account note and reconnect refusal (167.1.2 plan 04)", () => {
   const HOLDER = "key-binance-1";
   const DUP = "key-binance-2";
+  let fetchMockDup: ReturnType<typeof vi.fn>;
   const DUP_SENTENCE =
     "This key reads the same exchange account as Binance — Primary Binance. We count that account once.";
   const RECONNECT_REFUSAL =
@@ -2635,15 +2667,13 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
     routerRefreshMock.mockReset();
     rpcMock.mockReset();
     holdingsCountMock.mockReset();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ ok: true, job_id: "j1" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ) as unknown as typeof fetch,
+    fetchMockDup = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, job_id: "j1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
     );
+    stubFetch(fetchMockDup);
   });
 
   it("names the holder on the duplicate row and says we count that account once, in the muted tone (Phase 183 D-02)", () => {
@@ -2790,7 +2820,7 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
       expect(screen.getByRole("heading", { name: /Disconnected/i })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /Reconnect binance key/i })).not.toBeDisabled();
       // The refusal is not followed by a sync request that could not succeed.
-      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(fetchMockDup).not.toHaveBeenCalled();
       // Never the raw database text.
       expect(screen.queryByText(/duplicate key value/i)).not.toBeInTheDocument();
       errSpy.mockRestore();
@@ -2986,5 +3016,502 @@ describe("AllocatorExchangeManager — venue display names (170.1.2 / D-01)", ()
     );
     expect(screen.getByText(/OKX · Disconnected/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reconnect OKX key" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 200 plan 10 (D-06, LEAN-04) — the Profile key manager is the one place a
+ * manager-only user adds, deletes and updates a key's password, once the edit page's
+ * controls go. Three tests carry the parity names plan 08 greps for before it removes
+ * anything: `manager-only parity: add`, `manager-only parity: delete` and
+ * `manager-only parity: update password`.
+ *
+ * Why role matters here: neither `/api/allocator/holdings/sync` nor
+ * `request_allocator_holdings_sync` checks the caller's role, only key ownership, so a
+ * manager-only click would enqueue an allocator holdings poll. The manager role must
+ * therefore never reach any of the three call sites.
+ */
+describe("AllocatorExchangeManager — manager-only parity (200-10, D-06)", () => {
+  const ALPHA = {
+    strategy_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    name: "Alpha Single",
+    status: "draft",
+    kind: "single",
+  };
+  const BETA = {
+    strategy_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    name: "Beta Composite",
+    status: "published",
+    kind: "composite",
+  };
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let memberFeeds: unknown[];
+
+  const holdingsSyncCalls = () =>
+    fetchMock.mock.calls.filter((c) => String(c[0]) === "/api/allocator/holdings/sync");
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+    rpcMock.mockReset();
+    rpcMock.mockResolvedValue({ data: true, error: null });
+    holdingsCountMock.mockReset();
+    apiKeysRefetchMock.mockReset();
+    apiKeysRefetchCall = null;
+    capturedAddKeyOnSubmit = null;
+    memberFeeds = [ALPHA, BETA];
+    apiKeysRefetchMock.mockReturnValue({
+      data: makeKey({ id: "new-key", label: "Fresh key", sync_status: "idle" }),
+      error: null,
+    });
+    fetchMock = vi.fn(async (url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return new Response(
+          JSON.stringify({ api_key_id: "new-key", valid: true, read_only: true }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/allocator/holdings/sync") {
+        return new Response(JSON.stringify({ ok: true, job_id: "job-1" }), { status: 200 });
+      }
+      if (/\/api\/keys\/[^/]+\/memberships/.test(url)) {
+        return new Response(JSON.stringify({ memberships: [], feeds: memberFeeds }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    stubFetch(fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function addKeyThroughTheForm() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /\+ Connect exchange/i }));
+    });
+    expect(capturedAddKeyOnSubmit).not.toBeNull();
+    await act(async () => {
+      await capturedAddKeyOnSubmit!({
+        exchange: "binance",
+        label: "Fresh key",
+        apiKey: "test-key",
+        apiSecret: "test-secret",
+        passphrase: "",
+      });
+    });
+  }
+
+  async function openConfirmFrom(name: string | RegExp) {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("allocator-delete-feeds")).not.toHaveTextContent("Checking");
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Checking holdings…")).not.toBeInTheDocument();
+    });
+  }
+
+  it("manager-only parity: add", async () => {
+    render(<AllocatorExchangeManager hasHoldings={null} initialKeys={[]} role="manager" />);
+    await addKeyThroughTheForm();
+
+    // The same validate-and-encrypt arm the edit page's Add Key uses, in persist mode.
+    const validate = fetchMock.mock.calls.find((c) => c[0] === "/api/keys/validate-and-encrypt");
+    expect(validate).toBeTruthy();
+    expect(JSON.parse(validate![1].body as string)).toMatchObject({
+      exchange: "binance",
+      persist: true,
+      label: "Fresh key",
+    });
+    // The key appears ...
+    await waitFor(() => {
+      expect(screen.getByText("Fresh key")).toBeInTheDocument();
+    });
+    // ... and nothing allocator-side ran: no holdings poll was enqueued.
+    expect(holdingsSyncCalls()).toHaveLength(0);
+  });
+
+  it("role both still enqueues the first holdings sync after an add (the allocator book is theirs too)", async () => {
+    render(<AllocatorExchangeManager hasHoldings={null} initialKeys={[]} role="both" />);
+    await addKeyThroughTheForm();
+    await waitFor(() => {
+      expect(holdingsSyncCalls()).toHaveLength(1);
+    });
+  });
+
+  it("role manager renders no Sync now, no Active Allocation claim and no history-inclusion control", () => {
+    const keys = [
+      makeKey({ id: "key-live", label: "Live key" }),
+      makeKey({
+        id: "key-gone",
+        label: "Gone key",
+        disconnected_at: "2026-04-22T09:00:00Z",
+        sync_status: "idle",
+      }),
+    ];
+    const { unmount } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={keys} role="manager" />,
+    );
+    expect(screen.queryByRole("button", { name: /Sync .* now/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Active Allocation/)).not.toBeInTheDocument();
+    expect(screen.getByText("1 connected")).toBeInTheDocument();
+    expect(screen.queryByTestId("departed-history-key-gone")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    unmount();
+
+    // The same keys for a profile that is also an allocator keep all three.
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={keys} role="both" />);
+    expect(screen.getByRole("button", { name: /Sync binance now/i })).toBeInTheDocument();
+    expect(screen.getByText(/Active Allocation auto-synced/)).toBeInTheDocument();
+    expect(screen.getByTestId("departed-history-key-gone")).toBeInTheDocument();
+  });
+
+  it("role manager: Reconnect flips the key back without a holdings sync", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={null}
+        role="manager"
+        initialKeys={[
+          makeKey({
+            id: "key-gone",
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Reconnect binance key/i }));
+    });
+    expect(rpcMock).toHaveBeenCalledWith("reconnect_allocator_api_key", {
+      p_api_key_id: "key-gone",
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Delete binance key/i })).toBeInTheDocument();
+    });
+    expect(holdingsSyncCalls()).toHaveLength(0);
+    // Reconnected, so the pill must not be stuck on the optimistic "Syncing".
+    expect(screen.getByTestId("allocator-sync-pill").textContent).not.toContain("Syncing");
+  });
+
+  it("manager-only parity: delete", async () => {
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={null}
+        initialKeys={[makeKey()]}
+        role="manager"
+      />,
+    );
+    // The card offers Delete, never Disconnect, for a manager.
+    expect(screen.queryByRole("button", { name: /Disconnect binance key/i })).not.toBeInTheDocument();
+    await openConfirmFrom(/Delete binance key/i);
+
+    // A delete confirm: titled as one, naming what is lost, with no Disconnect.
+    expect(screen.getByText("Delete Binance?")).toBeInTheDocument();
+    expect(screen.getByTestId("allocator-delete-feeds")).toHaveTextContent(
+      "Deleting this key: Alpha Single loses its key; Beta Composite loses this member.",
+    );
+    expect(screen.getByText("Deleting also removes this account's history.")).toBeInTheDocument();
+    expect(screen.queryByText(/Disconnect instead/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/We'll stop syncing this key/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Disconnect$/ })).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete key" }));
+    });
+    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+      p_cascade_holdings: false,
+    });
+    expect(rpcMock).not.toHaveBeenCalledWith("disconnect_allocator_api_key", expect.anything());
+    await waitFor(() => {
+      expect(screen.queryByTestId("allocator-key-row")).not.toBeInTheDocument();
+    });
+  });
+
+  it("manager delete: an RPC error shows the error line and keeps the card", async () => {
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+    rpcMock.mockResolvedValue({ data: null, error: { code: "42501", message: "boom" } });
+    render(
+      <AllocatorExchangeManager hasHoldings={null} initialKeys={[makeKey()]} role="manager" />,
+    );
+    await openConfirmFrom(/Delete binance key/i);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete key" }));
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("Could not delete this key. Please try again.");
+    });
+    expect(screen.getByTestId("allocator-key-row")).toBeInTheDocument();
+  });
+
+  it("SFH-2 manager delete: a failed feeds read says it could not check, and holds Delete key disabled", async () => {
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockImplementation(async (url: string) => {
+      if (/\/memberships/.test(url)) return new Response("{}", { status: 500 });
+      return new Response("{}", { status: 200 });
+    });
+    render(
+      <AllocatorExchangeManager hasHoldings={null} initialKeys={[makeKey()]} role="manager" />,
+    );
+    await openConfirmFrom(/Delete binance key/i);
+    expect(screen.getByTestId("allocator-delete-feeds")).toHaveTextContent(
+      "Could not check which strategies this key feeds.",
+    );
+    // SFH-2: a delete never runs blind. The confirm is held while it could not check.
+    const del = screen.getByRole("button", { name: "Delete key" });
+    expect(del).toBeDisabled();
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    expect(rpcMock).not.toHaveBeenCalledWith("delete_allocator_api_key", expect.anything());
+  });
+
+  it("WR-06 role manager with holdings on the key: no cascade box, Delete key sends cascade false and shows the RPC refusal", async () => {
+    holdingsCountMock.mockReturnValue({ count: 3, error: null });
+    // delete_allocator_api_key without the cascade is refused by the allocator_holdings FK.
+    rpcMock.mockResolvedValue({ data: null, error: { code: "23503", message: "fk" } });
+    render(
+      <AllocatorExchangeManager hasHoldings={null} initialKeys={[makeKey()]} role="manager" />,
+    );
+    await openConfirmFrom(/Delete binance key/i);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByTestId("allocator-delete-manager-holdings")).toHaveTextContent(
+      "This key has 3 historical holdings from an allocator role, so it cannot be deleted from a manager account.",
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete key" }));
+    });
+    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+      p_cascade_holdings: false,
+    });
+    expect(rpcMock).not.toHaveBeenCalledWith(
+      "delete_allocator_api_key",
+      expect.objectContaining({ p_cascade_holdings: true }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "This key still has allocator holdings tied to it, so it cannot be deleted from a manager account.",
+      );
+    });
+    expect(screen.getByTestId("allocator-key-row")).toBeInTheDocument();
+  });
+
+  it("SFH2-2 role both: a 23503 refusal of Delete key (cascade false) tells the owner to tick the box, and the box appears", async () => {
+    // Holdings arrived after the confirm read 0: the RPC refuses, the next read says 2.
+    holdingsCountMock
+      .mockReturnValueOnce({ count: 0, error: null })
+      .mockReturnValue({ count: 2, error: null });
+    rpcMock.mockResolvedValue({ data: null, error: { code: "23503", message: "fk" } });
+    render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} role="both" />,
+    );
+    await openConfirmFrom(/Disconnect binance key/i);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete key" }));
+    });
+    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+      p_cascade_holdings: false,
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "This key still has allocator holdings tied to it. Tick the box to delete them too, or Disconnect to keep them.",
+      );
+    });
+    expect(screen.getByRole("alert")).not.toHaveTextContent("Please try again");
+    expect(await screen.findByRole("checkbox")).toBeInTheDocument();
+  });
+
+  it("WR-06 role both with holdings: the cascade box still cascades and names the derived allocator history it deletes", async () => {
+    holdingsCountMock.mockReturnValue({ count: 3, error: null });
+    render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} role="both" />,
+    );
+    await openConfirmFrom(/Disconnect binance key/i);
+    expect(screen.queryByTestId("allocator-cascade-derived-history")).not.toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox"));
+    });
+    expect(screen.getByTestId("allocator-cascade-derived-history")).toHaveTextContent(
+      "your allocator equity history built from it (the equity curve and its inputs) is deleted too",
+    );
+    const del = screen
+      .getAllByRole("button")
+      .filter((b) => b.textContent === "Disconnect" && b.className.includes("bg-negative"))
+      .at(-1)!;
+    await act(async () => {
+      fireEvent.click(del);
+    });
+    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+      p_cascade_holdings: true,
+    });
+  });
+
+  it("role both, zero holdings: Disconnect and Delete key are both offered, each calling its own RPC", async () => {
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+    const { unmount } = render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} role="both" />,
+    );
+    await openConfirmFrom(/Disconnect binance key/i);
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete key" })).toBeInTheDocument();
+    // The loss wording and the history warning belong to Delete key and are shown with it.
+    expect(screen.getByTestId("allocator-delete-feeds")).toHaveTextContent(
+      "This key feeds: Alpha Single, Beta Composite.",
+    );
+    expect(screen.getByTestId("allocator-delete-feeds-loss")).toHaveTextContent(
+      "Deleting this key: Alpha Single loses its key; Beta Composite loses this member.",
+    );
+    expect(screen.getByText(/Deleting also removes this account's history/)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    });
+    expect(rpcMock).toHaveBeenCalledWith("disconnect_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+    });
+    unmount();
+
+    rpcMock.mockClear();
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} role="both" />);
+    await openConfirmFrom(/Disconnect binance key/i);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete key" }));
+    });
+    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+      p_cascade_holdings: false,
+    });
+    expect(rpcMock).not.toHaveBeenCalledWith("disconnect_allocator_api_key", expect.anything());
+  });
+
+  it("role allocator, zero holdings: the modal is unchanged and offers no Delete key", async () => {
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+    render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} role="allocator" />,
+    );
+    await openConfirmFrom(/Disconnect binance key/i);
+    expect(screen.getByText("Disconnect Binance?")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete key" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("allocator-delete-feeds-loss")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Deleting also removes/)).not.toBeInTheDocument();
+  });
+
+  it("manager-only parity: update password", async () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={null}
+        role="manager"
+        initialKeys={[makeKey({ id: "key-mt5-1", exchange: "mt5", label: "My MT5" })]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Update password for MT5 key" }));
+    });
+    // The shared UpdateMt5SecretDialog opens on the key (the rotate both managers offer).
+    expect(screen.getByLabelText("New password")).toBeInTheDocument();
+  });
+  // Review round 1, SFH-1: a failed holdings read is "unknown", never "zero holdings".
+  it("SFH-1 HOLDINGS-UNKNOWN: a failed holdings read keeps Delete key disabled and says it could not check", async () => {
+    holdingsCountMock.mockReturnValue({ count: null, error: { message: "boom" } });
+    render(
+      <AllocatorExchangeManager hasHoldings={null} initialKeys={[makeKey()]} role="manager" />,
+    );
+    await openConfirmFrom(/Delete binance key/i);
+    expect(screen.getByTestId("allocator-delete-holdings-unchecked")).toHaveTextContent(
+      "Could not check this key's holdings.",
+    );
+    expect(screen.getByRole("button", { name: "Delete key" })).toBeDisabled();
+    expect(screen.queryByText(/Deleting also removes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No historical holdings/)).not.toBeInTheDocument();
+    expect(rpcMock).not.toHaveBeenCalledWith("delete_allocator_api_key", expect.anything());
+  });
+
+  it("SFH-3 HOLDINGS-RETRY: Retry re-reads a failed holdings count and then releases Delete key", async () => {
+    holdingsCountMock
+      .mockReturnValueOnce({ count: null, error: { message: "boom" } })
+      .mockReturnValue({ count: 0, error: null });
+    render(
+      <AllocatorExchangeManager hasHoldings={null} initialKeys={[makeKey()]} role="manager" />,
+    );
+    await openConfirmFrom(/Delete binance key/i);
+    expect(screen.getByRole("button", { name: "Delete key" })).toBeDisabled();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("allocator-delete-retry"));
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Delete key" })).not.toBeDisabled());
+    expect(screen.queryByTestId("allocator-delete-holdings-unchecked")).not.toBeInTheDocument();
+  });
+
+  it("SFH2-1 HOLDINGS-RETRY-FAILS: a Retry whose holdings re-read fails drops the earlier count and holds Delete key", async () => {
+    // First read succeeds with a count; the feeds read fails so Retry is offered; Retry's
+    // holdings re-read then fails. The earlier count must not keep driving the confirm.
+    holdingsCountMock
+      .mockReturnValueOnce({ count: 0, error: null })
+      .mockReturnValue({ count: null, error: { message: "boom" } });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockImplementation(async (url: string) => {
+      if (/\/memberships/.test(url)) return new Response("{}", { status: 500 });
+      return new Response("{}", { status: 200 });
+    });
+    render(
+      <AllocatorExchangeManager hasHoldings={null} initialKeys={[makeKey()]} role="manager" />,
+    );
+    await openConfirmFrom(/Delete binance key/i);
+    expect(screen.queryByTestId("allocator-delete-holdings-unchecked")).not.toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("allocator-delete-retry"));
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("allocator-delete-holdings-unchecked")).toHaveTextContent(
+        "Could not check this key's holdings.",
+      ),
+    );
+    expect(screen.getByRole("button", { name: "Delete key" })).toBeDisabled();
+    expect(screen.queryByText(/Deleting also removes/)).not.toBeInTheDocument();
+    expect(rpcMock).not.toHaveBeenCalledWith("delete_allocator_api_key", expect.anything());
+  });
+
+  it("SFH-1 HOLDINGS-STALE-ANSWER-DROPPED: key A's late holdings count does not land on key B's confirm", async () => {
+    let releaseA: (v: { count: number; error: null }) => void = () => {};
+    holdingsCountMock
+      .mockReturnValueOnce(new Promise((resolve) => (releaseA = resolve)))
+      .mockReturnValueOnce({ count: 0, error: null });
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-a", label: "Key A" }),
+          makeKey({ id: "key-b", label: "Key B" }),
+        ]}
+        role="both"
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: /Disconnect binance key/i })[0]);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: /Disconnect binance key/i })[1]);
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Delete key" })).toBeInTheDocument());
+    await act(async () => {
+      releaseA({ count: 5, error: null });
+    });
+    // B has no holdings: A's 5 must not turn B's confirm into the cascade box.
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete key" })).toBeInTheDocument();
   });
 });

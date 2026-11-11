@@ -29,7 +29,6 @@ import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { PeerRanksSection, hasPeerRanks } from "@/components/strategy/PeerRanksSection";
 import { formatCloseDay, formatUnpricedDays, withUnit } from "@/lib/factsheet/returns-unit";
 import { TINY_BASE_PERCENT, TINY_BASE_WINDOW_DAYS } from "@/lib/tiny-base-flag";
-import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
 // affordance sites (the strategies page and discovery detail, both of which go
 // through `ShareableLink` in the same module). Importing the decision rather
@@ -213,7 +212,7 @@ interface OwnerLaneProps {
    * ⛔ A RENDER PROP, NEVER A PAYLOAD FIELD. `FactsheetPayload` is the object
    * the shared id-keyed cache serves, so lane state folded into it would be
    * cached once and published to every subsequent reader — the T-150-27 rule
-   * that `viewerNotice`, `ownershipMark` and `renameTarget` already follow.
+   * that `viewerNotice` and `ownershipMark` already follow.
    *
    * ⛔ This does NOT replace `useShareMode()` (D-09). The `?share=1` mechanism
    * on the id route stays byte-identical and keeps serving PUBLISHED strategies;
@@ -229,18 +228,12 @@ interface OwnerLaneProps {
    */
   ownershipMark?: CapitalOwnership | null;
   /**
-   * Phase 150 / OWN-05 — present only when the viewer may rename this strategy,
-   * which the page derives from `lane === "owner"` (reachable only for an
-   * unpublished row the session owns — the D-17 gate for free).
-   */
-  renameTarget?: { id: string; name: string };
-  /**
    * Phase 164 / SHARE-04 — the owner-lane SHARE state, and the reason the Copy
    * Link control stops lying.
    *
    * PRESENCE IS THE PREDICATE. The v2 page passes this only on `lane === "owner"`,
-   * which is reachable only for an UNPUBLISHED row the session owns (the same
-   * free gate `renameTarget` rides). So `ownerShare !== undefined` ⇔ "not
+   * which is reachable only for an UNPUBLISHED row the session owns (the
+   * owner lane is the gate). So `ownerShare !== undefined` ⇔ "not
    * published", which is exactly the input `shareAffordanceMode` needs, with no
    * second predicate to keep in sync. Absent ⇒ the published lane, whose URL is
    * byte-identical to before this phase (D-09).
@@ -277,7 +270,6 @@ export function FactsheetView({
   viewerNotice,
   recipientShare,
   ownershipMark,
-  renameTarget,
   ownerShare,
   showAum,
   beforeFooterSlot,
@@ -296,7 +288,6 @@ export function FactsheetView({
           viewerNotice={viewerNotice}
           recipientShare={recipientShare}
           ownershipMark={ownershipMark}
-          renameTarget={renameTarget}
           ownerShare={ownerShare}
           showAum={showAum}
           beforeFooterSlot={beforeFooterSlot}
@@ -355,7 +346,6 @@ function FactsheetShell({
   viewerNotice,
   recipientShare,
   ownershipMark,
-  renameTarget,
   ownerShare,
   showAum,
   beforeFooterSlot,
@@ -408,7 +398,6 @@ function FactsheetShell({
       viewerNotice={viewerNotice}
       recipientShare={recipientShare}
       ownershipMark={ownershipMark}
-      renameTarget={renameTarget}
       ownerShare={ownerShare}
       showAum={showAum}
       beforeFooterSlot={beforeFooterSlot}
@@ -482,7 +471,6 @@ export function FactsheetBody({
   viewerNotice,
   recipientShare = false,
   ownershipMark,
-  renameTarget,
   ownerShare,
   showAum = false,
   beforeFooterSlot,
@@ -554,7 +542,6 @@ export function FactsheetBody({
           <FactsheetHeader
             payload={payload}
             ownershipMark={ownershipMark}
-            renameTarget={renameTarget}
             showAum={showAum}
           />
         )}
@@ -1500,12 +1487,10 @@ function UsdDisclosure({ usdView }: { usdView: FactsheetUsdView }) {
 function FactsheetHeader({
   payload: payloadProp,
   ownershipMark,
-  renameTarget,
   showAum = false,
 }: {
   payload: FactsheetPayload;
-} & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget" | "showAum">) {
-  const [renameOpen, setRenameOpen] = React.useState(false);
+} & Pick<OwnerLaneProps, "ownershipMark" | "showAum">) {
   // Phase 164.6.6.2.1 (D-19, UI-SPEC rule 4): every identity element below (H1,
   // unit chip, trust tier, FreshnessChip, SeriesRecencyLine, CapacityChip) reads
   // the NATIVE payload, in both views. The frozen provider is handed the selected
@@ -1557,51 +1542,17 @@ function FactsheetHeader({
       </p>
       <div className="mt-2 flex flex-col sm:flex-row sm:flex-wrap sm:items-end sm:justify-between gap-4">
         <div className="max-w-3xl">
-          {/* Phase 150 / OWN-05 — the owner arm puts `Rename…` on the H1's
-              baseline row. The two arms are kept apart rather than always
-              wrapping the H1, so a public render emits the SAME single <h1>
-              with no extra wrapper (the class string is shared above, so the
-              two arms cannot drift).
-
-              151 review A2 — the focus ring is the Phase-117 / UIFIX-02
-              CLIP-PROOF idiom, the same one every other focusable site on this
-              route already carries (see focus-ring-clipproof.test.tsx). It
-              first shipped as `ring-accent/20`, which is ≈1.3:1 against the
-              masthead — far under the WCAG 1.4.11 ≥3:1 non-text floor, and on
-              a borderless, underline-less text button the ring is the ENTIRE
-              focus affordance, so a keyboard user reaching the only owner
-              action on this masthead saw nothing. Full-opacity + inset + a
-              radius for the ring to follow; pinned so `/20` cannot return. */}
-          {renameTarget ? (
-            <div className="flex flex-wrap items-baseline gap-3">
-              <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
-              <ReturnsUnitChip unit={returnsUnit} />
-              <button
-                type="button"
-                onClick={() => setRenameOpen(true)}
-                className="text-caption text-text-muted hover:text-text-primary transition-colors rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
-              >
-                Rename…
-              </button>
-            </div>
-          ) : returnsUnit ? (
-            // Phase 164.6.6.2 (D-09, UI-SPEC A1): the unit sits WITH the name, in the
-            // same wrapper class the owner arm uses. Only when a unit is set: a USD
-            // render keeps the bare <h1> with no wrapper, byte-for-byte.
+          {returnsUnit ? (
+            // Phase 164.6.6.2 (D-09, UI-SPEC A1): the unit sits WITH the name, in a
+            // flex wrapper. Only when a unit is set: a USD render keeps the bare <h1>
+            // with no wrapper, byte-for-byte. (Phase 200 D-09: the owner arm that also
+            // carried `Rename…` is gone; renaming lives on the edit page only.)
             <div className="flex flex-wrap items-baseline gap-3">
               <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
               <ReturnsUnitChip unit={returnsUnit} />
             </div>
           ) : (
             <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
-          )}
-          {renameTarget && (
-            <RenameStrategyDialog
-              open={renameOpen}
-              onClose={() => setRenameOpen(false)}
-              strategyId={renameTarget.id}
-              currentName={renameTarget.name}
-            />
           )}
           <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <TrustTierLabel trustTier={payload.trustTier} />

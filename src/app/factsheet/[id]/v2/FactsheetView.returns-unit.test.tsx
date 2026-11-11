@@ -72,7 +72,7 @@ function unitPayload(unit: string, over: Partial<FactsheetPayload> = {}): Factsh
 
 function renderFactsheet(
   payload: FactsheetPayload,
-  extra: { renameTarget?: { id: string; name: string }; showAum?: boolean } = {},
+  extra: { viewerNotice?: "owner_unpublished"; ownerShare?: { hasActiveShare: boolean }; showAum?: boolean } = {},
 ) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
@@ -118,17 +118,18 @@ describe("A1 — the masthead chip", () => {
     expect(chip.parentElement!.className).not.toContain("gap-2 sm:gap-3");
   });
 
-  it("the owner arm orders H1, then the chip, then Rename", () => {
+  it("the owner lane orders H1, then the chip, and carries no Rename (Phase 200 D-09)", () => {
     const { container } = renderFactsheet(unitPayload("BTC"), {
-      renameTarget: { id: "s-1", name: BASE.strategyName },
+      viewerNotice: "owner_unpublished",
+      ownerShare: { hasActiveShare: false },
     });
     const h1 = container.querySelector("h1") as HTMLElement;
     const row = h1.parentElement as HTMLElement;
     const kids = Array.from(row.children);
-    expect(kids.length).toBe(3);
+    expect(kids.length).toBe(2);
     expect(kids[0].tagName).toBe("H1");
     expect(kids[1].getAttribute("data-returns-unit")).toBe("BTC");
-    expect(kids[2].textContent).toContain("Rename");
+    expect(container.textContent).not.toContain("Rename");
   });
 
   it("a USD payload's public arm emits the bare h1, with no wrapper and no chip", () => {

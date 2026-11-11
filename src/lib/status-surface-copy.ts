@@ -396,9 +396,10 @@ function shapeRemedy(shape: StrategyShape, strategyId: string): OwnerRemedy {
     },
     unlinked: {
       id: "KCS21-UNLINKED",
-      before: "Link a key with Use & Sync on this strategy's ",
+      before: "Link a key with Change key… on this strategy's ",
       link: { text: "edit page", href: editHref },
-      after: " to start a new computation. Use the contact form if it does not complete.",
+      after:
+        " (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.",
     },
     composite: {
       id: "KCS21-COMPOSITE",

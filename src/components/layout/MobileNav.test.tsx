@@ -62,7 +62,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).not.toContain("/strategies");
     expect(hrefs).not.toContain("/portfolios");
     // Every item carries the NavItem shape. Phase 110 (CONTRIB-01): NavItem is
-    // now a union — link items carry a string `href`, while the "Add a Strategy"
+    // now a union — link items carry a string `href`, while the "Add a strategy"
     // action item carries a string `action` and NO href instead.
     for (const item of items) {
       expect(typeof item.label).toBe("string");
@@ -134,15 +134,15 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
   });
 
   /**
-   * Phase 110 CONTRIB-01 — the allocator "Add a Strategy" client action is the
+   * Phase 110 CONTRIB-01 — the allocator "Add a strategy" client action is the
    * LEADING discretionary filler, so it survives the single filler slot the
    * <=5 cap grants a pure allocator (the SC#1 primary trio still leads). It is
    * href-less (an action, not a route) and never surfaces for a non-allocator
    * (role-leak T-110-16).
    */
-  it("pure allocator: surfaces the href-less 'Add a Strategy' action filler, trio still leads", () => {
+  it("pure allocator: surfaces the href-less 'Add a strategy' action filler, trio still leads", () => {
     const items = buildPrimaryMobileNav({ isAllocator: true });
-    const addItem = items.find((i) => i.label === "Add a Strategy");
+    const addItem = items.find((i) => i.label === "Add a strategy");
     expect(addItem).toBeDefined();
     expect(addItem?.href).toBeUndefined();
     expect(
@@ -156,14 +156,14 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     ]);
   });
 
-  it("manager-only: does NOT surface 'Add a Strategy'", () => {
+  it("manager-only: does NOT surface 'Add a strategy'", () => {
     const items = buildPrimaryMobileNav({ isManager: true });
-    expect(items.find((i) => i.label === "Add a Strategy")).toBeUndefined();
+    expect(items.find((i) => i.label === "Add a strategy")).toBeUndefined();
   });
 
-  it("bare is_admin: does NOT surface 'Add a Strategy'", () => {
+  it("bare is_admin: does NOT surface 'Add a strategy'", () => {
     const items = buildPrimaryMobileNav({ isAdmin: true });
-    expect(items.find((i) => i.label === "Add a Strategy")).toBeUndefined();
+    expect(items.find((i) => i.label === "Add a strategy")).toBeUndefined();
   });
 
   it("My allocation carries the flaggedCount badge when > 0", () => {
@@ -193,12 +193,12 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     expect(within(nav).getByText("Risk")).toBeInTheDocument();
   });
 
-  it("renders 'Add a Strategy' as a <button> that fires onNavAction (CONTRIB-01)", () => {
+  it("renders 'Add a strategy' as a <button> that fires onNavAction (CONTRIB-01)", () => {
     pathnameMock.mockReturnValue("/allocations");
     const onNavAction = vi.fn();
     render(<MobileNav isAllocator onNavAction={onNavAction} />);
     const nav = screen.getByRole("navigation", { name: "Primary mobile" });
-    const button = within(nav).getByText("Add a Strategy").closest("button");
+    const button = within(nav).getByText("Add a strategy").closest("button");
     expect(button).not.toBeNull();
     expect(button).toHaveAttribute("type", "button");
     fireEvent.click(button!);
@@ -258,7 +258,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     const nav = screen.getByRole("navigation", { name: "Primary mobile" });
     return [
       ...within(nav).getAllByRole("link"),
-      within(nav).getByText("Add a Strategy").closest("button") as HTMLElement,
+      within(nav).getByText("Add a strategy").closest("button") as HTMLElement,
     ];
   }
 
@@ -296,7 +296,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     for (const cell of navCells()) {
       expect(tokens(cell).filter(clipping), `${cell.textContent} clips`).toEqual([]);
     }
-    for (const label of within(nav).getAllByText(/^(My allocation|Risk|Bridge|Add a Strategy|Profile)$/)) {
+    for (const label of within(nav).getAllByText(/^(My allocation|Risk|Bridge|Add a strategy|Profile)$/)) {
       expect(tokens(label).filter(clipping), `${label.textContent} label clips`).toEqual([]);
     }
   });

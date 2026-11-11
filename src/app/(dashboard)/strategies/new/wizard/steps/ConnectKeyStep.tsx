@@ -42,6 +42,9 @@ import { venueSecretIsVerbatim } from "@/lib/closed-sets";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { venueLabel } from "@/lib/display-labels";
+import { KEY_STORAGE_LINK, KEY_STORAGE_SENTENCE } from "@/lib/status-surface-copy";
+import type { KeyFeed } from "@/lib/key-feeds";
+import { buildFactsheetHref } from "@/lib/factsheet/origin";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -192,18 +195,19 @@ const SFOX_REJECT_ATOM_BODY =
 const MT5_REJECT_ATOM_BODY =
   "MT5 master passwords can place trades, so we reject them at connect time and store nothing — only a read-only investor login is accepted.";
 
-const TRUST_ATOMS: { title: string; body: string }[] = [
+const TRUST_ATOMS: {
+  title: string;
+  body: string;
+  link?: { href: string; label: string };
+}[] = [
   {
     title: "What we store",
-    body: "Your API key and secret are encrypted with AES-256-GCM envelope encryption before they ever hit the database. The KEK lives in Supabase Vault.",
+    body: KEY_STORAGE_SENTENCE,
+    link: KEY_STORAGE_LINK,
   },
   {
     title: "What we reject",
     body: "Any key with trading or withdrawal scopes is rejected before we store it. Only Read permissions are allowed, enforced at the database level.",
-  },
-  {
-    title: "Who can decrypt",
-    body: "Only the Railway analytics service can decrypt the stored ciphertext to fetch your trade history. The web tier has no decryption path.",
   },
   {
     title: "Security contact",
@@ -779,6 +783,146 @@ export interface ConnectKeyStepProps {
   onUseDifferentKey?: () => void;
 }
 
+// Phase 200 D-01 (ROUTE-09, plan 200-09): the saved-key summary names the
+// strategies the preselected key feeds, from ONE read of `GET /api/keys/feeds`.
+// Same three copy strings as the key managers (`ApiKeyManager`). A read that
+// failed, or an answer that is not about this key, is never "Feeds no
+// strategy.": a manager reusing a key is never told it is unused when the app
+// could not look (T-200-19).
+const PRESELECT_FEEDS_NONE_COPY = "Feeds no strategy.";
+const PRESELECT_FEEDS_UNCHECKED_COPY =
+  "Could not check which strategies this key feeds.";
+/** Same bound as the key manager's reads; the abort also stops a hung body. */
+const PRESELECT_FEEDS_BOUND_MS = 15_000;
+
+/** The part of a `KeyFeed` this line reads; `status` is not shown here. */
+type PreselectFeed = Pick<KeyFeed, "strategy_id" | "name" | "kind">;
+
+type PreselectFeedsResult =
+  | { status: "failed" }
+  | { status: "ok"; feeds: PreselectFeed[] };
+
+/** A feed as the browser accepts it; anything else makes the read fail. */
+function parsePreselectFeed(value: unknown): PreselectFeed | null {
+  if (value === null || typeof value !== "object") return null;
+  const f = value as Record<string, unknown>;
+  const text = (v: unknown) =>
+    typeof v === "string" ? v : v === null ? null : undefined;
+  const strategy_id = text(f.strategy_id);
+  const name = text(f.name);
+  if (strategy_id === undefined || name === undefined) return null;
+  if (f.kind !== "single" && f.kind !== "composite") return null;
+  return { strategy_id, name, kind: f.kind };
+}
+
+/**
+ * What `GET /api/keys/feeds` says the key `keyId` feeds. Never throws: a non-2xx
+ * answer, a body that is not `{ feeds: { <id>: [...] } }`, a map with no entry
+ * for `keyId`, a malformed entry, a rejected fetch and the bound all answer
+ * "failed". Logs the reason only, no key id and no strategy id.
+ */
+async function readPreselectFeeds(keyId: string): Promise<PreselectFeedsResult> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), PRESELECT_FEEDS_BOUND_MS);
+  let failure: string;
+  try {
+    const res = await fetch("/api/keys/feeds", {
+      cache: "no-store",
+      signal: abort.signal,
+    });
+    if (!res.ok) {
+      failure = `the feeds read answered HTTP ${res.status}`;
+    } else {
+      const body = (await res.json()) as unknown;
+      const map =
+        body !== null && typeof body === "object"
+          ? (body as { feeds?: unknown }).feeds
+          : undefined;
+      if (map === null || typeof map !== "object" || Array.isArray(map)) {
+        failure = "the feeds answer carried no feeds map";
+      } else {
+        // The route answers every key the caller owns, so a miss means the
+        // answer is not about this key: could not check, never "feeds nothing".
+        const entry = (map as Record<string, unknown>)[keyId];
+        const parsed = Array.isArray(entry)
+          ? entry.map(parsePreselectFeed)
+          : null;
+        if (parsed === null) {
+          failure = "the feeds answer had no list for the saved key";
+        } else if (parsed.includes(null)) {
+          failure = "the feeds answer carried a malformed entry";
+        } else {
+          return { status: "ok", feeds: parsed as PreselectFeed[] };
+        }
+      }
+    }
+  } catch (err) {
+    failure = err instanceof Error ? err.message : String(err);
+  } finally {
+    clearTimeout(timer);
+  }
+  console.error(
+    "[ConnectKeyStep] the key feeds read failed; the summary says it could not check:",
+    failure,
+  );
+  return { status: "failed" };
+}
+
+/**
+ * The feeds line under the saved-key identity: each strategy the key feeds as a
+ * link, `Feeds no strategy.`, or the could-not-check line. Read-only text and
+ * links: it adds no control, so the connect step does not become a key manager
+ * (D-08). Links go to the factsheet, not `/strategies/[id]/edit`: this surface
+ * is reached by allocators too, and the edit route is manager-guarded, while
+ * the factsheet serves the owner at any status. A strategy with no id (a
+ * composite row the route redacted) is named without a link.
+ */
+function PreselectFeedsLine({ result }: { result: PreselectFeedsResult }) {
+  if (result.status === "failed") {
+    return (
+      <p
+        className="mt-1 text-small text-warning"
+        data-testid="wizard-preselect-feeds"
+      >
+        {PRESELECT_FEEDS_UNCHECKED_COPY}
+      </p>
+    );
+  }
+  if (result.feeds.length === 0) {
+    return (
+      <p
+        className="mt-1 text-small text-text-muted"
+        data-testid="wizard-preselect-feeds"
+      >
+        {PRESELECT_FEEDS_NONE_COPY}
+      </p>
+    );
+  }
+  return (
+    <p
+      className="mt-1 text-small text-text-muted"
+      data-testid="wizard-preselect-feeds"
+    >
+      Feeds:{" "}
+      {result.feeds.map((feed, i) => (
+        <span key={`${feed.kind}-${feed.strategy_id ?? "unreadable"}-${i}`}>
+          {i > 0 && ", "}
+          {feed.strategy_id === null ? (
+            "a strategy we could not read"
+          ) : (
+            <Link
+              href={buildFactsheetHref(feed.strategy_id, { key: "strategies" })}
+              className="text-accent underline underline-offset-4"
+            >
+              {feed.name ?? "Unnamed strategy"}
+            </Link>
+          )}
+        </span>
+      ))}
+    </p>
+  );
+}
+
 export function ConnectKeyStep({
   wizardSessionId,
   onSuccess,
@@ -1151,6 +1295,26 @@ export function ConnectKeyStep({
       ?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Phase 200 D-01: which strategies the saved key feeds. One read when a
+  // preselect is set, none otherwise (the credential form makes no call). The
+  // result is stored with the key id it answers, so an answer for a previous
+  // preselect is never shown for the current one; "loading" renders nothing.
+  const preselectId = preselectKey?.id ?? null;
+  const [preselectFeeds, setPreselectFeeds] = useState<{
+    keyId: string;
+    result: PreselectFeedsResult;
+  } | null>(null);
+  useEffect(() => {
+    if (preselectId === null) return;
+    let live = true;
+    void readPreselectFeeds(preselectId).then((result) => {
+      if (live) setPreselectFeeds({ keyId: preselectId, result });
+    });
+    return () => {
+      live = false;
+    };
+  }, [preselectId]);
 
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
   // WR-01: the per-exchange "setup guide" SubAnchors for the flag-gated venues
@@ -1714,6 +1878,9 @@ export function ConnectKeyStep({
           >
             {preselectKey.exchangeLabel} — {preselectKey.keyLabel}
           </p>
+          {preselectFeeds !== null && preselectFeeds.keyId === preselectKey.id && (
+            <PreselectFeedsLine result={preselectFeeds.result} />
+          )}
         </div>
 
         {errorEnvelope && (
@@ -1843,6 +2010,18 @@ export function ConnectKeyStep({
                   href={contactHref({ topic: "security" })}
                   newTab
                 />
+                {atom.link && (
+                  <>
+                    {" "}
+                    <Link
+                      href={atom.link.href}
+                      className="text-accent underline underline-offset-4"
+                    >
+                      {atom.link.label}
+                    </Link>
+                    .
+                  </>
+                )}
               </dd>
             </div>
           ))}

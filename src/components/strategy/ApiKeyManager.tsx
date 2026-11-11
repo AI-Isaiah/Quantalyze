@@ -1,19 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { Modal } from "@/components/ui/Modal";
-import { ApiKeyForm } from "./ApiKeyForm";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import {
-  addKeyBlockedReason,
   COMPOSITE_CARD_NOTE,
-  deleteCompositeWarning,
-  DELETE_MEMBERSHIP_UNCHECKED_COPY,
   EMPTY_NOLINK_COPY,
   FINISH_UNVERIFIED_NOTE,
   SHAPE_UNKNOWN_CARD_NOTE,
@@ -27,20 +23,25 @@ import {
   type SyncStatus,
   type SyncStatusInfo,
 } from "./SyncProgress";
-import { UpdateMt5SecretDialog } from "./UpdateMt5SecretDialog";
+import { ConfirmKeyChangeDialog } from "./ConfirmKeyChangeDialog";
 import { readChainJobState } from "./chain-job-state";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
-import { dataSourceLabel } from "@/lib/api-key-label";
+import { apiKeyLabelById, dataSourceLabel } from "@/lib/api-key-label";
 import { accountShareNote } from "@/lib/account-share-note";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import type { KeyFeed } from "@/lib/key-feeds";
 
 interface ApiKeyManagerProps {
   strategyId: string;
+  /**
+   * Phase 200 D-04: the strategy's name, which the re-point confirm says out
+   * loud ("<name> will read trades from <key> instead of <key>").
+   */
+  strategyName: string;
   currentKeyId: string | null;
-  defaultExchange?: string;
   /**
    * Phase 167.2 / KCS-23: what the edit page could tell about the strategy.
    * "single" means NOT a composite (a single-key or an unlinked strategy, both
@@ -268,37 +269,172 @@ interface KeysReadOutcome {
 }
 
 
-// 167-06 security delta (UF-1): authored copy for a delete whose outcome we
-// could not confirm. A raw PostgREST message never reaches the page.
-const DELETE_FAILED_COPY =
-  "Failed to delete key. Try again, and contact support if it keeps failing.";
+// Phase 200 D-01 (ROUTE-09): what the key cards say about the strategies each
+// key feeds. A read that failed is never "Feeds no strategy.": a manager
+// deciding whether to delete or re-point a key is never told it is unused when
+// the app simply could not look.
+const FEEDS_NONE_COPY = "Feeds no strategy.";
+const FEEDS_UNCHECKED_COPY = "Could not check which strategies this key feeds.";
 
-// 167.1.2 C4 review SFH-C4-09: this card's Delete is a hard `api_keys` DELETE,
-// and csv_daily_returns_api_key_id_fkey is ON DELETE CASCADE, so the key's
-// per-key daily returns (the allocator's history for this account) go with it.
-// The first sentence of AllocatorExchangeManager's DELETE_REMOVES_HISTORY
-// (plan 09). Its second sentence, "Disconnect instead to keep it.", is left
-// out: this card has no Disconnect (167.1.2 REVIEW WR-01).
-const DELETE_REMOVES_HISTORY = "Deleting also removes this account's history.";
+// Phase 200 D-07 (ROUTE-09): the edit page shows this strategy's one key, so
+// the empty states say what is true of THIS strategy. A current key the list
+// cannot hold (read through RLS) is never reported as "no key linked".
+const NO_KEY_LINKED_COPY = "No key is linked to this strategy yet.";
+const KEY_NOT_LISTED_COPY = "This strategy's key is not in your account's key list.";
+// The one place keys are added, deleted and updated (D-06), reachable from the
+// edit page for every role that can hold a key (plan 07 opens the tab).
+const PROFILE_KEYS_HREF = "/profile?tab=exchanges";
+
+type FeedsState =
+  | { status: "loading" }
+  | { status: "failed" }
+  | { status: "ok"; feeds: Record<string, KeyFeed[]> };
+
+/** A `KeyFeed` as the browser accepts it; anything else makes the read fail. */
+function parseKeyFeed(value: unknown): KeyFeed | null {
+  if (value === null || typeof value !== "object") return null;
+  const f = value as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === "string" ? v : v === null ? null : undefined);
+  const strategy_id = text(f.strategy_id);
+  const name = text(f.name);
+  const status = text(f.status);
+  if (strategy_id === undefined || name === undefined || status === undefined) return null;
+  if (f.kind !== "single" && f.kind !== "composite") return null;
+  return { strategy_id, name, status, kind: f.kind };
+}
+
+/**
+ * One read of `GET /api/keys/feeds`, which answers every key the caller owns
+ * in one call (a per-key read would spend the route's 5-per-60-s limiter on a
+ * list of more than five keys). Bounded like the card's other reads
+ * (`BASELINE_READ_BOUND_MS`); the abort also stops a body that never finishes.
+ * Never throws: a non-2xx answer, a body that is not `{ feeds: { <id>: [...] } }`,
+ * a rejected fetch and the bound all answer "failed". Logs the reason only, no
+ * key id and no strategy id.
+ */
+async function readKeyFeeds(): Promise<FeedsState> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), BASELINE_READ_BOUND_MS);
+  let failure: string;
+  try {
+    const res = await fetch("/api/keys/feeds", { cache: "no-store", signal: abort.signal });
+    if (!res.ok) {
+      failure = `the feeds read answered HTTP ${res.status}`;
+    } else {
+      const body = (await res.json()) as unknown;
+      const raw =
+        body !== null && typeof body === "object"
+          ? (body as { feeds?: unknown }).feeds
+          : undefined;
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+        failure = "the feeds answer carried no feeds map";
+      } else {
+        const feeds: Record<string, KeyFeed[]> = {};
+        let malformed = false;
+        for (const [keyId, list] of Object.entries(raw as Record<string, unknown>)) {
+          const parsed = Array.isArray(list) ? list.map(parseKeyFeed) : null;
+          if (parsed === null || parsed.includes(null)) {
+            malformed = true;
+            break;
+          }
+          feeds[keyId] = parsed as KeyFeed[];
+        }
+        if (!malformed) return { status: "ok", feeds };
+        failure = "the feeds answer carried a malformed entry";
+      }
+    }
+  } catch (err) {
+    failure = err instanceof Error ? err.message : String(err);
+  } finally {
+    clearTimeout(timer);
+  }
+  console.error("[ApiKeyManager] the key feeds read failed; the cards say they could not check:", failure);
+  return { status: "failed" };
+}
+
+/**
+ * The feeds line under a key card: the strategies the key feeds, each a link to
+ * its edit page, or `Feeds no strategy.`, or the could-not-check line. Renders
+ * nothing while the read is open. A key id missing from an OK map is "could not
+ * check", never "feeds nothing": the route answers every owned key, so a miss
+ * means the answer is not about this key. A strategy with no id (a composite
+ * row the route redacted) is named without a link.
+ */
+function KeyFeedsLine({
+  keyId,
+  state,
+  onRetry,
+  testIdPrefix = "api-key-feeds",
+}: {
+  keyId: string;
+  state: FeedsState;
+  onRetry: () => void;
+  testIdPrefix?: string;
+}) {
+  if (state.status === "loading") return null;
+  const feeds = state.status === "ok" ? state.feeds[keyId] : undefined;
+  if (!feeds) {
+    // SFH-3 (round 1): the route allows 5 reads per 60 s, so a burst of key
+    // changes can fail the read. One Retry re-runs it; without it the line
+    // stayed "could not check" until the page was reloaded.
+    return (
+      <div className="flex flex-wrap items-center gap-x-2">
+        <p data-testid={`${testIdPrefix}-${keyId}`} className="mt-0.5 text-xs text-warning">
+          {FEEDS_UNCHECKED_COPY}
+        </p>
+        <Button size="sm" variant="ghost" onClick={onRetry}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (feeds.length === 0) {
+    return (
+      <p data-testid={`${testIdPrefix}-${keyId}`} className="mt-0.5 text-xs text-text-muted">
+        {FEEDS_NONE_COPY}
+      </p>
+    );
+  }
+  return (
+    <p data-testid={`${testIdPrefix}-${keyId}`} className="mt-0.5 text-xs text-text-muted">
+      Feeds:{" "}
+      {feeds.map((feed, i) => (
+        <span key={`${feed.kind}-${feed.strategy_id ?? "unreadable"}-${i}`}>
+          {i > 0 && ", "}
+          {feed.strategy_id === null ? (
+            "a strategy we could not read"
+          ) : (
+            <Link
+              href={`/strategies/${feed.strategy_id}/edit`}
+              className="text-accent underline underline-offset-4"
+            >
+              {feed.name ?? "Unnamed strategy"}
+            </Link>
+          )}
+        </span>
+      ))}
+    </p>
+  );
+}
 
 export function ApiKeyManager({
   strategyId,
+  strategyName,
   currentKeyId,
-  defaultExchange,
   keyShape = "single",
   compositeMemberKeyIds,
 }: ApiKeyManagerProps) {
   /**
    * Phase 167.2 / KCS-23: may this card offer a control that writes
-   * `strategies.api_key_id` (Resync, Use & Sync, Add Key)? Only when the page
+   * `strategies.api_key_id` (Resync, Change key…)? Only when the page
    * knows the strategy is NOT a composite. `handleLinkKey` writes that column
-   * unconditionally, so on a composite `Use & Sync` would silently turn it into
-   * a single-key strategy, and `Add Key` links the new key the same way. An
-   * "unknown" shape fails closed on these controls, since it might be a
-   * composite, but NOT on the remedy controls: `Update password`, `Delete` and
-   * each key's pill stay, because the /strategies "Sign-in failed" pill links
-   * here for exactly that remedy. The three link handlers also return early
-   * when this is false (defence in depth behind the missing buttons).
+   * unconditionally, so on a composite `Change key…` would silently turn it into
+   * a single-key strategy. An "unknown" shape fails closed on these controls,
+   * since it might be a composite, but each key's pill and the Profile link
+   * stay, because the /strategies "Sign-in failed" pill links here for its
+   * remedy (Phase 200 D-07: add, delete and update password moved to the
+   * Profile API keys tab). The link handlers also return early when this is
+   * false (defence in depth behind the missing buttons).
    */
   const linkControlsAllowed = keyShape === "single";
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -307,8 +443,6 @@ export function ApiKeyManager({
   // every arm that SETTLES a read (clean, failed, thrown), never by the
   // superseded early return, and never reset: a re-read keeps the list it has.
   const [firstReadSettled, setFirstReadSettled] = useState(false);
-  const [showForm, setShowForm] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // H-0395: distinct load-failure state. Without it, a failed api_keys SELECT
   // (RLS regression after a GRANT migration, expired session, network error)
@@ -327,25 +461,22 @@ export function ApiKeyManager({
   // state is set. `loadKeys` is a useCallback keyed on `currentKeyId` only, so
   // it reads the subject here rather than from the render it closed over.
   const lastAttemptedKeyIdRef = useRef<string | null>(null);
+  // Phase 200 R2-01: the key the manager confirmed (or saw) as the strategy's
+  // current key when the last attempt began, replayed by the panel's Retry. The
+  // write is conditioned on THIS, never on the live `currentKeyId` prop, which
+  // changes under a mounted card on any `router.refresh()`. A ref, read at
+  // click time like `attemptRef`; it drives no render.
+  const lastAttemptExpectedKeyIdRef = useRef<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  // 167.2-REVIEW-R2 WR-02 (founder decision 2026-09-24): what the Delete
-  // confirm knows about the key's composite memberships. "checking" holds the
-  // confirm's Delete while the bounded read is open; the answer is shown as an
-  // amber warning inside the confirm, and never blocks the delete. The seq
-  // ref drops an answer for a confirm that was closed or re-opened meanwhile.
-  const [deleteCheck, setDeleteCheck] = useState<
-    | { state: "checking" }
-    | { state: "none" }
-    | { state: "warn"; text: string }
-  >({ state: "none" });
-  const deleteCheckSeqRef = useRef(0);
-  // Phase 164.5.3 / MT5CREDS Plan 05 — the id of the MT5 key whose password
-  // is being corrected. Distinct from Reconnect: this key's credential is
-  // WRONG and needs re-validation, not merely "try the stored one again".
-  const [updatingKeyId, setUpdatingKeyId] = useState<string | null>(null);
+  // Phase 200 D-03 (ROUTE-09): the key a `Change key…` pick asked to re-point
+  // the strategy to, held until the manager confirms. Nothing is written while
+  // it is only pending.
+  const [pendingKeyId, setPendingKeyId] = useState<string | null>(null);
+  // Phase 200 D-07: whether the `Change key…` picker is open. A pick only sets
+  // `pendingKeyId` (and closes this); the write is `confirmPendingKey`'s.
+  const [pickerOpen, setPickerOpen] = useState(false);
   // The live tracked attempt, or null. See `SyncAttempt`. A ref, not state: it
   // is read inside async continuations that must see the CURRENT attempt, not
   // the one their render closed over, and it never drives a render itself
@@ -369,13 +500,6 @@ export function ApiKeyManager({
   // reason the panel forwarded), so the panel says how long it waited. Reset
   // at every attempt's registration.
   const [panelStopReason, setPanelStopReason] = useState<PanelStopReason | null>(null);
-  // Phase 167.2 / KCS-01 (RESEARCH P7, the reverse overlap): true while an
-  // Add Key is in flight, from before its validate request until it hands off
-  // to its own tracked attempt. A ref, not `loading`: `loading` is async
-  // state, so a handler running before the re-render would read it stale
-  // (the NEW-C37-02 lesson). While it is set, `handleSyncTrades` registers
-  // nothing, so no attempt can start that the add would then collide with.
-  const addInFlightRef = useRef(false);
   // 167-06 fix round 2 (167-REVIEW-06-R2 WR-04): the key-list reads are
   // ORDERED. Each `loadKeys` call takes the next number; a response older than
   // the newest one already applied is dropped. Without it, an attempt's own
@@ -398,6 +522,31 @@ export function ApiKeyManager({
   // the next attempt's registration, never by a list read.
   const [finishUnverified, setFinishUnverified] = useState(false);
   const router = useRouter();
+  // Phase 200 D-01: which strategies each key feeds, from ONE read of
+  // `GET /api/keys/feeds`. Read once on mount and again only after a completed
+  // key change (a link, an add, a delete), never from `loadKeys` and never on
+  // the sync poll, so the route's 5-per-60-s limiter is never spent by
+  // polling. ORDERED like `loadKeys`: an answer older than the newest read, or
+  // one that lands after an unmount, is dropped.
+  const [feedsState, setFeedsState] = useState<FeedsState>({ status: "loading" });
+  const feedsSeqRef = useRef(0);
+  const loadFeeds = useCallback(async () => {
+    const seq = ++feedsSeqRef.current;
+    const next = await readKeyFeeds();
+    if (seq === feedsSeqRef.current) setFeedsState(next);
+  }, []);
+  // After a key change the old map may be wrong (a re-point, a new key with no
+  // entry yet, a deleted key), so the lines go quiet until the new answer lands.
+  const refreshFeeds = useCallback(() => {
+    setFeedsState({ status: "loading" });
+    void loadFeeds();
+  }, [loadFeeds]);
+  useEffect(() => {
+    void loadFeeds();
+    return () => {
+      feedsSeqRef.current += 1;
+    };
+  }, [loadFeeds]);
   // Phase 164.6.6.3.5 (AD-05): where every "contact form" pointer on this card
   // goes, with this strategy's id attached. Same tab (UI-SPEC pointer rule for
   // these surfaces).
@@ -416,12 +565,11 @@ export function ApiKeyManager({
   );
 
   /**
-   * 167.2-REVIEW IN-01: the core of `retireWithheldSuccess`, as a STABLE
-   * callback that reads nothing from its render (only the stable
-   * `setSyncStatus`), so `loadKeys` can depend on it honestly. It used to call
-   * the render-scoped `retireWithheldSuccess` under an `eslint-disable` of
-   * exhaustive-deps: safe only while that function read nothing from its
-   * render, and the disable would have hidden the lint the moment it did.
+   * 167.2-REVIEW IN-01: retire a shown terminal success, as a STABLE callback
+   * that reads nothing from its render (only the stable `setSyncStatus`), so
+   * `loadKeys` can depend on it honestly. (Phase 200 plan 08: the event-handler
+   * wrapper that used to call it from Add Key, Delete and Update password went
+   * with those controls; `loadKeys` is its one caller.)
    */
   const retireSuccessIf = useCallback((subjectUntrusted: boolean) => {
     if (!subjectUntrusted) return;
@@ -437,7 +585,7 @@ export function ApiKeyManager({
   // that is what the list now shows.
   //
   // Phase 167.2 / KCS-04: every applied read also retires a shown success
-  // whose subject it finds untrusted (`retireWithheldSuccess`), so a success
+  // whose subject it finds untrusted (`retireSuccessIf`), so a success
   // never outlives the moment the list shows its key untrusted.
   const loadKeys = useCallback(async (opts?: { lastSyncedKeyId?: string }): Promise<KeysReadOutcome> => {
     const seq = ++keysReadSeqRef.current;
@@ -691,19 +839,33 @@ export function ApiKeyManager({
    * delete, the load-error Retry) stopped reading the key as untrusted.
    */
   /**
-   * 167.2-REVIEW CR-02: the keys this card LISTS. On a composite, only its
-   * members (see `compositeMemberKeyIds`); every other shape lists every key
-   * the owner has, as before. `keys` stays the full list: the subject lookups
-   * and the Add Key blocked reason read it, and none of them is a claim about
-   * the composite.
+   * 167.2-REVIEW CR-02, Phase 200 D-07: the keys this card LISTS. On a composite,
+   * only its members (see `compositeMemberKeyIds`); every other shape lists
+   * only the strategy's own current key, so the edit page is this strategy's
+   * key panel and not the account's key list (that is the Profile API keys
+   * tab). `keys` stays the full list: the `Change key…` picker, the confirm's
+   * labels and the share-note holder look-up read it, and none of them is a
+   * claim about what this strategy reads from.
    */
   const listedKeys =
     keyShape === "composite"
       ? keys.filter((k) => compositeMemberKeyIds?.includes(k.id) ?? false)
-      : keys;
+      : keys.filter((k) => k.id === currentKeyId);
   // Phase 167.1.2 plan 04 — accountShareNote's holder look-up, over every key
   // this read returned (see the render).
   const keysById = new Map(keys.map((k) => [k.id, k]));
+  // Phase 200 D-04: the shared key label ("<Exchange> — <label>", a masked id
+  // tail when the label is empty) the re-point confirm names both keys with.
+  const keyLabels = apiKeyLabelById(keys);
+  const pendingKeyLabel = pendingKeyId === null ? undefined : keyLabels.get(pendingKeyId);
+  // Phase 200 D-07: the account keys the strategy could be re-pointed to. The
+  // one `Change key…` control exists only for a single-key shape (KCS-23) and
+  // only when there is another key to pick.
+  const changeKeyCandidates = linkControlsAllowed
+    ? keys.filter((k) => k.id !== currentKeyId)
+    : [];
+  const showChangeKey = firstReadSettled && changeKeyCandidates.length > 0;
+  const changeKeyBlocked = !!syncingKeyId;
 
   const panelSubjectUntrusted = isUntrustedKeySyncStatus(
     keys.find((k) => k.id === lastAttemptedKeyId)?.sync_status,
@@ -711,212 +873,7 @@ export function ApiKeyManager({
   const withholdPanelSuccess =
     isComputedAnalytics(syncStatus) && panelSubjectUntrusted;
 
-  /**
-   * Phase 167 / 167-06, R3 and R5 (167-CONTEXT D-18): retire a panel success
-   * that R2 is withholding, so it is never re-shown.
-   *
-   * WHY. R2's withhold reads the subject key's CURRENT status, so it lapses the
-   * moment that status stops being untrusted, and the panel would re-mount with
-   * the terminal success of an attempt that the fix never touched:
-   *   - R3, `Update password`: `rotate-secret`'s validated write sets the key's
-   *     status to `idle`, and the run shown was made under the REPLACED password;
-   *   - R5, `Delete`: the subject row leaves `keys`, and a missing row reads as
-   *     "not untrusted";
-   *   - R5, `Add Key`: the subject moves to the new key, which R2 then judges.
-   *
-   * WHY THE UPDATER IS FUNCTIONAL. It reads the state committed when it runs,
-   * not this closure's copy: the dialog calls `onUpdated` only after awaiting
-   * `rotate-secret`, and the panel's poll can move `syncStatus` during that
-   * await. It maps a terminal success to `idle` and returns every other value
-   * unchanged. ⛔ `syncing` and `computing` stay as they are, so an in-flight
-   * panel keeps polling and still clears `syncingKeyId` (T-167-06-04). `error`
-   * stays too: it makes no success claim, and it is the attempt's own message.
-   * On `Update password` its Retry is also useful, with the new password. On
-   * `Delete` it is not: the panel's Retry still targets `lastAttemptedKeyId`,
-   * now a deleted id, and surfaces a raw link failure. That is pre-existing,
-   * unchanged by 167-06, and recorded as 167-REVIEW-06 IN-02; retiring an
-   * `error` on Delete would be a behaviour change, so it is not made here.
-   *
-   * WHY IT IS GUARDED BY THE WITHHOLD. Unguarded, rotating any MT5 password,
-   * deleting any key or adding one would retire a TRUTHFUL success about a
-   * healthy key. The guard is `panelSubjectUntrusted` from the render the user
-   * clicked in. For `Delete` that render still holds the row; re-deriving it
-   * from the list with the row filtered out would answer false and re-show the
-   * success.
-   *
-   * The one window this cannot reach, a rotation that lands while the rotated
-   * key's OWN sync is in flight, is closed by R4: that key's `Update password`
-   * (and, by R5, its `Delete`) is disabled for exactly that window.
-   *
-   * ⛔ This is the only EVENT-HANDLER path that maps a terminal success to
-   * `idle`; the terminal arm of `handleSyncStatusChange` also lands on `idle`
-   * when its bounded re-read fails or times out. It runs from event handlers
-   * only; it is not an effect.
-   *
-   * Phase 167.2 / KCS-04 (KCS-05: R2's "withheld" becomes "retired"). The
-   * residual this closes (167 D-18 residual 2): the guard above reads THIS
-   * tab's view, so a change made in another tab (the key's password fixed, the
-   * key deleted) reached this tab only through a later re-read, which lifted
-   * R2's withhold and re-showed the success without passing through here. Now:
-   *   - the terminal arm never SETS a success beside an untrusted subject (it
-   *     lands on idle, see `handleSyncStatusChange`), which is the moment of
-   *     withholding becoming the moment of retirement;
-   *   - `loadKeys` calls this with `subjectUntrusted` taken from the rows it
-   *     APPLIED, a new call site of this one helper and not a second
-   *     mechanism, so a success shown for a healthy key is retired by the
-   *     first read that shows that key untrusted, before any later heal read.
-   * The optional argument is what lets `loadKeys` judge by its own rows; every
-   * event-handler caller omits it and keeps the render-time guard above. Still
-   * no effect: `withholdPanelSuccess` is watched by nothing.
-   */
-  function retireWithheldSuccess(subjectUntrusted: boolean = panelSubjectUntrusted) {
-    // IN-01: a thin wrapper over the stable core; this is the one place the
-    // render-scoped default (`panelSubjectUntrusted`) is read.
-    retireSuccessIf(subjectUntrusted);
-  }
-
-  async function handleAddKey(data: {
-    exchange: string;
-    label: string;
-    apiKey: string;
-    apiSecret: string;
-    passphrase: string;
-  }) {
-    // NEW-C37-02: guard at the top of handleAddKey so two rapid Enter
-    // presses (which fire before setLoading(true) re-renders) cannot race
-    // to POST /api/keys/validate-and-encrypt and create duplicate api_keys
-    // rows. The Connect button is already disabled via `loading`, but Enter
-    // inside an <Input> submits the form regardless and setLoading is async.
-    // Phase 167.2 / KCS-01: nor while a tracked attempt is live. The post-add
-    // sync runs AS the tracked attempt, and the card holds one attempt at a
-    // time, so an add during a live attempt could only collide with it. This
-    // is defence in depth behind the disabled Connect Key. `addInFlightRef` is
-    // checked too because, unlike `loading`, it is never read stale.
-    if (loading || addInFlightRef.current || attemptRef.current !== null) return;
-    // KCS-23: an add links the new key to this strategy (via the tracked
-    // attempt's `handleLinkKey`), which a composite or unknown shape forbids.
-    if (!linkControlsAllowed) return;
-    addInFlightRef.current = true;
-    setLoading(true);
-    setError(null);
-
-    // F6 (phase-119 fold-in): canonicalize the exchange to lowercase before it
-    // leaves this component. The DB CHECK admits lowercase venue codes only, so
-    // a mixed-case value ("sFOX") used to pass validation (burning a live probe)
-    // and then 23514 on the INSERT. Credential fields are untouched (their
-    // .trim() chokepoint lives server-side per the v1.11 dogfood fix).
-    //
-    // 160-02 / RANK-03: the INSERT this canonicalization used to also feed is
-    // GONE — the route writes the row now, and it re-normalizes independently
-    // at its own chokepoint (route.ts, `exchangeNormalized`). This stays because
-    // it is what the request body carries, and a component that sends a
-    // canonical venue is one less place a stray casing can originate.
-    const exchange = data.exchange.trim().toLowerCase();
-
-    try {
-      // Validate + encrypt atomically (prevents TOCTOU race on key permissions)
-      const res = await fetch("/api/keys/validate-and-encrypt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          exchange,
-          api_key: data.apiKey,
-          api_secret: data.apiSecret,
-          passphrase: data.passphrase || null,
-          // 160-02 / RANK-03 — the persist discriminator. With it, the route
-          // writes the api_keys row ITSELF, stamping `exchange` AND
-          // `attested_venue` from the venue its own validateKey call
-          // authenticated against, and returns `{ api_key_id }` with NO
-          // ciphertext. It is REQUIRED: a body without `persist: true` is
-          // refused with 409 `STALE_CLIENT`, so no arm of this route returns key
-          // material to a browser. The label goes in the body now because the
-          // server composes the row.
-          persist: true,
-          label: data.label,
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Validation failed" }));
-        throw new Error(err.error || "Key validation failed");
-      }
-
-      // Step 3: consume the id of the row the SERVER wrote. This component no
-      // longer inserts into api_keys — a browser-composed INSERT could claim
-      // any venue, and the venue is what decides the annualization factor
-      // (√365 crypto vs √252 traditional) downstream. Plan 160-05 revokes the
-      // client's INSERT grant outright once this has soaked on PROD.
-      const { api_key_id: newKeyId } = await res.json();
-
-      if (typeof newKeyId !== "string") {
-        // Rule 12 / fail loud. A 2xx carrying no id means the server did not
-        // persist. Continuing would report the key as added while it is
-        // unlinked and will never sync — precisely the false-success that
-        // NEW-C37-03 and B-06 below exist to prevent.
-        throw new Error("Your key was verified but not saved. Please try again.");
-      }
-
-      // Phase 167 / 167-06, R5 (167-CONTEXT D-18), kept by 167.2 KCS-05: the
-      // panel's subject is about to move to the new key (the tracked attempt
-      // below sets `lastAttemptedKeyId`), and R2 would then judge the new,
-      // healthy key instead. A success R2 was withholding beside the old key's
-      // failed sign-in would re-appear, so it is retired here. A failed
-      // validation throws before this point and leaves the subject where it was.
-      // ⚠️ This guard reads the subject's trust status AS OF THE SUBMIT CLICK:
-      // the closure is that render's. A re-read landing during the validate
-      // await above can make it stale. Only a success line is affected, because
-      // the updater is functional and returns every in-flight value unchanged.
-      // That is a residual, named beside the cross-tab one in D-18 (a change
-      // made in another tab reaches this tab only through a re-read), and
-      // neither is fixed here.
-      retireWithheldSuccess();
-
-      setShowForm(false);
-
-      // Phase 167.2 / KCS-01: the sync after an add RUNS AS the card's one
-      // tracked attempt. `handleSyncTrades` registers the attempt before its
-      // first await, links the new key (NEW-C37-03: a failed link throws before
-      // any sync request is sent), sends the enqueue, applies
-      // `isSyncEnqueued`, enters `computing` and ends itself through
-      // `endAttempt`. So the post-add sync takes the in-flight marker, is
-      // polled, has the new key as its subject and Retry target, and reports
-      // its own failure on the panel with the route's own message.
-      //
-      // Still NOT awaited: "don't block the UI" is a real requirement and the
-      // add flow continues below regardless.
-      //
-      // LINEAGE of the untracked chain this call replaces, kept so the reasons
-      // are not lost with the code:
-      //  - 140.3-08 / SEAMUX-05 (B-06): it was `fetch(…).catch(…)`, which saw
-      //    only transport rejections, so a 401/403/500 or a breaker 503 was
-      //    invisible. It then observed the HTTP outcome and the enqueue
-      //    evidence, one shape at both call sites.
-      //  - FINDING-10: its catch kept an operator log. The tracked attempt's
-      //    failure now reaches the panel itself.
-      //  - 167-06 R6, as corrected in the 167-06 fix round (167-REVIEW-06
-      //    CR-01): it was never registered in the one sync slot, so it could
-      //    fail while ANOTHER key's attempt was live, and its failure then
-      //    reached the console only. That was the named residual (1) of D-18.
-      //  - 167-06 fix round 2 (167-REVIEW-06-R2 WR-01): the subject moved with
-      //    the failure so the panel's Retry targeted the new key.
-      // KCS-01 closes that residual: this sync IS the tracked attempt, and the
-      // overlap that made it untracked cannot start (Add Key is blocked while
-      // an attempt is live; no second attempt starts during an add).
-      // The add hands off to its own attempt here, so the reverse-overlap
-      // guard is lifted immediately before the call it would otherwise block.
-      addInFlightRef.current = false;
-      void handleSyncTrades(newKeyId);
-      await loadKeys();
-      router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add key");
-    } finally {
-      addInFlightRef.current = false;
-      setLoading(false);
-    }
-  }
-
-  async function handleLinkKey(keyId: string) {
+  async function handleLinkKey(keyId: string, expectedCurrent: string | null) {
     // KCS-23: the one write of `strategies.api_key_id` on this card. Never on a
     // composite, nor on a strategy the page could not classify. It throws
     // rather than returning, so a caller cannot go on to sync as if the key
@@ -930,216 +887,41 @@ export function ApiKeyManager({
     // the link update is denied (RLS violation, stale session, wrong
     // strategyId). Pre-fix: the {error} return was silently discarded —
     // the same pre-fix scenario that NEW-C37-03 fixed for handleAddKey.
-    const { error: linkError } = await supabase
-      .from("strategies")
-      .update({ api_key_id: keyId })
-      .eq("id", strategyId);
+    //
+    // Phase 200 CR-01 (round 1): a Resync (`keyId` is the key the page shows as
+    // current) writes NOTHING. It used to write `api_key_id = keyId` with no
+    // condition, so on a page opened before another tab or the wizard changed
+    // the key it silently re-pointed the strategy back with no confirm. The
+    // read-back in `handleSyncTrades` now refuses a stale Resync as
+    // `link_unverified`. The confirmed re-point is conditional on the key the
+    // dialog NAMED as current, so a write can never land over a key the
+    // manager did not see: zero matched rows is a loud error, never a success.
+    //
+    // Phase 200 R2-01: `expectedCurrent` is the key the ATTEMPT was started or
+    // confirmed against, carried with it and replayed by the panel's Retry. It
+    // is never the live `currentKeyId` prop: that moves under a mounted card on
+    // any `router.refresh()`, so a Retry read it at click time and wrote a key
+    // no dialog had named over a key the manager never saw.
+    if (keyId === expectedCurrent) return;
+    const guarded = supabase.from("strategies").update({ api_key_id: keyId }).eq("id", strategyId);
+    const { data: linkedRows, error: linkError } = await (
+      expectedCurrent === null ? guarded.is("api_key_id", null) : guarded.eq("api_key_id", expectedCurrent)
+    ).select("id");
     if (linkError) {
       throw new Error(`Failed to link key to strategy: ${linkError.message}`);
     }
+    if (linkedRows?.length !== 1) {
+      throw new Error(
+        "This strategy's key changed since the page loaded, so nothing was changed. Reload the page and try again.",
+      );
+    }
+    // Phase 200 D-01: a re-point changes what two keys feed. Linking the key
+    // the strategy already uses (a Resync) changes nothing, so it spends no read.
+    if (keyId !== expectedCurrent) refreshFeeds();
     // 167.2-REVIEW WR-04 (lineage): `router.refresh()` used to run here,
     // unconditionally, so a link update answering after its bound (the
     // request is deliberately not aborted) refreshed whatever page was current.
     // The live-attempt path in `handleSyncTrades` refreshes instead.
-  }
-
-  /**
-   * 167.2-REVIEW WR-05 / 167.2-REVIEW-R2 WR-02 — which composites would this
-   * Delete shrink? `strategy_keys.api_key_id` cascades on the key's DELETE,
-   * and the database's guard refuses only for a PUBLISHED composite, so
-   * deleting a member of any other composite removes the key from it (its
-   * last member leaves it "unlinked").
-   *
-   * FOUNDER DECISION 2026-09-24 (round 2): warn, never block. Round 1 REFUSED
-   * such a Delete on every card; the owner may now delete after the confirm
-   * names each composite and says what deleting does.
-   *
-   * One read of `GET /api/keys/[id]/memberships`, which checks ownership
-   * with an explicit equality and reads `strategy_keys` on the service role,
-   * bounded like the card's other reads (`BASELINE_READ_BOUND_MS`, 15 s).
-   * Answers the memberships (a composite whose name could not be read is
-   * listed with a null name, never dropped), or "unreadable": a non-2xx
-   * answer, a body that is not JSON, a missing or non-array `memberships`, an
-   * element that is not an object, a rejected fetch or the bound. Never throws.
-   *
-   * ⚠️ WHERE EACH FAILURE IS RECORDED (167.2.1-REVIEW-SFH M-6). This component
-   * is `"use client"` and Sentry is SERVER-ONLY in this repo (no client
-   * `Sentry.init`; see `src/instrumentation.ts`), so the `captureToSentry` call
-   * below is a browser no-op today. What IS recorded server-side: the route's
-   * own 500s (captured by `GET`, stage `ownership` / `memberships`, with the
-   * error code) and a limiter deny (a server `console.warn`). The bound, HTTP
-   * 401 and 404, a non-JSON body, a malformed `memberships` and a rejected
-   * fetch reach only this browser's console. The owner still sees the "could
-   * not check" warning for every one of them. The capture is kept so it starts
-   * reporting if a client init lands; that init must adopt `scrubSentryEvent`
-   * first, per `src/instrumentation.ts`.
-   *
-   * Lineage (167.2-REVIEW-SFH-R2 R2-L4 (b)): this used to read `strategy_keys`
-   * in the browser through RLS, which FILTERS rather than errors, so a
-   * regressed `strategy_keys_owner` answered `[]` and the confirm showed no
-   * warning. Closed by Phase 167.2.1 D-01: the read is now server-side, and
-   * every failure of it reaches the owner as the "could not check" warning.
-   */
-  async function readKeyCompositeMemberships(
-    keyId: string,
-  ): Promise<{ name: string | null; status: string | null }[] | "unreadable"> {
-    let boundTimer: ReturnType<typeof setTimeout> | undefined;
-    let failure: string | null = null;
-    // 167.2.1-REVIEW-SFH L-2: aborted in the `finally`, so a request (or a
-    // body read) the bound has already given up on stops instead of running
-    // on with its answer discarded. Aborting a settled request is a no-op.
-    const abort = new AbortController();
-    try {
-      const bound = new Promise<"timed_out">((resolve) => {
-        boundTimer = setTimeout(() => resolve("timed_out"), BASELINE_READ_BOUND_MS);
-      });
-      // One promise for the request AND its body, so a body that never
-      // finishes is bounded too.
-      const read = (async (): Promise<{ failure: string } | { body: unknown }> => {
-        const res = await fetch(`/api/keys/${encodeURIComponent(keyId)}/memberships`, {
-          cache: "no-store",
-          signal: abort.signal,
-        });
-        if (!res.ok) return { failure: `the membership read answered HTTP ${res.status}` };
-        return { body: (await res.json()) as unknown };
-      })();
-      const outcome = await Promise.race([read, bound]);
-      if (outcome === "timed_out") {
-        failure = `no answer within ${BASELINE_READ_BOUND_MS} ms`;
-      } else if ("failure" in outcome) {
-        failure = outcome.failure;
-      } else {
-        const body = outcome.body;
-        const list =
-          body !== null && typeof body === "object"
-            ? (body as { memberships?: unknown }).memberships
-            : undefined;
-        if (!Array.isArray(list)) {
-          failure = "the membership answer carried no memberships array";
-        } else if (!list.every((m) => m !== null && typeof m === "object")) {
-          failure = "the membership answer carried an element that is not an object";
-        } else {
-          return (list as Array<{ name?: unknown; status?: unknown }>).map((m) => ({
-            name: typeof m.name === "string" ? m.name : null,
-            status: typeof m.status === "string" ? m.status : null,
-          }));
-        }
-      }
-    } catch (err) {
-      failure = err instanceof Error ? err.message : String(err);
-    } finally {
-      clearTimeout(boundTimer);
-      abort.abort();
-    }
-    console.error(
-      "[ApiKeyManager] composite membership read before a delete failed; the confirm warns instead:",
-      failure,
-    );
-    // SFH-R2 R2-L4 (a): captured like every other read on this card. Tags
-    // only: no key id and no strategy id. A browser no-op until a client
-    // Sentry init exists (167.2.1-REVIEW-SFH M-6, see the docstring above).
-    captureToSentry(new Error("composite membership read before a delete failed"), {
-      level: "warning",
-      tags: { component: "ApiKeyManager", stage: "delete-membership-read" },
-    });
-    return "unreadable";
-  }
-
-  /**
-   * 167.2-REVIEW-R2 WR-02 (founder decision): the card's Delete button opens
-   * the confirm AND starts the membership read. The confirm's Delete is held
-   * only while the read is open (at most 15 s), so the owner decides with the
-   * answer in front of them; the answer never refuses the delete.
-   */
-  async function handleDeleteClick(keyId: string) {
-    const seq = ++deleteCheckSeqRef.current;
-    setDeleteCheck({ state: "checking" });
-    setConfirmDelete(keyId);
-    const memberships = await readKeyCompositeMemberships(keyId);
-    if (deleteCheckSeqRef.current !== seq) return;
-    setDeleteCheck(
-      memberships === "unreadable"
-        ? { state: "warn", text: DELETE_MEMBERSHIP_UNCHECKED_COPY }
-        : memberships.length > 0
-          ? { state: "warn", text: deleteCompositeWarning(memberships) }
-          : { state: "none" },
-    );
-  }
-
-  /** Close the confirm and forget its membership answer. */
-  function closeDeleteConfirm() {
-    deleteCheckSeqRef.current += 1;
-    setDeleteCheck({ state: "none" });
-    setConfirmDelete(null);
-  }
-
-  async function handleDeleteKey(keyId: string) {
-    const supabase = createClient();
-    // 167.2-REVIEW-R2 WR-02 (founder decision 2026-09-24): no membership
-    // refusal here. The confirm the owner just accepted named every composite
-    // this key belongs to (`handleDeleteClick`), or said it could not check.
-    // 167-06 fix round: `.select("id")` returns the rows the DELETE removed.
-    // Without it, a delete that RLS filtered down to zero rows answers with no
-    // error, the row was dropped locally, R5 retired a withheld success, and
-    // the key came back on the next load. This is the remedy the `revoked`
-    // helper points at, so a delete that removed nothing must say so.
-    const { data: deletedRows, error: deleteError } = await supabase
-      .from("api_keys")
-      .delete()
-      .eq("id", keyId)
-      .select("id");
-    closeDeleteConfirm();
-    if (deleteError) {
-      // 167-06 security delta (UF-1): the raw PostgREST message goes to the
-      // console only; the page gets authored copy.
-      console.error("[ApiKeyManager] api_keys delete failed:", deleteError.message);
-      setError(DELETE_FAILED_COPY);
-      return;
-    }
-    if (deletedRows?.length !== 1) {
-      // 167-06 fix round 2 (167-REVIEW-06-R2 WR-05): zero removed rows means
-      // either the delete was refused (RLS) or the row was ALREADY gone (deleted
-      // in another tab). Reporting both as a refusal left a card for a key that
-      // no longer exists, and every later Delete said so again until a reload.
-      // So ask: a row that is still there is a refusal; a row that is gone is
-      // the outcome the user asked for, and takes the success path below.
-      const removed = deletedRows?.length ?? 0;
-      const { data: remaining, error: lookupError } = await supabase
-        .from("api_keys")
-        .select("id")
-        .eq("id", keyId);
-      if (lookupError) {
-        console.error(
-          `[ApiKeyManager] api_keys delete removed ${removed} rows, expected 1, and the follow-up lookup failed:`,
-          lookupError.message,
-        );
-        setError(DELETE_FAILED_COPY);
-        return;
-      }
-      if (!remaining || remaining.length > 0) {
-        console.error(
-          `[ApiKeyManager] api_keys delete removed ${removed} rows, expected 1; the key is still present`,
-        );
-        setError(
-          "Failed to delete key: the key is still connected. Try again, and contact support if it keeps failing.",
-        );
-        return;
-      }
-    }
-    // Phase 167 / 167-06, R5 (167-CONTEXT D-18): once the row leaves `keys`,
-    // R2 reads the missing subject row as "not untrusted", so a success it was
-    // withholding beside that key's failed sign-in would re-appear. Retire it
-    // here, AFTER the error return (a failed delete leaves the row, so the
-    // withhold still holds) and BEFORE the row is filtered out. The guard is
-    // the pre-delete derivation from the render the user clicked in, which
-    // still holds the row. The user cannot move the list during the delete
-    // await (the confirm is modal), but an async re-read from another key's
-    // attempt, or the zero-row lookup below, can; the worst case is retiring
-    // a truthful success line, never showing a false one. ⛔ Do not re-derive it
-    // from the filtered list: that answers false and re-shows the success.
-    retireWithheldSuccess();
-    setKeys((prev) => prev.filter((k) => k.id !== keyId));
-    router.refresh();
   }
 
   /**
@@ -1251,16 +1033,15 @@ export function ApiKeyManager({
     }
   }
 
-  async function handleSyncTrades(keyId: string) {
+  async function handleSyncTrades(keyId: string, expectedCurrent: string | null) {
     // Phase 167.2 / KCS-01: the card never starts a second sync while one is
-    // live, nor while an Add Key is in flight (RESEARCH P7: the add would then
-    // collide with it). Every Resync / Use & Sync is disabled in both windows;
+    // live. Resync and a confirmed `Change key…` are disabled in that window;
     // this is the handler guard behind those disables, and the one that covers
-    // the panel's Retry and the post-add call, which no card button gates.
-    if (addInFlightRef.current || attemptRef.current !== null) return;
+    // the panel's Retry, which no card button gates.
+    if (attemptRef.current !== null) return;
     // KCS-23: every sync from this card first re-links the strategy to `keyId`
     // (`handleLinkKey`), so none starts on a composite or an unknown shape. This
-    // also covers the panel's Retry and the post-add call.
+    // also covers the panel's Retry.
     if (!linkControlsAllowed) return;
     // The attempt is registered BEFORE any await, so `handleSyncStatusChange`
     // and anything else that checks `attemptRef` see it as live from the first
@@ -1277,6 +1058,7 @@ export function ApiKeyManager({
     setSyncingKeyId(keyId);
     setLastAttemptedKeyId(keyId);
     lastAttemptedKeyIdRef.current = keyId;
+    lastAttemptExpectedKeyIdRef.current = expectedCurrent;
     setSyncStatus("syncing");
     setSyncError(null);
     setError(null);
@@ -1339,7 +1121,7 @@ export function ApiKeyManager({
       // late answer is still awaited so it is logged (a late rejection reaches
       // the catch, which logs it because the attempt already ended); it never
       // resumes the attempt.
-      const linked = handleLinkKey(keyId).then(() => "linked" as const);
+      const linked = handleLinkKey(keyId, expectedCurrent).then(() => "linked" as const);
       let linkTimer: ReturnType<typeof setTimeout> | undefined;
       let linkOutcome: "linked" | "timed_out";
       try {
@@ -1387,7 +1169,13 @@ export function ApiKeyManager({
       // The link landed for the live attempt: refresh the page's server data
       // now (moved here from `handleLinkKey` by WR-04, so a late link from an
       // attempt that already ended can never refresh the page).
-      if (attemptRef.current === attempt) router.refresh();
+      if (attemptRef.current === attempt) {
+        router.refresh();
+        // R2-01: the link landed, so the strategy's key IS `keyId` now. A Retry
+        // of this attempt is a Resync of it (no write; the read-back verifies
+        // it still holds), not a replay of the write over the old expectation.
+        lastAttemptExpectedKeyIdRef.current = keyId;
+      }
 
       // 167.2-REVIEW WR-04 — READ THE LINK BACK BEFORE THE ENQUEUE. The link
       // request is not aborted on its bound (by design: aborting cannot stop a
@@ -1611,12 +1399,55 @@ export function ApiKeyManager({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-text-primary">Exchange API Keys</h2>
-        {linkControlsAllowed && !showForm && (
-          <Button size="sm" onClick={() => setShowForm(true)}>
-            Add Key
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {showChangeKey && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="whitespace-nowrap"
+              aria-expanded={pickerOpen}
+              onClick={() => setPickerOpen((open) => !open)}
+              disabled={changeKeyBlocked}
+            >
+              Change key…
+            </Button>
+          )}
+        </div>
       </div>
+
+      {/* Phase 200 D-07 / D-01: every other account key, each with what it
+          feeds. A pick opens plan 06's confirm and writes nothing; only that
+          dialog's Change key button writes (D-03). */}
+      {showChangeKey && pickerOpen && (
+        <Card data-testid="change-key-picker">
+          <p className="text-sm font-medium text-text-primary">Pick the key this strategy should use</p>
+          <ul className="mt-3 space-y-3">
+            {changeKeyCandidates.map((key) => (
+              <li key={key.id}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="whitespace-normal text-left"
+                  data-testid={`change-key-option-${key.id}`}
+                  disabled={changeKeyBlocked}
+                  onClick={() => {
+                    setPickerOpen(false);
+                    setPendingKeyId(key.id);
+                  }}
+                >
+                  {keyLabels.get(key.id) ?? key.label}
+                </Button>
+                <KeyFeedsLine keyId={key.id} state={feedsState} onRetry={refreshFeeds} testIdPrefix="change-key-feeds" />
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3 flex justify-end">
+            <Button size="sm" variant="secondary" onClick={() => setPickerOpen(false)}>
+              Cancel
+            </Button>
+          </div>
+        </Card>
+      )}
 
       {/* KCS-23 (UI-SPEC S3): the one line that explains the missing link
           controls, directly under the header. 167.2-REVIEW-SFH H-2: an
@@ -1633,23 +1464,6 @@ export function ApiKeyManager({
         <p className="text-xs text-text-muted">
           <ContactPointerText text={SHAPE_UNKNOWN_CARD_NOTE} href={supportContactHref} />
         </p>
-      )}
-
-      {linkControlsAllowed && showForm && (
-        <ApiKeyForm
-          onSubmit={handleAddKey}
-          onCancel={() => { setShowForm(false); setError(null); }}
-          loading={loading}
-          error={error}
-          defaultExchange={defaultExchange}
-          // Phase 167.2 / KCS-01: Connect Key is blocked for the whole of a
-          // live attempt, and says which key's sync it is waiting for.
-          submitBlockedReason={
-            syncingKeyId
-              ? addKeyBlockedReason(keys.find((k) => k.id === syncingKeyId)?.label)
-              : null
-          }
-        />
       )}
 
       {/* H-0395: distinct load-failure state. Shown instead of the
@@ -1678,7 +1492,7 @@ export function ApiKeyManager({
           flight. Same box as the empty state so the swap moves no layout. No
           spinner or skeleton (DESIGN.md Motion), and muted, never red or amber:
           waiting is not a fault. */}
-      {!firstReadSettled && !showForm && (
+      {!firstReadSettled && (
         <Card>
           <p role="status" aria-live="polite" className="text-sm text-text-muted text-center py-4">
             Loading keys…
@@ -1686,13 +1500,17 @@ export function ApiKeyManager({
         </Card>
       )}
 
-      {firstReadSettled && listedKeys.length === 0 && !loadError && !showForm && (
+      {firstReadSettled && listedKeys.length === 0 && !loadError && (
         <Card>
           <p className="text-sm text-text-muted text-center py-4">
-            {/* H-2: a card with no Add Key never invites one (KCS-EMPTY-NOLINK). */}
-            {linkControlsAllowed
-              ? "No API keys connected. Add a read-only exchange key to import your trading data."
-              : EMPTY_NOLINK_COPY}
+            {/* H-2: a card that offers no link control never invites one
+                (KCS-EMPTY-NOLINK). A composite or unknown shape might hold keys
+                this card cannot name, so only a single-key shape says "none". */}
+            {keyShape === "composite" || (!linkControlsAllowed && currentKeyId === null)
+              ? EMPTY_NOLINK_COPY
+              : currentKeyId === null
+                ? NO_KEY_LINKED_COPY
+                : KEY_NOT_LISTED_COPY}
           </p>
         </Card>
       )}
@@ -1740,85 +1558,27 @@ export function ApiKeyManager({
                     </p>
                   ) : null;
                 })()}
+                {/* Phase 200 D-01 (ROUTE-09): the strategies this key feeds.
+                    No role: it is not a live region and not a note. */}
+                <KeyFeedsLine keyId={key.id} state={feedsState} onRetry={refreshFeeds} />
               </div>
             </div>
             <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
-              {/* KCS-23: no Resync / Use & Sync on a composite or an unknown
-                  shape; both write `strategies.api_key_id`. */}
-              {!linkControlsAllowed ? null : key.id === currentKeyId ? (
+              {/* KCS-23: no Resync on a composite or an unknown shape, and no
+                  Change key… either (header); both write `strategies.api_key_id`.
+                  Phase 200 D-03: a non-current key has no per-card button, the
+                  header's Change key… picker is the only way to re-point. */}
+              {linkControlsAllowed && key.id === currentKeyId && (
                 <Button
                   size="sm"
                   className="whitespace-nowrap"
                   variant="ghost"
-                  onClick={() => handleSyncTrades(key.id)}
-                  // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
-                  disabled={!!syncingKeyId || loading}
+                  onClick={() => handleSyncTrades(key.id, key.id)}
+                  disabled={!!syncingKeyId}
                 >
                   {syncingKeyId === key.id ? "Syncing\u2026" : "Resync"}
                 </Button>
-              ) : (
-                <Button
-                  size="sm"
-                  className="whitespace-nowrap"
-                  variant="ghost"
-                  onClick={() => handleSyncTrades(key.id)}
-                  // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
-                  disabled={!!syncingKeyId || loading}
-                >
-                  {syncingKeyId === key.id ? "Syncing\u2026" : "Use & Sync"}
-                </Button>
               )}
-              {key.exchange === "mt5" && (
-                <Button
-                  size="sm"
-                  className="whitespace-nowrap"
-                  variant="ghost"
-                  onClick={() => setUpdatingKeyId(key.id)}
-                  // Phase 167 / 167-06, R4 (167-CONTEXT D-18): a key's password
-                  // is never replaced while THAT key's own sync is in flight.
-                  // Otherwise the rotation's validated write sets the status to
-                  // idle, R2 no longer withholds, and the attempt's later
-                  // success, made under the REPLACED password, is shown. The
-                  // reverse order is already impossible: `Modal` opens this
-                  // dialog with `showModal()`, which makes the rest of the
-                  // document inert, so no sync can start while it is open, and
-                  // `rotate-secret` is awaited before the dialog closes.
-                  // KEY-SCOPED, not `!!syncingKeyId`: a rotation occupies none
-                  // of the one sync slot and changes only the rotated key's
-                  // status, so another key's withhold is untouched, and a
-                  // global disable would block the remedy the pill asks for for
-                  // the whole of an unrelated sync. No status conjunct: a
-                  // status can flip mid-attempt on a re-read, the in-flight
-                  // marker cannot (only its own attempt clears it; until the
-                  // 167-06 fix round a stale pre-enqueue poll read or a failed
-                  // post-add sync could, see `SyncAttempt`). Lineage: plan revision 1 said closing this
-                  // window needed a record tying the withhold to the attempt's
-                  // credential. That was wrong: the window exists only if the
-                  // attempt and the rotation overlap, and existing state
-                  // prevents the overlap, so nothing has to be recorded.
-                  disabled={syncingKeyId === key.id}
-                >
-                  Update password
-                </Button>
-              )}
-              <Button
-                size="sm"
-                className="whitespace-nowrap"
-                variant="ghost"
-                onClick={() => handleDeleteClick(key.id)}
-                // Phase 167 / 167-06, R5 (167-CONTEXT D-18): a key is never
-                // deleted during its own sync. Deleting it mid-attempt removes
-                // the panel's subject while the retirement must leave
-                // `computing` alone, so the attempt's later success would land
-                // with no row left to withhold it. The reverse order is closed
-                // as R4's is: the confirm renders through `Modal`, opens with
-                // `showModal()`, and `handleDeleteKey` awaits the delete before
-                // it closes the confirm. Key-scoped for R4's reason: deleting
-                // key K changes only K's row.
-                disabled={syncingKeyId === key.id}
-              >
-                Delete
-              </Button>
             </div>
           </div>
           {/*
@@ -1828,8 +1588,9 @@ export function ApiKeyManager({
             manager owns the stalled factsheet, `profiles.role` defaults to
             `manager`, and the only other render of this state sits on the
             allocator-only `/profile` Exchanges tab. This card is on the
-            strategy's own edit page, beside the controls the helper names
-            (`Update password`, and `Delete` / `Add Key` for a re-add).
+            strategy's own edit page. The remedies its helper names (update the
+            credentials, re-add a key) live on the Profile API keys tab, which
+            the panel links to under the cards (Phase 200 D-07).
             - REUSES the locked `AllocatorSyncStatus`: no copy and no colour is
               authored here (D-05, D-11 arm B, 167-UI-SPEC S1).
             - No factsheet path is touched (D-04).
@@ -1875,6 +1636,17 @@ export function ApiKeyManager({
         </Card>
       ))}
 
+      {/* Phase 200 D-07 / D-06: adding, deleting and updating keys live in one
+          place, the Profile API keys tab. Always shown, for every shape, since
+          it is the remedy the "Sign-in failed" pill on /strategies sends a
+          manager here for. */}
+      <p className="text-xs text-text-muted">
+        Keys are added, deleted and updated on your Profile.{" "}
+        <Link href={PROFILE_KEYS_HREF} className="text-accent underline underline-offset-4">
+          Add or remove keys
+        </Link>
+      </p>
+
       {/* Sync progress indicator. R2 (167-06, D-18): withheld ONLY on a
           terminal success whose subject key is untrusted on the server; see
           `withholdPanelSuccess`. Never withheld in flight, never on error. */}
@@ -1888,7 +1660,10 @@ export function ApiKeyManager({
           stopReason={panelStopReason}
           lastSyncAt={lastSyncAt}
           syncError={syncError}
-          onRetry={() => lastAttemptedKeyId && handleSyncTrades(lastAttemptedKeyId)}
+          onRetry={() =>
+            lastAttemptedKeyId &&
+            handleSyncTrades(lastAttemptedKeyId, lastAttemptExpectedKeyIdRef.current)
+          }
           onStatusChange={handleSyncStatusChange}
         />
       )}
@@ -1902,70 +1677,34 @@ export function ApiKeyManager({
         </p>
       )}
 
-      <Modal
-        open={!!confirmDelete}
-        onClose={closeDeleteConfirm}
-        title="Delete API Key"
-      >
-        <p className="text-sm text-text-secondary mb-4">
-          This will permanently remove this API key. Trade data already imported will not be affected.
-        </p>
-        {/* 167.1.2 C4 review SFH-C4-09: unconditional, because this Delete
-            always hard-deletes (see DELETE_REMOVES_HISTORY). Amber (DESIGN.md
-            § Color): it informs the choice and never blocks it. */}
-        <p
-          data-testid="delete-history-warning"
-          role="status"
-          className="text-sm text-warning mb-4"
-        >
-          {DELETE_REMOVES_HISTORY}
-        </p>
-        {/* 167.2-REVIEW-R2 WR-02 (founder decision 2026-09-24): the composites
-            this Delete would shrink, by name, or that they could not be
-            checked. Amber (DESIGN.md § Color: a recoverable consequence, not a
-            failure). It informs the choice and never blocks it. */}
-        {deleteCheck.state === "warn" && (
-          <p
-            data-testid="delete-composite-warning"
-            role="status"
-            className="text-sm text-warning mb-4"
-          >
-            <ContactPointerText text={deleteCheck.text} href={supportContactHref} />
-          </p>
-        )}
-        <div className="flex justify-end gap-3">
-          <Button variant="secondary" onClick={closeDeleteConfirm}>Cancel</Button>
-          <Button
-            variant="danger"
-            // Held only while the bounded membership read is open (<= 15 s).
-            disabled={deleteCheck.state === "checking"}
-            onClick={() => confirmDelete && handleDeleteKey(confirmDelete)}
-          >
-            Delete
-          </Button>
-        </div>
-      </Modal>
-
-      <UpdateMt5SecretDialog
-        open={!!updatingKeyId}
-        apiKeyId={updatingKeyId ?? ""}
-        onClose={() => setUpdatingKeyId(null)}
-        // Phase 167 / 167-06, R3 (D-18): retire a success R2 is withholding
-        // FIRST, then re-read. The re-read returns the rotated key as idle,
-        // which lifts the withhold; without the retirement the panel would
-        // re-show a success from the attempt made under the replaced password.
-        onUpdated={() => {
-          retireWithheldSuccess();
-          loadKeys();
-        }}
-      />
+      {/* Phase 200 D-03 / D-04: mounted only while a re-point is pending, so
+          its sentence is never in the page otherwise. A key the list no longer
+          holds cannot be named, so it opens nothing and writes nothing. */}
+      {pendingKeyLabel !== undefined && pendingKeyId !== null && (
+        <ConfirmKeyChangeDialog
+          open
+          strategyName={strategyName}
+          currentLabel={
+            currentKeyId === null ? null : (keyLabels.get(currentKeyId) ?? "its current key")
+          }
+          nextLabel={pendingKeyLabel}
+          onConfirm={() => {
+            const id = pendingKeyId;
+            setPendingKeyId(null);
+            // The dialog named `currentKeyId` as of this render; the write is
+            // conditioned on exactly that key (R2-01).
+            void handleSyncTrades(id, currentKeyId);
+          }}
+          onCancel={() => setPendingKeyId(null)}
+        />
+      )}
 
       {/* Hidden only when it would repeat the error panel's own message (a
           failed sync writes the same text to both). 167-06 fix round: it used
           to be hidden whenever the panel showed ANY error, so a failed Delete
           on a key whose last sync had failed, the `revoked` helper's remedy
           path, was reported nowhere. */}
-      {error && !showForm && !(syncStatus === "error" && error === syncError) && (
+      {error && !(syncStatus === "error" && error === syncError) && (
         <p className="text-sm text-negative">{error}</p>
       )}
     </div>

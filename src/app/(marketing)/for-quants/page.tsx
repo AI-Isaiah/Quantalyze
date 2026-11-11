@@ -138,7 +138,7 @@ export default function ForQuantsPage() {
                 >
                   <path d="M8 1.5l6 2.5v4c0 3-2.5 5.5-6 6.5-3.5-1-6-3.5-6-6.5v-4z" />
                 </svg>
-                Envelope encryption
+                Encrypted at rest
               </span>
               <span className="flex items-center gap-1.5">
                 <svg
@@ -313,7 +313,7 @@ const TRUST_ATOMS: {
     body: "Trading and withdrawal permissions are rejected at submission — for example, \"Key has trading permissions. Please use a read-only key.\" Any key we can't positively verify as read-only is rejected too, and the check runs server-side, so you cannot bypass it.",
   },
   {
-    title: "Envelope encryption at rest",
+    title: "Keys encrypted at rest",
     body: KEY_STORAGE_SENTENCE,
     link: KEY_STORAGE_LINK,
   },

@@ -2592,7 +2592,12 @@ describe("[164.6.5-07 / D-14] ConnectKeyStep — the envelope shows the failed a
     fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
     await screen.findByTestId("error-envelope");
 
-    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    // 200-09: a preselect mount also issues the feeds GET, so the reuse request
+    // is found by URL rather than assumed to be call 0.
+    const reuseCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/api/strategies/create-with-key"),
+    );
+    const init = reuseCall![1] as RequestInit;
     const sentId = new Headers(init.headers).get("X-Correlation-Id");
     expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
     expect(screen.getByText(sentId!)).toBeInTheDocument();
@@ -2618,5 +2623,26 @@ describe("[DOMAINONE S10] ConnectKeyStep — trust panel security contact", () =
     expect(link).toHaveAttribute("target", "_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
     expect(dd.textContent).not.toMatch(/@/);
+  });
+});
+
+/**
+ * 200 MANAGERKEYS plan 02 / D-14 — the "What we store" atom is the ONE shared
+ * key-storage sentence and a link to /security#key-handling, and the atom that
+ * restated who can decrypt is gone. The sentence is typed here as a literal (oracle
+ * independence: a drift in the shared constant fails this test, not passes with it).
+ */
+describe("[200-02 D-14] ConnectKeyStep — trust panel key storage", () => {
+  it("renders the shared sentence with a link to /security#key-handling and no mechanism name", () => {
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    const dd = screen.getByText("What we store").nextElementSibling as HTMLElement;
+    expect((dd.textContent ?? "").replace(/\s+/g, " ")).toBe(
+      "We store your read-only API key encrypted, under a data key of its own, and only our analytics service can decrypt it. How we store keys.",
+    );
+    const link = dd.querySelector("a")!;
+    expect(link.textContent).toBe("How we store keys");
+    expect(link.getAttribute("href")).toBe("/security#key-handling");
+    expect(screen.queryByText("Who can decrypt")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/AES-256|Supabase Vault|KEK/);
   });
 });

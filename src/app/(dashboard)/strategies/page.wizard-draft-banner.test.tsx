@@ -11,7 +11,7 @@
  *
  * Post-fix: a separate query fetches the most-recent wizard draft. When
  * one exists, a "Resume draft" banner renders above the list AND the
- * empty-state CTA switches from "Create your first strategy" to
+ * empty-state CTA switches from the (since removed, Phase 200 D-12) create button to
  * "Resume your draft" pointing at /strategies/new/wizard.
  *
  * The filter that hides wizard drafts inline stays — preserving the
@@ -282,11 +282,12 @@ describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)"
     restoreFetchMock();
   });
 
-  it("with NO published strategies AND NO wizard draft, shows 'Create your first strategy'", async () => {
+  it("with NO published strategies AND NO wizard draft, the empty state points at the header 'Add a strategy' control (D-12)", async () => {
     state.wizardDraft = null;
     const container = await renderPage();
     expect(container.textContent).toMatch(/no strategies yet/i);
-    expect(container.textContent).toMatch(/create your first strategy/i);
+    expect(container.textContent).toMatch(/use add a strategy above/i);
+    expect(container.textContent).not.toMatch(/create your first strategy/i);
     expect(container.textContent).not.toMatch(/unfinished/i);
     expect(container.textContent).not.toMatch(/resume/i);
   });

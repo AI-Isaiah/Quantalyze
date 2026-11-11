@@ -53,8 +53,12 @@ if (typeof HTMLDialogElement !== "undefined") {
 
 const TITLE = "Rename strategy";
 const FIELD_LABEL = "Name";
-const HELPER =
+// Phase 200 / D-11: the hint is the host's `publicNote` and nothing else; the
+// old sentence claimed a codename hides the name and is typed here only as the
+// text that must never render.
+const RETIRED_HINT =
   "Only you see this name. Public surfaces keep showing the codename.";
+const PUBLIC_NOTE = "A shared factsheet link shows Alpha Centauri.";
 const CTA_SAVE = "Save name";
 const CTA_CANCEL = "Cancel";
 const ERR_EMPTY = "Enter a name.";
@@ -105,12 +109,23 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("RenameStrategyDialog — the form", () => {
-  it("renders the title, a prefilled Name field and the D-18 helper line", () => {
-    renderDialog();
+  it("renders the title, a prefilled Name field and the host's public note as the hint", () => {
+    renderDialog({ publicNote: PUBLIC_NOTE });
 
     expect(screen.getByText(TITLE)).toBeInTheDocument();
     expect(nameInput()).toHaveValue(CURRENT_NAME);
-    expect(screen.getByText(HELPER)).toBeInTheDocument();
+    expect(screen.getByText(PUBLIC_NOTE)).toBeInTheDocument();
+  });
+
+  it("D-11: the retired codename sentence is nowhere in the render, with or without a note", () => {
+    const { unmount } = renderDialog({ publicNote: PUBLIC_NOTE });
+    expect(document.body.textContent).not.toContain(RETIRED_HINT);
+    expect(document.body.textContent).not.toMatch(/keep showing the codename/);
+    unmount();
+
+    renderDialog();
+    expect(document.body.textContent).not.toContain(RETIRED_HINT);
+    expect(document.body.textContent).not.toMatch(/keep showing the codename/);
   });
 
   it("Cancel closes without writing", () => {

@@ -4,6 +4,7 @@ import type { ComponentProps } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { AllocatorExchangeManager } from "@/components/exchanges/AllocatorExchangeManager";
+import type { Role } from "@/lib/types";
 
 export interface ExchangesTabContentProps {
   initialKeys: ComponentProps<typeof AllocatorExchangeManager>["initialKeys"];
@@ -13,20 +14,30 @@ export interface ExchangesTabContentProps {
   // Tri-state (FIX 2): null = the holdings head-count failed → neutral
   // subtitle, never the affirmative-negative "no open positions yet".
   hasHoldings: boolean | null;
+  // Phase 200 D-06: the profile's role. The manager is shown to every role that
+  // can hold keys, and the role picks where a key's feeds links go.
+  role: Role;
 }
 
 export function ExchangesTabContent({
   initialKeys,
   activePortfolio,
   hasHoldings,
+  role,
 }: ExchangesTabContentProps) {
   return (
     <section className="space-y-6">
       <p className="text-sm text-text-secondary max-w-prose">
-        Upload read-only exchange API keys to automatically sync your real
-        positions and build your Active Allocation portfolio. No manual data
-        entry — your invest and divest events are detected directly from your
-        exchange account.
+        {role === "manager" ? (
+          "Read-only exchange API keys your strategies read trades from."
+        ) : (
+          <>
+            Upload read-only exchange API keys to automatically sync your real
+            positions and build your Active Allocation portfolio. No manual data
+            entry — your invest and divest events are detected directly from your
+            exchange account.
+          </>
+        )}
       </p>
 
       {activePortfolio ? (
@@ -61,6 +72,7 @@ export function ExchangesTabContent({
       <AllocatorExchangeManager
         initialKeys={initialKeys}
         hasHoldings={hasHoldings}
+        role={role}
       />
     </section>
   );

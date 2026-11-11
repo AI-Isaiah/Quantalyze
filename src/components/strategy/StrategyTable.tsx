@@ -455,7 +455,7 @@ interface StrategyTableProps {
    * Strategy and swaps the Actions cell for an Edit link plus this row's
    * `actions` slot; it drops the in-name status badge and the ownership tag
    * (Status has its own column now) and renders no Simulate Impact, Mark
-   * ownership or Rename control (a manager's page has no allocator portfolio)
+   * ownership control (a manager's page has no allocator portfolio)
    * unless `allocatorFurniture` is also set (199, D-02).
    *
    * ABSENT means byte-identical output. /discovery, /browse and /my-strategies
@@ -490,12 +490,12 @@ interface StrategyTableProps {
    * Phase 199 / D-02 — the allocator half of the owner-list furniture. `managerRows` is the
    * owner-list switch (Status and Created columns, no in-name status badge, the note row,
    * `showExamples`); this prop re-enables the controls that need an allocator portfolio inside
-   * that mode: the ownership tag, Mark ownership or Change mark, Rename and Simulate Impact.
+   * that mode: the ownership tag, Mark ownership or Change mark and Simulate Impact.
    * Edit and the actions slot are decided per ROW by the server (an entry's `editHref` and
    * `actions`), so one row can carry manager furniture, allocator furniture or both.
    *
    * ABSENT (false) means the manager-only reading shipped in 170.7: none of the allocator
-   * controls render, even when `onMarkOwnership` or `onRename` are passed. Without `managerRows`
+   * controls render, even when `onMarkOwnership` is passed. Without `managerRows`
    * it changes nothing (the plain owner mount already shows them).
    */
   allocatorFurniture?: boolean;
@@ -564,14 +564,6 @@ interface StrategyTableProps {
    * cell is byte-identical to today.
    */
   onMarkOwnership?: (s: StrategyWithAnalytics) => void;
-  /**
-   * Phase 150 / OWN-05 — opens the Rename dialog. Rendered only on private and
-   * draft rows (D-17): on a published row the affordance is ABSENT, not
-   * disabled, because published rename is a deferred trust-surface decision and
-   * there is no honest remedy to offer. Same precedent as the Simulate gate
-   * below — rendering nothing beats rendering a control that cannot work.
-   */
-  onRename?: (s: StrategyWithAnalytics) => void;
   /**
    * Phase 197 / CLAR-02 (D-03, RESEARCH Pitfall 6) — the server's clock, in epoch milliseconds, that
    * the stale-data verdict is judged against. The verdict changes row ORDER and row TEXT, so the
@@ -676,7 +668,6 @@ export function StrategyTable({
   placeholderKeys,
   onFinishSetup,
   onMarkOwnership,
-  onRename,
   nowMs,
   selectable = false,
   sharedAccountPartners,
@@ -1698,16 +1689,11 @@ export function StrategyTable({
                     // would push the guard out of that window and redden the pin
                     // with a misleading message.
                     //
-                    // Both callbacks are ABSENT on every public mount, so this
+                    // The callback is ABSENT on every public mount, so this
                     // is `null` on /discovery and /browse and the action cell
                     // there is byte-identical to today.
-                    // D-17: the rename affordance mirrors the SERVER gate
-                    // exactly (the route's UPDATE filters to these two
-                    // statuses), rather than "not published" — an archived row
-                    // is not renameable either, and a render gate that is wider
-                    // than the write gate produces a control that 404s.
-                    const isRenameable =
-                      s.status === "private" || s.status === "draft";
+                    // Phase 200 / D-09: no Rename… here. The edit page is the
+                    // one rename place, so this cluster is the ownership mark only.
                     // Phase 199 / D-02 — in owner-list mode (`managerRows` set) the
                     // allocator controls need `allocatorFurniture`, so a manager-only
                     // list never shows a control that needs an allocator portfolio,
@@ -1716,8 +1702,7 @@ export function StrategyTable({
                     // row whose own gap spaces the controls.
                     const allocatorControls = !managerRows || allocatorFurniture;
                     const ownerRowActions =
-                      allocatorControls &&
-                      (onMarkOwnership || (onRename && isRenameable)) ? (
+                      allocatorControls && onMarkOwnership ? (
                         <span
                           className={`inline-flex items-center gap-3 ${s.status === "published" && !managerRows ? "mr-3" : ""}`}
                         >
@@ -1734,15 +1719,6 @@ export function StrategyTable({
                               {s.capital_ownership
                                 ? "Change mark…"
                                 : "Mark ownership…"}
-                            </button>
-                          )}
-                          {onRename && isRenameable && (
-                            <button
-                              type="button"
-                              onClick={() => onRename(s)}
-                              className={GHOST_ROW_ACTION}
-                            >
-                              Rename…
                             </button>
                           )}
                         </span>
@@ -2150,7 +2126,7 @@ export function StrategyTable({
                         <td className="pl-4 pr-8 py-3 text-right group-hover:bg-page/50 transition-colors">
                           {/* Phase 170.7 / D-01, 199 / D-02 — owner-list mode: Edit,
                               this row's server-built slot, Mark ownership or
-                              Change mark, Rename, then Simulate Impact, on ONE
+                              Change mark, then Simulate Impact, on ONE
                               line (a wrapped Actions cell doubles the row height
                               and breaks the --row-h rhythm). Each piece renders
                               only when its furniture is on: Edit and the slot

@@ -373,6 +373,21 @@ afterEach(() => {
   restoreFetchMock();
 });
 
+/**
+ * D-12 / LEAN-04: every control on the page that starts a new strategy, by its
+ * rendered name. The manager's header is the ONLY one, so this must be 1.
+ */
+function addStrategyControls(): HTMLElement[] {
+  // The page house style is a Link wrapping a Button: that is ONE control, so a
+  // button inside an anchor is not counted a second time.
+  return [
+    ...screen.queryAllByRole("link", { name: "Add a strategy" }),
+    ...screen
+      .queryAllByRole("button", { name: "Add a strategy" })
+      .filter((el) => el.closest("a") === null),
+  ];
+}
+
 describe("/strategies furniture by role (199-09, D-02)", () => {
   it("an allocator opens the page: own rows, ownership tag and Simulate, none of the manager furniture", async () => {
     asRole("allocator");
@@ -398,7 +413,7 @@ describe("/strategies furniture by role (199-09, D-02)", () => {
     expect(screen.queryByTestId("share-s-pub")).toBeNull();
     expect(screen.queryByTestId("share-s-priv")).toBeNull();
     expect(screen.queryByTestId("actions-s-pub")).toBeNull();
-    expect(screen.queryByText("New Strategy")).toBeNull();
+    expect(addStrategyControls()).toHaveLength(0);
     expect(screen.queryByTestId("pending-intros")).toBeNull();
     expect(redirectMock).not.toHaveBeenCalled();
   });
@@ -409,11 +424,13 @@ describe("/strategies furniture by role (199-09, D-02)", () => {
     expect(state.tables).not.toContain("contact_requests");
   });
 
-  it("a manager gets New Strategy, Edit, the share control, the row actions and PendingIntros, and no allocator furniture", async () => {
+  it("a manager gets one Add a strategy link to the wizard, Edit, the share control, the row actions and PendingIntros, and no allocator furniture", async () => {
     asRole("manager");
     await renderPage();
 
-    expect(screen.getByText("New Strategy")).toBeTruthy();
+    const controls = addStrategyControls();
+    expect(controls).toHaveLength(1);
+    expect(controls[0].getAttribute("href")).toBe("/strategies/new/wizard");
     expect(screen.getByRole("link", { name: "Edit Strategy s-pub" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Edit Strategy s-priv" })).toBeTruthy();
     expect(screen.getByTestId("share-s-pub")).toBeTruthy();
@@ -430,7 +447,7 @@ describe("/strategies furniture by role (199-09, D-02)", () => {
     asRole("both");
     await renderPage();
 
-    expect(screen.getByText("New Strategy")).toBeTruthy();
+    expect(addStrategyControls()).toHaveLength(1);
     expect(screen.getAllByRole("link", { name: "Strategy s-pub" }).length).toBe(1);
     expect(screen.getByRole("link", { name: "Edit Strategy s-pub" })).toBeTruthy();
     expect(screen.getByTestId("share-s-pub")).toBeTruthy();
@@ -471,22 +488,22 @@ describe("/strategies role read discipline (199-09, T-199-15)", () => {
 });
 
 describe("/strategies mounts one host for every role (199-09, Task 2)", () => {
-  it("allocator and both get Change mark and Rename (Rename only on the private row); a manager gets neither", async () => {
+  it("allocator and both get Change mark; no role gets Rename… on the list (D-09: the edit page is the one rename place); a manager gets no mark control", async () => {
     for (const role of ["allocator", "both"] as const) {
       asRole(role);
       const { unmount } = render(
         (await renderToElement()) as React.ReactElement,
       );
-      // Two rows carry a mark, so two "Change mark" controls; Rename is for
-      // private and draft rows only (D-17), so the published row has none.
+      // Two rows carry a mark, so two "Change mark" controls. Rename… is gone
+      // from the list for every role (Phase 200 D-09).
       expect(
         screen.getAllByRole("button", { name: "Change mark…" }).length,
         `${role}: a Change mark control per row`,
       ).toBe(2);
       expect(
-        screen.getAllByRole("button", { name: "Rename…" }).length,
-        `${role}: Rename on the private row only`,
-      ).toBe(1);
+        screen.queryByRole("button", { name: "Rename…" }),
+        `${role}: no Rename on the list`,
+      ).toBeNull();
       unmount();
     }
 
@@ -718,7 +735,7 @@ describe("allocator reads and the K sentence, by role (199-10 task 2, D-02)", ()
 
     expect(screen.getByText(PLACEHOLDER_KEYS_UNREADABLE)).toBeTruthy();
     expect(screen.queryByText("No strategies yet.")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Add a Strategy" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add a strategy" })).toBeNull();
   });
 
   it("no placeholder-key line when the read succeeded", async () => {
@@ -782,15 +799,39 @@ describe("empty and unreadable branches by role (199-10 task 2, UI-SPEC States)"
       asRole(role);
       state.strategies = [];
       const { unmount } = render(await renderToElement());
-      expect(screen.getByText("No strategies yet."), `${role}`).toBeTruthy();
-      expect(screen.getByRole("link", { name: "Create your first strategy" })).toBeTruthy();
-      expect(screen.queryByRole("button", { name: "Add a Strategy" })).toBeNull();
+      expect(screen.getByText(/^No strategies yet\./), `${role}`).toBeTruthy();
+      // D-12 / LEAN-04 adjacency + empty: the header control is the ONE way to
+      // start a strategy; the empty card points at it and carries no second one.
+      const controls = addStrategyControls();
+      expect(controls, `${role}: exactly one control`).toHaveLength(1);
+      expect(controls[0].getAttribute("href"), `${role}`).toBe("/strategies/new/wizard");
+      expect(screen.queryByRole("link", { name: "Create your first strategy" }), `${role}`).toBeNull();
+      expect(screen.getByText(/Use Add a strategy above/), `${role}`).toBeTruthy();
       expect(screen.queryByTestId("comparison-set-note")).toBeNull();
       unmount();
     }
   });
 
-  it("allocator only with nothing: the moved empty state, an Add a Strategy BUTTON, never a link into the manager subtree", async () => {
+  it("manager with nothing but a draft: Resume draft still links to the wizard, and the header stays the one Add a strategy control", async () => {
+    asRole("manager");
+    state.strategies = [];
+    state.wizardDraft = {
+      id: "s-wd",
+      name: "Wizard Draft",
+      created_at: "2026-01-02T00:00:00.000Z",
+      review_note: null,
+    };
+    await renderPage();
+    const controls = addStrategyControls();
+    expect(controls).toHaveLength(1);
+    expect(controls[0].getAttribute("href")).toBe("/strategies/new/wizard");
+    expect(screen.getByRole("link", { name: "Resume draft" }).getAttribute("href")).toBe(
+      "/strategies/new/wizard",
+    );
+    expect(screen.queryByRole("link", { name: "Create your first strategy" })).toBeNull();
+  });
+
+  it("allocator only with nothing: the moved empty state, an Add a strategy BUTTON, never a link into the manager subtree", async () => {
     asRole("allocator");
     state.strategies = [];
     await renderPage();
@@ -801,7 +842,8 @@ describe("empty and unreadable branches by role (199-10 task 2, UI-SPEC States)"
         "Connect an exchange API key or upload a CSV to see your strategies ranked here. First metrics arrive ~10–15 minutes after a key connects.",
       ),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add a Strategy" }).tagName).toBe("BUTTON");
+    expect(screen.getByRole("button", { name: "Add a strategy" }).tagName).toBe("BUTTON");
+    expect(screen.queryByText("Add a Strategy")).toBeNull();
     expect(screen.queryByRole("link", { name: "Create your first strategy" })).toBeNull();
     expect(screen.queryByTestId("comparison-set-note")).toBeNull();
   });
@@ -878,7 +920,7 @@ describe("role both: one list with the union (199-10 task 3, D-02)", () => {
     expect(within(tr).getByTestId("simulate-s-pub")).toBeTruthy();
 
     // The page furniture of both roles at once.
-    expect(screen.getByText("New Strategy")).toBeTruthy();
+    expect(addStrategyControls()).toHaveLength(1);
     expect(screen.getByTestId("pending-intros")).toBeTruthy();
     expect(screen.getByTestId("wizard-draft-resume-banner")).toBeTruthy();
     expect(screen.getByText(/Bybit · Bybit Main/)).toBeTruthy();
@@ -1110,7 +1152,7 @@ function renderedLabels(container: HTMLElement): Map<string, string> {
   for (const chip of table.querySelectorAll(
     '[class*="rounded-md"][class*="font-medium"], [class*="rounded-sm"][class*="font-medium"]',
   )) {
-    // A control (Edit, Change mark, Rename) is an action, not a status chip.
+    // A control (Edit, Change mark) is an action, not a status chip.
     if (chip.closest("a, button")) continue;
     const t = text(chip);
     if (t === "options") continue; // a strategy-type badge: self-describing text
@@ -1407,7 +1449,7 @@ describe("the Stale (no data yet) detail takes the never-started remedy by role 
       );
       expect(keyed.querySelector('a[href="/strategies/s-keyed/edit"]'), role).not.toBeNull();
       const bare = detailOf("Strategy s-bare", "strategies.stale-no-data") as HTMLElement;
-      expect(bare.textContent, role).toContain("Link a key with Use & Sync on this strategy's edit page");
+      expect(bare.textContent, role).toContain("Link a key with Change key… on this strategy's edit page");
       unmount();
     }
   });

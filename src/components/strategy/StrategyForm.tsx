@@ -30,50 +30,20 @@ const EXCHANGE_OPTIONS = EXCHANGES.filter((e) => e.toLowerCase() !== "sfox").map
 );
 
 /**
- * KEYLINK-01 — what the user is told when the `api_keys` row EXISTS but could
- * not be attached to the strategy.
- *
- * It is deliberately NOT the generic save-failure sentence, and not the
- * validation sentence either. The three outcomes demand three different next
- * actions: a validation failure means the credentials are wrong and should be
- * re-entered; a 2xx with no id means nothing was written at all; here the
- * credentials were accepted AND the row is already saved against the user's key
- * quota, so re-typing them fixes nothing. Naming the half that succeeded is the
- * only way the user can tell that a key now exists in their account.
- *
- * DESIGN.md §Voice: declarative, sentence-case, active voice, no adjective where
- * a fact will do. No number is quoted because none is knowable here — this
- * component reads no retry hint, and inventing a wait would be fabrication.
- */
-const KEY_LINK_FAILED_COPY =
-  "Your key was saved to your account, but we couldn't attach it to this strategy. Reload the page and try again.";
-
-/**
  * H-0405 (audit-2026-05-07): map a raw Postgres/PostgREST error to a safe,
  * user-facing string. Piping `error.message` straight into the banner leaked
  * internal detail — SQLSTATE 42501 (RLS / SECURITY DEFINER trigger RAISE, such
  * as the cross-tenant api_key_id guard from migration 028/029 which embeds two
  * UUIDs + the migration name), constraint text, and column names. Keep all of
- * that server-side; show the user one of two intent-specific messages.
- *
- * KEYLINK-01: `intent` picks the fallback sentence. The 42501 arm is shared on
- * purpose — "You can only link API keys you own." is already the correct
- * sentence for BOTH a strategy save and a key link, and the redaction itself has
- * to stay in ONE place: it is the security-relevant half, and a second copy of
- * it is a second thing to forget when the guard changes.
+ * that server-side; show the user one of two safe messages.
  */
-function toUserFacingStrategyError(
-  error: { code?: string; message?: string },
-  intent: "save" | "link" = "save",
-): string {
+function toUserFacingStrategyError(error: { code?: string; message?: string }): string {
   const code = error.code ?? "";
   const message = error.message ?? "";
   if (code === "42501" || message.includes("cross-tenant linkage blocked")) {
     return "You can only link API keys you own.";
   }
-  return intent === "link"
-    ? KEY_LINK_FAILED_COPY
-    : "Couldn't save your strategy. Please try again.";
+  return "Couldn't save your strategy. Please try again.";
 }
 
 interface StrategyFormProps {
@@ -82,15 +52,11 @@ interface StrategyFormProps {
 }
 
 export function StrategyForm({ strategy, mode }: StrategyFormProps) {
-  const [name, setName] = useState(strategy?.name ?? STRATEGY_NAMES[0]);
-  // D-01 (164.6.6.3.1): a strategy named outside STRATEGY_NAMES (e.g. "MM-2x")
-  // must show its OWN name in the picker. Without this option the <select>
-  // falls back to its first option and displays "Alpha Centauri" while `name`
-  // state still holds the real name.
-  const nameOptions: readonly string[] =
-    strategy?.name && !(STRATEGY_NAMES as readonly string[]).includes(strategy.name)
-      ? [strategy.name, ...STRATEGY_NAMES]
-      : STRATEGY_NAMES;
+  // D-09 (200-12): the name is chosen at create and never again from this form.
+  // Edit mode renders no picker and sends no `name`; a rename goes through the
+  // name route (`/api/strategies/[id]/name`), whose D-17 admin-review gate is the
+  // only rename writer. State is only read by create mode.
+  const [name, setName] = useState<string>(STRATEGY_NAMES[0]);
   const [description, setDescription] = useState(strategy?.description ?? "");
   const [categoryId, setCategoryId] = useState<string>(strategy?.category_id ?? "");
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
@@ -208,40 +174,10 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         throw new Error("Your key was verified but not saved. Please try again.");
       }
 
-      // KEYLINK-01 — PERSIST THE LINK BEFORE CLAIMING IT.
-      //
-      // In edit mode the `strategies` row already exists, so the attach happens
-      // HERE and not at form submit. The button below reads "API Key Connected"
-      // the instant this function resolves; a user who then navigates away — or
-      // simply never presses Save — must not be looking at a claim the database
-      // cannot confirm. Deferring the write to handleSubmit leaves exactly that
-      // window open, which is the same false-success one layer down.
-      //
-      // It also closes the mint loop. `apiConnected` initialises from
-      // `strategy?.api_key_id`; for as long as that column stayed NULL, every
-      // reload re-enabled the button and every retry minted ANOTHER `api_keys`
-      // row against the user's quota.
-      //
-      // Throwing is the point (this mirrors ApiKeyManager's NEW-C37-03 arm): the
-      // catch below leaves `apiConnected` false and puts the reason in
-      // `apiError`, so a link that failed can never render as a connected key.
-      if (mode === "edit") {
-        if (!strategy) {
-          // Rule 12 / fail loud. "edit" with no strategy has no row to attach
-          // to; skipping the write silently is precisely the false-success this
-          // block exists to remove.
-          throw new Error(toUserFacingStrategyError({}, "link"));
-        }
-        const supabase = createClient();
-        const { error: linkError } = await supabase
-          .from("strategies")
-          .update({ api_key_id: newKeyId })
-          .eq("id", strategy.id);
-        if (linkError) {
-          throw new Error(toUserFacingStrategyError(linkError, "link"));
-        }
-      }
-
+      // D-03 / D-07 (200-12): this handler runs in create mode only — edit mode
+      // renders no Data Source card, so there is no browser write of
+      // `strategies.api_key_id` here. Re-pointing a strategy goes through the
+      // confirmed route, never through this form.
       // Create mode has no row to attach to yet, so the id is held here and
       // rides in on the INSERT that handleSubmit composes (see the payload).
       setConnectedKeyId(newKeyId);
@@ -276,10 +212,11 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
 
     const payload = {
       user_id: user.id,
-      // D-02 (164.6.6.3.1): create always names the strategy. An edit sends
-      // `name` only when the picker changed, so an unrelated save can never
-      // rename; a deliberate pick still does.
-      ...(mode === "create" || name !== strategy?.name ? { name } : {}),
+      // D-09 (200-12): create names the strategy; an edit NEVER sends `name`,
+      // changed or not. This browser `.update(...)` reaches PostgREST behind no
+      // status gate, so sending it would rename a published or pending strategy
+      // around the name route's D-17 admin-review gate.
+      ...(mode === "create" ? { name } : {}),
       description: description || null,
       category_id: categoryId || null,
       strategy_types: selectedTypes,
@@ -322,12 +259,14 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       <Card>
         <h2 className="text-lg font-semibold text-text-primary mb-4">Strategy Details</h2>
         <div className="space-y-4">
-          <Select
-            label="Strategy Name"
-            options={nameOptions.map((n) => ({ value: n, label: n }))}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
+          {mode === "create" && (
+            <Select
+              label="Strategy Name"
+              options={STRATEGY_NAMES.map((n) => ({ value: n, label: n }))}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          )}
           <Textarea
             label="Description"
             value={description}
@@ -363,41 +302,44 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         </div>
       </Card>
 
-      <Card>
-        <h2 className="text-lg font-semibold text-text-primary mb-4">Data Source</h2>
-        <div className="rounded-lg border border-accent/30 bg-accent/5 p-4 mb-4">
-          <p className="text-sm font-medium text-text-primary mb-1">
-            Teams with verified API data get 3x more allocator interviews
-          </p>
-          <p className="text-xs text-text-muted">
-            Connecting a read-only exchange API key proves your track record is real.
-            Allocators trust verified data significantly more than self-reported PnL.
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <Button
-            type="button"
-            onClick={() => setShowApiModal(true)}
-            disabled={apiConnected}
-          >
-            {apiConnected ? "API Key Connected" : "Connect API Key"}
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => setDataSource("csv")}
-            disabled={dataSource === "csv"}
-          >
-            {dataSource === "csv" ? "CSV Selected" : "Upload CSV"}
-          </Button>
-        </div>
-        {apiConnected && (
-          <p className="text-xs text-positive mt-2">Read-only API key verified and connected.</p>
-        )}
-        {dataSource === "csv" && !apiConnected && (
-          <p className="text-xs text-text-muted mt-2">You can upload your trade CSV after creating the strategy.</p>
-        )}
-      </Card>
+      {/* D-03 / D-07 (200-12): create only. Edit mode has no unconfirmed key writer. */}
+      {mode === "create" && (
+        <Card>
+          <h2 className="text-lg font-semibold text-text-primary mb-4">Data Source</h2>
+          <div className="rounded-lg border border-accent/30 bg-accent/5 p-4 mb-4">
+            <p className="text-sm font-medium text-text-primary mb-1">
+              Teams with verified API data get 3x more allocator interviews
+            </p>
+            <p className="text-xs text-text-muted">
+              Connecting a read-only exchange API key proves your track record is real.
+              Allocators trust verified data significantly more than self-reported PnL.
+            </p>
+          </div>
+          <div className="flex gap-3">
+            <Button
+              type="button"
+              onClick={() => setShowApiModal(true)}
+              disabled={apiConnected}
+            >
+              {apiConnected ? "API Key Connected" : "Connect API Key"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setDataSource("csv")}
+              disabled={dataSource === "csv"}
+            >
+              {dataSource === "csv" ? "CSV Selected" : "Upload CSV"}
+            </Button>
+          </div>
+          {apiConnected && (
+            <p className="text-xs text-positive mt-2">Read-only API key verified and connected.</p>
+          )}
+          {dataSource === "csv" && !apiConnected && (
+            <p className="text-xs text-text-muted mt-2">You can upload your trade CSV after creating the strategy.</p>
+          )}
+        </Card>
+      )}
 
       {error && <p className="text-sm text-negative">{error}</p>}
 
@@ -410,52 +352,54 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         </Button>
       </div>
 
-      {/* API Key Modal */}
-      <Modal open={showApiModal} onClose={() => setShowApiModal(false)} title="Connect Exchange API Key">
-        <div className="space-y-4">
-          <Select
-            label="Exchange"
-            options={EXCHANGE_OPTIONS}
-            value={apiExchange}
-            onChange={(e) => setApiExchange(e.target.value)}
-          />
-          <Input
-            label="API Key"
-            value={apiKey}
-            onChange={(e) => setApiKey(readCredentialInput(e))}
-            placeholder="Your read-only API key"
-            {...CREDENTIAL_KEY_INPUT_PROPS}
-          />
-          <Input
-            label="API Secret"
-            value={apiSecret}
-            onChange={(e) => setApiSecret(readCredentialInput(e))}
-            placeholder="Your API secret"
-            type="password"
-            {...CREDENTIAL_SECRET_INPUT_PROPS}
-          />
-          {apiExchange === "okx" && (
+      {/* API Key Modal: create only (D-03 / D-07, 200-12) */}
+      {mode === "create" && (
+        <Modal open={showApiModal} onClose={() => setShowApiModal(false)} title="Connect Exchange API Key">
+          <div className="space-y-4">
+            <Select
+              label="Exchange"
+              options={EXCHANGE_OPTIONS}
+              value={apiExchange}
+              onChange={(e) => setApiExchange(e.target.value)}
+            />
             <Input
-              label="Passphrase (OKX)"
-              value={apiPassphrase}
-              onChange={(e) => setApiPassphrase(e.target.value)}
-              placeholder="OKX passphrase"
+              label="API Key"
+              value={apiKey}
+              onChange={(e) => setApiKey(readCredentialInput(e))}
+              placeholder="Your read-only API key"
+              {...CREDENTIAL_KEY_INPUT_PROPS}
+            />
+            <Input
+              label="API Secret"
+              value={apiSecret}
+              onChange={(e) => setApiSecret(readCredentialInput(e))}
+              placeholder="Your API secret"
               type="password"
               {...CREDENTIAL_SECRET_INPUT_PROPS}
             />
-          )}
-          <p className="text-xs text-text-muted">
-            Only read-only keys are accepted. Keys with trading or withdrawal permissions will be rejected.
-          </p>
-          {apiError && <p className="text-sm text-negative">{apiError}</p>}
-          <div className="flex gap-3">
-            <Button variant="secondary" type="button" onClick={() => setShowApiModal(false)}>Cancel</Button>
-            <Button type="button" onClick={handleApiKeySubmit} disabled={apiLoading || !apiKey || !apiSecret}>
-              {apiLoading ? "Validating..." : "Connect Key"}
-            </Button>
+            {apiExchange === "okx" && (
+              <Input
+                label="Passphrase (OKX)"
+                value={apiPassphrase}
+                onChange={(e) => setApiPassphrase(e.target.value)}
+                placeholder="OKX passphrase"
+                type="password"
+                {...CREDENTIAL_SECRET_INPUT_PROPS}
+              />
+            )}
+            <p className="text-xs text-text-muted">
+              Only read-only keys are accepted. Keys with trading or withdrawal permissions will be rejected.
+            </p>
+            {apiError && <p className="text-sm text-negative">{apiError}</p>}
+            <div className="flex gap-3">
+              <Button variant="secondary" type="button" onClick={() => setShowApiModal(false)}>Cancel</Button>
+              <Button type="button" onClick={handleApiKeySubmit} disabled={apiLoading || !apiKey || !apiSecret}>
+                {apiLoading ? "Validating..." : "Connect Key"}
+              </Button>
+            </div>
           </div>
-        </div>
-      </Modal>
+        </Modal>
+      )}
 
       {/* No API Warning Modal */}
       <Modal open={showNoApiWarning} onClose={() => setShowNoApiWarning(false)} title="Connect Your Data">

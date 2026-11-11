@@ -161,7 +161,7 @@ function buildNavSections(
     // (T-110-16 info-disclosure). Allocator-framed copy — never the manager
     // "publish to investors" voice.
     workspaceItems.push({
-      label: "Add a Strategy",
+      label: "Add a strategy",
       icon: PlusIcon,
       action: "add-strategy",
     });
@@ -302,7 +302,7 @@ export function buildPrimaryMobileNav(p: {
     // buildNavSections — still carries it). Href-less: it dispatches
     // onNavAction, never navigates (see NavActionItem). Never emitted outside
     // this allocator branch → T-110-16 role-leak pin.
-    fillers.push({ label: "Add a Strategy", icon: PlusIcon, action: "add-strategy" });
+    fillers.push({ label: "Add a strategy", icon: PlusIcon, action: "add-strategy" });
     // Discovery is a discretionary filler (allocator browse surface) — trimmed
     // first when the cap binds (admin keeps the SC trio + a manager destination).
     // Href is the canonical landing slug `/discovery/crypto-sma` (the same target

@@ -29,6 +29,16 @@ const STATE = vi.hoisted(() => ({
   adminMembers: { data: [], error: null } as Result,
   /** What the request-scoped (RLS) client's strategy_keys read would answer. */
   rlsMembers: { data: [], error: null } as Result,
+  /**
+   * Phase 200 D-01: the `strategies` rows the admin client can see, for the
+   * single-key half of `feeds`. The fake filters them by EVERY eq() the route
+   * applies, so a foreign strategy appears only when the owner equality is gone.
+   */
+  adminStrategies: [] as Array<Record<string, unknown>>,
+  /** A forced error (or a rows-less answer) on the single-key `strategies` read. */
+  singlesError: null as { message: string; code?: string } | "no-rows" | null,
+  /** The eq() filters applied to the admin strategies read. */
+  singleFilters: [] as Array<[string, unknown]>,
   rateLimitOk: true,
   adminClientsCreated: 0,
   /** Every (client, table) the route read, in order. */
@@ -96,6 +106,33 @@ vi.mock("@/lib/supabase/admin", () => ({
             }),
           };
         }
+        if (table === "strategies") {
+          const filters: Array<[string, unknown]> = [];
+          STATE.singleFilters = filters;
+          const chain = {
+            select: () => chain,
+            eq: (col: string, val: unknown) => {
+              filters.push([col, val]);
+              return chain;
+            },
+            then: (resolve: (v: unknown) => void, reject: (e: unknown) => void) => {
+              const forced = STATE.singlesError;
+              const answer =
+                forced === "no-rows"
+                  ? { data: null, error: null }
+                  : forced
+                    ? { data: null, error: forced }
+                    : {
+                        data: STATE.adminStrategies.filter((row) =>
+                          filters.every(([col, val]) => row[col] === val),
+                        ),
+                        error: null,
+                      };
+              return Promise.resolve(answer).then(resolve, reject);
+            },
+          };
+          return chain;
+        }
         throw new Error(`unexpected admin from(${table})`);
       },
     };
@@ -139,6 +176,9 @@ beforeEach(() => {
   STATE.ownershipError = null;
   STATE.adminMembers = { data: [], error: null };
   STATE.rlsMembers = { data: [], error: null };
+  STATE.adminStrategies = [];
+  STATE.singlesError = null;
+  STATE.singleFilters = [];
   STATE.rateLimitOk = true;
   STATE.adminClientsCreated = 0;
   STATE.reads = [];
@@ -163,12 +203,12 @@ describe("GET /api/keys/[id]/memberships", () => {
     const res = await GET(request(KEY_ID));
     expect(res.status).toBe(200);
     expectNoStore(res);
-    expect(await res.json()).toEqual({
-      memberships: [
-        { name: "Synthetic Composite A", status: "draft" },
-        { name: "Synthetic Composite P", status: "published" },
-      ],
-    });
+    // Phase 200 D-01: the body gained an additive `feeds`; `memberships` is
+    // byte-for-byte what it was, so this case pins that field alone.
+    expect((await res.json()).memberships).toEqual([
+      { name: "Synthetic Composite A", status: "draft" },
+      { name: "Synthetic Composite P", status: "published" },
+    ]);
   });
 
   it("RLS-REGRESSION: the request client answering [] (a regressed strategy_keys_owner) cannot hide a membership the service role reads (ROADMAP criterion 5)", async () => {
@@ -178,9 +218,9 @@ describe("GET /api/keys/[id]/memberships", () => {
     STATE.adminMembers = { data: [strategyRow("Synthetic Composite A", "draft")], error: null };
     const res = await GET(request(KEY_ID));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      memberships: [{ name: "Synthetic Composite A", status: "draft" }],
-    });
+    expect((await res.json()).memberships).toEqual([
+      { name: "Synthetic Composite A", status: "draft" },
+    ]);
     expect(STATE.reads).not.toContainEqual({ client: "request", table: "strategy_keys" });
     expect(STATE.reads).toContainEqual({ client: "admin", table: "strategy_keys" });
   });
@@ -303,13 +343,11 @@ describe("GET /api/keys/[id]/memberships", () => {
     };
     const res = await GET(request(KEY_ID));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      memberships: [
-        { name: "Synthetic Composite A", status: "pending_review" },
-        { name: null, status: "draft" },
-        { name: null, status: null },
-      ],
-    });
+    expect((await res.json()).memberships).toEqual([
+      { name: "Synthetic Composite A", status: "pending_review" },
+      { name: null, status: "draft" },
+      { name: null, status: null },
+    ]);
   });
 
   it("FOREIGN-STRATEGY-REDACTED: a membership whose strategy is not the caller's is listed with no name (defence in depth over the owner-coherence trigger)", async () => {
@@ -321,7 +359,13 @@ describe("GET /api/keys/[id]/memberships", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).not.toContain("Foreign Composite");
-    expect(JSON.parse(body)).toEqual({ memberships: [{ name: null, status: null }] });
+    expect(JSON.parse(body).memberships).toEqual([{ name: null, status: null }]);
+    // Phase 200: the same row in `feeds` carries no id either (the helper
+    // builds its id from the name, so a leaked id would also fail the check
+    // above), and no link a consumer could follow.
+    expect(JSON.parse(body).feeds).toEqual([
+      { strategy_id: null, name: null, status: null, kind: "composite" },
+    ]);
   });
 
   // 167.2.1-REVIEW-SFH M-4: a tripwire nobody hears is not defence in depth.
@@ -342,14 +386,12 @@ describe("GET /api/keys/[id]/memberships", () => {
     consoleError.mockClear();
     const res = await GET(request(KEY_ID));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      memberships: [
-        { name: "Synthetic Composite A", status: "draft" },
-        { name: null, status: null },
-        { name: null, status: null },
-        { name: null, status: null },
-      ],
-    });
+    expect((await res.json()).memberships).toEqual([
+      { name: "Synthetic Composite A", status: "draft" },
+      { name: null, status: null },
+      { name: null, status: null },
+      { name: null, status: null },
+    ]);
     expect(STATE.captured).toHaveLength(1);
     expect(String(STATE.captured[0].err)).toContain("strategy owner mismatch or dangling embed");
     expect(STATE.captured[0].options).toEqual({
@@ -377,5 +419,87 @@ describe("GET /api/keys/[id]/memberships", () => {
     expect(res.status).toBe(200);
     expect(STATE.captured).toEqual([]);
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  // Phase 200 D-01: the Delete confirm can name single-key strategies too.
+  const S_SINGLE = "11111111-1111-4111-8111-111111111111";
+  const S_FOREIGN = "99999999-9999-4999-8999-999999999999";
+  function single(id: string, name: unknown, over: Record<string, unknown> = {}) {
+    return { id, name, status: "draft", user_id: USER_ID, api_key_id: KEY_ID, ...over };
+  }
+
+  it("FEEDS-BOTH-KINDS: a key single-linked to one strategy and a member of a composite lists both, kind set, with memberships unchanged", async () => {
+    STATE.adminStrategies = [single(S_SINGLE, "Synthetic Single", { status: "published" })];
+    STATE.adminMembers = { data: [strategyRow("Synthetic Composite A", "draft")], error: null };
+    const res = await GET(request(KEY_ID));
+    expect(res.status).toBe(200);
+    expectNoStore(res);
+    expect(await res.json()).toEqual({
+      // Composite only, `{ name, status }` only: `deleteCompositeWarning` reads this.
+      memberships: [{ name: "Synthetic Composite A", status: "draft" }],
+      feeds: [
+        { strategy_id: "strat-Synthetic Composite A", name: "Synthetic Composite A", status: "draft", kind: "composite" },
+        { strategy_id: S_SINGLE, name: "Synthetic Single", status: "published", kind: "single" },
+      ],
+    });
+  });
+
+  it("FEEDS-SINGLE-SCOPED: the single-key read runs on the admin client scoped to the caller AND the key, so a foreign strategy pointing at it is never named", async () => {
+    STATE.adminStrategies = [
+      single(S_FOREIGN, "Foreign Single", { user_id: OTHER_USER_ID }),
+      single(S_SINGLE, "Synthetic Single"),
+    ];
+    const res = await GET(request(KEY_ID));
+    expect(STATE.singleFilters).toContainEqual(["user_id", USER_ID]);
+    expect(STATE.singleFilters).toContainEqual(["api_key_id", KEY_ID]);
+    expect(STATE.reads).toContainEqual({ client: "admin", table: "strategies" });
+    expect(STATE.reads).not.toContainEqual({ client: "request", table: "strategies" });
+    const body = await res.text();
+    expect(body).not.toContain("Foreign Single");
+    expect(body).not.toContain(S_FOREIGN);
+    expect(JSON.parse(body).feeds).toEqual([
+      { strategy_id: S_SINGLE, name: "Synthetic Single", status: "draft", kind: "single" },
+    ]);
+  });
+
+  it("FEEDS-ORDER: feeds sort by name case-insensitively, nulls last, equal names by strategy id", async () => {
+    const A1 = "00000000-0000-4000-8000-0000000000a1";
+    const A2 = "00000000-0000-4000-8000-0000000000a2";
+    STATE.adminStrategies = [single("c1", null), single(A2, "Alpha"), single("b1", "bravo"), single(A1, "Alpha")];
+    const res = await GET(request(KEY_ID));
+    expect((await res.json()).feeds.map((f: { strategy_id: string }) => f.strategy_id)).toEqual([A1, A2, "b1", "c1"]);
+  });
+
+  it("FEEDS-READ-ERROR-500: an error on the single-key read answers 500 Lookup failed, never a 200 with an empty feeds list", async () => {
+    STATE.adminMembers = { data: [strategyRow("Synthetic Composite A", "draft")], error: null };
+    STATE.singlesError = { message: "RAW-PG-DETAIL-sentinel", code: "57014" };
+    const res = await GET(request(KEY_ID));
+    expect(res.status).toBe(500);
+    expectNoStore(res);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: "Lookup failed" });
+    expect(text).not.toContain("RAW-PG-DETAIL-sentinel");
+    expect(STATE.captured).toHaveLength(1);
+    expect(STATE.captured[0].options).toEqual({
+      tags: { route: "api/keys/[id]/memberships", stage: "single-links", code: "57014" },
+    });
+    expect(JSON.stringify(STATE.captured.map((c) => [String(c.err), c.options]))).not.toContain(KEY_ID);
+  });
+
+  it("FEEDS-NOT-ARRAY-500: a single-key answer with no rows array and no error is a 500, never an empty list", async () => {
+    STATE.singlesError = "no-rows";
+    const res = await GET(request(KEY_ID));
+    expect(res.status).toBe(500);
+    expect(STATE.captured).toHaveLength(1);
+    expect(STATE.captured[0].options.tags).toEqual({
+      route: "api/keys/[id]/memberships",
+      stage: "single-links",
+      code: "no_error",
+    });
+  });
+
+  it("FEEDS-NO-LINKS: a key that feeds nothing answers memberships [] and feeds []", async () => {
+    const res = await GET(request(KEY_ID));
+    expect(await res.json()).toEqual({ memberships: [], feeds: [] });
   });
 });

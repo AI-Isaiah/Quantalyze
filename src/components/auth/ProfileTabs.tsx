@@ -17,7 +17,10 @@ import type { AllocatorOwnPreferences } from "@/lib/preferences";
 const ALL_TABS = [
   { key: "personal", label: "Personal Info" },
   { key: "mandate", label: "Mandate", allocatorOnly: true },
-  { key: "exchanges", label: "Exchanges", allocatorOnly: true },
+  // Phase 200 D-06: the one key manager, for every role that can hold keys
+  // (manager, allocator, both). The tab keeps its key `exchanges` so the
+  // inbound `/profile?tab=exchanges` links keep working; only the label moved.
+  { key: "exchanges", label: "API keys" },
   // Phase 11 / S6 / D-05 — allocator-only Security tab housing the
   // self-serve audit-log CSV download (linked from /security#data-handling-summary).
   { key: "security", label: "Security", allocatorOnly: true },
@@ -28,11 +31,7 @@ const ALL_TABS = [
 type TabKey = (typeof ALL_TABS)[number]["key"];
 
 const VALID_TAB_KEYS = ALL_TABS.map((t) => t.key) as readonly TabKey[];
-const ALLOCATOR_ONLY_KEYS: readonly TabKey[] = [
-  "mandate",
-  "exchanges",
-  "security",
-];
+const ALLOCATOR_ONLY_KEYS: readonly TabKey[] = ["mandate", "security"];
 
 function parseTabParam(raw: string | null, isAllocator: boolean): TabKey {
   if (!raw) return "personal";
@@ -120,12 +119,13 @@ export function ProfileTabs({
       {/* Each body lives in a Radix TabsContent (role="tabpanel") so every
           TabsTrigger's aria-controls resolves to a real panel and the active
           panel is labelled by its tab (WCAG 4.1.2 / 1.3.1). Radix renders only
-          the active panel. The allocator-only panels are gated on `isAllocator`
-          to stay symmetric with their triggers (a trigger without a panel —
-          or a panel without a trigger — would re-introduce the dangling
-          aria-controls). The exchanges panel renders whenever the exchanges
-          trigger does (isAllocator) and is null-safe inside, so the trigger
-          never points at a missing panel when `exchanges` is absent. */}
+          the active panel. The allocator-only panels (mandate, security) are
+          gated on `isAllocator` to stay symmetric with their triggers (a
+          trigger without a panel — or a panel without a trigger — would
+          re-introduce the dangling aria-controls). The API keys panel renders
+          for every role, like its trigger (Phase 200 D-06), and is null-safe
+          inside, so the trigger never points at a missing panel when
+          `exchanges` is absent. */}
       <TabsContent value="personal">
         <ProfileForm profile={profile} />
       </TabsContent>
@@ -134,17 +134,16 @@ export function ProfileTabs({
           <MandateForm initial={initialPreferences} />
         </TabsContent>
       )}
-      {isAllocator && (
-        <TabsContent value="exchanges">
-          {exchanges && (
-            <ExchangesTabContent
-              initialKeys={exchanges.initialKeys}
-              activePortfolio={exchanges.activePortfolio}
-              hasHoldings={exchanges.hasHoldings}
-            />
-          )}
-        </TabsContent>
-      )}
+      <TabsContent value="exchanges">
+        {exchanges && (
+          <ExchangesTabContent
+            initialKeys={exchanges.initialKeys}
+            activePortfolio={exchanges.activePortfolio}
+            hasHoldings={exchanges.hasHoldings}
+            role={exchanges.role}
+          />
+        )}
+      </TabsContent>
       {isAllocator && (
         <TabsContent value="security">
           {/* Phase 11 / S6 / D-05 — Allocator self-serve audit-log CSV.

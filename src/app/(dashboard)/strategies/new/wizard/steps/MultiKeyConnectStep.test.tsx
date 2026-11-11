@@ -3488,3 +3488,25 @@ describe("[DOMAINONE S10] MultiKeyConnectStep — trust panel security contact",
     expect(dd.textContent).not.toMatch(/@/);
   });
 });
+
+/**
+ * 200 MANAGERKEYS plan 02 / D-14 — the "What we store" atom is the ONE shared
+ * key-storage sentence and a link to /security#key-handling, and the atom that
+ * restated who can decrypt is gone. The sentence is typed here as a literal (oracle
+ * independence: a drift in the shared constant fails this test, not passes with it).
+ */
+describe("[200-02 D-14] MultiKeyConnectStep — trust panel key storage", () => {
+  it("renders the shared sentence with a link to /security#key-handling and no mechanism name", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const dd = screen.getByText("What we store").nextElementSibling as HTMLElement;
+    expect((dd.textContent ?? "").replace(/\s+/g, " ")).toBe(
+      "We store your read-only API key encrypted, under a data key of its own, and only our analytics service can decrypt it. How we store keys.",
+    );
+    const link = dd.querySelector("a")!;
+    expect(link.textContent).toBe("How we store keys");
+    expect(link.getAttribute("href")).toBe("/security#key-handling");
+    expect(screen.queryByText("Who can decrypt")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/AES-256|Supabase Vault|KEK/);
+  });
+});
