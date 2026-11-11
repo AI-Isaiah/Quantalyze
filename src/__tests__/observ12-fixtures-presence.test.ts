@@ -13,6 +13,8 @@ import { describe, it, expect } from "vitest";
 //
 // 2026-11-11 (Phase 200): api-key-flow.spec.ts was rewritten to the one-key edit-page panel and
 // legitimately shrank (Add/Delete key controls moved to Profile), so its floor dropped 8000 -> 6000.
+// 2026-11-11 (Phase 200 gap closure, plan 13): the edit-page panel tests left this file for the seeded
+// e2e/manager-keys.spec.ts, so the floor dropped from 6000 to 4600 (80% of the measured 5750 bytes).
 // Lower-bound thresholds intentionally allow ~20% drift for line-ending,
 // whitespace, or formatter changes; values calibrated against bytes-on-disk
 // at planning time (2026-05-01).
@@ -43,7 +45,7 @@ interface FixtureSpec {
 // caller nobody asked for. Its behaviour test (src/lib/observability.test.ts) went
 // with it.
 const FIXTURES: FixtureSpec[] = [
-  { path: "e2e/api-key-flow.spec.ts", minBytes: 6000, recordedBytes: 7750 },
+  { path: "e2e/api-key-flow.spec.ts", minBytes: 4600, recordedBytes: 5750 },
   { path: "scripts/seed-full-app-demo.ts", minBytes: 50000, recordedBytes: 59393 },
 ];
 

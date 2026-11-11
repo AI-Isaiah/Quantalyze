@@ -6393,6 +6393,13 @@ jobs:
           # (Phase 158 OPS-03 section) and needs a MEASURED run in the target
           # env first — they are green under THIS job's placeholder env, which
           # is not evidence about the seeded job's env.
+          # ⛔ CORRECTED 2026-11-11 (Phase 200 gap closure): the edit page's one-key panel
+          # tests these two specs carried moved to e2e/manager-keys.spec.ts in the
+          # e2e-seeded list, which blocks, and it carries no env self-skip (pinned by
+          # src/__tests__/manager-keys-e2e-wiring.test.ts). What stays in this list from
+          # the two specs is their unauthenticated contract describes, sync-analytics-flow's
+          # env-gated analytics describe and its retired-URL case; those remain ADVISORY
+          # for the two reasons above.
           # Capture the test exit code WITHOUT aborting the script (default
           # shell is `bash -e`). The port-3000 cleanup below is a FINALLY so a
           # failing spec never leaves an orphaned next-server bound to :3000
@@ -7076,8 +7083,14 @@ jobs:
               e2e/csv-upload-flow.spec.ts \
               e2e/my-strategies.spec.ts \
               e2e/role-home.spec.ts \
+              e2e/manager-keys.spec.ts \
               --timeout 60000
           fi
+          # Phase 200 gap closure (2026-11-11): e2e/manager-keys.spec.ts is in this list
+          # (place 1) and has NO place-2 self-skip, by decision. Its panel tests used
+          # to skip on an env var no workflow set, so they ran nowhere that could
+          # block a merge. A missing seed env must FAIL them, not skip them: the
+          # seed helper throws without it.
           # Phase 199 plan 17 (ROUTE-01): e2e/role-home.spec.ts is in this list
           # (place 1); its HAS_SEED_ENV skip is place 2. It signs a seeded allocator,
           # manager and admin in through the real form and asserts the exact landing.

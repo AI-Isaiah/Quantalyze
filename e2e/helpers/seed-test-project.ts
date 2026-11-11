@@ -1887,3 +1887,222 @@ export async function cleanupMt5VerifiedStrategy(
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 200 gap closure (plan 13) - the one-key panel seed.
+//
+// The strategy edit page's one-key panel (`Change key…`, the confirm, Resync,
+// the Profile link) only renders for a signed-in manager who OWNS a strategy
+// with a linked key, and `Change key…` only shows when the account holds a
+// SECOND key. This seeds exactly that and nothing more: a manager-only user,
+// one private strategy linked to key A, and a spare key B on the same account.
+// Every mutation routes through getAdmin(), so the production-URL and
+// service-role assertions fire before any write; the only ciphertext-shaped
+// literal is the gitleaks-safe placeholder idiom, no real credential.
+// ---------------------------------------------------------------------------
+
+export interface SeededManagerKeyPanel {
+  manager: SeededAllocator;
+  strategyId: string;
+  strategyName: string;
+  linkedKey: { id: string; label: string };
+  spareKey: { id: string; label: string };
+  /** Present only when the seed was given a `disconnectedLabel`. */
+  disconnectedKey?: { id: string; label: string };
+}
+
+/**
+ * Seed a manager-only user who owns one private strategy linked to a key, plus
+ * a second key on the same account (the picker's only candidate). With
+ * `disconnectedLabel` it also inserts a disconnected key (one day ago), which
+ * the Profile API keys tab lists under Disconnected.
+ *
+ * The strategy name and the two key labels are short and fixed on purpose. Each
+ * seed mints its own user, so the fixed strings never collide with another
+ * run's, and the plan that measures label truncation at 320px needs labels it
+ * can predict. Override them per call when a test needs other text.
+ */
+export async function seedManagerKeyPanel(opts?: {
+  strategyName?: string;
+  linkedLabel?: string;
+  spareLabel?: string;
+  disconnectedLabel?: string;
+}): Promise<SeededManagerKeyPanel> {
+  const admin = getAdmin();
+  const manager = await seedTestAllocator({ role: "manager" });
+  const strategyName = opts?.strategyName ?? "Key panel alpha";
+  const linkedLabel = opts?.linkedLabel ?? "Binance main";
+  const spareLabel = opts?.spareLabel ?? "OKX second";
+  // Rows created so far. A seed that throws partway deletes them before it
+  // rethrows, so the caller (which never receives the half-built result)
+  // cannot leak them (SFH-G2).
+  const createdKeyIds: string[] = [];
+  let createdStrategyId: string | undefined;
+  try {
+    const { data: linked, error: lErr } = await admin
+      .from("api_keys")
+      .insert({
+        user_id: manager.userId,
+        exchange: "binance",
+        label: linkedLabel,
+        api_key_encrypted: "e2e-placeholder-ciphertext",
+        is_active: true,
+      })
+      .select("id")
+      .single();
+    if (lErr || !linked) {
+      throw new Error(
+        `[seed] seedManagerKeyPanel (linked api_key) failed: ${lErr?.message ?? "no row"}`,
+      );
+    }
+    createdKeyIds.push(linked.id as string);
+
+    const { data: spare, error: spErr } = await admin
+      .from("api_keys")
+      .insert({
+        user_id: manager.userId,
+        exchange: "okx",
+        label: spareLabel,
+        api_key_encrypted: "e2e-placeholder-ciphertext",
+        is_active: true,
+      })
+      .select("id")
+      .single();
+    if (spErr || !spare) {
+      throw new Error(
+        `[seed] seedManagerKeyPanel (spare api_key) failed: ${spErr?.message ?? "no row"}`,
+      );
+    }
+    createdKeyIds.push(spare.id as string);
+
+    const { data: strategy, error: sErr } = await admin
+      .from("strategies")
+      .insert({
+        user_id: manager.userId,
+        name: strategyName,
+        status: "private",
+        source: "wizard",
+        api_key_id: linked.id,
+        benchmark: "BTC",
+        supported_exchanges: ["binance"],
+        strategy_types: ["spot"],
+        subtypes: [],
+        markets: ["BTC"],
+      })
+      .select("id")
+      .single();
+    if (sErr || !strategy) {
+      throw new Error(
+        `[seed] seedManagerKeyPanel (strategy) failed: ${sErr?.message ?? "no row"}`,
+      );
+    }
+    createdStrategyId = strategy.id as string;
+
+    let disconnectedKey: { id: string; label: string } | undefined;
+    if (opts?.disconnectedLabel) {
+      const { data: gone, error: dErr } = await admin
+        .from("api_keys")
+        .insert({
+          user_id: manager.userId,
+          exchange: "bybit",
+          label: opts.disconnectedLabel,
+          api_key_encrypted: "e2e-placeholder-ciphertext",
+          is_active: false,
+          disconnected_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .select("id")
+        .single();
+      if (dErr || !gone) {
+        throw new Error(
+          `[seed] seedManagerKeyPanel (disconnected api_key) failed: ${dErr?.message ?? "no row"}`,
+        );
+      }
+      createdKeyIds.push(gone.id as string);
+      disconnectedKey = { id: gone.id as string, label: opts.disconnectedLabel };
+    }
+
+    return {
+      manager,
+      strategyId: strategy.id as string,
+      strategyName,
+      linkedKey: { id: linked.id as string, label: linkedLabel },
+      spareKey: { id: spare.id as string, label: spareLabel },
+      ...(disconnectedKey ? { disconnectedKey } : {}),
+    };
+  } catch (seedError) {
+    // Strategy first (it references the linked key), then the keys. A failed
+    // rollback delete is reported beside the seed error, never swallowed.
+    const rollbackErrors: string[] = [];
+    if (createdStrategyId) {
+      const { error } = await admin.from("strategies").delete().eq("id", createdStrategyId);
+      if (error) rollbackErrors.push(`strategy ${createdStrategyId}: ${error.message}`);
+    }
+    for (const id of createdKeyIds) {
+      const { error } = await admin.from("api_keys").delete().eq("id", id);
+      if (error) rollbackErrors.push(`api_key ${id}: ${error.message}`);
+    }
+    if (rollbackErrors.length > 0) {
+      const reason = seedError instanceof Error ? seedError.message : String(seedError);
+      throw new Error(
+        `${reason} (rollback of the partial seed also failed: ${rollbackErrors.join("; ")})`,
+      );
+    }
+    throw seedError;
+  }
+}
+
+/**
+ * Service-role read of one strategy's `api_key_id`. It THROWS on a read error
+ * or a missing row, so a failed read can never pass as "unchanged".
+ */
+export async function readStrategyApiKeyId(
+  strategyId: string,
+): Promise<string | null> {
+  const admin = getAdmin();
+  const { data, error } = await admin
+    .from("strategies")
+    .select("api_key_id")
+    .eq("id", strategyId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`[seed] readStrategyApiKeyId failed: ${error.message}`);
+  }
+  if (!data) {
+    throw new Error(
+      `[seed] readStrategyApiKeyId found no strategy row for id ${strategyId}`,
+    );
+  }
+  return (data.api_key_id as string | null) ?? null;
+}
+
+/**
+ * Teardown for seedManagerKeyPanel: delete the strategy by id, then each key by
+ * id. Every delete is attempted, and any failure is collected and thrown as ONE
+ * aggregated Error at the end, so a leaked row fails the run instead of hiding
+ * in a log (SFH-G1). The seeded user stays, which is this file's convention.
+ */
+export async function cleanupManagerKeyPanel(
+  seeded: Pick<
+    SeededManagerKeyPanel,
+    "strategyId" | "linkedKey" | "spareKey" | "disconnectedKey"
+  >,
+): Promise<void> {
+  const admin = getAdmin();
+  const failures: string[] = [];
+  const { error: sErr } = await admin
+    .from("strategies")
+    .delete()
+    .eq("id", seeded.strategyId);
+  if (sErr) failures.push(`strategy ${seeded.strategyId}: ${sErr.message}`);
+  const keys = [seeded.linkedKey, seeded.spareKey];
+  if (seeded.disconnectedKey) keys.push(seeded.disconnectedKey);
+  for (const key of keys) {
+    const { error } = await admin.from("api_keys").delete().eq("id", key.id);
+    if (error) failures.push(`api_key ${key.id}: ${error.message}`);
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      `[seed] cleanupManagerKeyPanel left rows behind: ${failures.join("; ")}`,
+    );
+  }
+}
