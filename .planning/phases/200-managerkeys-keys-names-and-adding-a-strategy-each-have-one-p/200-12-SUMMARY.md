@@ -51,7 +51,7 @@ The edit form no longer renders the Strategy Name picker or the Data Source card
 
 ## RED evidence
 
-Backups are byte copies in `/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/b1f09c72-b6ca-45a1-8fe3-842b3f8b655b/scratchpad/p200-bak/12/`; each restore was `cp` then `cmp` exit 0.
+Backups are byte copies in `<scratchpad>/p200-bak/12/`; each restore was `cp` then `cmp` exit 0.
 
 - gc-200-12-neuter: picker render. Before implementing, `edit mode: renders no Strategy Name control` failed against the unmodified component (`queryByLabelText("Strategy Name")` returned the select). Implemented; GREEN.
 - gc-200-12-neuter: payload. `StrategyForm.tsx` edited in a byte copy (`200-12-StrategyForm.tsx.bak`): `...(mode === "create" ? { name } : {})` became `...{ name }`. RED: 2 failed, `edit mode: a save after changing the description sends no name key` and `edit mode: an untouched save sends no name key either`, both `AssertionError: expected { user_id: 'user-a', ...(10) } to not have property "name"`. Restored, `cmp` 0, 18/18 GREEN.

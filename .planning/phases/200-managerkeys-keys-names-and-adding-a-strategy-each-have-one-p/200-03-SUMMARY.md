@@ -60,7 +60,7 @@ The strategy edit page now has a name block that renames through the existing `P
 
 ## RED evidence
 
-All neuters applied to the working file after a byte backup in `/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/b1f09c72-b6ca-45a1-8fe3-842b3f8b655b/scratchpad/p200-bak/03/`, restored with `cp`, then `cmp` exit 0 and the test re-run GREEN.
+All neuters applied to the working file after a byte backup in `<scratchpad>/p200-bak/03/`, restored with `cp`, then `cmp` exit 0 and the test re-run GREEN.
 
 - gc-200-03-neuter: status gate. `StrategyNameBlock.tsx`, `const canRename = RENAMEABLE_STATUSES.includes(status)` replaced with `const canRename = true`. RED: 3 failed (published, pending_review, archived): `expected document not to contain element, found <button`. Restored, cmp=0, 9/9 green.
 - gc-200-03-neuter: page preview. `edit/page.tsx`, `preview={publicNamePreview(strategy)}` replaced with `{ factsheet: strategy.name, discovery: strategy.name }`. RED: 2 failed, `-"discovery": "Orion"` / `+"discovery": "Helios alpha sleeve"` and `Strategy #13f7b07f` vs `Alpha Centauri`. Restored, cmp=0, 23/23 green.
