@@ -14,7 +14,7 @@
 # Dev/test-only deps (pytest, pyarrow, mypy, …) live in requirements-dev.txt and
 # are NOT shipped to prod (Dockerfile installs only requirements.txt).
 
-fastapi==0.161.1
+fastapi==0.162.0
 uvicorn[standard]==0.54.0
 quantstats==0.0.81
 # ccxt parses live broker payloads feeding equity reconstruction + trade
@@ -26,7 +26,7 @@ quantstats==0.0.81
 # opens a PR against requirements.txt, then re-run `make lock` and commit the
 # regenerated lock (Dependabot's own pip-compile won't match the uv/universal
 # format).
-ccxt==4.5.89
+ccxt==4.5.92
 pandas==3.0.3
 numpy==2.5.4
 # NOTE: pyarrow is NOT here — it is a TEST-ONLY dependency (pd.read_parquet of the
@@ -35,11 +35,11 @@ numpy==2.5.4
 # installs ONLY requirements.txt) no longer ships the ~40MB native Arrow wheel and its
 # transitive attack surface. pandas 3.0.3 does not require pyarrow at runtime; no
 # production code path reads parquet (trades/positions come from Supabase as JSON).
-pydantic==2.14.1
+pydantic==2.14.3
 python-dotenv==1.2.4
 httpx==0.28.1
 slowapi==0.1.10
-supabase==2.33.0
+supabase==2.34.0
 cryptography>=50.0.2
 # Phase 15 / CSV-01..CSV-02: pandera CSV row-schema validation +
 # python-multipart UploadFile parsing for /api/csv/validate (the only
@@ -49,8 +49,8 @@ cryptography>=50.0.2
 # prior Python-3.14 multimethod<=1.10.0 pytest-collection workaround is gone.
 # (0.32 also left DataFrameSchema.__init__ unannotated; mypy clears it via the
 # pandera follow_imports=skip override in pyproject.toml.)
-pandera==0.34.1
-python-multipart==0.0.32
+pandera==0.35.0
+python-multipart==0.0.33
 # Phase 16 / OBSERV-09: structlog JSON-format logs with correlation_id contextvar.
 structlog==26.1.0
 # Phase 16 / OBSERV-10: psycopg required for direct-DSN trigger/RLS audit tests
@@ -59,12 +59,12 @@ structlog==26.1.0
 # The trigger/RPC audit tests connect via TEST_SUPABASE_DB_URL on port 5432 and
 # need a libpq binding to assert behavior under service-role context where
 # auth.uid() returns NULL (Pitfall 5).
-psycopg[binary]==3.3.6
+psycopg[binary]==3.3.8
 # Phase 16 / OBSERV-04 + OBSERV-05: sentry-sdk[fastapi] FastAPI/Starlette integrations
 # + before_send PII scrub (FULL mirror of src/lib/admin/pii-scrub.ts: 8 exact keys +
 # DENYLIST_PREFIX sb-ec- + JWT_SHAPE regex + broker signing headers per FIX 7).
 # vcrpy pin lands in Plan 8 (16-08).
-sentry-sdk[fastapi]==2.73.0
+sentry-sdk[fastapi]==2.74.0
 # Phase 16 / OBSERV-08: vcrpy pinned for deterministic local-repro of the unified
 # key flow. Records 12 cassettes (3 brokers × 4 scenarios) at
 # analytics-service/tests/cassettes/ and replays them in CI with NO network
