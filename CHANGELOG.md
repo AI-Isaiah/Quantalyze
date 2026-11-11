@@ -2,7 +2,7 @@
 
 ## [0.133.37.1] - 2026-11-11 — records: close 200 MANAGERKEYS
 
-Records PR for Phase 200, which shipped as PR #1251 (v0.133.37.0). Four commits on `records/200`, no source change. Its planning artifacts lived only on `feat/200-managerkeys` until now.
+Records PR for Phase 200, which shipped as PR #1251 (v0.133.37.0). Five commits on `records/200`, no source change. Three summaries (200-03, 200-04, 200-12) quoted a local scratchpad path; it is a placeholder here so the planning hygiene gate passes. Its planning artifacts lived only on `feat/200-managerkeys` until now.
 
 ### Added
 - **Phase 200 planning artifacts on `main`:** the 12 plans and summaries, CONTEXT (with the review-time decision D-R1), RESEARCH, PATTERNS, VALIDATION, `200-REVIEW.md` (three rounds), `200-VERIFICATION.md` (`human_needed`, 6/6, `verified_at_sha` plus `drift_subjects`, no covered_files or covered_digest) and `200-SECURITY.md` (SECURED).
