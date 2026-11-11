@@ -13997,3 +13997,35 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Reading.** A `/strategies` row with no figures and no running computation reads "No figures yet, and no computation is running." plus a remedy (`src/lib/degrade-warnings.ts`, the legend in `src/app/(dashboard)/strategies/StrategiesLegend.tsx`). Review round 2 (Task 2b in `199-REVIEW-R2.md`) measured that queued, retrying and running jobs write `computing`, so those rows read Updating, not this sentence. What is left is the short fetch window before `_mark_computing` in `analytics-service/services/analytics_runner.py`, where the sentence is momentarily wrong and the reload remedy is the right one. The orchestrator judged it LOW and booked it rather than fixing it.
 
 **Owner / Trigger:** unrouted. Trigger: the next phase that edits the strategies Health remedies or the analytics runner's status writes. Closed when the sentence is true for that window too (for example, the runner marks the row computing before its fetch), or the founder records the window as acceptable.
+
+## Phase 200 (MANAGERKEYS) — routed items (logged 2026-11-11)
+
+### [200-SEC-ROLE-GATING-CLIENT-SIDE] — role gating for a manager's Delete key and holdings sync is client-side only (booked 2026-11-11, Phase 200 security audit, T-200-20, LOW)
+
+**Reading.** The Profile API keys tab hides `Delete key` and the holdings sync for a role that should not see them, but the RPC and the routes behind them check that the caller OWNS the key, not the caller's role. An owner who calls the route directly can do what the UI hides. The audit closed T-200-20 at level 1 (ownership is enforced server-side, so no other tenant is reachable); the role check is a product-shape guard, not a tenant boundary.
+
+**Owner / Trigger:** unrouted. Trigger: the next phase that edits the key routes or the role model. Closed when the routes also check role, or the founder records the UI-only gate as acceptable.
+
+### [200-CASCADE-HOLDINGS-STALE-BOTH-ROLE] — a stale `cascadeHoldings` edge case for role `both` (booked 2026-11-11, Phase 200 review, LOW)
+
+**Reading.** For an account whose role is `both`, the Delete key confirm can act on a `cascadeHoldings` choice read before the role or the key's feeds changed. A manager's Delete key never cascades holdings (WR-06), so the window exists only on the allocator half of a `both` account.
+
+**Owner / Trigger:** unrouted. Trigger: the next phase that edits the Delete key confirm or the memberships route. Closed when the choice is re-read at confirm time, or recorded as acceptable.
+
+### [200-FOUNDER-SIGNOFF-ACCEPTED-RISKS-AND-DEFAULTS] — founder sign-off pending on accepted risks T-200-06, T-200-09, T-200-10, T-200-13 and on the orchestrator-default decisions D-01..D-15 and D-R1 (booked 2026-11-11, Phase 200 verification, LOW)
+
+**Reading.** The phase ran with orchestrator defaults for decisions D-01 through D-15, and D-R1 (an unchecked feeds read holds Delete key, not Disconnect) was recorded at review time. The security audit accepted four risks (T-200-06, T-200-09, T-200-10, T-200-13). None of this has been signed off by the founder. D-06 (the API keys tab for every role) is the costly one to reverse.
+
+**Owner / Trigger:** founder. Closed when the founder confirms or changes each, starting with D-06.
+
+### [200-LOW-LEFTOVERS] — small leftovers from Phase 200 (booked 2026-11-11, LOW)
+
+**Reading.** (1) `addKeyBlockedReason` and `DELETE_MEMBERSHIP_UNCHECKED_COPY` in `src/lib/key-card-copy.ts` are exported and unused. (2) Some code comments still say "Use & Sync", a control the phase replaced with `Change key…`. (3) The Disconnected key card offers no `Delete key`.
+
+**Owner / Trigger:** unrouted. Trigger: the next phase that edits `key-card-copy.ts` or the key card. Closed when the dead exports and stale comments are removed and the Disconnected card decision is made.
+
+### [200-UAT-PENDING] — UAT at 320px and desktop for the key panel, Change key picker and Profile API keys tab (booked 2026-11-11, Phase 200 verification, LOW)
+
+**Reading.** `e2e/api-key-flow.spec.ts` and `e2e/sync-analytics-flow.spec.ts` were rewritten for the one key panel and ran green in CI on #1251. The visual and interaction pass at 320px and on desktop is still pending, and the verification stays `human_needed` until it is done.
+
+**Owner / Trigger:** founder. Closed when the pass is done and `200-VERIFICATION.md` is moved to `passed`.
