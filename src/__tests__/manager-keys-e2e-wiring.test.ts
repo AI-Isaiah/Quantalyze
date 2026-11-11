@@ -112,7 +112,9 @@ describe("the one-key panel e2e spec stays in the blocking lane (Phase 200 gap 1
     // for a compound command that is the non-final element of an `||` list, so
     // `fi || true` turns a red run green without touching the invocation line.
     const armText = seededElseArm(step);
-    const afterFi = step.slice(step.indexOf(armText) + armText.length).split("\n")[0];
+    const armAt = step.indexOf(armText);
+    expect(armAt, "the seeded else arm is not inside the seeded step").toBeGreaterThan(-1);
+    const afterFi = step.slice(armAt + armText.length).split("\n")[0];
     expect(
       afterFi.trim(),
       `the seeded step's \`if\` has \`${afterFi.trim()}\` after its closing \`fi\`, which ignores errexit for the whole arm`,
